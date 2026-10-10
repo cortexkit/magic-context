@@ -112,7 +112,6 @@ function ocTaskBlock(): Record<string, unknown> {
         fallback_models: [ocEntry()],
         variant: "task-variant",
         timeout_minutes: 45,
-        mural: { model: "hostile/task-mural" },
         ...ESCALATION_VALUE,
     };
 }
@@ -123,14 +122,13 @@ function piTaskBlock(): Record<string, unknown> {
         fallback_models: [piEntry()],
         thinking_level: "high",
         timeout_minutes: 45,
-        mural: { model: "hostile/task-mural" },
         ...ESCALATION_VALUE,
     };
 }
 
 /**
  * One project-tier config that plants a value at every executable nested path
- * the per-harness schema admits, plus smuggled escalation / mural / extra
+ * the per-harness schema admits, plus smuggled escalation / extra
  * fields at those same depths.
  */
 function buildHostileProjectConfig(): Record<string, unknown> {
@@ -156,8 +154,7 @@ function buildHostileProjectConfig(): Record<string, unknown> {
                 historian: { opencode: { model: "hostile/profile-historian" } },
             },
         },
-        mural: { enabled: true, model: "hostile/top-mural" },
-        experimental: { mural: { enabled: true, model: "hostile/experimental-mural" } },
+        mural: { enabled: true },
         historian: {
             model: "hostile/flat-historian",
             fallback_models: ["hostile/flat-fallback"],
@@ -170,21 +167,18 @@ function buildHostileProjectConfig(): Record<string, unknown> {
                 model: ocEntry(),
                 fallback_models: [ocEntry()],
                 variant: "hostile-historian-variant",
-                mural: { model: "hostile/historian-oc-mural" },
                 ...ESCALATION_VALUE,
             },
             pi: {
                 model: piEntry(),
                 fallback_models: [piEntry()],
                 thinking_level: "max",
-                mural: { model: "hostile/historian-pi-mural" },
                 ...ESCALATION_VALUE,
             },
             omp: {
                 model: piEntry(),
                 fallback_models: [piEntry()],
                 thinking_level: "auto",
-                mural: { model: "hostile/historian-omp-mural" },
                 ...ESCALATION_VALUE,
             },
         },
@@ -197,7 +191,6 @@ function buildHostileProjectConfig(): Record<string, unknown> {
                 model: ocEntry(),
                 fallback_models: [ocEntry()],
                 variant: "hostile-dreamer-variant",
-                mural: { model: "hostile/dreamer-oc-mural" },
                 tasks: ocTasks,
                 ...ESCALATION_VALUE,
             },
@@ -205,7 +198,6 @@ function buildHostileProjectConfig(): Record<string, unknown> {
                 model: piEntry(),
                 fallback_models: [piEntry()],
                 thinking_level: "medium",
-                mural: { model: "hostile/dreamer-pi-mural" },
                 tasks: piTasks,
                 ...ESCALATION_VALUE,
             },
@@ -213,7 +205,6 @@ function buildHostileProjectConfig(): Record<string, unknown> {
                 model: piEntry(),
                 fallback_models: [piEntry()],
                 thinking_level: "auto",
-                mural: { model: "hostile/dreamer-omp-mural" },
                 tasks: ompTasks,
                 ...ESCALATION_VALUE,
             },
@@ -319,25 +310,6 @@ function nestedEscalationPaths(): string[] {
     return paths;
 }
 
-function nestedMuralModelPaths(): string[] {
-    const paths = [
-        "mural.model",
-        "experimental.mural.model",
-        "historian.opencode.mural.model",
-        "historian.pi.mural.model",
-        "historian.omp.mural.model",
-        "dreamer.opencode.mural.model",
-        "dreamer.pi.mural.model",
-        "dreamer.omp.mural.model",
-    ];
-    for (const task of CANONICAL_DREAM_TASKS) {
-        paths.push(`dreamer.opencode.tasks.${task}.mural.model`);
-        paths.push(`dreamer.pi.tasks.${task}.mural.model`);
-        paths.push(`dreamer.omp.tasks.${task}.mural.model`);
-    }
-    return paths;
-}
-
 function loadWithUserAndProjectConfig(userConfigText: string, projectConfigText: string) {
     const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-hostile-user-"));
     const projectDir = createTestTempDirFromPath(join(tmpdir(), "mc-hostile-proj-"));
@@ -422,21 +394,13 @@ describe("hostile-config stripping matrix", () => {
             if (hasOwnPath(raw, path)) survived.push(`escalation:${path}`);
             else removed.push(path);
         }
-        for (const path of nestedMuralModelPaths()) {
-            if (hasOwnPath(raw, path)) survived.push(`mural:${path}`);
-            else removed.push(path);
-        }
 
         expect(survived).toEqual([]);
         expect(hasOwnPath(raw, "profiles")).toBe(false);
         expect(readPath(raw, "profile")).toBe("work");
         expect(warningText).toContain("Ignoring profiles from project config");
         expect(removed.sort()).toEqual(
-            [
-                ...historianUserOnlyPaths(),
-                ...nestedEscalationPaths(),
-                ...nestedMuralModelPaths(),
-            ].sort(),
+            [...historianUserOnlyPaths(), ...nestedEscalationPaths()].sort(),
         );
 
         for (const path of dreamerKeepPaths()) {
@@ -467,11 +431,7 @@ describe("hostile-config stripping matrix", () => {
         expect(readPath(raw, "dreamer.omp.tasks.verify.thinking_level")).toBe("high");
         expect(readPath(raw, "dreamer.omp.tasks.verify.timeout_minutes")).toBe(45);
 
-        for (const path of [
-            ...historianUserOnlyPaths(),
-            ...nestedEscalationPaths(),
-            ...nestedMuralModelPaths(),
-        ]) {
+        for (const path of [...historianUserOnlyPaths(), ...nestedEscalationPaths()]) {
             expect(warningText).toContain(path);
         }
     });

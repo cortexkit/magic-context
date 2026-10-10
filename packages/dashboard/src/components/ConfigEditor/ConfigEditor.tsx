@@ -19,8 +19,8 @@ import HarnessModelFields, { type Harness, modelCatalogForHarness } from "./Harn
 import HelpPopover from "./HelpPopover";
 import { LANGUAGE_OPTIONS } from "./languages";
 import ModelRoutes from "./ModelRoutes";
-import ModelSelect from "./ModelSelect";
 import PerModelTable from "./PerModelTable";
+import ProtectedTools from "./ProtectedTools";
 import { PER_MODEL_KEYS, type PerModelValues } from "./per-model-overrides";
 import SearchPicker from "./SearchPicker";
 import StringList from "./StringList";
@@ -113,14 +113,6 @@ const FIELD_DEFS: FieldDef[] = [
       "Render a deterministic image of project memories that did not fit the context budget.",
     section: "Memory & search",
   },
-  {
-    key: "mural.model",
-    label: "Cue Compressor Model",
-    type: "string",
-    description:
-      "Shared across harnesses. Model used to compress each memory into a mural cue. The mural image itself is rendered deterministically.",
-    section: "Background models",
-  },
   // Context defaults and their exceptions are rendered by PerModelTable.
   // Tags & cleanup
   {
@@ -181,12 +173,7 @@ const FIELD_DEFS: FieldDef[] = [
 // These fields are valid only in trusted user configuration. They remain in the
 // schema coverage manifest because the user form renders them, but project forms
 // must not present controls for settings the runtime strips from repositories.
-const USER_ONLY_FORM_FIELDS = new Set([
-  "language",
-  "allow_home_project",
-  "mural.model",
-  "protected_tokens",
-]);
+const USER_ONLY_FORM_FIELDS = new Set(["language", "allow_home_project", "protected_tokens"]);
 
 // ── Nested value access helpers ─────────────────────────────
 
@@ -511,14 +498,6 @@ function ConfigForm(props: {
             emptyLabel="No override"
             onChange={(next) => handleFieldChange(field.key, next)}
           />
-        ) : field.key === "mural.model" ? (
-          <ModelSelect
-            label="Cue Compressor Model"
-            models={[...new Set(Object.values(props.modelCatalogs).filter(Array.isArray).flat())]}
-            value={value() as string | undefined}
-            placeholder="Use built-in cue model"
-            onChange={(next) => handleFieldChange(field.key, next || undefined)}
-          />
         ) : (
           <input
             class="config-input"
@@ -527,7 +506,7 @@ function ConfigForm(props: {
             value={typeof value() === "object" ? JSON.stringify(value()) : String(value() ?? "")}
             placeholder={defaultPlaceholder(
               field.key,
-              field.key === "language" ? "No language override" : "Use built-in cue model",
+              field.key === "language" ? "No language override" : undefined,
             )}
             onInput={(e) => {
               const next = e.currentTarget.value;
@@ -1682,9 +1661,6 @@ function ConfigForm(props: {
                 const todowriteOverlay = () => Boolean(booleanSetting("todowrite.overlay"));
                 const setTodowrite = (patch: Record<string, unknown>) =>
                   handleFieldChange("todowrite", { ...todowrite(), ...patch });
-                const [protectedToolsDraft, setProtectedToolsDraft] = createSignal<
-                  string | undefined
-                >();
                 const sqlite = () =>
                   (getNestedValue(formData(), "sqlite") as
                     | { cache_size_mb?: number; mmap_size_mb?: number }
@@ -1910,58 +1886,54 @@ function ConfigForm(props: {
                       </Show>
 
                       {/* Automatic result protection */}
-                      <div class="config-field" hidden={activeSection() !== "Context window"}>
+                      <div
+                        class="config-field config-field-wide"
+                        hidden={activeSection() !== "Context window"}
+                      >
                         <div class="config-field-header">
                           <span class="config-field-label">Protected Tools</span>
                           <span class="config-field-key">protected_tools</span>
                         </div>
                         <span class="config-field-desc">
-                          Keep each tool's newest active results from automatic and queued drops.
-                          Counts merge over the defaults; 0 disables protection for a tool.
+                          Always keep the newest results of the tools listed here, even when Magic
+                          Context would otherwise drop them. By default it keeps the newest todo
+                          list (<code>todowrite</code>) and the newest 3 <code>ctx_reduce</code>{" "}
+                          calls. Add a row to protect another tool. To change a default, add a row
+                          with its name; 0 turns protection off for that tool.
                         </span>
                         <details class="config-help">
-                          <summary>Protection policy</summary>
+                          <summary>Example and caveats</summary>
                           <p>
-                            Enter a JSON object mapping tool names to whole numbers ≥ 0. Names
-                            ignore case and leading mcp_. Protection applies even at 95% pressure,
-                            with no byte cap: large protected outputs can reach refusal sooner.
-                            Changes affect later cache-rebuilding passes. Queued drops wait for
-                            newer calls to displace the result; historian summaries and folds are
-                            unaffected.
+                            Rows <code>read</code> 2 and <code>bash</code> 1 keep the newest 2{" "}
+                            <code>read</code> results and the newest <code>bash</code> result. A row{" "}
+                            <code>ctx_reduce</code> 0 turns off that default. Saved, these rows
+                            become <code>{'{ "read": 2, "bash": 1, "ctx_reduce": 0 }'}</code>; the
+                            defaults you don't list keep applying.
                           </p>
+                          <ul>
+                            <li>
+                              Names ignore capital letters and a leading <code>mcp_</code>, so{" "}
+                              <code>MCP_Read</code> and <code>read</code> are the same tool.
+                            </li>
+                            <li>
+                              Protected results are kept even when the context window is 95% full,
+                              and there is no size limit. Protecting a tool with large outputs can
+                              make a session run out of room and refuse requests sooner.
+                            </li>
+                            <li>
+                              Changes take effect the next time Magic Context rebuilds the prompt
+                              cache, not immediately.
+                            </li>
+                            <li>
+                              A queued drop of a protected result waits until newer calls of the
+                              same tool push it out of the newest few. Historian summaries and folds
+                              are not affected.
+                            </li>
+                          </ul>
                         </details>
-                        <textarea
-                          class="code-editor"
-                          rows={4}
-                          placeholder={'{ "todowrite": 1, "ctx_reduce": 3 }'}
-                          value={
-                            protectedToolsDraft() ??
-                            JSON.stringify(
-                              getNestedValue(formData(), "protected_tools") ?? {},
-                              null,
-                              2,
-                            )
-                          }
-                          onInput={(e) => {
-                            const text = e.currentTarget.value;
-                            setProtectedToolsDraft(text);
-                            try {
-                              const next = parseJsonc(text);
-                              if (
-                                next &&
-                                typeof next === "object" &&
-                                !Array.isArray(next) &&
-                                Object.values(next).every(
-                                  (n) => typeof n === "number" && Number.isInteger(n) && n >= 0,
-                                )
-                              ) {
-                                handleFieldChange("protected_tools", next);
-                                setProtectedToolsDraft(undefined);
-                              }
-                            } catch {
-                              /* Keep invalid drafts visible without saving them. */
-                            }
-                          }}
+                        <ProtectedTools
+                          value={getNestedValue(formData(), "protected_tools")}
+                          onChange={(next) => handleFieldChange("protected_tools", next)}
                         />
                       </div>
 
@@ -2210,9 +2182,15 @@ export default function ConfigEditor(props: {
         </div>
       </div>
 
+      {/* Model discovery status floats over the page instead of taking a row, so the
+          form does not jump down while models load and back up when they arrive. */}
       <Show when={props.catalogLoading || props.catalogError}>
-        <div class="empty-state" role="status">
-          <span>{props.catalogLoading ? "Loading OpenCode models..." : props.catalogError}</span>
+        <div
+          class={`config-catalog-toast ${props.catalogLoading ? "" : "is-error"}`}
+          role="status"
+          aria-live="polite"
+        >
+          <span>{props.catalogLoading ? "Loading OpenCode models…" : props.catalogError}</span>
           <Show when={!props.catalogLoading && props.catalogError}>
             <button type="button" class="btn sm" onClick={props.onRetryCatalogs}>
               Retry model discovery

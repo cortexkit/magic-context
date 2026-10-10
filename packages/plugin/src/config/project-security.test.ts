@@ -242,26 +242,21 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warning).toContain("historian.opencode.runner");
     });
 
-    it("strips mural.model from project config but keeps the feature switch", () => {
+    it("leaves the ignored mural.model to the deprecation warning instead of a security strip", () => {
+        // mural.model no longer selects any model, so it is not a trust boundary;
+        // the compress-cues model is a dreamer task model like any other.
         const raw: Record<string, unknown> = {
             mural: { enabled: true, model: "repo-controlled-model" },
+            dreamer: { opencode: { tasks: { "compress-cues": { model: "repo/cue-model" } } } },
         };
 
         const warnings = stripUnsafeProjectConfigFields(raw);
 
-        expect(raw.mural).toEqual({ enabled: true });
-        expect(warnings.some((w) => w.includes("mural.model"))).toBe(true);
-    });
-
-    it("strips the legacy experimental mural model before migration", () => {
-        const raw: Record<string, unknown> = {
-            experimental: { mural: { enabled: true, model: "repo-controlled-model" } },
-        };
-
-        const warnings = stripUnsafeProjectConfigFields(raw);
-
-        expect(raw.experimental).toEqual({ mural: { enabled: true } });
-        expect(warnings.some((w) => w.includes("experimental.mural.model"))).toBe(true);
+        expect(raw.mural).toEqual({ enabled: true, model: "repo-controlled-model" });
+        expect(raw.dreamer).toEqual({
+            opencode: { tasks: { "compress-cues": { model: "repo/cue-model" } } },
+        });
+        expect(warnings).toEqual([]);
     });
 
     it("strips hidden-agent prompt/permission/tools but keeps benign fields", () => {

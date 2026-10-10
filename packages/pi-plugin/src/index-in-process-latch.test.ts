@@ -151,9 +151,11 @@ function createCountingPi() {
 			for (const handler of eventBusHandlers.get(channel) ?? []) handler(data);
 		},
 		async emitPiEvent(event: string, data: unknown = {}, ctx: unknown = {}) {
+			const results: unknown[] = [];
 			for (const handler of piEventHandlers.get(event) ?? []) {
-				await handler(data, ctx);
+				results.push(await handler(data, ctx));
 			}
+			return results;
 		},
 	};
 }
@@ -963,6 +965,86 @@ describe("Pi in-process child guard (#247)", () => {
 		expect(child.tools.length).toBeGreaterThan(0);
 		expect(child.commands.length).toBeGreaterThan(0);
 	}, 15_000);
+});
+
+describe("Pi system-prompt section injection (#649)", () => {
+	it("injects the guidance block as a structured section that composes with later extensions", async () => {
+		isolateXdgEnv();
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+		const runtime = createCountingPi();
+		await magicContextPiExtension(runtime.pi);
+
+		// Register a second extension's handler AFTER magic-context, mirroring
+		// Pi's in-order before_agent_start dispatch: a later extension writing
+		// its own section into the same shared, mutable options map.
+		runtime.pi.on("before_agent_start", (event) => {
+			event.systemPromptOptions.sections.later_ext =
+				"<later-ext>snapshot</later-ext>";
+		});
+
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			sessionManager: { getSessionId: () => "ses-section-injection" },
+			ui: { setStatus() {} },
+		};
+		await runtime.emitPiEvent("session_start", {}, ctx);
+
+		// Mirror Pi's BeforeAgentStartEvent: systemPromptOptions.sections is
+		// the normalized, mutable map every extension's handler writes into.
+		const event = {
+			type: "before_agent_start",
+			prompt: "hello",
+			systemPrompt: "BASE PROMPT",
+			systemPromptOptions: { sections: {} as Record<string, string> },
+		};
+		await runtime.emitPiEvent("before_agent_start", event, ctx);
+
+		// The guidance block must land in the shared sections map — not in a
+		// forced prompt, which Pi would render INSTEAD of the sections and
+		// thereby hide the later extension's section from the provider.
+		expect(event.systemPromptOptions.sections.magic_context).toContain(
+			"## Magic Context",
+		);
+		expect(event.systemPromptOptions.sections.later_ext).toBe(
+			"<later-ext>snapshot</later-ext>",
+		);
+
+		await runtime.emitPiEvent("session_shutdown", {}, ctx);
+	}, 20_000);
+
+	it("keeps the forced-prompt fallback on hosts without a sections API (Oh My Pi)", async () => {
+		isolateXdgEnv();
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+		const runtime = createCountingPi();
+		await magicContextPiExtension(runtime.pi);
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			sessionManager: { getSessionId: () => "ses-omp-fallback" },
+			ui: { setStatus() {} },
+		};
+		await runtime.emitPiEvent("session_start", {}, ctx);
+
+		// Oh My Pi's before_agent_start event has no systemPromptOptions
+		// (verified on Oh My Pi 18.2.6 and 18.8.7): the handler must not throw
+		// and must keep injecting via a forced prompt return, or requests
+		// would go out with no guidance block at all.
+		const event = {
+			type: "before_agent_start",
+			prompt: "hello",
+			systemPrompt: "BASE PROMPT",
+		};
+		const results = await runtime.emitPiEvent("before_agent_start", event, ctx);
+		const forced = results.find(
+			(r): r is { systemPrompt: string } =>
+				typeof r === "object" && r !== null && "systemPrompt" in r,
+		);
+		expect(forced?.systemPrompt).toContain("BASE PROMPT");
+		expect(forced?.systemPrompt).toContain("## Magic Context");
+
+		await runtime.emitPiEvent("session_shutdown", {}, ctx);
+	}, 20_000);
 });
 
 beforeEach(async () => {

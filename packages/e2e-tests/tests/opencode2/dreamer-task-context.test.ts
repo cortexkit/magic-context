@@ -27,6 +27,7 @@ interface RunRow {
 interface TaskResult {
     name: string;
     status: string;
+    error?: string;
     progress?: string;
     skipReason?: string;
 }
@@ -137,11 +138,29 @@ test("OpenCode 2 shapes all six dream routes and keeps timer work in its owning 
         const results = (row: RunRow) => JSON.parse(row.tasks_json) as TaskResult[];
         for (const task of TASKS) {
             const before = rows().at(-1)?.id ?? 0;
+            const memoryBefore = task === "curate"
+                ? JSON.stringify(db.prepare("SELECT * FROM memories WHERE id = ?").get(ids[0]!))
+                : undefined;
             await client.session.command({ sessionID: sessions[0]!, name: "ctx-dream", text: task });
             await eventually(() => rows().some(row => row.id > before && results(row).some(result => result.name === task)), task, 20_000);
             const result = rows().filter(row => row.id > before).flatMap(results).find(result => result.name === task)!;
+            console.log(`manual dream task=${task} recorded result=${JSON.stringify(result)}`);
             expect(result.status).toBe("completed");
-            if (task === "curate") expect(result.progress).toContain("1 memory operation applied (update)");
+            if (task === "curate") {
+                expect(result.progress).toContain("1 memory operation proposed (update)");
+                expect(result.progress).not.toContain("applied");
+                expect(JSON.stringify(db.prepare("SELECT * FROM memories WHERE id = ?").get(ids[0]!)))
+                    .toBe(memoryBefore!);
+                const proposals = db.prepare(
+                    "SELECT target_ids_json, proposal_json, reason FROM memory_tool_proposals WHERE project_path = ? AND writer = 'curate' AND operation = 'update'",
+                ).all(project) as { target_ids_json: string; proposal_json: string; reason: string }[];
+                expect(proposals).toHaveLength(1);
+                expect(JSON.parse(proposals[0]!.target_ids_json)).toEqual([ids[0]!]);
+                expect(proposals[0]!.reason).toBe("MEMORY_PENDING_PROPOSAL");
+                expect(JSON.parse(proposals[0]!.proposal_json)).toMatchObject({
+                    content: "Fixture claim is recorded in fact.txt. Clarification 1 preserves the fixture fact.",
+                });
+            }
         }
         expect(searchCalls).toBe(1);
         expect(memoryCalls).toBe(1);
@@ -197,6 +216,10 @@ test("OpenCode 2 shapes all six dream routes and keeps timer work in its owning 
         writeFileSync(join(host.root, "issue-647-proof.json"), JSON.stringify({ version, pid: host.pid, project, otherProject, runs: rows(), requests: host.mock.requests(), memoryCalls, searchCalls }, null, 2));
         console.log(`six manual tasks and two-location timer controls completed; artifacts=${host.root}`);
     } catch (error) {
+        writeFileSync(join(host.root, "issue-647-failed-proof.json"), JSON.stringify({
+            runs: db?.prepare("SELECT id, tasks_json FROM dream_runs ORDER BY id").all(),
+            requests: host.mock.requests(),
+        }, null, 2));
         console.error(`Artifacts: ${host.root}`, host.pluginLog().slice(-8000));
         throw error;
     } finally {

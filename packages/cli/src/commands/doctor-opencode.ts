@@ -87,6 +87,7 @@ import {
     selectOpenCodeStoreHost,
 } from "../lib/opencode-helpers";
 import {
+    describeUnusedOpenCodePluginCache,
     getOpenCodePluginCacheRoots,
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY_WITH_VERSION,
     OPENCODE_PLUGIN_NAME as PLUGIN_NAME,
@@ -118,11 +119,16 @@ import {
     formatOpenCodeV2MissingMarkerNotice,
 } from "./doctor-compaction-markers";
 import {
-    formatDanglingCompartmentBoundary,
+    formatDanglingCompartmentBoundaryDetails,
+    formatDanglingCompartmentBoundaryHeadline,
     listDanglingCompartmentBoundaries,
 } from "./doctor-compartment-boundaries";
 import { reportUnresolvedHarnessRelabel } from "./doctor-harness-relabel";
-import { clearPluginCache } from "./doctor-opencode-cache";
+import {
+    clearPluginCache,
+    type OpenCodePluginConfigUse,
+    readOpenCodePluginConfigUse,
+} from "./doctor-opencode-cache";
 import { checkPluginDuplicates } from "./doctor-opencode-plugin-duplicates";
 import {
     checkOpenCodePluginEntry,
@@ -1014,6 +1020,8 @@ export async function runDoctor(
         issue?: boolean;
         /** With `issue`, write the report here without prompting. */
         report?: string;
+        /** Print every row of long listings instead of a capped summary. */
+        verbose?: boolean;
     } & V22BackfillCommandArgs = {},
 ): Promise<number> {
     migrateConfigLocationsForCli(process.cwd(), log);
@@ -1179,7 +1187,9 @@ export async function runDoctor(
             } else if (report.migrationCompleted) {
                 // The backfill only matters for a conversion that has not run yet; this
                 // store's conversion is finished and will not run again on its own.
-                log.info(`${summary}; OpenCode 2 already converted this store`);
+                log.info(
+                    `${summary}; OpenCode 2 already converted this store, so these markers no longer matter (informational, no action needed)`,
+                );
             } else {
                 warn(`${summary}; run \`magic-context doctor --fix\` before upgrading OpenCode`);
             }
@@ -1223,16 +1233,18 @@ export async function runDoctor(
                     // never completed, so a compartment anchored there loses its id.
                     // Magic Context places such a compartment from its neighbours; one
                     // it cannot place is reported by the unresolved-compartment check.
-                    log.info(
-                        `${dangling.length} compartment(s) point at OpenCode message ids that are not in the OpenCode 2 store. Magic Context places these from the neighbouring compartments; any it cannot place are listed as excluded from range recovery below.`,
-                    );
-                    for (const boundary of dangling) {
-                        log.info(`  ${formatDanglingCompartmentBoundary(boundary)}`);
+                    log.info(formatDanglingCompartmentBoundaryHeadline(dangling, "opencode2"));
+                    for (const line of formatDanglingCompartmentBoundaryDetails(dangling, {
+                        verbose: options.verbose,
+                    })) {
+                        log.info(`  ${line}`);
                     }
                 } else {
-                    warn(`${dangling.length} compartment(s) have dangling OpenCode boundary ids`);
-                    for (const boundary of dangling) {
-                        log.warn(`  ${formatDanglingCompartmentBoundary(boundary)}`);
+                    warn(formatDanglingCompartmentBoundaryHeadline(dangling, "other"));
+                    for (const line of formatDanglingCompartmentBoundaryDetails(dangling, {
+                        verbose: options.verbose,
+                    })) {
+                        log.warn(`  ${line}`);
                     }
                 }
 
@@ -1959,13 +1971,39 @@ export async function runDoctor(
         issues++;
     }
 
-    // 8. Check plugin npm cache — clear only if outdated
+    // 8. Check plugin npm cache — clear only if outdated. A cached copy counts
+    // only when the host's config references that package spec; one the config
+    // never loads (a local checkout or a pinned version) is reported as unused.
+    // The config is read again here because the entry check above may have
+    // rewritten it; an unreadable config leaves every copy counted.
+    let pluginConfigUse: OpenCodePluginConfigUse | undefined;
+    if (paths.opencodeConfigFormat !== "none") {
+        try {
+            pluginConfigUse = readOpenCodePluginConfigUse(
+                parse(readFileSync(paths.opencodeConfig, "utf-8")) as Record<string, unknown>,
+                dirname(paths.opencodeConfig),
+            );
+        } catch {
+            // An unreadable config was already reported above.
+        }
+    }
     const cacheResult = await clearPluginCache({
         force: options.force,
         latestVersion: pluginNpmLatest,
         hostFiles: openCodeHostDatabaseFiles([openCodeDbResolution.path]),
+        referencedSpecs: pluginConfigUse?.referencedSpecs.opencode1,
     });
-    if (cacheResult.action === "cleared") {
+    if (cacheResult.action === "unused") {
+        log.info(
+            describeUnusedOpenCodePluginCache({
+                host: "OpenCode 1",
+                spec: "latest",
+                cached: cacheResult.cached,
+                paths: cacheResult.paths ?? [cacheResult.path],
+                loadedFrom: pluginConfigUse?.loadedFrom.opencode1,
+            }),
+        );
+    } else if (cacheResult.action === "cleared") {
         const versionInfo = cacheResult.cached
             ? ` (cached: ${cacheResult.cached}${cacheResult.latest ? `, latest: ${cacheResult.latest}` : ""})`
             : "";
@@ -2034,9 +2072,13 @@ export async function runDoctor(
                 : pluginNpmLatest,
             distTag: v2DistTag,
             hostFiles: openCodeHostDatabaseFiles([openCodeDbResolution.path]),
+            referencedSpecs: pluginConfigUse?.referencedSpecs.opencode2,
         }),
         { pass, warn, info: (message) => log.info(message) },
-        { reportMissing: hostGeneration === "v2" },
+        {
+            reportMissing: hostGeneration === "v2",
+            loadedFrom: pluginConfigUse?.loadedFrom.opencode2,
+        },
     );
     if (v2Cache.fixed) fixed++;
     if (v2Cache.issue) issues++;
@@ -2048,7 +2090,12 @@ export async function runDoctor(
     const sharedDbVersion = readContextDbSchemaVersion(dbPath);
     if (sharedDbVersion !== null) {
         reportCachedPluginFences(
-            compareCachedPluginFences(listCachedOpenCodePluginFences(), sharedDbVersion),
+            compareCachedPluginFences(
+                listCachedOpenCodePluginFences({
+                    referencedSpecs: pluginConfigUse?.referencedSpecs,
+                }),
+                sharedDbVersion,
+            ),
             { pass, fail, info: (message) => log.info(message) },
         );
     }

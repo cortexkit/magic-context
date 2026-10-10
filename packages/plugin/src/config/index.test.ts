@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveEpochFloorForPass } from "../features/magic-context/storage-meta-persisted";
 import { buildOpenCodeConfigWarningBanner } from "../shared/config-warning-surface";
-import { resolveHistorianModel } from "../shared/model-resolution";
+import { resolveDreamerTaskModel, resolveHistorianModel } from "../shared/model-resolution";
 import { Database } from "../shared/sqlite";
 import { createTestTempDir, createTestTempDirFromPath } from "../shared/test-temp-dir";
 import {
@@ -13,6 +13,7 @@ import {
     setWindowOverlayPath,
 } from "../shared/window-geometry";
 import { loadPluginConfig, loadPluginConfigDetailed } from "./index";
+import { MURAL_MODEL_DEPRECATION_WARNING } from "./mural-model-deprecation";
 import { resolveConfigProfile } from "./profiles";
 import { getProtectedTokensTierOverrides } from "./project-security";
 import { REMOVED_AGENT_CONFIG_WARNING } from "./removed-agent-config";
@@ -268,6 +269,71 @@ describe("loadPluginConfig — graduated mural config", () => {
         expect(result.configWarnings ?? []).not.toContain(
             expect.stringContaining('Deprecated "experimental.mural"'),
         );
+    });
+
+    it("loads a config with the retired mural.model, warns once, and leaves compress-cues on the dreamer model", () => {
+        const result = loadWithUserConfig(
+            JSON.stringify({
+                mural: { enabled: true, model: "google/antigravity-gemini-3.8-flash" },
+                dreamer: {
+                    opencode: { model: "open/dreamer-default" },
+                    pi: { model: "pi/dreamer-default" },
+                },
+            }),
+        );
+
+        expect(result.mural.enabled).toBe(true);
+        expect(
+            (result.configWarnings ?? []).filter((w) =>
+                w.endsWith(MURAL_MODEL_DEPRECATION_WARNING),
+            ),
+        ).toHaveLength(1);
+        expect(MURAL_MODEL_DEPRECATION_WARNING).toContain("mural.model");
+        expect(
+            resolveDreamerTaskModel({ config: result, harness: "opencode", task: "compress-cues" })
+                .primary,
+        ).toEqual({ model: "open/dreamer-default" });
+        expect(
+            resolveDreamerTaskModel({ config: result, harness: "pi", task: "compress-cues" })
+                .primary,
+        ).toEqual({ model: "pi/dreamer-default" });
+    });
+
+    it("emits no mural.model warning when the key is absent", () => {
+        const result = loadWithUserConfig(JSON.stringify({ mural: { enabled: true } }));
+
+        expect((result.configWarnings ?? []).some((w) => w.includes("mural.model"))).toBe(false);
+    });
+
+    it("lets a project choose the compress-cues task model like any other dreamer task model", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ dreamer: { opencode: { model: "open/user-default" } } }),
+            JSON.stringify({
+                mural: { model: "repo/ignored" },
+                dreamer: {
+                    opencode: {
+                        tasks: {
+                            "compress-cues": { model: "open/project-cues" },
+                            curate: { model: "open/project-curate" },
+                        },
+                    },
+                },
+            }),
+        );
+
+        expect(
+            resolveDreamerTaskModel({ config: result, harness: "opencode", task: "compress-cues" })
+                .primary,
+        ).toEqual({ model: "open/project-cues" });
+        expect(
+            resolveDreamerTaskModel({ config: result, harness: "opencode", task: "curate" })
+                .primary,
+        ).toEqual({ model: "open/project-curate" });
+        expect(
+            (result.configWarnings ?? []).filter((w) =>
+                w.endsWith(MURAL_MODEL_DEPRECATION_WARNING),
+            ),
+        ).toHaveLength(1);
     });
 });
 

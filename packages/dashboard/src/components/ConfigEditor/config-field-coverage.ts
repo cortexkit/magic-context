@@ -25,7 +25,7 @@ export const RENDERED_PREFIXES: readonly string[] = [
   "language",
   "toast_duration_ms",
   // Memory & search
-  "mural",
+  "mural.enabled",
   // Context window (defaults and compact PerModelTable)
   "cache_ttl",
   "output_reserve",
@@ -155,6 +155,8 @@ export const OMITTED_BY_DESIGN: Readonly<Record<string, string>> = {
   protected_tags:
     "deprecated and ignored by every runtime; retained only so existing files receive a migration warning",
   smart_drops: "deprecated and ignored; supersession is always on and old configs remain loadable",
+  "mural.model":
+    "deprecated and ignored; compress-cues uses each harness's dreamer model, set per task in the dreamer task list",
   debug_rpc:
     "developer-only diagnostics toggle (memory/heap endpoints on the local RPC); never a dashboard knob",
 };

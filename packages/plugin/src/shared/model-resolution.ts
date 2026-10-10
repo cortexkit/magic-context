@@ -137,14 +137,13 @@ export interface ResolvedDreamerTaskModel {
 
 /**
  * Resolve a dreamer task from one harness subtree. Model selection is task →
- * harness default, except compress-cues inserts its harness-independent mural
- * string between those two rungs. Scheduling remains at dreamer.tasks.<task>.
+ * harness default for every task, compress-cues included. Scheduling remains
+ * at dreamer.tasks.<task>.
  */
 export function resolveDreamerTaskModel(args: {
     config: unknown;
     harness: ModelHarness;
     task: string;
-    muralModel?: unknown;
 }): ResolvedDreamerTaskModel {
     const dreamer = asRecord(asRecord(args.config)?.dreamer);
     const harnessBlock = resolveHarnessBlock(dreamer, args.harness);
@@ -166,19 +165,13 @@ export function resolveDreamerTaskModel(args: {
     }
 
     const taskQualifier = taskBlock?.[args.harness === "opencode" ? "variant" : "thinking_level"];
-    // A mural string borrows the harness default's qualifier whether that
-    // qualifier is written beside `model` or inside the default entry object.
+    // A task override without its own qualifier borrows the harness default's
+    // qualifier, whether written beside `model` or inside the default entry object.
     const harnessQualifier =
         harnessBlock[args.harness === "opencode" ? "variant" : "thinking_level"] ??
         normalizeModelEntry(harnessBlock.model, args.harness)?.qualifier;
     const taskHasModel = taskBlock !== undefined && hasOwn(taskBlock, "model");
-    const usesMuralModel =
-        !taskHasModel && args.task === "compress-cues" && Boolean(readString(args.muralModel));
-    const primarySource = taskHasModel
-        ? taskBlock?.model
-        : usesMuralModel
-          ? args.muralModel
-          : harnessBlock.model;
+    const primarySource = taskHasModel ? taskBlock?.model : harnessBlock.model;
     const fallbackSource =
         taskBlock !== undefined && hasOwn(taskBlock, "fallback_models")
             ? taskBlock.fallback_models
@@ -187,11 +180,7 @@ export function resolveDreamerTaskModel(args: {
     return {
         primary: resolvePrimaryEntry({
             entry: primarySource,
-            // mural.model is a plain string, so its qualifier is always the
-            // executing harness default rather than a task-local default.
-            defaultQualifier: usesMuralModel
-                ? harnessQualifier
-                : (taskQualifier ?? harnessQualifier),
+            defaultQualifier: taskQualifier ?? harnessQualifier,
             harness: args.harness,
         }),
         fallbacks: resolveFallbackEntries(fallbackSource, args.harness),

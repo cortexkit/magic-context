@@ -960,8 +960,10 @@ lookup. Pi does not warm that cache (see §14); when metadata is absent the gate
 never injects the mural image until vision metadata is available; OpenCode warms
 the cache from its SDK at startup.
 
-**Config:** both honor `mural.enabled` (and `mural.model`
-for the compress-cues dreamer task). No intentional per-provider image-part
+**Config:** both honor `mural.enabled`. The compress-cues dreamer task takes its
+model from each harness's own dreamer settings
+(`dreamer.<harness>.tasks.compress-cues.model`, then `dreamer.<harness>.model`);
+the old shared `mural.model` is deprecated and ignored on both. No intentional per-provider image-part
 blacklist today — every Pi serializer path that accepts user image content takes
 raw base64 the same way.
 

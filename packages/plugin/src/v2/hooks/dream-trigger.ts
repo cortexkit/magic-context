@@ -48,13 +48,13 @@ export function startDreamTrigger(
     context: Pick<V2Context, "location" | "event" | "session">,
     args: {
         config: DreamerConfig;
-        sample?: () => { config: DreamerConfig; mural?: { enabled: boolean; model?: string } };
+        sample?: () => { config: DreamerConfig; mural?: { enabled: boolean } };
         executor: HiddenCompletionExecutor;
         projectIdentity: () => string;
         /** The project's `memory.enabled`; `false` keeps the identity unscheduled. */
         projectMemoryEnabled?: boolean;
         language?: string;
-        mural?: { enabled: boolean; model?: string };
+        mural?: { enabled: boolean };
         /** Native source boundary; injectable for scheduler-only tests. */
         openReader?: () => Pick<V2StoreReader, "rootSessionActivity" | "close">;
     },
@@ -100,7 +100,6 @@ export function startDreamTrigger(
                             sampled?.config ?? args.config,
                             "opencode",
                             args.language,
-                            (sampled?.mural ?? args.mural)?.model,
                         ),
                         toolsSupported: args.executor.capabilities.tools === true,
                     });

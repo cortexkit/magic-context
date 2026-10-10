@@ -72,17 +72,12 @@ export async function runManualDreamNow(args: {
     projectIdentity: string;
     directory: string;
     language?: string;
-    mural?: { enabled: boolean; model?: string };
+    mural?: { enabled: boolean };
     executor: HiddenCompletionExecutor;
     sessionId: string;
     task?: DreamTaskName;
 }): Promise<ManualDreamOutcome> {
-    const tasks = buildDreamTaskRuntimeConfigs(
-        args.dreamer,
-        "opencode",
-        args.language,
-        args.mural?.model,
-    );
+    const tasks = buildDreamTaskRuntimeConfigs(args.dreamer, "opencode", args.language);
     const executor = createDreamTaskExecutor({
         hiddenCompletionExecutor: args.executor,
         parentSessionId: args.sessionId,

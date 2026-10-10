@@ -25,6 +25,7 @@ import {
 } from "./migrate-config-location";
 import { migrateDreamerV2 } from "./migrate-dreamer-v2";
 import { migrateLegacyExperimental } from "./migrate-experimental";
+import { warnDeprecatedMuralModel } from "./mural-model-deprecation";
 import { resolveConfigProfile } from "./profiles";
 import {
     attachProtectedTokensTierOverrides,
@@ -437,6 +438,7 @@ export function parsePluginConfig(
         configWithoutRemovedAgent,
         preMigrationWarnings,
     );
+    warnDeprecatedMuralModel(migratedExperimental, preMigrationWarnings);
     // Dreamer v2: convert the legacy v1 dreamer shape (window schedule, tasks
     // array, user_memories/pin_key_files blocks) into the per-task `tasks` record.
     // Runs AFTER migrate-experimental so experimental.user_memories (already

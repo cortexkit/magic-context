@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import { migrateLegacyAgentEnabledInMemory } from "@magic-context/core/config/agent-disable";
 import { migrateDreamerV2 } from "@magic-context/core/config/migrate-dreamer-v2";
 import { migrateLegacyExperimental } from "@magic-context/core/config/migrate-experimental";
+import { warnDeprecatedMuralModel } from "@magic-context/core/config/mural-model-deprecation";
 import { resolveConfigProfile } from "@magic-context/core/config/profiles";
 import {
 	attachProtectedTokensTierOverrides,
@@ -327,10 +328,12 @@ function parsePiConfig(
 	// top-level; auto_search, git_commit_indexing → memory.*; user_memories,
 	// pin_key_files → dreamer.*). Shared with OpenCode so both harnesses preserve
 	// a user's opt-in/opt-out across the upgrade.
-	const migrated = migrateDreamerV2(
-		migrateLegacyExperimental(agentMigrated, preMigrationWarnings),
+	const migratedExperimental = migrateLegacyExperimental(
+		agentMigrated,
 		preMigrationWarnings,
 	);
+	warnDeprecatedMuralModel(migratedExperimental, preMigrationWarnings);
+	const migrated = migrateDreamerV2(migratedExperimental, preMigrationWarnings);
 	const parsed = MagicContextConfigSchema.safeParse(migrated);
 	if (parsed.success) {
 		return { config: parsed.data, warnings: preMigrationWarnings };

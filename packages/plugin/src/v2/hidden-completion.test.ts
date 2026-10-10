@@ -1114,6 +1114,7 @@ describe("curate validation over the OpenCode 2 tool-loop transcript", () => {
         expect(inspectCurateMemoryOperations(messages)).toEqual({
             totalCalls: 1,
             completedActions: ["archive"],
+            proposedActions: [],
         });
     });
 
@@ -1135,6 +1136,30 @@ describe("curate validation over the OpenCode 2 tool-loop transcript", () => {
             },
         ]);
         expect(inspectCurateMemoryOperations(messages).completedActions).toEqual(["merge"]);
+    });
+
+    test("counts a recorded proposal separately from an applied memory operation", () => {
+        const messages = transcript([
+            call("c1", "update"),
+            {
+                role: "tool",
+                content: [
+                    {
+                        type: "tool-result",
+                        id: "c1",
+                        result: {
+                            type: "text",
+                            value: "MEMORY_PENDING_PROPOSAL: update retained as a pending proposal; memory is unchanged.",
+                        },
+                    },
+                ],
+            },
+        ]);
+        expect(inspectCurateMemoryOperations(messages)).toEqual({
+            totalCalls: 1,
+            completedActions: [],
+            proposedActions: ["update"],
+        });
     });
 
     test("never counts a failed call, even when its content reads like success", () => {
@@ -1169,6 +1194,7 @@ describe("curate validation over the OpenCode 2 tool-loop transcript", () => {
         expect(inspectCurateMemoryOperations(messages)).toEqual({
             totalCalls: 2,
             completedActions: [],
+            proposedActions: [],
         });
         const [refused] = messages as { parts: { state: { status: string } }[] }[];
         expect(refused?.parts[0]?.state.status).toBe("error");

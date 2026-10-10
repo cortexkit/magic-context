@@ -263,12 +263,25 @@ struct Snapshot {
     opens: u64,
 }
 
-fn snapshot() -> Snapshot {
+/// Process CPU time (user + system) in microseconds. `getrusage` exists only on
+/// Unix; the release build compiles this benchmark binary on Windows too, where
+/// the CPU column reads 0 and the I/O counters still work.
+#[cfg(unix)]
+fn process_cpu_us() -> u64 {
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
     let tv = |t: libc::timeval| t.tv_sec as u64 * 1_000_000 + t.tv_usec as u64;
+    tv(usage.ru_utime) + tv(usage.ru_stime)
+}
+
+#[cfg(not(unix))]
+fn process_cpu_us() -> u64 {
+    0
+}
+
+fn snapshot() -> Snapshot {
     Snapshot {
-        cpu_us: tv(usage.ru_utime) + tv(usage.ru_stime),
+        cpu_us: process_cpu_us(),
         db_read: DB_READ.load(Ordering::Relaxed),
         wal_read: WAL_READ.load(Ordering::Relaxed),
         temp_read: TEMP_READ.load(Ordering::Relaxed),

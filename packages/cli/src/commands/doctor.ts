@@ -36,6 +36,8 @@ export interface RunDoctorOptions extends V22BackfillCommandArgs {
     issue?: boolean;
     report?: string;
     clear?: boolean;
+    /** Print every row of long listings instead of a capped summary. */
+    verbose?: boolean;
     argv?: string[];
 }
 
@@ -148,6 +150,7 @@ export async function dispatchDoctor(
                 fix: options.fix,
                 issue: options.issue,
                 report: options.report,
+                verbose: options.verbose,
             });
         }
         case "pi": {

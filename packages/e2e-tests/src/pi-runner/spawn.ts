@@ -34,9 +34,11 @@ export function resolvePiPackageJson(host: PiRunnerHost = "pi"): string {
   // Host-version comparisons (for example a control run on an older Pi) pin
   // the host explicitly: either an absolute package.json from a separate
   // install, or an exact version already present in the repository's bun store.
+  const explicitPackageJson = host === "pi"
+    ? process.env.MC_E2E_PI_PACKAGE_JSON
+    : process.env.MC_E2E_OMP_PACKAGE_JSON;
+  if (explicitPackageJson) return explicitPackageJson;
   if (host === "pi") {
-    const explicitPackageJson = process.env.MC_E2E_PI_PACKAGE_JSON;
-    if (explicitPackageJson) return explicitPackageJson;
     const pinnedVersion = process.env.MC_E2E_PI_VERSION;
     if (pinnedVersion) {
       const bunModules = join(REPO_ROOT, "node_modules/.bun");
@@ -120,6 +122,7 @@ export interface PiRunnerOptions {
   piSettingsExtra?: Record<string, unknown>;
   modelContextLimit?: number;
   extensionsBeforeMagicContext?: string[];
+  extensionsAfterMagicContext?: string[];
   /** Compatibility option from the old spawn-per-turn runner. RPC sessions persist naturally. */
   continueSession?: boolean;
 }

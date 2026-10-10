@@ -231,41 +231,78 @@ describe("model-resolution", () => {
         });
     });
 
-    test("uses mural model between compress-cues task and harness default", () => {
+    test("resolves compress-cues to each harness's dreamer default and ignores mural.model", () => {
+        // The retired shared mural.model sits in the same config to prove it
+        // no longer feeds resolution on any harness.
         const config = {
+            mural: { enabled: true, model: "google/antigravity-gemini-3.8-flash" },
             dreamer: {
                 tasks: { "compress-cues": { schedule: "0 4 * * *" } },
                 opencode: {
                     model: { model: "open/default", variant: "default-variant" },
-                    tasks: { "compress-cues": { variant: "task-local-must-not-leak" } },
                 },
                 pi: {
-                    model: { model: "pi/default", thinking_level: "high" },
+                    model: {
+                        model: "google-antigravity/antigravity-gemini-3.8-flash",
+                        thinking_level: "high",
+                    },
                     tasks: { "compress-cues": {} },
                 },
             },
         };
 
         expect(
-            resolveDreamerTaskModel({
-                config,
-                harness: "opencode",
-                task: "compress-cues",
-                muralModel: "mural/model",
-            }),
+            resolveDreamerTaskModel({ config, harness: "opencode", task: "compress-cues" }),
         ).toMatchObject({
-            primary: { model: "mural/model", qualifier: "default-variant" },
+            primary: { model: "open/default", qualifier: "default-variant" },
             fallbacks: [],
+            schedule: "0 4 * * *",
         });
         expect(
-            resolveDreamerTaskModel({
-                config,
-                harness: "pi",
-                task: "compress-cues",
-                muralModel: "mural/model",
-            }),
+            resolveDreamerTaskModel({ config, harness: "pi", task: "compress-cues" }),
         ).toMatchObject({
-            primary: { model: "mural/model", qualifier: "high" },
+            primary: {
+                model: "google-antigravity/antigravity-gemini-3.8-flash",
+                qualifier: "high",
+            },
+            fallbacks: [],
+            schedule: "0 4 * * *",
+        });
+    });
+
+    test("a per-harness compress-cues task override wins over the harness default", () => {
+        const config = {
+            mural: { enabled: true, model: "shared/must-not-win" },
+            dreamer: {
+                opencode: {
+                    model: "open/default",
+                    fallback_models: ["open/default-fallback"],
+                    tasks: {
+                        "compress-cues": {
+                            model: { model: "open/cues", variant: "low" },
+                            fallback_models: ["open/cues-fallback"],
+                        },
+                    },
+                },
+                pi: {
+                    model: "pi/default",
+                    thinking_level: "high",
+                    tasks: { "compress-cues": { model: "pi/cues" } },
+                },
+            },
+        };
+
+        expect(
+            resolveDreamerTaskModel({ config, harness: "opencode", task: "compress-cues" }),
+        ).toMatchObject({
+            primary: { model: "open/cues", qualifier: "low" },
+            fallbacks: [{ model: "open/cues-fallback" }],
+        });
+        // A task override without its own qualifier uses the harness default's qualifier.
+        expect(
+            resolveDreamerTaskModel({ config, harness: "pi", task: "compress-cues" }),
+        ).toMatchObject({
+            primary: { model: "pi/cues", qualifier: "high" },
             fallbacks: [],
         });
     });

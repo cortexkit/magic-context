@@ -27,10 +27,8 @@
           "type": "boolean"
         },
         "model": {
-          "description": "Model for the compress-cues task that compresses each memory into a mural cue. The mural image itself is rendered deterministically (no author model).",
-          "x-mc-live-reload": true,
-          "type": "string",
-          "minLength": 1
+          "description": "Deprecated: ignored. compress-cues now uses the dreamer model for each harness, like every other dreamer task; override it with dreamer.opencode.tasks.compress-cues.model (or the pi/omp equivalent). Remove this key; it no longer does anything.",
+          "deprecated": true
         }
       }
     },

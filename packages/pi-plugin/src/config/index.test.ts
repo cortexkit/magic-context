@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { MURAL_MODEL_DEPRECATION_WARNING } from "@magic-context/core/config/mural-model-deprecation";
 import { getProtectedTokensTierOverrides } from "@magic-context/core/config/project-security";
 import { REMOVED_AGENT_CONFIG_WARNING } from "@magic-context/core/config/removed-agent-config";
 import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
+import { buildDreamTaskRuntimeConfigs } from "@magic-context/core/features/magic-context/dreamer/task-config";
 import { resolveEpochFloorForPass } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { Database } from "@magic-context/core/shared/sqlite";
 import {
@@ -236,6 +238,37 @@ describe("loadPiConfig", () => {
 
 		expect(result.config.smart_drops).toBe(true);
 		expect(result.loadedFromPaths).toEqual([userPath]);
+	});
+
+	it("loads the retired mural.model with one deprecation warning and resolves compress-cues from dreamer.pi", () => {
+		const cwd = makeTempRoot("mc-pi-cwd-");
+		const home = makeTempRoot("mc-pi-home-");
+		withHome(home);
+		writeUserConfig(
+			home,
+			JSON.stringify({
+				mural: { enabled: true, model: "google/antigravity-gemini-3.8-flash" },
+				dreamer: {
+					pi: { model: "google-antigravity/antigravity-gemini-3.8-flash" },
+				},
+			}),
+		);
+
+		const result = loadPiConfig({ cwd });
+
+		expect(result.config.mural.enabled).toBe(true);
+		expect(
+			result.warnings.filter((w) =>
+				w.endsWith(MURAL_MODEL_DEPRECATION_WARNING),
+			),
+		).toHaveLength(1);
+		const compressCues = buildDreamTaskRuntimeConfigs(
+			result.config.dreamer,
+			"pi",
+		).find((task) => task.task === "compress-cues");
+		expect(compressCues?.model).toEqual({
+			model: "google-antigravity/antigravity-gemini-3.8-flash",
+		});
 	});
 
 	it("honors user storage permissions while ignoring a project-tier override", () => {

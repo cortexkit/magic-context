@@ -13,6 +13,7 @@ import {
     getOpenCodeV2PluginCacheSlot,
     OPENCODE_PLUGIN_NAME,
     readOpenCodeV2CachedPluginVersion,
+    readReferencedOpenCodePluginSpecs,
 } from "../lib/opencode-plugin-cache";
 import {
     checkOpenCodeV2PluginCache,
@@ -66,6 +67,100 @@ describe("OpenCode 2 plugin cache slot", () => {
         const { npm, slot } = makeNpmCache("0.42.6");
         expect(slot).toBe(join(npm, "@cortexkit", "opencode-magic-context@latest"));
         expect(readOpenCodeV2CachedPluginVersion(slot)).toBe("0.42.6");
+    });
+});
+
+describe("doctor OpenCode 2 plugin cache check against the config", () => {
+    const references = (config: Record<string, unknown>) =>
+        readReferencedOpenCodePluginSpecs(config, "opencode2");
+
+    function collect(result: ReturnType<typeof checkOpenCodeV2PluginCache>, loadedFrom?: string) {
+        const lines: Array<{ kind: "pass" | "warn" | "info"; message: string }> = [];
+        const outcome = reportOpenCodeV2PluginCache(
+            result,
+            {
+                pass: (message) => lines.push({ kind: "pass", message }),
+                warn: (message) => lines.push({ kind: "warn", message }),
+                info: (message) => lines.push({ kind: "info", message }),
+            },
+            { reportMissing: true, loadedFrom },
+        );
+        return { lines, outcome };
+    }
+
+    it("reports a stale @latest slot as one info line when the config loads a local path", () => {
+        const { slot } = makeNpmCache("0.31.2");
+        const removed: string[] = [];
+        const result = checkOpenCodeV2PluginCache(
+            {
+                fix: true,
+                force: true,
+                latestVersion: "0.47.0",
+                hostFiles: [],
+                referencedSpecs: references({
+                    plugin: ["file:///dev/magic-context/packages/plugin"],
+                }),
+            },
+            {
+                slot,
+                probe: () => ({ status: "in_use", pids: [4242] }),
+                remove: (path) => removed.push(path),
+            },
+        );
+        expect(result).toEqual({ action: "unused", slot, cached: "0.31.2" });
+        expect(removed).toEqual([]);
+        expect(existsSync(slot)).toBe(true);
+
+        const { lines, outcome } = collect(result, "file:///dev/magic-context/packages/plugin");
+        expect(outcome).toEqual({ fixed: false, issue: false });
+        expect(lines).toHaveLength(1);
+        expect(lines[0]?.kind).toBe("info");
+        expect(lines[0]?.message).toContain("unused cached copy");
+        expect(lines[0]?.message).toContain("safe to delete");
+        expect(lines[0]?.message).toContain("file:///dev/magic-context/packages/plugin");
+        expect(lines[0]?.message).toContain(slot);
+    });
+
+    it("still warns about a stale @latest slot an @latest entry loads", () => {
+        const { slot } = makeNpmCache("0.31.2");
+        const result = checkOpenCodeV2PluginCache(
+            {
+                latestVersion: "0.47.0",
+                hostFiles: [],
+                referencedSpecs: references({ plugins: [`${OPENCODE_PLUGIN_NAME}@latest`] }),
+            },
+            { slot, probe: free },
+        );
+        expect(result).toEqual({ action: "stale", slot, cached: "0.31.2", latest: "0.47.0" });
+        expect(collect(result).lines.map((line) => line.kind)).toContain("warn");
+    });
+
+    it("treats the @latest slot as unused when the entry pins a version", () => {
+        const { slot } = makeNpmCache("0.31.2");
+        const result = checkOpenCodeV2PluginCache(
+            {
+                latestVersion: "0.47.0",
+                hostFiles: [],
+                referencedSpecs: references({ plugin: [`${OPENCODE_PLUGIN_NAME}@0.45.0`] }),
+            },
+            { slot, probe: free },
+        );
+        expect(result.action).toBe("unused");
+        const { lines } = collect(result);
+        expect(lines.map((line) => line.kind)).toEqual(["info"]);
+        expect(lines[0]?.message).toContain(
+            "no OpenCode 2 plugin entry in the config references it",
+        );
+    });
+
+    it("says nothing about a missing slot the config does not load", () => {
+        const slot = getOpenCodeV2PluginCacheSlot(join(tempDir(), "npm"));
+        const result = checkOpenCodeV2PluginCache(
+            { latestVersion: "0.47.0", hostFiles: [], referencedSpecs: new Set() },
+            { slot, probe: free },
+        );
+        expect(result).toEqual({ action: "not_found", slot, unused: true });
+        expect(collect(result).lines).toEqual([]);
     });
 });
 

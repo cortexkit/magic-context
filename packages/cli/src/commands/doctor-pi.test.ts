@@ -285,6 +285,35 @@ describe("Pi doctor", () => {
         expect(output).toContain("FAIL 0");
     });
 
+    it("reports the retired mural.model as one config warning", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const configHome = process.env.XDG_CONFIG_HOME ?? join(root, ".config");
+        writeFileSync(
+            join(configHome, "cortexkit", "magic-context.jsonc"),
+            JSON.stringify({
+                embedding: { provider: "local" },
+                mural: { enabled: true, model: "google/antigravity-gemini-3.8-flash" },
+            }),
+        );
+        const prompts = new MockPrompts();
+
+        await runDoctor(baseOptions(root, cwd, prompts));
+
+        const output = prompts.messages.join("\n");
+        const muralWarnings = output
+            .split("\n")
+            .filter((line) => line.includes("mural.model is deprecated and ignored"));
+        expect(muralWarnings).toHaveLength(1);
+        expect(muralWarnings[0]).toContain("WARN");
+        expect(muralWarnings[0]).toContain(
+            "compress-cues now uses the dreamer model for each harness",
+        );
+        expect(output).not.toContain("PASS Pi Magic Context config loads successfully");
+    });
+
     it("names the database and repair command when integrity_check fails", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("mc-pi-doctor-cwd-");

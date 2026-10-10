@@ -33,7 +33,7 @@ Each memory needs a short **cue** before it can appear on the mural. The dreamer
 - Runs per memory (not one giant prompt for the whole pool).
 - Compresses the full memory text into a mural-sized line.
 - **Caches by content hash** — unchanged memories are not re-compressed.
-- Uses **`mural.model`** when set, otherwise the dreamer model ladder.
+- Uses the **dreamer model for the harness it runs on**, like every other dreamer task: `dreamer.<harness>.tasks.compress-cues.model` when set, otherwise `dreamer.<harness>.model` (with that harness's fallbacks and variant or thinking level). Model ids differ between harnesses (OpenCode writes `google/…`, Pi writes `google-antigravity/…`), so each harness names its own cue model.
 
 Until a memory has a current cue, it is skipped for mural selection even if it overflowed the text budget.
 
@@ -51,9 +51,16 @@ The gate keeps small projects from waiting forever while avoiding a mostly empty
 ```jsonc
 {
   "mural": {
-    "enabled": true,
-    // Optional: model for compress-cues only. The PNG itself is deterministic.
-    "model": "anthropic/claude-haiku-4-5"
+    "enabled": true
+  },
+  "dreamer": {
+    // Optional: give compress-cues its own model on a harness. Without this,
+    // compress-cues uses dreamer.opencode.model. The PNG itself is deterministic.
+    "opencode": {
+      "tasks": {
+        "compress-cues": { "model": "anthropic/claude-haiku-4-5" }
+      }
+    }
   }
 }
 ```
@@ -61,7 +68,8 @@ The gate keeps small projects from waiting forever while avoiding a mostly empty
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `mural.enabled` | `false` | Master switch for mural injection and compress-cues. |
-| `mural.model` | — | Model used by compress-cues. Falls back to the dreamer model when unset. |
+| `dreamer.<harness>.tasks.compress-cues.model` | — | Optional compress-cues model for one harness (`opencode`, `pi` or `omp`). Falls back to `dreamer.<harness>.model`. |
+| `mural.model` | — | **Deprecated and ignored.** It used to name one cue model shared by every harness, which could not work because model ids differ between harnesses. A config that still contains it loads normally, and `doctor` reports a config warning until you remove it. |
 
 ## Requirements and limits
 

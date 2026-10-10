@@ -17,14 +17,12 @@ export function buildDreamTaskRuntimeConfigs(
     dreamer: unknown,
     harness: ModelHarness,
     language?: string,
-    muralModel?: unknown,
 ): DreamTaskRuntimeConfig[] {
     return CANONICAL_DREAM_TASKS.map((task) => {
         const resolved = resolveDreamerTaskModel({
             config: { dreamer },
             harness,
             task,
-            muralModel,
         });
         return {
             task,

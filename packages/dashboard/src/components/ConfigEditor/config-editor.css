@@ -195,6 +195,12 @@
   display: none;
 }
 
+/* Harness tabs that open a section sit directly under its heading, so give them
+   the same top spacing and left edge as the field rows below them. */
+.config-section-panel .config-card > .tab-pills {
+  padding: 14px 0 12px;
+}
+
 .config-section-panel .config-card-two-col {
   display: contents;
 }
@@ -626,6 +632,42 @@
 .config-route-table .config-input {
   width: 100%;
 }
+.protected-tools-table th:nth-child(2) {
+  width: 200px;
+}
+.protected-tools-default td {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.protected-tools-default-note {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.protected-tools-error {
+  /* Plain --error-text measures 4.48:1 on the dark panel; blending in the
+     theme's primary text colour lifts it past the 4.5:1 AA minimum in both themes. */
+  color: color-mix(in srgb, var(--error-text) 80%, var(--text-primary));
+  font-size: 11px;
+}
+.protected-tools .config-input[aria-invalid="true"] {
+  border-color: var(--error-text);
+}
+.config-help {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+.config-help summary {
+  cursor: pointer;
+  color: var(--text-primary);
+}
+.config-help p,
+.config-help ul {
+  margin: 6px 0 0;
+}
+.config-help ul {
+  padding-left: 18px;
+}
 .model-select-dropdown {
   overflow-y: auto;
 }
@@ -761,4 +803,35 @@
   .config-route-table td:last-child {
     grid-column: 2;
   }
+
+  .config-route-table td:only-child {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Model discovery status: a small toast pinned to the bottom-right corner. Being
+   out of the document flow, it never moves the form when it appears or goes away. */
+.config-catalog-toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(420px, calc(100vw - 40px));
+  padding: 10px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 14%);
+  color: var(--text-secondary);
+  font-size: 12px;
+  animation: toast-in 200ms ease-out;
+}
+
+.config-catalog-toast.is-error {
+  background: var(--error-bg);
+  border-color: var(--error-border);
+  color: var(--error-text);
 }

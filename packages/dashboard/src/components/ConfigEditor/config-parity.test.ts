@@ -95,6 +95,7 @@ describe("ConfigEditor ⇄ schema parity", () => {
     const deprecated = deprecatedSchemaPaths(loadSchema());
     expect(deprecated).toContain("protected_tags");
     expect(deprecated).toContain("smart_drops");
+    expect(deprecated).toContain("mural.model");
     expect(
       deprecated.filter((leaf) =>
         RENDERED_PREFIXES.some((prefix) => isCoveredBy(leaf, prefix) || isCoveredBy(prefix, leaf)),

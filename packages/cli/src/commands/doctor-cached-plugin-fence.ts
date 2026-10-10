@@ -15,7 +15,10 @@
  * names each cache directory whose fence is behind the database's newest
  * migration, with the host-specific way to refresh it. Version-pinned copies
  * are left to the pinned-entry fence check, since updating the cache cannot
- * change what a pin installs. Nothing is removed here.
+ * change what a pin installs. A copy the host's config never loads (the config
+ * loads Magic Context from a local checkout, or pins a version) cannot fail
+ * that host closed, so it is skipped here; the plugin cache steps report it as
+ * an unused copy. Nothing is removed here.
  */
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
@@ -27,12 +30,13 @@ import {
     getOpenCodeV2ActiveGeneration,
     isOpenCodePluginDistTag,
     listOpenCodeV2PluginCacheSlots,
+    type OpenCodePluginCacheHost,
 } from "../lib/opencode-plugin-cache";
 import { readFenceFromDist } from "../lib/opencode-plugin-schema-fence";
 import { readCachedPluginVersion } from "./doctor-opencode-cache";
 import { OPENCODE_V2_PLUGIN_UPDATE_HINT } from "./doctor-opencode2-cache";
 
-export type CachedPluginHost = "opencode1" | "opencode2";
+export type CachedPluginHost = OpenCodePluginCacheHost;
 
 /** One cached Magic Context copy and the schema fence compiled into it. */
 export interface CachedPluginFence {
@@ -51,6 +55,22 @@ export interface CachedPluginFenceSources {
     openCodeV1Roots?: string[];
     /** OpenCode 2 `npm/` cache directory; defaults to the real one. */
     openCodeV2NpmCacheDir?: string;
+    /**
+     * Magic Context specs each host's config makes it load (see
+     * `readReferencedOpenCodePluginSpecs`). A cached copy whose spec is not in
+     * its host's set is never loaded and is left out. A host without a set
+     * (config unreadable, or a caller that has no config) keeps every copy.
+     */
+    referencedSpecs?: Partial<Record<CachedPluginHost, ReadonlySet<string>>>;
+}
+
+function isReferenced(
+    sources: CachedPluginFenceSources,
+    host: CachedPluginHost,
+    spec: string,
+): boolean {
+    const specs = sources.referencedSpecs?.[host];
+    return specs === undefined || specs.has(spec);
 }
 
 /** Read every dist-tag Magic Context copy cached by OpenCode 1 and OpenCode 2. */
@@ -58,7 +78,12 @@ export function listCachedOpenCodePluginFences(
     sources: CachedPluginFenceSources = {},
 ): CachedPluginFence[] {
     const fences: CachedPluginFence[] = [];
-    for (const root of sources.openCodeV1Roots ?? getOpenCodePluginCacheRoots()) {
+    // Both OpenCode 1 roots (`<name>@latest` and the bare `<name>`) hold the
+    // install that follows `latest`.
+    const v1Referenced = isReferenced(sources, "opencode1", "latest");
+    for (const root of v1Referenced
+        ? (sources.openCodeV1Roots ?? getOpenCodePluginCacheRoots())
+        : []) {
         const packageJson = getOpenCodePluginPackageJsonPath(root);
         if (!existsSync(packageJson)) continue;
         fences.push({
@@ -70,6 +95,7 @@ export function listCachedOpenCodePluginFences(
     }
     for (const slot of listOpenCodeV2PluginCacheSlots(sources.openCodeV2NpmCacheDir)) {
         if (!isOpenCodePluginDistTag(slot.spec)) continue;
+        if (!isReferenced(sources, "opencode2", slot.spec)) continue;
         // The host loads the newest generation, so that is the copy whose fence matters.
         const generation = getOpenCodeV2ActiveGeneration(slot.slot);
         if (!generation) continue;

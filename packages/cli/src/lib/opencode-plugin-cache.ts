@@ -81,6 +81,51 @@ export function readConfiguredOpenCodePluginSpec(
     return "latest";
 }
 
+/** Which OpenCode host generation a plugin cache belongs to. */
+export type OpenCodePluginCacheHost = "opencode1" | "opencode2";
+
+/**
+ * Every Magic Context registry spec (`latest` for a bare entry, otherwise the
+ * text after `<name>@`) that the config makes `host` load. OpenCode 1 reads only
+ * the legacy `plugin` array; OpenCode 2 reads `plugin` and `plugins` together.
+ * Local-path entries and other packages add nothing, because a host that loads
+ * Magic Context from a checkout never reads its npm cache copy. An empty set
+ * therefore means no cached copy of the package is loaded by that host.
+ */
+export function readReferencedOpenCodePluginSpecs(
+    config: Record<string, unknown> | null | undefined,
+    host: OpenCodePluginCacheHost,
+): Set<string> {
+    const specs = new Set<string>();
+    for (const { key, entry } of readPluginEntries(config)) {
+        if (host === "opencode1" && key !== "plugin") continue;
+        const specifier = pluginEntrySpecifier(entry);
+        const spec = specifier === undefined ? undefined : openCodeV2PluginSpecOf(specifier);
+        if (spec !== undefined) specs.add(spec);
+    }
+    return specs;
+}
+
+/**
+ * The single info line for a cached Magic Context copy the host never loads.
+ * Such a copy can be stale without harming anything, so it is reported as
+ * informational rather than as a warning or failure.
+ */
+export function describeUnusedOpenCodePluginCache(input: {
+    host: "OpenCode 1" | "OpenCode 2";
+    /** The spec the unused copy follows, normally `latest`. */
+    spec: string;
+    cached?: string;
+    paths: string[];
+    /** The local path the config loads Magic Context from instead, if any. */
+    loadedFrom?: string;
+}): string {
+    const why = input.loadedFrom
+        ? `the config loads Magic Context from ${input.loadedFrom}`
+        : `no ${input.host} plugin entry in the config references it`;
+    return `${input.host} plugin cache: unused cached copy of ${OPENCODE_PLUGIN_NAME}@${input.spec} (cached: ${input.cached ?? "unreadable"}); ${input.host} never loads it because ${why}. Informational, nothing breaks; safe to delete: ${input.paths.join(", ")}`;
+}
+
 function pluginEntrySpecifier(entry: unknown): string | undefined {
     if (typeof entry === "string") return entry;
     if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];

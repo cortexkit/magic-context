@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { REMOVED_AGENT_CONFIG_WARNING } from "@magic-context/core/config/removed-agent-config";
 import {
@@ -36,7 +37,7 @@ import {
     parseOpenCodeModelCatalog,
     resolveNpmRegistryUrl,
 } from "./doctor-opencode";
-import { clearPluginCache } from "./doctor-opencode-cache";
+import { clearPluginCache, readOpenCodePluginConfigUse } from "./doctor-opencode-cache";
 
 function migrate(input: Record<string, unknown>) {
     const logs: Array<{ level: "success" | "warn"; message: string }> = [];
@@ -730,6 +731,104 @@ describe("doctor OpenCode 1 plugin cache while OpenCode runs", () => {
             reason: "could not run lsof (ENOENT)",
         });
         expect(existsSync(pluginCachePath)).toBe(true);
+    });
+});
+
+describe("doctor OpenCode 1 plugin cache against the config", () => {
+    /** A local Magic Context checkout and an OpenCode config dir, both in a temp tree. */
+    function devCheckout(root: string): { configDir: string; fileUrl: string } {
+        const checkout = join(root, "magic-context", "packages", "plugin");
+        mkdirSync(checkout, { recursive: true });
+        writeFileSync(
+            join(checkout, "package.json"),
+            `${JSON.stringify({ name: OPENCODE_PLUGIN_NAME, version: "0.47.0" })}\n`,
+        );
+        const configDir = join(root, "config");
+        mkdirSync(configDir, { recursive: true });
+        return { configDir, fileUrl: pathToFileURL(checkout).href };
+    }
+
+    it("leaves a stale cache unused, without probing, when the config loads a file:// checkout", async () => {
+        const cacheRoot = makeTempDir("mc-opencode-cache-");
+        originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = cacheRoot;
+        const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.31.2");
+        const { configDir, fileUrl } = devCheckout(cacheRoot);
+        const use = readOpenCodePluginConfigUse(
+            { plugin: [fileUrl, "other-plugin@latest"] },
+            configDir,
+        );
+        expect(use.referencedSpecs.opencode1.size).toBe(0);
+        expect(use.loadedFrom).toEqual({ opencode1: fileUrl, opencode2: fileUrl });
+
+        let probed = false;
+        const result = await clearPluginCache(
+            {
+                force: true,
+                latestVersion: "0.47.0",
+                referencedSpecs: use.referencedSpecs.opencode1,
+            },
+            {
+                probe: () => {
+                    probed = true;
+                    return { status: "in_use", pids: [4242] };
+                },
+            },
+        );
+
+        expect(result).toEqual({
+            action: "unused",
+            path: pluginCachePath,
+            paths: [pluginCachePath],
+            cached: "0.31.2",
+        });
+        expect(probed).toBe(false);
+        expect(existsSync(pluginCachePath)).toBe(true);
+    });
+
+    it("still treats a stale cache as in use when the config loads @latest", async () => {
+        const cacheRoot = makeTempDir("mc-opencode-cache-");
+        originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = cacheRoot;
+        const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.31.2");
+        const use = readOpenCodePluginConfigUse(
+            { plugin: [[OPENCODE_PLUGIN_ENTRY_WITH_VERSION, {}]] },
+            cacheRoot,
+        );
+
+        const result = await clearPluginCache(
+            { latestVersion: "0.47.0", referencedSpecs: use.referencedSpecs.opencode1 },
+            { probe: () => ({ status: "in_use", pids: [4242] }) },
+        );
+
+        expect(result).toMatchObject({ action: "in_use", path: pluginCachePath, cached: "0.31.2" });
+    });
+
+    it("treats the @latest cache as unused when the entry pins a version", async () => {
+        const cacheRoot = makeTempDir("mc-opencode-cache-");
+        originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = cacheRoot;
+        createCachedOpenCodePlugin(cacheRoot, "0.31.2");
+        const use = readOpenCodePluginConfigUse(
+            { plugin: [`${OPENCODE_PLUGIN_NAME}@0.45.0`] },
+            cacheRoot,
+        );
+        expect([...use.referencedSpecs.opencode1]).toEqual(["0.45.0"]);
+
+        const result = await clearPluginCache(
+            { latestVersion: "0.47.0", referencedSpecs: use.referencedSpecs.opencode1 },
+            { probe: noOpenCodeRunning },
+        );
+        expect(result.action).toBe("unused");
+    });
+
+    it("counts only the plugin array for OpenCode 1, and both arrays for OpenCode 2", () => {
+        const use = readOpenCodePluginConfigUse(
+            { plugins: [{ package: OPENCODE_PLUGIN_NAME, options: {} }] },
+            tmpdir(),
+        );
+        expect(use.referencedSpecs.opencode1.size).toBe(0);
+        expect([...use.referencedSpecs.opencode2]).toEqual(["latest"]);
     });
 });
 

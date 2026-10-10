@@ -265,6 +265,10 @@ export class PiRpcClient {
           ]),
           "--extension",
           this.env.pluginDir,
+          ...(this.options.extensionsAfterMagicContext ?? []).flatMap((extension) => [
+            "--extension",
+            extension,
+          ]),
           "--extension",
           PI_RELOAD_EXTENSION,
           ...discoveryArgs,

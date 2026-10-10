@@ -48,6 +48,11 @@ const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descrip
  *                   on for an agent whose allow-list intentionally excludes it.
  * Dreamer model/cadence fields are deliberately NOT stripped: a repo may tune
  * its own dreamer overlays and schedules through the user's provider auth.
+ * Every dreamer task sends project memory to its model, so a repository that
+ * sets a dreamer model chooses where that memory goes; the project-tier allowance
+ * above accepts that. compress-cues follows the same rule: its model comes from
+ * dreamer.<harness>.tasks.compress-cues or the harness default, so a project
+ * can choose it exactly as it can for any other task.
  * Historian model selection stays USER-tier only, and compaction thresholds are
  * project raise-only, so a cloned repo cannot force earlier compaction or extra
  * historian spend on the user's dime.
@@ -180,25 +185,6 @@ function stripEscalationAtExecutableSite(
                     removed,
                 );
             }
-        }
-    }
-}
-
-/** Remove `mural.model` smuggled under hidden-agent trees. Top-level and
- *  experimental mural blocks are handled separately so their warnings stay
- *  specific; this walk covers harness and task nesting the schema does not
- *  admit but a hostile file can still write. */
-function stripNestedMuralModels(
-    node: Record<string, unknown>,
-    path: string,
-    removed: string[],
-): void {
-    for (const [key, value] of Object.entries(node)) {
-        if (key === "mural" && isPlainObject(value) && "model" in value) {
-            delete value.model;
-            removed.push(`${path}.${key}.model`);
-        } else if (isPlainObject(value)) {
-            stripNestedMuralModels(value, `${path}.${key}`, removed);
         }
     }
 }
@@ -368,9 +354,6 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  *    provider account. `host_runner` is stripped for the same reason in the other
  *    direction: a repo must not switch this machine's pull loop on and start
  *    spending the user's provider account on folds.
- *  - `mural.model` at the top-level block, the legacy experimental spelling,
- *    and any nested `mural.model` under hidden agents — a cloned repo cannot
- *    choose where project memory is sent.
  *  - `pi.subagent_extensions` — a cloned repo must not choose which extensions
  *    the user's Pi child processes load.
  *  - `prompt_surface.guidance_override_path` / `tool_descriptions` — a repository
@@ -609,39 +592,6 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         delete dreamer.runner;
         warnings.push(
             "Ignoring dreamer.runner from project config (security: which process and provider account run dreamer completions is a user-level setting).",
-        );
-    }
-
-    const mural = projectRaw.mural;
-    if (isPlainObject(mural) && "model" in mural) {
-        delete mural.model;
-        warnings.push(
-            "Ignoring mural.model from project config (security: the mural cue-compressor model is a user-level setting; a repository cannot choose where project memory is sent).",
-        );
-    }
-
-    // Keep the same trust boundary while accepting the pre-graduation spelling.
-    // This must run before the in-memory migration moves experimental.mural.model
-    // to mural.model, otherwise an untrusted project could bypass the user-only
-    // model check.
-    const experimental = projectRaw.experimental;
-    const legacyMural = isPlainObject(experimental) ? experimental.mural : undefined;
-    if (isPlainObject(legacyMural) && "model" in legacyMural) {
-        delete legacyMural.model;
-        warnings.push(
-            "Ignoring experimental.mural.model from project config (security: the mural cue-compressor model is a user-level setting; use user-level mural.model).",
-        );
-    }
-
-    const nestedMuralRemoved: string[] = [];
-    for (const agentKey of HIDDEN_AGENT_KEYS) {
-        const block = projectRaw[agentKey];
-        if (!isPlainObject(block)) continue;
-        stripNestedMuralModels(block, agentKey, nestedMuralRemoved);
-    }
-    if (nestedMuralRemoved.length > 0) {
-        warnings.push(
-            `Ignoring ${nestedMuralRemoved.join(", ")} from project config (security: the mural cue-compressor model is a user-level setting; a repository cannot choose where project memory is sent).`,
         );
     }
 

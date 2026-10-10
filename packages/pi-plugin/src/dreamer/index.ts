@@ -44,7 +44,7 @@ export interface PiDreamerOptions {
 	modelRegistry?: { find(provider: string, modelId: string): unknown };
 	sampleDreamRun?: () => {
 		dreamerConfig?: DreamerConfig;
-		mural?: { enabled: boolean; model?: string };
+		mural?: { enabled: boolean };
 		gitCommitIndexing?: PiDreamerOptions["gitCommitIndexing"];
 	};
 	/** Active Pi-compatible host used to select per-harness model configuration. */
@@ -65,7 +65,7 @@ export interface PiDreamerOptions {
 	 */
 	memoryEnabled: boolean;
 	retinaHandoff?: boolean;
-	mural?: { enabled: boolean; model?: string };
+	mural?: { enabled: boolean };
 	language?: string;
 	gitCommitIndexing: {
 		enabled: boolean;
@@ -372,7 +372,6 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 							dreamerConfig,
 							manualOpts.harness,
 							manualOpts.language,
-							mural?.model,
 						),
 						manualOpts.modelRegistry,
 						manualOpts.harness,
@@ -381,7 +380,6 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 						dreamerConfig,
 						manualOpts.harness,
 						manualOpts.language,
-						mural?.model,
 					),
 			executor: createDreamTaskExecutor({
 				client: manualClient as never,

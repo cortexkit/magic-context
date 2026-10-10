@@ -917,9 +917,9 @@ export interface ShadowEmbeddingConfig {
 
 export interface MuralConfig {
     enabled: boolean;
-    /** The CUE COMPRESSOR model for the compress-cues dreamer task (the mural is
-     *  now rendered deterministically, so this no longer names an author model). */
-    model?: string;
+    /** Deprecated and ignored: compress-cues takes its model from each
+     *  harness's dreamer settings, like every other dreamer task. */
+    model?: unknown;
 }
 
 export interface MagicContextConfig {
@@ -1123,13 +1123,12 @@ export const MagicContextConfigSchema = z
             .object({
                 enabled: z.boolean().default(false),
                 model: z
-                    .string()
-                    .trim()
-                    .min(1)
+                    .unknown()
                     .optional()
                     .describe(
-                        "Model for the compress-cues task that compresses each memory into a mural cue. The mural image itself is rendered deterministically (no author model).",
-                    ),
+                        "Deprecated: ignored. compress-cues now uses the dreamer model for each harness, like every other dreamer task; override it with dreamer.opencode.tasks.compress-cues.model (or the pi/omp equivalent). Remove this key; it no longer does anything.",
+                    )
+                    .meta({ deprecated: true }),
             })
             .default({ enabled: false })
             .describe(
@@ -1609,7 +1608,6 @@ export const MagicContextConfigSchema = z
 /** Settings whose fresh values can be used by later agent runs without changing rendered prompt bytes. */
 export const LIVE_RELOAD_CONFIG_PATHS = [
     "cache_ttl",
-    "mural.model",
     "toast_duration_ms",
     "historian.opencode.model",
     "historian.opencode.fallback_models",

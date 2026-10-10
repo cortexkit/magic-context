@@ -70,7 +70,6 @@ Keys listed below apply from the next historian or dreamer run (or dream-timer t
 - `memory.git_commit_indexing.enabled`
 - `memory.git_commit_indexing.max_commits`
 - `memory.git_commit_indexing.since_days`
-- `mural.model`
 - `toast_duration_ms`
 <!-- LIVE-CONFIG-KEYS-END -->
 

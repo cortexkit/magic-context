@@ -11,6 +11,7 @@ import {
     getOpenCodePluginPackageJsonPath,
     getOpenCodeV2PluginCacheSlot,
     OPENCODE_PLUGIN_NAME,
+    readReferencedOpenCodePluginSpecs,
 } from "../lib/opencode-plugin-cache";
 import {
     type CachedPluginFenceFinding,
@@ -227,5 +228,73 @@ describe("cached plugin schema fence vs shared context.db", () => {
         const path = writeContextDb(root, LATEST_SUPPORTED_VERSION + 1);
         expect(readContextDbSchemaVersion(path)).toBe(LATEST_SUPPORTED_VERSION + 1);
         expect(readContextDbSchemaVersion(join(root, "absent.db"))).toBeNull();
+    });
+});
+
+describe("cached plugin schema fence vs what the config loads", () => {
+    /** The operator's layout: an old OpenCode 1 `@latest` cache and an old OpenCode 2 `@latest` slot. */
+    function staleCaches() {
+        const root = tempDir();
+        const v1Root = writeOpenCodeV1Root(join(root, "opencode", "packages"), "0.31.2", 50);
+        const npm = join(root, "opencode", "npm");
+        const v2Slot = writeOpenCodeV2Generation(npm, "latest", "1", "0.31.2", 50);
+        return { v1Root, npm, v2Slot };
+    }
+
+    function findingsFor(config: Record<string, unknown>) {
+        const { v1Root, npm, v2Slot } = staleCaches();
+        const findings = compareCachedPluginFences(
+            listCachedOpenCodePluginFences({
+                openCodeV1Roots: [v1Root],
+                openCodeV2NpmCacheDir: npm,
+                referencedSpecs: {
+                    opencode1: readReferencedOpenCodePluginSpecs(config, "opencode1"),
+                    opencode2: readReferencedOpenCodePluginSpecs(config, "opencode2"),
+                },
+            }),
+            95,
+        );
+        return { findings, v1Root, v2Slot };
+    }
+
+    it("does not fail a host whose config loads Magic Context from a file:// path", () => {
+        const { findings } = findingsFor({
+            plugin: ["file:///dev/magic-context/packages/plugin", "other-plugin@latest"],
+        });
+        expect(findings).toEqual([]);
+        const { lines, result } = collectReport(findings);
+        expect(result).toEqual({ behind: 0 });
+        expect(lines).toEqual([]);
+    });
+
+    it("still fails a stale cache that an @latest entry loads", () => {
+        const { findings, v1Root, v2Slot } = findingsFor({
+            plugin: [`${OPENCODE_PLUGIN_NAME}@latest`],
+        });
+        expect(findings.map((finding) => [finding.directory, finding.status])).toEqual([
+            [v1Root, "behind"],
+            [v2Slot, "behind"],
+        ]);
+        const { lines, result } = collectReport(findings);
+        expect(result).toEqual({ behind: 2 });
+        expect(lines.filter((line) => line.kind === "fail")[0]?.message).toContain(
+            "OpenCode 1 has Magic Context 0.31.2 cached, which supports context.db only through schema v50, but the shared context.db is at v95",
+        );
+    });
+
+    it("leaves the @latest caches out when the entry pins a version", () => {
+        const { findings } = findingsFor({ plugin: [`${OPENCODE_PLUGIN_NAME}@0.45.0`] });
+        expect(findings).toEqual([]);
+    });
+
+    it("judges each host by the arrays it reads", () => {
+        // OpenCode 1 ignores the native `plugins` array; OpenCode 2 reads it.
+        const { findings, v2Slot } = findingsFor({
+            plugin: ["file:///dev/magic-context/packages/plugin"],
+            plugins: [`${OPENCODE_PLUGIN_NAME}@latest`],
+        });
+        expect(findings.map((finding) => [finding.host, finding.directory])).toEqual([
+            ["opencode2", v2Slot],
+        ]);
     });
 });

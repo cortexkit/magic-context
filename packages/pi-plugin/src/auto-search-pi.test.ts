@@ -381,6 +381,90 @@ describe("runAutoSearchHintForPi", () => {
 		}
 	});
 
+	it("skips a steer-only user message after the latest real prompt", async () => {
+		const db = createTestDb();
+		const spy = spyOn(searchModule, "searchAutoHint").mockResolvedValue([
+			memoryResult(),
+		]);
+		try {
+			const messages = [
+				userMessage("explain the historian cache wiring", 1),
+				userMessage(
+					[
+						"<system-reminder>",
+						"[BACKGROUND BASH COMPLETED]",
+						"</system-reminder>",
+						"<!-- OMO_INTERNAL_INITIATOR -->",
+						"<ctx-search-hint>injected hint</ctx-search-hint>",
+						"<instruction>injected instruction</instruction>",
+					].join("\n"),
+					2,
+				),
+			];
+			const before = JSON.stringify(messages);
+
+			await runAutoSearchHintForPi({
+				sessionId: "ses-auto",
+				db,
+				messages,
+				entryIds: ["entry-real-prompt", "entry-steer"],
+				decisions: [],
+				options: baseOptions,
+			});
+
+			expect(spy).not.toHaveBeenCalled();
+			expect(getAutoSearchHintDecisions(db, "ses-auto")).toEqual([]);
+			expect(JSON.stringify(messages)).toBe(before);
+		} finally {
+			spy.mockRestore();
+			closeQuietly(db);
+		}
+	});
+
+	it("replays a persisted hint unchanged when a steer message follows it", async () => {
+		const db = createTestDb();
+		const spy = spyOn(searchModule, "searchAutoHint").mockResolvedValue([
+			memoryResult(),
+		]);
+		try {
+			const originalMessage = userMessage(
+				"explain the historian cache wiring",
+				1,
+			);
+			const original = [originalMessage];
+			await runAutoSearchHintForPi({
+				sessionId: "ses-auto",
+				db,
+				messages: original,
+				entryIds: ["entry-real-prompt"],
+				options: baseOptions,
+			});
+			const replay = [
+				originalMessage,
+				userMessage(
+					"<system-reminder><channel-notice>continue</channel-notice></system-reminder>",
+					2,
+				),
+			];
+			const before = JSON.stringify(replay);
+
+			await runAutoSearchHintForPi({
+				sessionId: "ses-auto",
+				db,
+				messages: replay,
+				entryIds: ["entry-real-prompt", "entry-steer"],
+				decisions: getAutoSearchHintDecisions(db, "ses-auto"),
+				options: baseOptions,
+			});
+
+			expect(spy).toHaveBeenCalledTimes(1);
+			expect(JSON.stringify(replay)).toBe(before);
+		} finally {
+			spy.mockRestore();
+			closeQuietly(db);
+		}
+	});
+
 	it("does not append a hint when top score is below threshold", async () => {
 		const db = createTestDb();
 		const spy = spyOn(searchModule, "searchAutoHint").mockImplementation(

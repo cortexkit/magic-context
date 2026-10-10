@@ -135,7 +135,7 @@ interface ProjectRegistration {
         fallbackModelCount: number;
         keepSubagents: boolean;
     };
-    mural?: { enabled: boolean; model?: string };
+    mural?: { enabled: boolean };
     retinaHandoff?: boolean;
     embeddingConfig?: { provider?: string };
     ensureRegistered: (directory: string, db: Database) => Promise<void>;
@@ -620,12 +620,7 @@ async function sweepProject(
     const dreamingEnabled = Boolean(dreamerConfig && dreamerConfig.disable !== true);
     const configuredTasks =
         dreamingEnabled && dreamerConfig
-            ? buildDreamTaskRuntimeConfigs(
-                  dreamerConfig,
-                  reg.harness,
-                  reg.language,
-                  reg.mural?.model,
-              )
+            ? buildDreamTaskRuntimeConfigs(dreamerConfig, reg.harness, reg.language)
             : [];
     const runtimeConfigs = reg.validateTaskModels?.(configuredTasks) ?? configuredTasks;
     await sweepOrphanedInternalChildren(

@@ -46,7 +46,7 @@ Global on/off switches for the plugin and its agent-facing surface.
 | `todowrite.overlay` | boolean | `true` | Pi only: show the persistent todo overlay above the editor while tasks are active. |
 | `mural` | object | — | Experimental mural: a single deterministically-rendered image of project memories that did not fit the context budget. Cues are compressed per-memory by the compress-cues dreamer task. |
 | `mural.enabled` | boolean | `false` |  |
-| `mural.model` **Live** | string | — | Model for the compress-cues task that compresses each memory into a mural cue. The mural image itself is rendered deterministically (no author model). |
+| `mural.model` | unknown | — | Deprecated: ignored. compress-cues now uses the dreamer model for each harness, like every other dreamer task; override it with dreamer.opencode.tasks.compress-cues.model (or the pi/omp equivalent). Remove this key; it no longer does anything. |
 
 ## Prompt surface
 

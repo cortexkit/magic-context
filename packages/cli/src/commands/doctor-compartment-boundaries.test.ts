@@ -5,7 +5,12 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import { Database } from "@magic-context/core/shared/sqlite";
 import {
+    countDanglingCompartmentBoundariesBySession,
+    DANGLING_BOUNDARY_EXAMPLE_LIMIT,
+    type DanglingCompartmentBoundary,
     formatDanglingCompartmentBoundary,
+    formatDanglingCompartmentBoundaryDetails,
+    formatDanglingCompartmentBoundaryHeadline,
     listDanglingCompartmentBoundaries,
 } from "./doctor-compartment-boundaries";
 
@@ -94,12 +99,14 @@ const expectedDanglingBoundaries = [
         sequence: 1,
         missingStartMessageId: "missing-start",
         missingEndMessageId: null,
+        sessionInStore: true,
     },
     {
         sessionId: "ses-live",
         sequence: 2,
         missingStartMessageId: null,
         missingEndMessageId: "missing-end",
+        sessionInStore: true,
     },
 ];
 
@@ -154,5 +161,117 @@ describe("doctor dangling compartment boundary check", () => {
 
     it("uses session_message for a native v2 store", () => {
         expectResolvedLiveStore(v2Store);
+    });
+});
+
+/** `perSession` dangling compartments in each of `sessions` sessions, the last one absent from the store. */
+function manyDangling(sessions: number, perSession: number): DanglingCompartmentBoundary[] {
+    const boundaries: DanglingCompartmentBoundary[] = [];
+    for (let session = 0; session < sessions; session++) {
+        // Give each session a distinct count so the ordering is observable.
+        for (let sequence = 0; sequence < perSession + session; sequence++) {
+            boundaries.push({
+                sessionId: `ses-${String(session).padStart(3, "0")}`,
+                sequence,
+                missingStartMessageId: `ccm-${sequence}`,
+                missingEndMessageId: `ccm-${sequence + 16}`,
+                sessionInStore: session !== sessions - 1,
+            });
+        }
+    }
+    return boundaries;
+}
+
+describe("doctor dangling compartment boundary listing", () => {
+    it("reports a session with no messages in the store", () => {
+        const context = contextDatabase();
+        context
+            .prepare(
+                `INSERT INTO compartments
+                    (session_id, sequence, start_message, end_message, start_message_id,
+                     end_message_id, title, content, created_at)
+                 VALUES ('ses-gone', 0, 1, 2, 'ccm-0', 'ccm-16', 'gone', 'gone', 1)`,
+            )
+            .run();
+        const store = v1Store();
+        try {
+            const dangling = listDanglingCompartmentBoundaries(context, store, "v1");
+            expect(dangling.find((boundary) => boundary.sessionId === "ses-gone")).toEqual({
+                sessionId: "ses-gone",
+                sequence: 0,
+                missingStartMessageId: "ccm-0",
+                missingEndMessageId: "ccm-16",
+                sessionInStore: false,
+            });
+        } finally {
+            context.close();
+            store.close();
+        }
+    });
+
+    it("caps the listing at a summary by session plus a few examples", () => {
+        const boundaries = manyDangling(90, 200);
+        const lines = formatDanglingCompartmentBoundaryDetails(boundaries);
+
+        const sessionLines = lines.filter(
+            (line) => line.startsWith("  session=ses-") && line.includes(": "),
+        );
+        const exampleLines = lines.filter((line) => line.includes(" sequence="));
+        expect(sessionLines).toHaveLength(DANGLING_BOUNDARY_EXAMPLE_LIMIT);
+        expect(exampleLines).toHaveLength(DANGLING_BOUNDARY_EXAMPLE_LIMIT);
+        expect(lines.length).toBeLessThanOrEqual(2 * DANGLING_BOUNDARY_EXAMPLE_LIMIT + 5);
+        // Largest session first, and the one absent from the store is labelled.
+        expect(sessionLines[0]).toBe(
+            "  session=ses-089: 289 compartment(s) (session has no messages in this store)",
+        );
+        expect(sessionLines[1]).toBe("  session=ses-088: 288 compartment(s)");
+        expect(lines).toContain(`By session (largest 10 of 90):`);
+        expect(lines).toContain(`  … and 80 more session(s)`);
+        expect(lines).toContain(`Examples (10 of ${boundaries.length}):`);
+        expect(lines.at(-1)).toBe(
+            `Run \`magic-context doctor --verbose\` for the full list of ${boundaries.length} compartment(s).`,
+        );
+    });
+
+    it("prints every session and compartment with --verbose", () => {
+        const boundaries = manyDangling(90, 200);
+        const lines = formatDanglingCompartmentBoundaryDetails(boundaries, { verbose: true });
+
+        const exampleLines = lines.filter((line) => line.includes(" sequence="));
+        expect(exampleLines).toEqual(
+            boundaries.map((boundary) => `  ${formatDanglingCompartmentBoundary(boundary)}`),
+        );
+        expect(countDanglingCompartmentBoundariesBySession(boundaries)).toHaveLength(90);
+        expect(
+            lines.filter((line) => line.startsWith("  session=ses-") && line.includes(": ")),
+        ).toHaveLength(90);
+        expect(lines.some((line) => line.includes("--verbose"))).toBe(false);
+        expect(lines.some((line) => line.includes("more session(s)"))).toBe(false);
+    });
+
+    it("prints a short listing in full without a --verbose hint", () => {
+        const boundaries = manyDangling(2, 1);
+        const lines = formatDanglingCompartmentBoundaryDetails(boundaries);
+        expect(lines).toEqual([
+            "By session:",
+            "  session=ses-001: 2 compartment(s) (session has no messages in this store)",
+            "  session=ses-000: 1 compartment(s)",
+            "Compartments:",
+            "  session=ses-000 sequence=0 missing start_message_id=ccm-0 end_message_id=ccm-16",
+            "  session=ses-001 sequence=0 missing start_message_id=ccm-0 end_message_id=ccm-16",
+            "  session=ses-001 sequence=1 missing start_message_id=ccm-1 end_message_id=ccm-17",
+        ]);
+    });
+
+    it("says in the headline whether the user has to act", () => {
+        const boundaries = manyDangling(90, 200);
+        const converted = formatDanglingCompartmentBoundaryHeadline(boundaries, "opencode2");
+        expect(converted).toStartWith(
+            `Informational, no action needed: ${boundaries.length} compartment(s) in 90 session(s) point at OpenCode message ids`,
+        );
+        expect(converted).toContain("1 of those session(s) have no messages in this store at all");
+        expect(formatDanglingCompartmentBoundaryHeadline(boundaries, "other")).toStartWith(
+            `${boundaries.length} compartment(s) in 90 session(s) have dangling OpenCode boundary ids.`,
+        );
     });
 });

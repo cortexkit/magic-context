@@ -8,6 +8,7 @@
  *     --fix           Repair safe, Magic Context-owned store rows.
  *     --issue         Bundle a sanitized issue report and submit/open.
  *     --clear         Interactive picker to clear plugin caches.
+ *     --verbose       Print long listings in full instead of a capped summary.
  *   doctor migrate  Migrate OpenCode session content to Pi/OMP JSONL.
  *   doctor migrate-session  Re-home an OpenCode session to another directory/project.
  *   doctor merge-identity   Merge all project-scoped rows between identities.
@@ -197,6 +198,7 @@ async function runCommand(command: string | undefined, rest: string[]): Promise<
             issue: rest.includes("--issue") || report !== null,
             ...(report !== null ? { report } : {}),
             clear: rest.includes("--clear"),
+            verbose: rest.includes("--verbose"),
             checkV22Backfill: rest.includes("--check-v22-backfill"),
             retryV22Backfill: rest.includes("--retry-v22-backfill"),
             ...(rekeyV22DirIdentity !== null ? { rekeyV22DirIdentity } : {}),

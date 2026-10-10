@@ -211,7 +211,6 @@ export function runnablePiModelChains(
 			config.dreamer,
 			harness,
 			config.language,
-			config.mural?.model,
 		)) {
 			if (task.schedule.trim() === "") continue;
 			const chain = [task.model, ...(task.fallbackModels ?? [])].filter(

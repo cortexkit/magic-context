@@ -89,33 +89,43 @@ test.skipIf(process.platform === "win32")(
 );
 
 test.skipIf(process.platform === "win32")(
-    "shared connection close releases WAL after the collector drops one-shot statements",
-    async () => {
+    "shared SQLite issue releases files with untracked statements",
+    () => {
+        const plainPath = fixturePath();
+        const plainDb = new BunDatabase(plainPath);
+        plainDb.exec("PRAGMA journal_mode=WAL; CREATE TABLE t(a)");
+        const plainStatement = plainDb.prepare("SELECT 1");
+        let plainCloseAttempted = false;
+        try {
+            plainStatement.all();
+            expect(openFiles(plainPath).length).toBeGreaterThan(0);
+            // Bun's default close keeps its files open until this statement is finalized.
+            plainCloseAttempted = true;
+            plainDb.close();
+            expect(openFiles(plainPath).length).toBeGreaterThan(0);
+        } finally {
+            plainStatement.finalize();
+            if (!plainCloseAttempted) plainDb.close();
+        }
+        expect(openFiles(plainPath)).toEqual([]);
+
         const path = fixturePath();
         const db = new Database(path);
         db.exec("PRAGMA journal_mode=WAL; CREATE TABLE t(a)");
-        const statements: WeakRef<object>[] = [];
-        for (let index = 0; index < 50; index++) {
-            const statement = db.prepare(`SELECT ${index}`);
-            statement.all();
-            statements.push(new WeakRef(statement));
+        const trackedStatement = db.prepare("SELECT 1");
+        trackedStatement.all();
+        // Use Bun's native prepare method to keep a live statement outside the wrapper's owner.
+        const untrackedStatement = BunDatabase.prototype.prepare.call(db as never, "SELECT 1");
+        let wrapperCloseAttempted = false;
+        try {
+            untrackedStatement.all();
+            expect(openFiles(path).length).toBeGreaterThan(0);
+            wrapperCloseAttempted = true;
+            db.close();
+            expect(openFiles(path)).toEqual([]);
+        } finally {
+            untrackedStatement.finalize();
+            if (!wrapperCloseAttempted) db.close();
         }
-        // Let the collector mark the one-shot statements dead the way a busy host
-        // does, by allocating, never by a synchronous Bun.gc(true) that would also
-        // sweep (and so finalize) them. A dead statement's weak reference is
-        // cleared before its sweep finalizes it, so the shared Database wrapper's
-        // close cannot reach it to finalize it.
-        const deadline = Date.now() + 30_000;
-        while (statements.every((ref) => ref.deref() !== undefined) && Date.now() < deadline) {
-            let garbage: object[] = [];
-            for (let index = 0; index < 200_000; index++) garbage.push({ index });
-            garbage = [];
-            await Bun.sleep(1);
-        }
-        expect(statements.some((ref) => ref.deref() === undefined)).toBe(true);
-        expect(openFiles(path).length).toBeGreaterThan(0);
-        db.close();
-        expect(openFiles(path)).toEqual([]);
     },
-    60_000,
 );

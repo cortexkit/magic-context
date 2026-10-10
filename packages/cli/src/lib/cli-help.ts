@@ -53,6 +53,7 @@ export const DOCTOR_HELP = [
     "    --fix                               Repair safe, Magic Context-owned store rows and clear an outdated OpenCode 2 plugin cache",
     "    --force                             Force-clear the plugin cache",
     "    --clear                             Interactive cache cleanup picker",
+    "    --verbose                           Print long listings in full instead of a capped summary",
     "    --prune-discovery [--yes]           List RPC discovery records that block offline maintenance, then remove them after confirmation",
     "    --issue                             Collect diagnostics and open a GitHub issue",
     "    --report <path>                     Write the issue diagnostics to <path> without prompting",

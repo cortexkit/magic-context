@@ -77,6 +77,7 @@ import {
 	searchAutoHint,
 } from "@magic-context/core/hooks/magic-context/auto-search-worker-client";
 import type { CavemanWordRules } from "@magic-context/core/hooks/magic-context/caveman";
+import { hasMeaningfulUserText } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
 
@@ -187,7 +188,13 @@ function findLatestMeaningfulUserMessage(
 	for (let i = messages.length - 1; i >= 0; i -= 1) {
 		const msg = messages[i];
 		if (msg?.role !== "user") continue;
-		if (collectUserPromptParts(msg).trim().length === 0) continue;
+		const promptText = extractUserPromptText(msg);
+		if (
+			promptText.length === 0 ||
+			!hasMeaningfulUserText([{ type: "text", text: promptText }])
+		) {
+			continue;
+		}
 
 		// Reference-identity resolution takes precedence: `entryIds` is positional
 		// against the pre-splice array, but `messages` may have been spliced since
