@@ -7,7 +7,7 @@ export interface TaskMeta {
   defaultSchedule: string;
 }
 
-// Mirrors the canonical task registry and defaults shared with the plugin.
+// Mirrors CANONICAL_DREAM_TASKS + DEFAULT_TASK_SCHEDULES in the plugin schema.
 export const TASKS: TaskMeta[] = [
   {
     name: "map-memories",
