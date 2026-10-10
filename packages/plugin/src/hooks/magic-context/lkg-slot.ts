@@ -164,8 +164,14 @@ export function visitMessageContentFields(
     return visitor.field(LKG_SNAPSHOT_UNDEFINED);
 }
 
+/**
+ * The value a content snapshot covers: what the provider receives of a message.
+ * Tool-state fields no host sends are left out (see provider-visible-parts.ts),
+ * so they are never walked or hashed and a change to them is no change.
+ */
 export function contentSnapshotValue(value: unknown): unknown {
     if (!value || typeof value !== "object") return value;
+    value = providerVisibleMessage(value);
     const message = value as Partial<MessageLike>;
     const info = message.info as Record<string, unknown> | undefined;
     const summary = info?.summary;
@@ -485,7 +491,7 @@ export function incrementalLkgContentDigests(
  * left out, so they cost nothing and a change to them does not block a replay.
  */
 export function lkgContentDigest(message: MessageLike): string | null {
-    const fields = lkgContentFields(providerVisibleMessage(message));
+    const fields = lkgContentFields(message);
     return fields ? lkgContentDigestFromFields(fields) : null;
 }
 
@@ -906,15 +912,14 @@ export class LkgEntryDigestCache {
         for (const message of messages) {
             const rawId = message.info?.id;
             const id = typeof rawId === "string" ? rawId : "";
-            // Only what the provider sees is compared and digested.
-            const visible = providerVisibleMessage(message);
+            // Both paths cover only what the provider sees (contentSnapshotValue).
             let entry = prior?.entries.get(id);
             if (entry) lkgEntryWork.comparedMessages += 1;
-            if (entry && contentMatchesFields(visible, entry.fields)) {
+            if (entry && contentMatchesFields(message, entry.fields)) {
                 reused += 1;
             } else {
                 entry = undefined;
-                const fields = lkgContentFields(visible);
+                const fields = lkgContentFields(message);
                 lkgEntryWork.flattenedMessages += 1;
                 if (fields) {
                     for (const field of fields) {

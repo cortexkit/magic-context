@@ -1,10 +1,10 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { createRequire } from "node:module";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
 import { Database } from "../../shared/sqlite";
 import { computeM0BlockTokens } from "./m0-token-breakdown";
 import { estimateTokens } from "./read-session-formatting";
+import * as tokenCount from "./token-count-exact";
 
 /**
  * The shared m[0] breakdown is the single source of truth for BOTH the OpenCode
@@ -25,11 +25,10 @@ function makeDb(): Database {
 describe("computeM0BlockTokens", () => {
     test("reuses exact block token counts and recounts a changed sidebar block", () => {
         const db = makeDb();
-        // The estimator loads the CommonJS constructor; observe that same
-        // prototype rather than a second ESM copy of the tokenizer.
-        const tokenizerModule = createRequire(import.meta.url)("ai-tokenizer");
-        const Tokenizer = tokenizerModule.default ?? tokenizerModule.Tokenizer;
-        const encode = spyOn(Tokenizer.prototype, "encode");
+        // Every tokenizer count goes through countTokensExactly (it replays the
+        // library's encoder without its quadratic paths), so that call is what
+        // a recount looks like.
+        const encode = spyOn(tokenCount, "countTokensExactly");
         const args = {
             m0Text: "<project-docs>sidebar memo unique docs αβ</project-docs><user-profile>sidebar memo unique profile</user-profile><project-memory>sidebar memo unique memory</project-memory><session-history>sidebar memo unique history</session-history>",
             m1Text: "<new-compartments>sidebar memo unique delta</new-compartments>",
