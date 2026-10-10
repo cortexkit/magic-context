@@ -11,12 +11,15 @@ runbook. The canary must wait until the migration branch reaches master and ship
 This slice neither changes defaults nor adds production instrumentation. No operator
 database, live configuration, external repository source or model credentials was read.
 
-The new manifest rows select the provider pipeline on OpenCode **1.18.x** and
-**2.0.x**, not Pi/OMP. They test routing using durable `host_runner_state`/entries
+The host measurement rows name the provider pipeline on OpenCode **1.18.x** and
+**2.0.x**, not Pi/OMP. They are **opt-in/excluded from default mode lanes and Rust
+hermetic shards**, like `rust-plugin-stage-cache.test.ts`, whose measurement
+requires a separately preserved older plugin bundle and therefore runs by hand.
+Direct invocation tests routing using durable `host_runner_state`/entries
 and tagged bytes at the recording provider, then compare the surviving wire prefix
 across two turns. The OpenCode 1 lane checks host descriptors with `lsof`; the
 OpenCode 2 runner performs its existing descriptor/write-fence checks.
-Execution is **blocked** here: the Linux run reached both tests, but neither passed
+Live measurement execution remains **blocked** here: the original Linux run reached both tests, but neither passed
 its preflight because `MC_E2E_CK_SUBC_BIN` was absent. Supply a complete CI-built
 module/daemon pair and the fault variant (`MC_E2E_CK_MC_PREBUILT_BIN`,
 `MC_E2E_CK_SUBC_BIN`, `MC_E2E_CK_MC_DRIVE_FAULT_BIN`), matching this source revision,
@@ -27,6 +30,57 @@ bun test --max-concurrency=1 --timeout 600000 \
   packages/e2e-tests/tests/rust-provider-pipeline-opencode1.test.ts \
   packages/e2e-tests/tests/rust-provider-pipeline-opencode2.test.ts
 ```
+
+### CI follow-up: opt-in registration, not a compatibility waiver
+
+The reported CI run `38030290063` on `train/check-t2` at the original delivery
+commit ran both previously Rust-only rows. OpenCode 2 failed the pinned-version
+check; OpenCode 1 failed the nonempty durable-entry assertion. Those failures
+were not established as passing locally, so these probes must not claim default
+hermetic-shard coverage. The follow-up chooses the explicitly authorized opt-in
+registration option: both rows use `tier: excluded` and
+`invocation: {ts: false, rust: false}`. The assertions remain intact; no version
+compatibility shim or weakened record assertion is introduced. The durable-entry
+failure still needs investigation before the opt-in probe can pass.
+
+The manifest continues to cover all 186 test files exactly once, with 67 TS and
+59 Rust selections. Its validator asserts that neither measurement probe is
+selected for either mode or either OpenCode Rust lane, and includes both in the
+exact excluded list. `run-rust-hermetic-e2e.sh` and its shard selector consume
+that manifest-derived Rust list; direct/glob `bun test` invocations do not.
+An explicit invocation without its matching prebuilt input files throws an
+`Opt-in <host> provider-pipeline probe requires <environment variable>` error.
+Missing host binaries and unexpected version strings likewise name the host,
+the required version family and the observed error/version. OpenCode 2 resolution
+is deferred until after those input checks, so it cannot hide the missing-binary
+diagnostic behind a module-load failure.
+
+Follow-up verification: `bun run --cwd packages/e2e-tests test:validate-manifest`
+on Linux/Bun 1.4.2: **7 passed, 0 failed, 79 assertions**, seven tests/two files.
+The scoped TypeScript 5.9.3 check still reports only the two unchanged dependency
+diagnostics recorded below, with no new helper diagnostics. This excludes the
+probes from default shard selection; it does not claim a new CI run passed or
+that either live-host measurement succeeded.
+
+Restored-state verification also ran `bun test
+packages/e2e-tests/scripts/select-rust-shard.test.ts`: **two passed, zero failed,
+11 assertions**, covering the four disjoint manifest-derived shard partitions.
+A staged/restored `NON-VACUITY BREAK` that re-admitted only the OpenCode 1 probe
+as Rust-only made exactly `mode manifest validator > derives separate TS and Rust
+invocation lists` fail (expected 59 selections, received 60); the other six tests
+passed. The mutant changed one manifest file by +3/-3; diff-stat was empty before
+mutation and after restore. The final manifest validation again passed all seven
+tests with 79 assertions. Neither mutation nor a waived host assertion remains.
+
+The explicit missing-input negative check ran both files with the three prebuilt
+variables unset. Both failed before host startup, naming their host and
+`MC_E2E_CK_SUBC_BIN`; the command exited 1 as required (zero host-test passes,
+two expected preflight failures). The follow-up also reran the required repository
+gates on Linux/Bun 1.4.2: build passed all three package builds, typecheck passed
+all four package scripts, and lint passed 1,753 files (Biome 2.5.1). `npm run test`
+reported **8,111 passed, nine skipped, one failed**, 8,121 tests/760 files. Its sole
+failure was the unchanged temporary WASM bundle's unresolved
+`onnxruntime-web/webgpu` dependency; no dashboard/Bun change was made here.
 
 ## Synthetic Mac signal — not P1 or P2 acceptance
 
@@ -236,8 +290,10 @@ independent. This report does not claim that production currently emits them.
 ## Verification record
 
 - Linux Bun 1.4.2: gate + manifest validator: **13 passed**, 0 failed, 86 assertions.
-  Inventory assertions increased from 184 to 186 files and 59 to 61 Rust entries
-  solely because this slice adds two real-host tests; no behavior contract was reversed.
+  In the original partial, inventory assertions increased from 184 to 186 files
+  and 59 to 61 Rust entries for the two new host probes. The CI follow-up retains
+  186 files but restores the Rust count to 59 because those probes are now opt-in.
+  No host-byte or durable-record behavior assertion was reversed.
 - Gate's P3 non-vacuity control: ignored host payload overruns only on append passes.
   `P3 gates logical payload while reporting and excluding background delta bytes`
   alone failed; the other six gate tests passed. Restored from the staged live file;

@@ -4,17 +4,17 @@
     "entries": [
         {
             "path": "tests/rust-provider-pipeline-opencode1.test.ts",
-            "tier": "rust-only",
-            "invocation": { "ts": false, "rust": true },
-            "rationale": "Real OpenCode 1 1.18.x provider pipeline with a recording mock, hermetic ck-mc and prebuilt ck-subc; durable runner rows and tagged provider bytes prove routing, two turns assert served-prefix stability. No live stores or credentials. P1-P4 measurements remain a separate fail-closed cutover gate.",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Opt-in provider-pipeline measurement probe: invoke directly with bun test tests/rust-provider-pipeline-opencode1.test.ts, a pinned OpenCode 1.18.x host and matching prebuilt module/daemon/fault binaries. Not a default hermetic-shard gate; host routing and record assertions have not passed in that environment. Missing inputs fail explicitly. P1-P4 cutover measurements remain blocked.",
             "contract_refs": ["PROVIDER-PIPELINE-T2"],
             "hosts": ["opencode"]
         },
         {
             "path": "tests/rust-provider-pipeline-opencode2.test.ts",
-            "tier": "rust-only",
-            "invocation": { "ts": false, "rust": true },
-            "rationale": "Real OpenCode 2 2.0.x provider pipeline with a recording mock, hermetic ck-mc and prebuilt ck-subc; durable runner rows and tagged provider bytes prove routing, two turns assert served-prefix stability; host runner checks throwaway descriptors. P1-P4 measurements remain a separate fail-closed cutover gate.",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Opt-in provider-pipeline measurement probe: invoke directly with bun test tests/rust-provider-pipeline-opencode2.test.ts, a pinned OpenCode 2.0.x host and matching prebuilt module/daemon/fault binaries. Not a default hermetic-shard gate; its pinned version preflight has not passed with the shard host. Missing inputs fail explicitly. P1-P4 cutover measurements remain blocked.",
             "contract_refs": ["PROVIDER-PIPELINE-T2"],
             "hosts": ["opencode2"]
         },

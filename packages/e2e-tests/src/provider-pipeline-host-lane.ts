@@ -1,10 +1,10 @@
 import { expect } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import { OpenCode } from "@opencode/client";
 import { RustTestHarness, stableSerialize } from "./rust-harness";
-import { CLI, isolation, spawnOpencode2, waitForPluginActive } from "./opencode2-runner/spawn";
 import { buildHermeticBinaries, HermeticSubcStack, detectRustModePrereqs } from "./rust-runner/hermetic-subc";
 import { cleanupE2ETempDir } from "./temp-dir";
 
@@ -20,12 +20,23 @@ function assertRecord(db: Database, session: string, harness: string) {
 }
 
 export async function providerHostLane(host: "opencode" | "opencode2") {
-    expect(process.env.MC_E2E_CK_SUBC_BIN, "use a prebuilt daemon; do not build from an operator checkout").toBeTruthy();
-    expect(process.env.MC_E2E_CK_MC_PREBUILT_BIN, "the module and daemon must be a complete prebuilt pair").toBeTruthy();
-    expect(process.env.MC_E2E_CK_MC_DRIVE_FAULT_BIN, "the hermetic prerequisite checker also requires its fault variant").toBeTruthy();
-    expect(detectRustModePrereqs().ok).toBe(true);
-    const version = execFileSync(host === "opencode" ? "opencode" : CLI, ["--version"], { encoding: "utf8", timeout: 10000 }).trim();
-    expect(version).toMatch(host === "opencode" ? /^1\.18\.\d+$/ : /^2\.0\.\d+$/);
+    for (const name of ["MC_E2E_CK_SUBC_BIN", "MC_E2E_CK_MC_PREBUILT_BIN", "MC_E2E_CK_MC_DRIVE_FAULT_BIN"]) {
+        const path = process.env[name];
+        if (!path || !existsSync(path))
+            throw new Error(`Opt-in ${host} provider-pipeline probe requires ${name} pointing to an existing matching prebuilt binary; no operator checkout will be built.`);
+    }
+    const prereqs = detectRustModePrereqs();
+    if (!prereqs.ok) throw new Error(`Opt-in ${host} provider-pipeline prerequisites unavailable: ${prereqs.skipReason}`);
+    let v2: typeof import("./opencode2-runner/spawn") | undefined;
+    let version: string;
+    try {
+        if (host === "opencode2") v2 = await import("./opencode2-runner/spawn");
+        version = execFileSync(v2?.CLI ?? "opencode", ["--version"], { encoding: "utf8", timeout: 10000 }).trim();
+    } catch (error) {
+        throw new Error(`Opt-in ${host} provider-pipeline probe cannot resolve or run its pinned host: ${String(error)}`);
+    }
+    if (!(host === "opencode" ? /^1\.18\.\d+$/ : /^2\.0\.\d+$/).test(version))
+        throw new Error(`Opt-in ${host} provider-pipeline probe requires ${host === "opencode" ? "1.18.x" : "2.0.x"}; --version reported ${JSON.stringify(version)}. Default shard hosts are not measurement inputs.`);
     console.log(`provider lane ${host} ${version}; Bun ${Bun.version}`);
     if (host === "opencode") {
         const h = await RustTestHarness.create({ startHistorianProducer: false, magicContextConfig: config });
@@ -44,6 +55,7 @@ export async function providerHostLane(host: "opencode" | "opencode2") {
         } finally { await h.dispose(); }
         return;
     }
+    const { isolation, spawnOpencode2, waitForPluginActive } = v2!;
     const binaries = await buildHermeticBinaries();
     const fixture = isolation();
     let stack: HermeticSubcStack | undefined;

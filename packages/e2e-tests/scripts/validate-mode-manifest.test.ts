@@ -33,7 +33,7 @@ describe("mode manifest validator", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
         expect(ts).toHaveLength(67);
-        expect(rust).toHaveLength(61);
+        expect(rust).toHaveLength(59);
         expect(rust).toContain("tests/rust-tool-attachments.test.ts");
         expect(rust).toContain("tests/rust-tool-attachment-upgrade.test.ts");
         expect(rust).toContain("tests/idle-ttl-restart.test.ts");
@@ -146,9 +146,20 @@ describe("mode manifest validator", () => {
             "tests/rust-classify-host-runner.test.ts",
             "tests/rust-full-sync-frame-cap.test.ts",
             "tests/rust-plugin-stage-cache.test.ts",
+            "tests/rust-provider-pipeline-opencode1.test.ts",
+            "tests/rust-provider-pipeline-opencode2.test.ts",
             "tests/system-prompt-change-order.test.ts",
             "tests/window-overlay-reload.test.ts",
         ]);
+        for (const path of [
+            "tests/rust-provider-pipeline-opencode1.test.ts",
+            "tests/rust-provider-pipeline-opencode2.test.ts",
+        ]) {
+            expect(ts).not.toContain(path);
+            expect(rust).not.toContain(path);
+            expect(filesForMode(validation, "rust", "opencode")).not.toContain(path);
+            expect(filesForMode(validation, "rust", "opencode2")).not.toContain(path);
+        }
         expect(new Set([...ts, ...rust]).size).toBe(validation.files.length - excluded.length);
     });
 
