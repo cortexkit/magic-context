@@ -430,33 +430,28 @@ pub fn consume_provider_drops_tx(
     Ok(())
 }
 
-/// A refrozen baseline restates the measurement of every frozen part. Write
-/// them in one statement, and leave rows whose stored measurement is already
-/// the same text: each measurement is serialized in its struct's field order,
-/// as admission stored it, so an unchanged row compares equal.
+/// A refrozen baseline restates the measurement of every frozen part. Rows
+/// whose stored measurement is already the same text are left unwritten: each
+/// measurement is serialized in its struct's field order, as admission stored
+/// it, so an unchanged row compares equal.
 fn restate_baseline_measurements_tx(
     conn: &Connection,
     conv: &str,
     updates: &[Value],
 ) -> Result<(), ProviderError> {
-    let mut batch = String::from("[");
+    let mut restate = conn.prepare_cached("UPDATE mc_provider_policy_parts_v1 SET policy_json=json_set(policy_json,'$.measurement',json(?3)) WHERE conv_key=?1 AND block_id=?2 AND json_extract(policy_json,'$.measurement') IS NOT ?3")?;
     for update in updates {
         let Some(id) = update.get("block_id").and_then(Value::as_str) else {
             continue;
         };
         let measurement: crate::TailHygienePartMeasurement =
             serde_json::from_value(update["measurement"].clone()).map_err(sql_json)?;
-        if batch.len() > 1 {
-            batch.push(',');
-        }
-        batch.push_str(&format!(
-            "{{\"block_id\":{},\"measurement\":{}}}",
-            serde_json::to_string(id).map_err(sql_json)?,
+        restate.execute(params![
+            conv,
+            id,
             serde_json::to_string(&measurement).map_err(sql_json)?
-        ));
+        ])?;
     }
-    batch.push(']');
-    conn.execute("UPDATE mc_provider_policy_parts_v1 SET policy_json=json_set(policy_json,'$.measurement',json(u.value->>'$.measurement')) FROM json_each(?2) AS u WHERE mc_provider_policy_parts_v1.conv_key=?1 AND mc_provider_policy_parts_v1.block_id=u.value->>'$.block_id' AND json_extract(mc_provider_policy_parts_v1.policy_json,'$.measurement') IS NOT u.value->>'$.measurement'", params![conv, batch])?;
     Ok(())
 }
 
