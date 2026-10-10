@@ -305,6 +305,23 @@ fn fixed_schedule_score_projection_matches_shared_parity_fixture() {
                     .unwrap_or(row.importance)
             })
             .collect();
+        if let Some(expected_pressure) = step["pressure"].as_f64() {
+            let decay_inputs: Vec<_> = scores
+                .iter()
+                .enumerate()
+                .map(|(index, importance)| mc_core::decay::DecayInput {
+                    index: (scores.len() - index) as u32,
+                    importance: *importance,
+                })
+                .collect();
+            let pressure =
+                mc_core::decay::compute_budget_pressure(&decay_inputs, ctx.history_budget_tokens);
+            assert!(
+                (pressure - expected_pressure).abs() < 1e-10,
+                "{}: Rust pressure {pressure} != fixture {expected_pressure}",
+                step["name"]
+            );
+        }
         assert_eq!(
             serde_json::to_value(scores).unwrap(),
             step["effective"],
@@ -333,4 +350,222 @@ fn fixed_schedule_score_projection_matches_shared_parity_fixture() {
             assert_eq!(m0_bytes(&replay), last_fold);
         }
     }
+}
+
+#[test]
+fn review_marker_publication_between_probe_and_cas_keeps_exact_applied_render() {
+    let (_dir, s, request) = scored_fixture();
+    let s = std::sync::Arc::new(s);
+    let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    s.publish_score_for_test("ses", 1, 1).unwrap();
+    transform(&s, &request, &ctx).unwrap();
+    let baseline = transform(&s, &request, &ctx).unwrap();
+    assert_applied(&s, 1, 2);
+    mark_epoch(&s);
+    let publisher = std::sync::Arc::clone(&s);
+    s.after_score_snapshot_for_test(move || {
+        publisher.publish_score_for_test("ses", 2, 1).unwrap();
+    });
+    let marker = transform(&s, &request, &ctx).unwrap();
+    assert_eq!(marker.action, "HARD");
+    assert!(marker.committed);
+    assert!(!marker.prefix_bust_permitted);
+    assert_eq!(marker.messages(), baseline.messages());
+    assert_applied(&s, 1, 2);
+    assert_eq!(
+        s.load_compartment_score_snapshot("ses", mc_store::ScoreSelector::Latest)
+            .unwrap()
+            .watermark,
+        2
+    );
+}
+
+#[test]
+fn review_score_cas_retry_recomposes_bytes_and_watermark_together() {
+    let (_dir, s, mut request) = scored_fixture();
+    let s = std::sync::Arc::new(s);
+    let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    transform(&s, &request, &ctx).unwrap();
+    let before = s.load("ses").unwrap();
+    s.publish_score_for_test("ses", 1, 1).unwrap();
+    let competitor = std::sync::Arc::clone(&s);
+    s.after_score_snapshot_for_test(move || {
+        competitor.publish_score_for_test("ses", 2, 1).unwrap();
+        mark_epoch(&competitor);
+    });
+    request.model_key = Some("provider/model-b".into());
+    let hard = transform(&s, &request, &ctx).unwrap();
+    assert_eq!(hard.action, "HARD");
+    assert!(hard.committed);
+    assert_applied(&s, 2, 2);
+    assert!(m0_bytes(&hard).contains("detail-P2-2;"));
+    assert!(!m0_bytes(&hard).contains("detail-P1-2;"));
+    assert_eq!(
+        s.load("ses").unwrap().row_version,
+        Some(before.row_version.unwrap() + 2)
+    );
+}
+
+#[test]
+fn review_two_score_writers_cannot_commit_stale_render_after_newer_fold() {
+    let (_dir, first, mut request) = scored_fixture();
+    let first = std::sync::Arc::new(first);
+    let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    transform(&first, &request, &ctx).unwrap();
+    first.publish_score_for_test("ses", 1, 1).unwrap();
+    let second = std::sync::Arc::clone(&first);
+    request.model_key = Some("provider/model-b".into());
+    let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    first.after_score_snapshot_for_test(move || {
+        arrived_tx.send(()).unwrap();
+        resume_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
+    });
+    std::thread::scope(|scope| {
+        let delayed = scope.spawn(|| transform(&first, &request, &ctx).unwrap());
+        arrived_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
+        second.publish_score_for_test("ses", 2, 1).unwrap();
+        let winner = transform(&second, &request, &ctx).unwrap();
+        assert_eq!(winner.action, "HARD");
+        assert_applied(&second, 2, 2);
+        let winning_version = second.load("ses").unwrap().row_version;
+        resume_tx.send(()).unwrap();
+        let retried = delayed.join().unwrap();
+        assert_ne!(retried.action, "HARD");
+        assert_eq!(retried.messages(), winner.messages());
+        assert_eq!(first.load("ses").unwrap().row_version, winning_version);
+        assert_applied(&first, 2, 2);
+    });
+}
+
+#[test]
+fn review_score_render_commit_failure_rolls_back_bytes_and_watermark() {
+    let (dir, s, mut request) = scored_fixture();
+    let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    transform(&s, &request, &ctx).unwrap();
+    let baseline = transform(&s, &request, &ctx).unwrap();
+    let before = s.load("ses").unwrap();
+    s.publish_score_for_test("ses", 1, 1).unwrap();
+    request.model_key = Some("provider/model-b".into());
+    mc_store::cache_codec::fail_next_commit_after_section_writes();
+    let failure = transform(&s, &request, &ctx).unwrap_err();
+    assert!(matches!(failure, TransformError::Store(_)), "{failure}");
+    drop(s);
+    let s = store(dir.path());
+    let recovered = s.load("ses").unwrap();
+    assert_eq!(recovered.core, before.core);
+    assert_eq!(recovered.meta, before.meta);
+    assert_eq!(recovered.row_version, before.row_version);
+    assert_applied(&s, 0, 1);
+    let retry = transform(&s, &request, &ctx).unwrap();
+    assert_eq!(retry.action, "HARD");
+    assert_ne!(m0_bytes(&retry), m0_bytes(&baseline));
+    assert_applied(&s, 1, 2);
+}
+
+#[test]
+fn review_pre_v98_session_installing_score_tables_does_not_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    s.replace_compartments("ses", &[comp(1, 1, 1, "m1", "OLD BASE")])
+        .unwrap();
+    let request = with_usage(
+        req(
+            "ses",
+            "cfg0",
+            vec![item("m1", 1, "raw"), item("m2", 2, "tail")],
+        ),
+        10,
+        100,
+    );
+    let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    transform(&s, &request, &ctx).unwrap();
+    let before = transform(&s, &request, &ctx).unwrap();
+    s.install_score_schema_for_test().unwrap();
+    let after = transform(&s, &request, &ctx).unwrap();
+    assert_ne!(after.action, "HARD");
+    assert_eq!(after.messages(), before.messages());
+    let meta = s.load("ses").unwrap().meta;
+    assert_eq!(meta.score_selection_watermark, 0);
+    assert!(!serde_json::to_value(meta)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("score_selection_watermark"));
+}
+
+#[test]
+fn review_downgrade_meta_rewrite_must_not_adopt_unserved_scores_on_marker_hard() {
+    let (dir, s, request) = scored_fixture();
+    let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    s.publish_score_for_test("ses", 1, 1).unwrap();
+    transform(&s, &request, &ctx).unwrap();
+    let applied = transform(&s, &request, &ctx).unwrap();
+    assert_applied(&s, 1, 2);
+    s.publish_score_for_test("ses", 2, 1).unwrap();
+    let before = s.load("ses").unwrap();
+    // Older ModuleMeta deserializers ignore unknown keys and their next meta
+    // serialization drops the applied watermark while leaving frozen m0 intact.
+    let mut old_meta = before.meta.clone();
+    old_meta.score_selection_watermark = 0;
+    assert!(!serde_json::to_value(&old_meta)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("score_selection_watermark"));
+    s.commit("ses", before.row_version, &before.core, &old_meta)
+        .unwrap();
+    drop(s);
+    let s = store(dir.path());
+    assert_eq!(s.load("ses").unwrap().core, before.core);
+    assert_eq!(s.load("ses").unwrap().meta.score_selection_watermark, 0);
+    let replay = transform(&s, &request, &ctx).unwrap();
+    assert_ne!(replay.action, "HARD");
+    assert_eq!(replay.messages(), applied.messages());
+    mark_epoch(&s);
+    let marker = transform(&s, &request, &ctx).unwrap();
+    assert_eq!(marker.action, "HARD");
+    assert!(
+        !marker.prefix_bust_permitted && marker.messages() == applied.messages(),
+        "a downgraded meta-only rewrite turned an unchanged epoch marker into a prefix bust: watermark={}, pending score served={}",
+        s.load("ses").unwrap().meta.score_selection_watermark,
+        m0_bytes(&marker).contains("detail-P2-2;")
+    );
+}
+
+#[test]
+fn review_pressure_refold_commits_latest_snapshot_not_late_publication() {
+    let (_dir, s, mut request) = scored_fixture();
+    let s = std::sync::Arc::new(s);
+    let memory_ids = seed_pressure_memory(&s);
+    let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    transform(&s, &request, &ctx).unwrap();
+    s.publish_score_for_test("ses", 1, 1).unwrap();
+    add_pressure_memory_updates(&s, &memory_ids);
+    let publisher = std::sync::Arc::clone(&s);
+    s.after_score_snapshot_for_test(move || {
+        publisher.publish_score_for_test("ses", 2, 1).unwrap();
+    });
+    ctx.now_ms = 50;
+    request = with_usage(request, 70, 100);
+    let refold = transform(&s, &request, &ctx).unwrap();
+    assert_eq!(refold.action, "HARD");
+    assert_eq!(
+        refold.materialize_reason.as_deref(),
+        Some("pressure_refold")
+    );
+    assert!(refold.committed);
+    assert_applied(&s, 1, 2);
+    assert!(m0_bytes(&refold).contains("detail-P1-2;"));
+    assert!(!m0_bytes(&refold).contains("detail-P2-2;"));
+    assert_eq!(
+        s.load_compartment_score_snapshot("ses", mc_store::ScoreSelector::Latest)
+            .unwrap()
+            .watermark,
+        2
+    );
 }
