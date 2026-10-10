@@ -1,0 +1,13 @@
+{
+  "historyBudgetTokens": 1000,
+  "rowCount": 16,
+  "baseImportance": 50,
+  "steps": [
+    {"name": "first-fold", "latest": 0, "applied": 0, "effective": [50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50], "tiers": [4,4,4,4,3,3,3,3,3,2,2,2,2,2,1,1], "pressure": 2.809},
+    {"name": "publish-a-b", "latest": 2, "applied": 0, "effective": [100,1,50,50,50,50,50,50,50,50,50,50,50,50,50,50]},
+    {"name": "change-b-source", "latest": 2, "applied": 0, "effective": [100,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50]},
+    {"name": "fold-latest", "latest": 2, "applied": 2, "effective": [100,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50], "tiers": [2,4,4,4,4,3,3,3,3,3,2,2,2,2,1,1], "pressure": 3.022},
+    {"name": "undo-a", "latest": 3, "applied": 2, "effective": [50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50]},
+    {"name": "publish-c", "latest": 4, "applied": 2, "effective": [50,50,100,50,50,50,50,50,50,50,50,50,50,50,50,50]}
+  ]
+}

@@ -133,6 +133,7 @@ import {
 	withRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import { readEffectiveReferenceCompartments } from "@magic-context/core/hooks/magic-context/score-projection";
 import { describeError } from "@magic-context/core/shared/error-message";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { isTransientHistorianPromptError } from "@magic-context/core/shared/historian-transient-error";
@@ -748,7 +749,11 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				sessionId,
 				chunkStart: Math.max(1, offset),
 				lastOrdinal: eligibleEndOrdinal - 1,
-				sessionCompartments: priorCompartments,
+				sessionCompartments: readEffectiveReferenceCompartments(
+					db,
+					sessionId,
+					priorCompartments,
+				),
 				memories,
 				memoryEnabled: memoryEnabled !== false,
 			});

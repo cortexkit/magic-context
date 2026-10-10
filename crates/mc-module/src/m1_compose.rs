@@ -1035,6 +1035,7 @@ mod tests {
         let hard = crate::m0_compose::compose_m0_from_store(
             store,
             &crate::m0_compose::M0ComposeInputs {
+                score_selector: mc_store::ScoreSelector::Base,
                 session_id: "ses",
                 project_path: project,
                 project_directory: fixture.dir.path().to_str().unwrap(),
@@ -1122,6 +1123,7 @@ mod tests {
         let reconciled = crate::m0_compose::compose_m0_from_store(
             store,
             &crate::m0_compose::M0ComposeInputs {
+                score_selector: mc_store::ScoreSelector::Base,
                 session_id: "ses",
                 project_path: project,
                 project_directory: fixture.dir.path().to_str().unwrap(),

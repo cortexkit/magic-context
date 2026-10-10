@@ -91,7 +91,50 @@ Rust-mode needs a project-bound score job management API and the same host/modul
 4. **Concurrency.** Coordinate source validation/publication with the compartment lease used by recomp (`packages/plugin/src/hooks/magic-context/compartment-runner.ts:269-292`) or equivalent module CAS. Lease acquisition should be short at snapshot/publish, not block normal historian production throughout hundreds of calls. The source identity CAS is authoritative even when a lease expires. A structural rewrite between completion and a later HARD also invalidates the sidecar's applicability.
 5. **Audit/undo.** Record original and effective score, why/model/rubric, and completed time even if the score is unchanged. Avoid no-op base UPDATEs. Undo selects an earlier score revision (or base score) and waits for the next natural fold too; do not rebuild compartments. Store model reasons privately with normal memory access controls, not in public reports or logs containing summaries.
 6. **Visibility/cost.** Preview session/item counts, projected calls/tokens and cutoff; explain that there is no immediate prefix change. Status reports scored/failed/stale/pending-adoption counts and last job error. Project identity must be canonical, respecting worktrees/aliases and ownership; no “all sessions” default across unrelated projects. Config reload cannot change a running job's model/rubric unnoticed. Budget/cancellation apply between batches and to active requests.
-7. **Rust parity.** Add sidecar schema/domain reads to TS and Rust together; update the shared context-domain/table allowlist (`crates/mc-module/src/host_store.rs:85` is where the existing history table is exposed). Do not change raw `StoredCompartment` identities. Share JSON score validation, source-hash goldens and numeric rubric epoch. Route OpenCode/Pi commands to the same job service in Rust mode rather than editing a local mirror while ck-mc keeps another view. Test legacy sidecar absence and an older binary reading the unchanged base column (it safely ignores overrides, but does not provide corrected decay).
+7. **Rust parity.** Add sidecar schema/domain reads to TS and Rust together; score tables remain host-owned and are not added to Rust's write/fingerprint list. Do not change raw `StoredCompartment` identities. Share JSON score validation, source-hash goldens and numeric rubric epoch. Route OpenCode/Pi commands to the same job service in Rust mode rather than editing a local mirror while ck-mc keeps another view. Test legacy sidecar absence and the store-open fence that refuses older writers to protect the applied-score watermark; merely accepting an unknown metadata key does not make a downgrade safe.
+
+### Rust applied-score rollback fence
+
+Rust stores the applied score-selection sequence beside its frozen m[0] bytes in
+`mc_cache_state.meta`. Missing or zero means the base-score view only for a head
+that has not adopted scores. An older decoder can ignore an unknown key and then
+discard it on a metadata-only rewrite while preserving already rescored bytes.
+That would make a later marker-only rebuild compare the wrong score view and
+could let pending scores originate a provider-prefix bust.
+
+The release therefore pairs watermark support with the branch's **existing
+store.db fence v67** (`SCORE_SELECTION_WATERMARK_STORE_FENCE`), not a new migration.
+The v98 score tables are in **context.db**; their version is not the module's
+store.db ceiling. The placed pre-rescore ck-mc `77f54a691090a8927c3686735e912e46789e25c4`
+has a store.db ceiling of 63 and cannot rewrite a store migrated by this branch.
+A copied executable run against an isolated, branch-migrated v67 store refused:
+
+```text
+reason_code=store_ahead_of_binary db_version=67 binary_max=63
+store.db schema is v67 but this ck-mc build only knows up to v63
+```
+
+This refusal comes from the store.db opener, before serving or rewriting cache
+state. The context.db checks that tolerate newer lane versions or compatible
+table shapes do not override the store.db opener's refusal.
+The scratch cache row, applied W=1 and complete migration ledger stayed unchanged.
+The real-executable probe and its isolation evidence are recorded in
+`docs/reports/rescore-s3-rust-cache-review.md`.
+
+`supported_store_fences_round_trip_applied_score_watermark_with_frozen_head`
+pins every bundled ceiling from v67 onward: a nonzero watermark survives a
+metadata-only commit and reopen alongside identical head bytes. Shorter v63–v66
+openers are refused without changing the database. The downgrade regression
+tests that refusal before replaying the applied view and an unchanged marker
+HARD; it does not simulate an otherwise unreachable rewrite by deleting W.
+
+Supported rollback restores the older ck-mc **and both context.db and store.db
+from the same backup**. Replacing only the executable is refused. Intermediate
+development binaries carrying the same schema ceiling but lacking watermark
+support are not supported rollback artifacts; a fence cannot distinguish them.
+All released writers admitted by this fence must retain the watermark, and the
+round-trip guard must remain when the schema ceiling advances. Never recover a
+missing watermark by selecting Latest or forcing an upgrade HARD.
 
 ## Required shipping tests
 

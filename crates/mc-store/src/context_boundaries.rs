@@ -483,6 +483,48 @@ mod tests {
     }
 
     #[test]
+    fn score_publication_keeps_boundary_identity_warm_and_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        store.install_score_schema_for_test().unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        let expected = store.cached_context_boundaries("raw").unwrap();
+        assert_eq!(expected.len(), 1);
+        let before = store
+            .compartment_payload_query_count
+            .load(Ordering::Relaxed);
+        let revision = store
+            .context_read(|conn| McStore::compartment_history_revision_tx(conn, "raw"))
+            .unwrap();
+        store.publish_score_for_test("raw", 0, 99).unwrap();
+        assert_eq!(
+            store
+                .context_read(|conn| McStore::compartment_history_revision_tx(conn, "raw"))
+                .unwrap(),
+            revision
+        );
+        assert_eq!(store.cached_context_boundaries("raw").unwrap(), expected);
+        assert_eq!(
+            store
+                .compartment_payload_query_count
+                .load(Ordering::Relaxed),
+            before,
+            "score publication must not revalidate raw bodies"
+        );
+        drop(store);
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        assert_eq!(
+            store.cached_context_boundaries("raw").unwrap(),
+            expected,
+            "cold identity validation must still use original importance"
+        );
+        assert_eq!(store.load_compartments("raw").unwrap()[0].importance, 50);
+    }
+
+    #[test]
     fn unrelated_context_commits_from_host_and_module_writer_keep_validation_cached() {
         let dir = tempfile::tempdir().unwrap();
         let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();

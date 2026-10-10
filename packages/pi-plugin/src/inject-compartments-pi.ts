@@ -96,6 +96,10 @@ import {
 } from "@magic-context/core/hooks/magic-context/inject-compartments";
 
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import {
+	projectCompartmentScores,
+	readAppliedScoreWatermark,
+} from "@magic-context/core/hooks/magic-context/score-projection";
 import { renderUserProfileContent } from "@magic-context/core/hooks/magic-context/user-profile-render";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { sessionLog as logSession } from "@magic-context/core/shared/logger";
@@ -551,6 +555,12 @@ function sourceNamesForPiMemories(args: {
 }
 
 export interface PiM0SnapshotMarkers {
+	/**
+	 * Highest staged `/ctx-rescore` selection rendered into these bytes. Selections
+	 * staged later wait for the next natural rebuild of this head; a difference here
+	 * never triggers one on its own.
+	 */
+	scoreSelectionWatermark?: number;
 	maxCompartmentSeq: number;
 	maxMemoryId: number;
 	maxMutationId: number;
@@ -952,6 +962,10 @@ function getCachedMarkers(
 		projectDocsHash: meta.cachedM0ProjectDocsHash,
 		sessionFactsVersion: meta.cachedM0SessionFactsVersion,
 		materializedAt: meta.cachedM0MaterializedAt,
+		scoreSelectionWatermark:
+			cachedRowOverride === undefined
+				? readAppliedScoreWatermark(db, state.sessionId)
+				: (cachedRowOverride?.cached_m0_score_selection_watermark ?? 0),
 		upgradeState: cachedUpgradeIdentity.upgradeState ?? "",
 		compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,
 		memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
@@ -1379,7 +1393,18 @@ export function renderM0Pi(
 	);
 	const decayed = renderDecayedCompartments({
 		compartments:
-			compartmentsOverride ?? getRenderableCompartmentsPi(db, state),
+			compartmentsOverride ??
+			db
+				.transaction(
+					() =>
+						projectCompartmentScores(
+							db,
+							state.sessionId,
+							getRenderableCompartmentsPi(db, state),
+							readAppliedScoreWatermark(db, state.sessionId),
+						).compartments,
+				)
+				.deferred(),
 		// v2: use the HISTORY budget (~60K), not the memory injection budget (~4K).
 		// Falling back to the memory budget would over-demote every compartment.
 		historyBudgetTokens:
@@ -1493,18 +1518,27 @@ function readFrozenM0InputsPi(
 	db: ContextDatabase,
 	docs = readProjectDocsForPiM0(state),
 	memoryCutoff?: number,
-	compartmentsOverride?: readonly PiCompartment[],
+	scoreSelector: "latest" | number = readAppliedScoreWatermark(
+		db,
+		state.sessionId,
+	),
 ): FrozenM0Inputs {
 	// Read every render source and its corresponding watermark as one short DB
-	// transaction. Rendering happens later, but m[0] bytes and m[1] watermarks now
+	// transaction. Reload base compartments here rather than using the earlier
+	// pass snapshot, so source identities and score selections belong to this read.
+	// Rendering happens later, but m[0] bytes and m[1] watermarks now
 	// share the same frozen compartments/memories/user-profile set; a concurrent
 	// writer cannot make m[0] include rows that m[1] still considers "new".
 	const memPath = memoryProjectPath(state);
 	const read = db.transaction(() => {
 		const workspace = resolveWorkspaceRenderContextPi(state, db);
-		const compartments = compartmentsOverride
-			? [...compartmentsOverride]
-			: getRenderableCompartmentsPi(db, state);
+		const projected = projectCompartmentScores(
+			db,
+			state.sessionId,
+			getRenderableCompartmentsPi(db, state),
+			scoreSelector,
+		);
+		const compartments = projected.compartments;
 		const memories = memPath
 			? workspace.isWorkspaced
 				? getMemoriesByProjects(
@@ -1527,6 +1561,7 @@ function readFrozenM0InputsPi(
 		const projectState = memPath ? getProjectState(db, memPath) : undefined;
 		const globalState = getProjectState(db, GLOBAL_USER_PROFILE_PROJECT_PATH);
 		const markers: PiM0SnapshotMarkers = {
+			scoreSelectionWatermark: projected.watermark,
 			maxCompartmentSeq: compartments.reduce(
 				(max, compartment) =>
 					compartment.sequence > max ? compartment.sequence : max,
@@ -1682,7 +1717,7 @@ export function materializeM0Pi(
 		db,
 		docs,
 		foldMaterializedAt,
-		passSnapshot?.compartments,
+		"latest",
 	);
 	const snapshotMarkers = frozen.markers;
 
@@ -1852,11 +1887,12 @@ export function materializeM0Pi(
 		// "Injected" count AND a stale ctx_search hide-already-visible filter after
 		// any memory change (e.g. migration delete+reinserts with new ids).
 		db.prepare(
-			"UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ?, cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
+			"UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ?, cached_m0_last_baseline_end_message_id = ?, cached_m0_score_selection_watermark = ? WHERE session_id = ?",
 		).run(
 			visibleMemoryIds.length,
 			visibleIdsJson,
 			snapshotMarkers.lastBaselineEndMessageId,
+			snapshotMarkers.scoreSelectionWatermark ?? 0,
 			state.sessionId,
 		);
 
@@ -2183,6 +2219,7 @@ export function renderM1Pi(
 }
 
 export interface CachedPiM0M1Row {
+	cached_m0_score_selection_watermark: number;
 	cached_m0_bytes: Buffer | Uint8Array | null;
 	cached_m0_mural_data_url: string | null;
 	cached_m0_mural_hash: string | null;
@@ -2236,7 +2273,7 @@ function readCachedPiM0M1Row(
 ): CachedPiM0M1Row | null {
 	return db
 		.prepare(
-			`SELECT cached_m0_bytes, cached_m0_mural_data_url,
+			`SELECT cached_m0_bytes, cached_m0_score_selection_watermark, cached_m0_mural_data_url,
 					cached_m0_mural_hash, cached_m1_bytes,
 					cached_m0_project_memory_epoch,
 					cached_m0_workspace_fingerprint,
@@ -2322,6 +2359,7 @@ function markersFromCachedPiRow(
 		projectUserProfileVersion: row.cached_m0_project_user_profile_version,
 		projectDocsHash: row.cached_m0_project_docs_hash ?? "",
 		materializedAt: row.cached_m0_materialized_at,
+		scoreSelectionWatermark: row.cached_m0_score_selection_watermark ?? 0,
 		sessionFactsVersion: row.cached_m0_session_facts_version,
 		upgradeState: cachedUpgradeIdentity.upgradeState ?? "",
 		compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,

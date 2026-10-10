@@ -79,6 +79,7 @@ import { isHostRenderedSystemMessage } from "./host-served-rows";
 import { compareRawSessionMessageOrder, resolveHostServedBoundaryId } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
+import { projectCompartmentScores, readAppliedScoreWatermark } from "./score-projection";
 import type { MessageLike } from "./tag-messages";
 import { formatDate } from "./temporal-awareness";
 import { renderUserProfileContent } from "./user-profile-render";
@@ -852,6 +853,12 @@ function isDroppedPlaceholder(text: string): boolean {
 }
 
 export interface M0SnapshotMarkers {
+    /**
+     * Highest staged `/ctx-rescore` selection rendered into these bytes. Selections
+     * staged later wait for the next natural rebuild of this head; a difference here
+     * never triggers one on its own.
+     */
+    scoreSelectionWatermark?: number;
     projectMemoryEpoch: number;
     workspaceFingerprint: string | null;
     projectUserProfileVersion: number;
@@ -928,6 +935,7 @@ const EMPTY_HARD_SIGNALS: M0HardSignals = {
 };
 
 export interface M0M1State {
+    cachedM0ScoreSelectionWatermark?: number;
     sessionId: string;
     isSubagent?: boolean;
     cachedM0Bytes: Buffer | null;
@@ -1715,6 +1723,7 @@ function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null
         maxMemoryMutationId: state.cachedM0MaxMemoryMutationId,
         projectDocsHash: state.cachedM0ProjectDocsHash ?? "",
         materializedAt: state.cachedM0MaterializedAt ?? 0,
+        scoreSelectionWatermark: state.cachedM0ScoreSelectionWatermark ?? 0,
         sessionFactsVersion: state.cachedM0SessionFactsVersion,
         upgradeState: cachedUpgradeIdentity.upgradeState,
         compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,
@@ -2094,7 +2103,7 @@ function readM0Compartments(db: Database, sessionId: string): M0Compartment[] {
         m0CompartmentStatements,
         db,
         `SELECT id, session_id, sequence, start_message, end_message, start_message_id,
-                end_message_id, title, content, p1, p2, p3, p4, episode_type,
+                end_message_id, start_block_index, end_block_index, title, content, p1, p2, p3, p4, episode_type,
                 created_at, importance, legacy, rebase_status
            FROM compartments
           WHERE session_id = ?
@@ -2173,6 +2182,8 @@ function rowToM0Compartment(row: Record<string, unknown>): M0Compartment {
         endMessage: Number(row.end_message ?? 0),
         startMessageId: String(row.start_message_id ?? ""),
         endMessageId: String(row.end_message_id ?? ""),
+        startBlockIndex: row.start_block_index == null ? undefined : Number(row.start_block_index),
+        endBlockIndex: row.end_block_index == null ? undefined : Number(row.end_block_index),
         title: String(row.title ?? ""),
         content: String(row.content ?? ""),
         p1: nullableString(row.p1),
@@ -2196,7 +2207,7 @@ function readNewCompartments(
         newCompartmentStatements,
         db,
         `SELECT id, session_id, sequence, start_message, end_message, start_message_id,
-                end_message_id, title, content, p1, p2, p3, p4, episode_type,
+                end_message_id, start_block_index, end_block_index, title, content, p1, p2, p3, p4, episode_type,
                 created_at, importance, legacy, rebase_status
            FROM compartments
           WHERE session_id = ? AND sequence > ?
@@ -2387,6 +2398,7 @@ function applyMarkersToState(
     state.cachedM0MaxMemoryMutationId = markers.maxMemoryMutationId;
     state.cachedM0ProjectDocsHash = markers.projectDocsHash;
     state.cachedM0MaterializedAt = markers.materializedAt;
+    state.cachedM0ScoreSelectionWatermark = markers.scoreSelectionWatermark ?? 0;
     state.cachedM0SessionFactsVersion = markers.sessionFactsVersion;
     state.cachedM0UpgradeState = withCachedM0MemoryIds(
         encodeCachedM0UpgradeIdentity(
@@ -2499,9 +2511,14 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         // rows exist but never render into <session-history>. The snapshot
         // markers still read the real maxCompartmentSeq so the staleness
         // check stays accurate; only the render input is emptied.
-        compartments = options.compactionOff
-            ? []
-            : readM0Compartments(options.db, options.sessionId);
+        const projected = projectCompartmentScores(
+            options.db,
+            options.sessionId,
+            options.compactionOff ? [] : readM0Compartments(options.db, options.sessionId),
+            "latest",
+        );
+        compartments = projected.compartments;
+        snapshotMarkers.scoreSelectionWatermark = projected.watermark;
         // v2 faithful facts: session_facts is retired as a render source (facts
         // promote to project memory, rendered below via `memories`). Keep `facts`
         // empty so renderSessionHistoryWithDecay never emits a <session_facts>
@@ -2764,9 +2781,15 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         // bytes and their id manifest never diverge.
         options.db
             .prepare(
-                "UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ?, cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
+                "UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ?, cached_m0_last_baseline_end_message_id = ?, cached_m0_score_selection_watermark = ? WHERE session_id = ?",
             )
-            .run(visibleMemoryIds.length, visibleIdsJson, baselineEndMessageId, options.sessionId);
+            .run(
+                visibleMemoryIds.length,
+                visibleIdsJson,
+                baselineEndMessageId,
+                snapshotMarkers.scoreSelectionWatermark ?? 0,
+                options.sessionId,
+            );
 
         // Persist the boundary the freshly-rendered m[0]+m[1] cover (the latest
         // compartment's end message id). A cold post-restart pass reads this to
@@ -3057,6 +3080,7 @@ function decodeM0Bytes(bytes: Buffer | Uint8Array | null): string | null {
 }
 
 interface CachedM0M1Row {
+    cached_m0_score_selection_watermark: number;
     cached_m0_bytes: Buffer | Uint8Array | null;
     cached_m0_mural_data_url: string | null;
     cached_m0_mural_hash: string | null;
@@ -3107,14 +3131,21 @@ function parseMemoryBlockIds(raw: string | null): number[] {
 
 /**
  * Callers normally pass getOrCreateSessionMeta(), which already carries the
- * persisted mural payload. A lean process-local state leaves it undefined; fill
- * it from the persisted row, but only when that row holds the exact m[0] bytes
- * the state holds, so a stale row can never pose as the served image.
+ * persisted mural payload. A lean process-local state leaves cache extras
+ * undefined; fill the mural and score watermark from the persisted row, but only
+ * when that row holds the exact m[0] bytes the state holds, so a stale row can
+ * never pose as the served image or score view.
  */
 export function hydrateCachedM0Mural(db: Database, sessionId: string, state: M0M1State): void {
-    if (!state.cachedM0Bytes || state.cachedM0MuralDataUrl !== undefined) return;
+    if (!state.cachedM0Bytes) return;
+    if (
+        state.cachedM0MuralDataUrl !== undefined &&
+        state.cachedM0ScoreSelectionWatermark !== undefined
+    )
+        return;
     const row = readCachedM0M1Row(db, sessionId);
     if (row && bufferEqualsNullable(row.cached_m0_bytes, state.cachedM0Bytes)) {
+        state.cachedM0ScoreSelectionWatermark = row.cached_m0_score_selection_watermark ?? 0;
         state.cachedM0MuralDataUrl = row.cached_m0_mural_data_url ?? null;
         state.cachedM0MuralHash = row.cached_m0_mural_hash ?? null;
     }
@@ -3123,7 +3154,7 @@ export function hydrateCachedM0Mural(db: Database, sessionId: string, state: M0M
 function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | null {
     return db
         .prepare(
-            `SELECT cached_m0_bytes, cached_m0_mural_data_url,
+            `SELECT cached_m0_bytes, cached_m0_score_selection_watermark, cached_m0_mural_data_url,
                     cached_m0_mural_hash, cached_m1_bytes,
                     cached_m0_project_memory_epoch,
                     cached_m0_workspace_fingerprint,
@@ -3168,6 +3199,7 @@ function markersFromCachedRow(row: CachedM0M1Row): M0SnapshotMarkers | null {
         maxMemoryMutationId: row.cached_m0_max_memory_mutation_id,
         projectDocsHash: row.cached_m0_project_docs_hash ?? "",
         materializedAt: row.cached_m0_materialized_at ?? 0,
+        scoreSelectionWatermark: row.cached_m0_score_selection_watermark ?? 0,
         sessionFactsVersion: row.cached_m0_session_facts_version,
         upgradeState: cachedUpgradeIdentity.upgradeState,
         compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,
@@ -3228,6 +3260,7 @@ function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
     state.cachedM0MaxMemoryMutationId = markers.maxMemoryMutationId;
     state.cachedM0ProjectDocsHash = markers.projectDocsHash;
     state.cachedM0MaterializedAt = markers.materializedAt;
+    state.cachedM0ScoreSelectionWatermark = markers.scoreSelectionWatermark ?? 0;
     state.cachedM0SessionFactsVersion = markers.sessionFactsVersion;
     state.cachedM0UpgradeState = encodeCachedM0UpgradeIdentity(
         markers.upgradeState,
@@ -3432,14 +3465,23 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
     // filtering, deterministic across passes — matches Pi fallback).
     snapshotMarkers.materializedAt = options.state.cachedM0MaterializedAt ?? 0;
     // Compaction-off renders through the zero-compartment path here too.
-    const compartments = options.compactionOff
-        ? []
-        : withCompartmentDates(
-              options.db,
-              options.sessionId,
-              readM0Compartments(options.db, options.sessionId),
-              options.temporalAwareness,
-          );
+    const projected = options.db
+        .transaction(() =>
+            projectCompartmentScores(
+                options.db,
+                options.sessionId,
+                options.compactionOff ? [] : readM0Compartments(options.db, options.sessionId),
+                readAppliedScoreWatermark(options.db, options.sessionId),
+            ),
+        )
+        .deferred();
+    snapshotMarkers.scoreSelectionWatermark = projected.watermark;
+    const compartments = withCompartmentDates(
+        options.db,
+        options.sessionId,
+        projected.compartments,
+        options.temporalAwareness,
+    );
     // Use the SAME frozen cutoff for the baseline memory read as m[1] does, so a
     // memory crossing expires_at between two fallback passes can't shift the m[0]
     // baseline bytes either (live Date.now() default would reintroduce drift).
