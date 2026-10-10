@@ -1708,11 +1708,15 @@ async function startPiMagicContextRuntime(
 						} catch (err) {
 							// The re-check resolves deps and polls the config
 							// outside reportPiModelChains' own try/catch; a
-							// throw here must not escape as an unhandled
 							// rejection on the void chain. The settled marker
-							// stands (the await really finished), so the next
-							// session_start or agent turn re-runs the check and
-							// reports directly.
+							// stands (the await really finished) and the last
+							// checked generation was not updated -- this throw
+							// happens before reportPiModelChains records it --
+							// so the next session_start re-runs the check and
+							// reports directly, and a config reload that moves
+							// the generation re-runs it through agent_start's
+							// gate; with the config unchanged, agent_start
+							// alone does not re-report.
 							warn("model chain post-refresh check failed:", err);
 						}
 					});

@@ -792,6 +792,18 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 			),
 		).toBe(true);
 
+		// The recovery limit the guard's comment states: with the config
+		// unchanged the generation gate matches the last successful pass, so
+		// an agent turn does NOT re-run the check -- recovery is the next
+		// session_start below.
+		await runtime.agentTurn(ctx);
+		await macrotask();
+		expect(triggerLines(logs)).toEqual([]);
+
+		// The miss was reported later instead of lost: hydrate the catalogue
+		// and a fresh session_start of the waiting project reports directly
+		// (the settled marker stands -- the await really finished -- so zero
+		// lines here would mean the notice died waiting again forever).
 		hydrated = true;
 		await runtime.emit("session_start", ctx);
 		await macrotask();
