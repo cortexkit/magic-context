@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "../../shared/sqlite";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { closeDatabase, openDatabase } from "./storage-db";
 import { ensureSessionMetaRow } from "./storage-meta-shared";
@@ -85,4 +86,36 @@ test.skipIf(process.platform === "win32")(
             replay.close();
         }
     },
+);
+
+test.skipIf(process.platform === "win32")(
+    "shared connection close releases WAL after the collector drops one-shot statements",
+    async () => {
+        const path = fixturePath();
+        const db = new Database(path);
+        db.exec("PRAGMA journal_mode=WAL; CREATE TABLE t(a)");
+        const statements: WeakRef<object>[] = [];
+        for (let index = 0; index < 50; index++) {
+            const statement = db.prepare(`SELECT ${index}`);
+            statement.all();
+            statements.push(new WeakRef(statement));
+        }
+        // Let the collector mark the one-shot statements dead the way a busy host
+        // does, by allocating, never by a synchronous Bun.gc(true) that would also
+        // sweep (and so finalize) them. A dead statement's weak reference is
+        // cleared before its sweep finalizes it, so the shared Database wrapper's
+        // close cannot reach it to finalize it.
+        const deadline = Date.now() + 30_000;
+        while (statements.every((ref) => ref.deref() !== undefined) && Date.now() < deadline) {
+            let garbage: object[] = [];
+            for (let index = 0; index < 200_000; index++) garbage.push({ index });
+            garbage = [];
+            await Bun.sleep(1);
+        }
+        expect(statements.some((ref) => ref.deref() === undefined)).toBe(true);
+        expect(openFiles(path).length).toBeGreaterThan(0);
+        db.close();
+        expect(openFiles(path)).toEqual([]);
+    },
+    60_000,
 );

@@ -186,7 +186,11 @@ test("OpenCode 2 generate serves managed bytes without writes and preserves repl
             .run(session.id);
         expect(drop.changes).toBeGreaterThan(0);
         clearCachedM0M1(db as never, session.id);
-        db.close();
+        // clearCachedM0M1 prepares one-shot statements on this direct handle.
+        // Plain close() would leave the native connection open until the
+        // garbage collector finalizes them; close(true) finalizes them now,
+        // which the descriptor check before the store restore relies on.
+        db.close(true);
         await prompt("SECOND-QUESTION");
         const served = frames()
             .filter((frame) => frame.name === "context")

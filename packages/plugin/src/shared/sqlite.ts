@@ -569,6 +569,33 @@ interface StatementOwner {
 const statementOwners = new WeakMap<Database, StatementOwner>();
 const FIRST_PRUNE_AT = 256;
 
+/**
+ * Bun's default close (`sqlite3_close_v2`) only releases the native connection
+ * once every statement created by prepare() is finalized. The close override
+ * in ownPreparedStatement can finalize only statements that are still
+ * reachable. Once the garbage collector
+ * has marked a one-shot statement dead, its weak reference is already cleared,
+ * but the statement is finalized only when its memory is later swept. Until
+ * then the closed connection keeps the database, WAL and shared-memory files
+ * open, for an unbounded time.
+ *
+ * `close(true)` finalizes every outstanding statement, reachable or not, and
+ * releases the connection immediately. When the caller did not ask for errors
+ * and that close fails, fall back to the caller's own close so a teardown path
+ * never starts throwing; the fallback can defer the release as before.
+ */
+function closeReleasingStatements(
+    close: (...args: unknown[]) => unknown,
+    args: unknown[],
+): unknown {
+    if (args[0] === true) return close(true);
+    try {
+        return close(true);
+    } catch {
+        return close(...args);
+    }
+}
+
 function ownPreparedStatement(db: Database, statement: Statement): Statement {
     const finalizable = statement as FinalizableStatement;
     // Node finalizes its statements on close and exposes no finalize() method.
@@ -592,7 +619,7 @@ function ownPreparedStatement(db: Database, statement: Statement): Statement {
                     }
                 }
                 references.clear();
-                const result = close(...args);
+                const result = closeReleasingStatements(close, args);
                 if (failure) throw failure;
                 return result;
             },

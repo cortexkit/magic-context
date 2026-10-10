@@ -207,9 +207,13 @@ done < "$changed_file"
     if [ "$selected" -eq 1 ]; then
       (
         cd "packages/$package"
+        # Run each package's own test script, as CI does: it carries the
+        # timeouts, parallelism and engine flags the suite was written for. Plain
+        # `bun test` uses Bun's 5 s default timeout and fails tests that wait on
+        # a bounded database writer retry, which CI never sees.
         case "$runner" in
-          test-typecheck) run bun test; run bun run typecheck ;;
-          test) run bun test ;;
+          test-typecheck) run bun run test; run bun run typecheck ;;
+          test) run bun run test ;;
           mode-manifest) run bun test scripts/validate-mode-manifest.test.ts ;;
           *) die "Unknown package gate runner: $runner" ;;
         esac
