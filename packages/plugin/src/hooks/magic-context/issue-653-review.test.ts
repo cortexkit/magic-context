@@ -283,8 +283,9 @@ describe("issue 653 independent upgrade review", () => {
 });
 
 describe("issue 653 upstream conversion proof review", () => {
-    // These run OpenCode 1.18.35's own conversion from its verbatim source (see
-    // opencode1-to-model-messages.fixture.ts), through the AI SDK step.
+    // These run OpenCode 1.18.35's MessageV2.toModelMessages, executed from a
+    // verbatim, hash-pinned copy of its source (opencode1-to-model-messages.fixture.ts),
+    // AI SDK convertToModelMessages step included.
     const png = "data:image/png;base64,iVBORw0KGgo=";
     function mediaHistory(): MessageLike[] {
         const messages = history();

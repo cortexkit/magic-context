@@ -22,7 +22,7 @@ import {
     readOpencode1Excerpt,
 } from "./opencode1-to-model-messages.fixture";
 
-/** An OpenCode checkout to compare against: OPENCODE_SOURCE_DIR, or the usual local clone. */
+/** An OpenCode checkout holding the tag: OPENCODE_SOURCE_DIR, or ~/Work/OSS/opencode. */
 function opencodeCheckout(): string | undefined {
     const candidates = [process.env.OPENCODE_SOURCE_DIR, join(homedir(), "Work/OSS/opencode")];
     for (const candidate of candidates) {

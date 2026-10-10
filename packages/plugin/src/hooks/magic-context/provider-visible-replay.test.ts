@@ -2,8 +2,9 @@
 
 /**
  * The last-known-good snapshot stores the served messages as the provider
- * receives them (provider-visible-parts.ts). These tests run whole and reduced
- * messages through OpenCode 1.18.35's conversion (run from a verbatim, hash-pinned
+ * receives them (provider-visible-parts.ts): tool-state fields no host sends,
+ * such as `metadata` with LSP diagnostics, `title` and start/end times, are
+ * removed. These tests run whole messages and that reduced form through OpenCode 1.18.35's conversion (run from a verbatim, hash-pinned
  * copy of its source, AI SDK step included) and through Magic Context's
  * OpenCode 2 commit, and show the resulting messages are the same, for tool
  * parts in every state and the other part kinds a request carries.
@@ -161,8 +162,10 @@ function roundTrip<T>(value: T): T {
 describe("provider-visible last-known-good snapshots", () => {
     beforeEach(() => resetLkgSlotsForTest());
 
-    // Models that route tool-result media differently in OpenCode 1
-    // (message-v2.ts 137-170), plus the conversion's two options.
+    // OpenCode 1 keeps tool-result media inside the tool result for some
+    // adapters (Anthropic, Gemini 3, Bedrock Anthropic, Vertex Anthropic) and
+    // moves it into a synthetic user message for others (OpenAI-compatible);
+    // stripMedia and toolOutputMaxChars are the conversion's two options.
     const routes: Array<{ label: string; model: Opencode1Model; options?: object }> = [
         { label: "anthropic", model: MODEL },
         {
@@ -205,7 +208,7 @@ describe("provider-visible last-known-good snapshots", () => {
         it(`give OpenCode 1 the same provider messages as the whole messages (${route.label})`, async () => {
             const whole = roundTrip(session());
             const reduced = roundTrip(session().map(providerVisibleMessage));
-            // The reduction removed the diagnostics and other UI data.
+            // providerVisibleMessage removed the tool metadata (diagnostics), titles and times.
             expect(JSON.stringify(reduced).length).toBeLessThan(JSON.stringify(whole).length / 10);
             const wholeRequest = await opencode1ToModelMessages(whole, route.model, route.options);
             expect(
