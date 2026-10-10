@@ -1007,7 +1007,7 @@ fn replay(
     }
     for (tier, entries) in additions {
         let list = hint.entry(tier).or_default();
-        if list.entries.is_empty() && !list.complete && summary.hint.get(&tier).is_none() {
+        if list.entries.is_empty() && !list.complete && !summary.hint.contains_key(&tier) {
             // A tier the summary never saw had no candidates at all.
             list.complete = true;
         }
