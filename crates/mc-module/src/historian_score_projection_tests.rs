@@ -1,3 +1,7 @@
+// A published rescore changes which compartments the historian prompt picks as
+// diverse calibration references and the importance they show, while the recent
+// window (last four references, rendered without importance) and the stored
+// compartment rows stay unchanged.
 #[test]
 fn historian_effective_scores_change_diverse_picks_not_recent_or_base_rows() {
     let (_dir, store) = store_for_tests();

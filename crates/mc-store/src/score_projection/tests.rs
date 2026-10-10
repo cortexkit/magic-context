@@ -186,6 +186,11 @@ fn score_view_is_evaluated_in_the_base_rows_read_transaction() {
     assert_eq!(latest.importance_by_sequence[&1], 99);
 }
 
+/// For every store.db schema version from the fence to the newest one, a nonzero
+/// applied score watermark survives a metadata-only rewrite and reopen next to
+/// unchanged m0 bytes, and openers that stop at v63-v66 (older ck-mc builds) are
+/// refused without touching the file. Keep this loop when the newest migration
+/// advances: every future build must also keep the watermark.
 #[test]
 fn supported_store_fences_round_trip_applied_score_watermark_with_frozen_head() {
     use crate::{LATEST_MIGRATION_VERSION, SCORE_SELECTION_WATERMARK_STORE_FENCE};
@@ -217,8 +222,8 @@ fn supported_store_fences_round_trip_applied_score_watermark_with_frozen_head() 
             };
             store.commit("scored", None, &core, &meta).unwrap();
         }
-        // A supported writer's meta-only update must not forget the selection
-        // represented by head bytes it leaves untouched.
+        // A metadata-only update by a build that knows this schema must keep the
+        // watermark, because the m0 bytes it leaves untouched were rendered at it.
         {
             let store = McStore::open_with_schema_ceiling_for_test(&descriptor, ceiling).unwrap();
             let mut loaded = store.load("scored").unwrap();

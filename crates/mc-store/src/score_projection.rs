@@ -1,4 +1,18 @@
-//! Read-only score views. Boundary fingerprints and writes use original compartment rows.
+//! Read-only views of `/ctx-rescore` score overrides for compartments.
+//!
+//! The host writes rescored importance into two context.db sidecar tables:
+//! `compartment_score_revisions` (one row per scored answer) and
+//! `compartment_score_selections` (an append-only, per-session sequence that
+//! picks which revision is active for each compartment; a row without a
+//! revision is an undo back to the original score). The module only reads
+//! them and never writes `compartments.importance`, so boundary fingerprints,
+//! history revisions and other writes keep using the original rows.
+//!
+//! A published score is recorded but stays pending: it reaches the cached m0
+//! only when a rebuild that is already happening for another reason commits, and
+//! never requests a rebuild itself. That commit stores the selection sequence it
+//! rendered (the score watermark) with the bytes in `ModuleMeta`. See
+//! `docs/designs/compartment-rescore.md`.
 
 use std::collections::HashMap;
 
@@ -10,15 +24,22 @@ use crate::{McStore, McStoreError, StoredCompartment};
 
 pub const RESCORE_RUBRIC_VERSION: i64 = 1;
 
+/// Which score view to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScoreSelector {
+    /// Original historian scores only; score tables are not read.
     Base,
+    /// The selections at or below this sequence: reproduces a view already
+    /// committed with m0.
     AtWatermark(i64),
+    /// Every selection published so far, including pending ones.
     Latest,
 }
 
 /// Scores are keyed by sequence only within this snapshot's session. They must be
 /// applied to render copies, never to the base rows returned alongside them.
+/// `watermark` is the highest selection sequence the view covers (zero for
+/// original scores).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompartmentScoreSnapshot {
     pub compartments: Vec<StoredCompartment>,
@@ -36,9 +57,13 @@ impl CompartmentScoreSnapshot {
     }
 }
 
-/// Source identities use the host's original message IDs and block indices,
-/// not IDs or dates resolved by the module. UTF-8 length framing is shared with
-/// the TypeScript writer.
+/// The compartment content a score was produced for. A revision applies only
+/// while its stored `source_identity` still matches this hash, so a score never
+/// lands on a compartment that was edited, recompacted or given a different
+/// original score after it was scored.
+/// The hash uses the host's original message IDs and block indices, not IDs or
+/// dates resolved by the module, and its field framing (byte-length-prefixed
+/// UTF-8 strings) matches the TypeScript writer.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Source {
@@ -205,8 +230,8 @@ pub(crate) fn score_view_tx(
 
 impl McStore {
     /// Base rows, selected revisions and the highest selection sequence share
-    /// one context.db read transaction. Scores published later wait for the next
-    /// history rebuild triggered independently of score publication.
+    /// one context.db read transaction. Scores published after that read stay
+    /// pending until a later rebuild, required for some other reason, reads them.
     pub fn load_compartment_score_snapshot(
         &self,
         session_id: &str,
@@ -232,9 +257,9 @@ impl McStore {
         Ok(snapshot)
     }
 
-    /// Run a test hook once after scores are acquired and before rendered bytes
-    /// are committed, allowing a concurrent score publication in that interval.
-    /// The hook is absent from production builds.
+    /// Run a test hook once, after the score snapshot is read and before the
+    /// caller commits rendered bytes, so a test can publish a competing score in
+    /// that window. Only test builds contain the hook.
     #[cfg(any(test, feature = "test-support"))]
     pub fn after_score_snapshot_for_test(&self, hook: impl FnOnce() + Send + 'static) {
         *self.after_score_snapshot_hook.lock().unwrap() = Some(Box::new(hook));

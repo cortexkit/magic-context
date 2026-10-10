@@ -1,3 +1,21 @@
+// Transform-level tests for rescored compartment importance (see
+// `docs/designs/compartment-rescore.md`).
+//
+// Terms used below:
+// - m0 is the frozen history head of the cached prompt; see "m[0]/m[1] cache
+//   layout" in ARCHITECTURE.md.
+// - The applied watermark (`ModuleMeta::score_selection_watermark`, "W" in test
+//   names and messages) is the highest score selection rendered into m0.
+// - A marker HARD is a rebuild requested because content may have changed (here
+//   a pending project-memory epoch, set by `mark_epoch`), not because the
+//   provider's cache was lost. It must re-render at W and keep the prefix.
+// - Each fixture compartment N stores tier text `detail-P<tier>-N;` for tiers
+//   P1 (fullest) to P4 (shortest), so the tier the decay curve picked shows up
+//   in m0. In this fixture compartment 1 renders at P1 with its original score
+//   and at P2 once rescored to importance 1.
+//
+// Tests prefixed `review_` cover concurrent publication, commit failure,
+// pre-rescore stores and downgrade refusal.
 fn scored_fixture() -> (tempfile::TempDir, McStore, TransformRequest) {
     let dir = tempfile::tempdir().unwrap();
     let s = store(dir.path());
@@ -129,8 +147,10 @@ fn ttl_and_model_cache_loss_adopt_latest_even_when_w_render_matches() {
         )
         .unwrap();
         assert_eq!(probe.m0_bytes, m0_bytes(&baseline));
-        // The memory-epoch marker also requests a rebuild, but an expired cache
-        // or a changed model must still adopt the pending score.
+        // The probe above shows a render at the applied watermark would match the
+        // served m0. The memory-epoch marker also requests a rebuild, but once the
+        // cache has expired or the model changed the prefix is lost anyway, so
+        // the rebuild must adopt the pending score.
         mark_epoch(&s);
         if ttl {
             ctx.now_ms = 600_000;
@@ -513,9 +533,11 @@ fn review_downgrade_meta_rewrite_must_not_adopt_unserved_scores_on_marker_hard()
     );
     drop(s);
     let before = std::fs::read(dir.path().join("store.db")).unwrap();
-    // This opener carries only migrations through v63, matching the placed
-    // pre-rescore binary. A newer store.db must be refused before a metadata
-    // rewrite; context.db's table-shape compatibility is a separate check.
+    // This opener carries only store.db migrations through v63, the newest that
+    // the last ck-mc build released before score support knows. It must refuse
+    // this store (now at the newest version) before it could rewrite metadata and
+    // drop W. context.db's own table-shape compatibility checks are separate and
+    // do not override this store.db refusal.
     let descriptor = crate::test_support::descriptor(dir.path());
     let Err(refusal) = McStore::open_with_schema_ceiling_for_test(&descriptor, 63) else {
         panic!("the pre-rescore writer must be refused before it can discard W");

@@ -5378,6 +5378,12 @@ fn apply_once(
     // in the HARD branch, says it busts the served prefix. Otherwise the provider's cached
     // prefix survives the pass and a queued drop or heuristic riding it would originate the
     // pass's only bust. The HARD itself still runs so its markers commit.
+    //
+    // The probe renders at the score watermark already committed with m0
+    // (`ModuleMeta::score_selection_watermark`), never at the latest scores. A
+    // published but not yet applied rescore therefore cannot turn an otherwise
+    // byte-identical marker HARD into a prefix bust; when the probe keeps the
+    // prefix, the HARD branch commits this same composition below.
     let marker_hard_candidate = prefix_materialization_enabled
         && (external_revision_changed
             || project_memory_epoch_hard_due
@@ -6206,9 +6212,11 @@ fn apply_once(
                     coverage_bounds.map(|(start, _)| start),
                     serializer_profile,
                 );
-                // Retain the render that proved the provider-visible prefix would
-                // stay unchanged. Other baseline rebuilds adopt the latest scores
-                // visible in their input snapshot.
+                // A marker HARD whose probe proved the provider-visible prefix stays
+                // unchanged commits that probe's render, including its committed score
+                // watermark. Every other baseline rebuild was required for its own reason
+                // (cache loss, first fold, pressure, changed content or render inputs), so
+                // it adopts the latest scores in its read snapshot.
                 let mut comp = match marker_hard_composition.take() {
                     Some(composition) => composition,
                     None => crate::m0_compose::compose_m0_from_store_timed(
@@ -10015,10 +10023,13 @@ fn render_mural_block(mural: &crate::m0_compose::M0MuralBlock) -> FrozenUnit {
     }
 }
 
-/// Render a marker-triggered baseline rebuild at the last committed score
-/// selection, without writing cache state. An unchanged prefix carries this
-/// composition into the commit; a load error or changed prefix instead permits
-/// a fresh render with the latest scores.
+/// Render the m0 a marker-triggered HARD on this pass would produce, at the score
+/// watermark already committed with m0, without writing cache state. A marker
+/// trigger (project-memory epoch, external history revision, changed
+/// protection-floor inputs) means content may have changed, not that the provider
+/// cache was lost. If this render keeps the served prefix, the HARD commits it
+/// as-is; if loading or composing fails (`None`) or the prefix would change, the
+/// HARD renders afresh with the latest scores.
 #[allow(clippy::too_many_arguments)]
 fn compose_hard_fold_m0(
     store: &McStore,

@@ -3278,8 +3278,23 @@ pub const LATEST_MIGRATION_VERSION: u32 = {
     latest
 };
 
-/// Released builds serving applied score selections must support store version
-/// 67 or later and preserve their watermark when rewriting cache metadata.
+/// Lowest store.db schema version a build must know before it may hold a cache
+/// row whose m0 contains rescored importance.
+///
+/// The applied score watermark (`ModuleMeta::score_selection_watermark`) is a key
+/// inside the `mc_cache_state.meta` JSON. A build that predates it ignores the
+/// unknown key and would drop it on its next metadata-only rewrite while keeping
+/// the rescored m0 bytes. A later marker-triggered rebuild would then render at
+/// the wrong score view and could bust the provider's cached prefix.
+///
+/// No new migration is needed: the existing v67 already fences those builds
+/// out. Every ck-mc build released before score support has a store.db ceiling
+/// below 67 (the last one stops at v63), and `McStore::open` refuses a store
+/// whose recorded version is above the binary's newest migration
+/// (`StoreAheadOfBinary`) before it reads or rewrites any cache row. So an older
+/// build can never rewrite the metadata and drop the watermark. Every build at or
+/// above this version must keep the watermark when it rewrites metadata. See
+/// "Rust applied-score rollback fence" in `docs/designs/compartment-rescore.md`.
 pub const SCORE_SELECTION_WATERMARK_STORE_FENCE: u32 = 67;
 
 /// Whether this binary can serve a store whose project rows have been moved into the host's
@@ -4131,6 +4146,10 @@ pub struct CompartmentSetGeneration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistorianAssemblySnapshot {
     pub compartments: Vec<StoredCompartment>,
+    /// Rescored importance by compartment sequence, from the latest score
+    /// selections read in the same transaction. `compartments` keep their
+    /// original scores; the historian prompt applies these only to its reference
+    /// copies.
     pub importance_by_sequence: HashMap<i64, i32>,
     pub revert_epoch: u64,
     pub compartment_set_generation: CompartmentSetGeneration,
@@ -4725,9 +4744,16 @@ pub struct SessionCacheTtlPolicy {
 /// The non-CoreState durable blob: bootstrap + epoch-detection + coverage watermark.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModuleMeta {
-    /// Highest score-selection log sequence represented in frozen m0, committed
-    /// atomically with its bytes. Later selections wait for an independently
-    /// triggered baseline rebuild and never request one themselves.
+    /// Highest `compartment_score_selections.sequence` (context.db) whose scores
+    /// are rendered into the frozen m0, committed in the same write as those
+    /// bytes. Zero or absent means m0 uses the original historian scores.
+    ///
+    /// Scores published after this value are recorded but stay pending: they
+    /// reach m0 only when a rebuild that is already happening for another reason
+    /// (cache loss, first fold, pressure, changed content) commits, and they
+    /// never request a rebuild themselves. A marker-triggered rebuild re-renders
+    /// at exactly this value so pending scores cannot change its bytes. See
+    /// `SCORE_SELECTION_WATERMARK_STORE_FENCE` for why older builds cannot drop it.
     #[serde(default, skip_serializing_if = "i64_is_zero")]
     pub score_selection_watermark: i64,
     /// Idle-expiry policy only; it never changes rendered context or cached prompt text.
@@ -7923,8 +7949,9 @@ impl McStore {
         Self::open_with_private_permissions(descriptor, true)
     }
 
-    /// Exercise the real opener with a shorter migration chain. Older stores
-    /// migrate normally; a newer recorded version is refused, never downgraded.
+    /// Open with the real opener but only the migrations up to `ceiling`, which
+    /// stands in for an older ck-mc build. A store at or below `ceiling` migrates
+    /// normally; a store recorded at a newer version is refused, never downgraded.
     #[cfg(any(test, feature = "test-support"))]
     pub fn open_with_schema_ceiling_for_test(
         descriptor: &StorageDescriptor,
