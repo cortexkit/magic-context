@@ -26,6 +26,11 @@ export interface LkgEntryNote {
     pristineTail: MessageLike[];
     entryInputIds: string[];
     entryContentDigests: string[];
+    /**
+     * Legacy-format digests of the same prefix, present when the slot it was
+     * noted against was written before the current digest format.
+     */
+    entryLegacyContentDigests?: (string | null)[];
     anchorIndex: number;
 }
 
@@ -171,7 +176,11 @@ export function visitMessageContentFields(
  */
 export function contentSnapshotValue(value: unknown): unknown {
     if (!value || typeof value !== "object") return value;
-    value = providerVisibleMessage(value);
+    return withoutEmptyUserDiffSummary(providerVisibleMessage(value));
+}
+
+function withoutEmptyUserDiffSummary(value: unknown): unknown {
+    if (!value || typeof value !== "object") return value;
     const message = value as Partial<MessageLike>;
     const info = message.info as Record<string, unknown> | undefined;
     const summary = info?.summary;
@@ -235,6 +244,10 @@ export function messageContentSnapshot(message: MessageLike): MessageContentSnap
 
 /** Flatten a value into typed tokens while retaining strings without deep copies. */
 export function lkgContentFields(value: unknown): LkgContentField[] | null {
+    return flattenContentFields(contentSnapshotValue(value));
+}
+
+function flattenContentFields(snapshot: unknown): LkgContentField[] | null {
     const fields: LkgContentField[] = [];
     const seen = new WeakSet<object>();
     const visit = (child: unknown): void => {
@@ -266,7 +279,7 @@ export function lkgContentFields(value: unknown): LkgContentField[] | null {
         } else fields.push(LKG_SNAPSHOT_UNDEFINED);
     };
     try {
-        visit(contentSnapshotValue(value));
+        visit(snapshot);
         return fields;
     } catch {
         return null;
@@ -356,7 +369,61 @@ export function lkgContentDigestFromFields(fields: readonly LkgContentField[]): 
         }
     }
     if (offset > 0) hash.update(chunk.subarray(0, offset));
-    return hash.digest("base64url");
+    return LKG_DIGEST_FORMAT_PREFIX + hash.digest("base64url");
+}
+
+/**
+ * Marks a digest written by {@link lkgContentDigestFromFields}. Durable slots
+ * written before it carry unmarked digests over the whole message in a text
+ * encoding (base64url never contains "."), and those are checked with
+ * {@link legacyLkgDigestFromFields} instead, so an upgrade does not turn a
+ * replayable turn into a refusal. The next healthy capture writes the slot in
+ * the current format.
+ */
+export const LKG_DIGEST_FORMAT_PREFIX = "2.";
+
+export function isLegacyLkgDigest(digest: string): boolean {
+    return !digest.startsWith(LKG_DIGEST_FORMAT_PREFIX);
+}
+
+/**
+ * The digest durable slots carried before {@link LKG_DIGEST_FORMAT_PREFIX}:
+ * sha256 of the text `<type>:<length>:<value>\0` per token. Kept only to verify
+ * legacy slots; nothing writes it.
+ */
+export function legacyLkgDigestFromFields(fields: readonly LkgContentField[]): string {
+    lkgDigestsComputed += 1;
+    let key = "";
+    for (const field of fields) {
+        const value = typeof field === "symbol" ? (field.description ?? "") : String(field);
+        key += `${typeof field}:${value.length}:${value}\0`;
+    }
+    return createHash("sha256").update(key).digest("base64url");
+}
+
+/**
+ * The legacy digest of a message: over the whole message, tool metadata
+ * included, as slots were written before the provider view; only an empty user
+ * diff summary is left out, as it was then.
+ */
+export function legacyLkgContentDigest(message: unknown): string | null {
+    const fields = flattenContentFields(withoutEmptyUserDiffSummary(message));
+    return fields ? legacyLkgDigestFromFields(fields) : null;
+}
+
+/**
+ * Whether tokens match a stored digest in either format. Callers whose tokens
+ * are the same in both formats (Pi) use this; the OpenCode entry note keeps a
+ * separate legacy digest because its legacy tokens covered the whole message.
+ */
+export function lkgFieldsMatchDigest(
+    fields: readonly LkgContentField[],
+    stored: string | undefined,
+): boolean {
+    if (stored === undefined) return false;
+    return isLegacyLkgDigest(stored)
+        ? legacyLkgDigestFromFields(fields) === stored
+        : lkgContentDigestFromFields(fields) === stored;
 }
 
 export interface LkgInputSnapshot {
@@ -473,7 +540,10 @@ export function incrementalLkgContentDigests(
             reusedPrefix < entries.length &&
             reusedPrefix < prior.ids.length &&
             entries[reusedPrefix]?.id === prior.ids[reusedPrefix] &&
-            entries[reusedPrefix]?.signature === prior.signatures[reusedPrefix]
+            entries[reusedPrefix]?.signature === prior.signatures[reusedPrefix] &&
+            // A legacy-format digest from an older slot is never carried into a
+            // new one; a slot holds one format.
+            !isLegacyLkgDigest(prior.digests[reusedPrefix] ?? "")
         ) {
             reusedPrefix += 1;
         }
@@ -713,10 +783,16 @@ export function noteEntry(sessionId: string, messages: MessageLike[]): LkgEntryN
         entryContentDigests.push(digest);
     }
     const pristineTail = structuredClone(messages.slice(anchorIndex + 1)) as MessageLike[];
+    // A slot written before the current digest format is verified against
+    // legacy digests of the same messages (whole-message tokens, text encoding).
+    const entryLegacyContentDigests = slot.inputContentDigests.some(isLegacyLkgDigest)
+        ? messages.slice(0, anchorIndex + 1).map((message) => legacyLkgContentDigest(message))
+        : undefined;
     return {
         pristineTail,
         entryInputIds,
         entryContentDigests,
+        ...(entryLegacyContentDigests ? { entryLegacyContentDigests } : {}),
         anchorIndex,
     };
 }

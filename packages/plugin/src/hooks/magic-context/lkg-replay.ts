@@ -4,6 +4,7 @@ import {
     captureSlot,
     dropSlot,
     getSlot,
+    isLegacyLkgDigest,
     LkgEntryDigestCache,
     type LkgEntryDigestStats,
     type LkgEntryNote,
@@ -395,10 +396,19 @@ function entryIdsAreValid(slot: LkgSlot, entryIds: string[]): boolean {
     return true;
 }
 
-function entryContentIsValid(slot: LkgSlot, entryDigests: string[]): boolean {
+/**
+ * Every captured message is unchanged. A digest in the legacy format (a slot
+ * written before the current format) is compared with the entry's legacy
+ * digest of the same message; with none to compare, it does not match.
+ */
+function entryContentIsValid(slot: LkgSlot, entry: LkgEntryNote): boolean {
     return (
-        entryDigests.length >= slot.inputContentDigests.length &&
-        slot.inputContentDigests.every((digest, index) => entryDigests[index] === digest)
+        entry.entryContentDigests.length >= slot.inputContentDigests.length &&
+        slot.inputContentDigests.every((digest, index) =>
+            isLegacyLkgDigest(digest)
+                ? entry.entryLegacyContentDigests?.[index] === digest
+                : entry.entryContentDigests[index] === digest,
+        )
     );
 }
 
@@ -604,7 +614,7 @@ export function replayLkg(args: {
         dropSlot(args.sessionId, "lkg_invalidated_reshape");
         return { ok: false, reason: "lkg_invalidated_reshape" };
     }
-    if (!entryContentIsValid(slot, entry.entryContentDigests)) {
+    if (!entryContentIsValid(slot, entry)) {
         dropSlot(args.sessionId, "lkg_content_mismatch");
         return { ok: false, reason: "lkg_content_mismatch" };
     }

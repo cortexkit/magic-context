@@ -4,10 +4,14 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import {
     captureSlot,
     getLkgDigestsComputedForTest,
+    incrementalLkgContentDigests,
+    isLegacyLkgDigest,
     type LkgContentField,
+    legacyLkgDigestFromFields,
     lkgContentDigest,
     lkgContentDigestFromFields,
     lkgContentFields,
+    lkgFieldsMatchDigest,
     noteEntry,
     resetLkgSlotsForTest,
 } from "./lkg-slot";
@@ -86,6 +90,30 @@ describe("LKG entry digests", () => {
         // chunk or is hashed on its own.
         const big: LkgContentField[] = ["x".repeat(70_000), 1, "tail"];
         expect(lkgContentDigestFromFields(big)).toBe(lkgContentDigestFromFields([...big]));
+    });
+
+    it("marks current digests and verifies legacy-format ones with the legacy encoding", () => {
+        const fields = lkgContentFields({ info: { id: "m", role: "user" }, parts: [] })!;
+        const current = lkgContentDigestFromFields(fields);
+        const legacy = legacyLkgDigestFromFields(fields);
+        expect(isLegacyLkgDigest(current)).toBe(false);
+        expect(isLegacyLkgDigest(legacy)).toBe(true);
+        expect(lkgFieldsMatchDigest(fields, current)).toBe(true);
+        expect(lkgFieldsMatchDigest(fields, legacy)).toBe(true);
+        const other = lkgContentFields({ info: { id: "m", role: "user" }, parts: [1] })!;
+        expect(lkgFieldsMatchDigest(other, legacy)).toBe(false);
+        expect(lkgFieldsMatchDigest(other, current)).toBe(false);
+    });
+
+    it("never carries a legacy-format digest into a new slot", () => {
+        const entry = { id: "m1", signature: "s1", fields: lkgContentFields({ a: 1 })! };
+        const reused = incrementalLkgContentDigests([entry], {
+            ids: ["m1"],
+            signatures: ["s1"],
+            digests: [legacyLkgDigestFromFields(entry.fields)],
+        });
+        expect(reused.reusedPrefix).toBe(0);
+        expect(reused.digests).toEqual([lkgContentDigestFromFields(entry.fields)]);
     });
 
     it("hashes only the messages added since the last pass, however long the prefix", () => {

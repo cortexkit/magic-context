@@ -7,6 +7,7 @@ import { clearPersistedLkgSlot, loadPersistedLkgSlot, saveLkgSlotToDb } from "./
 import { captureLkgSlot, replayLkg } from "./lkg-replay";
 import {
     getSlot,
+    isLegacyLkgDigest,
     lkgContentDigest,
     registerLkgPersistence,
     resetLkgSlotsForTest,
@@ -200,12 +201,19 @@ describe("issue 653 independent upgrade review", () => {
         );
     });
 
-    test("legacy-format restart diagnoses content mismatch and the exact BUSY refusal", async () => {
+    test("a legacy-format slot that genuinely mismatches is still refused on BUSY", async () => {
+        // The input changed after the legacy slot was written: the legacy digest
+        // check must reject it (fail closed), exactly as before the upgrade.
+        const changed = () => {
+            const messages = history();
+            (messages[0]!.parts[0] as { text: string }).text = "Fix the JavaScript build.";
+            return messages;
+        };
         restartFromDurableSlot("legacy");
         expect(
             replayLkg({
                 sessionId: SESSION,
-                messages: history(),
+                messages: changed(),
                 modelKey: "test/model",
                 providerKey: "test",
             }),
@@ -213,13 +221,13 @@ describe("issue 653 independent upgrade review", () => {
         restartFromDurableSlot("legacy");
         let refusals = 0;
         await expect(
-            busyHandler(() => refusals++)({}, { messages: history() } as never),
+            busyHandler(() => refusals++)({}, { messages: changed() } as never),
         ).rejects.toThrow(STORAGE_BUSY_MESSAGE);
         expect(refusals).toBe(1);
         expect(loadPersistedLkgSlot(openDatabase()!, SESSION)).toBeUndefined();
     });
 
-    test.failing("legacy-format upgrade should retain managed replay availability on BUSY", async () => {
+    test("legacy-format upgrade retains managed replay availability on BUSY", async () => {
         restartFromDurableSlot("legacy");
         const output = { messages: history() };
         await busyHandler()({}, output as never);
@@ -251,6 +259,15 @@ describe("issue 653 independent upgrade review", () => {
             rustReplayParticipant: () => null,
         });
         await handler({}, output as never);
+        // The healthy pass wrote the slot in the current format.
+        const upgraded = getSlot(SESSION)!;
+        expect(upgraded.inputContentDigests.every((digest) => !isLegacyLkgDigest(digest))).toBe(
+            true,
+        );
+        expect(saveLkgSlotToDb(openDatabase()!, SESSION, upgraded)).toBe(true);
+        expect(loadPersistedLkgSlot(openDatabase()!, SESSION)?.inputContentDigests).toEqual(
+            upgraded.inputContentDigests,
+        );
         expect(
             replayLkg({
                 sessionId: SESSION,

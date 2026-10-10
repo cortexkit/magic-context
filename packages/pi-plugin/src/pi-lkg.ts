@@ -10,6 +10,7 @@ import {
 	exactReusablePrefix,
 	getSlot,
 	incrementalLkgContentDigests,
+	isLegacyLkgDigest,
 	LKG_SNAPSHOT_ARRAY,
 	LKG_SNAPSHOT_BOOLEAN,
 	LKG_SNAPSHOT_KEY,
@@ -21,8 +22,10 @@ import {
 	type LkgContentField,
 	type LkgEntryNote,
 	type LkgSlot,
+	legacyLkgDigestFromFields,
 	lkgContentDigestFromFields,
 	lkgContentFields,
+	lkgFieldsMatchDigest,
 	registerLkgPersistence,
 	signatureForFields,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
@@ -727,8 +730,10 @@ export function createPiLkgCoordinator(
 			if (
 				surviving.some(
 					(input, index) =>
-						lkgContentDigestFromFields(input.fields) !==
-						slot.inputContentDigests[start + index],
+						!lkgFieldsMatchDigest(
+							input.fields,
+							slot.inputContentDigests[start + index],
+						),
 				)
 			)
 				return { ok: false, reason: "lkg_content_mismatch" };
@@ -749,12 +754,25 @@ export function createPiLkgCoordinator(
 				],
 			};
 		}
+		const prefixInputs = snapshot.inputs.slice(
+			0,
+			snapshot.replayAnchorInputIndex + 1,
+		);
 		const entry: LkgEntryNote = {
 			pristineTail: snapshot.pristineTail,
 			entryInputIds: snapshot.inputs.map((input) => input.id),
-			entryContentDigests: snapshot.inputs
-				.slice(0, snapshot.replayAnchorInputIndex + 1)
-				.map((input) => lkgContentDigestFromFields(input.fields)),
+			entryContentDigests: prefixInputs.map((input) =>
+				lkgContentDigestFromFields(input.fields),
+			),
+			// A slot written before the current digest format is verified with the
+			// legacy digest of the same tokens (Pi's tokens are the same in both).
+			...(slot?.inputContentDigests.some(isLegacyLkgDigest)
+				? {
+						entryLegacyContentDigests: prefixInputs.map((input) =>
+							legacyLkgDigestFromFields(input.fields),
+						),
+					}
+				: {}),
 			anchorIndex: snapshot.replayAnchorInputIndex,
 		};
 		const result = replayLkg({
