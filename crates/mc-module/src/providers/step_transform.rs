@@ -855,7 +855,7 @@ impl McHandler {
                                 && temporal_permitted
                                 && ctx.counters.pointer("/pass_context/lineage_id").and_then(Value::as_str)==Some(lineage_id)
                             {
-                                if let Some(prefix) = ctx.parts.iter().filter(|p|p.kind=="header" && p.ordinal<ordinal).max_by_key(|p|p.ordinal).and_then(|p|transform::temporal_marker_from_timestamps(p.created_at_ms,p.completed_at_ms,ingress.ck.meta.created_at_ms)).filter(|p|!p.is_empty())
+                                if let Some(prefix) = ctx.policy_index.previous_header(ordinal)?.and_then(|p|transform::temporal_marker_from_timestamps(p.created_at_ms,p.completed_at_ms,ingress.ck.meta.created_at_ms)).filter(|p|!p.is_empty())
                                 {
                                     let op = Operation::Prepend {
                                         block: 0,
@@ -897,7 +897,7 @@ impl McHandler {
                     let carrier=hook==Hook::PostTool && targets.iter().any(|t|carrier_block.is_some_and(|p|p.block_id==t.id));
                     let cache_busting=temporal_permitted && !matches!(c.preset.as_deref(),Some("worker"|"subagent"|"reader"));
                     let pass_model=ctx.counters.pointer("/pass_context/model_key").and_then(Value::as_str);
-                    let inputs=transform::channel1_inputs_from_parts(&ctx.parts,&ctx.counters["engine_policy"],binding.config.resolve_protected_tokens(100_000).floor,&binding.config.protected_tools,carrier,cache_busting,pass_model);
+                    let (inputs,policy_summary)=super::policy_summary::channel1_inputs(&ctx.policy_index,&ctx.counters["engine_policy"],binding.config.resolve_protected_tokens(100_000).floor,&binding.config.protected_tools,carrier,cache_busting,pass_model)?;
                     if cache_busting {counters["engine_policy"]["calibration"]=serde_json::to_value(crate::decision_calibration::DecisionCalibration::freeze_for_model(pass_model)).expect("calibration JSON");}
                     if ctx.counters.pointer("/engine_policy/baseline/baseline_generation").and_then(Value::as_u64)!=Some(inputs.baseline.baseline_generation) {
                         counters["policy_baseline_updates"]=json!(inputs.baseline.baseline_parts.iter().map(|m|json!({"block_id":m.key.split('\0').next().unwrap_or(""),"measurement":m})).collect::<Vec<_>>());
@@ -952,6 +952,7 @@ impl McHandler {
                                 tags,
                             }),
                             counters,
+                            policy_summary,
                         },
                         answer,
                     ))

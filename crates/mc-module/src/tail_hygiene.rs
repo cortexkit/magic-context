@@ -748,7 +748,7 @@ fn message_id_from_part_key(key: &str) -> &str {
 /// when the part still matches. Protection release and queue membership are
 /// explainable state moves; they are only a mismatch when the tag is no longer
 /// active, because then the U they carry cannot be attributed.
-fn compared_field(
+pub(crate) fn compared_field(
     before: &TailHygienePartMeasurement,
     after: &TailHygienePartMeasurement,
 ) -> Option<&'static str> {

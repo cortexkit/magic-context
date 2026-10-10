@@ -9239,7 +9239,7 @@ fn frozen_units_matched_to_tail(
         .count()
 }
 
-fn is_tail(ordinal: u64, coverage: Option<u64>) -> bool {
+pub(crate) fn is_tail(ordinal: u64, coverage: Option<u64>) -> bool {
     coverage.is_none_or(|c| ordinal > c)
 }
 
@@ -11464,7 +11464,7 @@ fn refresh_channel1_baseline(
 
 /// A real prefix rebuild adopts this pass's model; defers preserve the epoch
 /// already priced into the cached prefix. Neither lane guesses from old ratios.
-fn calibration_for_prefix_pass(
+pub(crate) fn calibration_for_prefix_pass(
     model_key: Option<&str>,
     frozen: Option<&mc_store::FrozenDecisionCalibration>,
     cache_busting: bool,

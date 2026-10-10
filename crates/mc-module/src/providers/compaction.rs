@@ -307,6 +307,21 @@ fn non_tag_messages(
     Ok(messages)
 }
 
+/// The conversation row is rewritten by every hook, so it keeps a receipt of
+/// the last step answer rather than the answer itself: a replacement view can
+/// be megabytes. Host steps read only the receipt's request id; the view bytes
+/// stay in the immutable view row.
+fn answer_receipt(answer: &Value) -> String {
+    let mut receipt = answer.clone();
+    if let Some(compaction) = receipt.get_mut("compaction") {
+        *compaction = json!({
+            "compaction_id": compaction.get("compaction_id"),
+            "version": compaction.get("version"),
+        });
+    }
+    receipt.to_string()
+}
+
 fn save_host_setup(
     store: &McStore,
     key: &Key,
@@ -1275,7 +1290,7 @@ impl McHandler {
         };
         conversation.cursor_frontier = frontier;
         conversation.wait_request = None;
-        conversation.last_answer_json = Some(answer.to_string());
+        conversation.last_answer_json = Some(answer_receipt(&answer));
         save_host_setup(store, &work.key, &mut conversation, &setup)?;
         fault("AnswerRecorded");
         bytes(&answer)
@@ -1884,6 +1899,7 @@ mod host_tests {
                                 tags,
                             }),
                             counters: ctx.counters.clone(),
+                            policy_summary: None,
                         },
                         (),
                     ))
@@ -3269,6 +3285,7 @@ mod host_tests {
                             tags: vec![],
                         }),
                         counters: ctx.counters.clone(),
+                        policy_summary: None,
                     },
                     (),
                 ))

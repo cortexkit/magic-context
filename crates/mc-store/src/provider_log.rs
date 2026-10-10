@@ -4,7 +4,10 @@ use crate::{McStore, McStoreError, McTagRow, ProviderSessionKey};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+mod policy_index;
+pub use policy_index::*;
 
 #[derive(Debug)]
 pub enum ProviderError {
@@ -111,14 +114,16 @@ pub struct ProviderStoredAnswer {
     pub state: String,
 }
 /// Policy sees counters after burns and promotion, never a transcript snapshot.
-#[derive(Debug)]
-pub struct ProviderHookContext {
+pub struct ProviderHookContext<'c> {
     pub counters: Value,
     pub policy: ProviderPolicyTotals,
     pub tag_high_water: i64,
-    pub pending_answers: u64,
-    pub live_answers: u64,
+    /// Policy parts of the hooked message and of the messages appended by the
+    /// synchronized pass. Lineage-wide policy goes through `policy_index`.
     pub parts: Vec<ProviderPolicyPart>,
+    /// Bounded reads of the conversation's whole policy lineage, inside this
+    /// transaction.
+    pub policy_index: ProviderPolicyIndex<'c>,
 }
 
 /// The engine's measured block without its content. Hashes and token estimates
@@ -147,45 +152,6 @@ pub struct ProviderPolicyPart {
     pub completed_at_ms: Option<i64>,
 }
 
-/// Correctness-stage full metadata walk. This does not read transcript content,
-/// but its cost grows with retained parts; bounded lineage summaries are stage two.
-fn policy_parts_tx(
-    conn: &Connection,
-    conv: &str,
-    lineage: &str,
-) -> rusqlite::Result<Vec<ProviderPolicyPart>> {
-    let ancestry = ancestry_tx(conn, conv, lineage)?;
-    let mut parts = BTreeMap::new();
-    let prefix = ancestry
-        .last()
-        .map_or(u64::MAX, |(root, _)| root.first_ordinal.saturating_sub(1));
-    let sources = ancestry
-        .into_iter()
-        .map(|(row, cut)| (row.lineage_id, cut))
-        .chain(std::iter::once((String::new(), prefix)));
-    for (lineage, cut) in sources {
-        let mut q=conn.prepare("SELECT p.policy_json,EXISTS(SELECT 1 FROM mc_provider_consumed_tags_v1 t JOIN mc_provider_conversations_v2 c ON c.engine_namespace=t.engine_namespace WHERE c.conv_key=p.conv_key AND t.tag_number=json_extract(p.policy_json,'$.tag_number')) FROM mc_provider_policy_parts_v1 p WHERE conv_key=?1 AND lineage_id=?2 AND ordinal<=?3 ORDER BY ordinal,block_id")?;
-        for raw in q.query_map(
-            params![conv, lineage, as_i64(cut.min(i64::MAX as u64))?],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
-        )? {
-            let (raw, consumed) = raw?;
-            let mut part: ProviderPolicyPart = serde_json::from_str(&raw).map_err(sql_json)?;
-            if consumed {
-                part.active = false;
-            }
-            parts.entry(part.block_id.clone()).or_insert(part);
-        }
-    }
-    let mut parts = parts.into_values().collect::<Vec<_>>();
-    parts.sort_by(|a, b| {
-        a.ordinal
-            .cmp(&b.ordinal)
-            .then_with(|| a.block_index.cmp(&b.block_index))
-    });
-    Ok(parts)
-}
-
 #[derive(Clone, Debug)]
 pub struct ProviderEnginePolicy {
     pub parts: Vec<ProviderPolicyPart>,
@@ -208,6 +174,8 @@ pub(crate) fn save_engine_policy_tx(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (conv, lineage, raw) in conversations {
+        // Every part is rewritten below; a summary would only log each one.
+        drop_policy_summary_tx(conn, &conv)?;
         for part in &policy.parts {
             conn.execute("INSERT INTO mc_provider_policy_parts_v1 VALUES (?1,?2,?3,?4,?5,json_extract(?1,'$[1]')) ON CONFLICT(conv_key,lineage_id,block_id) DO UPDATE SET policy_json=excluded.policy_json",params![conv,lineage,as_i64(part.ordinal)?,part.block_id,serde_json::to_string(part).map_err(sql_json)?])?;
         }
@@ -370,7 +338,7 @@ fn surviving_policy_state_tx(
             ),
             (
                 &mut fire,
-                "json_extract(policy_json,'$.cadence_event.fire')=true",
+                "json_extract(policy_json,'$.cadence_event.fire')=1",
             ),
         ] {
             let row:Option<(i64,String)>=conn.query_row(&format!("SELECT answer_seq,json_extract(policy_json,'$.cadence_event') FROM mc_provider_hook_answers_v1 WHERE conv_key=?1 AND lineage_id=?2 AND ordinal<=?3 AND state IN ('pending','live') AND {predicate} ORDER BY answer_seq DESC LIMIT 1"),params![conv,ancestor.lineage_id,as_i64(cut)?],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
@@ -456,6 +424,10 @@ pub fn consume_provider_drops_tx(
 pub struct ProviderHookWrite {
     pub answer: Option<ProviderHookAnswer>,
     pub counters: Value,
+    /// A policy summary describing the lineage after this write, including any
+    /// baseline measurement updates in `counters`. Saving it forgets the logged
+    /// changes it accounts for.
+    pub policy_summary: Option<String>,
 }
 pub struct ProviderHookRequest<'a> {
     pub lineage: &'a ProviderLineage,
@@ -1071,7 +1043,7 @@ impl McStore {
         &self,
         key: &ProviderSessionKey,
         request: ProviderHookRequest<'_>,
-        decide: impl FnOnce(&ProviderHookContext) -> Result<(ProviderHookWrite, T), ProviderError>,
+        decide: impl FnOnce(&ProviderHookContext<'_>) -> Result<(ProviderHookWrite, T), ProviderError>,
     ) -> Result<T, ProviderError> {
         let messages = request.message.map(std::slice::from_ref).unwrap_or(&[]);
         self.commit_provider_delta(key, request, messages, None, &[], None, decide)
@@ -1082,7 +1054,7 @@ impl McStore {
         key: &ProviderSessionKey,
         request: ProviderHookRequest<'_>,
         parts: &[ProviderPolicyPart],
-        decide: impl FnOnce(&ProviderHookContext) -> Result<(ProviderHookWrite, T), ProviderError>,
+        decide: impl FnOnce(&ProviderHookContext<'_>) -> Result<(ProviderHookWrite, T), ProviderError>,
     ) -> Result<T, ProviderError> {
         let messages = request.message.map(std::slice::from_ref).unwrap_or(&[]);
         self.commit_provider_delta(key, request, messages, None, parts, None, decide)
@@ -1114,6 +1086,7 @@ impl McStore {
                     ProviderHookWrite {
                         answer: None,
                         counters: ctx.counters.clone(),
+                        policy_summary: None,
                     },
                     (),
                 ))
@@ -1149,6 +1122,7 @@ impl McStore {
                     ProviderHookWrite {
                         answer: None,
                         counters: ctx.counters.clone(),
+                        policy_summary: None,
                     },
                     (),
                 ))
@@ -1182,6 +1156,7 @@ impl McStore {
                     ProviderHookWrite {
                         answer: None,
                         counters: ctx.counters.clone(),
+                        policy_summary: None,
                     },
                     (),
                 ))
@@ -1211,7 +1186,7 @@ impl McStore {
         complete_through: Option<u64>,
         parts: &[ProviderPolicyPart],
         pass_context: Option<&Value>,
-        decide: impl FnOnce(&ProviderHookContext) -> Result<(ProviderHookWrite, T), ProviderError>,
+        decide: impl FnOnce(&ProviderHookContext<'_>) -> Result<(ProviderHookWrite, T), ProviderError>,
     ) -> Result<T, ProviderError> {
         let mut refusal = None;
         let result = self.inner.with_conn_fenced(|conn| {
@@ -1234,7 +1209,7 @@ impl McStore {
                     if old.pointer("/pass_context/pass_id")!=context.get("pass_id") {
                         // An admitted but unanswered reservation was never served.
                         // Keep its raw mass and clock, but never count its tag as actionable.
-                        conn.execute("UPDATE mc_provider_policy_parts_v1 SET policy_json=json_set(policy_json,'$.active',json('false')) WHERE conv_key=?1 AND json_extract(policy_json,'$.served')=false AND json_extract(policy_json,'$.tag_number') IS NOT NULL AND NOT EXISTS(SELECT 1 FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.state IN ('pending','live') AND json_extract(t.value,'$.number')=json_extract(mc_provider_policy_parts_v1.policy_json,'$.tag_number'))",[&conv])?;
+                        conn.execute("UPDATE mc_provider_policy_parts_v1 SET policy_json=json_set(policy_json,'$.active',json('false')) WHERE conv_key=?1 AND json_extract(policy_json,'$.served')=0 AND json_extract(policy_json,'$.tag_number') IS NOT NULL AND NOT EXISTS(SELECT 1 FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.state IN ('pending','live') AND json_extract(t.value,'$.number')=json_extract(mc_provider_policy_parts_v1.policy_json,'$.tag_number'))",[&conv])?;
                         for m in messages {
                             let mut q=conn.prepare("SELECT subject_mid,hook,subject_part FROM mc_provider_hook_answers_v1 WHERE conv_key=?1 AND lineage_id=?2 AND subject_mid=?3 AND state='pending'")?;
                             let subjects=q.query_map(params![conv,request.lineage.lineage_id,m.mid],|r|Ok(ProviderSubject {subject_mid:r.get(0)?,hook:r.get(1)?,subject_part:r.get(2)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1260,15 +1235,14 @@ impl McStore {
                 admit_policy_parts_tx(conn,&conv,&request.lineage.lineage_id,&c.engine_namespace,parts,&mut reserved_high,request.repeat_subject,pass_context.is_some())?;
                 counters["reserved_tag_high_water"]=json!(reserved_high);
                 if let Some(context)=pass_context {counters["pass_context"]=context.clone();}
-                let policy_parts=policy_parts_tx(conn,&conv,&request.lineage.lineage_id)?;
-                let mut pending_answers=0u64;
-                let mut live_answers=0u64;
-                for (ancestor, cut) in ancestry_tx(conn,&conv,&request.lineage.lineage_id)? {
-                    let (pending,live):(u64,u64)=conn.query_row("SELECT coalesce(sum(state='pending'),0),coalesce(sum(state='live'),0) FROM mc_provider_hook_answers_v1 WHERE conv_key=?1 AND lineage_id=?2 AND ordinal<=?3 AND legacy_json IS NULL",params![conv,ancestor.lineage_id,as_i64(cut)?],|r|Ok((r.get(0)?,r.get(1)?)))?;
-                    pending_answers+=pending;
-                    live_answers+=live;
+                let policy_index=ProviderPolicyIndex::new(conn,&conv,&request.lineage.lineage_id)?;
+                let mut mids=BTreeSet::new();
+                if let Some(m)=request.message {
+                    mids.insert(m.mid.clone());
+                    mids.extend(counters.pointer("/pass_context/appended_ids").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string));
                 }
-                let (mut write,value) = decide(&ProviderHookContext {counters,policy,tag_high_water:reserved_high,pending_answers,live_answers,parts:policy_parts.clone()})?;
+                let policy_parts=policy_index.parts_for_mids(&mids)?;
+                let (mut write,value) = decide(&ProviderHookContext {counters,policy,tag_high_water:reserved_high,parts:policy_parts.clone(),policy_index})?;
                 if let Some(updates)=write.counters.as_object_mut().and_then(|c|c.remove("policy_baseline_updates")).and_then(|v|v.as_array().cloned()) {
                     for update in updates {
                         if let Some(id)=update.get("block_id").and_then(Value::as_str) {
@@ -1276,6 +1250,7 @@ impl McStore {
                         }
                     }
                 }
+                if let Some(summary)=&write.policy_summary {save_policy_summary_tx(conn,&conv,summary)?;}
                 let answer_policy = write.counters.as_object_mut().and_then(|c|c.remove("answer_policy")).unwrap_or_else(||json!({}));
                 let mut high = tag_high_water;
                 if let Some(a) = write.answer {
@@ -1622,7 +1597,7 @@ mod policy_tests {
         store.commit_provider_hook(key,ProviderHookRequest {lineage:l,message:Some(&m),served_through_ordinal:None,unserved_subjects:unserved,repeat_subject:repeat.then_some(&s)},|ctx| {
             assert_eq!(ctx.policy,expected,"policy must be read after burns");
             let mut counters=ctx.counters.clone();counters["answer_policy"]=json!({"metrics":metrics,"channel1":{"channel1_last_nudge_undropped":n*100}});
-            Ok((ProviderHookWrite {answer:Some(ProviderHookAnswer {subject:s.clone(),ordinal:n,ops_json:"[]".into(),tags:vec![ProviderAnswerTag {number:ctx.tag_high_water+1,block_id:format!("m{n}#0"),kind:"tool_result".into(),source:"payload".into(),token_count:10,created_at_ms:1}]}),counters},()))
+            Ok((ProviderHookWrite {answer:Some(ProviderHookAnswer {subject:s.clone(),ordinal:n,ops_json:"[]".into(),tags:vec![ProviderAnswerTag {number:ctx.tag_high_water+1,block_id:format!("m{n}#0"),kind:"tool_result".into(),source:"payload".into(),token_count:10,created_at_ms:1}]}),counters,policy_summary:None},()))
         }).unwrap();
         s
     }

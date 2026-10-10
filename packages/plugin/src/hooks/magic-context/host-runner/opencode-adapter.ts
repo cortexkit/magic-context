@@ -98,16 +98,37 @@ export function rememberOpenCodeHostReplay(message: MessageLike, read: () => unk
 export function providerMessageSource(message: MessageLike): MessageLike {
     return publishedSources.get(message) ?? message;
 }
+// Publication copies the whole served window on every pass, so this walks each
+// value once without the intermediate arrays of entries/filter/fromEntries. It
+// copies the same own enumerable string keys in the same order.
 function copyPublishedData<T>(value: T): T {
-    if (Array.isArray(value)) return value.map(copyPublishedData) as T;
+    if (Array.isArray(value)) {
+        const copy = new Array(value.length);
+        for (let index = 0; index < value.length; index++) {
+            if (index in value) copy[index] = copyPublishedData(value[index]);
+        }
+        return copy as T;
+    }
     if (value && typeof value === "object") {
-        // Protocol messages are JSON data. An in-process transport's serializer
-        // method is not message data; copying must neither invoke nor publish it.
-        return Object.fromEntries(
-            Object.entries(value)
-                .filter(([key, entry]) => key !== "toJSON" || typeof entry !== "function")
-                .map(([key, entry]) => [key, copyPublishedData(entry)]),
-        ) as T;
+        const source = value as Record<string, unknown>;
+        const copy: Record<string, unknown> = {};
+        for (const key of Object.keys(source)) {
+            const entry = source[key];
+            // Protocol messages are JSON data. An in-process transport's serializer
+            // method is not message data; copying must neither invoke nor publish it.
+            if (key === "toJSON" && typeof entry === "function") continue;
+            if (key === "__proto__") {
+                // An own `__proto__` key (JSON.parse can produce one) must stay a
+                // data property, as Object.fromEntries kept it, not set the prototype.
+                Object.defineProperty(copy, key, {
+                    value: copyPublishedData(entry),
+                    enumerable: true,
+                    writable: true,
+                    configurable: true,
+                });
+            } else copy[key] = copyPublishedData(entry);
+        }
+        return copy as T;
     }
     return value;
 }
@@ -844,18 +865,18 @@ export function createOpenCodeProviderTransform(
     }
     function model(id: string, messages: MessageLike[]): string {
         const live = deps.liveModelBySession?.get(id);
-        const m =
-            live ??
-            [...messages]
-                .reverse()
-                .map(
-                    (m) =>
-                        part(m.info).model ??
-                        (part(m.info).providerID && part(m.info).modelID
-                            ? { providerID: part(m.info).providerID, modelID: part(m.info).modelID }
-                            : undefined),
-                )
-                .find(Boolean);
+        // Newest message first, stopping at the first one naming a model, instead
+        // of copying and mapping the whole transcript on every pass.
+        let m: unknown = live;
+        for (let index = messages.length - 1; m == null && index >= 0; index--) {
+            const info = part(messages[index]!.info);
+            const found =
+                info.model ??
+                (info.providerID && info.modelID
+                    ? { providerID: info.providerID, modelID: info.modelID }
+                    : undefined);
+            if (found) m = found;
+        }
         const value = part(m ?? {});
         return `${value.providerID ?? "unknown"}/${value.modelID ?? "unknown"}`;
     }

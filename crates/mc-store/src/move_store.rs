@@ -160,6 +160,17 @@ pub(crate) fn install_writer_guards(conn: &Connection) -> rusqlite::Result<()> {
         if table.class == Class::NotSession {
             continue;
         }
+        // A store opened with a shorter migration chain (an older binary's
+        // schema, as migration-fence tests simulate) lacks newer tables; there is
+        // nothing to guard on a table that does not exist.
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table.table],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            continue;
+        }
         let owner = table.session_column().ok_or_else(|| {
             rusqlite::Error::InvalidColumnName(format!("{} session owner", table.table))
         })?;

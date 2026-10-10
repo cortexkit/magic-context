@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Section-inventory protocol version serialized in move manifests.
 pub const INVENTORY_VERSION: u32 = 4;
 pub const CONTEXT_SCHEMA_VERSION: u32 = 100;
-pub const STORE_SCHEMA_VERSION: u32 = 67;
+pub const STORE_SCHEMA_VERSION: u32 = 68;
 pub const GLOBAL_USER_PROFILE_PROJECT_PATH: &str = "__global__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2892,6 +2892,41 @@ pub const TABLES: &[TableInventory] = &[
         ],
         &[],
         Some(KeyPolicy::PreserveOrRefuseCollision),
+        None
+    ),
+    // Derived from the policy parts above: an absent summary makes the next hook
+    // rebuild it, and its change log is meaningless without it, so neither moves.
+    table!(
+        Module,
+        "mc_provider_policy_summaries_v1",
+        LocalReset,
+        RowSelector::Predicate(
+            "conv_key IN (SELECT conv_key FROM mc_provider_conversations_v2 WHERE session = ?1)"
+        ),
+        &["conv_key"],
+        &["conv_key", "summary_json", "session"],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Module,
+        "mc_provider_policy_changes_v1",
+        LocalReset,
+        RowSelector::Predicate(
+            "conv_key IN (SELECT conv_key FROM mc_provider_conversations_v2 WHERE session = ?1)"
+        ),
+        &["conv_key", "lineage_id", "block_id"],
+        &[
+            "conv_key",
+            "lineage_id",
+            "block_id",
+            "previous_json",
+            "previous_consumed",
+            "session"
+        ],
+        &[],
+        None,
         None
     ),
     // Must move: a consumed-number fence cannot be reconstructed from replayed
