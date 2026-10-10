@@ -1460,6 +1460,9 @@ mod tests;
 mod review_tests;
 
 #[cfg(test)]
+mod policy_summary_migration_tests;
+
+#[cfg(test)]
 mod lineage_metadata_tests {
     use super::*;
     use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
