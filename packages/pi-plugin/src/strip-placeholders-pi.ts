@@ -121,6 +121,13 @@ export function stripPiDroppedPlaceholderMessages(args: {
 	applyDelta?: typeof applyStrippedPlaceholderDelta;
 	/** Called only for newly persisted removals, before the message is spliced. */
 	onFirstApplication?: (message: unknown, index: number) => void;
+	/**
+	 * Asked before a newly found placeholder-only message is added to the stored
+	 * removal list. False keeps the message in the request and off that list, so a
+	 * later discovery pass finds it again. Removing messages already on the list,
+	 * and the one-time rediscovery after a message-id scheme change, never ask.
+	 */
+	admit?: (message: unknown, index: number) => boolean;
 }): StripPiDroppedPlaceholderResult {
 	const { db, sessionId, messages, isCacheBusting, stableIdByRef } = args;
 	const persistedIds = getStrippedPlaceholderIds(db, sessionId);
@@ -143,7 +150,14 @@ export function stripPiDroppedPlaceholderMessages(args: {
 			const id = idOf(messages[i], i);
 			if (!id) continue;
 			presentIds?.add(id);
-			if (messageIsPlaceholderOnly(messages[i]) && !persistedIds.has(id)) {
+			if (
+				messageIsPlaceholderOnly(messages[i]) &&
+				!persistedIds.has(id) &&
+				// After a message-id scheme change, messages removed under their old ids
+				// are found again under the new ids. Removing them keeps the request as
+				// it was already sent, so it is not a new edit.
+				(args.forceDiscovery === true || (args.admit?.(messages[i], i) ?? true))
+			) {
 				discoveredIds.push(id);
 			}
 		}

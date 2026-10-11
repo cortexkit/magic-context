@@ -160,7 +160,6 @@ type Lane =
 const EXPOSED = new Set<Lane>([
 	"m[0]/m[1] re-render after a recomp clears the cached pair",
 	"synthetic todo",
-	"frozen-sentinel first application",
 ]);
 
 const PRIMARY_LANES: Lane[] = [
@@ -206,6 +205,9 @@ const STRIPS_THINKING_WHEN_HELD = new Set<Lane>([
 	"emergency 95% wall",
 	"/ctx-flush",
 	"HARD fold after historian publication",
+	// Pi discovers placeholder-only messages only on a history-refresh pass, and that
+	// refresh also lets the pass rebuild the request, which runs the thinking strip.
+	"frozen-sentinel first application",
 ]);
 
 // Pi discovers placeholder-only messages on a history refresh, which a
@@ -1073,6 +1075,79 @@ describe("signed prefix parking: Pi/OMP", () => {
 			),
 		);
 	}
+
+	it(
+		"a history refresh held under thinking is parked and released once",
+		withFixture(
+			false,
+			"frozen-sentinel first application",
+			async (f) => {
+				await toolLoop(f, 4);
+				signalPiHistoryRefresh(f.sessionId);
+				const held = await f.pass();
+				expect(f.mock.check(wire(held.messages))).toBeNull();
+				expect(JSON.stringify(wire(held.messages))).toContain(
+					"[dropped §998§]",
+				);
+				// The held pass keeps the history-refresh signal and parks it instead of
+				// draining it.
+				expect(__test.hasHistoryRefreshForTests(f.sessionId)).toBe(true);
+				expect(hasPiParkedBustTrigger(f.sessionId)).toBe(true);
+				f.served = held.messages;
+				// Later passes of the same turn do not use the parked history refresh to
+				// rebuild the request, however long the loop runs.
+				for (let i = 0; i < 4; i++) {
+					await toolLoop(f, 1);
+					const later = await f.pass();
+					expect(later.bustedThisPass).toBe(false);
+					expect(wire(later.messages)).toEqual(wire(f.served));
+					expect(__test.hasHistoryRefreshForTests(f.sessionId)).toBe(true);
+				}
+				f.userTurn("history-release", "Continue the parser work.");
+				const release = await f.pass();
+				expect(release.bustedThisPass).toBe(true);
+				expect(f.mock.check(wire(release.messages))).toBeNull();
+				expect(JSON.stringify(wire(release.messages))).not.toContain(
+					"[dropped §998§]",
+				);
+				expect(__test.hasHistoryRefreshForTests(f.sessionId)).toBe(false);
+				expect(hasPiParkedBustTrigger(f.sessionId)).toBe(false);
+				// The releasing pass consumed the history refresh: neither a repeat of that
+				// pass nor the first pass of the following turn rebuilds the request again.
+				expect((await f.pass()).bustedThisPass).toBe(false);
+				f.served = release.messages;
+				await nextUserTurn(f, "history-after-release");
+				expect((await f.pass()).bustedThisPass).toBe(false);
+				expect(hasPiParkedBustTrigger(f.sessionId)).toBe(false);
+			},
+			"parking-history-refresh",
+		),
+	);
+
+	it(
+		"a parked history refresh clears with its signal",
+		withFixture(
+			false,
+			"frozen-sentinel first application",
+			async (f) => {
+				await toolLoop(f, 4);
+				signalPiHistoryRefresh(f.sessionId);
+				f.served = (await f.pass()).messages;
+				expect(hasPiParkedBustTrigger(f.sessionId)).toBe(true);
+				// A session reset drops the in-memory history-refresh signal. The next pass
+				// sees no signal and clears the parked flag, so nothing waits for a user
+				// turn that may never come.
+				clearContextHandlerSession(f.sessionId);
+				const next = await f.pass();
+				expect(next.bustedThisPass).toBe(false);
+				expect(f.mock.check(wire(next.messages))).toBeNull();
+				expect(hasPiParkedBustTrigger(f.sessionId)).toBe(false);
+				f.userTurn("history-cleared", "Continue the parser work.");
+				expect((await f.pass()).bustedThisPass).toBe(false);
+			},
+			"parking-history-cleared",
+		),
+	);
 
 	it(
 		"parked force cancels when pressure ends with no bust",

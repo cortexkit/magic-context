@@ -115,6 +115,7 @@ import {
     type DroppedTokenReduction,
     estimateDroppedTokensFromTagReductions,
 } from "./dropped-token-estimate";
+import { createEditAdmission, isAdmissionUser, thinkingAnchor } from "./edit-admission";
 import {
     contextRefusalError,
     EmergencyFailClosedError,
@@ -2019,6 +2020,45 @@ export async function runPostTransformPhase(
     const protectedThinkingMessages = new Set(
         args.messages.filter((message) => message.parts.some((part) => retainedThinking.has(part))),
     );
+    // Edit admission. On prefix-bound models a signed thinking block is valid only while
+    // every byte before it is unchanged, so an edit before the last current-turn thinking
+    // block still sent is held: not applied and not persisted. Built once, before any edit
+    // of this pass, over the same messages and `info.id` values the strips below use.
+    const editAdmission = createEditAdmission({
+        messages: args.messages,
+        stableId: (message) => message.info.id,
+        partsOf: (message) => message.parts,
+        isRealUser: isAdmissionUser,
+        prefixBound: args.thinkingBindingRecoveryEnabledForModel === true,
+        isRetainedThinking: (_message, part) => retainedThinking.has(part),
+        anchorOf: thinkingAnchor,
+        onUnresolved: (reason) =>
+            sessionLog(
+                args.sessionId,
+                `edit admission: unresolved thinking boundary (${reason}); holding every edit not provably after it`,
+            ),
+    });
+    const heldWholeMessages = new Map<string, string[]>();
+    const admitWholeMessage =
+        (lane: string) =>
+        (message: MessageLike): boolean => {
+            if (editAdmission.admit({ kind: "message", id: message.info.id, block: "whole" }))
+                return true;
+            const held = heldWholeMessages.get(lane) ?? [];
+            held.push(message.info.id ?? "<no id>");
+            heldWholeMessages.set(lane, held);
+            return false;
+        };
+    const logHeldWholeMessages = (): void => {
+        if (editAdmission.frame.kind !== "boundary") return;
+        for (const [lane, ids] of heldWholeMessages) {
+            sessionLog(
+                args.sessionId,
+                `edit admission: held lane=${lane} coords=${ids.map((id) => `${id}:whole`).join(",")} boundary=${editAdmission.frame.messageId ?? "<unresolved>"} held_edits=${ids.length}`,
+            );
+        }
+        heldWholeMessages.clear();
+    };
     const newTargets = protectNewTagMutations(
         args.messages,
         args.targets,
@@ -3325,6 +3365,7 @@ export async function runPostTransformPhase(
                 args.messages,
                 args.resolvedProviderID,
                 recordFirstApplicationAt,
+                admitWholeMessage("placeholder"),
             );
             const protectedTailStart = Math.max(
                 0,
@@ -3335,7 +3376,11 @@ export async function runPostTransformPhase(
                 protectedTailStart,
                 args.resolvedProviderID,
                 recordFirstApplicationAt,
+                admitWholeMessage("system-injected"),
             );
+            logHeldWholeMessages();
+            // Messages hidden behind the compaction marker are not in the request this
+            // pass sends, so storing a decision for them changes nothing sent now.
             const hiddenMessages = args.hiddenMessagesAtCompactionSeam ?? [];
             const hiddenDroppedResult = stripDroppedPlaceholderMessages(
                 hiddenMessages,

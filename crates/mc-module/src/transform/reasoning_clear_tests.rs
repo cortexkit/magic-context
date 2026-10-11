@@ -259,6 +259,7 @@ fn processed_images_match_typescript_drop_watermark_and_frozen_replay_golden() {
                     image_watermark: watermark,
                 },
                 &HashSet::new(),
+                &edit_admission_for_request(&core, &request),
             );
             let selected: Vec<_> = added
                 .iter()

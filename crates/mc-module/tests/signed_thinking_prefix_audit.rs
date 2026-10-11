@@ -269,6 +269,8 @@ enum Lane {
     Caveman,
     Image,
     Placeholder,
+    /// An older assistant message holding only a host notification.
+    SystemInjected,
 }
 
 const SUMMARY_TEXT: &str = "I have finished reading the parser and the lexer. The parser consumes tokens from the lexer, and the error recovery path is incomplete because it never resynchronises after an unexpected token.";
@@ -553,6 +555,29 @@ impl Fixture {
             );
             self.served = self.pass();
         }
+        if self.lane == Lane::SystemInjected {
+            self.push(
+                "system-injected",
+                "assistant",
+                vec![json!({"type":"text","text":"<system-reminder>Background task bg-7 completed; its output is ready.</system-reminder>"})],
+            );
+            // The strip spares the newest 40 messages, which may still be actionable, so the
+            // notification needs that many later messages before it is eligible.
+            for i in 0..20 {
+                let id = format!("filler-read-{i}");
+                self.push(
+                    &format!("filler-{i}"),
+                    "assistant",
+                    vec![read_call(&id, &format!("/project/notes/{i}.md"))],
+                );
+                self.push(
+                    &format!("filler-{i}-result-0"),
+                    "tool",
+                    vec![result(&id, "read", &format!("note {i}\n"))],
+                );
+            }
+            self.served = self.pass();
+        }
         if !subagent {
             audit_assert_eq!(self.mock.check(&self.wire()), None);
             self.user_turn(
@@ -701,6 +726,7 @@ impl Fixture {
             Lane::Caveman => !text.contains(SUMMARY_TEXT),
             Lane::Image => !text.contains("\"media\""),
             Lane::Placeholder => !text.contains("[dropped §998§]"),
+            Lane::SystemInjected => !text.contains("Background task bg-7"),
         }
     }
 }
@@ -708,7 +734,7 @@ impl Fixture {
 /// Lanes whose mid-loop bust changes the request before a signed thinking block the request
 /// still carries, which a strict-binding provider rejects.
 fn exposed(subagent: bool, lane: Lane) -> bool {
-    !subagent && matches!(lane, Lane::HardFold | Lane::Todo | Lane::Placeholder)
+    !subagent && matches!(lane, Lane::HardFold | Lane::Todo)
 }
 
 fn mid_loop(profile: &str, subagent: bool, lane: Lane) {
@@ -890,7 +916,7 @@ fn control(profile: &str, lane: Lane) {
 // supersession, the 85% force band, reasoning clearing and the stale ctx_reduce strip
 // did not price a bust or select work here even at a new user turn, so a held result
 // for them would be vacuous; the report covers them from the code.
-const PRIMARY_LANES: [Lane; 9] = [
+const PRIMARY_LANES: [Lane; 10] = [
     Lane::DropFull,
     Lane::Wall95,
     Lane::Flush,
@@ -900,11 +926,25 @@ const PRIMARY_LANES: [Lane; 9] = [
     Lane::Caveman,
     Lane::Image,
     Lane::Placeholder,
+    Lane::SystemInjected,
 ];
 // A subagent pass at the execute threshold is already allowed to change the request
 // (the module reports a SOFT `m1_delta` pass), so a held result here is the thinking
 // guard declining the edit, not a missing permission.
-const SUBAGENT_LANES: [Lane; 3] = [Lane::DropFull, Lane::Wall95, Lane::Placeholder];
+const SUBAGENT_LANES: [Lane; 4] = [
+    Lane::DropFull,
+    Lane::Wall95,
+    Lane::Placeholder,
+    Lane::SystemInjected,
+];
+
+/// Lanes added after the Claude Code lane list was frozen run only on the OpenCode profile.
+/// Claude Code keeps earlier turns' signed thinking on a bust, so its new-user-turn release
+/// fails until the module strips that completed-turn thinking; lanes join its list together
+/// with that strip (rollout step 8 in docs/designs/signed-thinking-hold.md).
+fn on_profile(profile: &str, lane: Lane) -> bool {
+    profile != "claude-code-anthropic" || lane != Lane::SystemInjected
+}
 
 /// `MC_AUDIT_LANE=<Lane>` restricts a diagnostic run to one lane.
 fn selected(lane: Lane) -> bool {
@@ -917,19 +957,28 @@ macro_rules! audit {
             use super::*;
             #[test]
             fn primary_mid_loop() {
-                for lane in PRIMARY_LANES.into_iter().filter(|l| selected(*l)) {
+                for lane in PRIMARY_LANES
+                    .into_iter()
+                    .filter(|l| selected(*l) && on_profile($profile, *l))
+                {
                     mid_loop($profile, false, lane);
                 }
             }
             #[test]
             fn subagent_run() {
-                for lane in SUBAGENT_LANES.into_iter().filter(|l| selected(*l)) {
+                for lane in SUBAGENT_LANES
+                    .into_iter()
+                    .filter(|l| selected(*l) && on_profile($profile, *l))
+                {
                     mid_loop($profile, true, lane);
                 }
             }
             #[test]
             fn control_at_new_user_turn() {
-                for lane in PRIMARY_LANES.into_iter().filter(|l| selected(*l)) {
+                for lane in PRIMARY_LANES
+                    .into_iter()
+                    .filter(|l| selected(*l) && on_profile($profile, *l))
+                {
                     control($profile, lane);
                 }
             }

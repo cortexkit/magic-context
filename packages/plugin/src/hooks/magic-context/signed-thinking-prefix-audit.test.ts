@@ -135,7 +135,8 @@ type Lane =
     | "reasoning clearing (keep_reasoning_tokens)"
     | "processed image strip"
     | "stale ctx_reduce strip"
-    | "frozen-sentinel first application";
+    | "frozen-sentinel first application"
+    | "system-injected neutralization";
 
 /**
  * Lanes whose mid-loop bust changes the request before a signed thinking block the
@@ -146,7 +147,6 @@ const EXPOSED = new Set<Lane>([
     "synthetic todo",
     "processed image strip",
     "stale ctx_reduce strip",
-    "frozen-sentinel first application",
 ]);
 
 const PRIMARY_LANES: Lane[] = [
@@ -165,6 +165,7 @@ const PRIMARY_LANES: Lane[] = [
     "processed image strip",
     "stale ctx_reduce strip",
     "frozen-sentinel first application",
+    "system-injected neutralization",
 ];
 /**
  * Obligation lanes whose held work must still be released at the next user turn when the
@@ -195,6 +196,7 @@ const SUBAGENT_LANES: Lane[] = [
     "reasoning clearing (keep_reasoning_tokens)",
     "stale ctx_reduce strip",
     "frozen-sentinel first application",
+    "system-injected neutralization",
 ];
 
 interface Fixture {
@@ -269,6 +271,10 @@ const HISTORY_COMPARTMENT = {
     title: "Parser inspection",
     content: "Read parser.ts, ast.ts and lexer.ts; error recovery never resynchronises.",
 };
+
+/** An assistant message holding only a host notification, which the strip neutralizes. */
+const SYSTEM_INJECTED_TEXT =
+    "<system-reminder>Background task bg-7 completed; its output is ready.</system-reminder>";
 
 const PARSER_SOURCE = "export function parse(tokens) { /* recursive descent */ }\n".repeat(150);
 const SUMMARY_TEXT =
@@ -443,6 +449,19 @@ async function fixture(
             info: { id: "placeholder-only", role: "assistant", sessionID: sessionId, ...MODEL },
             parts: [{ type: "text", text: "[dropped §998§]" }],
         });
+    }
+    if (lane === "system-injected neutralization") {
+        raw.push({
+            info: { id: "system-injected", role: "assistant", sessionID: sessionId, ...MODEL },
+            parts: [{ type: "text", text: SYSTEM_INJECTED_TEXT }],
+        });
+        // The strip spares the newest 40 messages, which may still be actionable, so
+        // the notification needs that many later messages before it is eligible.
+        for (let i = 0; i < 40; i++)
+            raw.push({
+                info: { id: `filler-${i}`, role: "assistant", sessionID: sessionId, ...MODEL },
+                parts: [readPart(`filler-read-${i}`, `/project/notes/${i}.md`, `note ${i}\n`)],
+            });
     }
     if (!subagent) {
         served = (await pass()).messages;
@@ -670,6 +689,8 @@ function landed(f: Fixture, lane: Lane, after: Wire): boolean {
         case "frozen-sentinel first application":
             // The raw history always carries the placeholder message.
             return !text.includes("[dropped §998§]");
+        case "system-injected neutralization":
+            return !text.includes("Background task bg-7");
     }
 }
 

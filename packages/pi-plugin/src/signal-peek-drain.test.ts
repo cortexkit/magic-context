@@ -157,7 +157,8 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 		// Find the injection block inside runPipeline. The drain must be:
 		//  1. Inside the try block (so it only runs on success)
 		//  2. After the injectM0M1Pi seam returns
-		//  3. Guarded by isCacheBusting
+		//  3. Guarded by the history-refresh permission (the pass-start signal,
+		//     unless it is parked while the turn keeps signed thinking)
 		// Anchor on the LAST call site: the wire-injection seam. The pre-fold
 		// probe (fold-execution gate) also calls injectM0M1PiForRun earlier in
 		// runPipeline, and the drain contract applies to the wire injection only.
@@ -165,9 +166,9 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 		expect(idx).toBeGreaterThan(0);
 		// Look at the next ~600 chars after the injection call
 		const segment = code.slice(idx, idx + 2400);
-		// The drain must mention historyRefreshSessions.delete and isCacheBusting
+		// The drain must mention historyRefreshSessions.delete and its guard
 		expect(segment).toContain("historyRefreshSessions.delete(args.sessionId)");
-		expect(segment).toMatch(/if\s*\(\s*args\.isCacheBusting\s*\)/);
+		expect(segment).toMatch(/if\s*\(\s*historyRefreshPermitted\s*\)/);
 	});
 
 	test("deferred publication drains only on a bust-opportunity gate", () => {
@@ -234,7 +235,9 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 		const noteIdx = code.indexOf("applyNoteNudges(");
 		expect(pipelineIdx).toBeGreaterThan(0);
 		expect(noteIdx).toBeGreaterThan(pipelineIdx);
-		expect(code).toContain("isCacheBusting || result.executedWorkThisPass");
+		expect(code).toMatch(
+			/isCacheBusting:\s*historyRefreshThisPass\s*\|\|\s*result\.executedWorkThisPass/,
+		);
 	});
 });
 

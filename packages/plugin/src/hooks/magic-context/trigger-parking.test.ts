@@ -7,16 +7,19 @@ describe("parked bust triggers", () => {
         expect(triggers.permissions(true, true, true)).toEqual({
             materialization: true,
             force: true,
+            history: false,
         });
         triggers.holdMaterialization();
         triggers.holdForce();
         expect(triggers.permissions(true, true, true)).toEqual({
             materialization: false,
             force: false,
+            history: false,
         });
         expect(triggers.permissions(false, true, true)).toEqual({
             materialization: true,
             force: true,
+            history: false,
         });
         triggers.settle(false, false);
         expect(triggers.pending).toBe(false);
@@ -29,11 +32,13 @@ describe("parked bust triggers", () => {
         expect(triggers.permissions(true, false, false)).toEqual({
             materialization: false,
             force: false,
+            history: false,
         });
         expect(triggers.pending).toBe(false);
         expect(triggers.permissions(false, false, false)).toEqual({
             materialization: false,
             force: false,
+            history: false,
         });
     });
 
@@ -45,8 +50,22 @@ describe("parked bust triggers", () => {
         expect(triggers.permissions(true, true, true)).toEqual({
             materialization: false,
             force: true,
+            history: false,
         });
         triggers.settle(false, true);
         expect(triggers.pending).toBe(false);
+    });
+
+    it("parks a history refresh only under a boundary and clears it with its signal", () => {
+        const triggers = new ParkedBustTriggers();
+        expect(triggers.permissions(true, false, false, true).history).toBe(true);
+        triggers.holdHistory();
+        expect(triggers.permissions(true, false, false, true).history).toBe(false);
+        triggers.settle(false, false, true);
+        expect(triggers.pending).toBe(true);
+        expect(triggers.permissions(false, false, false, true).history).toBe(true);
+        triggers.settle(false, false, false);
+        expect(triggers.pending).toBe(false);
+        expect(triggers.permissions(true, false, false, false).history).toBe(false);
     });
 });

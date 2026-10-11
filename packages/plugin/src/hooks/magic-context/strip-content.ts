@@ -63,6 +63,12 @@ export function stripSystemInjectedMessages(
     protectedTailStart: number,
     providerID?: string,
     onFirstApplication?: (message: MessageLike, partIndex: number) => void,
+    /**
+     * Asked before a message is neutralized. False leaves the message untouched and
+     * out of `sentineledIds`, so the caller stores no replay decision for it and a
+     * later cache-busting pass can find it again.
+     */
+    admit?: (message: MessageLike) => boolean,
 ): { stripped: number; sentineledIds: string[] } {
     let stripped = 0;
     const sentineledIds: string[] = [];
@@ -115,6 +121,7 @@ export function stripSystemInjectedMessages(
         }
 
         if (hasContentPart && allContentIsSystemInjection) {
+            if (admit && !admit(msg)) continue;
             onFirstApplication?.(msg, 0);
             msg.parts.length = 0;
             msg.parts.push(makeWholeMessageSentinel(providerID));
@@ -178,6 +185,11 @@ export function stripDroppedPlaceholderMessages(
     messages: MessageLike[],
     providerID?: string,
     onFirstApplication?: (message: MessageLike, partIndex: number) => void,
+    /**
+     * Asked before a message is neutralized. False leaves the message untouched and
+     * out of `sentineledIds`, so a later cache-busting pass can find it again.
+     */
+    admit?: (message: MessageLike) => boolean,
 ): {
     stripped: number;
     sentineledIds: string[];
@@ -235,6 +247,7 @@ export function stripDroppedPlaceholderMessages(
         }
 
         if (hasContentPart && !hasNonDroppedContent) {
+            if (admit && !admit(msg)) continue;
             onFirstApplication?.(msg, 0);
             msg.parts.length = 0;
             msg.parts.push(makeWholeMessageSentinel(providerID));

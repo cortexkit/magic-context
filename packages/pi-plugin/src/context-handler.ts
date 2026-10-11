@@ -178,6 +178,11 @@ import {
 	estimateDroppedTokensFromTagReductions,
 } from "@magic-context/core/hooks/magic-context/dropped-token-estimate";
 import {
+	createEditAdmission,
+	isAdmissionUser,
+	thinkingAnchor,
+} from "@magic-context/core/hooks/magic-context/edit-admission";
+import {
 	contextRefusalError,
 	EmergencyFailClosedError,
 	outgoingContextRefusal,
@@ -491,6 +496,9 @@ export const __test = {
 		return new Set(taggedStableMessageIdsBySession.get(sessionId));
 	},
 	recordSuccessfulTaggedMessageIds,
+	hasHistoryRefreshForTests(sessionId: string): boolean {
+		return historyRefreshSessions.has(sessionId);
+	},
 	buildPiTextIdentityPlan,
 	setInFlightHistorianForTests(
 		sessionId: string,
@@ -3771,6 +3779,9 @@ export function registerPiContextHandler(
 					injectionPassSnapshot: piM0M1PassSnapshot,
 				}),
 			);
+			// After a held pass parked the history-refresh signal, later passes of the same
+			// turn must not treat it as a bust either.
+			const historyRefreshThisPass = result.historyRefreshPermitted;
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
 			const postPipelineStart = performance.now();
 			const tTransformDecision = performance.now();
@@ -3867,7 +3878,7 @@ export function registerPiContextHandler(
 						minimumPercentage: usagePercentage,
 						liveIsRawBranchEstimate: piLiveUsageIsRawBranchEstimate,
 						historianStateSnapshot: historianStateForPass,
-						publishedHistoryRide: isCacheBusting,
+						publishedHistoryRide: historyRefreshThisPass,
 					});
 				} catch (error) {
 					budget.assertOutcome();
@@ -3931,7 +3942,8 @@ export function registerPiContextHandler(
 						entryIdByRef: result.postCommitEntryIdByRef,
 						// Same signal OpenCode uses to gate sticky-anchor GC
 						// (isCacheBustingPass = history-refresh OR work executed).
-						isCacheBusting: isCacheBusting || result.executedWorkThisPass,
+						isCacheBusting:
+							historyRefreshThisPass || result.executedWorkThisPass,
 						// These leading synthetic messages have no persisted entry IDs, so
 						// exclude them from the sticky-anchor GC denominator.
 						syntheticLeadingCount: result.syntheticLeadingCount,
@@ -4031,7 +4043,7 @@ export function registerPiContextHandler(
 					sessionMetaForTodo.lastTodoState !== ""
 				) {
 					const isCacheBustingForTodo =
-						isCacheBusting || result.executedWorkThisPass;
+						historyRefreshThisPass || result.executedWorkThisPass;
 					outputMessages = injectSyntheticTodowriteForPi({
 						db: options.db,
 						sessionId,
@@ -4125,7 +4137,7 @@ export function registerPiContextHandler(
 						// history" as valid. Any other edit, or one the pass cannot
 						// classify, still strips every block.
 						cacheBustingPass:
-							isCacheBusting ||
+							historyRefreshThisPass ||
 							(result.executedWorkThisPass &&
 								(result.prefixEditBesidesReasoningTrim ||
 									hostEditBeforeNewestThinking)),
@@ -4372,7 +4384,7 @@ export function registerPiContextHandler(
 			if (
 				!options.compactionOff &&
 				(result.executedWorkThisPass ||
-					isCacheBusting ||
+					historyRefreshThisPass ||
 					schedulerDecision === "execute")
 			) {
 				const envelope = readPiLkgFitEnvelope(
@@ -5752,6 +5764,13 @@ interface PiChannelBaselineSnapshot {
 
 interface RunPipelineResult {
 	messages: unknown[];
+	/**
+	 * Whether this pass treated the history-refresh signal as permission to rebuild
+	 * the history head. Equal to the signal at pass start, except false while an
+	 * earlier pass of the same turn parked the signal because the current turn
+	 * still keeps signed thinking (see ParkedBustTriggers).
+	 */
+	historyRefreshPermitted: boolean;
 	servedTagNumbers?: ReadonlySet<number>;
 	/** Whether heuristic cleanup actually ran on this pass. */
 	heuristicsExecuted: boolean;
@@ -5928,6 +5947,7 @@ async function runCompactionOffPipeline(
 			pendingDropTagNumbers: new Set(),
 		},
 		postCommitEntryIdByRef: new Map(),
+		historyRefreshPermitted: args.isCacheBusting,
 		lkgEntryIdByRef: new Map(),
 	};
 }
@@ -6438,7 +6458,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		hasPendingMaterializeSignal ||
 			deferredMaterializationSessions.has(args.sessionId),
 		emergencyDropEligible,
+		args.isCacheBusting,
 	);
+	// The history-refresh signal as this pass may use it. It differs from
+	// `args.isCacheBusting` only after a held pass parked the signal: later passes
+	// of the same turn that still keep current-turn thinking get no refresh from it.
+	const historyRefreshPermitted = triggerPermissions.history;
 	if (firstRenderHeld) {
 		signalPiPendingMaterialization(args.sessionId);
 		parkedTriggers.holdMaterialization();
@@ -6461,7 +6486,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				!prefixPreflightContended),
 		publishedHistory:
 			!prefixPreflightContended &&
-			(args.isCacheBusting ||
+			(historyRefreshPermitted ||
 				publishedM1RefreshedThisPass ||
 				(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart)),
 	};
@@ -6639,6 +6664,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		? frozenBindingEntryIds(args.db, args.sessionId)
 		: new Set<string>();
 	const protectedThinkingProxies = new Set<unknown>();
+	// The current-turn thinking parts that are still sent (the ones protected below through
+	// their `protectedThinkingProxies` proxies), recorded as the raw Pi content parts so
+	// the edit-admission scan over `workingMessages` can recognize them.
+	const retainedThinkingParts = new Set<unknown>();
 	if (activeThinkingTurn) {
 		for (
 			let i = latestAssistantTurnStart(workingMessages);
@@ -6667,9 +6696,32 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				)
 					continue;
 				protectedThinkingProxies.add(part);
+				if (local) retainedThinkingParts.add(local);
 			}
 		}
 	}
+	// Edit admission: any edit before the last current-turn signed thinking block that is
+	// still sent would invalidate that block, so such edits are held (not applied, not
+	// persisted). Messages are identified by their session entry ids; positional
+	// `pi-msg-<index>` fallback ids shift when the array is spliced, so they never
+	// qualify. Strips that run after later splices look messages up by the same ids.
+	const editAdmission = createEditAdmission({
+		messages: workingMessages as unknown[],
+		stableId: stableIdResolver,
+		partsOf: (message) => {
+			const content = (message as { content?: unknown })?.content;
+			return Array.isArray(content) ? content : [];
+		},
+		isRealUser: isAdmissionUser,
+		prefixBound: args.reasoningClearing?.prefixBound === true,
+		isRetainedThinking: (_message, part) => retainedThinkingParts.has(part),
+		anchorOf: thinkingAnchor,
+		onUnresolved: (reason) =>
+			sessionLog(
+				args.sessionId,
+				`edit admission: unresolved thinking boundary (${reason}); holding every edit not provably after it`,
+			),
+	});
 	const newTargets = protectNewTagMutations(
 		mutationView.map((message) => ({
 			info: message.info,
@@ -7749,8 +7801,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// retries the rebuild. Deferred-history is NOT drained
 			// here; Pi-native compaction marker application happens at
 			// the end of runPipeline after materializing work succeeds.
-			if (args.isCacheBusting) {
-				historyRefreshSessions.delete(args.sessionId);
+			if (historyRefreshPermitted) {
+				// While the current turn keeps signed thinking, the cached m[0]/m[1]
+				// head was replayed unchanged, so neither the history rebuild nor the
+				// placeholder discovery that rides it happened. Keep the signal, parked,
+				// for the first pass after the next real user message instead of
+				// draining it here.
+				if (materializationHeld) parkedTriggers.holdHistory();
+				else historyRefreshSessions.delete(args.sessionId);
 				historyWasConsumedThisPass = true;
 			}
 			if (deferredHistoryRefresh) {
@@ -7772,6 +7830,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 
 	transcript.finalizeToolRemovals();
 	const tDroppedPlaceholders = performance.now();
+	const heldPlaceholderIds: string[] = [];
 	stripPiDroppedPlaceholderMessages({
 		db: args.db,
 		sessionId: args.sessionId,
@@ -7780,7 +7839,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		// place. Subagent execute alone must not discover new splices that collapse
 		// a freshly dropped turn: tiny shells wait for a history refresh (or the
 		// stable-id cutover below). Frozen discoveries still replay every pass.
-		isCacheBusting: args.isCacheBusting,
+		isCacheBusting: historyRefreshPermitted,
 		stableIdByRef: postCommitStableIdByRef,
 		// F4 cutover: when the stable-id scheme just changed, force rediscovery so
 		// previously-stripped placeholders get re-keyed under the new scheme this
@@ -7796,7 +7855,26 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					? postCommitStableIdByRef.get(item)
 					: undefined,
 			),
+		admit: (message) => {
+			const id =
+				message && typeof message === "object"
+					? postCommitStableIdByRef.get(message)
+					: undefined;
+			if (editAdmission.admit({ kind: "message", id, block: "whole" }))
+				return true;
+			heldPlaceholderIds.push(id ?? "<no id>");
+			return false;
+		},
 	});
+	if (
+		heldPlaceholderIds.length > 0 &&
+		editAdmission.frame.kind === "boundary"
+	) {
+		sessionLog(
+			args.sessionId,
+			`edit admission: held lane=placeholder coords=${heldPlaceholderIds.map((id) => `${id}:whole`).join(",")} boundary=${editAdmission.frame.messageId ?? "<unresolved>"} held_edits=${heldPlaceholderIds.length}`,
+		);
+	}
 	logTransformTiming(
 		args.sessionId,
 		"stripDroppedPlaceholders",
@@ -8161,11 +8239,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			deferredMaterializationSessions.has(args.sessionId),
 		emergencyDropEligible &&
 			getEmergencyInputSample(args.db, args.sessionId) === 0,
+		historyRefreshSessions.has(args.sessionId),
 	);
 	if (!parkedTriggers.pending)
 		parkedBustTriggersBySession.delete(args.sessionId);
 	return {
 		messages: outputMessages,
+		historyRefreshPermitted,
 		servedTagNumbers,
 		heuristicsExecuted,
 		executedWorkThisPass,
@@ -8183,7 +8263,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		prefixEditBesidesReasoningTrim:
 			prefixEditBesidesReasoningTrim ||
 			firstRenderBust ||
-			args.isCacheBusting ||
+			historyRefreshPermitted ||
 			(isCacheBustingPass && hasPendingMaterializeSignal) ||
 			deferredMaterializationConsumedThisPass ||
 			foldBustsServedPrefixThisPass ||
