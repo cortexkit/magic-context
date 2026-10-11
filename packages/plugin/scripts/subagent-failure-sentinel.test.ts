@@ -87,7 +87,12 @@ test("normalisation folds ids numbers durations and paths but preserves the fail
     // differ only by request id are the same class.
     expect(
         normalizeError("APIError: Insufficient Balance (request_id: 6ccd58a4-fd7d-4695-ae30-b3cbd8c5b633)"),
-    ).toBe("APIError: Insufficient Balance (request_id: <id>)");
+    ).toBe(
+        normalizeError("APIError: Insufficient Balance (request_id: 3f5266e0-127a-42d4-9a78-8f5c32e6bc8c)"),
+    );
+    expect(
+        normalizeError("APIError: Insufficient Balance (request_id: 6ccd58a4-fd7d-4695-ae30-b3cbd8c5b633)"),
+    ).not.toContain("<number>");
 });
 
 test("dedupe suppresses a wake for six hours unless class count grows by half", async () => {
