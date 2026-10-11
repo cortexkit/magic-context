@@ -90,9 +90,13 @@ export function isPiModelRegistered(
  * OMP's own consumers re-check after awaiting this (session/agent-session.ts
  * `#retryInactiveAdvisorAfterModelDiscovery`, task/executor.ts). An extension
  * that trusts one synchronous miss disables the feature for the life of the
- * process. Resolves immediately where the API is absent (Pi, or a registry with
- * no refresh in flight) and never rejects: a failed refresh leaves the caller's
- * next synchronous check to report the miss.
+ * process. Prefer the initial-discovery barrier: it remains pending until the
+ * host completes discovery, including when discovery has not started yet.
+ * Older hosts expose only the in-flight barrier, which resolves immediately
+ * when idle. Pi without either API is checked synchronously. Refresh failures
+ * are swallowed so the caller can re-read the settled catalogue.
+ * Do not time out into an absence report: elapsed time is not evidence that
+ * a model is missing from a catalogue that has not finished loading.
  */
 export async function waitForPiModelRegistryRefresh(
 	registry: Pick<
