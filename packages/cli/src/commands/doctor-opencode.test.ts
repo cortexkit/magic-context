@@ -31,6 +31,7 @@ import {
     describeOpenCodeDatabaseDoctorCheck,
     findUndeclaredConfiguredVariants,
     formatSharedDbRowCounts,
+    getOpenCodePluginHostStatus,
     getUserNpmrcPath,
     isPinnedOpenCodePluginSpecifier,
     migrateLegacyAgentEnabledConfigForDoctor,
@@ -1150,6 +1151,19 @@ it("names the installed OpenCode host and minimum native session API version", (
     expect(describeOpenCode2SessionAPIRequirement("2.0.21")).toBe(
         "OpenCode host 2.0.21; Magic Context requires OpenCode 2.0.22 or newer with session.remove and session.compact.",
     );
+});
+
+it("treats an absent plugin as informational and fails an old installed OpenCode host", () => {
+    expect(getOpenCodePluginHostStatus("OpenCode 2.0.21", "2.0.21", false)).toEqual({
+        status: "info",
+        message:
+            "OpenCode 2.0.21 found; Magic Context is not installed there (run setup to add it)",
+    });
+    expect(getOpenCodePluginHostStatus("OpenCode 2.0.21", "2.0.21", true)).toEqual({
+        status: "fail",
+        message: describeOpenCode2SessionAPIRequirement("2.0.21"),
+    });
+    expect(getOpenCodePluginHostStatus("OpenCode 2.0.22", "2.0.22", true)).toBeNull();
 });
 
 describe("doctor CLI version comparison", () => {

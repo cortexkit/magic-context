@@ -54,6 +54,17 @@ export interface PluginEntryCheckReporter {
     autoUpdateStall(specifier: string): void;
 }
 
+export function isOpenCodePluginRegistered(
+    config: Record<string, unknown>,
+    configDir: string,
+): boolean {
+    return readPluginEntries(config).some(
+        ({ entry }) =>
+            matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME) ||
+            isDevPathPluginEntry(entry, configDir),
+    );
+}
+
 /**
  * Check the Magic Context entry in a parsed config and apply the change in
  * place. Returns true when `config` changed and must be written back.

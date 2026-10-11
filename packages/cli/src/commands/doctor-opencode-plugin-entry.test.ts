@@ -4,7 +4,10 @@ import {
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION,
     OPENCODE_PLUGIN_NAME,
 } from "../lib/opencode-plugin-cache";
-import { checkOpenCodePluginEntry } from "./doctor-opencode-plugin-entry";
+import {
+    checkOpenCodePluginEntry,
+    isOpenCodePluginRegistered,
+} from "./doctor-opencode-plugin-entry";
 
 function run(config: Record<string, unknown>, force = false) {
     const lines: Array<{ level: string; message: string }> = [];
@@ -25,6 +28,16 @@ function run(config: Record<string, unknown>, force = false) {
 const OPTIONS = { debug: true, nested: { level: 2 } };
 
 describe("doctor OpenCode plugin entry", () => {
+    it("distinguishes an unregistered host from one with a Magic Context entry", () => {
+        expect(isOpenCodePluginRegistered({ plugins: ["other-plugin"] }, "/config")).toBe(false);
+        expect(
+            isOpenCodePluginRegistered(
+                { plugins: [OPENCODE_PLUGIN_ENTRY_WITH_VERSION] },
+                "/config",
+            ),
+        ).toBe(true);
+    });
+
     it("accepts an OpenCode 2 object entry on @latest without rewriting it", () => {
         const config = {
             plugins: [{ package: OPENCODE_PLUGIN_ENTRY_WITH_VERSION, options: OPTIONS }],

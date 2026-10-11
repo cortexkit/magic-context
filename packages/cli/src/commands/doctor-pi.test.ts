@@ -285,6 +285,50 @@ describe("Pi doctor", () => {
         expect(output).toContain("FAIL 0");
     });
 
+    it("does not fail or run Pi checks when Magic Context is not installed", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        writeFileSync(
+            join(agentDir, "settings.json"),
+            JSON.stringify({ packages: ["npm:other-pi-extension"] }),
+        );
+        const prompts = new MockPrompts();
+        const options = baseOptions(root, cwd, prompts);
+        if (!options.deps) throw new Error("expected doctor dependencies");
+        options.deps.getPiVersion = () => "0.70.0";
+
+        const code = await runDoctor(options);
+
+        expect(code).toBe(0);
+        expect(prompts.messages).toContain(
+            "info:INFO Pi 0.70.0 found; Magic Context is not installed there (run setup to add it)",
+        );
+        expect(
+            prompts.messages.filter((message) => message.startsWith("info:INFO Pi ")),
+        ).toHaveLength(1);
+        expect(prompts.messages.filter((message) => message.startsWith("error:"))).toHaveLength(0);
+        expect(prompts.messages.join("\n")).toContain("FAIL 0");
+        expect(prompts.messages.join("\n")).not.toContain("older than required 0.74.0");
+    });
+
+    it("still fails when Magic Context is installed on an old Pi version", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const prompts = new MockPrompts();
+        const options = baseOptions(root, cwd, prompts);
+        if (!options.deps) throw new Error("expected doctor dependencies");
+        options.deps.getPiVersion = () => "0.70.0";
+
+        const code = await runDoctor(options);
+
+        expect(code).toBe(1);
+        expect(prompts.messages.join("\n")).toContain("Pi 0.70.0 is older than required 0.74.0");
+    });
+
     it("reports the retired mural.model as one config warning", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("mc-pi-doctor-cwd-");
@@ -656,7 +700,12 @@ describe("Pi doctor", () => {
                 "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json",
         });
         const output = prompts.messages.join("\n");
-        expect(output).toContain("FAIL npm:@cortexkit/pi-magic-context is missing from packages[]");
+        expect(output).toContain(
+            "INFO Pi 0.74.0 found; Magic Context is not installed there (run setup to add it)",
+        );
+        expect(output).not.toContain(
+            "FAIL npm:@cortexkit/pi-magic-context is missing from packages[]",
+        );
         expect(output).toContain("Added npm:@cortexkit/pi-magic-context");
         expect(output).toContain("Wrote default Magic Context config");
         expect(output).toContain("Repair attempted; 2 item(s) changed");
@@ -690,7 +739,12 @@ describe("Pi doctor", () => {
         expect(existsSync(legacyPath)).toBe(false);
         expect(existsSync(`${legacyPath}.MOVED_READPLEASE`)).toBe(true);
         const output = prompts.messages.join("\n");
-        expect(output).toContain("FAIL npm:@cortexkit/pi-magic-context is missing from packages[]");
+        expect(output).toContain(
+            "INFO Pi 0.74.0 found; Magic Context is not installed there (run setup to add it)",
+        );
+        expect(output).not.toContain(
+            "FAIL npm:@cortexkit/pi-magic-context is missing from packages[]",
+        );
         expect(output).toContain("Migrated Magic Context user config");
         expect(output).not.toContain("Wrote default Magic Context config");
     });

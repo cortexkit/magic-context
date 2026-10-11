@@ -604,26 +604,8 @@ async function runHealthChecks(options: {
     const self = options.deps.selfVersion();
 
     const pi = options.deps.detectPiBinary();
-    if (!pi) {
-        add(results, "fail", "Pi binary not found on PATH or at ~/.pi/bin/pi");
-    } else {
-        const version = options.deps.getPiVersion(pi.path);
-        if (version === null) {
-            add(results, "fail", `Pi CLI was found at ${pi.path} but could not be executed`);
-        } else {
-            add(results, "pass", `Pi ${version} detected at ${pi.path}`);
-        }
-        const compare = compareSemver(version, MIN_PI_VERSION);
-        if (compare !== null && compare < 0) {
-            add(
-                results,
-                "fail",
-                `Pi ${version} is older than required ${MIN_PI_VERSION}. Subagents (historian/dreamer) use the long-form \`--extension\` flag introduced in Pi 0.71.0; older versions hard-fail with "Unknown option". Run \`pi update\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`).`,
-            );
-        } else if (version) {
-            add(results, "pass", `Pi version meets minimum ${MIN_PI_VERSION} requirement`);
-        }
-    }
+    const piVersion = pi ? options.deps.getPiVersion(pi.path) : null;
+    if (!pi) add(results, "fail", "Pi binary not found on PATH or at ~/.pi/bin/pi");
 
     const latest = options.deps.getLatestNpmVersion();
     const latestCompare = latest ? compareSemver(self, latest) : null;
@@ -647,8 +629,15 @@ async function runHealthChecks(options: {
 
     const settingsPath = getPiUserExtensionsPath();
     let packages: unknown[] = [];
+    let piPluginInstalled = false;
     if (!existsSync(settingsPath)) {
-        add(results, "fail", `Pi settings not found at ${settingsPath}`);
+        if (pi) {
+            add(
+                results,
+                "info",
+                `${piVersion ? `Pi ${piVersion}` : "Pi"} found; Magic Context is not installed there (run setup to add it)`,
+            );
+        }
         repairPlan.addPackageEntry = true;
     } else {
         const parsed = readJsonc(settingsPath);
@@ -656,13 +645,37 @@ async function runHealthChecks(options: {
             add(results, "fail", `Could not parse Pi settings ${settingsPath}: ${parsed.error}`);
         } else {
             packages = packagesFrom(parsed.value);
-            add(results, "pass", `Pi settings found at ${settingsPath}`);
             if (hasPiMagicContextPackage(packages)) {
+                piPluginInstalled = true;
+                add(results, "pass", `Pi settings found at ${settingsPath}`);
                 add(results, "pass", `${PI_PACKAGE_SOURCE} is registered in packages[]`);
             } else {
-                add(results, "fail", `${PI_PACKAGE_SOURCE} is missing from packages[]`);
+                if (pi) {
+                    add(
+                        results,
+                        "info",
+                        `${piVersion ? `Pi ${piVersion}` : "Pi"} found; Magic Context is not installed there (run setup to add it)`,
+                    );
+                }
                 repairPlan.addPackageEntry = true;
             }
+        }
+    }
+    if (pi && piPluginInstalled) {
+        if (piVersion === null) {
+            add(results, "fail", `Pi CLI was found at ${pi.path} but could not be executed`);
+        } else {
+            add(results, "pass", `Pi ${piVersion} detected at ${pi.path}`);
+        }
+        const compare = compareSemver(piVersion, MIN_PI_VERSION);
+        if (compare !== null && compare < 0) {
+            add(
+                results,
+                "fail",
+                `Pi ${piVersion} is older than required ${MIN_PI_VERSION}. Subagents (historian/dreamer) use the long-form \`--extension\` flag introduced in Pi 0.71.0; older versions hard-fail with "Unknown option". Run \`pi update\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`).`,
+            );
+        } else if (piVersion) {
+            add(results, "pass", `Pi version meets minimum ${MIN_PI_VERSION} requirement`);
         }
     }
 
@@ -751,7 +764,7 @@ async function runHealthChecks(options: {
         );
     }
 
-    checkPiModelChains(results, pi, loadedConfig.config, options.deps);
+    if (piPluginInstalled) checkPiModelChains(results, pi, loadedConfig.config, options.deps);
 
     const storage = getMagicContextStorageResolution();
     const storageDir = storage.path;
@@ -939,7 +952,7 @@ async function runHealthChecks(options: {
         }
     } else if (loadedConfig.config.embedding.provider === "off") {
         add(results, "info", "Embedding provider disabled");
-    } else {
+    } else if (piPluginInstalled) {
         // Local (default) provider: verify the native ONNX runtime and the
         // persistence-capable Node WASM fallback. Resolution starts from the
         // installed plugin dir and stays silent when no tree can be inspected.
@@ -1004,70 +1017,74 @@ async function runHealthChecks(options: {
         }
     }
 
-    // Conflict detection — Pi doesn't have known competing context-management
-    // extensions today, but we still check for self-conflicts that the user
-    // can hit (e.g. accidentally registering both an npm entry AND a local
-    // dev-path entry, which causes duplicate plugin loading).
-    const piEntries = packages.filter(isConfiguredPiMagicContextEntry).map(describePiPackageEntry);
-    if (piEntries.length > 1) {
-        add(
-            results,
-            "fail",
-            `Multiple magic-context entries in Pi packages[] — this loads the plugin twice: ${piEntries.join(", ")}`,
-        );
-    } else {
-        add(results, "pass", "No conflicting magic-context entries in Pi packages[]");
-    }
-
-    const otherExtensions = packages
-        .filter((entry) => !isConfiguredPiMagicContextEntry(entry))
-        .map(describePiPackageEntry);
-    if (otherExtensions.length > 0) {
-        add(results, "info", `Other Pi extensions registered: ${otherExtensions.join(", ")}`);
-    } else {
-        add(results, "info", "No other Pi extensions listed in settings.json");
-    }
-
-    const configuredEntry = packages.find(isPiMagicContextPackageEntry);
-    const configuredSpecifier = getPiMagicContextPackageSpecifier(configuredEntry);
-    const expectedPluginVersion =
-        pinnedVersionFromPackageSpecifier(configuredSpecifier) ?? latest ?? null;
-    const staleCaches = findPiMagicContextCacheDirs(
-        options.cwd,
-        expectedPluginVersion,
-        options.force === true,
-    );
-    if (staleCaches.length > 0) {
-        repairPlan.clearCachePaths = staleCaches.map((entry) => entry.path);
-        add(
-            results,
-            "warn",
-            `Stale Pi extension cache found: ${staleCaches.map((entry) => `${entry.path}${entry.version ? ` (v${entry.version})` : ""}`).join(", ")}`,
-        );
-    } else {
-        add(results, "pass", "Pi extension cache clean (no stale cached package found)");
-    }
-
-    const logFiles = inspectMagicContextLogs("pi");
-    const existingLogFiles = logFiles.filter((file) => file.exists);
-    if (existingLogFiles.length === 0) {
-        add(
-            results,
-            "info",
-            `No plugin log file yet; checked: ${logFiles.map((file) => file.path).join(", ")}`,
-        );
-    } else {
-        for (const file of existingLogFiles) {
-            add(results, "info", `Log file read: ${formatLogFileInspection(file)}`);
+    if (piPluginInstalled) {
+        // Conflict detection — Pi doesn't have known competing context-management
+        // extensions today, but we still check for self-conflicts that the user
+        // can hit (e.g. accidentally registering both an npm entry AND a local
+        // dev-path entry, which causes duplicate plugin loading).
+        const piEntries = packages
+            .filter(isConfiguredPiMagicContextEntry)
+            .map(describePiPackageEntry);
+        if (piEntries.length > 1) {
+            add(
+                results,
+                "fail",
+                `Multiple magic-context entries in Pi packages[] — this loads the plugin twice: ${piEntries.join(", ")}`,
+            );
+        } else {
+            add(results, "pass", "No conflicting magic-context entries in Pi packages[]");
         }
-        // Sanitize before printing — a raw log line can carry a secret/path the
-        // user then pastes into a public issue.
-        const lastLine = readLogLines(existingLogFiles).at(-1);
-        add(
-            results,
-            "info",
-            `Last plugin log line: ${lastLine ? sanitizeDiagnosticText(lastLine) : "<empty log>"}`,
+
+        const otherExtensions = packages
+            .filter((entry) => !isConfiguredPiMagicContextEntry(entry))
+            .map(describePiPackageEntry);
+        if (otherExtensions.length > 0) {
+            add(results, "info", `Other Pi extensions registered: ${otherExtensions.join(", ")}`);
+        } else {
+            add(results, "info", "No other Pi extensions listed in settings.json");
+        }
+
+        const configuredEntry = packages.find(isPiMagicContextPackageEntry);
+        const configuredSpecifier = getPiMagicContextPackageSpecifier(configuredEntry);
+        const expectedPluginVersion =
+            pinnedVersionFromPackageSpecifier(configuredSpecifier) ?? latest ?? null;
+        const staleCaches = findPiMagicContextCacheDirs(
+            options.cwd,
+            expectedPluginVersion,
+            options.force === true,
         );
+        if (staleCaches.length > 0) {
+            repairPlan.clearCachePaths = staleCaches.map((entry) => entry.path);
+            add(
+                results,
+                "warn",
+                `Stale Pi extension cache found: ${staleCaches.map((entry) => `${entry.path}${entry.version ? ` (v${entry.version})` : ""}`).join(", ")}`,
+            );
+        } else {
+            add(results, "pass", "Pi extension cache clean (no stale cached package found)");
+        }
+
+        const logFiles = inspectMagicContextLogs("pi");
+        const existingLogFiles = logFiles.filter((file) => file.exists);
+        if (existingLogFiles.length === 0) {
+            add(
+                results,
+                "info",
+                `No plugin log file yet; checked: ${logFiles.map((file) => file.path).join(", ")}`,
+            );
+        } else {
+            for (const file of existingLogFiles) {
+                add(results, "info", `Log file read: ${formatLogFileInspection(file)}`);
+            }
+            // Sanitize before printing — a raw log line can carry a secret/path the
+            // user then pastes into a public issue.
+            const lastLine = readLogLines(existingLogFiles).at(-1);
+            add(
+                results,
+                "info",
+                `Last plugin log line: ${lastLine ? sanitizeDiagnosticText(lastLine) : "<empty log>"}`,
+            );
+        }
     }
 
     // Historian dumps now live per-project under `<dir>/.cortexkit/magic-context/historian/`

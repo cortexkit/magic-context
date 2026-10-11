@@ -185,82 +185,98 @@ async function runHealthChecks(options: {
         add(results, "fail", "OMP binary not found on PATH or in standard user bin directories");
     } else {
         const version = options.deps.getOmpVersion(omp.path);
-        if (!version) add(results, "fail", `OMP at ${omp.path} could not report its version`);
-        else if (isOlderThan(version, MIN_OMP_VERSION)) {
-            add(results, "fail", `OMP ${version} is older than tested minimum ${MIN_OMP_VERSION}`);
-        } else add(results, "pass", `OMP ${version} detected at ${omp.path}`);
-
         const plugins = options.deps.listOmpPlugins(omp.path);
         if (!plugins) {
             add(results, "fail", "`omp plugin list --json` failed or returned invalid JSON");
         } else {
             const plugin = plugins.find((entry) => entry.name === OMP_PLUGIN_PACKAGE);
             if (!plugin) {
-                add(results, "fail", `${OMP_PLUGIN_PACKAGE} is not installed in OMP`);
-                repairPlan.installPlugin = true;
-            } else if (!plugin.enabled) {
-                add(results, "fail", `${OMP_PLUGIN_PACKAGE} is installed but disabled in OMP`);
-                repairPlan.installPlugin = true;
-            } else {
-                add(results, "pass", `${OMP_PLUGIN_PACKAGE} ${plugin.version} is enabled`);
-                const manifest = pluginDeclaresOmp(plugin.path);
-                if (manifest === true)
-                    add(results, "pass", "Plugin exposes an OMP/Pi extension manifest");
-                else if (manifest === false)
-                    add(results, "fail", "Installed plugin has no OMP/Pi extension manifest");
-                else add(results, "warn", "Could not inspect the installed plugin manifest");
-            }
-        }
-
-        const compaction = options.deps.getOmpSetting(omp.path, "compaction.enabled");
-        if (compaction === false) add(results, "pass", "OMP native compaction is disabled");
-        else if (compaction === true) {
-            add(
-                results,
-                "fail",
-                "OMP native compaction is enabled and conflicts with Magic Context",
-            );
-            repairPlan.disableCompaction = true;
-        } else add(results, "fail", "Could not read OMP compaction.enabled");
-
-        const memory = options.deps.getOmpSetting(omp.path, "memory.backend");
-        if (memory === "off") add(results, "pass", "OMP automatic memory backend is disabled");
-        else if (typeof memory === "string") {
-            add(
-                results,
-                "fail",
-                `OMP memory.backend=${memory} duplicates Magic Context memory injection`,
-            );
-            repairPlan.disableMemory = true;
-        } else add(results, "fail", "Could not read OMP memory.backend");
-
-        const nonGlobalSources = getOmpNonGlobalConfigSources(options.cwd);
-        if (
-            nonGlobalSources.length > 0 &&
-            (repairPlan.disableCompaction || repairPlan.disableMemory)
-        ) {
-            add(
-                results,
-                "warn",
-                "OMP project/overlay config owns effective conflicting settings; automatic global repair is disabled: " +
-                    nonGlobalSources.join(", "),
-            );
-        }
-
-        const reportedAgentDir = options.deps.runOmpCommand(omp.path, ["config", "path"], 10_000);
-        if (!reportedAgentDir.ok) {
-            add(results, "warn", "Could not verify OMP active agent directory");
-        } else {
-            const reportedPath = resolve(reportedAgentDir.stdout);
-            const expectedPath = resolve(getOmpAgentDir());
-            if (reportedPath === expectedPath) {
-                add(results, "pass", `OMP agent directory resolved to ${getOmpAgentDir()}`);
-            } else {
                 add(
                     results,
-                    "fail",
-                    `OMP reports agent directory ${reportedAgentDir.stdout}, but Magic Context resolved ${getOmpAgentDir()}`,
+                    "info",
+                    `${version ? `Oh My Pi ${version}` : "Oh My Pi"} found; Magic Context is not installed there (run setup to add it)`,
                 );
+                repairPlan.installPlugin = true;
+            } else {
+                if (!version) {
+                    add(results, "fail", `OMP at ${omp.path} could not report its version`);
+                } else if (isOlderThan(version, MIN_OMP_VERSION)) {
+                    add(
+                        results,
+                        "fail",
+                        `OMP ${version} is older than tested minimum ${MIN_OMP_VERSION}`,
+                    );
+                } else add(results, "pass", `OMP ${version} detected at ${omp.path}`);
+
+                if (!plugin.enabled) {
+                    add(results, "fail", `${OMP_PLUGIN_PACKAGE} is installed but disabled in OMP`);
+                    repairPlan.installPlugin = true;
+                } else {
+                    add(results, "pass", `${OMP_PLUGIN_PACKAGE} ${plugin.version} is enabled`);
+                    const manifest = pluginDeclaresOmp(plugin.path);
+                    if (manifest === true)
+                        add(results, "pass", "Plugin exposes an OMP/Pi extension manifest");
+                    else if (manifest === false)
+                        add(results, "fail", "Installed plugin has no OMP/Pi extension manifest");
+                    else add(results, "warn", "Could not inspect the installed plugin manifest");
+                }
+
+                const compaction = options.deps.getOmpSetting(omp.path, "compaction.enabled");
+                if (compaction === false) add(results, "pass", "OMP native compaction is disabled");
+                else if (compaction === true) {
+                    add(
+                        results,
+                        "fail",
+                        "OMP native compaction is enabled and conflicts with Magic Context",
+                    );
+                    repairPlan.disableCompaction = true;
+                } else add(results, "fail", "Could not read OMP compaction.enabled");
+
+                const memory = options.deps.getOmpSetting(omp.path, "memory.backend");
+                if (memory === "off")
+                    add(results, "pass", "OMP automatic memory backend is disabled");
+                else if (typeof memory === "string") {
+                    add(
+                        results,
+                        "fail",
+                        `OMP memory.backend=${memory} duplicates Magic Context memory injection`,
+                    );
+                    repairPlan.disableMemory = true;
+                } else add(results, "fail", "Could not read OMP memory.backend");
+
+                const nonGlobalSources = getOmpNonGlobalConfigSources(options.cwd);
+                if (
+                    nonGlobalSources.length > 0 &&
+                    (repairPlan.disableCompaction || repairPlan.disableMemory)
+                ) {
+                    add(
+                        results,
+                        "warn",
+                        "OMP project/overlay config owns effective conflicting settings; automatic global repair is disabled: " +
+                            nonGlobalSources.join(", "),
+                    );
+                }
+
+                const reportedAgentDir = options.deps.runOmpCommand(
+                    omp.path,
+                    ["config", "path"],
+                    10_000,
+                );
+                if (!reportedAgentDir.ok) {
+                    add(results, "warn", "Could not verify OMP active agent directory");
+                } else {
+                    const reportedPath = resolve(reportedAgentDir.stdout);
+                    const expectedPath = resolve(getOmpAgentDir());
+                    if (reportedPath === expectedPath) {
+                        add(results, "pass", `OMP agent directory resolved to ${getOmpAgentDir()}`);
+                    } else {
+                        add(
+                            results,
+                            "fail",
+                            `OMP reports agent directory ${reportedAgentDir.stdout}, but Magic Context resolved ${getOmpAgentDir()}`,
+                        );
+                    }
+                }
             }
         }
     }
