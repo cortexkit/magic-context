@@ -55,7 +55,7 @@ export type FailureSentinelOptions = {
 export function normalizeError(error: string | null): string {
     return (error ?? "(no error)")
         .replace(/(?:[a-zA-Z]:)?(?:\/[\w.~-]+){2,}/g, "<path>")
-        .replace(/\b(?:[a-f0-9]{8}-){4}[a-f0-9]{12}\b/gi, "<id>")
+        .replace(/\b[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\b/gi, "<id>")
         .replace(/\b(?:0x[a-f0-9]+|[a-f0-9]{16,}|(?:session|task|run|agent|invocation|request|trace|job|msg|wi|ct)_[a-z0-9_-]+)\b/gi, "<id>")
         .replace(/\b\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|hrs?)\b/gi, "<duration>")
         .replace(/\b\d+(?:\.\d+)?\b/g, "<number>")

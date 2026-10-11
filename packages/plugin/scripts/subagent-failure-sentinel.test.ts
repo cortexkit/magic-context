@@ -83,6 +83,11 @@ test("normalisation folds ids numbers durations and paths but preserves the fail
     expect(normalizeError("job_abcdef failed /tmp/one/file after 20ms code 42"))
         .toBe(normalizeError("job_xyz123 failed /var/two/file after 7.5 seconds code 99"));
     expect(normalizeError("timeout 4ms")).not.toBe(normalizeError("permission denied 4ms"));
+    // Provider request ids are standard 8-4-4-4-12 UUIDs; two failures that
+    // differ only by request id are the same class.
+    expect(
+        normalizeError("APIError: Insufficient Balance (request_id: 6ccd58a4-fd7d-4695-ae30-b3cbd8c5b633)"),
+    ).toBe("APIError: Insufficient Balance (request_id: <id>)");
 });
 
 test("dedupe suppresses a wake for six hours unless class count grows by half", async () => {
