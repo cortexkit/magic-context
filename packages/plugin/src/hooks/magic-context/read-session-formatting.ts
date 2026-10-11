@@ -2,7 +2,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { COMMIT_VERB_PATTERN, createCommitHashExtractPattern } from "../../shared/commit-detection";
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import { log } from "../../shared/logger";
@@ -154,12 +154,17 @@ let tokenizerWarningSent = false;
 let tokenizerEncodingPath: string | undefined;
 let tokenizerSerializedTableBytes: number | null | undefined;
 
-function tokenizerPackageRoots(): string[] {
+/** Candidate `ai-tokenizer` package directories, in probe order. Exported for
+ *  read-session-formatting-tokenizer-roots.test.ts, which pins the compiled-host
+ *  case where only the extension's own install tree or the host plugin root can
+ *  supply the dependency. */
+export function tokenizerPackageRoots(): string[] {
     const cwd = process.cwd();
     const openCodeCache = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "opencode");
-    const roots = [cwd, openCodeCache];
     const candidates: string[] = [];
-    for (const root of roots) {
+    // Probe a root for both a dependency nested under the plugin package and a
+    // copy hoisted directly into the root's own node_modules.
+    const probeRoot = (root: string): void => {
         for (const packageDir of TOKENIZER_PACKAGE_DIRS) {
             // Prefer a dependency nested under the plugin over a conflicting
             // version hoisted by the host application.
@@ -168,15 +173,53 @@ function tokenizerPackageRoots(): string[] {
             );
         }
         candidates.push(join(root, "node_modules", "ai-tokenizer"));
+    };
+    // `findTokenizerImportPaths` binds the first candidate whose package.json
+    // resolves, so probe order IS the precedence contract: the launch root and
+    // the OpenCode cache are host-specific trees, then the plugin's own install
+    // tree (below), and only LAST the host-wide OMP plugin tree.
+    for (const root of [cwd, openCodeCache]) {
+        probeRoot(root);
     }
 
-    let ancestor = process.argv[1] ? dirname(resolve(process.argv[1])) : cwd;
-    while (true) {
-        candidates.push(join(ancestor, "node_modules", "ai-tokenizer"));
-        const parent = dirname(ancestor);
-        if (parent === ancestor) break;
-        ancestor = parent;
-    }
+    const pushAncestors = (startDir: string): void => {
+        let ancestor = startDir;
+        while (true) {
+            candidates.push(join(ancestor, "node_modules", "ai-tokenizer"));
+            const parent = dirname(ancestor);
+            if (parent === ancestor) break;
+            ancestor = parent;
+        }
+    };
+
+    pushAncestors(process.argv[1] ? dirname(resolve(process.argv[1])) : cwd);
+
+    // The tree the extension was actually loaded from is the authoritative
+    // root: ai-tokenizer is a declared dependency of this package, so its
+    // node_modules chain is where a correct install keeps it. The argv walk
+    // above cannot reach it under a compiled host binary -- OMP ships as a
+    // `bun build --compile` executable whose process.argv[1] is a user CLI
+    // argument rather than the module path -- which is exactly when this
+    // probe runs, so the run fell back to approximate character counts while
+    // ~/.omp/plugins/node_modules/ai-tokenizer sat unused on disk.
+    // The host appends a `?mtime=` cache-bust to the loaded module's identity;
+    // fileURLToPath drops the query, and dirname is applied to the FILE path so
+    // no segment is lost to a trailing slash.
+    const ownDir = dirname(fileURLToPath(new URL(import.meta.url)));
+    pushAncestors(ownDir);
+
+    // OMP's plugin tree, where a linked install (`omp plugin install <dir>`)
+    // leaves the package's hoisted dependencies while the module itself loads
+    // from the linked source directory. Same class of host-specific root as the
+    // OpenCode cache above, but it MUST stay below the plugin's own install tree:
+    // `~/.omp/plugins/node_modules` is a long-lived host-wide tree, so a stale or
+    // plugin-unrelated `ai-tokenizer` hoisted there must never outrank the version
+    // this package declares in its own tree (probed just above) -- a wrong copy
+    // would silently change the vocabulary behind persisted per-message counts and
+    // budget/compartment decisions. It is still probed, last, so the linked-source
+    // case (where only the host tree carries the dependency) keeps working.
+    probeRoot(join(homedir(), ".omp", "plugins"));
+
     return [...new Set(candidates)];
 }
 

@@ -295,12 +295,33 @@ export const defaultLoaders: ModuleLoader[] = [
 		},
 	},
 	{
+		// A static import cannot work here: this package is a peer of whichever
+		// host loaded the extension, and it is absent in the others, so the three
+		// loaders must probe in order and only the winner is ever evaluated.
+		//
+		// The specifier MUST stay a string literal, not the PI_CODING_AGENT_MODULE
+		// constant. OMP resolves host packages for legacy extensions by rewriting
+		// the extension SOURCE TEXT, and it only records a reference when the
+		// specifier parses as a StringLiteral (@oh-my-pi/pi-coding-agent
+		// src/extensibility/plugins/legacy-pi-compat.ts
+		// `collectExtensionSpecifierReferences` -> `record("import", node.source)`).
+		// A variable specifier is invisible to that pass, and inside the shipped
+		// `omp` binary (a `bun build --compile` executable whose own resolver does
+		// not reach an on-disk node_modules) the import then fails outright with
+		// "Cannot find package '@earendil-works/pi-coding-agent' imported from
+		// ~/.omp/plugins/node_modules/@cortexkit/pi-magic-context/dist/index.js",
+		// which took down the [session-projects] backfill and the dreamer
+		// retrospective. Bun keeps both literals runtime-resolved: they are
+		// `--external` in packages/pi-plugin/package.json `build`.
 		name: "Bare import",
-		load: async () => await import(/* @vite-ignore */ PI_CODING_AGENT_MODULE),
+		load: async () =>
+			await import(/* @vite-ignore */ "@earendil-works/pi-coding-agent"),
 	},
 	{
+		// Same contract in OMP's canonical scope.
 		name: "Bare import (OMP)",
-		load: async () => await import(/* @vite-ignore */ OMP_CODING_AGENT_MODULE),
+		load: async () =>
+			await import(/* @vite-ignore */ "@oh-my-pi/pi-coding-agent"),
 	},
 ];
 
