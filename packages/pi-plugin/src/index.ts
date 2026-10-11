@@ -192,6 +192,7 @@ import {
 	formatEmptyPiModelChain,
 	formatEmptyPiModelChainsNotice,
 	type PiModelRegistryLike,
+	waitForPiModelRegistryRefresh,
 } from "./model-chain-health";
 import { bootPiRuntimeWithDeadline } from "./pi-boot-deadline";
 import {
@@ -1621,21 +1622,44 @@ async function startPiMagicContextRuntime(
 	let activeModelRegistry:
 		| { find(provider: string, modelId: string): unknown }
 		| undefined;
+	// The latest session context Pi handed the extension, kept alongside the
+	// active registry. A report deferred behind a discovery refresh resolves
+	// its dependencies through this instead of replaying the context captured
+	// when the wait was scheduled: after a session switch that capture belongs
+	// to a dead session (its `ui` reaches nowhere, its registry is not the
+	// live catalogue), and after a config reload its project is stale. The
+	// context and its cwd stay paired: reports belong to the session's
+	// current project, never to a project merely cached in the process.
+	type PiModelChainReportContext = {
+		modelRegistry?: PiModelRegistryLike;
+		cwd?: string;
+		hasUI?: boolean;
+		ui?: { notify?: (message: string, level?: "warning") => unknown };
+	};
+	let activeModelChainContext: PiModelChainReportContext | undefined;
 
 	// Config generation last checked per project directory.
 	const modelChainsCheckedGeneration = new Map<string, number>();
+	// Project directories whose chain report already awaited the host's
+	// discovery-backed catalogue once. Set only when that await has settled.
+	const modelChainReadinessWaited = new Set<string>();
+	// Project directories with a discovery await still in flight. Reports
+	// defer to it while it is pending; it is the only thing allowed to
+	// schedule the settled re-check.
+	const modelChainRefreshPending = new Set<string>();
 	/**
 	 * Validate the historian and dreamer chains against Pi's model registry:
 	 * log the historian chain that will actually run, and notify the session
 	 * once per process for each set of chains left empty (see
 	 * model-chain-health.ts). Runs at session start and after a config reload.
+	 * An empty chain is first re-checked after one background-refresh await,
+	 * because a registration-time miss on a discovery-backed provider means
+	 * "not hydrated yet" far more often than "not configured". While that
+	 * await is in flight every further report defers to it, and it re-checks
+	 * through current lifecycle state, never the pass that scheduled it.
 	 */
 	function reportPiModelChains(
-		ctx: {
-			modelRegistry?: PiModelRegistryLike;
-			hasUI?: boolean;
-			ui?: { notify?: (message: string, level?: "warning") => unknown };
-		},
+		ctx: PiModelChainReportContext,
 		project: ResolvedPiProjectDeps,
 	): void {
 		const registry = ctx.modelRegistry;
@@ -1654,6 +1678,51 @@ async function startPiMagicContextRuntime(
 				registry,
 				harness: PI_HARNESS_KIND,
 			});
+
+			// Nothing is logged or notified from a pass that found an empty
+			// chain before the host's discovery has settled: on OMP the provider
+			// that owns these models is queued during extension loading and
+			// merged by a boot refresh nobody awaits, so announcing "will not
+			// run" from an unsettled catalogue is usually wrong and, once
+			// notified, sticky for the process through
+			// loggedPiModelChainLines/notifiedPiModelChainKeys. One await per
+			// project: any event arriving inside the refresh window -- a second
+			// session_start, or the reload-driven agent_start gate -- defers to
+			// the in-flight await instead of skipping the wait and reporting the
+			// miss.
+			if (
+				empty.length > 0 &&
+				!modelChainReadinessWaited.has(project.projectDir)
+			) {
+				if (!modelChainRefreshPending.has(project.projectDir)) {
+					modelChainRefreshPending.add(project.projectDir);
+					const waitingDir = project.projectDir;
+					void waitForPiModelRegistryRefresh(registry).then(() => {
+						// Marked settled only now: the await has actually
+						// finished, so a miss remaining from here on is
+						// trustworthy and later passes may report it.
+						modelChainRefreshPending.delete(waitingDir);
+						modelChainReadinessWaited.add(waitingDir);
+						try {
+							reportPiModelChainsAfterRefresh(waitingDir);
+						} catch (err) {
+							// The re-check resolves deps and polls the config
+							// outside reportPiModelChains' own try/catch; a
+							// rejection on the void chain. The settled marker
+							// stands (the await really finished) and the last
+							// checked generation was not updated -- this throw
+							// happens before reportPiModelChains records it --
+							// so the next session_start re-runs the check and
+							// reports directly, and a config reload that moves
+							// the generation re-runs it through agent_start's
+							// gate; with the config unchanged, agent_start
+							// alone does not re-report.
+							warn("model chain post-refresh check failed:", err);
+						}
+					});
+				}
+				return;
+			}
 			const emptyHistorian = empty.find((chain) => chain.owner === "historian");
 			const historianLine = historian
 				? `registered historian trigger (model=${historian.model}${historian.fallbackModels?.length ? `, fallbacks=${historian.fallbackModels.join(",")}` : ""}, executeThreshold=${formatExecuteThresholdForLog(historian.executeThresholdPercentage)})`
@@ -1679,6 +1748,32 @@ async function startPiMagicContextRuntime(
 		} catch (err) {
 			warn("model chain check failed:", err);
 		}
+	}
+	/**
+	 * Re-run the chain report once a scheduled discovery refresh has settled.
+	 * Nothing from the scheduled pass is replayed: the session may have been
+	 * switched and the config reloaded while the await was open, so the
+	 * report resolves the current session context and this directory's
+	 * dependencies from the lifecycle state above. The context and project
+	 * stay paired -- if the session switched to another project, this one's
+	 * warning must not reach that project's UI, and the once-per-process
+	 * notice must not be spent here; the next session_start of this
+	 * directory re-checks (the settled-catalogue marker is process-wide, so
+	 * it reports directly). A config whose generation moved past the last
+	 * checked one was replaced while the await was open, and its report is
+	 * left to the reload-aware path (agent_start's generation gate, or the
+	 * next session_start) rather than announced from a superseded file.
+	 */
+	function reportPiModelChainsAfterRefresh(projectDir: string): void {
+		const ctx = activeModelChainContext;
+		const registry = ctx?.modelRegistry;
+		if (!ctx || !registry) return;
+		if (ctx.cwd !== undefined && ctx.cwd !== projectDir) return;
+		const project = resolveProjectDepsForDir(projectDir);
+		const generation = liveReaderFor(project.projectDir, project.config).poll()
+			.generation;
+		if (modelChainsCheckedGeneration.get(projectDir) !== generation) return;
+		reportPiModelChains(ctx, project);
 	}
 	function resolveContextOptionsForProject(
 		dir: string,
@@ -1829,6 +1924,7 @@ async function startPiMagicContextRuntime(
 		projectDepsByDir.delete(ctx.cwd);
 		const current = resolveCurrentProjectDeps(ctx);
 		activeModelRegistry = ctx.modelRegistry;
+		activeModelChainContext = ctx;
 		reportPiModelChains(ctx, current);
 		if (ctx.hasUI) syncDreamerProjectRegistration(current, ctx.modelRegistry);
 		syncCtxMemoryToolEnabled(pi, current.config.memory.enabled);
@@ -2252,6 +2348,7 @@ async function startPiMagicContextRuntime(
 			// shared helper releases that ownership explicitly.
 			try {
 				activeModelRegistry = ctx.modelRegistry;
+				activeModelChainContext = ctx;
 				if (ctx.hasUI)
 					syncDreamerProjectRegistration(
 						effectiveProjectDeps,

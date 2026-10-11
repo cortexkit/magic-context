@@ -155,7 +155,19 @@ export function validatePiDreamerModels(
 			let available = resolved.get(model);
 			if (available === undefined) {
 				available = isPiModelRegistered(model, registry, harness);
-				resolved.set(model, available);
+				// Positives only. OMP hydrates discovery-backed providers such as
+				// `litellm` from a fire-and-forget boot refresh that the startup
+				// path never awaits (config/model-registry.ts
+				// `#refreshRuntimeDiscoveries`, main.ts `refreshInBackground`), and
+				// extension `registerProvider` calls are themselves queued until
+				// after extension loading -- so a miss during registration usually
+				// means "not yet", not "absent". Remembering the miss pinned the
+				// historian off for the whole process even after the model became
+				// visible; OMP's own consumers re-check after awaiting instead
+				// (session/agent-session.ts `#retryInactiveAdvisorAfterModelDiscovery`).
+				// A genuinely absent model costs one extra `find()` per re-resolution,
+				// which happens per transform pass.
+				if (available) resolved.set(model, available);
 			}
 			if (available) return true;
 			if (!warnedUnknownModels.has(model)) {
