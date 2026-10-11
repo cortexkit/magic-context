@@ -1770,10 +1770,8 @@ async function startPiMagicContextRuntime(
 		if (!ctx || !registry) return;
 		if (ctx.cwd !== undefined && ctx.cwd !== projectDir) return;
 		const project = resolveProjectDepsForDir(projectDir);
-		const generation = liveReaderFor(
-			project.projectDir,
-			project.config,
-		).poll().generation;
+		const generation = liveReaderFor(project.projectDir, project.config).poll()
+			.generation;
 		if (modelChainsCheckedGeneration.get(projectDir) !== generation) return;
 		reportPiModelChains(ctx, project);
 	}
