@@ -93,6 +93,10 @@ test("normalisation folds ids numbers durations and paths but preserves the fail
     expect(
         normalizeError("APIError: Insufficient Balance (request_id: 6ccd58a4-fd7d-4695-ae30-b3cbd8c5b633)"),
     ).not.toContain("<number>");
+    // A request id cut short by the stored error's length limit is still an id.
+    expect(normalizeError("Insufficient Balance (request_id: 1a52d1e8-50cb…")).toBe(
+        normalizeError("Insufficient Balance (request_id: 885b3a6a-e982-40a3…"),
+    );
 });
 
 test("dedupe suppresses a wake for six hours unless class count grows by half", async () => {
