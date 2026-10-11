@@ -50,9 +50,10 @@ import {
 } from "./test-utils.test";
 import { createPiTranscript } from "./transcript-pi";
 
-// History edits must preserve text preceding kept signed thinking. These opt-in
-// tests expose existing placeholder/reminder-strip defects without making ordinary
-// test runs fail for known defects.
+// History edits must preserve text preceding kept signed thinking. The placeholder
+// and reminder-strip contracts run by default. The remaining probes are opt-in
+// (MC_S03A_REVIEW=1); one of them, the restart case, records a known limit: the
+// parked history refresh is kept only in memory, so it does not survive a restart.
 const review = process.env.MC_S03A_REVIEW === "1" ? describe : describe.skip;
 const thinking = {
 	type: "thinking",
@@ -60,7 +61,7 @@ const thinking = {
 	thinkingSignature: "signed",
 };
 
-review("signed-thinking s03a review: Pi", () => {
+describe("signed-thinking s03a review: Pi", () => {
 	test("stable-id cutover must not remove a placeholder that was previously sent", () => {
 		const db = createTestDb();
 		const sessionId = "s03a-cutover";
@@ -516,7 +517,7 @@ async function historyFixture(sessionId: string, legacy = false) {
 	};
 }
 
-review("signed-thinking s03a review: kept Pi signal", () => {
+describe("signed-thinking s03a review: Pi stable-id migration", () => {
 	test("handler stable-id migration preserves a sent placeholder under thinking", async () => {
 		const f = await historyFixture("s03a-handler-cutover", true);
 		try {
@@ -527,7 +528,7 @@ review("signed-thinking s03a review: kept Pi signal", () => {
 			expect(JSON.stringify(requestWire(before.messages))).toContain(
 				"[dropped §998§]",
 			);
-			expect(JSON.stringify(requestWire(after.messages))).not.toContain(
+			expect(JSON.stringify(requestWire(after.messages))).toContain(
 				"[dropped §998§]",
 			);
 			console.log(
@@ -538,6 +539,9 @@ review("signed-thinking s03a review: kept Pi signal", () => {
 			f.close();
 		}
 	});
+});
+
+review("signed-thinking s03a review: kept Pi signal", () => {
 	for (const release of ["new user", "model change"] as const) {
 		for (const fold of [false, true]) {
 			test(`history ${fold ? "fold" : "refresh"} releases once at ${release}`, async () => {

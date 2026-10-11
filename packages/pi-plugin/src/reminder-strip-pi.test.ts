@@ -107,3 +107,29 @@ test("frozen reminders replay byte-identically without querying sources", () => 
 		prepare.mockRestore();
 	}
 });
+
+test("a bust records no new decision for a tag the caller protects, but keeps serving legacy bytes", () => {
+	const { args, served } = setup(
+		"§1§ words <SYSTEM-REMINDER>noise</SYSTEM-REMINDER>",
+		"words",
+	);
+	replayPiReminderStrips({
+		...args,
+		cacheBusting: true,
+		legacyReminderTagNumbers: new Set([1]),
+		mayRecordDecision: () => false,
+	});
+	expect(served()).toBe("§1§ words");
+	expect(getPiContentDecisions(args.db, "session").size).toBe(0);
+	replayPiReminderStrips({
+		...args,
+		cacheBusting: true,
+		legacyReminderTagNumbers: new Set([1]),
+		mayRecordDecision: () => true,
+	});
+	expect(
+		getPiContentDecisions(args.db, "session").has(
+			encodePiContentDecision("reminder-strip", "m:p0"),
+		),
+	).toBe(true);
+});

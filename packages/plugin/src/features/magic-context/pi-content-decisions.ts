@@ -107,3 +107,43 @@ export function freezePiContentDecision(
         throw error;
     }
 }
+
+/**
+ * Remove one stored content decision (for example a `reminder-strip`) whose text edit was
+ * refused after the decision was recorded. Replay applies every stored decision on later
+ * passes, so a leftover one would change text that was sent unchanged. Returns false when
+ * another writer kept changing the stored list across all retries.
+ */
+export function withdrawPiContentDecision(
+    db: Database,
+    sessionId: string,
+    kind: PiContentDecisionKind,
+    messageId: string,
+): boolean {
+    const entry = encodePiContentDecision(kind, messageId);
+    return db
+        .transaction(() => {
+            for (let attempt = 0; attempt < 5; attempt++) {
+                const row = db
+                    .prepare(
+                        "SELECT merged_reasoning_stripped_ids AS decisions FROM session_meta WHERE session_id = ?",
+                    )
+                    .get(sessionId) as { decisions: string | null } | undefined;
+                if (!row) return true;
+                const current = readEntries(row.decisions);
+                if (!current.includes(entry)) return true;
+                const result = db
+                    .prepare(
+                        "UPDATE session_meta SET merged_reasoning_stripped_ids = ? WHERE session_id = ? AND merged_reasoning_stripped_ids IS ?",
+                    )
+                    .run(
+                        JSON.stringify(current.filter((value) => value !== entry)),
+                        sessionId,
+                        row.decisions,
+                    );
+                if (result.changes > 0) return true;
+            }
+            return false;
+        })
+        .immediate();
+}

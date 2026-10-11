@@ -124,10 +124,23 @@ export function stripPiDroppedPlaceholderMessages(args: {
 	/**
 	 * Asked before a newly found placeholder-only message is added to the stored
 	 * removal list. False keeps the message in the request and off that list, so a
-	 * later discovery pass finds it again. Removing messages already on the list,
-	 * and the one-time rediscovery after a message-id scheme change, never ask.
+	 * later discovery pass finds it again. Removing messages already on the list
+	 * never asks, and neither does re-keying a message that the list already holds
+	 * under its id from before a message-id scheme change (see `legacyIdByRef`).
 	 */
 	admit?: (message: unknown, index: number) => boolean;
+	/**
+	 * Older sessions stored removed placeholders under positional ids
+	 * (`pi-msg-<index>-...`); newer ones use session entry ids. This map gives each
+	 * message's positional id, keyed by object reference like `stableIdByRef`. On the
+	 * pass that switches a session to entry ids (`forceDiscovery`), a placeholder
+	 * whose positional id is already on the stored removal list was removed from
+	 * every earlier request, so storing it again under its entry id and removing it
+	 * leaves the request as it was sent. Any other placeholder found on that pass
+	 * would be a new removal, so it asks `admit`. Without this map the positional id
+	 * is computed from the message's current index.
+	 */
+	legacyIdByRef?: ReadonlyMap<object, string>;
 }): StripPiDroppedPlaceholderResult {
 	const { db, sessionId, messages, isCacheBusting, stableIdByRef } = args;
 	const persistedIds = getStrippedPlaceholderIds(db, sessionId);
@@ -144,20 +157,35 @@ export function stripPiDroppedPlaceholderMessages(args: {
 	const canPrune =
 		(isCacheBusting || args.forceDiscovery === true) && !!stableIdByRef;
 	const presentIds = canPrune ? new Set<string>() : null;
+	const legacyIdOf = (msg: unknown, index: number): string | undefined => {
+		const m = msg && typeof msg === "object" ? (msg as object) : undefined;
+		return (
+			(m ? args.legacyIdByRef?.get(m) : undefined) ??
+			resolvePiStableId(msg, index)
+		);
+	};
 	const discoveredIds: string[] = [];
+	// Placeholders stored again under their entry id were already absent from earlier
+	// requests, so removing them is not a new edit and is not reported as one.
+	const rekeyedIds = new Set<string>();
 	if (isCacheBusting || args.forceDiscovery) {
 		for (let i = 0; i < messages.length; i++) {
 			const id = idOf(messages[i], i);
 			if (!id) continue;
 			presentIds?.add(id);
+			if (!messageIsPlaceholderOnly(messages[i]) || persistedIds.has(id))
+				continue;
+			const legacyId = args.forceDiscovery
+				? legacyIdOf(messages[i], i)
+				: undefined;
 			if (
-				messageIsPlaceholderOnly(messages[i]) &&
-				!persistedIds.has(id) &&
-				// After a message-id scheme change, messages removed under their old ids
-				// are found again under the new ids. Removing them keeps the request as
-				// it was already sent, so it is not a new edit.
-				(args.forceDiscovery === true || (args.admit?.(messages[i], i) ?? true))
+				legacyId !== undefined &&
+				legacyId !== id &&
+				persistedIds.has(legacyId)
 			) {
+				discoveredIds.push(id);
+				rekeyedIds.add(id);
+			} else if (args.admit?.(messages[i], i) ?? true) {
 				discoveredIds.push(id);
 			}
 		}
@@ -220,7 +248,7 @@ export function stripPiDroppedPlaceholderMessages(args: {
 		const id = idOf(messages[i], i);
 		if (!id || !idsToStrip.has(id)) continue;
 		if (toolOwnerIds.has(id)) continue;
-		if (discovered > 0 && discoveredIds.includes(id))
+		if (discovered > 0 && discoveredIds.includes(id) && !rekeyedIds.has(id))
 			args.onFirstApplication?.(messages[i], i);
 		messages.splice(i, 1);
 		removed++;

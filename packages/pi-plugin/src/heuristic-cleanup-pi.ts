@@ -32,7 +32,12 @@
  * source_contents remain intact for expansion.
  */
 
-import { freezePiContentDecision } from "@magic-context/core/features/magic-context/pi-content-decisions";
+import {
+	encodePiContentDecision,
+	freezePiContentDecision,
+	getPiContentDecisions,
+	withdrawPiContentDecision,
+} from "@magic-context/core/features/magic-context/pi-content-decisions";
 import {
 	CTX_REDUCE_KEEP,
 	protectedToolTagNumbers,
@@ -557,6 +562,7 @@ export function applyPiHeuristicCleanup(
 
 	// ── Pass 2: strip system injections from message tags ─────────────
 	if (routine) {
+		let existingDecisions: Set<string> | undefined;
 		db.transaction(() => {
 			for (const tag of tags) {
 				if (tag.status !== "active") continue;
@@ -591,6 +597,17 @@ export function applyPiHeuristicCleanup(
 						}
 					}
 				} else {
+					// A replay decision may exist only for an edit that was applied: replay
+					// strips the reminder on every later pass, so a decision left behind by
+					// a refused edit would change text that was sent unstripped. A rewrite
+					// before kept current-turn signed thinking is refused, so skip it.
+					if (target.thinkingRewriteProtected) continue;
+					existingDecisions ??= getPiContentDecisions(db, sessionId);
+					const alreadyDecided = existingDecisions.has(
+						encodePiContentDecision("reminder-strip", tag.messageId),
+					);
+					// The decision is stored before the edit so that bytes never ship
+					// without a durable replay record.
 					if (
 						freezePiContentDecision(
 							db,
@@ -609,6 +626,14 @@ export function applyPiHeuristicCleanup(
 									content.length - stripped.length,
 								),
 							});
+						} else if (!alreadyDecided) {
+							// Any other refusal: take back the decision this call added.
+							withdrawPiContentDecision(
+								db,
+								sessionId,
+								"reminder-strip",
+								tag.messageId,
+							);
 						}
 					}
 				}

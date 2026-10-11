@@ -7599,6 +7599,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		targets,
 		legacyReminderTagNumbers: textIdentityPlan.legacyReminderTagNumbers,
 		cacheBusting: isCacheBustingPass,
+		mayRecordDecision: (tagNumber) =>
+			newTargets.get(tagNumber)?.thinkingRewriteProtected !== true,
 	});
 
 	// 5. Commit tagging mutations back to Pi messages BEFORE injecting
@@ -7707,9 +7709,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const postCommitStableIdByRef = new Map<object, string>();
 	const postCommitEntryIdByRef = new Map<object, string>();
 	const lkgEntryIdByRef = new Map<object, string>();
+	// Ids under the older positional scheme, which the placeholder strip needs on the
+	// scheme-change pass to tell a stored removal from a newly found placeholder.
+	const legacyStableIdByRef = new Map<object, string>();
 	for (let i = 0; i < args.messages.length; i++) {
 		const m = args.messages[i];
 		if (!m || typeof m !== "object") continue;
+		if (args.stableIdSchemeCutover === true) {
+			const legacyId = resolvePiStableId(m, i);
+			if (legacyId) legacyStableIdByRef.set(m as object, legacyId);
+		}
 		const id = resolvePiStableId(
 			m,
 			i,
@@ -7841,10 +7850,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		// stable-id cutover below). Frozen discoveries still replay every pass.
 		isCacheBusting: historyRefreshPermitted,
 		stableIdByRef: postCommitStableIdByRef,
-		// F4 cutover: when the stable-id scheme just changed, force rediscovery so
+		// Stable-id cutover: when the stable-id scheme just changed, force rediscovery so
 		// previously-stripped placeholders get re-keyed under the new scheme this
 		// pass (discovery is otherwise gated on isCacheBusting = history-refresh).
+		// Only placeholders stored under their old positional id are re-keyed
+		// without admission; any other placeholder found here is a new removal.
 		forceDiscovery: args.stableIdSchemeCutover === true,
+		legacyIdByRef: legacyStableIdByRef,
 		// Frozen ids whose message owns a tool call are forgotten only on a pass
 		// that already changes the served prefix, so the stored set never changes
 		// on a pass meant to replay the previous bytes.

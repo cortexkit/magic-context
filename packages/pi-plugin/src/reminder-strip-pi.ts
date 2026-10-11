@@ -26,6 +26,13 @@ export function replayPiReminderStrips(args: {
 	targets: ReadonlyMap<number, ReminderTarget>;
 	legacyReminderTagNumbers: ReadonlySet<number>;
 	cacheBusting: boolean;
+	/**
+	 * Whether a new decision may be recorded for this tag. Replay of an existing
+	 * decision never asks, because its text was already sent stripped. The caller
+	 * refuses tags whose text sits before kept current-turn signed thinking, the
+	 * same protection that refuses the cleanup edit itself.
+	 */
+	mayRecordDecision?: (tagNumber: number) => boolean;
 }): Set<string> {
 	const decisions = getPiContentDecisions(args.db, args.sessionId);
 	const candidates = args.activeTags.map((tag) => {
@@ -74,6 +81,7 @@ export function replayPiReminderStrips(args: {
 			!frozen &&
 			args.cacheBusting &&
 			legacyProjection &&
+			(args.mayRecordDecision?.(tag.tagNumber) ?? true) &&
 			freezePiContentDecision(
 				args.db,
 				args.sessionId,
