@@ -1322,3 +1322,24 @@ test("OpenCode 2 score batch records rescore accounting and publishes only score
     });
     f.db.close();
 });
+
+test("OpenCode 2 recovery preserves actual model and length/error termination metadata", async () => {
+    const f = await setup();
+    f.rows.append("length-child", "[]", { modelID: "answering-model", finish: "length" });
+    f.rows.appendIdle("length-child", "succeeded");
+    expect(await f.executor.recover?.("length-child")).toMatchObject({
+        text: "[]",
+        providerId: "mock",
+        modelId: "answering-model",
+        lengthCapped: true,
+    });
+    f.rows.append("error-child", "[]", { error: { message: "provider failed" } });
+    f.rows.appendIdle("error-child", "failed");
+    expect(await f.executor.recover?.("error-child")).toMatchObject({
+        text: "[]",
+        providerId: "mock",
+        modelId: "cheap",
+        failed: true,
+    });
+    f.db.close();
+});

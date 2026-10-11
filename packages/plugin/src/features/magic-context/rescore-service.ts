@@ -667,15 +667,41 @@ export class RescoreService {
     private setItem(id: string, state: RescoreItemState): void {
         this.db.prepare("UPDATE rescore_items SET state = ? WHERE id = ?").run(state, id);
     }
-    recordCarrier(authority: RescoreAuthority, attemptId: string, carrierId: string): boolean {
+    recordCarrier(
+        authority: RescoreAuthority,
+        attemptId: string,
+        carrierId: string,
+        previousId: string | null = null,
+    ): boolean {
         return this.write(() => {
             if (!this.admitted(authority, attemptId)) return false;
             this.db
                 .prepare(
-                    "UPDATE rescore_attempts SET carrier_run_id = ? WHERE id = ? AND carrier_run_id IS NULL",
+                    "UPDATE rescore_attempts SET carrier_run_id = ? WHERE id = ? AND carrier_run_id IS ?",
                 )
-                .run(carrierId, attemptId);
-            return true;
+                .run(carrierId, attemptId, previousId);
+            return this.attempt(attemptId).carrier_run_id === carrierId;
+        });
+    }
+    hasAuthority(authority: RescoreAuthority): boolean {
+        return this.owner(authority) !== null;
+    }
+    waitForCarrier(authority: RescoreAuthority, attemptId: string): void {
+        this.write(() => {
+            if (!this.admitted(authority, attemptId)) return;
+            this.db
+                .prepare(
+                    "UPDATE rescore_jobs SET pause_reason = 'carrier-active', last_error = ?, updated_at = ? WHERE id = ?",
+                )
+                .run(
+                    JSON.stringify({
+                        class: "recovery-wait",
+                        message:
+                            "The previous score carrier has not been confirmed terminal; its reservation is retained",
+                    }),
+                    this.now(),
+                    authority.jobId,
+                );
         });
     }
     persistPayload(authority: RescoreAuthority, attemptId: string, text: string): boolean {
@@ -845,7 +871,7 @@ export class RescoreService {
                 .run(attempt.batch_id);
             this.db
                 .prepare(
-                    "UPDATE rescore_jobs SET consecutive_failed_batches = 0, pause_reason = CASE WHEN pause_reason = 'recomp-lease' THEN NULL ELSE pause_reason END, updated_at = ? WHERE id = ?",
+                    "UPDATE rescore_jobs SET consecutive_failed_batches = 0, pause_reason = CASE WHEN pause_reason IN ('recomp-lease','carrier-active') THEN NULL ELSE pause_reason END, updated_at = ? WHERE id = ?",
                 )
                 .run(this.now(), authority.jobId);
             this.finish(authority.jobId);

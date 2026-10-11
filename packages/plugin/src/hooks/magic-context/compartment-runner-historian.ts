@@ -309,7 +309,48 @@ export function createV1HiddenCompletionExecutor(
             return this.collect({ id }, 10);
         },
         async interrupt(id) {
-            await client?.session.abort({ path: { id }, query: { directory } });
+            if (!client) throw new Error("Hidden completion client is unavailable");
+            await client.session.abort({ path: { id }, query: { directory } });
+            const deadline = Date.now() + 30_000;
+            while (Date.now() < deadline) {
+                const state = await this.recoveryState?.(id);
+                if (state === "terminal" || state === "unavailable") return;
+                if (state !== "active") throw new Error("Cannot confirm score child termination");
+                await new Promise((resolve) => setTimeout(resolve, 200));
+            }
+            throw new Error("Score child did not become idle after interruption");
+        },
+        async recoveryState(id) {
+            if (!client) return "unknown";
+            try {
+                if (typeof client.session.status === "function") {
+                    const response = await client.session.status({ query: { directory } });
+                    const statuses = shared.normalizeSDKResponse(
+                        response,
+                        {} as Record<string, { type?: string }>,
+                    );
+                    return statuses[id] && statuses[id].type !== "idle" ? "active" : "terminal";
+                }
+                const response = await client.session.messages({
+                    path: { id },
+                    query: { directory, limit: 10 },
+                });
+                const messages = shared.normalizeSDKResponse(response, [] as unknown[], {
+                    preferResponseOnMissingData: true,
+                });
+                return messages.some(
+                    (message) =>
+                        isRecord(message) &&
+                        isRecord(message.info) &&
+                        message.info.role === "assistant" &&
+                        (message.info.finish ||
+                            (isRecord(message.info.time) && message.info.time.completed)),
+                )
+                    ? "terminal"
+                    : "unknown";
+            } catch (error) {
+                return isRecord(error) && error.status === 404 ? "unavailable" : "unknown";
+            }
         },
         async close(handle, settlement) {
             if (handle?.id) {
@@ -318,6 +359,7 @@ export function createV1HiddenCompletionExecutor(
                 forgetRescoreSampling(handle.id);
             }
             if (!client) return;
+            if (settlement.retainForRecovery) return;
             await teardownChildSession({
                 client,
                 sessionId: handle?.id || null,

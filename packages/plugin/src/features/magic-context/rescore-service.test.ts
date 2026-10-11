@@ -120,9 +120,11 @@ function carrier(complete: RescoreCarrier["complete"]): RescoreCarrier {
     return {
         complete,
         async recover() {
-            return null;
+            return { state: "unavailable" as const };
         },
-        async interrupt() {},
+        async interrupt() {
+            return true;
+        },
     };
 }
 
@@ -485,7 +487,7 @@ describe("rescore owner authority and crash recovery", () => {
             }),
             async recover() {
                 recovered++;
-                return null;
+                return { state: "unavailable" as const };
             },
         };
         await recoverRescore(f.service, current, transport);
@@ -510,7 +512,16 @@ describe("rescore owner authority and crash recovery", () => {
             async recover(id) {
                 expect(id).toBe("finished-child");
                 recoveries++;
-                return scores(call);
+                return {
+                    state: "completed" as const,
+                    completion: {
+                        text: scores(call),
+                        lengthCapped: false,
+                        providerId: "mock",
+                        modelId: "score",
+                        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                    },
+                };
             },
         });
         expect(recoveries).toBe(1);
@@ -654,4 +665,27 @@ test("explicit resume recovers admitted spend before retrying an abandoned Pi it
             ?.state,
     ).toBe("abandoned");
     expect(f.service.status(authority.jobId).job.state).toBe("complete");
+});
+
+test("unknown carrier termination retains the admitted reservation and refuses replacement spend", async () => {
+    const f = fixture();
+    const old = f.start();
+    const admission = f.service.admit(old)!;
+    f.service.recordCarrier(old, admission.attempt.id, "unknown-run");
+    f.advance();
+    const owner = f.service.takeover(old.jobId, old.generation)!;
+    let calls = 0;
+    const transport = {
+        ...carrier(async (request) => {
+            calls++;
+            return scores(request);
+        }),
+        async recover() {
+            return { state: "unknown" as const };
+        },
+    };
+    expect(await resumeRescore(f.service, owner, transport)).toBe(false);
+    expect(calls).toBe(0);
+    expect(f.service.status(owner.jobId).attempts[0].state).toBe("admitted");
+    expect(f.service.status(owner.jobId).job.pause_reason).toBe("carrier-active");
 });

@@ -16,7 +16,7 @@ import type { PromptArgs } from "../shared/model-suggestion-retry";
 import { parseProviderModel, toModelEntry } from "../shared/resolve-fallbacks";
 import { runTokenLog } from "../shared/run-token-log";
 import type { Database } from "../shared/sqlite";
-import { createNativeHiddenChildren } from "./hidden-child-native";
+import { createNativeHiddenChildren, isSessionNotFound } from "./hidden-child-native";
 import {
     assistantOutcome,
     errorText,
@@ -371,6 +371,7 @@ export function createLateHiddenExecutor(
         attempt: (handle, request) => wired().attempt(handle, request),
         collect: (handle, limit) => wired().collect(handle, limit),
         recover: (id) => wired().recover?.(id) ?? Promise.resolve(null),
+        recoveryState: (id) => wired().recoveryState?.(id) ?? Promise.resolve("unknown"),
         interrupt: (id) => wired().interrupt?.(id) ?? Promise.resolve(),
         close: (handle, settlement) => wired().close(handle, settlement),
     };
@@ -503,6 +504,7 @@ export async function createV2HiddenCompletionExecutor(
     const interruptAndRetire = async (run: RunState, reason: string): Promise<void> => {
         try {
             await host.interrupt({ sessionID: run.child.id });
+            if (run.identity.kind === "rescore") await host.wait({ sessionID: run.child.id });
         } finally {
             retire(run, reason);
         }
@@ -793,12 +795,7 @@ export async function createV2HiddenCompletionExecutor(
             return withReader(options.openReader, (reader) => {
                 const row = reader.latestAssistant(id);
                 const idle = reader.latestIdle(id);
-                if (
-                    !row ||
-                    !idle ||
-                    idle.seq < row.seq ||
-                    (row.data.outcome !== "succeeded" && row.data.finish !== "stop")
-                )
+                if (!row || !idle || idle.seq < row.seq || (!row.data.finish && !row.data.outcome))
                     return null;
                 const tokens = row.data.tokens;
                 return {
@@ -810,17 +807,58 @@ export async function createV2HiddenCompletionExecutor(
                         cacheWrite: tokens?.cache?.write ?? 0,
                     },
                     lengthCapped: ["length", "max_tokens"].includes(row.data.finish ?? ""),
+                    failed:
+                        row.data.error !== undefined ||
+                        idle.data.outcome === "failed" ||
+                        idle.data.outcome === "interrupted" ||
+                        row.data.outcome === "failed" ||
+                        row.data.outcome === "interrupted" ||
+                        row.data.finish === "error" ||
+                        row.data.finish === "aborted",
+                    providerId: row.data.model?.providerID,
+                    modelId: row.data.model?.id,
                 };
             });
         },
+        async recoveryState(id) {
+            const state = withReader(options.openReader, (reader) => {
+                const idle = reader.latestIdle(id);
+                return idle && idle.seq >= reader.latestSequence(id)
+                    ? ("terminal" as const)
+                    : undefined;
+            });
+            if (state) return state;
+            try {
+                await host.get({ sessionID: id });
+                return "active";
+            } catch (error) {
+                return isSessionNotFound(error) ? "unavailable" : "unknown";
+            }
+        },
         async interrupt(id) {
             await host.interrupt({ sessionID: id });
+            await host.wait({ sessionID: id });
         },
         async close(handle, settlement) {
             if (!handle) return;
             const run = runs.get(handle);
-            if (!run) return;
+            if (!run) {
+                if (
+                    settlement.context === "rescore" &&
+                    !settlement.retainForRecovery &&
+                    !options.keepSubagents
+                ) {
+                    try {
+                        await removeSession.call(host, { sessionID: handle.id });
+                    } catch (error) {
+                        if (!isSessionNotFound(error))
+                            note("Could not remove recovered score child");
+                    }
+                }
+                return;
+            }
             try {
+                if (settlement.retainForRecovery) return;
                 // Settled provider failures are retired in attempt() before the marker is released.
                 // Keep this guard for callers that close an unsuccessful run without an attempt
                 // error, but never make a retired child reusable through close().
@@ -841,7 +879,7 @@ export async function createV2HiddenCompletionExecutor(
                 runs.delete(handle);
                 run.releaseRole();
             }
-            await lifecycle.finish(run.child, run.retired);
+            if (!settlement.retainForRecovery) await lifecycle.finish(run.child, run.retired);
         },
     };
 }

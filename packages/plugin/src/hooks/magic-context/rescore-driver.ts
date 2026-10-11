@@ -9,17 +9,47 @@ import { recordSubagentInvocation } from "../../features/magic-context/storage-s
 import type { HarnessId } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
 import { historianPromptAdmissionFailure } from "./compartment-runner-historian";
-import type { HiddenCompletionExecutor, HiddenRunHandle } from "./compartment-runner-types";
+import type {
+    HiddenCompletion,
+    HiddenCompletionExecutor,
+    HiddenRunHandle,
+} from "./compartment-runner-types";
+
+export type RescoreRecovery =
+    | { state: "completed"; completion: HiddenCompletion }
+    | { state: "active" | "unavailable" | "unknown" };
+export class RescorePayloadError extends Error {}
+export class RescoreCarrierActiveError extends Error {}
+
+export function validateRescoreCompletion(
+    completion: HiddenCompletion,
+    profile: RescoreModelProfile,
+): string {
+    const model = splitModel(profile.model);
+    if (!model) throw new Error("No historian model configured for rescore");
+    if (
+        (completion.providerId && completion.providerId !== model.providerID) ||
+        (completion.modelId && completion.modelId !== model.modelID)
+    ) {
+        throw new Error("Score carrier answered with a different model than the frozen profile");
+    }
+    if (completion.failed || completion.lengthCapped || !completion.text)
+        throw new Error("Score completion failed, empty or length capped");
+    return completion.text;
+}
 
 export interface RescoreCarrier {
     complete(
         request: RescoreAdmission,
         signal: AbortSignal,
-        opened: (id: string) => boolean,
+        opened: (id: string, previousId?: string) => boolean,
+        stage?: (text: string) => boolean,
     ): Promise<string>;
     /** Reads a finished durable child only. Never opens or prompts a child. */
-    recover(id: string): Promise<string | null>;
-    interrupt(id: string): Promise<void>;
+    recover(id: string): Promise<RescoreRecovery>;
+    /** Resolves true only after the previous inference is known to be terminal. */
+    interrupt(id: string): Promise<boolean>;
+    release?(id: string, preserveRecovery?: boolean): Promise<void>;
 }
 
 export function rescoreAdmissionFailure(parentSessionId: string) {
@@ -48,14 +78,21 @@ export function createOpenCodeRescoreCarrier(options: {
     timeoutMs: number;
 }): RescoreCarrier {
     const { executor } = options;
+    const active = new Map<string, Promise<void>>();
     return {
-        async complete(request, signal, opened) {
+        async complete(request, signal, opened, stage) {
             const reference = request.profile.model;
             const model = splitModel(reference);
             if (!model || !reference) throw new Error("No historian model configured for rescore");
             let handle: HiddenRunHandle | null = null;
             let settled = false;
             let accepted = false;
+            let staged = false;
+            let unsafeToClose = false;
+            let finished!: () => void;
+            const done = new Promise<void>((resolve) => {
+                finished = resolve;
+            });
             const start = Date.now();
             let completion: Awaited<ReturnType<HiddenCompletionExecutor["collect"]>> | undefined;
             try {
@@ -72,6 +109,7 @@ export function createOpenCodeRescoreCarrier(options: {
                     maxOutputTokens: request.profile.maxOutputTokens,
                     metadata: { temperature: request.profile.temperature },
                 });
+                active.set(handle.id, done);
                 if (!opened(handle.childSessionId ?? handle.id) || signal.aborted)
                     throw new Error("Rescore owner lost before prompt");
                 await executor.attempt(handle, {
@@ -91,46 +129,87 @@ export function createOpenCodeRescoreCarrier(options: {
                 });
                 settled = true;
                 completion = await executor.collect(handle, 10);
-                if (
-                    (completion.providerId && completion.providerId !== model.providerID) ||
-                    (completion.modelId && completion.modelId !== model.modelID)
-                )
-                    throw new Error(
-                        "Score carrier answered with a different model than the frozen profile",
-                    );
-                if (completion.lengthCapped || !completion.text)
-                    throw new Error("Score completion empty or length capped");
+                const text = validateRescoreCompletion(completion, request.profile);
                 accepted = true;
-                return completion.text;
+                if (stage) {
+                    try {
+                        staged = stage(text);
+                    } catch {
+                        throw new RescorePayloadError("Score payload could not be staged");
+                    }
+                    if (!staged)
+                        throw new RescoreCarrierActiveError(
+                            "Score owner lost before payload staging",
+                        );
+                }
+                return text;
+            } catch (error) {
+                if (handle && !settled) {
+                    try {
+                        await executor.interrupt?.(handle.id);
+                    } catch {
+                        unsafeToClose = true;
+                        throw new RescoreCarrierActiveError(
+                            "Score child termination could not be confirmed",
+                        );
+                    }
+                }
+                throw error;
             } finally {
-                recordSubagentInvocation(options.db, {
-                    sessionId: options.sessionId,
-                    harness: options.harness,
-                    subagent: "rescore",
-                    task: request.attempt.id,
-                    providerId: completion?.providerId ?? model.providerID,
-                    modelId: completion?.modelId ?? model.modelID,
-                    startedAt: start,
-                    endedAt: Date.now(),
-                    status: accepted ? "completed" : signal.aborted ? "aborted" : "failed",
-                    inputTokens: completion?.usage.input ?? 0,
-                    outputTokens: completion?.usage.output ?? 0,
-                    cacheReadTokens: completion?.usage.cacheRead ?? 0,
-                    cacheWriteTokens: completion?.usage.cacheWrite ?? 0,
-                });
-                await executor.close(handle, {
-                    promptSettled: settled,
-                    privacySensitive: false,
-                    context: "rescore",
-                    log: () => {},
-                });
+                try {
+                    try {
+                        recordSubagentInvocation(options.db, {
+                            sessionId: options.sessionId,
+                            harness: options.harness,
+                            subagent: "rescore",
+                            task: request.attempt.id,
+                            providerId: completion?.providerId ?? model.providerID,
+                            modelId: completion?.modelId ?? model.modelID,
+                            startedAt: start,
+                            endedAt: Date.now(),
+                            status: accepted ? "completed" : signal.aborted ? "aborted" : "failed",
+                            inputTokens: completion?.usage.input ?? 0,
+                            outputTokens: completion?.usage.output ?? 0,
+                            cacheReadTokens: completion?.usage.cacheRead ?? 0,
+                            cacheWriteTokens: completion?.usage.cacheWrite ?? 0,
+                        });
+                    } finally {
+                        await executor.close(handle, {
+                            promptSettled: settled,
+                            retainForRecovery: unsafeToClose || (accepted && !staged),
+                            privacySensitive: false,
+                            context: "rescore",
+                            log: () => {},
+                        });
+                    }
+                } finally {
+                    if (handle) active.delete(handle.id);
+                    finished();
+                }
             }
         },
         async recover(id) {
-            return executor.recover ? ((await executor.recover(id))?.text ?? null) : null;
+            if (active.has(id)) return { state: "active" };
+            const state = await executor.recoveryState?.(id);
+            if (state === "active") return { state };
+            const completion = await executor.recover?.(id);
+            if (completion) return { state: "completed", completion };
+            return {
+                state: state === "terminal" || state === "unavailable" ? "unavailable" : "unknown",
+            };
         },
         async interrupt(id) {
-            await executor.interrupt?.(id);
+            if (!executor.interrupt) return false;
+            await executor.interrupt(id);
+            await active.get(id);
+            return true;
+        },
+        async release(id, preserveRecovery) {
+            if (preserveRecovery) return;
+            await executor.close(
+                { id },
+                { promptSettled: true, privacySensitive: false, context: "rescore", log: () => {} },
+            );
         },
     };
 }
@@ -141,33 +220,69 @@ export async function recoverRescore(
     authority: RescoreAuthority,
     carrier: RescoreCarrier,
 ): Promise<void> {
-    const attempt = service
-        .status(authority.jobId)
-        .attempts.find((attempt) => attempt.state === "admitted");
+    if (!service.hasAuthority(authority)) return;
+    const status = service.status(authority.jobId);
+    const attempt = status.attempts.find((attempt) => attempt.state === "admitted");
     if (!attempt) return;
-    // Status intentionally omits private payloads. Publication reads staging directly.
-    const published = service.publish(authority, attempt.id);
-    if (published) return;
-    let text: string | null = null;
+    let recovered: RescoreRecovery = { state: "unavailable" };
     if (attempt.carrier_run_id) {
         try {
-            text = await carrier.recover(attempt.carrier_run_id);
+            recovered = await carrier.recover(attempt.carrier_run_id);
+            if (recovered.state === "active" && service.hasAuthority(authority)) {
+                if (!(await carrier.interrupt(attempt.carrier_run_id))) {
+                    service.waitForCarrier(authority, attempt.id);
+                    return;
+                }
+                recovered = await carrier.recover(attempt.carrier_run_id);
+                if (recovered.state === "active") recovered = { state: "unavailable" };
+            }
         } catch {
-            /* Unreadable children retain their admitted spend record. */
+            recovered = { state: "unknown" };
         }
     }
-    if (text !== null) {
+    if (recovered.state === "active" || recovered.state === "unknown") {
+        service.waitForCarrier(authority, attempt.id);
+        return;
+    }
+    if (!service.hasAuthority(authority)) return;
+    // A staged payload is authoritative, but the carrier must be terminal before its reservation is released.
+    const published = service.publish(authority, attempt.id);
+    if (published) {
+        if (attempt.carrier_run_id) await carrier.release?.(attempt.carrier_run_id);
+        return;
+    }
+    if (recovered.state === "completed") {
+        let text: string;
+        try {
+            text = validateRescoreCompletion(
+                recovered.completion,
+                JSON.parse(status.job.model_profile) as RescoreModelProfile,
+            );
+        } catch {
+            const receipt = service.fail(authority, attempt.id, {
+                class: "invalid-completion",
+                message:
+                    "Recovered score completion is failed, length capped or outside the frozen model",
+            });
+            if (attempt.carrier_run_id) await carrier.release?.(attempt.carrier_run_id, !receipt);
+            return;
+        }
         try {
             if (!service.persistPayload(authority, attempt.id, text)) return;
         } catch {
-            service.fail(authority, attempt.id, {
+            const receipt = service.fail(authority, attempt.id, {
                 class: "invalid-payload",
                 message: "Recovered score payload is invalid",
             });
+            if (attempt.carrier_run_id) await carrier.release?.(attempt.carrier_run_id, !receipt);
             return;
         }
+        if (attempt.carrier_run_id) await carrier.release?.(attempt.carrier_run_id);
         service.publish(authority, attempt.id);
-    } else service.abandon(authority, attempt.id);
+    } else {
+        const receipt = service.abandon(authority, attempt.id);
+        if (attempt.carrier_run_id) await carrier.release?.(attempt.carrier_run_id, !receipt);
+    }
 }
 
 export async function driveRescore(
@@ -190,6 +305,8 @@ export async function driveRescore(
                 .status(authority.jobId)
                 .attempts.find((attempt) => attempt.state === "admitted");
             if (existing) {
+                await recoverRescore(service, authority, carrier);
+                if (service.status(authority.jobId).job.pause_reason === "carrier-active") return;
                 const result = service.publish(authority, existing.id);
                 if (!result) return;
                 if (result.state === "waiting") {
@@ -201,29 +318,56 @@ export async function driveRescore(
             const admission = service.admit(authority);
             if (!admission) return;
             let text: string;
+            let carrierId: string | undefined;
             try {
                 if (!admission.profile.model)
                     throw new Error("No historian model configured for rescore");
-                text = await carrier.complete(admission, controller.signal, (id) =>
-                    service.recordCarrier(authority, admission.attempt.id, id),
+                text = await carrier.complete(
+                    admission,
+                    controller.signal,
+                    (id, previousId) => {
+                        if (
+                            !service.recordCarrier(
+                                authority,
+                                admission.attempt.id,
+                                id,
+                                previousId ?? null,
+                            )
+                        )
+                            return false;
+                        carrierId = id;
+                        return true;
+                    },
+                    (body) => service.persistPayload(authority, admission.attempt.id, body),
                 );
             } catch (error) {
+                if (error instanceof RescoreCarrierActiveError) {
+                    service.waitForCarrier(authority, admission.attempt.id);
+                    return;
+                }
                 // Carrier/provider failures are messages, not score output or parsed reasons.
-                service.fail(authority, admission.attempt.id, {
-                    class: "model-failure",
+                const receipt = service.fail(authority, admission.attempt.id, {
+                    class:
+                        error instanceof RescorePayloadError ? "invalid-payload" : "model-failure",
                     message: error instanceof Error ? error.message : "Score carrier failed",
                 });
+                if (carrierId) await carrier.release?.(carrierId, !receipt);
                 continue;
             }
             try {
-                if (!service.persistPayload(authority, admission.attempt.id, text)) return;
+                if (!service.persistPayload(authority, admission.attempt.id, text)) {
+                    if (carrierId) await carrier.release?.(carrierId, true);
+                    return;
+                }
             } catch {
-                service.fail(authority, admission.attempt.id, {
+                const receipt = service.fail(authority, admission.attempt.id, {
                     class: "invalid-payload",
                     message: "Score payload is invalid",
                 });
+                if (carrierId) await carrier.release?.(carrierId, !receipt);
                 continue;
             }
+            if (carrierId) await carrier.release?.(carrierId);
             for (;;) {
                 const result = service.publish(authority, admission.attempt.id);
                 if (!result) return;
@@ -256,6 +400,7 @@ export async function resumeRescore(
     carrier: RescoreCarrier,
 ): Promise<boolean> {
     await recoverRescore(service, authority, carrier);
+    if (service.status(authority.jobId).job.pause_reason === "carrier-active") return false;
     await driveRescore(service, authority, carrier, { recoveryOnly: true });
     if (!service.resume(authority)) return false;
     await driveRescore(service, authority, carrier);
@@ -268,5 +413,13 @@ export async function cancelRescore(
     carrier: RescoreCarrier,
 ): Promise<void> {
     const ids = service.cancel(jobId);
-    await Promise.all(ids.map((id) => carrier.interrupt(id).catch(() => {})));
+    await Promise.all(
+        ids.map(async (id) => {
+            try {
+                if (await carrier.interrupt(id)) await carrier.release?.(id);
+            } catch {
+                /* The cancelled spend record remains even when the host cannot acknowledge interruption. */
+            }
+        }),
+    );
 }

@@ -71,6 +71,12 @@ export interface SubagentRunOptions {
     temperature?: number | undefined;
     /** Requested output-token budget for the provider request. */
     maxOutputTokens?: number | undefined;
+    /** Score jobs stage the answer synchronously before subprocess output is discarded. */
+    onResult?: (result: SubagentRunResult) => void;
+    /** Score recovery needs termination, not merely an abort request, before releasing spend. */
+    waitForExit?: boolean;
+    /** Opaque process-instance token included in the child's system-prompt file path. */
+    runIdentity?: string;
     /** Per-child cumulative prompt tokens for tool-loop dreamer tasks. */
     tokenBudget?: number | undefined;
     cwd?: string | undefined;

@@ -106,6 +106,7 @@ export interface HiddenCompletion {
     reasoning?: string | null;
     usage: TokenTotals;
     lengthCapped: boolean;
+    failed?: boolean;
     tokenLog?: import("../../shared/run-token-log").RunTokenLog;
     /** Original host messages are retained only by transports that expose them. */
     messages?: unknown[];
@@ -121,11 +122,16 @@ export interface HiddenCompletionExecutor {
     collect(handle: HiddenRunHandle, limit: number): Promise<HiddenCompletion>;
     /** Reads a finished durable child after restart, without placing a prompt. */
     recover?(childSessionId: string): Promise<HiddenCompletion | null>;
+    recoveryState?(
+        childSessionId: string,
+    ): Promise<"active" | "terminal" | "unavailable" | "unknown">;
     interrupt?(childSessionId: string): Promise<void>;
     close(
         handle: HiddenRunHandle | null,
         settlement: {
             promptSettled: boolean;
+            /** Release local resources without deleting the durable recovery source. */
+            retainForRecovery?: boolean;
             privacySensitive: boolean;
             context: string;
             log: (message: string) => void;

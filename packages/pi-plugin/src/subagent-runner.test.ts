@@ -4177,3 +4177,69 @@ it("rescore spawns one tool-less child with explicit frozen sampling and no prov
 		rmSync(testDataDir, { recursive: true, force: true });
 	}
 });
+
+it("score handoff stages the answer before subprocess cleanup but still waits for exit", async () => {
+	const child = createMockChild();
+	const { runner, spawnImpl } = runnerWith(child);
+	let payload: string | undefined;
+	let settled = false;
+	const resultPromise = runner.run({
+		...baseOptions,
+		agent: "rescore",
+		waitForExit: true,
+		onResult(result) {
+			if (result.ok) {
+				const [, , options] = spawnImpl.mock.calls[0] as unknown as [
+					string,
+					string[],
+					{ env: NodeJS.ProcessEnv },
+				];
+				expect(
+					existsSync(
+						requirePromptPath(options.env.MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE),
+					),
+				).toBe(true);
+				payload = result.assistantText;
+			}
+		},
+	});
+	resultPromise.then(() => {
+		settled = true;
+	});
+	child.writeStdoutLine(
+		agentEnd([
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "[]" }],
+				stopReason: "stop",
+			},
+		]),
+	);
+	await nextTick();
+	expect(payload).toBe("[]");
+	expect(settled).toBe(false);
+	child.emitClose(0);
+	expect((await resultPromise).ok).toBe(true);
+});
+
+it("score abort keeps the runner pending until the subprocess really exits", async () => {
+	const child = createMockChild();
+	const { runner } = runnerWith(child);
+	const controller = new AbortController();
+	let settled = false;
+	const resultPromise = runner.run({
+		...baseOptions,
+		agent: "rescore",
+		waitForExit: true,
+		signal: controller.signal,
+	});
+	resultPromise.then(() => {
+		settled = true;
+	});
+	controller.abort();
+	await nextTick();
+	expect(child.killed).toBe(true);
+	expect(settled).toBe(false);
+	child.emitClose(null, "SIGTERM");
+	expect(await resultPromise).toMatchObject({ ok: false, reason: "abort" });
+});

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPiRescoreCarrier } from "../../../../pi-plugin/src/rescore-carrier";
@@ -21,6 +21,7 @@ import { setKeepSubagents } from "../../shared/keep-subagents";
 import { Database } from "../../shared/sqlite";
 import { configureContextDatabasePragmas } from "../../shared/sqlite-context-pragmas";
 import type { SubagentRunner } from "../../shared/subagent-runner";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { childCreateInput } from "../../v2/hidden-child-record";
 import { createV2HiddenCompletionExecutor, type HiddenChildHost } from "../../v2/hidden-completion";
 import { HiddenChildHook, hiddenToolCallRefusal } from "../../v2/hooks/hidden-child";
@@ -48,7 +49,7 @@ function fixture(fileBacked = false, harness = "opencode") {
         const parent = join(tmpdir(), "magic-context");
         // Fixtures never open the user's context.db.
         mkdirSync(parent, { recursive: true });
-        const root = mkdtempSync(join(parent, "rescore-s4-review-"));
+        const root = createTestTempDirFromPath(join(parent, "rescore-s4-review-"));
         roots.push(root);
         path = join(root, "context.db");
     }
@@ -487,6 +488,7 @@ review(
         ) => {
             const children = inputs.map((input) =>
                 Bun.spawn({
+                    windowsHide: true,
                     cmd: [process.execPath, "-e", script],
                     stdout: "pipe",
                     stderr: "pipe",
@@ -554,7 +556,7 @@ hostReview(
             await import("../../../../e2e-tests/src/opencode2-runner/spawn");
         const parent = join(tmpdir(), "magic-context", "rescore-s4-review");
         mkdirSync(parent, { recursive: true });
-        const root = realpathSync(mkdtempSync(join(parent, "host-")));
+        const root = realpathSync(createTestTempDirFromPath(join(parent, "host-")));
         roots.push(root);
         const env: NodeJS.ProcessEnv = {
             PATH: process.env.PATH,
@@ -591,6 +593,7 @@ hostReview(
             });
             await waitForPluginActive(client, cwd);
             const opened = execFileSync("lsof", ["-p", String(host.pid), "-Fn"], {
+                windowsHide: true,
                 encoding: "utf8",
             });
             const paths = opened
@@ -600,7 +603,7 @@ hostReview(
             expect(paths.length).toBeGreaterThan(0);
             assertOpenPaths(paths, root);
             console.log(
-                `rescore-s4-review host ${execFileSync(CLI, ["--version"], { env, encoding: "utf8" }).trim()} pid=${host.pid} lsof db=${JSON.stringify(paths)}`,
+                `rescore-s4-review host ${execFileSync(CLI, ["--version"], { env, encoding: "utf8", windowsHide: true }).trim()} pid=${host.pid} lsof db=${JSON.stringify(paths)}`,
             );
             const info = await client.agent.get({
                 agentID: "rescore",
