@@ -31,6 +31,7 @@ export interface PiModelRegistryLike {
 	getAll?: () => ReadonlyArray<{ provider?: unknown; id?: unknown }>;
 	/** OMP only: resolves once the boot-time discovery merge has settled. */
 	awaitBackgroundRefresh?: () => Promise<unknown>;
+	awaitInitialBackgroundRefresh?: () => Promise<unknown>;
 }
 
 export interface DroppedPiModel {
@@ -94,9 +95,13 @@ export function isPiModelRegistered(
  * next synchronous check to report the miss.
  */
 export async function waitForPiModelRegistryRefresh(
-	registry: Pick<PiModelRegistryLike, "awaitBackgroundRefresh">,
+	registry: Pick<
+		PiModelRegistryLike,
+		"awaitBackgroundRefresh" | "awaitInitialBackgroundRefresh"
+	>,
 ): Promise<void> {
-	const refresh = registry.awaitBackgroundRefresh;
+	const refresh =
+		registry.awaitInitialBackgroundRefresh ?? registry.awaitBackgroundRefresh;
 	if (typeof refresh !== "function") return;
 	try {
 		await refresh.call(registry);

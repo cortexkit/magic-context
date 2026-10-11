@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { LiveConfigReader } from "@magic-context/core/config/live-snapshot";
 import type { MagicContextConfig } from "@magic-context/core/config/schema/magic-context";
 import {
 	clearSession,
@@ -25,7 +26,6 @@ import {
 	suggestRegisteredPiModel,
 } from "./model-chain-health";
 import { MAGIC_CONTEXT_PI_SUBAGENT_ENV } from "./subagent-runner";
-import { LiveConfigReader } from "@magic-context/core/config/live-snapshot";
 
 // The registry an operator had: the antigravity-auth extension registers its
 // provider as `google-antigravity`, and pi-ollama-cloud's catalog carries
@@ -238,9 +238,7 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 	// Only the historian trigger lines, so an assertion names what the report
 	// decided instead of incidental boot logging.
 	function triggerLines(logs: string[]): string[] {
-		return logs.filter((line) =>
-			line.includes("registered historian trigger"),
-		);
+		return logs.filter((line) => line.includes("registered historian trigger"));
 	}
 
 	// Yield until queued microtasks -- the settled refresh's re-check chain --
@@ -415,15 +413,16 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 		const hydratedModels = [
 			{ provider: "litellm", id: "google/gemini-3.1-flash-lite" },
 		];
+		const initialDiscovery = Promise.withResolvers<void>();
 		const lateRegistry = {
 			find: (provider: string, id: string) =>
 				(hydrated ? hydratedModels : []).find(
 					(m) => m.provider === provider && m.id === id,
 				),
 			getAll: () => (hydrated ? hydratedModels : []),
-			awaitBackgroundRefresh: async () => {
-				hydrated = true;
-			},
+			// The in-flight API is a no-op before OMP starts discovery.
+			awaitBackgroundRefresh: async () => {},
+			awaitInitialBackgroundRefresh: () => initialDiscovery.promise,
 		};
 
 		const runtime = createPi();
@@ -437,6 +436,13 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 			ui: { notify, setStatus: () => undefined },
 		};
 		await runtime.emit("session_start", ctx);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(notify).not.toHaveBeenCalled();
+		expect(
+			logs.some((line) => line.includes("registered historian trigger")),
+		).toBe(false);
+		hydrated = true;
+		initialDiscovery.resolve();
 		const { promise: settled, resolve: resolveSettled } =
 			Promise.withResolvers<void>();
 		setImmediate(resolveSettled);
@@ -481,7 +487,9 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 					: []
 				).find((model) => model.provider === provider && model.id === id),
 			getAll: () =>
-				hydrated ? [{ provider: "litellm", id: "google/gemini-3.1-flash-lite" }] : [],
+				hydrated
+					? [{ provider: "litellm", id: "google/gemini-3.1-flash-lite" }]
+					: [],
 			awaitBackgroundRefresh: () => refreshing,
 		};
 
