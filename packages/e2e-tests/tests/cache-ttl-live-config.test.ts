@@ -36,7 +36,7 @@ test("OpenCode 1 live cache_ttl edits affect the next idle check without changin
     try {
         expect(realpathSync(root).startsWith(realpathSync(taskRoot) + "/")).toBe(true);
         const health = await fetch(`${h.serverUrl}/global/health`).then(r => r.json()) as { version: string };
-        expect(health.version).toMatch(/^1\.18\./);
+        expect(health.version).toMatch(/^1\./);
         const containment = () => {
             const result = spawnSync("timeout", ["10s", "lsof", "-p", String(h.opencode.pid), "-Fn"], { encoding: "utf8" });
             expect(result.status).toBe(0);

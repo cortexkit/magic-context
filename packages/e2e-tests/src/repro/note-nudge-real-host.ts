@@ -30,7 +30,7 @@ const env = {
     OPENCODE_DISABLE_AUTOUPDATE: "true", OPENCODE_DISABLE_MODELS_FETCH: "true",
 };
 const version = Bun.spawnSync([binary, "--version"], { env }).stdout.toString().trim();
-if (!/^1\.18\./.test(version)) throw new Error(`Expected OpenCode 1.18.x, got ${version}`);
+if (!/^1\./.test(version)) throw new Error(`Expected OpenCode 1.x, got ${version}`);
 const mock = new MockProvider();
 const { baseURL } = await mock.start();
 mock.setDefault({ text: "MOCK_ANSWER", usage: { input_tokens: 1000, output_tokens: 10 } });

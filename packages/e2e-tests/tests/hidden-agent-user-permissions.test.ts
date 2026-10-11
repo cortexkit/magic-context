@@ -58,7 +58,7 @@ test("OpenCode 1 keeps every hidden Magic Context agent's denies over a user con
 		const health = (await fetch(`${h.serverUrl}/global/health`).then((r) => r.json())) as {
 			version: string;
 		};
-		expect(health.version).toMatch(/^1\.18\./);
+		expect(health.version).toMatch(/^1\./);
 		const files = inspectHostOpenFiles(h.opencode.pid, dirname(h.opencode.env.configDir), h.contextDbPath());
 		console.log(`issue-639 oc1 host=${health.version} pid=${files.pid} lsof=${JSON.stringify(files.databases)}`);
 		const agents = (await fetch(`${h.serverUrl}/agent`).then((r) => r.json())) as Array<{

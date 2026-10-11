@@ -149,7 +149,7 @@ for (const { band, mode } of [{ band: 76, mode: "drops" }, { band: 85, mode: "dr
 					version: string;
 				}
 			).version;
-			expect(version).toMatch(/^1\.18\./);
+			expect(version).toMatch(/^1\./);
 			const contain = () => {
 				const lsof = spawnSync("lsof", ["-p", String(h.opencode.pid), "-Fn"], {
 					encoding: "utf8",

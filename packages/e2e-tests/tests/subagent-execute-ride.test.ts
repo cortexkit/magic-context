@@ -51,7 +51,7 @@ test("issue 619 task subagent drops ride execute once and replay the provider pr
         const health = (await fetch(`${h.serverUrl}/global/health`).then((r) => r.json())) as {
             version: string;
         };
-        expect(health.version).toMatch(/^1\.18\./);
+        expect(health.version).toMatch(/^1\./);
         const containment = () => {
             const result = spawnSync("lsof", ["-p", String(h.opencode.pid), "-Fn"], {
                 encoding: "utf8",

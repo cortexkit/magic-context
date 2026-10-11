@@ -13,7 +13,7 @@ test("OC1 task child cannot write memories or notes; primary tools and bytes sur
     const store = new Database(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
     try {
         const version = await fetch(`${h.serverUrl}/global/health`).then(r => r.json()) as { version: string };
-        expect(version.version).toMatch(/^1\.18\./);
+        expect(version.version).toMatch(/^1\./);
         const root = dirname(h.opencode.env.configDir);
         const files = inspectHostOpenFiles(h.opencode.pid, root, h.contextDbPath());
         console.log(JSON.stringify({ version: version.version, root, pid: files.pid, lsofDatabases: files.databases }));

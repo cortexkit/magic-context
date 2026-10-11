@@ -28,7 +28,7 @@ test.skipIf(!process.env.MC_RUST_STAGE_BASELINE)("old/new Rust adapters serve id
     mkdirSync(requestedRoot, { recursive: true });
     const root = realpathSync(requestedRoot);
     const version = execFileSync("opencode", ["--version"], { encoding: "utf8" }).trim();
-    expect(version).toMatch(/^1\.18\./);
+    expect(version).toMatch(/^1\./);
     console.log(`RUST_STAGE_HOST OpenCode=${version} Bun=${Bun.version} root=${root}`);
     const projectRoot = join(root, "project");
     mkdirSync(projectRoot, { recursive: true });

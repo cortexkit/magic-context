@@ -426,7 +426,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
         h = await RustTestHarness.create({ modelContextLimit: 872_000, historianModelContextLimit: 872_000, magicContextConfig: config, startInTsMode: true, startHistorianProducer: false, mockDefault: { text: "mixed fixture reply", usage: { input_tokens: 350_000, output_tokens: 20 } } });
         h.subc.writeModuleConfig(config);
         const health = await fetch(`${h.opencode.url}/global/health`).then(response => response.json()) as { version: string };
-        expect(health.version).toMatch(/^1\.18\./);
+        expect(health.version).toMatch(/^1\./);
         const sessionId = await h.createSession();
         await h.sendPrompt(sessionId, "seed mixed sparse history");
         assertHermeticStores(h);
