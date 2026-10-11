@@ -17144,6 +17144,27 @@ fn set_memory_verification_tx(
                     continue;
                 };
                 let hash = compute_normalized_memory_hash(content);
+                // memories has UNIQUE(project_path, category, normalized_hash). A
+                // rewrite onto another memory's exact content would fail the whole
+                // transaction, so reject that row instead; merging the two is not
+                // the verifier's call.
+                let duplicate: Option<i64> = tx
+                    .query_row(
+                        "SELECT id FROM memories
+                          WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3
+                            AND id <> ?4
+                          LIMIT 1",
+                        params![memory.project_path, memory.category, hash, update.memory_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(duplicate_id) = duplicate {
+                    rejected.push(VerificationRejected {
+                        memory_id: update.memory_id,
+                        reason: format!("duplicate_of:{duplicate_id}"),
+                    });
+                    continue;
+                }
                 tx.execute(
                     "UPDATE memories
                         SET content = ?1, normalized_hash = ?2, updated_at = ?3,

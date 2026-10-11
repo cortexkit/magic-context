@@ -19,6 +19,7 @@ import type { Database } from "../../../shared/sqlite";
 import {
     archiveMemory,
     clearMemoryVerifications,
+    getMemoryByHash,
     getMemoryById,
     hasMemoryClassifiedAtColumn,
     hasMemoryShareableColumn,
@@ -743,6 +744,24 @@ async function applyParsedVerifyManifest(
                 if (verifiedHead) recordVerifiedCommit(args.db, memory, now, verifiedHead);
                 verified += 1;
             } else if (w.kind === "update") {
+                // memories has UNIQUE(project_path, category, normalized_hash).
+                // A rewrite that lands on another memory's exact content would
+                // throw and roll back the whole batch, so skip it instead. Two
+                // memories saying the same thing is a merge, which verify does
+                // not decide; curate or an agent can merge them.
+                const duplicate = getMemoryByHash(
+                    args.db,
+                    memory.projectPath,
+                    memory.category,
+                    w.hash,
+                );
+                if (duplicate && duplicate.id !== memory.id) {
+                    log(
+                        `[dreamer] verify safety refusal: memory_id=${w.id} verdict=update reason=duplicate-of duplicate_id=${duplicate.id}`,
+                    );
+                    refused += 1;
+                    continue;
+                }
                 rewriteMemoryContent(args.db, memory, w.content, w.hash);
                 queueMemoryMutation(args.db, {
                     projectPath: args.projectIdentity,

@@ -1222,6 +1222,66 @@ describe("applyVerifyManifest", () => {
         }
     });
 
+    test("refuses a rewrite onto another memory's exact content without losing the rest of the batch", async () => {
+        const db = freshDb();
+        const logSpy = spyOn(logger, "log").mockImplementation(() => {});
+        try {
+            const projectIdentity = "git:verify-duplicate";
+            const dir = tempProject();
+            const existing = insertMemory(db, {
+                projectPath: projectIdentity,
+                category: "ARCHITECTURE",
+                content: "The cache verifier now reads src/new.ts before it changes state.",
+                sourceSessionId: "ses",
+            });
+            const target = insertMemory(db, {
+                projectPath: projectIdentity,
+                category: "ARCHITECTURE",
+                content: "The cache verifier reads src/old.ts before it changes state.",
+                sourceSessionId: "ses",
+            });
+            const other = insertMemory(db, {
+                projectPath: projectIdentity,
+                category: "ARCHITECTURE",
+                content: "The store keeps one writer lease per data directory.",
+                sourceSessionId: "ses",
+            });
+
+            const result = await applyVerifyManifest(
+                verifyArgs(db, dir, projectIdentity),
+                [target, other].map((memory) => ({
+                    id: memory.id,
+                    category: memory.category,
+                    content: memory.content,
+                    mappedFiles: [],
+                })),
+                `<verify><update id="${target.id}" files="src/new.ts">${existing.content}</update><verified id="${other.id}"/></verify>`,
+            );
+
+            // The duplicate rewrite is refused; the same batch still verifies the other memory.
+            expect(result).toEqual({
+                verified: 1,
+                updated: 0,
+                archived: 0,
+                skipped: 0,
+                refused: 1,
+            });
+            expect(getMemoryById(db, target.id)?.content).toBe(target.content);
+            expect(getMemoryById(db, existing.id)?.content).toBe(existing.content);
+            expect(
+                logSpy.mock.calls.some(
+                    ([message]) =>
+                        typeof message === "string" &&
+                        message.includes(`memory_id=${target.id} verdict=update`) &&
+                        message.includes(`reason=duplicate-of duplicate_id=${existing.id}`),
+                ),
+            ).toBe(true);
+        } finally {
+            logSpy.mockRestore();
+            closeQuietly(db);
+        }
+    });
+
     test("allows an explicitly marked consolidation to cross the content-loss belt", async () => {
         const db = freshDb();
         try {

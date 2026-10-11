@@ -32136,6 +32136,30 @@ mod tests {
             "content updates advance the m1 mutation signal"
         );
 
+        // A rewrite onto another memory's exact content (same project and
+        // category) is rejected by name instead of failing the whole batch on the
+        // UNIQUE index; the other row in the same call still applies.
+        let duplicate = call_facade(&handler, "memory.set_verification", json!({
+            "memory_project": identity, "context_store_uuid": "context", "authority_generation": generation,
+            "rows": [
+                {"memory_id": archived_id, "content_hash_at_prompt": hash(archived_id), "verification_status": "update", "updated_content": "updated by verifier"},
+                {"memory_id": verified_id, "content_hash_at_prompt": hash(verified_id), "verification_status": "verified"}
+            ]
+        })).await;
+        let duplicate_body = match duplicate {
+            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+            other => panic!("duplicate update facade failed: {other:?}"),
+        };
+        assert_eq!(duplicate_body["accepted"], json!([verified_id]));
+        assert_eq!(
+            duplicate_body["rejected"],
+            json!([{"memory_id": archived_id, "reason": format!("duplicate_of:{updated_id}")}])
+        );
+        assert_eq!(
+            store.get_memory_full(archived_id).unwrap().unwrap().content,
+            "archived"
+        );
+
         let before_archive =
             crate::m1_compose::m1_revision_signal(&store, identity, "session").unwrap();
         let archive = call_facade(&handler, "memory.set_verification", json!({
