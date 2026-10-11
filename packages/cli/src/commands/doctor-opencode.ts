@@ -1716,6 +1716,9 @@ export async function runDoctor(
         magicContextStatusKnown = true;
     }
 
+    // When the config can't be read, whether Magic Context is registered is
+    // unknown. Run the install checks rather than silently skipping them.
+    if (!magicContextStatusKnown) magicContextInstalled = true;
     const hostPluginStatus = magicContextStatusKnown
         ? getOpenCodePluginHostStatus(
               openCodeHostLabel,
