@@ -4,6 +4,15 @@ import { dreamerRunConfig } from "./live-run-config";
 import type { MagicContextConfig } from "./schema/magic-context";
 
 const historianCaps = new BoundedSessionMap<{ value: number | undefined }>(4096);
+const rescoreSampling = new BoundedSessionMap<{ cap: number; temperature: number }>(4096);
+
+export function rememberRescoreSampling(sessionId: string, cap: number, temperature: number) {
+    rescoreSampling.set(sessionId, { cap, temperature });
+}
+
+export function forgetRescoreSampling(sessionId: string) {
+    rescoreSampling.delete(sessionId);
+}
 
 /** Keep the historian child session's output cap fixed across later config changes. */
 export function rememberHistorianOutputCap(sessionId: string, cap: number | undefined) {
@@ -42,8 +51,16 @@ export function createDreamerOutputCapSampler<T extends MagicContextConfig>(
     return {
         apply(
             input: { sessionID: string; agent: string },
-            output: { maxOutputTokens: number | undefined },
+            output: { maxOutputTokens: number | undefined; temperature?: number },
         ) {
+            if (input.agent === "rescore") {
+                const sampling = rescoreSampling.get(input.sessionID);
+                if (sampling) {
+                    output.maxOutputTokens = sampling.cap;
+                    output.temperature = sampling.temperature;
+                }
+                return;
+            }
             // An unset cap must leave the host's own output limit in place. Writing
             // `undefined` over it removes the limit OpenCode computed from the model,
             // and some providers then send no usable max_tokens (a local Anthropic-
@@ -69,6 +86,7 @@ export function createDreamerOutputCapSampler<T extends MagicContextConfig>(
         delete(sessionId: string) {
             caps.delete(sessionId);
             forgetHistorianOutputCap(sessionId);
+            forgetRescoreSampling(sessionId);
         },
     };
 }

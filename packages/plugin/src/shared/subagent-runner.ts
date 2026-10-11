@@ -102,6 +102,7 @@ export interface SubagentRunOptions {
     /** Optional token accounting metadata. When present, harness runners persist subagent_invocations. */
     accountingSessionId?: string | undefined;
     accountingSubagent?:
+        | "rescore"
         | "historian"
         | "historian_editor"
         | "compressor"

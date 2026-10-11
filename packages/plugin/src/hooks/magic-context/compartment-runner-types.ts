@@ -77,7 +77,7 @@ export interface HiddenRunIdentity {
     parentSessionId?: string;
     parentInvocationId?: number | null;
     agent: string;
-    kind: "historian" | "historian-editor" | "dreamer-task";
+    kind: "historian" | "historian-editor" | "dreamer-task" | "rescore";
     system: string;
     model?: ModelInput;
     configuredModels?: readonly ModelInput[];
@@ -119,6 +119,9 @@ export interface HiddenCompletionExecutor {
     attempt(handle: HiddenRunHandle, request: PromptArgs): Promise<void>;
     /** Kept separate from prompt settlement so read failures never resend a historian prompt. */
     collect(handle: HiddenRunHandle, limit: number): Promise<HiddenCompletion>;
+    /** Reads a finished durable child after restart, without placing a prompt. */
+    recover?(childSessionId: string): Promise<HiddenCompletion | null>;
+    interrupt?(childSessionId: string): Promise<void>;
     close(
         handle: HiddenRunHandle | null,
         settlement: {

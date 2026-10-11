@@ -1,8 +1,9 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, mock, test } from "bun:test";
-
+import { createDreamerOutputCapSampler } from "../../config/live-child-output-cap";
 import { runMigrations } from "../../features/magic-context/migrations";
+import { RescoreService } from "../../features/magic-context/rescore-service";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
     type PromptArgs,
@@ -13,6 +14,7 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createV1HiddenCompletionExecutor } from "./compartment-runner-historian";
 import type { HiddenRunIdentity } from "./compartment-runner-types";
+import { createOpenCodeRescoreCarrier, driveRescore } from "./rescore-driver";
 
 function freshDb(): Database {
     const db = new Database(":memory:");
@@ -244,6 +246,93 @@ describe("OpenCode 1 historian under a host request timer", () => {
             expect(h.promptAsync).toHaveBeenCalledTimes(1);
         } finally {
             h.stop();
+            closeQuietly(db);
+        }
+    });
+});
+
+describe("OpenCode 1 score carrier", () => {
+    test("host score errors settle failed with no fallback or second model", async () => {
+        const db = freshDb();
+        const h = slowHost({ runMs: Number.POSITIVE_INFINITY, hostRequestTimerMs: 60_000 });
+        try {
+            db.prepare(
+                "INSERT INTO session_projects(session_id,harness,project_path,updated_at) VALUES ('session','opencode','git:score',0)",
+            ).run();
+            db.prepare(`INSERT INTO compartments(session_id,sequence,start_message,end_message,start_message_id,end_message_id,title,content,p1,importance,legacy,created_at)
+                VALUES ('session',1,1,2,'m1','m2','Title','','P1',50,0,1)`).run();
+            const service = new RescoreService({
+                db,
+                projectPath: "git:score",
+                sessionId: "session",
+                harness: "opencode",
+                profile: {
+                    model: "mock/score",
+                    variant: "low",
+                    temperature: 0,
+                    maxOutputTokens: 1000,
+                },
+                admissionFailure: () => null,
+            });
+            const authority = service.confirm(service.preview().snapshotId);
+            h.promptAsync.mockImplementationOnce(async () => {
+                setTimeout(
+                    () =>
+                        recordPromptSessionError("ses-child", {
+                            name: "APIError",
+                            data: { message: "missing credentials" },
+                        }),
+                    50,
+                );
+                return { data: undefined };
+            });
+            const executor = createV1HiddenCompletionExecutor(h.client, db, "/repo");
+            await driveRescore(
+                service,
+                authority,
+                createOpenCodeRescoreCarrier({
+                    executor,
+                    db,
+                    sessionId: "session",
+                    harness: "opencode",
+                    directory: "/repo",
+                    timeoutMs: 1000,
+                }),
+            );
+            expect(h.promptAsync).toHaveBeenCalledTimes(1);
+            expect(h.prompt).not.toHaveBeenCalled();
+            const status = service.status(authority.jobId);
+            expect(status.job.state).toBe("paused");
+            expect(status.attempts[0].outcome).toBe("failed");
+            expect(status.job.last_error).toContain("missing credentials");
+            expect(db.prepare("SELECT subagent, model_id FROM subagent_invocations").all()).toEqual(
+                [{ subagent: "rescore", model_id: "score" }],
+            );
+        } finally {
+            h.stop();
+            closeQuietly(db);
+        }
+    });
+    test("score sampling is frozen, and finished-child recovery places no prompt", async () => {
+        const db = freshDb();
+        const h = host();
+        const executor = createV1HiddenCompletionExecutor(h.client, db, "/repo");
+        try {
+            const handle = await executor.open({
+                ...run("rescore"),
+                agent: "rescore",
+                maxOutputTokens: 1234,
+                metadata: { temperature: 0 },
+            });
+            const sampler = createDreamerOutputCapSampler({}, () => ({}));
+            const options = { temperature: 0.9, maxOutputTokens: 99 };
+            sampler.apply({ sessionID: handle.id, agent: "rescore" }, options);
+            expect(options).toEqual({ temperature: 0, maxOutputTokens: 1234 });
+            expect(await executor.recover?.(handle.id)).toBeNull();
+            await executor.attempt(handle, request);
+            expect((await executor.recover?.(handle.id))?.text).toBe("<classify/>");
+            expect(h.promptAsync).toHaveBeenCalledTimes(1);
+        } finally {
             closeQuietly(db);
         }
     });

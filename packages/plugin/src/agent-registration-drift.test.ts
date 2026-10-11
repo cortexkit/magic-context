@@ -67,6 +67,7 @@ describe("hidden-agent registration drift guard", () => {
     test("registers hidden agents with canonical ids", () => {
         expect(regs.map((r) => r.id).sort()).toEqual(
             [
+                "rescore",
                 DREAMER_AGENT,
                 DREAMER_DOCS_AGENT,
                 DREAMER_REVIEWER_AGENT,
@@ -259,7 +260,7 @@ describe("hidden-agent registration drift guard", () => {
     });
 
     test("every hidden agent has an internal-only task-routing description", () => {
-        expect(regs).toHaveLength(11);
+        expect(regs).toHaveLength(12);
         for (const registration of regs) {
             expect(registration.mode, registration.id).toBe("primary");
             expect(registration.hidden, registration.id).toBe(true);
@@ -342,6 +343,7 @@ describe("hidden-agent registration drift guard", () => {
         // user `dreamer.tools`/`permission` override must not be able to broaden
         // them. Historians likewise keep their zero-tool capability boundary.
         const lockedDreamerAgents = new Set<string>([
+            "rescore",
             DREAMER_AGENT,
             DREAMER_DOCS_AGENT,
             DREAMER_REVIEWER_AGENT,
@@ -476,11 +478,17 @@ describe("hidden-agent registration drift guard", () => {
             historianEditorPrompt: undefined,
             historianDisallowed: [],
         });
-        expect(noPrompts.every((r) => r.prompt === undefined)).toBe(true);
+        expect(
+            noPrompts.filter((r) => r.id !== "rescore").every((r) => r.prompt === undefined),
+        ).toBe(true);
+        expect(byId("rescore")?.prompt).toBe(
+            "You are a score-only completion carrier for the magic-context system.",
+        );
         // ...but the ids and allow-lists are STILL present (the whole point —
         // they don't depend on module-init timing).
         expect(noPrompts.map((r) => r.id).sort()).toEqual(
             [
+                "rescore",
                 DREAMER_AGENT,
                 DREAMER_DOCS_AGENT,
                 DREAMER_REVIEWER_AGENT,

@@ -4,6 +4,7 @@ import type { Database } from "../../shared/sqlite";
 export type SubagentKind =
     | "historian"
     | "historian_editor"
+    | "rescore"
     | "compressor"
     | "dreamer"
     | "user_memory_review"

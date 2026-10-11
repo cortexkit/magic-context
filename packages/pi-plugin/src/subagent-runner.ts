@@ -1459,6 +1459,7 @@ export class PiSubagentRunner implements SubagentRunner {
 							MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE: systemPromptPath,
 							MAGIC_CONTEXT_SUBAGENT_BUDGET_GUARD_FILE: budgetGuardFile,
 							MAGIC_CONTEXT_SUBAGENT_PROVENANCE_ONLY:
+								options.agent === "rescore" ||
 								/^(magic-context-)?historian(?:-recomp|-editor)?$/.test(
 									options.agent,
 								)

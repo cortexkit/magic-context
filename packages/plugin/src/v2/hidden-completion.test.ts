@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { inspectCurateMemoryOperations } from "../features/magic-context/dreamer/task-executor";
+import { RescoreService } from "../features/magic-context/rescore-service";
+import { initializeDatabase } from "../features/magic-context/storage-db";
 import {
     HiddenCompletionRefusal,
     type HiddenRunIdentity,
 } from "../hooks/magic-context/compartment-runner-types";
+import { createOpenCodeRescoreCarrier } from "../hooks/magic-context/rescore-driver";
 import {
     getPromptFailureDetail,
     promptSyncWithValidatedOutputRetry,
@@ -964,6 +967,7 @@ describe("OpenCode 2 hidden child completion", () => {
         });
         expect([...agents.keys()]).toEqual([
             HIDDEN_HISTORIAN_AGENT,
+            "rescore",
             HIDDEN_DREAMER_AGENT,
             HIDDEN_CURATE_AGENT,
             "dreamer-memory-mapper",
@@ -1199,4 +1203,122 @@ describe("curate validation over the OpenCode 2 tool-loop transcript", () => {
         const [refused] = messages as { parts: { state: { status: string } }[] }[];
         expect(refused?.parts[0]?.state.status).toBe("error");
     });
+});
+
+describe("score-only hidden completions", () => {
+    test("rescore has a separate tool-less role and does not queue the live historian", async () => {
+        const f = await setup();
+        const score = await f.executor.open({
+            ...run,
+            kind: "rescore",
+            agent: "rescore",
+            maxOutputTokens: 1000,
+        });
+        expect(f.creates[0].metadata.role).toBe("rescore");
+        expect(f.creates[0].agent).toBe("rescore");
+        expect(f.creates[0].permissions).toEqual([{ action: "*", resource: "*", effect: "deny" }]);
+        const historian = await f.executor.open(run);
+        expect(f.creates).toHaveLength(2);
+        await f.executor.attempt(score, request("cheap", { temperature: 0, system: "score-only" }));
+        expect(f.requests[0].tools).toEqual({});
+        expect(f.requests[0].options).toEqual({
+            temperature: 0,
+            maxOutputTokens: 1000,
+            maxTokens: 1000,
+        });
+        expect(f.requests[0].system).toEqual([{ type: "text", text: "score-only" }]);
+        await close(f.executor, historian, false);
+        await close(f.executor, score, true);
+        f.db.close();
+    });
+    test("rescore refuses unsupported frozen variant instead of silently dropping it", async () => {
+        const f = await setup("generation", {
+            modelCatalog: async () => [{ providerID: "mock", id: "cheap", variants: {} }],
+        });
+        await expect(
+            f.executor.open({
+                ...run,
+                kind: "rescore",
+                agent: "rescore",
+                model: { model: "mock/cheap", qualifier: "unsupported" },
+                configuredModels: [{ model: "mock/cheap", qualifier: "unsupported" }],
+            }),
+        ).rejects.toThrow("Frozen score variant");
+        expect(f.creates).toHaveLength(0);
+        f.db.close();
+    });
+    test("durable score recovery reads a finished child without prompting after restart", async () => {
+        const f = await setup("generation", { keepSubagents: true });
+        const score = await f.executor.open({ ...run, kind: "rescore", agent: "rescore" });
+        await f.executor.attempt(score, request());
+        f.rows.appendIdle(score.id, "succeeded");
+        await close(f.executor, score, true);
+        const restarted = await f.create("next-generation");
+        const prompts = f.requests.length;
+        const creates = f.creates.length;
+        expect((await restarted.recover?.(score.id))?.text).toBe("editor completion");
+        expect(f.requests).toHaveLength(prompts);
+        expect(f.creates).toHaveLength(creates);
+        await restarted.interrupt?.(score.id);
+        expect(f.interrupts).toContain(score.id);
+        f.db.close();
+    });
+});
+
+test("OpenCode 2 score batch records rescore accounting and publishes only scores", async () => {
+    const f = await setup();
+    initializeDatabase(f.db);
+    f.db
+        .prepare(
+            "INSERT INTO session_projects(session_id,harness,project_path,updated_at) VALUES ('session','opencode','/project',0)",
+        )
+        .run();
+    f.db
+        .prepare(`INSERT INTO compartments(session_id,sequence,start_message,end_message,start_message_id,end_message_id,title,content,p1,importance,legacy,created_at)
+        VALUES ('session',1,1,2,'m1','m2','Title','','P1',50,0,1)`)
+        .run();
+    const service = new RescoreService({
+        db: f.db,
+        projectPath: "/project",
+        sessionId: "session",
+        harness: "opencode2",
+        profile: { model: "mock/cheap", temperature: 0, maxOutputTokens: 1234 },
+        admissionFailure: () => null,
+    });
+    const authority = service.confirm(service.preview().snapshotId);
+    const admission = service.admit(authority)!;
+    f.setCompletion(
+        JSON.stringify(
+            Object.keys(JSON.parse(admission.attempt.handle_map)).map((handle) => ({
+                handle,
+                importance: 90,
+                reason: "durable invariant",
+            })),
+        ),
+    );
+    const carrier = createOpenCodeRescoreCarrier({
+        db: f.db,
+        executor: f.executor,
+        sessionId: "session",
+        directory: "/project",
+        harness: "opencode2",
+        timeoutMs: 1000,
+    });
+    const text = await carrier.complete(admission, new AbortController().signal, (id) =>
+        service.recordCarrier(authority, admission.attempt.id, id),
+    );
+    service.persistPayload(authority, admission.attempt.id, text);
+    service.publish(authority, admission.attempt.id);
+    expect(service.status(authority.jobId).job.state).toBe("complete");
+    expect(f.db.prepare("SELECT subagent, model_id FROM subagent_invocations").all()).toEqual([
+        { subagent: "rescore", model_id: "cheap" },
+    ]);
+    expect(f.db.prepare("SELECT importance FROM compartments").get()).toEqual({ importance: 50 });
+    expect(f.requests[0].tools).toEqual({});
+    expect(f.requests[0].options).toEqual({
+        temperature: 0,
+        maxTokens: 1234,
+        maxOutputTokens: 1234,
+    });
+    f.db.close();
 });

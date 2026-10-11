@@ -95,6 +95,7 @@ function configuredHead(identity: HiddenRunIdentity): Model | undefined {
 }
 
 function roleFor(identity: HiddenRunIdentity): HiddenChildRole {
+    if (identity.kind === "rescore") return "rescore";
     if (identity.kind !== "dreamer-task") return "historian";
     return identity.agent === HIDDEN_CURATE_AGENT ? "dreamer-curate" : "dreamer";
 }
@@ -369,6 +370,8 @@ export function createLateHiddenExecutor(
         open: (run) => wired().open(run),
         attempt: (handle, request) => wired().attempt(handle, request),
         collect: (handle, limit) => wired().collect(handle, limit),
+        recover: (id) => wired().recover?.(id) ?? Promise.resolve(null),
+        interrupt: (id) => wired().interrupt?.(id) ?? Promise.resolve(),
         close: (handle, settlement) => wired().close(handle, settlement),
     };
 }
@@ -413,7 +416,7 @@ export async function createV2HiddenCompletionExecutor(
     };
 
     const warnedVariants = new Set<string>();
-    const validateVariant = async (model: Model): Promise<Model> => {
+    const validateVariant = async (model: Model, strict = false): Promise<Model> => {
         if (!model.variant || !options.modelCatalog) return model;
         try {
             const listed = await options.modelCatalog();
@@ -439,6 +442,7 @@ export async function createV2HiddenCompletionExecutor(
             )
                 return model;
             const key = `${model.providerID}/${model.modelID}:${model.variant}`;
+            if (strict) throw new Error(`Frozen score variant is unsupported: ${key}`);
             if (!warnedVariants.has(key)) {
                 warnedVariants.add(key);
                 note(
@@ -446,14 +450,15 @@ export async function createV2HiddenCompletionExecutor(
                 );
             }
             return { providerID: model.providerID, modelID: model.modelID };
-        } catch {
+        } catch (error) {
+            if (strict) throw error;
             return model;
         }
     };
 
     const resolveHead = async (identity: HiddenRunIdentity): Promise<Model> => {
         const configured = configuredHead(identity);
-        if (configured) return validateVariant(configured);
+        if (configured) return validateVariant(configured, identity.kind === "rescore");
         if (!identity.parentSessionId) {
             throw new HiddenCompletionRefusal(
                 "hidden_model_unsupported",
@@ -545,7 +550,10 @@ export async function createV2HiddenCompletionExecutor(
                 throw new Error("Hidden completion prompt aborted");
             }
 
-            const requested = await validateVariant(requestModel(request, run.child.model));
+            const requested = await validateVariant(
+                requestModel(request, run.child.model),
+                run.identity.kind === "rescore",
+            );
             if (run.retired) {
                 // Fallback retries share the original handle. A terminal provider failure has
                 // already retired its child, so give the retry a fresh carrier instead of
@@ -780,6 +788,33 @@ export async function createV2HiddenCompletionExecutor(
             const completion = runs.get(handle)?.completion;
             if (!completion) throw new Error("Hidden completion has no settled output");
             return completion;
+        },
+        async recover(id) {
+            return withReader(options.openReader, (reader) => {
+                const row = reader.latestAssistant(id);
+                const idle = reader.latestIdle(id);
+                if (
+                    !row ||
+                    !idle ||
+                    idle.seq < row.seq ||
+                    (row.data.outcome !== "succeeded" && row.data.finish !== "stop")
+                )
+                    return null;
+                const tokens = row.data.tokens;
+                return {
+                    text: assistantText(row),
+                    usage: {
+                        input: tokens?.input ?? 0,
+                        output: tokens?.output ?? 0,
+                        cacheRead: tokens?.cache?.read ?? 0,
+                        cacheWrite: tokens?.cache?.write ?? 0,
+                    },
+                    lengthCapped: ["length", "max_tokens"].includes(row.data.finish ?? ""),
+                };
+            });
+        },
+        async interrupt(id) {
+            await host.interrupt({ sessionID: id });
         },
         async close(handle, settlement) {
             if (!handle) return;

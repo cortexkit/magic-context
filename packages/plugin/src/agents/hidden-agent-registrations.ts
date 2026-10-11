@@ -93,6 +93,16 @@ export function buildHiddenAgentRegistrations(args: {
 }): HiddenAgentRegistration[] {
     return [
         {
+            id: "rescore",
+            mode: "primary",
+            hidden: true,
+            description: HIDDEN_AGENT_DESCRIPTION,
+            prompt: "You are a score-only completion carrier for the magic-context system.",
+            allowedTools: [],
+            maxSteps: 1,
+            lockPermissions: true,
+        },
+        {
             id: "dreamer",
             mode: "primary",
             hidden: true,

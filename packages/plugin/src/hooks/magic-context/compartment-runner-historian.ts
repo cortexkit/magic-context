@@ -4,7 +4,9 @@ import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "../../agents/historian"
 import { withContentLanguageDirective } from "../../agents/language-directive";
 import {
     forgetHistorianOutputCap,
+    forgetRescoreSampling,
     rememberHistorianOutputCap,
+    rememberRescoreSampling,
 } from "../../config/live-child-output-cap";
 import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context";
 import { openDatabase } from "../../features/magic-context/storage";
@@ -195,9 +197,17 @@ export function createV1HiddenCompletionExecutor(
                 preferResponseOnMissingData: true,
             });
             const id = typeof created?.id === "string" ? created.id : "";
-            if (id && run.kind !== "dreamer-task") {
+            if (id && (run.kind === "historian" || run.kind === "historian-editor")) {
                 historianChildren.add(id);
                 rememberHistorianOutputCap(id, run.maxOutputTokens);
+            }
+            if (
+                id &&
+                run.kind === "rescore" &&
+                run.maxOutputTokens !== undefined &&
+                typeof run.metadata?.temperature === "number"
+            ) {
+                rememberRescoreSampling(id, run.maxOutputTokens, run.metadata.temperature);
             }
             return { id, childSessionId: id || undefined };
         },
@@ -265,12 +275,47 @@ export function createV1HiddenCompletionExecutor(
                     undefined,
                     info.finish ?? info.finish_reason ?? info.finishReason,
                 ),
+                providerId: typeof info.providerID === "string" ? info.providerID : undefined,
+                modelId: typeof info.modelID === "string" ? info.modelID : undefined,
             };
+        },
+        async recover(id) {
+            if (!client) return null;
+            const response = await client.session.messages({
+                path: { id },
+                query: { directory, limit: 10 },
+            });
+            const messages = shared.normalizeSDKResponse(response, [] as unknown[], {
+                preferResponseOnMissingData: true,
+            });
+            const latest = Array.isArray(messages)
+                ? messages
+                      .filter(
+                          (message): message is Record<string, unknown> =>
+                              isRecord(message) &&
+                              isRecord(message.info) &&
+                              message.info.role === "assistant",
+                      )
+                      .sort(
+                          (a, b) => historianMessageCreatedAt(b) - historianMessageCreatedAt(a),
+                      )[0]
+                : undefined;
+            if (
+                !latest ||
+                !isRecord(latest.info) ||
+                (!latest.info.finish && !(isRecord(latest.info.time) && latest.info.time.completed))
+            )
+                return null;
+            return this.collect({ id }, 10);
+        },
+        async interrupt(id) {
+            await client?.session.abort({ path: { id }, query: { directory } });
         },
         async close(handle, settlement) {
             if (handle?.id) {
                 historianChildren.delete(handle.id);
                 forgetHistorianOutputCap(handle.id);
+                forgetRescoreSampling(handle.id);
             }
             if (!client) return;
             await teardownChildSession({
@@ -925,7 +970,7 @@ async function runFallbackHistorianPass(args: {
  * reserve and the estimator margin. Returns the refusal reason, or null when the
  * prompt fits or the window is unknown (the prompt then goes out unguarded).
  */
-function historianPromptAdmissionFailure(args: {
+export function historianPromptAdmissionFailure(args: {
     model: { providerID: string; modelID: string } | undefined;
     prompt: string;
     system: string;

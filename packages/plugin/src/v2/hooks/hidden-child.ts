@@ -20,12 +20,14 @@ import type { PromptArgs } from "../../shared/model-suggestion-retry";
 import type { SessionContext, V2AgentDomain } from "./types";
 
 export const HIDDEN_HISTORIAN_AGENT = "historian";
+export const HIDDEN_RESCORE_AGENT = "rescore";
 export const HIDDEN_DREAMER_AGENT = "dreamer-classifier";
 export const HIDDEN_CURATE_AGENT = DREAMER_AGENT;
 
 const READ_TOOLS = ["read", "grep", "glob"] as const;
 const AGENT_TOOLS: Record<string, readonly string[]> = {
     [HIDDEN_HISTORIAN_AGENT]: [],
+    [HIDDEN_RESCORE_AGENT]: [],
     [HIDDEN_DREAMER_AGENT]: [],
     [HIDDEN_CURATE_AGENT]: ["ctx_memory"],
     [DREAMER_MEMORY_MAPPER_AGENT]: READ_TOOLS,
@@ -41,6 +43,7 @@ const AGENT_STEPS: Record<string, number> = {
 };
 
 export function hiddenAgentFor(identity: HiddenRunIdentity): string {
+    if (identity.kind === "rescore") return HIDDEN_RESCORE_AGENT;
     if (identity.kind === "dreamer-task" && identity.agent === DREAMER_DOCS_AGENT)
         return DREAMER_MEMORY_MAPPER_AGENT;
     return identity.kind === "dreamer-task" && AGENT_TOOLS[identity.agent]

@@ -3,6 +3,7 @@ import {
     HIDDEN_CURATE_AGENT,
     HIDDEN_DREAMER_AGENT,
     HIDDEN_HISTORIAN_AGENT,
+    HIDDEN_RESCORE_AGENT,
     type HiddenPermissionRule,
     hiddenAgentFor,
     hiddenChildPermissions,
@@ -18,7 +19,7 @@ export interface HiddenChildModel {
     variant?: string;
 }
 
-export type HiddenChildRole = "historian" | "dreamer" | "dreamer-curate";
+export type HiddenChildRole = "historian" | "dreamer" | "dreamer-curate" | "rescore";
 
 export interface PersistedHiddenChild {
     id: string;
@@ -121,10 +122,12 @@ export function keptUnderRetention(keepSubagents: boolean, child: RetentionFacts
 }
 
 export function roleTitle(role: HiddenChildRole): string {
+    if (role === "rescore") return "Magic Context rescore";
     return role === "historian" ? "Magic Context historian" : "Magic Context dreamer";
 }
 
 function roleAgent(role: HiddenChildRole): string {
+    if (role === "rescore") return HIDDEN_RESCORE_AGENT;
     if (role === "historian") return HIDDEN_HISTORIAN_AGENT;
     return role === "dreamer-curate" ? HIDDEN_CURATE_AGENT : HIDDEN_DREAMER_AGENT;
 }

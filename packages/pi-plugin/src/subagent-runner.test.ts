@@ -32,7 +32,7 @@ import { getSubagentInvocations } from "@magic-context/core/features/magic-conte
 import * as loggerModule from "@magic-context/core/shared/logger";
 import type { SubagentRunOptions } from "@magic-context/core/shared/subagent-runner";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
-
+import { calibrateHistorianProviderPayload } from "./historian-calibration-extension";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import {
 	__test,
@@ -4103,4 +4103,77 @@ describe("Pi dreamer prompt-token budget", () => {
 			});
 		expect(await run).toMatchObject({ ok: false, reason: "token_budget" });
 	});
+});
+
+it("rescore spawns one tool-less child with explicit frozen sampling and no provenance-only bypass", async () => {
+	const testDataDir = createTestTempDirFromPath(
+		join(tmpdir(), "mc-pi-score-accounting-"),
+	);
+	const previousData = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+	const previousXdg = process.env.XDG_DATA_HOME;
+	process.env.MAGIC_CONTEXT_TEST_DATA_DIR = testDataDir;
+	process.env.XDG_DATA_HOME = testDataDir;
+	closeDatabase();
+	try {
+		const child = createMockChild();
+		const { runner, spawnImpl } = runnerWith(child);
+		const resultPromise = runner.run({
+			...baseOptions,
+			agent: "rescore",
+			model: "test/score",
+			thinkingLevel: "low",
+			temperature: 0,
+			maxOutputTokens: 1234,
+			accountingSessionId: "score-session",
+			accountingSubagent: "rescore",
+		});
+		child.writeStdoutLine(
+			agentEnd([
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "[]" }],
+					stopReason: "stop",
+				},
+			]),
+		);
+		child.emitClose(0);
+		expect((await resultPromise).ok).toBe(true);
+		const [, argv, spawnOptions] = (spawnImpl.mock.calls as unknown[][])[0] as [
+			string,
+			string[],
+			{ env: NodeJS.ProcessEnv },
+		];
+		expect(argv).toContain("--no-tools");
+		expect(argv).toEqual(expect.arrayContaining(["--thinking", "low"]));
+		expect(
+			spawnOptions.env.MAGIC_CONTEXT_SUBAGENT_PROVENANCE_ONLY,
+		).toBeUndefined();
+		expect(spawnOptions.env.MAGIC_CONTEXT_HISTORIAN_TEMPERATURE).toBe("0");
+		expect(spawnOptions.env.MAGIC_CONTEXT_HISTORIAN_MAX_OUTPUT_TOKENS).toBe(
+			"1234",
+		);
+		expect(spawnImpl).toHaveBeenCalledTimes(1);
+		const db = openDatabase();
+		if (!db) throw new Error("Score accounting database unavailable");
+		expect(getSubagentInvocations(db, "score-session")[0]?.subagent).toBe(
+			"rescore",
+		);
+		expect(
+			calibrateHistorianProviderPayload(
+				{ generationConfig: {} },
+				Number(spawnOptions.env.MAGIC_CONTEXT_HISTORIAN_TEMPERATURE),
+				Number(spawnOptions.env.MAGIC_CONTEXT_HISTORIAN_MAX_OUTPUT_TOKENS),
+			),
+		).toMatchObject({
+			generationConfig: { temperature: 0, maxOutputTokens: 1234 },
+		});
+	} finally {
+		closeDatabase();
+		if (previousData === undefined)
+			delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+		else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = previousData;
+		if (previousXdg === undefined) delete process.env.XDG_DATA_HOME;
+		else process.env.XDG_DATA_HOME = previousXdg;
+		rmSync(testDataDir, { recursive: true, force: true });
+	}
 });
