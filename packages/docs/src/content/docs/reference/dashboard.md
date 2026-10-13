@@ -83,7 +83,7 @@ The project's **project memories**: search, filter by category/status, and open 
 
 - **Edit** content and change status (`active`, `permanent`, `archived`).
 - **Archive** or **permanently delete** individual memories (delete is confirmed in the UI).
-- **Bulk select** rows and **bulk archive** or **bulk delete** with confirmation.
+- **Bulk select** rows and **bulk archive**, **restore**, **make permanent**, or **bulk delete** with confirmation.
 - View metadata: category, source (`historian`, `agent`, `dreamer`, `user`), classify columns (importance / scope / shareable), merge lineage, embeddings flag.
 
 Changes write to the shared database; **running sessions pick up memory updates automatically** on subsequent turns without restarting the harness.
