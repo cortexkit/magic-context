@@ -147,6 +147,20 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
     setSelectedIds(new Set<number>());
   });
 
+  // A row can also leave the current list without any filter changing: the
+  // detail panel's status/category edits refetch under the same filters. Drop
+  // selected ids the refreshed list no longer contains, so bulk actions —
+  // including Restore's permanent-downgrade warning — never act on rows the
+  // user can no longer see. createResource keeps the previous list while a
+  // refetch is in flight, so a reload never prunes a still-visible selection.
+  createEffect(() => {
+    const visibleIds = new Set((memories() ?? []).map((m) => m.id));
+    setSelectedIds((prev) => {
+      const next = new Set([...prev].filter((id) => visibleIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  });
+
   const [error, setError] = createSignal<string | null>(null);
 
   const handleStatusChange = async (memoryId: number, newStatus: string) => {
@@ -300,6 +314,57 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
       refetchStats();
     } catch (e: unknown) {
       setError(`Failed to archive memories: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleBulkRestore = async () => {
+    const ids = [...selectedIds()];
+    if (ids.length === 0) return;
+    // A permanent row is already injected, so restoring it would flatten it
+    // to active and silently drop its never-expire status. Selection is reset
+    // whenever a filter changes, so every selected row's status is known
+    // here: name the permanent rows in the confirm dialog and let the user
+    // decide, instead of skipping them or downgrading them unnoticed.
+    const permanentCount = ids.filter(
+      (id) => memories()?.find((m) => m.id === id)?.status === "permanent",
+    ).length;
+    const permanentClause =
+      permanentCount > 0
+        ? ` ${permanentCount} permanent memor${permanentCount === 1 ? "y" : "ies"} in this selection will become active and lose never-expire.`
+        : "";
+    const prompt =
+      permanentCount === ids.length
+        ? `Set ${ids.length} memor${ids.length === 1 ? "y" : "ies"} to active?${permanentClause}`
+        : `Restore ${ids.length} memor${ids.length === 1 ? "y" : "ies"}? Restored memories re-enter injection as active.${permanentClause}`;
+    const confirmed = await ask(prompt, { title: "Confirm Restore", kind: "warning" });
+    if (!confirmed) return;
+    try {
+      setError(null);
+      await bulkUpdateMemoryStatus(ids, "active");
+      clearSelection();
+      refetchMemories();
+      refetchStats();
+    } catch (e: unknown) {
+      setError(`Failed to restore memories: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleBulkPermanent = async () => {
+    const ids = [...selectedIds()];
+    if (ids.length === 0) return;
+    const confirmed = await ask(
+      `Make ${ids.length} memor${ids.length === 1 ? "y" : "ies"} permanent? Permanent memories always stay in injection and never expire.`,
+      { title: "Confirm Permanent", kind: "warning" },
+    );
+    if (!confirmed) return;
+    try {
+      setError(null);
+      await bulkUpdateMemoryStatus(ids, "permanent");
+      clearSelection();
+      refetchMemories();
+      refetchStats();
+    } catch (e: unknown) {
+      setError(`Failed to make memories permanent: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -565,6 +630,12 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
           <div class="bulk-action-right">
             <button type="button" class="btn sm" onClick={handleBulkArchive}>
               Archive
+            </button>
+            <button type="button" class="btn sm" onClick={handleBulkRestore}>
+              Restore
+            </button>
+            <button type="button" class="btn sm" onClick={handleBulkPermanent}>
+              Make permanent
             </button>
             <button type="button" class="btn sm danger" onClick={handleBulkDelete}>
               Delete
