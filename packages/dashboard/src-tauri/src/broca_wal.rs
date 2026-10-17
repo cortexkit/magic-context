@@ -181,6 +181,10 @@ pub(crate) struct WalStep {
     /// run's.
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// Size in bytes of the request body sent for the step's last provider
+    /// attempt (`model_attempt_finished.request_body_len`). `None` when the
+    /// WAL recorded no attempt size for the step.
+    pub request_body_len: Option<i64>,
 }
 
 /// One run (episode) of a session, from its `run_started` record on.
@@ -471,6 +475,9 @@ struct Fold {
     runs: Vec<WalRun>,
     step_started_ts: HashMap<u64, i64>,
     attempt_ts: HashMap<u64, i64>,
+    /// The request body size of each in-flight step's latest attempt; a retry
+    /// overwrites the failed attempt's size.
+    attempt_request_len: HashMap<u64, i64>,
     last_ts_ms: Option<i64>,
     activity_note: Option<String>,
 }
@@ -508,6 +515,7 @@ impl Fold {
                 .filter(|limit| *limit > 0);
             self.step_started_ts.clear();
             self.attempt_ts.clear();
+            self.attempt_request_len.clear();
             self.runs.push(WalRun {
                 run_id,
                 ts_ms: envelope_ts,
@@ -536,8 +544,12 @@ impl Fold {
                 }
             }
             "model_attempt_finished" => {
+                let step_id = step_id()?;
                 if let Some(ts) = envelope_ts {
-                    self.attempt_ts.insert(step_id()?, ts);
+                    self.attempt_ts.insert(step_id, ts);
+                }
+                if let Some(len) = record.get("request_body_len").and_then(non_negative_int) {
+                    self.attempt_request_len.insert(step_id, len);
                 }
             }
             "model_step_finished" => {
@@ -550,6 +562,7 @@ impl Fold {
                 };
                 let started = self.step_started_ts.remove(&step_id);
                 let attempted = self.attempt_ts.remove(&step_id);
+                let request_body_len = self.attempt_request_len.remove(&step_id);
                 run.steps.push(WalStep {
                     step_id,
                     ts_ms: envelope_ts.or(attempted).or(started),
@@ -562,6 +575,7 @@ impl Fold {
                     finish_reason: finish_reason(record.get("finish_reason")),
                     provider: string_field(record, "provider").or_else(|| run.provider.clone()),
                     model: string_field(record, "model").or_else(|| run.model.clone()),
+                    request_body_len,
                 });
             }
             "run_finished" => run.finished = true,
@@ -1160,6 +1174,36 @@ pub(crate) mod tests {
                     .map(|step| (run.run_id.clone(), step.step_id))
             })
             .collect()
+    }
+
+    #[test]
+    fn each_step_keeps_its_last_attempt_request_size() {
+        let sized = |step: u64, attempt: u64, len: u64| {
+            json!({"type": "model_attempt_finished", "step_id": step, "attempt": attempt,
+                   "ts_ms": 1_000 + step * 10 + attempt, "request_body_len": len,
+                   "request_body_sha256": "00", "response_body_len": 1,
+                   "response_body_sha256": "00", "outcome": "completed"})
+        };
+        let mut wal = Wal::new();
+        wal.push(run_started("r1", 1_000))
+            // A retried step: the request that succeeded is the second one.
+            .push(step_started(1))
+            .push(sized(1, 0, 100))
+            .push(sized(1, 1, 378_960))
+            .push(step_finished(1, usage(10, 0, 0, 10)))
+            .push(step_started(2))
+            .push(sized(2, 0, 382_956))
+            .push(step_finished(2, usage(10, 0, 0, 10)))
+            // No attempt record, so no size.
+            .push(step_started(3))
+            .push(step_finished(3, usage(10, 0, 0, 10)));
+        let runs = decode(&wal.bytes).unwrap();
+        let lens: Vec<_> = runs[0]
+            .steps
+            .iter()
+            .map(|step| step.request_body_len)
+            .collect();
+        assert_eq!(lens, [Some(378_960), Some(382_956), None]);
     }
 
     /// Addresses produced by Broca's own `scripts/wal-addressability.py --key`
@@ -2191,7 +2235,10 @@ pub(crate) mod tests {
     fn decoded_archived_members_are_bounded() {
         let mut cache = WalCache::default();
         for i in 0..(MAX_REMEMBERED_ARCHIVED as u64 + 5) {
-            cache.remember_archived((PathBuf::from(format!("c{i}.ark")), 0, 100), Err("x".into()));
+            cache.remember_archived(
+                (PathBuf::from(format!("c{i}.ark")), 0, 100),
+                Err("x".into()),
+            );
         }
         assert!(cache.archived.len() <= MAX_REMEMBERED_ARCHIVED);
 

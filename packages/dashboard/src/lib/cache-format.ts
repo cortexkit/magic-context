@@ -140,6 +140,52 @@ export function cacheCauseText(cause: string): string {
   return `Cause: ${cacheCauseLabel(cause)}`;
 }
 
+export const UNMANAGED_DROP_TITLE = "Prompt tokens dropped";
+export const UNMANAGED_DROP_DETAIL = "Magic Context does not manage this session.";
+export const DROP_REQUEST_NOT_SMALLER =
+  "The request did not get smaller; the provider counted fewer tokens.";
+export const DROP_REQUEST_SMALLER = "The request got smaller.";
+
+type DropFields = Pick<DbCacheEvent, "cause" | "context_reduced_by_mc" | "drop_request_size">;
+
+/**
+ * The explanation for a drop in a session Magic Context does not manage. It
+ * says what the request size shows only when the source recorded the size of
+ * both requests, and otherwise claims no cause.
+ */
+function unmanagedDropDetail(event: DropFields): string {
+  if (event.drop_request_size === "not_smaller") {
+    return `${UNMANAGED_DROP_DETAIL} ${DROP_REQUEST_NOT_SMALLER}`;
+  }
+  if (event.drop_request_size === "smaller") {
+    return `${UNMANAGED_DROP_DETAIL} ${DROP_REQUEST_SMALLER}`;
+  }
+  return UNMANAGED_DROP_DETAIL;
+}
+
+/**
+ * Title and explanation for a step whose prompt shrank (`is_drop`). Only a
+ * session whose context Magic Context manages is credited with the reclaim;
+ * in any other session the drop is reported without a Magic Context cause.
+ */
+export function cacheDropText(event: DropFields): { title: string; detail: string } {
+  if (!event.context_reduced_by_mc) {
+    return { title: UNMANAGED_DROP_TITLE, detail: unmanagedDropDetail(event) };
+  }
+  return {
+    title: "Magic Context reclaimed context",
+    detail: event.cause ? cacheCauseText(event.cause) : "Cause not recorded",
+  };
+}
+
+/** The drop line in a timeline bar's tooltip, worded like the drop marker. */
+export function cacheDropLine(event: DropFields): string {
+  if (!event.context_reduced_by_mc) {
+    return `⬇ ${UNMANAGED_DROP_TITLE} — ${unmanagedDropDetail(event)}`;
+  }
+  return `⬇ MC reclaimed context${event.cause ? ` — ${cacheCauseLabel(event.cause)}` : ""}`;
+}
+
 /**
  * CSS color variable name for a cause line. A provider-side loss is set in the
  * secondary text color so it reads as context, not as something Magic Context did.

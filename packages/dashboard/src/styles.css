@@ -1837,7 +1837,7 @@ body {
    Outer bar height = prompt / context_window (how full the window is).
    Inner segment (bottom) = cache_read / prompt (the cached, cheap portion),
    colored by severity. The neutral top gap = uncached tokens (full-price).
-   A full-height marker line flags steps where MC reclaimed context. */
+   A full-height marker line flags steps where the prompt shrank. */
 .ctx-chart {
   position: relative;
   height: 148px;

@@ -4,6 +4,8 @@ import {
   cacheCauseLabel,
   cacheCauseText,
   cacheCauseTooltip,
+  cacheDropLine,
+  cacheDropText,
   cacheEventColorClass,
   cacheEventLabel,
   cacheReadLabel,
@@ -39,6 +41,8 @@ function ev(partial: Partial<DbCacheEvent>): DbCacheEvent {
     context_limit: 0,
     context_limit_estimated: false,
     is_drop: false,
+    context_reduced_by_mc: true,
+    drop_request_size: null,
     aggregate: false,
     cold_start: false,
     cache_write_reported: true,
@@ -324,5 +328,49 @@ describe("sentenceCaseLabel", () => {
   it("turns upper-case row labels into sentence case", () => {
     expect(sentenceCaseLabel("COLD START · RUN TOTAL")).toBe("Cold start · run total");
     expect(sentenceCaseLabel("FULL BUST")).toBe("Full bust");
+  });
+});
+
+describe("drop marker wording", () => {
+  const drop = (partial: Partial<DbCacheEvent>) => ev({ is_drop: true, ...partial });
+
+  it("credits Magic Context with a drop only in a session it manages", () => {
+    const managed = drop({ context_reduced_by_mc: true, cause: "mc_transform_failed_open" });
+    expect(cacheDropText(managed)).toEqual({
+      title: "Magic Context reclaimed context",
+      detail: "Cause: Magic Context transform failed open",
+    });
+    expect(cacheDropLine(managed)).toBe(
+      "⬇ MC reclaimed context — Magic Context transform failed open",
+    );
+    const noCause = drop({ context_reduced_by_mc: true });
+    expect(cacheDropText(noCause).detail).toBe("Cause not recorded");
+    expect(cacheDropLine(noCause)).toBe("⬇ MC reclaimed context");
+  });
+
+  it("labels a drop in an unmanaged session without a Magic Context cause", () => {
+    // A cause on the event is ignored: it cannot be Magic Context's here.
+    const unmanaged = drop({ context_reduced_by_mc: false, cause: "mc_transform_failed_open" });
+    expect(cacheDropText(unmanaged)).toEqual({
+      title: "Prompt tokens dropped",
+      detail: "Magic Context does not manage this session.",
+    });
+    expect(cacheDropLine(unmanaged)).toBe(
+      "⬇ Prompt tokens dropped — Magic Context does not manage this session.",
+    );
+  });
+
+  it("says what the request size shows when both sizes were recorded", () => {
+    const grew = drop({ context_reduced_by_mc: false, drop_request_size: "not_smaller" });
+    expect(cacheDropText(grew).detail).toBe(
+      "Magic Context does not manage this session. The request did not get smaller; the provider counted fewer tokens.",
+    );
+    expect(cacheDropLine(grew)).toBe(
+      "⬇ Prompt tokens dropped — Magic Context does not manage this session. The request did not get smaller; the provider counted fewer tokens.",
+    );
+    const shrank = drop({ context_reduced_by_mc: false, drop_request_size: "smaller" });
+    expect(cacheDropText(shrank).detail).toBe(
+      "Magic Context does not manage this session. The request got smaller.",
+    );
   });
 });

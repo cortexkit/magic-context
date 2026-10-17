@@ -908,6 +908,12 @@ impl Harness {
         )
     }
 
+    /// Hosts whose Magic Context state lives only in the Rust module's
+    /// store.db, keyed by the host's session id.
+    fn mc_state_lives_in_store(self) -> bool {
+        matches!(self, Self::ClaudeCode | Self::Codex | Self::Broca)
+    }
+
     /// OpenCode 1.x and 2.x are two store generations of the same product: a
     /// converted session keeps its id, so the plugin's context.db may record a
     /// row under `opencode` while the dashboard lists the same session under
@@ -1333,10 +1339,26 @@ pub struct DbCacheEvent {
     // to a single stable per-session value before scaling/segmenting, or the
     // timeline fragments into one box per step.
     pub context_limit_estimated: bool,
-    // True when the prompt shrank meaningfully vs the previous step — i.e. Magic
-    // Context reclaimed context (execute-pass drops, comparting). The `cause`
-    // field carries the reason pulled from the plugin logs for these steps.
+    // True when the prompt shrank meaningfully vs the previous step. In a
+    // session whose context Magic Context manages (`context_reduced_by_mc`)
+    // that is Magic Context reclaiming context (execute-pass drops,
+    // comparting), and `cause` carries the reason it recorded. Elsewhere the
+    // shrink is not Magic Context's and no Magic Context cause is attached.
     pub is_drop: bool,
+    // True when Magic Context manages this session's context, so a drop here
+    // is Magic Context's own reclaim. This differs from
+    // `SessionCacheStats::managed`, which only decides whether the Cache list
+    // shows the session by default (every Broca session is "managed" in that
+    // sense, though Magic Context does not manage a Broca run's context unless
+    // store.db holds state for it).
+    pub context_reduced_by_mc: bool,
+    // On a drop, whether the request actually sent got smaller than the
+    // previous step's. `None` unless the source records the request size for
+    // both steps (today only Broca, from `model_attempt_finished`).
+    pub drop_request_size: Option<DropRequestSize>,
+    // Bytes of the request body sent for this step, when the source records it.
+    #[serde(skip)]
+    request_body_len: Option<i64>,
     // True when the row sums several provider requests (a whole Broca run)
     // instead of describing one request. `hit_ratio` is then the run's total
     // cached share and `severity` is "aggregate", never a cache-health verdict.
@@ -1352,6 +1374,18 @@ pub struct DbCacheEvent {
     // them. The timeline header shows the session's latest model from these.
     pub provider: Option<String>,
     pub model: Option<String>,
+}
+
+/// How a dropped step's sent request compared in size with the previous
+/// step's. A token drop on a request that did not get smaller came from how
+/// the provider counted tokens, not from anything removed from the request.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DropRequestSize {
+    /// The request was the same size or larger.
+    NotSmaller,
+    /// The request got smaller.
+    Smaller,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1419,6 +1453,10 @@ struct BrocaRow {
     /// store on 2026-09-25: only Anthropic facts carried it), which is
     /// different from a reported zero.
     cache_write_reported: bool,
+    /// Bytes of the request body sent for this step's last provider attempt,
+    /// from the WAL's `model_attempt_finished.request_body_len`. `None` for a
+    /// run total and for a step whose attempt size was not recorded.
+    request_body_len: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -2614,7 +2652,7 @@ fn finish_continues_turn(finish: &str) -> bool {
 }
 
 fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec<DbCacheEvent> {
-    build_db_cache_events_with_attribution(rows, enrich_causes, None, None, None)
+    build_db_cache_events_with_overrides(rows, enrich_causes, None, None, None, None)
 }
 
 #[cfg(test)]
@@ -2634,6 +2672,7 @@ fn build_db_cache_events_with_decisions(
     )
 }
 
+#[cfg(test)]
 fn build_db_cache_events_with_attribution(
     rows: Vec<RawDbCacheEvent>,
     enrich_causes: bool,
@@ -2642,6 +2681,28 @@ fn build_db_cache_events_with_attribution(
     >,
     transform_failure_sessions_override: Option<HashSet<(Harness, String)>>,
     session_cache_ttls_override: Option<HashMap<(Harness, String), String>>,
+) -> Vec<DbCacheEvent> {
+    build_db_cache_events_with_overrides(
+        rows,
+        enrich_causes,
+        transform_decisions_override,
+        transform_failure_sessions_override,
+        session_cache_ttls_override,
+        None,
+    )
+}
+
+/// Each `*_override` replaces what would otherwise be read from the stores on
+/// disk, so tests can supply it; `None` reads the store.
+fn build_db_cache_events_with_overrides(
+    rows: Vec<RawDbCacheEvent>,
+    enrich_causes: bool,
+    transform_decisions_override: Option<
+        HashMap<(Harness, String, String), TransformDecisionCause>,
+    >,
+    transform_failure_sessions_override: Option<HashSet<(Harness, String)>>,
+    session_cache_ttls_override: Option<HashMap<(Harness, String), String>>,
+    mc_state_sessions_override: Option<HashSet<(Harness, String)>>,
 ) -> Vec<DbCacheEvent> {
     // Build a map of earliest timestamp per session in our window so we can
     // detect whether an event is truly the session's first message vs just
@@ -2832,6 +2893,9 @@ fn build_db_cache_events_with_attribution(
             context_limit: row.context_limit.unwrap_or(0),
             context_limit_estimated: false, // set with context_limit below
             is_drop: false,                 // computed in pass 2
+            context_reduced_by_mc: false,   // set per session in pass 2
+            drop_request_size: None,        // computed in pass 2
+            request_body_len: row.broca.and_then(|broca| broca.request_body_len),
             aggregate: row.broca.is_some_and(|broca| broca.aggregate),
             cold_start: row.broca.is_some_and(|broca| broca.first_in_session),
             cache_write_reported: row.broca.map_or(true, |broca| broca.cache_write_reported),
@@ -2888,6 +2952,10 @@ fn build_db_cache_events_with_attribution(
             HashMap::new()
         }
     });
+    // Read whether or not causes are enriched: the drop label depends on it,
+    // and the Claude Code, Codex and Broca timelines never enrich causes.
+    let mc_state_sessions =
+        mc_state_sessions_override.unwrap_or_else(|| load_mc_state_sessions(&session_keys));
 
     // ── Pass 2: turn grouping + cross-step retention severity ──
     // Expected next cache_read = prev.cache_read + growth, where growth is the
@@ -2954,7 +3022,17 @@ fn build_db_cache_events_with_attribution(
             cur_session.clone(),
             chronological[i].message_id.clone(),
         );
-        let decision_row = transform_decisions.get(&decision_key);
+        let context_reduced_by_mc = session_context_reduced_by_mc(
+            chronological[i].harness,
+            &cur_session,
+            &mc_state_sessions,
+        );
+        chronological[i].context_reduced_by_mc = context_reduced_by_mc;
+        // A Magic Context decision explains only a session whose context Magic
+        // Context manages; in any other session it must not become the cause.
+        let decision_row = transform_decisions
+            .get(&decision_key)
+            .filter(|_| context_reduced_by_mc);
         let has_transform_failure = transform_failure_sessions.contains(&session_key);
         // A missing decision is normal for routine passes that do not invalidate
         // the cache: the plugin persists decisions only when they bust the cache.
@@ -3103,33 +3181,49 @@ fn build_db_cache_events_with_attribution(
                 ("stable".to_string(), None, None)
             };
 
-        // Drop detection: a meaningful prompt shrink vs the previous step means
-        // MC reclaimed context this step. Mark it and (if not already) attach the
-        // DB-recorded transform decision so the timeline explains WHY it dropped.
+        // Drop detection: a meaningful prompt shrink vs the previous step. In a
+        // session Magic Context manages that is its reclaim, so (if not already)
+        // attach the DB-recorded transform decision to explain WHY it dropped.
+        // Elsewhere no decision is consulted; when the source records request
+        // sizes, note whether the request itself got smaller.
         let mut is_drop = false;
+        let mut drop_request_size = None;
         let mut cause = cause;
         if let Some(&prev_idx) = prev_event_idx_by_session
             .get(&session_key)
             .filter(|_| !chronological[i].aggregate)
         {
-            let prev_prompt = {
+            let (prev_prompt, prev_request_len) = {
                 let prev = &chronological[prev_idx];
-                prev.input_tokens + prev.cache_read + prev.cache_write
+                (
+                    prev.input_tokens + prev.cache_read + prev.cache_write,
+                    prev.request_body_len,
+                )
             };
             let cur_prompt = chronological[i].input_tokens
                 + chronological[i].cache_read
                 + chronological[i].cache_write;
             if prev_prompt - cur_prompt >= DROP_MARKER_MIN_TOKENS {
                 is_drop = true;
-                if cause.is_none() && enrich_causes {
+                if cause.is_none() && enrich_causes && context_reduced_by_mc {
                     cause = cause_from_decision();
                 }
+                drop_request_size = prev_request_len.zip(chronological[i].request_body_len).map(
+                    |(prev_len, cur_len)| {
+                        if cur_len < prev_len {
+                            DropRequestSize::Smaller
+                        } else {
+                            DropRequestSize::NotSmaller
+                        }
+                    },
+                );
             }
         }
 
         chronological[i].severity = severity;
         chronological[i].cause = cause;
         chronological[i].is_drop = is_drop;
+        chronological[i].drop_request_size = drop_request_size;
         if chronological[i].severity == "info" {
             chronological[i].cold_start = true;
         }
@@ -3598,6 +3692,7 @@ fn load_broca_run_totals(
                 aggregate: true,
                 cache_write_reported: row.get::<_, i64>(9)? != 0,
                 first_in_session: false,
+                request_body_len: None,
             }),
         })
     })?;
@@ -3666,6 +3761,7 @@ fn broca_wal_step_rows(
                 aggregate: false,
                 first_in_session: false,
                 cache_write_reported: usage.cache_write_tokens.is_some(),
+                request_body_len: step.request_body_len,
             }),
         });
     }
@@ -4080,30 +4176,41 @@ fn resolve_store_db_path() -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-fn load_managed_cache_sessions(keys: &HashSet<(Harness, String)>) -> HashSet<(Harness, String)> {
+/// The Claude Code, Codex and Broca sessions among `keys` that Magic Context
+/// holds state for in its store.db. Those hosts have no Magic Context plugin
+/// state of their own, so this is how the dashboard knows Magic Context runs
+/// in one of their sessions.
+fn load_mc_state_sessions(keys: &HashSet<(Harness, String)>) -> HashSet<(Harness, String)> {
+    // Most timelines (OpenCode, Pi) have no such session; skip the store then.
+    if !keys
+        .iter()
+        .any(|(harness, _)| harness.mc_state_lives_in_store())
+    {
+        return HashSet::new();
+    }
     let Some(path) = resolve_store_db_path() else {
         return HashSet::new();
     };
-    load_managed_cache_sessions_from_path(&path, keys)
+    load_mc_state_sessions_from_path(&path, keys)
 }
 
-fn load_managed_cache_sessions_from_path(
+fn load_mc_state_sessions_from_path(
     path: &Path,
     keys: &HashSet<(Harness, String)>,
 ) -> HashSet<(Harness, String)> {
     let Ok(conn) = open_readonly(&path.to_path_buf()) else {
         return HashSet::new();
     };
-    load_managed_cache_sessions_from_conn(&conn, keys)
+    load_mc_state_sessions_from_conn(&conn, keys)
 }
 
-fn load_managed_cache_sessions_from_conn(
+fn load_mc_state_sessions_from_conn(
     conn: &Connection,
     keys: &HashSet<(Harness, String)>,
 ) -> HashSet<(Harness, String)> {
     let external_session_ids: Vec<String> = keys
         .iter()
-        .filter(|(harness, _)| matches!(harness, Harness::ClaudeCode | Harness::Codex))
+        .filter(|(harness, _)| harness.mc_state_lives_in_store())
         .map(|(_, session_id)| session_id.clone())
         .collect::<HashSet<_>>()
         .into_iter()
@@ -4134,13 +4241,16 @@ fn load_managed_cache_sessions_from_conn(
     let managed_ids: HashSet<String> = rows.flatten().collect();
     keys.iter()
         .filter(|(harness, session_id)| {
-            matches!(harness, Harness::ClaudeCode | Harness::Codex)
-                && managed_ids.contains(session_id)
+            harness.mc_state_lives_in_store() && managed_ids.contains(session_id)
         })
         .cloned()
         .collect()
 }
 
+/// Whether the Cache list shows this session by default. "Managed" here means
+/// one of our own systems runs the session (every Broca run) or Magic Context
+/// runs in it; it does not mean Magic Context manages the session's context.
+/// See `session_context_reduced_by_mc` for that.
 fn is_managed_cache_session(
     harness: Harness,
     session_id: &str,
@@ -4149,6 +4259,22 @@ fn is_managed_cache_session(
     harness.has_magic_context_plugin_state()
         || harness == Harness::Broca
         || detected.contains(&(harness, session_id.to_string()))
+}
+
+/// Whether Magic Context manages this session's context, so a prompt drop in
+/// it is Magic Context's reclaim. True on hosts with Magic Context plugin
+/// state, and on Claude Code, Codex and Broca only when store.db holds Magic
+/// Context state for the session (`mc_state` from `load_mc_state_sessions`).
+/// Unlike `is_managed_cache_session`, a Broca session is not counted by
+/// default.
+fn session_context_reduced_by_mc(
+    harness: Harness,
+    session_id: &str,
+    mc_state: &HashSet<(Harness, String)>,
+) -> bool {
+    harness.has_magic_context_plugin_state()
+        || (harness.mc_state_lives_in_store()
+            && mc_state.contains(&(harness, session_id.to_string())))
 }
 
 pub fn load_cache_session_titles(
@@ -4378,7 +4504,7 @@ pub fn get_session_cache_stats_from_db(
         .iter()
         .map(|row| (row.harness, row.session_id.clone()))
         .collect();
-    let detected_managed = load_managed_cache_sessions(&candidate_keys);
+    let detected_managed = load_mc_state_sessions(&candidate_keys);
     if !show_unmanaged {
         sessions.retain(|row| {
             is_managed_cache_session(row.harness, &row.session_id, &detected_managed)
@@ -11840,6 +11966,9 @@ mod cache_turn_tests {
             context_limit: 0,
             context_limit_estimated: false,
             is_drop: false,
+            context_reduced_by_mc: true,
+            drop_request_size: None,
+            request_body_len: None,
             aggregate: false,
             cold_start: false,
             cache_write_reported: true,
@@ -12380,12 +12509,13 @@ mod managed_cache_tests {
             // U+241F and subagent/epoch parts. Matching by this prefix folds those
             // rows back onto the visible Claude Code session.
             conn.execute(
-                "INSERT INTO mc_cache_state (session_id) VALUES (?1), (?2), (?3), (?4)",
+                "INSERT INTO mc_cache_state (session_id) VALUES (?1), (?2), (?3), (?4), (?5)",
                 params![
                     "cc-exact",
                     "cc-composite␟agent␟1",
                     "cc-other-suffix",
                     "codex-exact",
+                    "broca-with-state",
                 ],
             )
             .unwrap();
@@ -12397,13 +12527,38 @@ mod managed_cache_tests {
             (Harness::ClaudeCode, "cc-other".to_string()),
             (Harness::Codex, "codex-exact".to_string()),
             (Harness::Opencode, "oc-session".to_string()),
+            (Harness::Broca, "broca-with-state".to_string()),
+            (Harness::Broca, "broca-without-state".to_string()),
         ]);
-        let managed = load_managed_cache_sessions_from_path(&path, &keys);
+        let managed = load_mc_state_sessions_from_path(&path, &keys);
         assert!(managed.contains(&(Harness::ClaudeCode, "cc-exact".to_string())));
         assert!(managed.contains(&(Harness::ClaudeCode, "cc-composite".to_string())));
         assert!(!managed.contains(&(Harness::ClaudeCode, "cc-other".to_string())));
         assert!(managed.contains(&(Harness::Codex, "codex-exact".to_string())));
         assert!(!managed.contains(&(Harness::Opencode, "oc-session".to_string())));
+        // Broca sessions are detected the same way. The Cache list shows every
+        // Broca session regardless, but only one with state counts as having
+        // its context managed by Magic Context.
+        assert!(managed.contains(&(Harness::Broca, "broca-with-state".to_string())));
+        assert!(!managed.contains(&(Harness::Broca, "broca-without-state".to_string())));
+        for id in ["broca-with-state", "broca-without-state"] {
+            assert!(is_managed_cache_session(Harness::Broca, id, &managed));
+        }
+        assert!(session_context_reduced_by_mc(
+            Harness::Broca,
+            "broca-with-state",
+            &managed
+        ));
+        assert!(!session_context_reduced_by_mc(
+            Harness::Broca,
+            "broca-without-state",
+            &managed
+        ));
+        assert!(session_context_reduced_by_mc(
+            Harness::Opencode,
+            "oc-session",
+            &managed
+        ));
     }
 
     #[test]
@@ -12411,7 +12566,7 @@ mod managed_cache_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing-store.db");
         let keys = HashSet::from([(Harness::ClaudeCode, "cc-session".to_string())]);
-        assert!(load_managed_cache_sessions_from_path(&path, &keys).is_empty());
+        assert!(load_mc_state_sessions_from_path(&path, &keys).is_empty());
     }
 }
 
@@ -12446,6 +12601,9 @@ mod get_session_cache_events_by_turn_count_tests {
             context_limit: 0,
             context_limit_estimated: false,
             is_drop: false,
+            context_reduced_by_mc: true,
+            drop_request_size: None,
+            request_body_len: None,
             aggregate: false,
             cold_start: false,
             cache_write_reported: true,
@@ -13969,6 +14127,7 @@ mod broca_cache_tests {
             finish_reason: Some("tool_calls".to_string()),
             provider: Some("anthropic".to_string()),
             model: Some(model.to_string()),
+            request_body_len: None,
         }
     }
 
@@ -14819,6 +14978,137 @@ mod broca_cache_tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    /// A Broca run in progress whose second step reports about 36k fewer
+    /// prompt tokens than its first (DeepSeek drops its retained thinking
+    /// from `prompt_tokens` when a new turn starts). Neither step reads the
+    /// cache, so the drop is the only thing that can attach a cause. Each
+    /// step's sent request size is `request_lens`.
+    fn broca_drop_session(
+        name: &str,
+        request_lens: (Option<i64>, Option<i64>),
+    ) -> (Connection, String, Vec<broca_wal::WalRun>) {
+        let conn = store();
+        let session = identity(name).to_string();
+        let mut first = wal_step(
+            1,
+            Some(2_010),
+            "deepseek-flash",
+            step_usage(138_083, Some(0), None),
+        );
+        first.request_body_len = request_lens.0;
+        let mut second = wal_step(
+            2,
+            Some(2_020),
+            "deepseek-flash",
+            step_usage(102_299, Some(0), None),
+        );
+        second.request_body_len = request_lens.1;
+        let mut run = wal_run("r1", 2_000, vec![first, second]);
+        run.finished = false;
+        (conn, session, vec![run])
+    }
+
+    /// Events for the session with causes enriched and a recorded Magic
+    /// Context decision on the dropped step, and `mc_state` standing in for
+    /// store.db.
+    fn broca_drop_events(
+        conn: &Connection,
+        session: &str,
+        runs: &[broca_wal::WalRun],
+        mc_state: HashSet<(Harness, String)>,
+    ) -> Vec<DbCacheEvent> {
+        let rows =
+            load_broca_cache_events_from_conn(conn, session, Some(runs), None, None).unwrap();
+        let decisions = HashMap::from([(
+            (Harness::Broca, session.to_string(), "r1#2".to_string()),
+            TransformDecisionCause {
+                decision: "execute".to_string(),
+                materialize_reason: Some("m1_delta".to_string()),
+                emergency: false,
+            },
+        )]);
+        build_db_cache_events_with_overrides(
+            rows,
+            true,
+            Some(decisions),
+            Some(HashSet::new()),
+            Some(HashMap::new()),
+            Some(mc_state),
+        )
+    }
+
+    #[test]
+    fn broca_drop_without_mc_state_gets_no_magic_context_cause() {
+        let (conn, session, runs) = broca_drop_session("alfonso:bg_mason", (None, None));
+        let events = broca_drop_events(&conn, &session, &runs, HashSet::new());
+        assert_eq!(ids(&events), ["r1#1", "r1#2"]);
+        let dropped = &events[1];
+        assert!(dropped.is_drop);
+        assert!(!dropped.context_reduced_by_mc);
+        assert_eq!(dropped.cause, None);
+        assert_eq!(dropped.drop_request_size, None);
+        // The Cache list still shows the session by default.
+        assert!(is_managed_cache_session(
+            Harness::Broca,
+            &session,
+            &HashSet::new()
+        ));
+    }
+
+    #[test]
+    fn broca_drop_with_mc_state_keeps_the_magic_context_cause() {
+        let (conn, session, runs) = broca_drop_session("alfonso:bg_mason", (None, None));
+        let mc_state = HashSet::from([(Harness::Broca, session.clone())]);
+        let events = broca_drop_events(&conn, &session, &runs, mc_state.clone());
+        let dropped = &events[1];
+        assert!(dropped.is_drop);
+        assert!(dropped.context_reduced_by_mc);
+        assert_eq!(dropped.cause.as_deref(), Some("M1 delta"));
+        assert!(is_managed_cache_session(
+            Harness::Broca,
+            &session,
+            &mc_state
+        ));
+    }
+
+    #[test]
+    fn broca_drop_compares_the_sent_request_sizes() {
+        // Request bytes from the real case: the request grew while the
+        // provider counted 36k fewer prompt tokens.
+        for (lens, expected) in [
+            (
+                (Some(378_960), Some(382_956)),
+                Some(DropRequestSize::NotSmaller),
+            ),
+            (
+                (Some(382_956), Some(382_956)),
+                Some(DropRequestSize::NotSmaller),
+            ),
+            (
+                (Some(382_956), Some(250_000)),
+                Some(DropRequestSize::Smaller),
+            ),
+            ((None, Some(382_956)), None),
+            ((Some(378_960), None), None),
+        ] {
+            let (conn, session, runs) = broca_drop_session("alfonso:bg_mason", lens);
+            let events = broca_drop_events(&conn, &session, &runs, HashSet::new());
+            assert!(events[1].is_drop, "{lens:?}");
+            assert_eq!(events[1].drop_request_size, expected, "{lens:?}");
+            let json = serde_json::to_value(&events[1]).unwrap();
+            assert!(json.get("request_body_len").is_none());
+        }
+        // Steps that did not drop say nothing about the request size.
+        let (conn, session, runs) =
+            broca_drop_session("alfonso:bg_mason", (Some(378_960), Some(382_956)));
+        let events = broca_drop_events(&conn, &session, &runs, HashSet::new());
+        assert_eq!(events[0].drop_request_size, None);
+        assert_eq!(
+            serde_json::to_value(&events[1]).unwrap()["drop_request_size"],
+            "not_smaller"
         );
     }
 }

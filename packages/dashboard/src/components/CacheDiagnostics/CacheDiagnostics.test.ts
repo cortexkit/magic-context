@@ -71,6 +71,8 @@ function event(partial: Partial<DbCacheEvent>): DbCacheEvent {
     context_limit: 0,
     context_limit_estimated: false,
     is_drop: false,
+    context_reduced_by_mc: true,
+    drop_request_size: null,
     aggregate: false,
     cold_start: false,
     cache_write_reported: true,
