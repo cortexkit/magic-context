@@ -505,8 +505,9 @@ export interface DbCacheEvent {
   context_limit_estimated: boolean;
   is_drop: boolean;
   /** True when Magic Context manages this session's context, so a drop
-   *  (`is_drop`) is Magic Context's own reclaim. False when the host or runner
-   *  shrank the prompt itself. Not the same as `SessionCacheStats.managed`,
+   *  (`is_drop`) is Magic Context's own reclaim. False when Magic Context
+   *  does not manage the session, so a drop there is not its doing. Not the
+   *  same as `SessionCacheStats.managed`,
    *  which only decides whether the Cache list shows the session by default. */
   context_reduced_by_mc: boolean;
   /** On a drop, whether the request actually sent got smaller than the

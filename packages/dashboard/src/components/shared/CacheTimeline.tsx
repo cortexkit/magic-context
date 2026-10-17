@@ -62,8 +62,9 @@ function formatLimitLabel(limit: number): string {
  * a red-tinted bar and a red tick above it so they stand out at any density.
  * A vertical "old → new" divider marks where the window changed. Steps where
  * the prompt shrank get a full-height marker line whose tooltip explains why:
- * Magic Context's reclaim in a session it manages, otherwise a shrink made by
- * the host or runner.
+ * Magic Context's reclaim in a session it manages; otherwise it says Magic
+ * Context does not manage the session, plus what the request size shows when
+ * the source recorded it.
  *
  * Shared by the global Cache Diagnostics page and the per-session viewer; the
  * caller owns scroll-to-list behavior via onBarClick.
