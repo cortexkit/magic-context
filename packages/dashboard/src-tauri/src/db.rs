@@ -5526,6 +5526,34 @@ fn like_contains_pattern(raw: &str) -> String {
     escaped
 }
 
+/// Parse a search box value that is exactly a memory ID: digits, optionally
+/// prefixed with `#` (the form agents use when citing a memory, e.g. `#831`),
+/// with surrounding whitespace ignored. Anything else, including an ID that
+/// does not fit in an i64, returns None and is searched as ordinary text.
+fn parse_memory_id_query(search_query: Option<&str>) -> Option<i64> {
+    let trimmed = search_query?.trim();
+    let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Restricts a memory list query to one memory ID, or excludes one.
+#[derive(Clone, Copy)]
+enum MemoryIdCondition {
+    Only(i64),
+    Exclude(i64),
+}
+
+/// List memories for the Memories view.
+///
+/// When the search text is exactly a memory ID (`1234` or `#1234`) and that
+/// memory passes the project/workspace/status/category filters, the result is
+/// that memory followed by the normal text-search results with it removed.
+/// `limit`/`offset` page through that combined list, so the exact match only
+/// appears on the first page. An ID that does not exist or is filtered out
+/// leaves the ordinary text search unchanged.
 #[allow(clippy::too_many_arguments)]
 pub fn get_memories(
     conn: &Connection,
@@ -5534,6 +5562,63 @@ pub fn get_memories(
     status_filter: Option<&str>,
     category_filter: Option<&str>,
     search_query: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Memory>, rusqlite::Error> {
+    let run =
+        |search: Option<&str>, id_condition: Option<MemoryIdCondition>, limit: i64, offset: i64| {
+            query_memories(
+                conn,
+                project_filter,
+                workspace_filter,
+                status_filter,
+                category_filter,
+                search,
+                id_condition,
+                limit,
+                offset,
+            )
+        };
+
+    // A zero limit asks for no rows; skip the ID lookup so it cannot add one.
+    if let Some(id) = parse_memory_id_query(search_query).filter(|_| limit != 0) {
+        // The exact lookup runs without the search text but with every view
+        // filter, so an ID outside the current filters is not surfaced.
+        let exact = run(None, Some(MemoryIdCondition::Only(id)), 1, 0)?
+            .into_iter()
+            .next();
+        if let Some(exact) = exact {
+            // The combined list is [exact match, text results without it...].
+            // The first page holds the exact match plus one fewer text row;
+            // later pages read the text results shifted back by one. A negative
+            // limit means "no limit" to SQLite and is passed through as-is.
+            let text_condition = Some(MemoryIdCondition::Exclude(id));
+            if offset > 0 {
+                return run(search_query, text_condition, limit, offset - 1);
+            }
+            let text_limit = if limit > 0 { limit - 1 } else { limit };
+            let mut rows = vec![exact];
+            if text_limit != 0 {
+                rows.extend(run(search_query, text_condition, text_limit, 0)?);
+            }
+            return Ok(rows);
+        }
+    }
+
+    run(search_query, None, limit, offset)
+}
+
+/// The filtered FTS/LIKE/unfiltered memory list behind `get_memories`, with an
+/// optional condition that keeps or drops a single memory ID.
+#[allow(clippy::too_many_arguments)]
+fn query_memories(
+    conn: &Connection,
+    project_filter: Option<&str>,
+    workspace_filter: Option<i64>,
+    status_filter: Option<&str>,
+    category_filter: Option<&str>,
+    search_query: Option<&str>,
+    id_condition: Option<MemoryIdCondition>,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Memory>, rusqlite::Error> {
@@ -5625,6 +5710,22 @@ pub fn get_memories(
         params.push(Box::new(c.to_string()));
         conditions.push(format!("m.category = ?{}", params.len()));
     }
+    // Position in `params` of an excluded ID. The FTS fallback check below
+    // binds NULL there instead: `m.id IS NOT NULL` keeps every row, so that
+    // check sees the same matches as the search without the exclusion.
+    let mut exclude_param_pos = None;
+    match id_condition {
+        Some(MemoryIdCondition::Only(id)) => {
+            params.push(Box::new(id));
+            conditions.push(format!("m.id = ?{}", params.len()));
+        }
+        Some(MemoryIdCondition::Exclude(id)) => {
+            exclude_param_pos = Some(params.len());
+            params.push(Box::new(id));
+            conditions.push(format!("m.id IS NOT ?{}", params.len()));
+        }
+        None => {}
+    }
 
     let where_extra = if conditions.is_empty() {
         String::new()
@@ -5714,22 +5815,32 @@ pub fn get_memories(
             enrich_memories_workspace_source(conn, workspace_filter, &mut memories)?;
             Ok(memories)
         }
-        Ok(empty) if use_fts && !use_like_fallback && offset > 0 && {
-            // An empty page past the first one only falls back to LIKE when FTS
-            // matches nothing at all. Otherwise it is just the end of the FTS
-            // results, and a LIKE page at the same offset would splice a
-            // different result set onto the pages already shown.
-            let mut probe: Vec<&dyn rusqlite::types::ToSql> = params[..params.len() - 2]
-                .iter()
-                .map(|p| p.as_ref())
-                .collect();
-            probe.push(&1i64);
-            probe.push(&0i64);
-            conn.prepare(&sql)?
-                .query(probe.as_slice())?
-                .next()?
-                .is_some()
-        } =>
+        Ok(empty)
+            if use_fts
+                && !use_like_fallback
+                && (offset > 0 || exclude_param_pos.is_some())
+                && {
+                    // An empty page past the first one only falls back to LIKE when FTS
+                    // matches nothing at all. Otherwise it is just the end of the FTS
+                    // results, and a LIKE page at the same offset would splice a
+                    // different result set onto the pages already shown. The same holds
+                    // for a first page that is empty only because the excluded ID was
+                    // the sole FTS match: the caller already shows that memory, and the
+                    // search without the exclusion would have stayed on FTS.
+                    let mut probe: Vec<&dyn rusqlite::types::ToSql> = params[..params.len() - 2]
+                        .iter()
+                        .map(|p| p.as_ref())
+                        .collect();
+                    if let Some(pos) = exclude_param_pos {
+                        probe[pos] = &rusqlite::types::Null;
+                    }
+                    probe.push(&1i64);
+                    probe.push(&0i64);
+                    conn.prepare(&sql)?
+                        .query(probe.as_slice())?
+                        .next()?
+                        .is_some()
+                } =>
         {
             Ok(empty)
         }
@@ -5768,6 +5879,10 @@ pub fn get_memories(
             }
             if let Some(c) = category_filter {
                 like_params.push(Box::new(c.to_string()));
+            }
+            if let Some(MemoryIdCondition::Only(id) | MemoryIdCondition::Exclude(id)) = id_condition
+            {
+                like_params.push(Box::new(id));
             }
             like_params.push(Box::new(limit));
             like_params.push(Box::new(offset));
@@ -5811,6 +5926,10 @@ pub fn get_memories(
             }
             if let Some(c) = category_filter {
                 like_params.push(Box::new(c.to_string()));
+            }
+            if let Some(MemoryIdCondition::Only(id) | MemoryIdCondition::Exclude(id)) = id_condition
+            {
+                like_params.push(Box::new(id));
             }
             like_params.push(Box::new(limit));
             like_params.push(Box::new(offset));
@@ -12917,6 +13036,352 @@ mod memory_project_filter_tests {
                 .len()
         };
         assert_eq!((like_page(0), like_page(2), like_page(4)), (2, 1, 0));
+    }
+
+    /// Insert a memory with an explicit ID, indexed in FTS like the plugin does.
+    fn insert_memory_row(
+        conn: &Connection,
+        id: i64,
+        project_path: &str,
+        category: &str,
+        status: &str,
+        content: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO memories
+                (id, project_path, category, content, normalized_hash,
+                 source_type, seen_count, retrieval_count,
+                 first_seen_at, last_seen_at, verification_status,
+                 status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5,
+                     'historian', 1, 0,
+                     1000, 1000, 'unverified',
+                     ?6, 1000, ?7)",
+            (
+                id,
+                project_path,
+                category,
+                content,
+                format!("{:x}", md5::compute(content)),
+                status,
+                1000 + id,
+            ),
+        )
+        .expect("insert memory");
+        conn.execute(
+            "INSERT INTO memories_fts(rowid, content, category) VALUES (?1, ?2, ?3)",
+            (id, content, category),
+        )
+        .expect("index memory");
+    }
+
+    fn search_ids(
+        conn: &Connection,
+        project: Option<&str>,
+        status: Option<&str>,
+        category: Option<&str>,
+        search: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Vec<i64> {
+        get_memories(
+            conn,
+            project,
+            None,
+            status,
+            category,
+            Some(search),
+            limit,
+            offset,
+        )
+        .expect("get_memories")
+        .into_iter()
+        .map(|m| m.id)
+        .collect()
+    }
+
+    #[test]
+    fn parse_memory_id_query_accepts_only_a_bare_or_hashed_id() {
+        assert_eq!(parse_memory_id_query(Some("1451")), Some(1451));
+        assert_eq!(parse_memory_id_query(Some("#1451")), Some(1451));
+        assert_eq!(parse_memory_id_query(Some("  #1451 \t")), Some(1451));
+        for text in [
+            "",
+            "#",
+            "# 1451",
+            "1451a",
+            "#14 51",
+            "-5",
+            "+5",
+            "##5",
+            "memory 5",
+            "99999999999999999999",
+        ] {
+            assert_eq!(parse_memory_id_query(Some(text)), None, "{text:?}");
+        }
+        assert_eq!(parse_memory_id_query(None), None);
+    }
+
+    #[test]
+    fn memory_id_search_returns_exact_memory_with_or_without_hash() {
+        let conn = make_memory_db();
+        insert_memory_row(
+            &conn,
+            1451,
+            "/tmp/ids",
+            "CONSTRAINTS",
+            "active",
+            "alpha fact",
+        );
+        insert_memory_row(
+            &conn,
+            1526,
+            "/tmp/ids",
+            "CONSTRAINTS",
+            "active",
+            "beta fact",
+        );
+        // A two-digit ID takes the LIKE text path rather than FTS.
+        insert_memory_row(&conn, 42, "/tmp/ids", "CONSTRAINTS", "active", "gamma fact");
+
+        for search in ["1451", "#1451", "  #1451  "] {
+            assert_eq!(
+                search_ids(&conn, None, None, None, search, 200, 0),
+                vec![1451],
+                "{search:?}"
+            );
+        }
+        for search in ["42", "#42"] {
+            assert_eq!(
+                search_ids(&conn, None, None, None, search, 200, 0),
+                vec![42],
+                "{search:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_id_search_puts_exact_match_first_without_duplicating_text_hits() {
+        let conn = make_memory_db();
+        // The memory's own text also contains its ID, so the text search
+        // returns it too; it must appear exactly once, in first place. Its
+        // text is long so FTS ranks it below the short hits: without the ID
+        // lookup it would not come first.
+        insert_memory_row(
+            &conn,
+            1451,
+            "/tmp/ids",
+            "WORKFLOW",
+            "active",
+            "decision kept after a long discussion about release timing, review load, \
+             and several unrelated follow-ups, recorded as 1451",
+        );
+        insert_memory_row(
+            &conn,
+            1526,
+            "/tmp/ids",
+            "CONSTRAINTS",
+            "active",
+            "1451 1451",
+        );
+        insert_memory_row(
+            &conn,
+            1600,
+            "/tmp/ids",
+            "CONSTRAINTS",
+            "active",
+            "1451 again",
+        );
+        insert_memory_row(
+            &conn,
+            1700,
+            "/tmp/ids",
+            "CONSTRAINTS",
+            "active",
+            "unrelated",
+        );
+
+        for search in ["1451", "#1451"] {
+            // Pin the premise: text ranking alone puts 1451 last.
+            let text_only: Vec<i64> =
+                query_memories(&conn, None, None, None, None, Some(search), None, 200, 0)
+                    .expect("text search")
+                    .into_iter()
+                    .map(|m| m.id)
+                    .collect();
+            assert_eq!(text_only.len(), 3, "{search:?}: {text_only:?}");
+            assert_eq!(text_only.last(), Some(&1451), "{search:?}: {text_only:?}");
+
+            let all = search_ids(&conn, None, None, None, search, 200, 0);
+            assert_eq!(all[0], 1451, "{search:?}: {all:?}");
+            let mut rest = all[1..].to_vec();
+            rest.sort_unstable();
+            assert_eq!(rest, vec![1526, 1600], "{search:?}: {all:?}");
+
+            // Pages walk the same combined list: the exact match is on the
+            // first page only, and no row is repeated or skipped.
+            let mut paged = search_ids(&conn, None, None, None, search, 2, 0);
+            assert_eq!(paged.len(), 2);
+            paged.extend(search_ids(&conn, None, None, None, search, 2, 2));
+            assert_eq!(paged, all, "{search:?}");
+            assert!(search_ids(&conn, None, None, None, search, 2, 4).is_empty());
+            assert_eq!(
+                search_ids(&conn, None, None, None, search, 1, 0),
+                vec![1451]
+            );
+        }
+    }
+
+    #[test]
+    fn memory_id_search_stays_on_fts_when_the_exact_match_is_the_only_hit() {
+        // FTS matches only memory 1451 itself. Showing it as the exact match
+        // must not leave the text part empty and trigger the LIKE fallback,
+        // which would add the substring-only hit on "14510".
+        let conn = make_memory_db();
+        insert_memory_row(
+            &conn,
+            1451,
+            "/tmp/ids",
+            "CONSTRAINTS",
+            "active",
+            "note 1451 here",
+        );
+        insert_memory_row(
+            &conn,
+            1460,
+            "/tmp/ids",
+            "CONSTRAINTS",
+            "active",
+            "ticket 14510",
+        );
+
+        assert_eq!(
+            search_ids(&conn, None, None, None, "1451", 200, 0),
+            vec![1451]
+        );
+        assert!(search_ids(&conn, None, None, None, "1451", 1, 1).is_empty());
+    }
+
+    #[test]
+    fn memory_id_search_does_not_override_view_filters() {
+        let conn = make_memory_db();
+        insert_memory_row(
+            &conn,
+            1451,
+            "/tmp/ids-a",
+            "WORKFLOW",
+            "archived",
+            "old rule",
+        );
+        insert_memory_row(
+            &conn,
+            1526,
+            "/tmp/ids-a",
+            "CONSTRAINTS",
+            "active",
+            "see 1451",
+        );
+        insert_memory_row(&conn, 2000, "/tmp/ids-b", "CONSTRAINTS", "active", "other");
+        insert_memory_row(
+            &conn,
+            2001,
+            "/tmp/ids-a",
+            "CONSTRAINTS",
+            "active",
+            "cites 2000",
+        );
+
+        // Status: 1451 is archived, so an active-only view shows text hits only.
+        assert_eq!(
+            search_ids(&conn, None, Some("active"), None, "#1451", 200, 0),
+            vec![1526]
+        );
+        // Category: 1451 is WORKFLOW, so a CONSTRAINTS view shows text hits only.
+        assert_eq!(
+            search_ids(&conn, None, None, Some("CONSTRAINTS"), "1451", 200, 0),
+            vec![1526]
+        );
+        // Project: 2000 lives in another project.
+        let project_a = stable_dir_identity("/tmp/ids-a");
+        assert_eq!(
+            search_ids(&conn, Some(&project_a), None, None, "#2000", 200, 0),
+            vec![2001]
+        );
+        // Matching filters still surface the exact match first.
+        assert_eq!(
+            search_ids(
+                &conn,
+                Some(&project_a),
+                Some("archived"),
+                None,
+                "1451",
+                200,
+                0
+            ),
+            vec![1451]
+        );
+        let project_b = stable_dir_identity("/tmp/ids-b");
+        assert_eq!(
+            search_ids(
+                &conn,
+                Some(&project_b),
+                None,
+                Some("CONSTRAINTS"),
+                "#2000",
+                200,
+                0
+            ),
+            vec![2000]
+        );
+    }
+
+    #[test]
+    fn memory_id_search_for_a_missing_id_returns_text_results_only() {
+        let conn = make_memory_db();
+        insert_memory_row(
+            &conn,
+            10,
+            "/tmp/ids",
+            "CONSTRAINTS",
+            "active",
+            "see 9999 later",
+        );
+        insert_memory_row(&conn, 11, "/tmp/ids", "CONSTRAINTS", "active", "unrelated");
+
+        assert_eq!(
+            search_ids(&conn, None, None, None, "9999", 200, 0),
+            vec![10]
+        );
+        assert_eq!(
+            search_ids(&conn, None, None, None, "#9999", 200, 0),
+            vec![10]
+        );
+        assert!(search_ids(&conn, None, None, None, "#8888", 200, 0).is_empty());
+    }
+
+    #[test]
+    fn ordinary_text_search_is_unaffected_by_id_lookup() {
+        let conn = make_memory_db();
+        insert_memory_row(&conn, 1, "/tmp/ids", "CONSTRAINTS", "active", "alpha fact");
+        insert_memory_row(
+            &conn,
+            2,
+            "/tmp/ids",
+            "CONSTRAINTS",
+            "active",
+            "memory 1 alpha",
+        );
+        insert_memory_row(&conn, 3, "/tmp/ids", "CONSTRAINTS", "active", "beta");
+
+        let mut alpha = search_ids(&conn, None, None, None, "alpha", 200, 0);
+        alpha.sort_unstable();
+        assert_eq!(alpha, vec![1, 2]);
+        // Text that merely contains a number is not an ID lookup: memory 1 is
+        // not pulled in ahead of the text match.
+        assert_eq!(
+            search_ids(&conn, None, None, None, "memory 1", 200, 0),
+            vec![2]
+        );
     }
 
     #[test]
