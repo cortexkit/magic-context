@@ -63,7 +63,9 @@ const GATED_VERSION: u8 = 3;
 /// model saw, which matters only to a transcript view: this reader takes
 /// usage, steps and timestamps, which they leave as they were.
 /// `input-token-cap/v1` adds a `budget_exhausted` run end, and this reader
-/// only records that a run finished, not why.
+/// only records that a run finished, not why. `structured-output/v1` adds the
+/// run's frozen output schema to `RunStarted` and a structured result record
+/// at the run's end, neither of which this reader uses.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -81,6 +83,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "compaction-wait/v1",
     "step-transforms/v1",
     "input-token-cap/v1",
+    "structured-output/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1737,9 +1740,8 @@ pub(crate) mod tests {
         assert!(runs[0].finished);
     }
 
-    /// Every feature name Broca 0.3.210 writes (`KNOWN_FEATURES` in
-    /// broca-wal's framing.rs), plus `input-token-cap/v1` announced for the
-    /// next deploy, spelled out rather than taken from this reader's own list,
+    /// Every feature name Broca 0.3.214 writes (`KNOWN_FEATURES` in
+    /// broca-wal's framing.rs), spelled out rather than taken from this reader's own list,
     /// so a name Broca adds and this reader lacks shows up here instead of
     /// silently truncating sessions.
     #[test]
@@ -1761,6 +1763,7 @@ pub(crate) mod tests {
             "compaction-wait/v1",
             "step-transforms/v1",
             "input-token-cap/v1",
+            "structured-output/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -1769,6 +1772,23 @@ pub(crate) mod tests {
             let runs = decode(&bytes).unwrap_or_else(|e| panic!("{feature}: {e}"));
             assert_eq!(step_ids(&runs), [("r1".to_string(), 1)], "{feature}");
         }
+    }
+
+    /// `structured-output/v1` adds the frozen schema settings to `RunStarted`
+    /// and a structured result record at the run's end; a run that carries both
+    /// still yields its steps and finishes.
+    #[test]
+    fn a_structured_output_run_keeps_its_steps() {
+        let mut record = run_started("r1", 1);
+        record["structured_output"] = json!({"schema_digest": "sha256:00", "mode": "best_effort"});
+        let bytes = wal_bytes(&[
+            json!({"requires": ["structured-output/v1"], "record": record}),
+            step_finished(1, usage(1, 2, 3, 4)),
+            json!({"requires": ["structured-output/v1"],
+                   "record": {"type": "structured_result", "run_id": "r1", "value": {"ok": true}}}),
+        ]);
+        let runs = decode(&bytes).unwrap();
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
     }
 
     /// `session-class/v1` adds `session_class` to `RunStarted`; a run that
