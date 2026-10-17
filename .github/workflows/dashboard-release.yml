@@ -182,7 +182,12 @@ jobs:
         timeout-minutes: 60
         with:
           projectPath: packages/dashboard
-          tauriScript: bunx tauri
+          # Linux legs build through a wrapper that strips the bundled libwayland
+          # from the AppImage, repacks and re-signs it, and verifies the result
+          # before tauri-action uploads it (Mesa on current hosts fails with
+          # EGL_BAD_ALLOC when it loads an older bundled libwayland). See
+          # scripts/dashboard-appimage-build.sh. Other legs run bunx tauri as is.
+          tauriScript: ${{ contains(matrix.settings.host, 'ubuntu') && 'bash ../../scripts/dashboard-appimage-build.sh' || 'bunx tauri' }}
           args: --target ${{ matrix.settings.target }}${{ matrix.settings.bundles && format(' --bundles {0}', matrix.settings.bundles) || '' }}
           updaterJsonPreferNsis: true
           # Upload into the single pre-created draft (see create-release). Using
@@ -201,6 +206,41 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ${{ runner.temp }}/apple-api-key.p8
+
+      # Release gate for the Linux AppImage: no bundled libwayland, ldd resolves
+      # libwayland from the system, and the signature verifies against the
+      # updater key in tauri.conf.json, both for the local file and for the
+      # asset and .sig uploaded to the draft release (what the CLI installer and
+      # the in-app updater download). A failure fails this leg, so
+      # deploy-updater never publishes the release.
+      - name: Verify Linux AppImage
+        if: contains(matrix.settings.host, 'ubuntu')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          TARGET: ${{ matrix.settings.target }}
+          ASSET: magic-context-dashboard-linux-${{ matrix.settings.arch }}.AppImage
+        run: |
+          shopt -s nullglob
+          images=(packages/dashboard/src-tauri/target/"$TARGET"/release/bundle/appimage/*.AppImage)
+          if [[ ${#images[@]} -ne 1 ]]; then
+            echo "::error::expected one AppImage for $TARGET, found ${#images[@]}"
+            exit 1
+          fi
+          bash scripts/dashboard-appimage-verify.sh "${images[0]}"
+
+          mkdir -p "$RUNNER_TEMP/uploaded"
+          for name in "$ASSET" "$ASSET.sig"; do
+            id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --jq ".[] | select(.name == \"$name\") | .id")
+            if [[ -z "$id" ]]; then
+              echo "::error::release $RELEASE_ID has no asset $name"
+              exit 1
+            fi
+            gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "$RUNNER_TEMP/uploaded/$name"
+          done
+          cmp "${images[0]}" "$RUNNER_TEMP/uploaded/$ASSET"
+          cmp "${images[0]}.sig" "$RUNNER_TEMP/uploaded/$ASSET.sig"
+          bun scripts/dashboard-updater-verify.ts "$RUNNER_TEMP/uploaded/$ASSET" "$RUNNER_TEMP/uploaded/$ASSET.sig"
 
   # Deploy latest.json to gh-pages for the updater endpoint.
   #
@@ -278,6 +318,40 @@ jobs:
               "latest.json still has /releases/latest/download/ URLs after rewrite"
           PY
           cat "$FILE"
+
+      # Bun and the workspace dependencies run scripts/dashboard-updater-verify.ts,
+      # which imports the CLI installer's signature verifier.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      # Every Linux AppImage entry in the manifest must point at a file that its
+      # signature verifies with the updater key in tauri.conf.json. The Linux
+      # legs repack and re-sign the AppImage after Tauri's bundle step, so this
+      # catches a manifest that kept the signature of the original file. On
+      # failure latest.json is not deployed and the updater keeps offering the
+      # previous release.
+      - name: Verify Linux updater entries
+        run: |
+          FILE=_updater_publish/latest.json
+          mkdir -p "$RUNNER_TEMP/updater"
+          keys=$(jq -r '.platforms | to_entries[] | select(.key | startswith("linux-")) | select(.value.url | endswith(".AppImage")) | .key' "$FILE")
+          if [[ -z "$keys" ]]; then
+            echo "::error::latest.json has no linux-* AppImage entry"
+            exit 1
+          fi
+          for key in $keys; do
+            url=$(jq -r --arg k "$key" '.platforms[$k].url' "$FILE")
+            file="$RUNNER_TEMP/updater/$(basename "$url")"
+            # linux-<arch> and linux-<arch>-appimage name the same file; fetch it once.
+            [[ -s "$file" ]] || curl -fsSL --retry 5 -o "$file" "$url"
+            jq -r --arg k "$key" '.platforms[$k].signature' "$FILE" > "$RUNNER_TEMP/updater/$key.sig"
+            echo "$key -> $url"
+            bun scripts/dashboard-updater-verify.ts "$file" "$RUNNER_TEMP/updater/$key.sig"
+          done
 
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v4
