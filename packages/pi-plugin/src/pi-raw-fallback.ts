@@ -15,8 +15,13 @@ export class PiStorageBusyError extends Error {
 	readonly code = "PI_STORAGE_BUSY";
 	readonly recoverable = true;
 
-	constructor(options?: { cause?: unknown }) {
-		super("Magic Context storage is busy; send your message again", options);
+	constructor(options?: { cause?: unknown; reason?: string }) {
+		super(
+			options?.reason
+				? `Magic Context could not safely prepare this turn; send your message again (${options.reason})`
+				: "Magic Context storage is busy; send your message again",
+			options?.cause !== undefined ? { cause: options.cause } : undefined,
+		);
 		this.name = "PiStorageBusyError";
 	}
 }

@@ -20,12 +20,14 @@ import {
 	capturePiServedArray,
 	clearPiServedArraySession,
 	flushPiServedArrayLedger,
+	getPiLastServedDigest,
 	getPiServedArrayBodyPath,
 	getPiServedArrayLedgerPath,
 	getPiServedTagNumbers,
 	getPiServedTagNumbersPath,
 	PI_SERVED_ARRAY_TAIL_MESSAGES,
 } from "./served-array-ledger";
+import { PiServedEnvelopeUnavailable } from "./pi-served-identities";
 
 const temporaryDirectories: string[] = [];
 
@@ -414,5 +416,79 @@ console.log(JSON.stringify([...getPiServedTagNumbers("restart", ${JSON.stringify
 			}),
 		).toBeUndefined();
 		expect(__test.getDiagnostics().swallowedWriteCount).toBe(1);
+	});
+});
+
+describe("issue #723: hole-padded NUL tails in the served ledgers", () => {
+	function padNulTail(file: string, bytes: number): void {
+		appendFileSync(file, Buffer.alloc(bytes));
+	}
+
+	test("identity ledger ignores a NUL-only tail, adopts the last valid record, and repairs the file", () => {
+		const storageDir = temporaryDirectory();
+		capturePiServedArray("nul-identity", [], {
+			storageDir,
+			servedTagNumbers: [3],
+		});
+		const file = getPiServedTagNumbersPath("nul-identity", storageDir);
+		padNulTail(file, 87);
+
+		__test.reset();
+		expect([...getPiServedTagNumbers("nul-identity", storageDir)]).toEqual([3]);
+		// The padded tail is repaired so the plugin never re-fails on the same bytes.
+		expect(readFileSync(file).includes(0)).toBe(false);
+		// The repaired file keeps validating record semantics.
+		expect([...getPiServedTagNumbers("nul-identity", storageDir)]).toEqual([3]);
+	});
+
+	test("digest ledger ignores a NUL-only tail and still returns the last digest", () => {
+		const storageDir = temporaryDirectory();
+		capturePiServedArray("nul-digest", [], { storageDir });
+		flushPiServedArrayLedger();
+		const file = getPiServedArrayLedgerPath("nul-digest", storageDir);
+		const digest = getPiLastServedDigest("nul-digest", storageDir);
+		expect(digest).toBeDefined();
+		padNulTail(file, 1584);
+
+		__test.reset();
+		expect(getPiLastServedDigest("nul-digest", storageDir)).toBe(digest);
+		// The digest ledger's padded tail is repaired on read as well.
+		expect(readFileSync(file).includes(0)).toBe(false);
+	});
+
+	test("genuinely corrupt content lines still fail closed with a typed error", () => {
+		const storageDir = temporaryDirectory();
+		capturePiServedArray("nul-content", [], {
+			storageDir,
+			servedTagNumbers: [3],
+		});
+		const file = getPiServedTagNumbersPath("nul-content", storageDir);
+		// A corrupt *content* line plus NUL padding: the tail may be dropped,
+		// but the unreadable record must refuse identity adoption for safety.
+		writeFileSync(file, "not a served record\n\u0000\u0000\u0000");
+
+		__test.reset();
+		let error: unknown;
+		try {
+			getPiServedTagNumbers("nul-content", storageDir);
+		} catch (caught) {
+			error = caught;
+		}
+		expect(error).toBeInstanceOf(PiServedEnvelopeUnavailable);
+	});
+
+	test("a raw JSON syntax failure surfaces as pi-served-envelope-unavailable", () => {
+		const storageDir = temporaryDirectory();
+		capturePiServedArray("nul-syntax", [], {
+			storageDir,
+			servedTagNumbers: [3],
+		});
+		const file = getPiServedTagNumbersPath("nul-syntax", storageDir);
+		writeFileSync(file, "{torn json\n");
+
+		__test.reset();
+		expect(() => getPiServedTagNumbers("nul-syntax", storageDir)).toThrow(
+			PiServedEnvelopeUnavailable,
+		);
 	});
 });

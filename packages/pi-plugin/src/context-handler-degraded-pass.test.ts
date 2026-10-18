@@ -155,6 +155,29 @@ describe("Pi context handler never serves a degraded pass", () => {
 			});
 	});
 
+	it("names the real cause when refusing an ordinary failure whose LKG is unavailable (issue #723)", async () => {
+		const raw = [userMessage("hello", 1)];
+		const { result } = await runFailingPass(
+			"pi-degraded-named-cause",
+			{
+				resolveForProject: () => {
+					throw new Error("ordinary transform defect");
+				},
+			},
+			raw,
+		);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error).toMatchObject({ name: "PiStorageBusyError" });
+			const message = (result.error as { message?: string }).message ?? "";
+			// The refusal must no longer claim a busy store when the store is fine:
+			// a corrupt ledger surfaced as unexplainable "storage is busy" here.
+			expect(message).toContain("could not safely prepare this turn");
+			expect(message).toContain("ordinary transform defect");
+			expect(message).not.toContain("storage is busy");
+		}
+	});
+
 	it("passes through an ordinary failure when compaction is off", async () => {
 		const { result } = await runFailingPass(
 			"pi-degraded-off",

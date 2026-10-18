@@ -7051,6 +7051,10 @@ export function registerPiContextHandler(
 			// Without a resolved session there are no persisted decisions to omit
 			// (Pi's runtime manager is missing), so the host's input passes through.
 			if (!lkgCompactionOff && sessionIdForError) {
+				// Named-cause refusal: the turn is still retryable, but the reason
+				// must reach the user instead of a false "storage is busy" label.
+				// Issue #723: a corrupt ledger surfaced as a fake busy state and a
+				// resend loop that could never succeed.
 				throw new PiStorageBusyError({
 					cause:
 						err instanceof PiDegradedPassError
@@ -7058,6 +7062,7 @@ export function registerPiContextHandler(
 							: new PiDegradedPassError("context-handler-failed", {
 									cause: err,
 								}),
+					reason: `failed pass: ${piStorageErrorReason(err).slice(0, 300) || "context-handler-failed"}`,
 				});
 			}
 			log(

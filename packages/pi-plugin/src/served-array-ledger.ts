@@ -83,6 +83,64 @@ function sameIdentityFile(
 	);
 }
 
+/**
+ * Issue #723: the append-mode ledger flushes on Windows/Bun have been seen to
+ * grow these files with a hole-padded NUL tail. Those bytes carry no record
+ * content, so callers strip them before parsing and restore the file to its
+ * written length; only genuinely unreadable records may fail closed.
+ */
+function splitNulTail(buffer: Buffer): {
+	text: string;
+	nulTailBytes: number;
+	midFileNul: boolean;
+} {
+	let end = buffer.length;
+	while (end > 0 && buffer[end - 1] === 0) end -= 1;
+	let midFileNul = false;
+	for (let index = 0; index < end; index += 1) {
+		if (buffer[index] === 0) {
+			midFileNul = true;
+			break;
+		}
+	}
+	return {
+		text: buffer.toString("utf8", 0, end),
+		nulTailBytes: buffer.length - end,
+		midFileNul,
+	};
+}
+
+function repairNulTailOnDisk(
+	filePath: string,
+	buffer: Buffer,
+	nulTailBytes: number,
+	label: string,
+): void {
+	if (!nulTailBytes) return;
+	try {
+		// Only trim while no peer appended between read and repair: rewriting a
+		// stale length would drop a legitimately concurrent record.
+		const stamp = identityFileStamp(filePath);
+		if (stamp && stamp.size === buffer.length) {
+			writeStorageFileSync(
+				filePath,
+				buffer.subarray(0, buffer.length - nulTailBytes),
+			);
+			log(
+				`[magic-context][pi] repaired ${label} hole-padded NUL tail (${nulTailBytes} bytes) in ${path.basename(filePath)}`,
+			);
+			return;
+		}
+		log(
+			`[magic-context][pi] skipped ${label} NUL tail repair in ${path.basename(filePath)}: file changed since read`,
+		);
+	} catch (error) {
+		log(
+			`[magic-context][pi] could not repair ${label} NUL tail: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
 interface CaptureOptions {
 	/** The saved request plus raw recovery messages assigns no new tag numbers; log bytes without consulting or publishing their identity tables. */
 	recoveryWithoutTagState?: boolean;
@@ -145,7 +203,16 @@ export function getPiServedTagNumbers(
 		return cached.numbers;
 	let text: string;
 	try {
-		text = readFileSync(filePath, "utf8");
+		const bytes = readFileSync(filePath);
+		const sanitized = splitNulTail(bytes);
+		if (sanitized.midFileNul) {
+			// Zeros inside recorded content might not be padding; strict parsing
+			// below decides whether the file is fit for identity adoption.
+			text = bytes.toString("utf8");
+		} else {
+			text = sanitized.text;
+			repairNulTailOnDisk(filePath, bytes, sanitized.nulTailBytes, "identity");
+		}
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		text = "";
@@ -153,11 +220,21 @@ export function getPiServedTagNumbers(
 	const numbers = new Set<number>();
 	for (const line of text.split("\n")) {
 		if (!line.trim()) continue;
-		const row = JSON.parse(line) as {
+		let row: {
 			version?: unknown;
 			session_id?: unknown;
 			tag_numbers?: unknown;
 		};
+		try {
+			row = JSON.parse(line) as typeof row;
+		} catch (error) {
+			// A torn write must surface as the envelope-unavailable class callers
+			// already wrap the SQLite mirror with, never as a raw SyntaxError.
+			throw new PiServedEnvelopeUnavailable(
+				`Pi served-number ledger is unreadable (JSON parse error in ${path.basename(filePath)}); refusing identity adoption`,
+				{ cause: error },
+			);
+		}
 		if (
 			row.version !== 1 ||
 			row.session_id !== sessionId ||
@@ -185,10 +262,12 @@ export function getPiLastServedDigest(
 	const previous = previousBySession.get(sessionId);
 	if (previous) return previous.digest;
 	try {
-		const lines = readFileSync(
-			getPiServedArrayLedgerPath(sessionId, storageDir),
-			"utf8",
-		)
+		const filePath = getPiServedArrayLedgerPath(sessionId, storageDir);
+		const bytes = readFileSync(filePath);
+		const sanitized = splitNulTail(bytes);
+		if (!sanitized.midFileNul)
+			repairNulTailOnDisk(filePath, bytes, sanitized.nulTailBytes, "digest");
+		const lines = (sanitized.midFileNul ? bytes.toString("utf8") : sanitized.text)
 			.trim()
 			.split("\n");
 		const last = JSON.parse(lines.at(-1) ?? "") as PiServedArrayDigestRecord;
