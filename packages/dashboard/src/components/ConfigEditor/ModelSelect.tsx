@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 import FloatingLayer from "./FloatingLayer";
-import { commitTypedModelValue, getTypedModelSelection } from "./model-selection";
+import { commitTypedModelValue, getTypedModelSelection, suggestedModels } from "./model-selection";
 
 export { commitTypedModelValue, getTypedModelSelection } from "./model-selection";
 
@@ -18,10 +18,12 @@ export default function ModelSelect(props: ModelSelectProps) {
   let triggerRef!: HTMLButtonElement;
   let inputRef: HTMLInputElement | undefined;
 
+  const suggestions = createMemo(() => suggestedModels(props.models));
+
   // Group models by provider
   const grouped = createMemo(() => {
     const q = search().toLowerCase();
-    const filtered = q ? props.models.filter((m) => m.toLowerCase().includes(q)) : props.models;
+    const filtered = q ? suggestions().filter((m) => m.toLowerCase().includes(q)) : suggestions();
 
     const groups: Record<string, string[]> = {};
     for (const m of filtered) {
@@ -33,7 +35,7 @@ export default function ModelSelect(props: ModelSelectProps) {
     return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
   });
 
-  const typedSelection = createMemo(() => getTypedModelSelection(search(), props.models));
+  const typedSelection = createMemo(() => getTypedModelSelection(search(), suggestions()));
   const typedModel = () => typedSelection().model;
   const showTypedModelOption = () => {
     const selection = typedSelection();
@@ -58,7 +60,7 @@ export default function ModelSelect(props: ModelSelectProps) {
     setOpen(false);
   };
 
-  const commitTypedModel = () => commitTypedModelValue(search(), props.models, selectModel);
+  const commitTypedModel = () => commitTypedModelValue(search(), suggestions(), selectModel);
 
   // Normalize values at the component boundary because asynchronous form-state
   // refreshes can briefly provide a non-string value before the next render.
