@@ -4,7 +4,10 @@ import {
 	clearPendingPiCompactionMarkerStateIf,
 	setPendingPiCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage";
-import { applyDeferredPiCompactionMarker } from "./compaction-marker-manager-pi";
+import {
+	adaptPiAppendCompaction,
+	applyDeferredPiCompactionMarker,
+} from "./compaction-marker-manager-pi";
 import { signalPiDeferredHistoryRefresh } from "./context-handler";
 import {
 	buildPiCompactionSummary,
@@ -188,7 +191,7 @@ function resolvePiAppendCompaction(
 		  }
 		| undefined;
 	if (typeof sm?.appendCompaction !== "function") return undefined;
-	return sm.appendCompaction.bind(sm);
+	return adaptPiAppendCompaction(sm.appendCompaction.bind(sm));
 }
 
 function resolvePiReadBranchEntries(

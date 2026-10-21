@@ -283,6 +283,7 @@ import { clearPiEmbedSessionState } from "./commands/ctx-embed";
 import { sendCtxStatusMessage } from "./commands/pi-command-utils";
 import {
 	type ApplyDeferredPiCompactionMarkerDeps,
+	adaptPiAppendCompaction,
 	applyDeferredPiCompactionMarker,
 	clearPiCompactionMarkerDrainLogState,
 	getPiCompactionMarkerDrainErrorFields,
@@ -2698,6 +2699,8 @@ function stripMcOwnedPiCompactionSummary(
 				summary?: unknown;
 				tokensBefore?: unknown;
 				fromHook?: unknown;
+				/** OMP records the hook origin here instead of `fromHook`. */
+				fromExtension?: unknown;
 				details?: unknown;
 		  }
 		| undefined;
@@ -2708,7 +2711,9 @@ function stripMcOwnedPiCompactionSummary(
 			break;
 		}
 	}
-	if (compaction?.fromHook !== true) return false;
+	if (compaction?.fromHook !== true && compaction?.fromExtension !== true) {
+		return false;
+	}
 	const details = compaction.details as { source?: unknown } | undefined;
 	if (details?.source !== "magic-context") return false;
 	if (
@@ -7593,7 +7598,7 @@ function resolvePiAppendCompaction(
 		  }
 		| undefined;
 	if (typeof sm?.appendCompaction !== "function") return undefined;
-	return sm.appendCompaction.bind(sm);
+	return adaptPiAppendCompaction(sm.appendCompaction.bind(sm));
 }
 
 function guardedPiAppendCompaction(

@@ -4,6 +4,7 @@ import type { PendingPiCompactionMarker } from "@magic-context/core/features/mag
 import * as logger from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import {
+	adaptPiAppendCompaction,
 	applyDeferredPiCompactionMarker,
 	clearPiCompactionMarkerDrainLogState,
 	findLatestCompactionFirstKept,
@@ -650,5 +651,70 @@ describe("Pi deferred compaction marker manager", () => {
 			logSpy.mockRestore();
 			closeQuietly(db);
 		}
+	});
+});
+
+// Pi and OMP declare different appendCompaction signatures. MC speaks pi's;
+// handing that shape to OMP shifts every argument one slot, so the persisted
+// boundary becomes a token count, no entry id matches it, and the compaction
+// reclaims nothing. The adapter translates at the host binding.
+describe("adaptPiAppendCompaction", () => {
+	it("translates pi's argument shape into OMP's", () => {
+		const calls: unknown[][] = [];
+		function ompHost(
+			summary: string,
+			shortSummary: string | undefined,
+			firstKeptEntryId: string,
+			tokensBefore: number,
+			options: {
+				details?: unknown;
+				fromExtension?: boolean;
+			} = {},
+		): string {
+			calls.push([
+				summary,
+				shortSummary,
+				firstKeptEntryId,
+				tokensBefore,
+				options,
+			]);
+			return "compact-omp";
+		}
+
+		const adapted = adaptPiAppendCompaction(ompHost);
+		expect(
+			adapted("summary", "entry-3", 200, { source: "magic-context" }, true),
+		).toBe("compact-omp");
+		expect(calls).toEqual([
+			[
+				"summary",
+				undefined,
+				"entry-3",
+				200,
+				{
+					details: { source: "magic-context" },
+					fromExtension: true,
+				},
+			],
+		]);
+	});
+
+	it("passes pi-shaped hosts through untouched", () => {
+		const calls: unknown[][] = [];
+		function piHost(
+			summary: string,
+			firstKeptEntryId: string,
+			tokensBefore: number,
+			_details?: unknown,
+			_fromHook?: boolean,
+			_usage?: unknown,
+		): string {
+			calls.push([summary, firstKeptEntryId, tokensBefore]);
+			return "compact-pi";
+		}
+
+		const adapted = adaptPiAppendCompaction(piHost);
+		expect(adapted("summary", "entry-3", 200)).toBe("compact-pi");
+		expect(calls).toEqual([["summary", "entry-3", 200]]);
 	});
 });

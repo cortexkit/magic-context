@@ -4,8 +4,9 @@ import {
 } from "@magic-context/core/features/magic-context/compartment-storage";
 import type { PendingPiCompactionMarker } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { BoundedSessionMap } from "@magic-context/core/shared/bounded-session-map";
-import { sessionLog } from "@magic-context/core/shared/logger";
+import { log, sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
+import { resolvePiHarnessKind } from "./pi-harness-kind";
 import { resolvePiFirstKeptEntry } from "./pi-historian-runner";
 import {
 	isPiOrdinalAlignmentUnanchored,
@@ -29,16 +30,67 @@ export type PiMarkerUpdateOutcome =
 	| { kind: "waiting-for-entry" }
 	| { kind: "retryable-failure"; error: Error };
 
+/**
+ * Pi's `SessionManager.appendCompaction` shape:
+ * `(summary, firstKeptEntryId, tokensBefore, details?, fromHook?)`.
+ * Everything in Magic Context speaks this shape; OMP's host diverges and is
+ * adapted at the binding site by {@link adaptPiAppendCompaction}.
+ */
+export type PiAppendCompaction = (
+	summary: string,
+	firstKeptEntryId: string,
+	tokensBefore: number,
+	details?: unknown,
+	fromHook?: boolean,
+) => string | undefined;
+
+/**
+ * OMP's `SessionManager.appendCompaction` inserts `shortSummary` as the
+ * second parameter and folds `details`/`fromHook` into an options object
+ * (`{ details, fromExtension }`). Handing OMP a pi-shaped call shifts every
+ * argument one slot: the boundary is persisted as a token count, no entry id
+ * matches it, and OMP keeps the whole branch on the wire — a compaction that
+ * reclaims nothing. Translate at the host binding so the rest of Magic
+ * Context keeps one signature.
+ *
+ * shortcut: the host method's arity is the discriminator — measured 4 on OMP
+ * 18.2.6 (its options object is defaulted) and 6 on pi 0.83.0. An
+ * unrecognized arity falls back to the detected harness. Revisit if either
+ * host changes its arity.
+ */
+export function adaptPiAppendCompaction(
+	host: (...args: never[]) => string | undefined,
+): PiAppendCompaction {
+	const arity = host.length;
+	const ompShape =
+		arity === 4 || (arity !== 6 && resolvePiHarnessKind() === "omp");
+	if (arity !== 4 && arity !== 6 && !loggedAppendShape) {
+		loggedAppendShape = true;
+		log(
+			`[magic-context][pi] appendCompaction host shape unresolved by arity (length=${arity}); using ${ompShape ? "omp" : "pi"} shape`,
+		);
+	}
+	if (!ompShape) return host as PiAppendCompaction;
+	const omp = host as (
+		summary: string,
+		shortSummary: string | undefined,
+		firstKeptEntryId: string,
+		tokensBefore: number,
+		options?: { details?: unknown; fromExtension?: boolean },
+	) => string | undefined;
+	return (summary, firstKeptEntryId, tokensBefore, details, fromHook) =>
+		omp(summary, undefined, firstKeptEntryId, tokensBefore, {
+			details,
+			fromExtension: fromHook,
+		});
+}
+
+let loggedAppendShape = false;
+
 export interface ApplyDeferredPiCompactionMarkerDeps {
 	db: Database;
 	readBranchEntries: () => unknown[];
-	appendCompaction: (
-		summary: string,
-		firstKeptEntryId: string,
-		tokensBefore: number,
-		details?: unknown,
-		fromHook?: boolean,
-	) => string | undefined;
+	appendCompaction: PiAppendCompaction;
 }
 
 export type PiCompactionMarkerDrainGate =

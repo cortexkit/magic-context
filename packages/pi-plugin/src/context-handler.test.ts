@@ -6793,6 +6793,142 @@ describe("registerPiContextHandler", () => {
 			}
 		});
 
+		it("binds an OMP-shaped host with pi's appendCompaction contract", async () => {
+			const db = createTestDb();
+			const sessionId = "ses-pi-marker-omp-signature";
+			const fake = createFakePi();
+			const pending = {
+				endMessageId: "synth-user-38b47eef",
+				firstKeptEntryId: "5fedebb3",
+				ordinal: 9,
+				publishedAt: 1791428662185,
+				summary: "Magic Context compacted: OMP host binding",
+				tokensBefore: 1186,
+			};
+			const calls: unknown[][] = [];
+			try {
+				updateSessionMeta(db, sessionId, {
+					piStableIdScheme: 1,
+					lastResponseTime: Date.now(),
+				});
+				registerPiContextHandler(fake.pi as never, {
+					db,
+					injection: { injectionBudgetTokens: 10_000 },
+					scheduler: { executeThresholdPercentage: 80 },
+				});
+				const handler = fake.handlers.get("context") as (
+					event: { messages: never[] },
+					ctx: never,
+				) => Promise<{ messages: never[] }>;
+				const pass = async (percent: number) => {
+					const messages = Array.from({ length: 11 }, (_, index) =>
+						index % 2 === 0
+							? userMessage(`request ${index + 1}`, index + 1)
+							: assistantMessage(`answer ${index + 1}`, index + 1),
+					);
+					const entryIds = messages.map((_, index) =>
+						index === 8
+							? pending.endMessageId
+							: index === 9
+								? pending.firstKeptEntryId
+								: `entry-${index + 1}`,
+					);
+					const ctx = fakeContext(sessionId, process.cwd(), entryIds, messages);
+					const branchEntries: unknown[] = ctx.sessionManager.getBranch();
+					// OMP's SessionManager declares four parameters; the options
+					// object is defaulted, which is what distinguishes it from pi's
+					// six. The marker must land on the branch for the drain to clear.
+					function ompAppendCompaction(
+						summary: string,
+						shortSummary: string | undefined,
+						firstKeptEntryId: string,
+						tokensBefore: number,
+						options: { details?: unknown; fromExtension?: boolean } = {},
+					): string {
+						calls.push([
+							summary,
+							shortSummary,
+							firstKeptEntryId,
+							tokensBefore,
+							options,
+						]);
+						branchEntries.push({
+							type: "compaction",
+							id: "compact-omp",
+							summary,
+							shortSummary,
+							firstKeptEntryId,
+							tokensBefore,
+							details: options.details,
+							fromExtension: options.fromExtension,
+						});
+						return "compact-omp";
+					}
+					return handler({ messages: messages as never[] }, {
+						...ctx,
+						getContextUsage: () => ({
+							tokens: percent * 1000,
+							percent,
+							contextWindow: 100_000,
+						}),
+						sessionManager: {
+							...ctx.sessionManager,
+							getBranch: () => branchEntries,
+							appendCompaction: ompAppendCompaction,
+						},
+					} as never);
+				};
+				await pass(1);
+				appendCompartments(db, sessionId, [
+					{
+						sequence: 0,
+						startMessage: 1,
+						endMessage: 4,
+						startMessageId: "entry-1",
+						endMessageId: "entry-4",
+						title: "Earlier history",
+						content: "Previously compacted requests and answers.",
+					},
+					{
+						sequence: 1,
+						startMessage: 5,
+						endMessage: 9,
+						startMessageId: "entry-5",
+						endMessageId: pending.endMessageId,
+						title: "OMP binding",
+						content: "Drain must land a resolvable boundary on the OMP host.",
+					},
+				]);
+				recordProtectedTailPublicationFloor(db, sessionId, 10);
+				setPendingPiCompactionMarkerState(db, sessionId, pending);
+				signalPiDeferredHistoryRefresh(sessionId);
+				signalPiDeferredMaterialization(sessionId);
+				await pass(81);
+
+				// OMP's slots: shortSummary stays empty, the kept-entry id lands
+				// in slot three, and details/fromHook fold into the options.
+				expect(calls).toEqual([
+					[
+						pending.summary,
+						undefined,
+						pending.firstKeptEntryId,
+						pending.tokensBefore,
+						{
+							details: {
+								source: "magic-context",
+								lastCompactedOrdinal: pending.ordinal,
+							},
+							fromExtension: true,
+						},
+					],
+				]);
+				expect(getPendingPiCompactionMarkerState(db, sessionId)).toBeNull();
+			} finally {
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+
 		it("retries the durable marker after serving and consuming publication flags", async () => {
 			const db = createTestDb();
 			const sessionId = "ses-pi-marker-independent-retry";

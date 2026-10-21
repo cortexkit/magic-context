@@ -204,7 +204,7 @@ try {
 			},
 		]);
 		bootstrapFrame = false;
-		manager.appendCompaction(
+		adaptPiAppendCompaction(manager.appendCompaction.bind(manager))(
 			"managed history",
 			keptId,
 			178473,
