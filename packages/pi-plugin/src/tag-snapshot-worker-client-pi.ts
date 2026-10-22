@@ -368,7 +368,12 @@ export function startPiTagSnapshotWorker(
 				}
 			};
 			worker.on("message", (message: PiHydrationMessage) => {
-				consumption = consumeMessage(message);
+				// Serialize consumption: the worker streams packets without waiting
+				// for per-packet credits (required under Bun, where the ack
+				// round-trip can deadlock the worker's port), so ordering is
+				// preserved here instead — packet N+1 must not be assembled before
+				// packet N has been fully appended to the candidate.
+				consumption = consumption.then(() => consumeMessage(message));
 			});
 			worker.once("error", (error) => abort(error));
 			worker.once("exit", async (code) => {

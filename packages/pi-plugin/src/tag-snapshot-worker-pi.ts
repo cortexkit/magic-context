@@ -58,26 +58,23 @@ function envelope() {
 	};
 }
 
+// Credit-flow note: this worker intentionally does NOT wait for the parent's
+// ack before sending the next packet. Under Bun, once a worker has posted a
+// message with a transfer list, its port can stop delivering the parent's
+// replies entirely (observed on Bun 1.3.x; Node.js is unaffected), so a
+// request/ack round-trip deadlocks here: the promise below never settles, the
+// worker stalls mid-stream, and the parent aborts the job at its deadline
+// ("tag snapshot hydration ... job deadline exceeded"). Packet ordering and
+// back-pressure are instead enforced on the parent side, which serializes
+// consumption of worker messages (see tag-snapshot-worker-client-pi.ts).
 async function send(message: PiHydrationMessage) {
-	const ack = new Promise<ArrayBuffer | undefined>((resolve, reject) => {
-		port?.once(
-			"message",
-			(value: { type: string; sequence: number; bytes?: ArrayBuffer }) => {
-				if (value.type !== "ack" || value.sequence !== message.sequence)
-					reject(new Error("invalid packet credit"));
-				else if (
-					message.type === "packet" &&
-					(!(value.bytes instanceof ArrayBuffer) ||
-						value.bytes.byteLength !== 65_536)
-				)
-					reject(new Error("invalid returned packet buffer"));
-				else resolve(value.bytes);
-			},
-		);
-	});
-	if (message.type === "packet") port?.postMessage(message, [message.bytes]);
-	else port?.postMessage(message);
-	return await ack;
+	if (message.type === "packet") {
+		port?.postMessage(message, [message.bytes]);
+		// The transferred buffer is detached; hand the caller a fresh one.
+		return new ArrayBuffer(65_536);
+	}
+	port?.postMessage(message);
+	return undefined;
 }
 
 function* operations(
