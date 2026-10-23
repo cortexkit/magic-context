@@ -150,6 +150,7 @@ import { CTX_NOTE_LIGHT_DESCRIPTION } from "../../tools/light-descriptions";
 import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-descriptions";
 import { createV2RustCompactionMarkerStrategy, trimToRecordedBoundary } from "../fold/boundary";
 import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/host-media";
+import { HostFoldIdle } from "../fold/idle";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { nativeFoldCache } from "../fold/memory-cache";
 import {
@@ -1384,6 +1385,9 @@ export async function registerContext(context: V2Context) {
                   log: sessionLog,
               })
             : undefined;
+    const hostFoldIdle = hostFolds
+        ? new HostFoldIdle((sessionID, eligible) => hostFolds.idle(sessionID, eligible))
+        : undefined;
     const usageController = new AbortController();
     const usageDone = (async () => {
         let retry = 0;
@@ -1418,6 +1422,13 @@ export async function registerContext(context: V2Context) {
                             );
                         }
                         if (
+                            event.type === "session.execution.started" ||
+                            event.type === "session.execution.interrupted"
+                        ) {
+                            hostFoldIdle?.active(sessionID);
+                            continue;
+                        }
+                        if (
                             event.type?.startsWith("session.revert.") ||
                             event.type === "session.message.content.updated"
                         ) {
@@ -1438,6 +1449,7 @@ export async function registerContext(context: V2Context) {
                             event.type === "session.error" ||
                             event.type === "session.execution.failed"
                         ) {
+                            hostFoldIdle?.active(sessionID);
                             const error = hiddenTerminalError(event);
                             if (error !== undefined) hiddenSessionErrors.set(sessionID, error);
                             if (error !== undefined && db && !compactionOff) {
@@ -1460,6 +1472,7 @@ export async function registerContext(context: V2Context) {
                             continue;
                         }
                         if (event.type === "session.deleted") {
+                            hostFoldIdle?.active(sessionID);
                             clearLkgMeasuredRequest(sessionID);
                             deletedSessions.add(sessionID);
                             // A failed store clear (a busy writer lock, say) must not skip
@@ -1520,13 +1533,21 @@ export async function registerContext(context: V2Context) {
                                 sessionID,
                                 model: { providerID: model.providerID, id: model.modelID },
                             });
-                            // Do not block event handling while the automatic fold runs: idle()
-                            // queues a compaction and then waits for OpenCode to settle it.
+                            // Use the TTL already frozen by the served request, not
+                            // a live config edit made while its cache is still warm.
                             if (
                                 !compactionOff &&
                                 typeof (await nativeFoldReplay?.baseline(sessionID)) === "string"
-                            )
-                                void hostFolds?.idle(sessionID);
+                            ) {
+                                if (db) {
+                                    const meta = getOrCreateSessionMeta(db, sessionID);
+                                    hostFoldIdle?.idle(
+                                        sessionID,
+                                        meta.cacheTtl,
+                                        meta.lastResponseTime,
+                                    );
+                                }
+                            }
                         }
                     } catch (error) {
                         log(
@@ -2708,6 +2729,7 @@ export async function registerContext(context: V2Context) {
     };
     await context.session.hook("context", (draft) =>
         withSqliteTransformPass(async () => {
+            hostFoldIdle?.active(draft.sessionID);
             const anchor = generateReplayAnchor(draft.messages);
             await runManagedContext(draft);
             // The shared last-good-request slot is saved before m[0] is replaced
@@ -2886,6 +2908,7 @@ export async function registerContext(context: V2Context) {
     return {
         async dispose() {
             messageTimesCache.clear();
+            hostFoldIdle?.dispose();
             usageController.abort();
             // OpenCode 2 runs this disposer before it removes this instance's hooks
             // (scope finalizers run in reverse registration order, and the disposer

@@ -135,3 +135,19 @@ test("automatic admission reports cache callback failures without an unhandled r
     expect(f.logs[0]).toContain("status=failed");
     expect(f.logs[0]).toContain('cache_error="Error: storage unavailable"');
 });
+
+test("a turn starting during replay validation cancels the claim before queue dispatch", async () => {
+    const f = fixture();
+    let eligible = true;
+    f.deps.canReplay = async () => {
+        eligible = false;
+        return true;
+    };
+    const policy = new HostFoldPolicy(f.deps);
+    await policy.idle("s", () => eligible);
+    expect(f.calls).toHaveLength(0);
+    eligible = true;
+    f.deps.canReplay = async () => true;
+    await policy.idle("s", () => eligible);
+    expect(f.calls).toHaveLength(1);
+});

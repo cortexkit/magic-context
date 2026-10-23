@@ -35,12 +35,13 @@ export class HostFoldPolicy {
     private owned(sessionID: string, cut: StoreRow<"compaction">, id: string): boolean {
         return cut.id === id && isAdmittedLocalCheckpoint(this.deps.storage, sessionID, cut);
     }
-    async idle(sessionID: string): Promise<void> {
+    async idle(sessionID: string, eligible: () => boolean = () => true): Promise<void> {
         const { storage, session, threshold } = this.deps;
         if (
             !Number.isSafeInteger(threshold) ||
             threshold <= 0 ||
             typeof session.compact !== "function" ||
+            !eligible() ||
             this.active.has(sessionID)
         )
             return;
@@ -114,6 +115,12 @@ export class HostFoldPolicy {
                 if (!claimed) return;
             } finally {
                 reader.close();
+            }
+            // Eligibility can change while replay validation or the claim yields:
+            // a newly started turn must get another full idle lifetime.
+            if (!eligible()) {
+                await storage.finish(sessionID, attempt.id, this.owner, "coalesced", now());
+                return;
             }
             const admitted = (await session.compact({
                 sessionID,
