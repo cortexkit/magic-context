@@ -6,17 +6,45 @@ use mc_store::McStore;
 use rusqlite::{params, types::Value as SqlValue, Connection, OptionalExtension};
 use std::collections::BTreeSet;
 
-pub(crate) struct RetrievalStore<'a> {
-    pub store: &'a McStore,
+#[path = "retrieval_search.rs"]
+pub(crate) mod search;
+
+pub(crate) trait ReadContext {
+    fn context_read<T>(
+        &self,
+        read: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, String>;
+}
+
+impl ReadContext for McStore {
+    fn context_read<T>(
+        &self,
+        read: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, String> {
+        self.with_context_read(read).map_err(|e| e.to_string())
+    }
+}
+
+impl<R: ReadContext> ReadContext for std::sync::Arc<R> {
+    fn context_read<T>(
+        &self,
+        read: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, String> {
+        self.as_ref().context_read(read)
+    }
+}
+
+pub(crate) struct RetrievalStore<'a, R = McStore> {
+    pub store: &'a R,
     pub now_ms: i64,
 }
 
-impl RetrievalStore<'_> {
+impl<R: ReadContext> RetrievalStore<'_, R> {
     fn read<T>(
         &self,
         read: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> CapabilityResult<T> {
-        match self.store.with_context_read(read) {
+        match self.store.context_read(read) {
             Ok(value) => CapabilityResult::Available { value },
             Err(error) => CapabilityResult::Unavailable {
                 reason: CapabilityReason {
@@ -241,8 +269,8 @@ fn decode_vector(blob: Vec<u8>) -> rusqlite::Result<Vec<f32>> {
         .collect())
 }
 
-impl RetrievalInputStore for RetrievalStore<'_> {
-    fn read_search_memories(
+impl<R: ReadContext> RetrievalStore<'_, R> {
+    pub fn read_search_memories(
         &self,
         scope: &StoreScope,
         dates: DateBounds,
@@ -256,7 +284,7 @@ impl RetrievalInputStore for RetrievalStore<'_> {
             }))?.collect(); rows
         })
     }
-    fn search_memory_fts(
+    pub fn search_memory_fts(
         &self,
         scope: &StoreScope,
         query: &str,
@@ -280,7 +308,7 @@ impl RetrievalInputStore for RetrievalStore<'_> {
             Ok(hits)
         })
     }
-    fn read_memory_vectors(
+    pub fn read_memory_vectors(
         &self,
         scope: &StoreScope,
         ids: &[i64],
@@ -297,7 +325,7 @@ impl RetrievalInputStore for RetrievalStore<'_> {
             Ok(rows.into_iter().filter(|v| ids.contains(&v.memory_id)).collect())
         })
     }
-    fn read_compartment_chunks(
+    pub fn read_compartment_chunks(
         &self,
         scope: &StoreScope,
         _: DateBounds,
@@ -312,7 +340,7 @@ impl RetrievalInputStore for RetrievalStore<'_> {
             }))?.collect(); rows
         })
     }
-    fn read_visible_memory_ids(&self, scope: &StoreScope) -> CapabilityResult<BTreeSet<i64>> {
+    pub fn read_visible_memory_ids(&self, scope: &StoreScope) -> CapabilityResult<BTreeSet<i64>> {
         self.read(|conn| {
             let mut stmt = conn.prepare("SELECT a.memory_id, a.projected_metadata_json FROM memory_applied_rows a JOIN memories m ON m.id=a.memory_id AND m.content=a.projected_text WHERE a.session_id=? AND a.harness='opencode' AND m.status!='archived'")?;
             let rows = stmt.query_map([&scope.session.0], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -321,6 +349,44 @@ impl RetrievalInputStore for RetrievalStore<'_> {
                 metadata["representations"].as_array()?.iter().any(|v| v == "text" || v == "delta").then_some(id)
             }).collect())
         })
+    }
+}
+
+impl<R: ReadContext + Send + Sync> RetrievalInputStore for RetrievalStore<'_, R> {
+    fn read_search_memories(
+        &self,
+        scope: &StoreScope,
+        dates: DateBounds,
+    ) -> CapabilityResult<Vec<SearchMemory>> {
+        RetrievalStore::read_search_memories(self, scope, dates)
+    }
+    fn search_memory_fts(
+        &self,
+        scope: &StoreScope,
+        query: &str,
+        dates: DateBounds,
+        limit: usize,
+    ) -> CapabilityResult<Vec<MemoryFtsHit>> {
+        RetrievalStore::search_memory_fts(self, scope, query, dates, limit)
+    }
+    fn read_memory_vectors(
+        &self,
+        scope: &StoreScope,
+        ids: &[i64],
+        identity: &EmbeddingIdentity,
+    ) -> CapabilityResult<Vec<MemoryVector>> {
+        RetrievalStore::read_memory_vectors(self, scope, ids, identity)
+    }
+    fn read_compartment_chunks(
+        &self,
+        scope: &StoreScope,
+        dates: DateBounds,
+        identity: &EmbeddingIdentity,
+    ) -> CapabilityResult<Vec<CompartmentChunk>> {
+        RetrievalStore::read_compartment_chunks(self, scope, dates, identity)
+    }
+    fn read_visible_memory_ids(&self, scope: &StoreScope) -> CapabilityResult<BTreeSet<i64>> {
+        RetrievalStore::read_visible_memory_ids(self, scope)
     }
 }
 
