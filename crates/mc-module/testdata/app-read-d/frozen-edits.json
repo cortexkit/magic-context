@@ -1,0 +1,5 @@
+[
+  {"mid":"m3","part":"prt_3a","digest":"old-digest","bytes":null},
+  {"mid":"m3","part":"prt_3a","digest":"digest-a","bytes":"replacement bytes are not a whole-part drop"},
+  {"mid":"m3","part":"prt_3b","digest":"digest-b","bytes":null}
+]
