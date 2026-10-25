@@ -322,6 +322,15 @@ pub(crate) fn catalog_provider_target_for_test() -> RouteTarget {
     }
 }
 
+/// Inbound app binds are fixtures, not routes this module consumes.
+#[cfg(test)]
+pub(crate) fn app_read_target_for_test(module_id: &str) -> RouteTarget {
+    RouteTarget::InternalService {
+        module_id: module_id.to_string(),
+        service_id: crate::app_read::SERVICE_ID.to_string(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn expected_routes_for_tests(runner: &str) -> Vec<String> {
     #[cfg(feature = "agent-data")]

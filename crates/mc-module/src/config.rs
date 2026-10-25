@@ -506,6 +506,91 @@ pub fn user_smart_notes_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// Only the user can disable the desktop's direct app lane; projects cannot
+/// change which callers may bind a machine-wide service.
+pub(crate) fn user_app_read_allow_direct() -> bool {
+    user_app_read_allow_direct_at(&user_config_path())
+}
+
+fn user_app_read_allow_direct_at(user_path: &Path) -> bool {
+    let config = fs::read_to_string(user_path)
+        .ok()
+        .and_then(|raw| parse_config_text(&raw).ok());
+    match config
+        .as_ref()
+        .and_then(|value| value.pointer("/app_read/allow_direct"))
+    {
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => {
+            crate::project_identity::log_once(
+                "app_read.allow_direct:type".into(),
+                "app_read.allow_direct must be a boolean; using the default true",
+            );
+            true
+        }
+        None => true,
+    }
+}
+
+#[cfg(test)]
+mod app_read_config_tests {
+    use super::*;
+
+    #[test]
+    fn user_app_read_false_disables_direct() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("magic-context.json");
+        fs::write(&path, r#"{"app_read":{"allow_direct":false}}"#).unwrap();
+        assert!(!user_app_read_allow_direct_at(&path));
+    }
+
+    #[test]
+    fn user_app_read_ignores_project_config() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".cortexkit")).unwrap();
+        fs::write(
+            dir.path().join(".cortexkit/magic-context.json"),
+            r#"{"app_read":{"allow_direct":false}}"#,
+        )
+        .unwrap();
+        let user_path = dir.path().join("magic-context.json");
+        fs::write(&user_path, "{}").unwrap();
+        assert!(user_app_read_allow_direct_at(&user_path));
+    }
+
+    #[test]
+    fn user_app_read_jsonc_and_file_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("magic-context.json"),
+            r#"{"app_read":{"allow_direct":false}}"#,
+        )
+        .unwrap();
+        assert!(!user_app_read_allow_direct_at(&detect_config_file(
+            dir.path()
+        )));
+        fs::write(
+            dir.path().join("magic-context.jsonc"),
+            "{ // user override\n \"app_read\": {\"allow_direct\": true} }",
+        )
+        .unwrap();
+        assert!(user_app_read_allow_direct_at(&detect_config_file(
+            dir.path()
+        )));
+    }
+
+    #[test]
+    fn user_app_read_defaults_on_for_missing_unreadable_and_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("magic-context.json");
+        assert!(user_app_read_allow_direct_at(&path));
+        for body in ["{}", "not JSON", r#"{"app_read":{"allow_direct":"false"}}"#] {
+            fs::write(&path, body).unwrap();
+            assert!(user_app_read_allow_direct_at(&path));
+        }
+    }
+}
+
 /// Startup-only process limits. Neither projects nor provider requests can
 /// increase the resources reserved for background historian work.
 pub fn user_provider_historian_budget() -> (usize, usize) {
