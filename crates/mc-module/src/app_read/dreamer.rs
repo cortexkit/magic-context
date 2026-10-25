@@ -1,6 +1,6 @@
 //! Dreamer schedule, state, project, run and change reads.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Map, Value};
@@ -13,6 +13,7 @@ use super::{
 };
 
 const OP: &str = "dreamer.read";
+const REPLY_HEADROOM: Duration = Duration::from_millis(10);
 pub(super) const TASKS: [&str; 12] = [
     "map-memories",
     "verify",
@@ -56,6 +57,13 @@ pub fn read(
     }
     if let Err(refusal) = opt_str(params, "cursor", "params") {
         return refusal;
+    }
+    if let Some(project) = params.get("project") {
+        match project.as_str() {
+            Some(project) if super::project_memory::is_project_identity(project) => {}
+            Some(_) => return invalid("params.project", "range"),
+            None => return invalid("params.project", "type"),
+        }
     }
     match section {
         "schedule" => schedule(ctx, params),
@@ -251,25 +259,49 @@ fn projects(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
     };
     let after = cursor.and_then(|cursor| cursor.keys.into_iter().next());
     let started = Instant::now();
+    let catalog = match super::project_memory::project_paths(ctx) {
+        Ok(paths) => paths,
+        Err(refusal) => return refusal,
+    };
+    let mut groups = std::collections::BTreeMap::<String, (Vec<String>, bool)>::new();
+    for (path, source) in catalog {
+        let identity = super::project_memory::normalize_project_path(path);
+        let group = groups.entry(identity).or_default();
+        group.0.push(path.clone());
+        group.1 |= *source == 2;
+    }
+    let resolution_started = Instant::now();
     let schedules = crate::app_read::config::dream_schedules(ctx, None);
+    let mut slowest_resolution = resolution_started.elapsed();
     let mut resolved = std::collections::HashMap::new();
     let outcome = ctx.context(|conn| {
-        ctx.note_sql(PROJECTS_SQL);
-        let mut statement = prepare(conn, PROJECTS_SQL)?;
-        let mut rows = statement.query(params![after])?;
         let mut page = Page::new(ctx.row_budget());
         let mut last = None;
         let mut hit = false;
-        while let Some(row) = super::next_row(&mut rows, &mut hit)? {
+        for (project, (mut paths, has_state)) in groups {
+            if !has_state {
+                continue;
+            }
+            paths.dedup();
+            if after.as_ref().is_some_and(|after| project <= *after) {
+                continue;
+            }
             if ctx.expired(started) {
                 hit = true;
                 break;
             }
-            let project: String = row.get(0)?;
             if page.len() >= limit {
                 hit = true;
                 break;
             }
+            // Leave time to serialize the accepted rows after config and SQLite work stops.
+            if page.len() > 0
+                && ctx.remaining(started) < slowest_resolution.saturating_add(REPLY_HEADROOM)
+            {
+                hit = true;
+                break;
+            }
+            let resolution_started = Instant::now();
             let effective: &Map<String, Value> = if super::config::project_is_visible(ctx, &project)
             {
                 resolved
@@ -278,15 +310,17 @@ fn projects(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
             } else {
                 &schedules
             };
+            slowest_resolution = slowest_resolution.max(resolution_started.elapsed());
             if ctx.expired(started) {
                 hit = true;
                 break;
             }
-            let tasks = tasks_for(conn, &project, effective)?;
+            let tasks = tasks_for(conn, &paths, effective)?;
             if page.len() >= limit || !page.try_push(json!({"project": project, "tasks": tasks})) {
                 hit = true;
                 break;
             }
+            slowest_resolution = slowest_resolution.max(resolution_started.elapsed());
             last = Some(vec![project]);
         }
         Ok((page, !hit, last))
@@ -299,14 +333,11 @@ fn projects(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
 
 fn tasks_for(
     conn: &rusqlite::Connection,
-    project: &str,
+    projects: &[String],
     schedules: &Map<String, Value>,
 ) -> rusqlite::Result<Vec<Value>> {
-    let mut statement = prepare(
-        conn,
-        "SELECT task, schedule, last_run_at, next_due_at, last_status, last_error, retry_count FROM task_schedule_state WHERE project_path = ?1",
-    )?;
-    let rows = statement.query_map([project], |row| {
+    let mut statement = prepare(conn, TASKS_SQL)?;
+    let rows = statement.query_map([json!(projects).to_string()], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, Option<String>>(1)?,
@@ -353,7 +384,7 @@ fn tasks_for(
         .collect())
 }
 
-const PROJECTS_SQL: &str = "SELECT DISTINCT project_path FROM task_schedule_state WHERE (?1 IS NULL OR project_path > ?1) ORDER BY project_path ASC";
+const TASKS_SQL: &str = "SELECT task, schedule, last_run_at, next_due_at, last_status, last_error, retry_count FROM task_schedule_state WHERE project_path IN (SELECT value FROM json_each(?1)) ORDER BY rowid";
 
 fn runs(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome {
     let project = match opt_str(params, "project", "params") {
@@ -387,11 +418,15 @@ fn runs(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome {
     let Some(project) = project else {
         return super::index_unavailable("runs", "idx_dream_runs_finished");
     };
+    let projects = match super::project_memory::equivalent_paths(ctx, &project) {
+        Ok(paths) => paths,
+        Err(refusal) => return refusal,
+    };
     let started = Instant::now();
     let outcome = ctx.context(|conn| {
         ctx.note_sql(RUNS_SQL);
         let mut statement = prepare(conn, RUNS_SQL)?;
-        let mut rows = statement.query(params![project, finished, id])?;
+        let mut rows = statement.query(params![json!(projects).to_string(), finished, id])?;
         let mut page = Page::new(ctx.row_budget());
         let mut last = None;
         let mut hit = false;
@@ -449,7 +484,7 @@ fn runs(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome {
 }
 
 const RUNS_SQL: &str = "SELECT id, project_path, started_at, finished_at, holder_id, tasks_json, tasks_succeeded, tasks_failed, parent_session_id \
-     FROM dream_runs WHERE project_path = ?1 \
+      FROM dream_runs WHERE project_path IN (SELECT value FROM json_each(?1)) \
        AND (?2 IS NULL OR finished_at < ?2 OR (finished_at = ?2 AND id < ?3)) \
      ORDER BY finished_at DESC, id DESC";
 const RUN_TOKENS_SQL: &str =
@@ -488,6 +523,10 @@ fn run_changes(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutc
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
     let started = Instant::now();
+    let catalog = match super::project_memory::project_paths(ctx) {
+        Ok(paths) => paths,
+        Err(refusal) => return refusal,
+    };
     let outcome = ctx.context(|conn| {
         ctx.note_sql(RUN_CHANGES_SQL);
         let found = conn
@@ -532,8 +571,9 @@ fn run_changes(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutc
                 (detailed, false, false)
             }
             None => {
+                let projects = super::project_memory::equivalent_paths_in(catalog, &project);
                 let (changes, interrupted) =
-                    reconstruct(conn, &project, started_at, finished_at, after, limit + 1)?;
+                    reconstruct(conn, &projects, started_at, finished_at, after, limit + 1)?;
                 (changes, true, interrupted)
             }
         };
@@ -607,7 +647,7 @@ fn parse_changes(raw: &str) -> Option<Vec<Value>> {
 
 fn reconstruct(
     conn: &rusqlite::Connection,
-    project: &str,
+    projects: &[String],
     started_at: i64,
     finished_at: i64,
     after: usize,
@@ -615,9 +655,13 @@ fn reconstruct(
 ) -> rusqlite::Result<(Vec<Value>, bool)> {
     let mut statement = prepare(
         conn,
-        "SELECT id, category, content, status, created_at, updated_at, superseded_by_memory_id FROM memories WHERE project_path = ?1 AND status >= '' AND ((created_at >= ?2 AND created_at <= ?3) OR (updated_at >= ?2 AND updated_at <= ?3)) ORDER BY id",
+        "SELECT id, category, content, status, created_at, updated_at, superseded_by_memory_id FROM memories INDEXED BY idx_memories_project_status_category WHERE project_path IN (SELECT value FROM json_each(?1)) AND status >= '' AND ((created_at >= ?2 AND created_at <= ?3) OR (updated_at >= ?2 AND updated_at <= ?3)) ORDER BY id",
     )?;
-    let mut rows = statement.query(params![project, started_at, finished_at])?;
+    let mut rows = statement.query(params![
+        json!(projects).to_string(),
+        started_at,
+        finished_at
+    ])?;
     let mut output = Vec::new();
     let mut interrupted = false;
     let mut skipped = 0;
@@ -686,7 +730,7 @@ mod tests {
     use super::*;
     use crate::app_read::tests_support::{apply_sql, explain, open_store, response};
 
-    fn ready(dir: &std::path::Path) -> (AppReadContext, std::path::PathBuf) {
+    fn ready(dir: &std::path::Path) -> (AppReadContext<'static>, std::path::PathBuf) {
         let store = open_store(dir);
         (
             AppReadContext::for_test(store, 1_700_000_000_000),
@@ -807,6 +851,9 @@ mod tests {
             for attempt in 0..8 {
                 let reply = response(&read(&caller(), &ctx, params.as_object().unwrap()));
                 let rows = reply["rows"].as_array().unwrap();
+                if section == "runs" {
+                    assert!(rows.iter().all(|row| row["run_id"].is_string()));
+                }
                 assert!(!rows.is_empty(), "{section}: {reply}");
                 assert!(
                     serde_json::to_vec(rows).unwrap().len() <= budget,
@@ -835,7 +882,7 @@ mod tests {
         }
         for (sql, index) in [
             (STATE_SQL, "sqlite_autoindex_dream_state"),
-            (PROJECTS_SQL, "sqlite_autoindex_task_schedule_state"),
+            (TASKS_SQL, "sqlite_autoindex_task_schedule_state"),
             (SCHEDULE_PROJECT_SQL, "sqlite_autoindex_task_schedule_state"),
             (RUN_TOKENS_SQL, "idx_sai_subagent"),
             (RUN_CHANGES_SQL, "INTEGER PRIMARY KEY"),
@@ -977,6 +1024,7 @@ mod tests {
         let mut times = Vec::new();
         let mut sizes = Vec::new();
         for _ in 0..10 {
+            ctx.project_paths = std::sync::Arc::new(std::sync::OnceLock::new());
             let started = Instant::now();
             let reply = response(&read(
                 &caller(),
@@ -994,6 +1042,10 @@ mod tests {
         println!(
             "PROJECT_CAP_LATENCY cap=100 samples=10 p50_us={} p90_us={} served={sizes:?}",
             times[4], times[8]
+        );
+        assert!(
+            times[8] < 250_000,
+            "project page p90 exceeded the practical budget: {times:?}"
         );
     }
 }

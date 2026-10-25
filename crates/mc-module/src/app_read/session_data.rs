@@ -104,7 +104,7 @@ fn locate(
     unmanaged_ok: bool,
     section: &str,
 ) -> Result<Located, HandlerOutcome> {
-    if session.session.starts_with("mc-provider:") {
+    if session.session.starts_with("mc-provider:") || session.runner != session.harness {
         return Err(index_unavailable(
             section,
             "idx_mc_async_compaction_session",
@@ -192,6 +192,7 @@ fn compartments(
     let started = Instant::now();
     let session_id = session.session.clone();
     let outcome = ctx.context(|conn| {
+        let version = session_version(conn, session, "compartments")?;
         ctx.note_sql(COMPARTMENTS_SQL);
         let mut statement = prepare(conn, COMPARTMENTS_SQL)?;
         let mut rows = statement.query(params![session_id, after])?;
@@ -226,7 +227,6 @@ fn compartments(
             }
             last_sequence = Some(sequence.to_string());
         }
-        let version = session_version(conn, session, "compartments")?;
         Ok((page, !hit_limit, last_sequence, version))
     });
     match outcome {
@@ -245,7 +245,7 @@ fn compartments(
 
 const COMPARTMENTS_SQL: &str = "SELECT sequence, id, title, start_message_id, end_message_id, \
      start_message, end_message, importance, episode_type, legacy, created_at, \
-      LENGTH(CAST(content AS BLOB)), CASE WHEN p2 IS NOT NULL OR p3 IS NOT NULL OR p4 IS NOT NULL THEN 1 ELSE 0 END \
+      LENGTH(CAST(content AS BLOB)), CASE WHEN p1 IS NOT NULL OR p2 IS NOT NULL OR p3 IS NOT NULL OR p4 IS NOT NULL THEN 1 ELSE 0 END \
      FROM compartments WHERE session_id = ?1 AND (?2 IS NULL OR sequence < ?2) \
      ORDER BY sequence DESC";
 
@@ -273,6 +273,7 @@ fn facts(
     let started = Instant::now();
     let session_id = session.session.clone();
     let outcome = ctx.context(|conn| {
+        let version = session_version(conn, session, "facts")?;
         ctx.note_sql(FACTS_SQL);
         let mut statement = prepare(conn, FACTS_SQL)?;
         let mut rows = statement.query(params![session_id, category, created_at, id])?;
@@ -304,7 +305,6 @@ fn facts(
             }
             last = Some(vec![category, created.to_string(), fact_id.to_string()]);
         }
-        let version = session_version(conn, session, "facts")?;
         Ok((page, !hit_limit, last, version))
     });
     match outcome {
@@ -586,7 +586,7 @@ fn managed_breakdown(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutco
         None => (Some(estimated), Some("estimate")),
     };
     let parts = json!([
-        {"part": "system_prompt", "tokens": system, "estimate": system_tokens.is_none()},
+        {"part": "system_prompt", "tokens": system_tokens, "estimate": system_tokens.is_none()},
         {"part": "tool_definitions", "tokens": null, "estimate": true},
         {"part": "memory", "tokens": memory, "count": memory_count, "estimate": true},
         {"part": "project_docs", "tokens": null, "estimate": true},
@@ -914,7 +914,7 @@ mod tests {
     use serde_json::json;
     use std::time::Duration;
 
-    fn ctx(dir: &std::path::Path) -> (AppReadContext, std::path::PathBuf) {
+    fn ctx(dir: &std::path::Path) -> (AppReadContext<'static>, std::path::PathBuf) {
         let store = open_store(dir);
         let context_db = dir.join("context.db");
         let mut ctx = AppReadContext::for_test(store, 1_700_000_000_000);
@@ -1171,10 +1171,20 @@ mod tests {
             &served_db,
             "INSERT INTO session_meta(session_id, harness, last_input_tokens) VALUES ('ses', 'opencode', 11);",
         );
-        std::fs::copy(&served_db, resolver.join("context.db")).unwrap();
+        let alternate = open_store(&resolver);
         apply_sql(
             &resolver.join("context.db"),
-            "UPDATE session_meta SET last_input_tokens = 22 WHERE session_id = 'ses';",
+            "INSERT INTO session_meta(session_id, harness, last_input_tokens) VALUES ('ses', 'opencode', 22);",
+        );
+        assert_eq!(
+            alternate
+                .with_context_read(|conn| conn.query_row(
+                    "SELECT last_input_tokens FROM session_meta WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                ))
+                .unwrap(),
+            22
         );
         std::env::set_var("MAGIC_CONTEXT_TEST_DATA_DIR", other.path());
         std::env::set_var("XDG_DATA_HOME", other.path());
@@ -1229,6 +1239,7 @@ mod tests {
                         row[id].as_i64().unwrap()
                     });
                     if section == "compartments" {
+                        assert!(row["compartment_id"].is_string());
                         assert_eq!(row["summary_bytes"], 6);
                     }
                 }

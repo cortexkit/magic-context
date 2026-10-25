@@ -1,0 +1,12 @@
+[
+  {"input":"/tmp/magic-context-parity/foo/../bar","identity":"dir:cfae1a46e626"},
+  {"input":"/tmp/magic-context-parity/./baz","identity":"dir:8489eaf89d1b"},
+  {"input":"/work/api","identity":"dir:e02ef1f35c06"},
+  {"input":"/work/api/","identity":"dir:e02ef1f35c06"},
+  {"input":"/work/./x/../api","identity":"dir:e02ef1f35c06"},
+  {"input":"/","identity":"dir:6666cd76f969"},
+  {"input":"/tmp/näme dir","identity":"dir:93e3ea277593"},
+  {"input":"git:abc123","identity":"git:abc123"},
+  {"input":"dir:deadbeef0000","identity":"dir:deadbeef0000"},
+  {"input":"pj-dashboard-editor","identity":"pj-dashboard-editor"}
+]

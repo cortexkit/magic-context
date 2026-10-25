@@ -67,6 +67,13 @@ pub fn read(
     if let Err(refusal) = opt_str(params, "cursor", "params") {
         return refusal;
     }
+    if let Some(project) = params.get("project") {
+        match project.as_str() {
+            Some(project) if is_project_identity(project) => {}
+            Some(_) => return invalid("params.project", "range"),
+            None => return invalid("params.project", "type"),
+        }
+    }
     if section == "primers" || section == "user_memories" {
         if let Some(filters) = params.get("filters") {
             let object = match super::envelope::object(filters, "params.filters") {
@@ -97,6 +104,75 @@ struct Scope {
     digest_project: String,
 }
 
+// Distinct project paths are a small catalog, so one progress-budgeted covering-index walk is acceptable until an indexed identity-to-legacy-path alias catalog replaces it.
+// Source 0 is memory, 1 is a run, and 2 is scheduler state; the tags avoid a second read to identify scheduled projects.
+pub(super) const PROJECT_PATHS_SQL: &str = "SELECT project_path, 0 AS source FROM memories INDEXED BY idx_memories_project_status_category \
+    UNION SELECT project_path, 1 AS source FROM dream_runs INDEXED BY idx_dream_runs_project \
+    UNION SELECT project_path, 2 AS source FROM task_schedule_state ORDER BY project_path, source";
+
+pub(super) fn project_paths<'a>(
+    ctx: &'a AppReadContext<'_>,
+) -> Result<&'a [(String, u8)], HandlerOutcome> {
+    ctx.cached_project_paths(|| {
+        let started = Instant::now();
+        if ctx.expired(started) {
+            return Err(named(
+                "read_budget_exceeded",
+                "The project-path catalog exceeded its time budget.",
+            ));
+        }
+        ctx.context(|conn| {
+            ctx.note_sql(PROJECT_PATHS_SQL);
+            let mut statement = prepare(conn, PROJECT_PATHS_SQL)?;
+            let mut rows = statement.query([])?;
+            let mut paths = Vec::new();
+            while let Some(row) = rows.next()? {
+                if ctx.expired(started) {
+                    return Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+                        None,
+                    ));
+                }
+                paths.push((row.get(0)?, row.get(1)?));
+            }
+            Ok(paths)
+        })
+    })
+}
+
+pub(super) fn is_project_identity(value: &str) -> bool {
+    value.starts_with("git:") || value.starts_with("dir:") || value.starts_with("pj-")
+}
+
+pub(super) fn normalize_project_path(raw: &str) -> String {
+    if is_project_identity(raw) {
+        raw.to_string()
+    } else {
+        crate::project_identity::directory_fallback(std::path::Path::new(raw))
+    }
+}
+
+pub(super) fn equivalent_paths(
+    ctx: &AppReadContext,
+    project: &str,
+) -> Result<Vec<String>, HandlerOutcome> {
+    Ok(equivalent_paths_in(project_paths(ctx)?, project))
+}
+
+pub(super) fn equivalent_paths_in(catalog: &[(String, u8)], project: &str) -> Vec<String> {
+    let identity = normalize_project_path(project);
+    let mut paths: Vec<_> = catalog
+        .iter()
+        .filter(|(path, _)| normalize_project_path(path) == identity)
+        .map(|(path, _)| path.clone())
+        .collect();
+    paths.dedup();
+    if paths.is_empty() {
+        paths.push(project.to_string());
+    }
+    paths
+}
+
 fn filters(params: &Map<String, Value>) -> Result<(Vec<String>, Vec<String>), HandlerOutcome> {
     let Some(value) = params.get("filters") else {
         return Ok((Vec::new(), Vec::new()));
@@ -125,18 +201,10 @@ fn project_scope(
         return Err(invalid("params.project", "combination"));
     }
     if let Some(project) = project {
-        if project.is_empty() || project.contains('\\') || project.starts_with('/') {
+        if !is_project_identity(&project) {
             return Err(invalid("params.project", "range"));
         }
-        let mut projects = vec![project.clone()];
-        let resolver = crate::project_identity::ProjectIdentityResolver::new();
-        for root in ctx.bound_roots() {
-            if resolver.resolve(root).ok().as_deref() == Some(&project) {
-                projects.push(root.to_string_lossy().into_owned());
-            }
-        }
-        projects.sort();
-        projects.dedup();
+        let projects = equivalent_paths(ctx, &project)?;
         let exists = ctx.context(|conn| conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM project_state WHERE project_path IN (SELECT value FROM json_each(?1)) UNION ALL SELECT 1 FROM memories WHERE project_path IN (SELECT value FROM json_each(?1)))",
             [json!(projects).to_string()], |row| row.get::<_, bool>(0),
@@ -172,8 +240,14 @@ fn project_scope(
         let Some(members) = members else {
             return Err(named("workspace_not_found", "No workspace has that id."));
         };
+        let mut projects = Vec::new();
+        for member in members {
+            projects.extend(equivalent_paths(ctx, &member)?);
+        }
+        projects.sort();
+        projects.dedup();
         return Ok(Scope {
-            projects: members,
+            projects,
             digest_project: format!("workspace:{workspace}"),
         });
     }
@@ -229,6 +303,7 @@ fn memories(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
     };
     let started = Instant::now();
     let outcome = ctx.context(|conn| {
+        let version = scope_version(conn, &scope.projects)?;
         if let Some(query) = query
             .as_deref()
             .filter(|query| query.starts_with('#') && query[1..].parse::<i64>().is_ok())
@@ -249,13 +324,7 @@ fn memories(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
                 {
                     let mut page = Page::new(ctx.row_budget());
                     page.try_push(row);
-                    return Ok((
-                        page,
-                        true,
-                        None,
-                        None,
-                        scope_version(conn, &scope.projects)?,
-                    ));
+                    return Ok((page, true, None, None, version));
                 }
             }
         }
@@ -348,7 +417,7 @@ fn memories(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
                     .and_then(|cursor| cursor.issued_at_ms)
                     .unwrap_or(ctx.now_ms()),
             ),
-            scope_version(conn, &scope.projects)?,
+            version,
         ))
     });
     match outcome {
@@ -1143,7 +1212,7 @@ mod tests {
     use crate::app_read::tests_support::{apply_sql, explain, open_store, response};
     use std::sync::{Arc, Mutex};
 
-    fn ready(dir: &std::path::Path) -> (AppReadContext, std::path::PathBuf) {
+    fn ready(dir: &std::path::Path) -> (AppReadContext<'static>, std::path::PathBuf) {
         let store = open_store(dir);
         let mut ctx = AppReadContext::for_test(store, 1_700_000_000_000);
         ctx.set_sql_log(Arc::new(Mutex::new(Vec::new())));
@@ -1152,6 +1221,220 @@ mod tests {
 
     fn caller() -> AppCaller {
         crate::app_read::tests_support::caller()
+    }
+
+    #[test]
+    fn legacy_project_paths_match_dashboard_lexical_identity_cases() {
+        let cases: Value = serde_json::from_str(include_str!(
+            "../../testdata/app-read-g/legacy-project-paths.json"
+        ))
+        .unwrap();
+        for case in cases.as_array().unwrap() {
+            assert_eq!(
+                normalize_project_path(case["input"].as_str().unwrap()),
+                case["identity"]
+            );
+        }
+        assert_ne!(
+            normalize_project_path("/private/var/project"),
+            normalize_project_path("/var/project")
+        );
+        assert_eq!(
+            normalize_project_path("/private/var/project/"),
+            normalize_project_path("/private/var/project")
+        );
+        let absolute = std::env::current_dir().unwrap().join("relative/project");
+        let expected = format!(
+            "dir:{}",
+            &mc_store::md5_hex(&absolute.to_string_lossy())[..12]
+        );
+        assert_eq!(normalize_project_path("relative/project"), expected);
+    }
+
+    #[test]
+    fn legacy_normalizer_and_its_dependencies_do_not_probe_files_or_write_sidecars() {
+        fn body(source: &str, name: &str) -> syn::Block {
+            syn::parse_file(source)
+                .unwrap()
+                .items
+                .into_iter()
+                .find_map(|item| match item {
+                    syn::Item::Fn(item) if item.sig.ident == name => Some(*item.block),
+                    _ => None,
+                })
+                .unwrap()
+        }
+        fn same(actual: syn::Block, expected: syn::Block) {
+            let normalize = |tokens: String| tokens.replace("} ,", "}");
+            assert_eq!(
+                normalize(quote::quote!(#actual).to_string()),
+                normalize(quote::quote!(#expected).to_string())
+            );
+        }
+        same(
+            body(include_str!("project_memory.rs"), "normalize_project_path"),
+            syn::parse_quote!({
+                if is_project_identity(raw) {
+                    raw.to_string()
+                } else {
+                    crate::project_identity::directory_fallback(std::path::Path::new(raw))
+                }
+            }),
+        );
+        same(
+            body(include_str!("project_memory.rs"), "is_project_identity"),
+            syn::parse_quote!({
+                value.starts_with("git:") || value.starts_with("dir:") || value.starts_with("pj-")
+            }),
+        );
+        same(
+            body(include_str!("../project_identity.rs"), "directory_fallback"),
+            syn::parse_quote!({
+                let canonical = node_path_resolve(directory);
+                let hash = mc_store::md5_hex(&canonical.to_string_lossy());
+                format!("dir:{}", &hash[..12])
+            }),
+        );
+        same(
+            body(include_str!("../project_identity.rs"), "node_path_resolve"),
+            syn::parse_quote!({
+                let absolute = if directory.is_absolute() {
+                    directory.to_path_buf()
+                } else {
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("/"))
+                        .join(directory)
+                };
+                let mut resolved = PathBuf::new();
+                for component in absolute.components() {
+                    match component {
+                        Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
+                        Component::RootDir => resolved.push(Component::RootDir.as_os_str()),
+                        Component::CurDir => {}
+                        Component::ParentDir => {
+                            resolved.pop();
+                        }
+                        Component::Normal(part) => resolved.push(part),
+                    }
+                }
+                if resolved.as_os_str().is_empty() {
+                    resolved.push("/");
+                }
+                resolved
+            }),
+        );
+        same(
+            body(include_str!("../../../mc-store/src/lib.rs"), "md5_hex"),
+            syn::parse_quote!({ format!("{:032x}", md5::compute(input.as_bytes())) }),
+        );
+    }
+
+    #[test]
+    fn legacy_alias_catalog_is_covering_cached_and_shared_with_dreamer_reconstruction() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, db) = ready(dir.path());
+        let log = Arc::new(Mutex::new(Vec::new()));
+        ctx.set_sql_log(log.clone());
+        apply_sql(&db, "INSERT INTO memories(project_path,category,content,normalized_hash,first_seen_at,created_at,updated_at,last_seen_at,status) VALUES ('/work/api/','CONSTRAINTS','trailing alias','a',1,1,2,1,'active'),('/work/x/../api','CONSTRAINTS','parent alias','b',1,1,3,1,'active'); INSERT INTO dream_runs(project_path,started_at,finished_at,holder_id,tasks_json) VALUES ('/work/./api',1,10,'h','[]'); INSERT INTO task_schedule_state(project_path,task,schedule) VALUES ('/work/./api/','verify','0 3 * * *');");
+        let params = json!({"section":"memories","project":"dir:e02ef1f35c06","filters":{"status":["active"]}});
+        let reply = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+        assert_eq!(reply["rows"].as_array().unwrap().len(), 2);
+        let paths = equivalent_paths(&ctx, "dir:e02ef1f35c06").unwrap();
+        assert!(paths.contains(&"/work/./api".to_string()));
+        assert!(paths.contains(&"/work/./api/".to_string()));
+        let runs = response(&super::super::dreamer::read(
+            &caller(),
+            &ctx,
+            json!({"section":"runs","project":"dir:e02ef1f35c06"})
+                .as_object()
+                .unwrap(),
+        ));
+        assert_eq!(runs["rows"].as_array().unwrap().len(), 1);
+        let projects = response(&super::super::dreamer::read(
+            &caller(),
+            &ctx,
+            json!({"section":"projects"}).as_object().unwrap(),
+        ));
+        assert_eq!(projects["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(projects["rows"][0]["project"], "dir:e02ef1f35c06");
+        let changes = response(&super::super::dreamer::read(
+            &caller(),
+            &ctx,
+            json!({"section":"run_changes","run_id":"1"})
+                .as_object()
+                .unwrap(),
+        ));
+        assert_eq!(changes["reconstructed"], true);
+        assert_eq!(changes["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .iter()
+                .filter(|sql| sql.as_str() == PROJECT_PATHS_SQL)
+                .count(),
+            1
+        );
+        let plan = explain(&db, PROJECT_PATHS_SQL);
+        for table in ["memories", "dream_runs", "task_schedule_state"] {
+            assert!(
+                plan.lines()
+                    .any(|line| line.contains(&format!("SCAN {table} "))
+                        && line.contains("USING COVERING INDEX")),
+                "{plan}"
+            );
+        }
+        assert!(
+            plan.contains("idx_memories_project_status_category"),
+            "{plan}"
+        );
+        assert!(plan.contains("idx_dream_runs_project"), "{plan}");
+    }
+
+    #[test]
+    fn interrupted_project_catalog_is_refused_without_caching_partial_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, db) = ready(dir.path());
+        apply_sql(
+            &db,
+            include_str!("../../testdata/app-read-g/project-catalog.sql")
+                .replace("__MEMORY_COUNT__", "30000")
+                .as_str(),
+        );
+        ctx.set_budget(std::time::Duration::ZERO);
+        assert!(
+            matches!(project_paths(&ctx),Err(HandlerOutcome::Error {code,..}) if code=="read_budget_exceeded")
+        );
+        assert!(ctx.project_paths.get().is_none());
+    }
+
+    #[test]
+    fn project_catalog_reports_latency_at_thirty_and_three_hundred_thousand_memories() {
+        for count in [30_000, 300_000] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = open_store(dir.path());
+            let db = dir.path().join("context.db");
+            apply_sql(
+                &db,
+                &include_str!("../../testdata/app-read-g/project-catalog.sql")
+                    .replace("__MEMORY_COUNT__", &count.to_string()),
+            );
+            apply_sql(&db,"WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<5000) INSERT INTO dream_runs(project_path,started_at,finished_at,holder_id,tasks_json) SELECT printf('/fixture/catalog/project-%02d',x%60),x,x+1,'h','[]' FROM n; WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<719) INSERT INTO task_schedule_state(project_path,task) SELECT printf('/fixture/catalog/project-%02d',x/12),'task-'||(x%12) FROM n;");
+            let mut times = Vec::new();
+            for _ in 0..10 {
+                let ctx = AppReadContext::for_test(Arc::clone(&store), 1);
+                let started = Instant::now();
+                let paths = project_paths(&ctx).unwrap();
+                let elapsed = started.elapsed();
+                assert_eq!(paths.len(), 180);
+                assert!(
+                    elapsed < std::time::Duration::from_millis(250),
+                    "{count}: {elapsed:?}"
+                );
+                times.push(elapsed.as_micros());
+            }
+            times.sort();
+            println!("PROJECT_CATALOG_LATENCY memories={count} distinct_paths=60 runs=5000 schedule_rows=720 samples=10 p50_us={} p90_us={}",times[4],times[8]);
+        }
     }
 
     #[test]
@@ -1334,7 +1617,7 @@ mod tests {
             (PRIMERS_SQL, "idx_primers_project_status_observed"),
             (CANDIDATES_SQL, "idx_primer_candidates_project_time"),
             (WORKSPACES_SQL, "sqlite_autoindex_workspaces"),
-            (MEMBERS_SQL, "sqlite_autoindex_workspace_members"),
+            (MEMBERS_SQL, "idx_workspace_member_name"),
             (MEMBER_COUNT_SQL, "idx_memories_project_status"),
             (USER_MEMORIES_SQL, "idx_um_status"),
             (USER_CANDIDATES_SQL, "idx_umc_created"),

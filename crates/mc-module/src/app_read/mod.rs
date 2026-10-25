@@ -57,6 +57,7 @@ pub struct AppReadContext<'a> {
     bound_roots: Vec<PathBuf>,
     identity_roots: HashMap<String, PathBuf>,
     resolved_roots: Arc<std::sync::OnceLock<HashMap<String, PathBuf>>>,
+    project_paths: Arc<std::sync::OnceLock<Vec<(String, u8)>>>,
     now_ms: i64,
     budget: Duration,
     row_budget: usize,
@@ -80,6 +81,7 @@ impl AppReadContext<'_> {
             bound_roots,
             identity_roots: HashMap::new(),
             resolved_roots: Arc::new(std::sync::OnceLock::new()),
+            project_paths: Arc::new(std::sync::OnceLock::new()),
             now_ms,
             budget: READ_BUDGET,
             row_budget: envelope::ROW_BUDGET,
@@ -154,6 +156,11 @@ impl AppReadContext<'_> {
         started.elapsed() >= self.budget
     }
 
+    /// Return the time still available for non-interruptible work in this read.
+    pub fn remaining(&self, started: Instant) -> Duration {
+        self.budget.saturating_sub(started.elapsed())
+    }
+
     /// Borrow the serving context database through its query-only reader.
     pub fn with_context_read<T>(
         &self,
@@ -219,6 +226,7 @@ impl AppReadContext<'_> {
             bound_roots: self.bound_roots.clone(),
             identity_roots: self.identity_roots.clone(),
             resolved_roots: Arc::clone(&self.resolved_roots),
+            project_paths: Arc::clone(&self.project_paths),
             now_ms: self.now_ms,
             budget: self.budget,
             row_budget: self.row_budget,
@@ -263,7 +271,7 @@ impl AppReadContext<'_> {
                 self.resolved_roots
                     .get_or_init(|| {
                         let resolver = crate::project_identity::ProjectIdentityResolver::new();
-                        self.bound_roots
+                        self.bound_roots()
                             .iter()
                             .filter_map(|root| {
                                 resolver
@@ -276,6 +284,18 @@ impl AppReadContext<'_> {
                     .get(identity)
             })
             .map(PathBuf::as_path)
+    }
+
+    /// Load the serving store's project-path catalog at most once in this request.
+    pub(super) fn cached_project_paths(
+        &self,
+        load: impl FnOnce() -> Result<Vec<(String, u8)>, HandlerOutcome>,
+    ) -> Result<&[(String, u8)], HandlerOutcome> {
+        if self.project_paths.get().is_none() {
+            let paths = load()?;
+            let _ = self.project_paths.set(paths);
+        }
+        Ok(self.project_paths.get().expect("loaded project catalog"))
     }
 
     /// Return an injected HTTP transport for fixture-only embedding probes.
@@ -981,6 +1001,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn interrupted_list_keeps_rows_and_reports_an_incomplete_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = AppReadContext::for_test(tests_support::open_store(dir.path()), 1);
+        ctx.set_budget(Duration::from_millis(20));
+        let (rows, incomplete) = ctx.with_context_read(|conn| {
+            let mut statement = conn.prepare("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT x FROM n")?;
+            let mut rows = statement.query([])?;
+            let mut page = Vec::new();
+            let mut interrupted = false;
+            while let Some(row) = next_row(&mut rows, &mut interrupted)? {
+                page.push(row.get::<_, i64>(0)?);
+                if page.len() == 1 { std::thread::sleep(Duration::from_millis(30)); }
+            }
+            Ok((page, interrupted))
+        }).unwrap();
+        assert!(incomplete);
+        assert_eq!(rows[0], 1);
+        assert!(
+            rows.len() < 1000,
+            "SQLite did not interrupt the remaining work"
+        );
     }
 
     fn code(outcome: HandlerOutcome) -> String {

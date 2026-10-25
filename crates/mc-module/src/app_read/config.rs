@@ -139,7 +139,7 @@ pub fn probe(
     let key = project
         .filter(|identity| project_is_visible(ctx, identity))
         .unwrap_or_else(|| "user".to_string());
-    if let Some(retry) = reserve_probe(&key, ctx.now_ms()) {
+    if let Some(retry) = probe_admission(&key, ctx.now_ms()) {
         return named_detail(
             "probe_rate_limited",
             "An embedding probe for this project already ran recently.",
@@ -527,7 +527,7 @@ fn probes() -> &'static Mutex<HashMap<String, i64>> {
     PROBES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn reserve_probe(key: &str, now_ms: i64) -> Option<i64> {
+fn probe_admission(key: &str, now_ms: i64) -> Option<i64> {
     let mut probes = probes()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
