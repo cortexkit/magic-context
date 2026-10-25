@@ -508,6 +508,7 @@ pub fn user_smart_notes_enabled() -> bool {
 
 /// Only the user can disable the desktop's direct app lane; projects cannot
 /// change which callers may bind a machine-wide service.
+/// A present non-boolean setting keeps Direct disabled until it is corrected.
 pub(crate) fn user_app_read_allow_direct() -> bool {
     user_app_read_allow_direct_at(&user_config_path())
 }
@@ -524,9 +525,9 @@ fn user_app_read_allow_direct_at(user_path: &Path) -> bool {
         Some(_) => {
             crate::project_identity::log_once(
                 "app_read.allow_direct:type".into(),
-                "app_read.allow_direct must be a boolean; using the default true",
+                "app_read.allow_direct must be a boolean; the direct lane stays off until it is fixed",
             );
-            true
+            false
         }
         None => true,
     }
@@ -584,10 +585,19 @@ mod app_read_config_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("magic-context.json");
         assert!(user_app_read_allow_direct_at(&path));
-        for body in ["{}", "not JSON", r#"{"app_read":{"allow_direct":"false"}}"#] {
+        for (body, expected) in [
+            ("{}", true),
+            ("not JSON", true),
+            (r#"{"app_read":{"allow_direct":"false"}}"#, false),
+            (r#"{"app_read":{"allow_direct":null}}"#, false),
+            (r#"{"app_read":{"allow_direct":0}}"#, false),
+            (r#"{"app_read":{"allow_direct":[]}}"#, false),
+            (r#"{"app_read":{"allow_direct":{}}}"#, false),
+        ] {
             fs::write(&path, body).unwrap();
-            assert!(user_app_read_allow_direct_at(&path));
+            assert_eq!(user_app_read_allow_direct_at(&path), expected, "{body}");
         }
+        assert!(user_app_read_allow_direct_at(dir.path()));
     }
 }
 
