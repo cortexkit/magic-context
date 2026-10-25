@@ -17,6 +17,52 @@ mod setup_checkpoint;
 mod user_commands_tests;
 mod wrapup;
 
+#[tokio::test]
+async fn app_search_real_setup_without_project_membership() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(dir.path()).await;
+    let state = rig.state();
+    let namespace = state.namespace();
+    let context = rusqlite::Connection::open(dir.path().join("context.db")).unwrap();
+    let store = rusqlite::Connection::open(dir.path().join("store.db")).unwrap();
+    assert!(!context
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_projects WHERE session_id='s')",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    context.execute("INSERT INTO message_history_fts(session_id,message_ordinal,message_id,role,content) VALUES(?1,1,'real-message','assistant','needle')", [&namespace]).unwrap();
+    context
+        .execute(
+            "INSERT INTO message_fts_rowid_map VALUES(?1,1,?2,10)",
+            rusqlite::params![namespace, context.last_insert_rowid()],
+        )
+        .unwrap();
+    context.execute_batch("INSERT INTO session_meta(session_id,harness) VALUES('anchor','opencode'); INSERT INTO session_projects VALUES('anchor','opencode','git:project',1)").unwrap();
+    let call = |params: Value| {
+        response(crate::app_read::search::search_for_test(
+            &context, &store, &params,
+        ))
+    };
+    let session = call(
+        json!({"query":"needle","scope":{"session":{"runner":state.key.runner,"harness":state.key.harness,"session":state.key.session}}}),
+    );
+    assert_eq!(session["hits"].as_array().unwrap().len(), 1, "{session}");
+    assert_eq!(session["hits"][0]["message_id"], "real-message");
+    assert_eq!(session["hits"][0]["project"], Value::Null);
+    assert_eq!(
+        session["diagnostics"]["project_resolution"]["reason"],
+        "project_identity_not_recorded"
+    );
+    for source in ["memory", "git_commit", "primer"] {
+        assert_eq!(session["source_status"][source], "unavailable");
+    }
+    let project =
+        call(json!({"query":"needle","scope":{"project":"git:project"},"sources":["message"]}));
+    assert!(project["hits"].as_array().unwrap().is_empty());
+}
+
 #[derive(Default)]
 struct Runner {
     /// The session runner module the conversation was admitted under.

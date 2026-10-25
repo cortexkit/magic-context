@@ -16,7 +16,7 @@ mod part_ref_tests;
 mod project_memory;
 #[cfg(test)]
 mod samples_tests;
-mod search;
+pub(crate) mod search;
 mod session_data;
 mod version;
 

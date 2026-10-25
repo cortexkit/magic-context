@@ -14,6 +14,34 @@ pub(crate) trait ReadContext {
         &self,
         read: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> Result<T, String>;
+
+    fn lexical(&self) -> Option<&dyn LexicalRead> {
+        None
+    }
+}
+
+/// App snapshots bound lexical candidates and retain metadata for their replies.
+pub(crate) trait LexicalRead {
+    fn limit(&self) -> usize;
+    fn git_page_limit(&self) -> usize;
+    fn memories(
+        &self,
+        scope: &StoreScope,
+        dates: DateBounds,
+    ) -> CapabilityResult<Vec<SearchMemory>>;
+    fn memory_fts(&self) -> CapabilityResult<Vec<MemoryFtsHit>>;
+    fn messages(&self, dates: DateBounds)
+        -> CapabilityResult<Vec<mc_store::archive_index::FtsRow>>;
+    fn notes(
+        &self,
+        scope: &StoreScope,
+        request: &RetrievalRequest,
+        probes: &[String],
+        limit: usize,
+    ) -> CapabilityResult<(
+        Vec<crate::retrieval::note_ranking::NoteHit>,
+        Vec<crate::retrieval::note_ranking::NoteRow>,
+    )>;
 }
 
 impl ReadContext for McStore {
@@ -107,6 +135,9 @@ impl<R: ReadContext> RetrievalStore<'_, R> {
         limit: usize,
         relaxed: bool,
     ) -> CapabilityResult<Vec<mc_store::archive_index::FtsRow>> {
+        if let Some(snapshot) = self.store.lexical() {
+            return snapshot.messages(dates);
+        }
         self.read(|conn| {
             let sanitized = fts_query(query);
             if sanitized.is_empty() {
@@ -194,6 +225,9 @@ impl<R: ReadContext> RetrievalStore<'_, R> {
         Vec<crate::retrieval::note_ranking::NoteHit>,
         Vec<crate::retrieval::note_ranking::NoteRow>,
     )> {
+        if let Some(snapshot) = self.store.lexical() {
+            return snapshot.notes(scope, request, probes, limit);
+        }
         use crate::retrieval::note_ranking::{rank_notes, NoteRow, NoteStatus, NoteType};
         self.read(|conn| {
             let mut stmt = conn.prepare("SELECT id,type,status,content,session_id,project_path,surface_condition,ready_reason,created_at,anchor_ordinal FROM notes WHERE ((type='session' AND session_id=?1) OR (type='smart' AND project_path=?2)) AND status IN ('active','pending','ready') ORDER BY created_at DESC,id ASC")?;
@@ -215,7 +249,7 @@ impl<R: ReadContext> RetrievalStore<'_, R> {
         limit: usize,
     ) -> CapabilityResult<mc_store::git_archive::SearchResults> {
         let options = mc_store::git_archive::SearchOptions {
-            limit: limit as u32,
+            limit: self.store.lexical().map_or(limit, |s| s.git_page_limit()) as u32,
             from: request.start_at_ms,
             to: request.end_at_ms_inclusive,
             query_embedding: query.map(|(_, v)| v.to_vec()),
@@ -275,6 +309,9 @@ impl<R: ReadContext> RetrievalStore<'_, R> {
         scope: &StoreScope,
         dates: DateBounds,
     ) -> CapabilityResult<Vec<SearchMemory>> {
+        if let Some(snapshot) = self.store.lexical() {
+            return snapshot.memories(scope, dates);
+        }
         self.read(|conn| {
             let (filter, binds) = self.memory_filter(conn, scope, dates)?;
             let binds = std::iter::once(scope.project.0.clone().into()).chain(binds).collect::<Vec<SqlValue>>();
@@ -291,6 +328,9 @@ impl<R: ReadContext> RetrievalStore<'_, R> {
         dates: DateBounds,
         limit: usize,
     ) -> CapabilityResult<Vec<MemoryFtsHit>> {
+        if let Some(snapshot) = self.store.lexical() {
+            return snapshot.memory_fts();
+        }
         self.read(|conn| {
             let run = |query: &str| -> rusqlite::Result<Vec<MemoryFtsHit>> {
                 let (filter, mut binds) = self.memory_filter(conn, scope, dates)?;
@@ -341,6 +381,11 @@ impl<R: ReadContext> RetrievalStore<'_, R> {
         })
     }
     pub fn read_visible_memory_ids(&self, scope: &StoreScope) -> CapabilityResult<BTreeSet<i64>> {
+        if self.store.lexical().is_some() {
+            return CapabilityResult::Available {
+                value: BTreeSet::new(),
+            };
+        }
         self.read(|conn| {
             let mut stmt = conn.prepare("SELECT a.memory_id, a.projected_metadata_json FROM memory_applied_rows a JOIN memories m ON m.id=a.memory_id AND m.content=a.projected_text WHERE a.session_id=? AND a.harness='opencode' AND m.status!='archived'")?;
             let rows = stmt.query_map([&scope.session.0], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;

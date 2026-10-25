@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 
 pub(crate) struct PreparedSearch {
     pub baseline: Vec<SearchCandidate>,
-    availability: BTreeMap<String, Availability>,
+    pub availability: BTreeMap<String, Availability>,
     probes: Vec<String>,
     lanes: SearchLanes,
     bodies: HashMap<String, String>,
@@ -23,8 +23,9 @@ pub(crate) fn collect<R: ReadContext>(
     sources: &[RetrievalSource],
     vector: Option<&[f32]>,
 ) -> PreparedSearch {
-    let limit = request.limit.clamp(1, 25) as usize;
-    let tier_limit = (limit * 3).max(10);
+    let app_limit = adapter.store.lexical().map(|s| s.limit());
+    let limit = app_limit.unwrap_or(request.limit.clamp(1, 25) as usize);
+    let tier_limit = app_limit.unwrap_or((limit * 3).max(10));
     let dates = DateBounds {
         from_ms: request.start_at_ms,
         to_ms: request.end_at_ms_inclusive,
