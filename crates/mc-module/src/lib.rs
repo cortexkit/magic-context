@@ -16879,7 +16879,22 @@ impl McHandler {
             .cloned();
         if let Some(caller) = app_caller {
             let allow_direct = !caller.is_direct() || config::user_app_read_allow_direct();
-            return app_read::handle(&caller, allow_direct, &body);
+            let context = app_read::AppReadContext::from_parts(
+                self.store.get().cloned(),
+                Arc::clone(&self.config),
+                {
+                    let roots = self
+                        .active_project_roots
+                        .lock()
+                        .expect("active project roots");
+                    let mut paths: Vec<_> = roots.values().cloned().collect();
+                    paths.sort();
+                    paths.dedup();
+                    paths
+                },
+                now_ms(),
+            );
+            return app_read::handle(&caller, allow_direct, &body, &context);
         }
         // A flow-scoped route never takes the agent-data lane: it falls through to
         // the dispatcher, whose flow fence admits only the flow ops.

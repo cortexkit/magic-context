@@ -1,0 +1,8 @@
+{
+  "note": "project-visible",
+  "project_token": "project-token-secret",
+  "webhook_secret": "project-webhook-secret",
+  "headers": {
+    "x-project": "project-header-value"
+  }
+}

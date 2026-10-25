@@ -4,10 +4,6 @@ use serde_json::{json, Map, Value};
 use subc_client_rs::HandlerOutcome;
 
 pub const REQUEST_LIMIT: usize = 64 * 1024;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "paging is implemented by the read operations")
-)]
 pub const ROW_BUDGET: usize = 448 * 1024;
 pub const REPLY_LIMIT: usize = 512 * 1024;
 
@@ -97,13 +93,6 @@ fn invalid_request() -> HandlerOutcome {
 }
 
 /// Serialize the complete escaped JSON, not an estimate of the unescaped fields.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "successful replies arrive with the read operations"
-    )
-)]
 pub fn reply(op: &str, as_of_ms: i64, mut fields: Map<String, Value>) -> HandlerOutcome {
     fields.insert("schema".into(), json!(1));
     fields.insert("op".into(), json!(op));
