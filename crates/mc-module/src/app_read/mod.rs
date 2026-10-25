@@ -51,20 +51,23 @@ pub(super) const RANKED_TTL_MS: i64 = 120_000;
 /// Read access for one app call. It holds the store the module is already serving,
 /// the config cache, and the project roots bound on other routes. It has no write
 /// method and no path back into transform or session state.
-pub struct AppReadContext {
+pub struct AppReadContext<'a> {
     store: Option<Arc<mc_store::McStore>>,
     config: Arc<Mutex<crate::config::ConfigCache>>,
     bound_roots: Vec<PathBuf>,
     identity_roots: HashMap<String, PathBuf>,
+    resolved_roots: Arc<std::sync::OnceLock<HashMap<String, PathBuf>>>,
     now_ms: i64,
     budget: Duration,
     row_budget: usize,
     sql_log: Option<Arc<Mutex<Vec<String>>>>,
     probe: Option<Arc<dyn config::ProbeTransport>>,
     config_files: Option<(PathBuf, Option<PathBuf>)>,
+    connections: Option<(&'a rusqlite::Connection, &'a rusqlite::Connection)>,
 }
 
-impl AppReadContext {
+impl AppReadContext<'_> {
+    /// Capture the serving store, config cache and bound-root snapshot for one request.
     pub fn from_parts(
         store: Option<Arc<mc_store::McStore>>,
         config: Arc<Mutex<crate::config::ConfigCache>>,
@@ -76,12 +79,14 @@ impl AppReadContext {
             config,
             bound_roots,
             identity_roots: HashMap::new(),
+            resolved_roots: Arc::new(std::sync::OnceLock::new()),
             now_ms,
             budget: READ_BUDGET,
             row_budget: envelope::ROW_BUDGET,
             sql_log: None,
             probe: None,
             config_files: None,
+            connections: None,
         }
     }
 
@@ -95,10 +100,12 @@ impl AppReadContext {
         )
     }
 
+    /// Return the caller-independent timestamp captured for the reply envelope.
     pub fn now_ms(&self) -> i64 {
         self.now_ms
     }
 
+    /// Return the escaped-JSON budget available to a list's rows.
     pub fn row_budget(&self) -> usize {
         self.row_budget
     }
@@ -133,6 +140,7 @@ impl AppReadContext {
         self.config_files = Some((user, project));
     }
 
+    /// Observe SQL selected by an operation when a test has installed a query log.
     pub fn note_sql(&self, sql: &str) {
         if let Some(log) = &self.sql_log {
             log.lock()
@@ -141,47 +149,174 @@ impl AppReadContext {
         }
     }
 
+    /// Check elapsed non-SQL work against the same duration as the SQLite deadline.
     pub fn expired(&self, started: Instant) -> bool {
         started.elapsed() >= self.budget
     }
 
+    /// Borrow the serving context database through its query-only reader.
+    pub fn with_context_read<T>(
+        &self,
+        read: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, HandlerOutcome> {
+        if let Some((context, _)) = self.connections {
+            return read(context).map_err(map_sql);
+        }
+        let store = self.store.as_ref().ok_or_else(store_unavailable)?;
+        store
+            .with_context_read(|conn| {
+                let _deadline = ReadDeadline::install(conn, self.budget);
+                read(conn)
+            })
+            .map_err(map_store)
+    }
+
+    /// Borrow the serving module database through its read-only reader.
+    pub fn with_store_read<T>(
+        &self,
+        read: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, HandlerOutcome> {
+        if let Some((_, store)) = self.connections {
+            return read(store).map_err(map_sql);
+        }
+        let store = self.store.as_ref().ok_or_else(store_unavailable)?;
+        store
+            .with_store_read(|conn| {
+                let _deadline = ReadDeadline::install(conn, self.budget);
+                read(conn)
+            })
+            .map_err(map_store)
+    }
+
+    /// Borrow both serving databases for an operation that needs two read connections.
+    pub fn with_reads<T>(
+        &self,
+        read: impl FnOnce(&rusqlite::Connection, &rusqlite::Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, HandlerOutcome> {
+        if let Some((context, store)) = self.connections {
+            return read(context, store).map_err(map_sql);
+        }
+        self.with_context_read(|context| {
+            let store = self.store.as_ref().expect("context read requires a store");
+            store
+                .with_store_read(|store| {
+                    let _deadline = ReadDeadline::install(store, self.budget);
+                    read(context, store)
+                })
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+        })
+    }
+
+    /// Reuse one pair of read transactions throughout a dispatched operation.
+    fn borrowed<'a>(
+        &self,
+        context: &'a rusqlite::Connection,
+        store: &'a rusqlite::Connection,
+    ) -> AppReadContext<'a> {
+        AppReadContext {
+            store: self.store.clone(),
+            config: Arc::clone(&self.config),
+            bound_roots: self.bound_roots.clone(),
+            identity_roots: self.identity_roots.clone(),
+            resolved_roots: Arc::clone(&self.resolved_roots),
+            now_ms: self.now_ms,
+            budget: self.budget,
+            row_budget: self.row_budget,
+            sql_log: self.sql_log.clone(),
+            probe: self.probe.clone(),
+            config_files: self.config_files.clone(),
+            connections: Some((context, store)),
+        }
+    }
+
+    /// Run a context-only read without exposing the store itself to an operation.
     pub fn context<T>(
         &self,
         read: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
     ) -> Result<T, HandlerOutcome> {
-        let store = self.store.as_ref().ok_or_else(store_unavailable)?;
-        store.with_context_read(read).map_err(map_store)
+        self.with_context_read(read)
     }
 
+    /// Run a module-store-only read without exposing the store itself to an operation.
     pub fn store_db<T>(
         &self,
         read: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
     ) -> Result<T, HandlerOutcome> {
-        let store = self.store.as_ref().ok_or_else(store_unavailable)?;
-        store.with_store_read(read).map_err(map_store)
+        self.with_store_read(read)
     }
 
+    /// Borrow the config cache used by the serving handler's runtime policy.
     pub fn config_cache(&self) -> Arc<Mutex<crate::config::ConfigCache>> {
         Arc::clone(&self.config)
     }
 
+    /// Return only the project roots visible in this request's bind snapshot.
     pub fn bound_roots(&self) -> &[PathBuf] {
         &self.bound_roots
     }
 
+    /// Resolve identities from the captured roots once, without accepting caller-supplied paths.
     pub fn identity_root(&self, identity: &str) -> Option<&Path> {
-        self.identity_roots.get(identity).map(PathBuf::as_path)
+        self.identity_roots
+            .get(identity)
+            .or_else(|| {
+                self.resolved_roots
+                    .get_or_init(|| {
+                        let resolver = crate::project_identity::ProjectIdentityResolver::new();
+                        self.bound_roots
+                            .iter()
+                            .filter_map(|root| {
+                                resolver
+                                    .resolve(root)
+                                    .ok()
+                                    .map(|identity| (identity, root.clone()))
+                            })
+                            .collect()
+                    })
+                    .get(identity)
+            })
+            .map(PathBuf::as_path)
     }
 
+    /// Return an injected HTTP transport for fixture-only embedding probes.
     pub fn probe(&self) -> Option<&Arc<dyn config::ProbeTransport>> {
         self.probe.as_ref()
     }
 
+    /// Return explicit fixture config paths when a test has supplied them.
     pub fn config_files(&self) -> Option<(&Path, Option<&Path>)> {
         self.config_files
             .as_ref()
             .map(|(user, project)| (user.as_path(), project.as_deref()))
     }
+}
+
+/// Clear a borrowed connection's progress handler on every return path, including unwinding.
+struct ReadDeadline<'a>(&'a rusqlite::Connection);
+
+impl<'a> ReadDeadline<'a> {
+    fn install(conn: &'a rusqlite::Connection, budget: Duration) -> Self {
+        let started = Instant::now();
+        conn.progress_handler(1000, Some(move || started.elapsed() >= budget));
+        Self(conn)
+    }
+}
+
+impl Drop for ReadDeadline<'_> {
+    fn drop(&mut self) {
+        self.0.progress_handler(0, None::<fn() -> bool>);
+    }
+}
+
+/// Translate a SQLite interruption into the public budget refusal without leaking SQL errors.
+fn map_sql(error: rusqlite::Error) -> HandlerOutcome {
+    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) {
+        return named(
+            "read_budget_exceeded",
+            "The app read exceeded its time budget.",
+        );
+    }
+    store_unavailable()
 }
 
 fn store_unavailable() -> HandlerOutcome {
@@ -190,6 +325,12 @@ fn store_unavailable() -> HandlerOutcome {
 
 fn map_store(error: mc_store::McStoreError) -> HandlerOutcome {
     let message = error.to_string();
+    if message.to_ascii_lowercase().contains("interrupted") {
+        return named(
+            "read_budget_exceeded",
+            "The app read exceeded its time budget.",
+        );
+    }
     if message.contains("single_store_migration_required")
         || message.contains("single-store migration")
         || message.contains("SingleStoreMigrationRequired")
@@ -205,6 +346,7 @@ fn map_store(error: mc_store::McStoreError) -> HandlerOutcome {
     )
 }
 
+/// Build a named refusal without parameter details.
 pub(super) fn named(code: &str, message: impl Into<String>) -> HandlerOutcome {
     HandlerOutcome::Error {
         code: code.into(),
@@ -212,6 +354,7 @@ pub(super) fn named(code: &str, message: impl Into<String>) -> HandlerOutcome {
     }
 }
 
+/// Build a named refusal with machine-readable details.
 pub(super) fn named_detail(
     code: &str,
     message: impl Into<String>,
@@ -224,10 +367,12 @@ pub(super) fn named_detail(
     }
 }
 
+/// Refuse a parameter by its dotted field name and validation reason.
 pub(super) fn invalid(field: &str, reason: &str) -> HandlerOutcome {
     envelope::invalid_field(field, reason, None)
 }
 
+/// Refuse an indexed read until its required index is installed.
 pub(super) fn index_unavailable(section: &str, index: &str) -> HandlerOutcome {
     named_detail(
         "app_op_unavailable",
@@ -236,6 +381,7 @@ pub(super) fn index_unavailable(section: &str, index: &str) -> HandlerOutcome {
     )
 }
 
+/// Validate an object's keys with the shared dotted-path allowlist.
 pub(super) fn allow(
     object: &Map<String, Value>,
     keys: &[&str],
@@ -244,6 +390,7 @@ pub(super) fn allow(
     envelope::refuse_unknown(object, keys, path)
 }
 
+/// Decode an optional string and report type errors at its dotted path.
 pub(super) fn opt_str(
     object: &Map<String, Value>,
     key: &str,
@@ -256,6 +403,7 @@ pub(super) fn opt_str(
     }
 }
 
+/// Decode an optional integer, accepting decimal strings for stored identifiers.
 pub(super) fn opt_i64(
     object: &Map<String, Value>,
     key: &str,
@@ -275,6 +423,7 @@ pub(super) fn opt_i64(
     }
 }
 
+/// Decode a filter array containing only nonempty, NUL-free strings.
 pub(super) fn string_array(value: &Value, path: &str) -> Result<Vec<String>, HandlerOutcome> {
     let Some(items) = value.as_array() else {
         return Err(invalid(path, "type"));
@@ -291,12 +440,14 @@ pub(super) fn string_array(value: &Value, path: &str) -> Result<Vec<String>, Han
 }
 
 #[derive(Clone, Debug)]
+/// The three-part session identity supplied by an app, not an authorization claim.
 pub(super) struct SessionRef {
     pub runner: String,
     pub harness: String,
     pub session: String,
 }
 
+/// Validate every field in an app-supplied session identity.
 pub(super) fn session_ref(value: &Value, path: &str) -> Result<SessionRef, HandlerOutcome> {
     let object = envelope::object(value, path)?;
     allow(object, &["runner", "harness", "session"], path)?;
@@ -324,6 +475,7 @@ fn bounded(
     Ok(value.to_string())
 }
 
+/// Decode a bounded positive row limit with an operation-specific default.
 pub(super) fn page_limit(
     object: &Map<String, Value>,
     default: usize,
@@ -347,6 +499,7 @@ pub(super) fn page_limit(
     }
 }
 
+/// Truncate text at a UTF-8 boundary and retain its original byte length.
 pub(super) fn cut_text(text: &str, max_bytes: usize) -> (String, bool, usize) {
     let bytes = text.len();
     if bytes <= max_bytes {
@@ -359,7 +512,21 @@ pub(super) fn cut_text(text: &str, max_bytes: usize) -> (String, bool, usize) {
     (text[..end].to_string(), true, bytes)
 }
 
+/// Cap a free-form row field with size markers, using null rather than invalid partial structured text.
+pub(super) fn cap_field(row: &mut Value, field: &str, max_bytes: usize, structured: bool) {
+    let Some(text) = row.get(field).and_then(Value::as_str) else {
+        return;
+    };
+    let (text, truncated, bytes) = cut_text(text, max_bytes);
+    if truncated {
+        row[field] = if structured { Value::Null } else { json!(text) };
+        row[format!("{field}_truncated")] = json!(true);
+        row[format!("{field}_bytes")] = json!(bytes);
+    }
+}
+
 #[derive(Clone, Debug)]
+/// Decoded keyset or offset position, with an optional ranked-query issue time.
 pub(super) struct Cursor {
     pub keys: Vec<String>,
     /// Issue time for a ranked-search cursor. Expiry is decided while decoding.
@@ -367,6 +534,7 @@ pub(super) struct Cursor {
     pub issued_at_ms: Option<i64>,
 }
 
+/// Bind a cursor to the normalized scope and filters of one read.
 pub(super) fn digest_of(parts: &[(&str, &Value)]) -> String {
     let mut object = Map::new();
     for (key, value) in parts {
@@ -376,6 +544,7 @@ pub(super) fn digest_of(parts: &[(&str, &Value)]) -> String {
     format!("{:x}", sha2::Sha256::digest(&bytes))
 }
 
+/// Encode a bounded opaque cursor tied to its operation, section and filters.
 pub(super) fn encode_cursor(
     op: &str,
     section: &str,
@@ -398,6 +567,7 @@ pub(super) fn encode_cursor(
     Ok(cursor)
 }
 
+/// Check cursor ownership and ranked-query expiry before decoding its position.
 pub(super) fn decode_cursor(
     raw: Option<&str>,
     op: &str,
@@ -452,31 +622,29 @@ pub(super) fn decode_cursor(
     Ok(Some(Cursor { keys, issued_at_ms }))
 }
 
+/// Accumulate rows against their escaped JSON byte budget.
 pub(super) struct Page {
     rows: Vec<Value>,
     bytes: usize,
     budget: usize,
-    stopped: bool,
 }
 
 impl Page {
+    /// Start an empty JSON array with room for its delimiters.
     pub(super) fn new(budget: usize) -> Self {
         Self {
             rows: Vec::new(),
             bytes: 2,
             budget,
-            stopped: false,
         }
     }
 
+    /// Report how many complete rows have been accepted.
     pub(super) fn len(&self) -> usize {
         self.rows.len()
     }
 
-    pub(super) fn stopped_for_budget(&self) -> bool {
-        self.stopped
-    }
-
+    /// Consume the accumulator into its accepted rows.
     pub(super) fn rows(self) -> Vec<Value> {
         self.rows
     }
@@ -486,7 +654,6 @@ impl Page {
         let encoded = serde_json::to_vec(&row).unwrap_or_default();
         let next = self.bytes.saturating_add(encoded.len()).saturating_add(1);
         if !self.rows.is_empty() && next > self.budget {
-            self.stopped = true;
             return false;
         }
         self.bytes = next;
@@ -495,6 +662,7 @@ impl Page {
     }
 }
 
+/// Serialize a list section with its paging and version metadata.
 pub(super) fn list_reply(
     op: &str,
     section: &str,
@@ -519,6 +687,7 @@ pub(super) fn list_reply(
     envelope::reply(op, as_of_ms, fields)
 }
 
+/// Serialize a single-object section or operation with optional version metadata.
 pub(super) fn row_reply(
     op: &str,
     section: Option<&str>,
@@ -538,6 +707,7 @@ pub(super) fn row_reply(
     envelope::reply(op, as_of_ms, fields)
 }
 
+/// Prepare a statement on an already-admitted read connection.
 pub(super) fn prepare<'a>(
     conn: &'a rusqlite::Connection,
     sql: &str,
@@ -545,6 +715,23 @@ pub(super) fn prepare<'a>(
     conn.prepare(sql)
 }
 
+/// Preserve accumulated list rows when SQLite interrupts the next step for its deadline.
+pub(super) fn next_row<'a, 'stmt>(
+    rows: &'a mut rusqlite::Rows<'stmt>,
+    interrupted: &mut bool,
+) -> rusqlite::Result<Option<&'a rusqlite::Row<'stmt>>> {
+    match rows.next() {
+        Err(error)
+            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) =>
+        {
+            *interrupted = true;
+            Ok(None)
+        }
+        result => result,
+    }
+}
+
+/// Check the persisted single-store migration gate without changing it.
 pub(super) fn migrated(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'single_store_state')",
@@ -578,10 +765,21 @@ pub fn handle(
         Err(refusal) => return refusal,
     };
     match request.method.as_str() {
-        "session_data.read" => session_data::read(caller, ctx, &request.params),
-        "project_memory.read" => project_memory::read(caller, ctx, &request.params),
-        "dreamer.read" => dreamer::read(caller, ctx, &request.params),
-        "store.health" => health::read(caller, ctx, &request.params),
+        "session_data.read" | "project_memory.read" | "dreamer.read" | "store.health" => {
+            match ctx.with_reads(|context, store| {
+                let ctx = ctx.borrowed(context, store);
+                Ok(match request.method.as_str() {
+                    "session_data.read" => session_data::read(caller, &ctx, &request.params),
+                    "project_memory.read" => project_memory::read(caller, &ctx, &request.params),
+                    "dreamer.read" => dreamer::read(caller, &ctx, &request.params),
+                    "store.health" => health::read(caller, &ctx, &request.params),
+                    _ => unreachable!(),
+                })
+            }) {
+                Ok(outcome) => outcome,
+                Err(refusal) => refusal,
+            }
+        }
         "config.read" => config::read(caller, ctx, &request.params),
         "config.embedding_probe" => config::probe(caller, ctx, &request.params),
         other => envelope::unknown_method(other),
@@ -676,6 +874,115 @@ mod tests {
     use subc_protocol::Principal;
     use syn::visit::Visit;
 
+    #[test]
+    fn combined_read_adapter_uses_the_serving_stores_and_rejects_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = tests_support::open_store(dir.path());
+        let ctx = AppReadContext::for_test(store, 1);
+        ctx.with_reads(|context, store| {
+            for (connection, file) in [(context, "context.db"), (store, "store.db")] {
+                let path: String = connection.query_row(
+                    "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(Path::new(&path), dir.path().join(file));
+                let refused = connection
+                    .query_row("CREATE TABLE denied_read_write(id INTEGER)", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap_err();
+                assert_eq!(
+                    refused.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::ReadOnly)
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn marked_caps_preserve_utf8_and_maximum_escaped_rows_fit_the_budget() {
+        let mut row = json!({"title": "ab😀z", "metadata_json": "{\"value\":\"😀😀\"}"});
+        cap_field(&mut row, "title", 6, false);
+        assert_eq!(row["title"], "ab😀");
+        assert_eq!(row["title_bytes"], 7);
+        assert_eq!(row["title_truncated"], true);
+        cap_field(&mut row, "metadata_json", 8, true);
+        assert!(row["metadata_json"].is_null());
+        assert_eq!(row["metadata_json_truncated"], true);
+        let maximum =
+            json!({"question": "\u{1}".repeat(16 * 1024), "answer": "\u{1}".repeat(16 * 1024)});
+        let mut page = Page::new(envelope::ROW_BUDGET);
+        assert!(page.try_push(maximum.clone()));
+        assert!(page.try_push(maximum.clone()));
+        assert!(!page.try_push(maximum));
+        assert!(serde_json::to_vec(&page.rows()).unwrap().len() < envelope::ROW_BUDGET);
+    }
+
+    #[test]
+    fn progress_handler_is_cleared_before_the_next_ordinary_query() {
+        const WORK: &str = "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 100000) SELECT sum(x) FROM n";
+        for database in ["context", "store"] {
+            for ending in ["success", "interrupted", "panic"] {
+                let dir = tempfile::tempdir().unwrap();
+                let store = tests_support::open_store(dir.path());
+                let mut ctx = AppReadContext::for_test(Arc::clone(&store), 1);
+                ctx.set_budget(Duration::from_millis(1));
+                let read = |conn: &rusqlite::Connection| {
+                    if ending == "panic" {
+                        panic!("read callback panic");
+                    }
+                    if ending == "interrupted" {
+                        conn.query_row(WORK, [], |row| row.get::<_, i64>(0))?;
+                    }
+                    Ok(())
+                };
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if database == "context" {
+                        ctx.with_context_read(read)
+                    } else {
+                        ctx.with_store_read(read)
+                    }
+                }));
+                match ending {
+                    "success" => result.unwrap().unwrap(),
+                    "interrupted" => {
+                        assert_eq!(code(result.unwrap().unwrap_err()), "read_budget_exceeded")
+                    }
+                    _ => assert!(result.is_err()),
+                }
+                std::thread::sleep(Duration::from_millis(2));
+                let ordinary = |conn: &rusqlite::Connection| {
+                    conn.query_row(WORK, [], |row| row.get::<_, i64>(0))
+                };
+                let result = if database == "context" {
+                    store.with_context_read(ordinary)
+                } else {
+                    store.with_store_read(ordinary)
+                };
+                assert_eq!(result.unwrap(), 5_000_050_000, "{database}/{ending}");
+                let same_connection = |conn: &rusqlite::Connection| {
+                    {
+                        let _deadline = ReadDeadline::install(conn, Duration::ZERO);
+                    }
+                    conn.query_row(WORK, [], |row| row.get::<_, i64>(0))
+                };
+                let result = if database == "context" {
+                    store.with_context_read(same_connection)
+                } else {
+                    store.with_store_read(same_connection)
+                };
+                assert_eq!(
+                    result.unwrap(),
+                    5_000_050_000,
+                    "same connection/{database}/{ending}"
+                );
+            }
+        }
+    }
+
     fn code(outcome: HandlerOutcome) -> String {
         match outcome {
             HandlerOutcome::Error { code, .. } | HandlerOutcome::ErrorWithDetail { code, .. } => {
@@ -687,7 +994,7 @@ mod tests {
 
     // The handler's process-wide historian budget reads user config on first use.
     // Construct handlers only in fresh children with an empty temporary home.
-    fn isolated(test: &str) -> bool {
+    pub(super) fn isolated(test: &str) -> bool {
         if std::env::var("MC_APP_READ_ISOLATED_TEST").as_deref() == Ok(test) {
             return false;
         }

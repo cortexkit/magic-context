@@ -173,7 +173,13 @@ fn table_estimates(
             [&name],
             |row| row.get(0),
         )?;
-        if sql.to_ascii_uppercase().contains("WITHOUT ROWID") {
+        // Virtual-table aggregates can walk every row instead of seeking the largest rowid.
+        if sql.to_ascii_uppercase().contains("WITHOUT ROWID")
+            || sql
+                .trim_start()
+                .to_ascii_uppercase()
+                .starts_with("CREATE VIRTUAL TABLE")
+        {
             estimates.push(json!({"table": name, "rows": null, "method": "not_estimated"}));
             continue;
         }
@@ -186,7 +192,7 @@ fn table_estimates(
             estimates.push(json!({"table": name, "rows": rows, "method": "sqlite_sequence"}));
             continue;
         }
-        let max_sql = format!("SELECT MAX(rowid) FROM \"{name}\"");
+        let max_sql = format!("SELECT MAX(rowid) FROM \"{}\"", name.replace('"', "\"\""));
         ctx.note_sql(&max_sql);
         let max: Option<i64> = conn.query_row(&max_sql, [], |row| row.get(0))?;
         estimates.push(json!({
@@ -253,6 +259,30 @@ mod tests {
                 "{query}: {plan}"
             );
         }
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        let module_connection = rusqlite::Connection::open(dir.path().join("store.db")).unwrap();
+        for query in sql {
+            let query_plan = format!("EXPLAIN {query}");
+            let mut statement = connection
+                .prepare(&query_plan)
+                .or_else(|_| module_connection.prepare(&query_plan))
+                .unwrap();
+            let params = vec![rusqlite::types::Value::Null; statement.parameter_count()];
+            let opcodes = statement
+                .query_map(rusqlite::params_from_iter(params), |row| {
+                    Ok((row.get::<_, String>(1)?, row.get::<_, Option<String>>(5)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(
+                opcodes.iter().all(|(opcode, argument)| opcode != "Count"
+                    && !argument
+                        .as_deref()
+                        .is_some_and(|value| value.starts_with("count("))),
+                "{query}: {opcodes:?}"
+            );
+        }
         let methods: Vec<_> = reply["row"]["databases"][0]["rows"]
             .as_array()
             .unwrap()
@@ -300,5 +330,61 @@ mod tests {
             HandlerOutcome::Error { code, .. } => assert_eq!(code, "read_budget_exceeded"),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn health_refuses_nested_filter_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppReadContext::for_test(open_store(dir.path()), 1);
+        let outcome = read(
+            &crate::app_read::tests_support::caller(),
+            &ctx,
+            json!({"filters": {"table": "memories"}})
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(
+            crate::app_read::tests_support::detail_field(&outcome),
+            json!({"field": "params.filters", "reason": "unknown"})
+        );
+    }
+
+    #[test]
+    fn virtual_health_tables_have_no_row_scan_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let mut ctx = AppReadContext::for_test(store, 1);
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        ctx.set_sql_log(log.clone());
+        let reply = response(&read(
+            &crate::app_read::tests_support::caller(),
+            &ctx,
+            json!({}).as_object().unwrap(),
+        ));
+        for sql in log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|sql| sql.contains("FROM \"memories_fts\""))
+        {
+            let plan = explain(&dir.path().join("context.db"), sql);
+            assert!(
+                !plan.contains("SCAN") && !plan.contains("VIRTUAL TABLE"),
+                "virtual table estimate must not issue a row plan: {sql}: {plan}"
+            );
+        }
+        let rows = reply["row"]["databases"][0]["rows"].as_array().unwrap();
+        let virtual_table = rows
+            .iter()
+            .find(|row| row["table"] == "memories_fts")
+            .unwrap();
+        assert_eq!(virtual_table["method"], "not_estimated");
+        assert!(virtual_table["rows"].is_null());
+        let shadow = rows
+            .iter()
+            .find(|row| row["table"] == "memories_fts_data")
+            .unwrap();
+        assert_eq!(shadow["method"], "max_rowid");
+        assert!(shadow["rows"].is_number());
     }
 }

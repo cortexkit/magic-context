@@ -8,12 +8,12 @@ use subc_client_rs::HandlerOutcome;
 
 use super::admission::AppCaller;
 use super::{
-    allow, cut_text, decode_cursor, digest_of, encode_cursor, invalid, list_reply, named, opt_i64,
-    opt_str, page_limit, prepare, AppReadContext, Page,
+    allow, cut_text, decode_cursor, digest_of, encode_cursor, invalid, list_reply, named, opt_str,
+    page_limit, prepare, AppReadContext, Page,
 };
 
 const OP: &str = "dreamer.read";
-const TASKS: [&str; 12] = [
+pub(super) const TASKS: [&str; 12] = [
     "map-memories",
     "verify",
     "verify-broad",
@@ -45,6 +45,18 @@ pub fn read(
         Some(section) if !section.is_empty() => section,
         _ => return invalid("params.section", "type"),
     };
+    let keys: &[&str] = match section {
+        "schedule" | "runs" => &["section", "project", "limit", "cursor"],
+        "projects" | "state" => &["section", "limit", "cursor"],
+        "run_changes" => &["section", "run_id", "limit", "cursor"],
+        _ => return invalid("params.section", "unknown"),
+    };
+    if let Err(refusal) = allow(params, keys, "params") {
+        return refusal;
+    }
+    if let Err(refusal) = opt_str(params, "cursor", "params") {
+        return refusal;
+    }
     match section {
         "schedule" => schedule(ctx, params),
         "state" => state(ctx, params),
@@ -103,14 +115,23 @@ fn schedule(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
     let started = Instant::now();
     let outcome = ctx.context(|conn| {
         ctx.note_sql(SCHEDULE_SQL);
-        let mut statement = prepare(conn, SCHEDULE_SQL)?;
+        let sql = if project.is_some() {
+            SCHEDULE_PROJECT_SQL
+        } else {
+            SCHEDULE_SQL
+        };
+        let mut statement = prepare(conn, sql)?;
         let lower_project = after_project.unwrap_or_default();
         let lower_task = after_task.unwrap_or_default();
-        let mut rows = statement.query(params![lower_project, lower_task])?;
+        let mut rows = if let Some(project) = &project {
+            statement.query(params![project, lower_project, lower_task])?
+        } else {
+            statement.query(params![lower_project, lower_task])?
+        };
         let mut page = Page::new(ctx.row_budget());
         let mut last = None;
         let mut hit = false;
-        while let Some(row) = rows.next()? {
+        while let Some(row) = super::next_row(&mut rows, &mut hit)? {
             if ctx.expired(started) {
                 hit = true;
                 break;
@@ -122,7 +143,7 @@ fn schedule(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
                     continue;
                 }
             }
-            let value = json!({
+            let mut value = json!({
                 "project_path": project_path,
                 "task": task,
                 "last_run_at_ms": row.get::<_, Option<i64>>(2)?,
@@ -132,6 +153,7 @@ fn schedule(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
                 "last_error": row.get::<_, Option<String>>(6)?,
                 "retry_count": row.get::<_, i64>(7)?,
             });
+            super::cap_field(&mut value, "last_error", 4 * 1024, false);
             if page.len() >= limit || !page.try_push(value) {
                 hit = true;
                 break;
@@ -149,7 +171,9 @@ fn schedule(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
 const SCHEDULE_SQL: &str = "SELECT project_path, task, last_run_at, next_due_at, schedule, last_status, last_error, retry_count \
      FROM task_schedule_state \
      WHERE project_path > ?1 OR (project_path = ?1 AND task > ?2) \
-     ORDER BY project_path ASC, task ASC";
+      ORDER BY project_path ASC, task ASC";
+const SCHEDULE_PROJECT_SQL: &str = "SELECT project_path, task, last_run_at, next_due_at, schedule, last_status, last_error, retry_count \
+     FROM task_schedule_state WHERE project_path = ?1 AND (project_path > ?2 OR (project_path = ?2 AND task > ?3)) ORDER BY task";
 
 fn state(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome {
     let limit = match page_limit(params, 200, 500, "params.limit") {
@@ -177,7 +201,7 @@ fn state(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome {
         let mut page = Page::new(ctx.row_budget());
         let mut last = None;
         let mut hit = false;
-        while let Some(row) = rows.next()? {
+        while let Some(row) = super::next_row(&mut rows, &mut hit)? {
             if ctx.expired(started) {
                 hit = true;
                 break;
@@ -226,8 +250,9 @@ fn projects(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
         Err(refusal) => return refusal,
     };
     let after = cursor.and_then(|cursor| cursor.keys.into_iter().next());
-    let schedules = crate::app_read::config::dream_schedules(ctx);
     let started = Instant::now();
+    let schedules = crate::app_read::config::dream_schedules(ctx, None);
+    let mut resolved = std::collections::HashMap::new();
     let outcome = ctx.context(|conn| {
         ctx.note_sql(PROJECTS_SQL);
         let mut statement = prepare(conn, PROJECTS_SQL)?;
@@ -235,43 +260,34 @@ fn projects(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
         let mut page = Page::new(ctx.row_budget());
         let mut last = None;
         let mut hit = false;
-        let mut current: Option<String> = None;
-        let mut bucket: Vec<Value> = Vec::new();
-        let flush = |page: &mut Page, project: String, tasks: Vec<Value>, limit: usize| -> bool {
-            let value = json!({"project": project, "tasks": tasks});
-            page.len() >= limit || !page.try_push(value)
-        };
-        while let Some(row) = rows.next()? {
+        while let Some(row) = super::next_row(&mut rows, &mut hit)? {
             if ctx.expired(started) {
                 hit = true;
                 break;
             }
             let project: String = row.get(0)?;
-            if current.as_ref() != Some(&project) {
-                if let Some(previous) = current.take() {
-                    if flush(
-                        &mut page,
-                        previous.clone(),
-                        std::mem::take(&mut bucket),
-                        limit,
-                    ) {
-                        hit = true;
-                        last = Some(vec![previous]);
-                        break;
-                    }
-                    last = Some(vec![previous]);
-                }
-                current = Some(project.clone());
-                bucket = tasks_for(conn, &project, &schedules)?;
+            if page.len() >= limit {
+                hit = true;
+                break;
             }
-        }
-        if !hit {
-            if let Some(project) = current {
-                if flush(&mut page, project.clone(), bucket, limit) {
-                    hit = true;
-                }
-                last = Some(vec![project]);
+            let effective: &Map<String, Value> = if super::config::project_is_visible(ctx, &project)
+            {
+                resolved
+                    .entry(project.clone())
+                    .or_insert_with(|| super::config::dream_schedules(ctx, Some(&project)))
+            } else {
+                &schedules
+            };
+            if ctx.expired(started) {
+                hit = true;
+                break;
             }
+            let tasks = tasks_for(conn, &project, effective)?;
+            if page.len() >= limit || !page.try_push(json!({"project": project, "tasks": tasks})) {
+                hit = true;
+                break;
+            }
+            last = Some(vec![project]);
         }
         Ok((page, !hit, last))
     });
@@ -322,7 +338,7 @@ fn tasks_for(
                     None
                 }
             });
-            json!({
+            let mut value = json!({
                 "task": task,
                 "schedule": effective,
                 "last_run_at_ms": row.and_then(|row| row.2),
@@ -330,7 +346,9 @@ fn tasks_for(
                 "last_status": row.and_then(|row| row.4.clone()),
                 "last_error": row.and_then(|row| row.5.clone()),
                 "retry_count": row.map(|row| row.6).unwrap_or(0),
-            })
+            });
+            super::cap_field(&mut value, "last_error", 4 * 1024, false);
+            value
         })
         .collect())
 }
@@ -367,7 +385,7 @@ fn runs(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome {
         .and_then(|cursor| cursor.keys.get(1))
         .and_then(|value| value.parse::<i64>().ok());
     let Some(project) = project else {
-        return invalid("params.project", "combination");
+        return super::index_unavailable("runs", "idx_dream_runs_finished");
     };
     let started = Instant::now();
     let outcome = ctx.context(|conn| {
@@ -377,7 +395,7 @@ fn runs(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome {
         let mut page = Page::new(ctx.row_budget());
         let mut last = None;
         let mut hit = false;
-        while let Some(row) = rows.next()? {
+        while let Some(row) = super::next_row(&mut rows, &mut hit)? {
             if ctx.expired(started) {
                 hit = true;
                 break;
@@ -403,7 +421,7 @@ fn runs(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome {
                 },
             )?;
             let value = json!({
-                "run_id": run_id,
+                "run_id": run_id.to_string(),
                 "project": row.get::<_, String>(1)?,
                 "started_at_ms": started_at,
                 "finished_at_ms": finished_at,
@@ -441,8 +459,11 @@ const RUN_TOKENS_SQL: &str =
        AND (?4 IS NULL OR session_id = ?4) GROUP BY task";
 
 fn run_changes(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome {
-    let run_id = match opt_i64(params, "run_id", "params") {
-        Ok(Some(id)) => id,
+    let run_id = match opt_str(params, "run_id", "params") {
+        Ok(Some(id)) => match id.parse::<i64>() {
+            Ok(id) if id > 0 => id,
+            _ => return invalid("params.run_id", "range"),
+        },
         Ok(None) => return invalid("params.run_id", "type"),
         Err(refusal) => return refusal,
     };
@@ -482,24 +503,57 @@ fn run_changes(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutc
         let Some((project, started_at, finished_at, changes)) = found else {
             return Ok(None);
         };
-        let (changes, reconstructed) = match changes.as_deref().and_then(parse_changes) {
-            Some(changes) => (changes, false),
-            None => (reconstruct(conn, &project, started_at, finished_at)?, true),
+        let (changes, reconstructed, interrupted) = match changes.as_deref().and_then(parse_changes)
+        {
+            Some(changes) => {
+                let mut detailed = Vec::new();
+                for mut change in changes.into_iter().skip(after).take(limit + 1) {
+                    if let Some(id) = change["id"].as_i64() {
+                        if let Some((category, content, status)) = conn
+                            .query_row(CHANGE_MEMORY_SQL, [id], |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, String>(1)?,
+                                    row.get::<_, String>(2)?,
+                                ))
+                            })
+                            .optional()?
+                        {
+                            let (content, truncated, bytes) = cut_text(&content, 4 * 1024);
+                            change["category"] = json!(category);
+                            change["content"] = json!(content);
+                            change["content_truncated"] = json!(truncated);
+                            change["content_bytes"] = json!(bytes);
+                            change["status"] = json!(status);
+                        }
+                    }
+                    detailed.push(change);
+                }
+                (detailed, false, false)
+            }
+            None => {
+                let (changes, interrupted) =
+                    reconstruct(conn, &project, started_at, finished_at, after, limit + 1)?;
+                (changes, true, interrupted)
+            }
         };
-        Ok(Some((changes, reconstructed)))
+        Ok(Some((changes, reconstructed, interrupted)))
     });
-    let (changes, reconstructed) = match outcome {
+    let (changes, reconstructed, interrupted) = match outcome {
         Ok(Some(row)) => row,
         Ok(None) => return named("dream_run_not_found", "No dream run has that id."),
         Err(refusal) => return refusal,
     };
     let mut page = Page::new(ctx.row_budget());
     let mut next_index = None;
-    for (index, change) in changes.into_iter().enumerate().skip(after) {
+    for (index, change) in changes.into_iter().enumerate() {
         if ctx.expired(started) || page.len() >= limit || !page.try_push(change) {
-            next_index = Some(index);
+            next_index = Some(after + index);
             break;
         }
+    }
+    if interrupted && next_index.is_none() {
+        next_index = Some(after + page.len());
     }
     let complete = next_index.is_none();
     let cursor = next_index.and_then(|index| {
@@ -524,12 +578,13 @@ fn run_changes(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutc
 }
 
 const RUN_CHANGES_SQL: &str = "SELECT project_path, started_at, finished_at, memory_changes_json FROM dream_runs WHERE id = ?1";
+const CHANGE_MEMORY_SQL: &str = "SELECT category, content, status FROM memories WHERE id = ?1";
 
 fn parse_changes(raw: &str) -> Option<Vec<Value>> {
     let value: Value = serde_json::from_str(raw).ok()?;
-    if value.get("writtenIds").is_none()
-        && value.get("archivedIds").is_none()
-        && value.get("mergedIds").is_none()
+    if !["writtenIds", "archivedIds", "mergedIds"]
+        .iter()
+        .any(|key| value.get(key).is_some_and(Value::is_array))
     {
         return None;
     }
@@ -541,7 +596,9 @@ fn parse_changes(raw: &str) -> Option<Vec<Value>> {
     ] {
         if let Some(ids) = value.get(key).and_then(Value::as_array) {
             for id in ids {
-                changes.push(json!({"change": kind, "id": id, "category": null, "content": null, "status": null}));
+                if id.as_i64().is_some() {
+                    changes.push(json!({"change": kind, "id": id, "category": null, "content": null, "status": null}));
+                }
             }
         }
     }
@@ -553,12 +610,18 @@ fn reconstruct(
     project: &str,
     started_at: i64,
     finished_at: i64,
-) -> rusqlite::Result<Vec<Value>> {
+    after: usize,
+    limit: usize,
+) -> rusqlite::Result<(Vec<Value>, bool)> {
     let mut statement = prepare(
         conn,
-        "SELECT id, category, content, status, created_at, updated_at, superseded_by_memory_id FROM memories WHERE project_path = ?1 AND status >= '' AND ((created_at >= ?2 AND created_at <= ?3) OR (updated_at >= ?2 AND updated_at <= ?3))",
+        "SELECT id, category, content, status, created_at, updated_at, superseded_by_memory_id FROM memories WHERE project_path = ?1 AND status >= '' AND ((created_at >= ?2 AND created_at <= ?3) OR (updated_at >= ?2 AND updated_at <= ?3)) ORDER BY id",
     )?;
-    let rows = statement.query_map(params![project, started_at, finished_at], |row| {
+    let mut rows = statement.query(params![project, started_at, finished_at])?;
+    let mut output = Vec::new();
+    let mut interrupted = false;
+    let mut skipped = 0;
+    while let Some(row) = super::next_row(&mut rows, &mut interrupted)? {
         let created: i64 = row.get(4)?;
         let updated: i64 = row.get(5)?;
         let superseded: Option<i64> = row.get(6)?;
@@ -574,7 +637,14 @@ fn reconstruct(
         };
         let content: String = row.get(2)?;
         let (text, truncated, bytes) = cut_text(&content, 4 * 1024);
-        Ok(json!({
+        if kind.is_empty() {
+            continue;
+        }
+        if skipped < after {
+            skipped += 1;
+            continue;
+        }
+        output.push(json!({
             "change": kind,
             "id": row.get::<_, i64>(0)?,
             "category": row.get::<_, String>(1)?,
@@ -582,14 +652,12 @@ fn reconstruct(
             "content_truncated": truncated,
             "content_bytes": bytes,
             "status": status,
-        }))
-    })?;
-    rows.filter(|row| {
-        row.as_ref()
-            .map(|value| value["change"] != "")
-            .unwrap_or(true)
-    })
-    .collect()
+        }));
+        if output.len() >= limit {
+            break;
+        }
+    }
+    Ok((output, interrupted))
 }
 
 fn finish(
@@ -692,5 +760,240 @@ mod tests {
         assert_eq!(reply["complete"], false);
         let plan = explain(&db, RUNS_SQL);
         assert!(plan.contains("idx_dream_runs_project"), "{plan}");
+    }
+
+    #[test]
+    fn unfiltered_runs_name_the_missing_global_time_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ready(dir.path());
+        match read(
+            &caller(),
+            &ctx,
+            json!({"section":"runs"}).as_object().unwrap(),
+        ) {
+            HandlerOutcome::ErrorWithDetail { code, detail, .. } => {
+                assert_eq!(code, "app_op_unavailable");
+                assert_eq!(
+                    detail,
+                    json!({"section":"runs","index":"idx_dream_runs_finished"})
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_dreamer_list_stops_under_budget_and_resumes_without_gaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, db) = ready(dir.path());
+        ctx.set_config_files(dir.path().join("absent-user.json"), None);
+        apply_sql(&db, include_str!("../../testdata/app-read-g/lists.sql"));
+        for (section, budget) in [
+            ("schedule", 12000),
+            ("state", 12000),
+            ("projects", 15000),
+            ("runs", 40000),
+            ("run_changes", 6000),
+        ] {
+            ctx.set_row_budget(budget);
+            let mut params = json!({"section":section});
+            if section == "runs" {
+                params["project"] = json!("git:a");
+            }
+            if section == "run_changes" {
+                params["run_id"] = json!("1");
+            }
+            let mut found = Vec::new();
+            for attempt in 0..8 {
+                let reply = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+                let rows = reply["rows"].as_array().unwrap();
+                assert!(!rows.is_empty(), "{section}: {reply}");
+                assert!(
+                    serde_json::to_vec(rows).unwrap().len() <= budget,
+                    "{section}"
+                );
+                found.extend(rows.iter().map(|row| match section {
+                    "schedule" => row["project_path"].to_string(),
+                    "state" => row["key"].to_string(),
+                    "projects" => row["project"].to_string(),
+                    "runs" => row["run_id"].to_string(),
+                    _ => row["id"].to_string(),
+                }));
+                if attempt == 0 {
+                    assert_eq!(reply["complete"], false, "{section}");
+                }
+                if reply["complete"] == true {
+                    break;
+                }
+                params["cursor"] = reply["next_cursor"].clone();
+                assert!(params["cursor"].is_string(), "{section}");
+            }
+            assert_eq!(found.len(), 4, "{section}: {found:?}");
+            found.sort();
+            found.dedup();
+            assert_eq!(found.len(), 4, "{section}");
+        }
+        for (sql, index) in [
+            (STATE_SQL, "sqlite_autoindex_dream_state"),
+            (PROJECTS_SQL, "sqlite_autoindex_task_schedule_state"),
+            (SCHEDULE_PROJECT_SQL, "sqlite_autoindex_task_schedule_state"),
+            (RUN_TOKENS_SQL, "idx_sai_subagent"),
+            (RUN_CHANGES_SQL, "INTEGER PRIMARY KEY"),
+            (CHANGE_MEMORY_SQL, "INTEGER PRIMARY KEY"),
+        ] {
+            let plan = explain(&db, sql);
+            assert!(plan.contains(index), "{sql}: {plan}");
+        }
+        let schedule = response(&read(
+            &caller(),
+            &ctx,
+            json!({"section":"schedule","project":"git:2"})
+                .as_object()
+                .unwrap(),
+        ));
+        assert_eq!(schedule["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(schedule["rows"][0]["project_path"], "git:2");
+    }
+
+    #[test]
+    fn run_changes_loads_memory_details_and_only_reconstructs_invalid_id_arrays() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, db) = ready(dir.path());
+        apply_sql(&db, include_str!("../../testdata/app-read-g/lists.sql"));
+        let params = json!({"section":"run_changes","run_id":"1"});
+        let reply = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+        assert_eq!(reply["reconstructed"], false);
+        assert_eq!(reply["rows"][0]["category"], "CONSTRAINTS");
+        assert_eq!(reply["rows"][0]["content_truncated"], true);
+        assert_eq!(reply["rows"][0]["content"].as_str().unwrap().len(), 4096);
+        apply_sql(&db,"UPDATE dream_runs SET memory_changes_json = '{\"writtenIds\":\"broken\"}' WHERE id = 1;");
+        let reply = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+        assert_eq!(reply["reconstructed"], true);
+        assert_eq!(reply["rows"].as_array().unwrap().len(), 4);
+        apply_sql(
+            &db,
+            "UPDATE dream_runs SET memory_changes_json = '{\"writtenIds\":[]}' WHERE id = 1;",
+        );
+        let reply = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+        assert_eq!(reply["reconstructed"], false);
+        assert!(reply["rows"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dreamer_refuses_nested_unknown_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ready(dir.path());
+        let outcome = read(
+            &caller(),
+            &ctx,
+            json!({"section":"schedule","filters":{"task":"verify"}})
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(
+            crate::app_read::tests_support::detail_field(&outcome),
+            json!({"field":"params.filters","reason":"unknown"})
+        );
+    }
+
+    #[test]
+    fn project_schedule_overrides_are_trusted_resolved_and_refresh_between_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, db) = ready(dir.path());
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join(".cortexkit")).unwrap();
+        let user = dir.path().join("user.json");
+        let project = root.join(".cortexkit/magic-context.json");
+        std::fs::write(
+            &user,
+            r#"{"dreamer":{"tasks":{"verify":{"schedule":"0 3 * * *"}}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project,
+            r#"{"dreamer":{"tasks":{"verify":{"schedule":"0 9 * * *"}}}}"#,
+        )
+        .unwrap();
+        ctx.set_config_files(user, None);
+        ctx.set_identity_root("git:a", root);
+        apply_sql(&db,"INSERT INTO task_schedule_state(project_path,task,schedule,next_due_at) VALUES ('git:a','verify','0 3 * * *',123);");
+        let params = json!({"section":"projects"});
+        let first = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+        let task = first["rows"][0]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["task"] == "verify")
+            .unwrap();
+        assert_eq!(task["schedule"], "0 9 * * *");
+        assert!(task["next_due_at_ms"].is_null());
+        std::fs::write(
+            &project,
+            r#"{"dreamer":{"tasks":{"verify":{"schedule":"0 8 * * *"}}}}"#,
+        )
+        .unwrap();
+        let second = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+        let task = second["rows"][0]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["task"] == "verify")
+            .unwrap();
+        assert_eq!(task["schedule"], "0 8 * * *");
+        std::fs::write(
+            &project,
+            r#"{"dreamer":{"tasks":{"verify":{"schedule":"not a cron"}}}}"#,
+        )
+        .unwrap();
+        let third = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+        let task = third["rows"][0]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["task"] == "verify")
+            .unwrap();
+        assert_eq!(task["schedule"], "0 3 * * *");
+        assert_eq!(task["next_due_at_ms"], 123);
+    }
+
+    #[test]
+    fn project_cap_with_real_config_files_reports_latency_percentiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, db) = ready(dir.path());
+        let user = dir.path().join("user.json");
+        std::fs::write(&user, "{}").unwrap();
+        ctx.set_config_files(user, None);
+        for n in 0..100 {
+            let root = dir.path().join(format!("project-{n}"));
+            std::fs::create_dir_all(root.join(".cortexkit")).unwrap();
+            std::fs::write(
+                root.join(".cortexkit/magic-context.json"),
+                r#"{"dreamer":{"tasks":{"verify":{"schedule":"0 9 * * *"}}}}"#,
+            )
+            .unwrap();
+            ctx.set_identity_root(format!("git:{n:03}"), root);
+        }
+        apply_sql(&db,"WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<99) INSERT INTO task_schedule_state(project_path,task) SELECT printf('git:%03d',x),'verify' FROM n;");
+        let mut times = Vec::new();
+        let mut sizes = Vec::new();
+        for _ in 0..10 {
+            let started = Instant::now();
+            let reply = response(&read(
+                &caller(),
+                &ctx,
+                json!({"section":"projects","limit":100})
+                    .as_object()
+                    .unwrap(),
+            ));
+            times.push(started.elapsed().as_micros());
+            sizes.push(reply["rows"].as_array().unwrap().len());
+            assert!(!reply["rows"].as_array().unwrap().is_empty());
+            assert!(reply["rows"].as_array().unwrap().len() <= 100);
+        }
+        times.sort();
+        println!(
+            "PROJECT_CAP_LATENCY cap=100 samples=10 p50_us={} p90_us={} served={sizes:?}",
+            times[4], times[8]
+        );
     }
 }

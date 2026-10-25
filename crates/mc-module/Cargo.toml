@@ -41,7 +41,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The single-store writer opens the host's context.db directly (src/host_store.rs).
 # Same pin as the workspace uses everywhere else so the Connection/Transaction types
 # unify with mc-store's and cortexkit-store's.
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, features = ["hooks", "blob"] }
 # subc-protocol is resolved from crates.io, matching the role crate's dependency.
 cortexkit-role-tool-provider = "=0.10.0"
 cortexkit-role-agent-data = "0.2.3"

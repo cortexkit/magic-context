@@ -9,8 +9,8 @@ use subc_client_rs::HandlerOutcome;
 use super::admission::AppCaller;
 use super::{
     allow, cut_text, decode_cursor, digest_of, encode_cursor, index_unavailable, invalid,
-    list_reply, migrated, named, named_detail, opt_i64, page_limit, prepare, row_reply,
-    session_ref, AppReadContext, Page, SessionRef,
+    list_reply, migrated, named, named_detail, page_limit, prepare, row_reply, session_ref,
+    AppReadContext, Page, SessionRef,
 };
 
 const OP: &str = "session_data.read";
@@ -39,8 +39,39 @@ pub fn read(
         Ok(section) => section,
         Err(refusal) => return refusal,
     };
-    if let Err(refusal) = opt_i64(params, "if_version", "params") {
+    let if_version = match super::opt_str(params, "if_version", "params") {
+        Ok(value) => value,
+        Err(refusal) => return refusal,
+    };
+    if let Err(refusal) = super::opt_str(params, "cursor", "params") {
         return refusal;
+    }
+    if let Err(refusal) = page_limit(params, 100, 500, "params.limit") {
+        return refusal;
+    }
+    if matches!(section.as_str(), "compartments" | "facts") {
+        if session.session.starts_with("mc-provider:") && section == "facts" {
+            return index_unavailable("facts", "idx_memories_source_session");
+        }
+        if let Err(refusal) = locate(ctx, &session, false, &section) {
+            return refusal;
+        }
+        let version = match ctx.context(|conn| session_version(conn, &session, &section)) {
+            Ok(version) => version,
+            Err(refusal) => return refusal,
+        };
+        if version.is_some() && version == if_version {
+            return super::envelope::reply(
+                OP,
+                ctx.now_ms(),
+                json!({
+                    "state": "unchanged", "version": version,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+        }
     }
     match section.as_str() {
         "compartments" => compartments(ctx, &session, params),
@@ -49,7 +80,7 @@ pub fn read(
         "meta" => meta(ctx, &session),
         "token_breakdown" => token_breakdown(ctx, &session),
         "subagents" => subagents(ctx, &session, params),
-        "subagent_totals" => subagent_totals(ctx, &session),
+        "subagent_totals" => subagent_totals(ctx, &session, params),
         _ => invalid("params.section", "unknown"),
     }
 }
@@ -71,7 +102,14 @@ fn locate(
     ctx: &AppReadContext,
     session: &SessionRef,
     unmanaged_ok: bool,
+    section: &str,
 ) -> Result<Located, HandlerOutcome> {
+    if session.session.starts_with("mc-provider:") {
+        return Err(index_unavailable(
+            section,
+            "idx_mc_async_compaction_session",
+        ));
+    }
     let started = Instant::now();
     if ctx.expired(started) {
         return Err(named(
@@ -114,9 +152,11 @@ fn locate(
             }
             Ok(Located::Standalone)
         }
-        Some(_) | None if unmanaged_ok => Ok(Located::Unmanaged),
+        Some(_) | None if unmanaged_ok && session.runner == session.harness => {
+            Ok(Located::Unmanaged)
+        }
         Some(_) | None => Err(index_unavailable(
-            "locator",
+            section,
             "idx_mc_async_compaction_session",
         )),
     }
@@ -127,7 +167,7 @@ fn compartments(
     session: &SessionRef,
     params: &Map<String, Value>,
 ) -> HandlerOutcome {
-    if let Err(refusal) = locate(ctx, session, false) {
+    if let Err(refusal) = locate(ctx, session, false, "compartments") {
         return refusal;
     }
     let limit = match page_limit(params, 100, 200, "params.limit") {
@@ -157,15 +197,15 @@ fn compartments(
         let mut rows = statement.query(params![session_id, after])?;
         let mut page = Page::new(ctx.row_budget());
         let mut last_sequence = None;
-        let mut complete = true;
-        while let Some(row) = rows.next()? {
+        let mut hit_limit = false;
+        while let Some(row) = super::next_row(&mut rows, &mut hit_limit)? {
             if ctx.expired(started) {
-                complete = false;
+                hit_limit = true;
                 break;
             }
             let sequence: i64 = row.get(0)?;
-            let value = json!({
-                "compartment_id": row.get::<_, i64>(1)?,
+            let mut value = json!({
+                "compartment_id": row.get::<_, i64>(1)?.to_string(),
                 "ordinal": sequence,
                 "title": row.get::<_, String>(2)?,
                 "first_message_id": empty_as_null(row.get(3)?),
@@ -179,29 +219,21 @@ fn compartments(
                 "summary_bytes": row.get::<_, i64>(11)?,
                 "has_tiers": row.get::<_, i64>(12)? != 0,
             });
+            super::cap_field(&mut value, "title", 4 * 1024, false);
             if page.len() >= limit || !page.try_push(value) {
-                complete = page.len() < limit && !page.stopped_for_budget() || page.len() >= limit;
-                if page.len() >= limit || page.stopped_for_budget() {
-                    complete = false;
-                }
+                hit_limit = true;
                 break;
             }
             last_sequence = Some(sequence.to_string());
         }
-        let version = conn
-            .query_row(
-                "SELECT version FROM compartment_history_versions WHERE session_id = ?1",
-                [&session_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        Ok((page, complete, last_sequence, version))
+        let version = session_version(conn, session, "compartments")?;
+        Ok((page, !hit_limit, last_sequence, version))
     });
     match outcome {
         Ok((page, complete, last, version)) => emit_page(
             ctx,
             "compartments",
-            version.map(|version| version.to_string()),
+            version,
             page,
             complete,
             last.map(|sequence| vec![sequence]),
@@ -213,7 +245,7 @@ fn compartments(
 
 const COMPARTMENTS_SQL: &str = "SELECT sequence, id, title, start_message_id, end_message_id, \
      start_message, end_message, importance, episode_type, legacy, created_at, \
-     LENGTH(content), CASE WHEN p2 IS NOT NULL OR p3 IS NOT NULL OR p4 IS NOT NULL THEN 1 ELSE 0 END \
+      LENGTH(CAST(content AS BLOB)), CASE WHEN p2 IS NOT NULL OR p3 IS NOT NULL OR p4 IS NOT NULL THEN 1 ELSE 0 END \
      FROM compartments WHERE session_id = ?1 AND (?2 IS NULL OR sequence < ?2) \
      ORDER BY sequence DESC";
 
@@ -225,7 +257,7 @@ fn facts(
     if session.session.starts_with("mc-provider:") {
         return index_unavailable("facts", "idx_memories_source_session");
     }
-    if let Err(refusal) = locate(ctx, session, false) {
+    if let Err(refusal) = locate(ctx, session, false, "facts") {
         return refusal;
     }
     let limit = match page_limit(params, 200, 500, "params.limit") {
@@ -247,7 +279,7 @@ fn facts(
         let mut page = Page::new(ctx.row_budget());
         let mut last = None;
         let mut hit_limit = false;
-        while let Some(row) = rows.next()? {
+        while let Some(row) = super::next_row(&mut rows, &mut hit_limit)? {
             if ctx.expired(started) {
                 hit_limit = true;
                 break;
@@ -272,7 +304,7 @@ fn facts(
             }
             last = Some(vec![category, created.to_string(), fact_id.to_string()]);
         }
-        let version = facts_version(conn, &session_id)?;
+        let version = session_version(conn, session, "facts")?;
         Ok((page, !hit_limit, last, version))
     });
     match outcome {
@@ -309,12 +341,40 @@ fn facts_version(
     .map(|row| row.flatten().map(|version| version.to_string()))
 }
 
+fn session_version(
+    conn: &rusqlite::Connection,
+    session: &SessionRef,
+    section: &str,
+) -> rusqlite::Result<Option<String>> {
+    let counters = if section == "compartments" {
+        conn.query_row(
+            "SELECT generation, version, rewrite_version FROM compartment_history_versions WHERE session_id = ?1",
+            [&session.session],
+            |row| Ok(json!([row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?])),
+        ).optional()?
+    } else {
+        facts_version(conn, &session.session)?.map(|value| json!(value))
+    };
+    Ok(counters.map(|counters| {
+        format!(
+            "sd1:{}",
+            digest_of(&[
+                ("section", &json!(section)),
+                ("runner", &json!(session.runner)),
+                ("harness", &json!(session.harness)),
+                ("session", &json!(session.session)),
+                ("counters", &counters),
+            ])
+        )
+    }))
+}
+
 fn notes(
     ctx: &AppReadContext,
     session: &SessionRef,
     params: &Map<String, Value>,
 ) -> HandlerOutcome {
-    if let Err(refusal) = locate(ctx, session, false) {
+    if let Err(refusal) = locate(ctx, session, false, "notes") {
         return refusal;
     }
     let limit = match page_limit(params, 100, 200, "params.limit") {
@@ -339,7 +399,7 @@ fn notes(
         let mut page = Page::new(ctx.row_budget());
         let mut last = None;
         let mut hit_limit = false;
-        while let Some(row) = rows.next()? {
+        while let Some(row) = super::next_row(&mut rows, &mut hit_limit)? {
             if ctx.expired(started) {
                 hit_limit = true;
                 break;
@@ -377,7 +437,7 @@ const NOTES_SQL: &str = "SELECT id, content, status, created_at, updated_at FROM
      ORDER BY created_at DESC, id DESC";
 
 fn meta(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutcome {
-    if let Err(refusal) = locate(ctx, session, false) {
+    if let Err(refusal) = locate(ctx, session, false, "meta") {
         return refusal;
     }
     let started = Instant::now();
@@ -414,7 +474,7 @@ fn meta(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutcome {
     });
     match outcome {
         Ok(Some(row)) => row_reply(OP, Some("meta"), ctx.now_ms(), None, row),
-        Ok(None) => index_unavailable("locator", "idx_mc_async_compaction_session"),
+        Ok(None) => index_unavailable("meta", "idx_mc_async_compaction_session"),
         Err(refusal) => refusal,
     }
 }
@@ -427,7 +487,7 @@ const META_SQL: &str =
      FROM session_meta WHERE session_id = ?1";
 
 fn token_breakdown(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutcome {
-    match locate(ctx, session, true) {
+    match locate(ctx, session, true, "token_breakdown") {
         Ok(Located::Unmanaged) => row_reply(
             OP,
             Some("token_breakdown"),
@@ -467,32 +527,39 @@ fn managed_breakdown(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutco
                 Ok((
                     row.get::<_, Option<i64>>(1)?,
                     row.get::<_, Option<i64>>(8)?,
-                    row.get::<_, i64>(12)?,
-                    row.get::<_, i64>(13)?,
                     row.get::<_, Option<i64>>(11)?,
                 ))
             })
             .optional()?;
-        let Some((at_ms, last_input, new_work, total_input, memory_count)) = row else {
+        let Some((at_ms, last_input, memory_count)) = row else {
             return Ok(None);
         };
         let limit = column_i64(conn, &session_id, "last_usage_context_limit")?;
         let system_tokens = column_i64(conn, &session_id, "system_prompt_tokens")?;
+        let overflow_limit = column_i64(conn, &session_id, "detected_context_limit")?;
         let summary_bytes: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(LENGTH(title) + LENGTH(content)), 0) FROM compartments WHERE session_id = ?1",
+            "SELECT COALESCE(SUM(LENGTH(CAST(title AS BLOB)) + LENGTH(CAST(content AS BLOB)) + 24), 0) FROM compartments WHERE session_id = ?1",
             [&session_id],
             |row| row.get(0),
         )?;
-        ctx.note_sql("SELECT COALESCE(SUM(LENGTH(title) + LENGTH(content)), 0) FROM compartments WHERE session_id = ?1");
+        let m0 = render_cache(conn, &session_id, "cached_m0_bytes")?;
+        let m1 = render_cache(conn, &session_id, "cached_m1_bytes")?;
+        let history_tokens = match m0.as_deref().and_then(|text| wrapped_bytes(text, "session-history")) {
+            Some(bytes) => bytes.div_ceil(4) as i64 + m1.as_deref().and_then(|text| wrapped_bytes(text, "new-compartments")).unwrap_or(0).div_ceil(4) as i64,
+            None => (summary_bytes + 3) / 4,
+        };
+        let memory = render_cache(conn, &session_id, "memory_block_cache")?.map(|text| text.len().div_ceil(4) as i64).unwrap_or(0);
+        let step_ref: Option<String> = conn.query_row(
+            "SELECT message_id FROM transform_decisions WHERE session_id = ?1 AND harness = ?2 AND ts_ms = ?3 ORDER BY message_id LIMIT 1",
+            params![session_id, session.harness, at_ms], |row| row.get(0),
+        ).optional()?;
         Ok(Some((
             at_ms,
             last_input,
-            new_work,
-            total_input,
             memory_count,
             limit,
             system_tokens,
-            summary_bytes,
+            history_tokens, memory, overflow_limit, step_ref,
         )))
     });
     let row = match outcome {
@@ -503,23 +570,21 @@ fn managed_breakdown(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutco
     let (
         at_ms,
         last_input,
-        new_work,
-        total_input,
         memory_count,
         limit,
         system_tokens,
-        summary_bytes,
+        history,
+        memory,
+        overflow_limit,
+        step_ref,
     ) = row;
-    let provider = last_input
-        .filter(|value| *value > 0)
-        .or_else(|| (total_input > 0).then_some(total_input));
+    let system = system_tokens.unwrap_or(0);
+    let estimated: i64 = system + history + memory;
+    let provider = last_input.filter(|value| *value > 0);
     let (total_tokens, total_source) = match provider {
         Some(tokens) => (Some(tokens), Some("provider")),
-        None => (Some(new_work), Some("estimate")),
+        None => (Some(estimated), Some("estimate")),
     };
-    let system = system_tokens.unwrap_or(0);
-    let history = summary_bytes / 4;
-    let memory = memory_count.unwrap_or(0).saturating_mul(32);
     let parts = json!([
         {"part": "system_prompt", "tokens": system, "estimate": system_tokens.is_none()},
         {"part": "tool_definitions", "tokens": null, "estimate": true},
@@ -531,10 +596,11 @@ fn managed_breakdown(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutco
         {"part": "tool_calls_results", "tokens": null, "estimate": true},
         {"part": "last_user_message", "tokens": null, "estimate": true},
     ]);
-    let estimated: i64 = system + history + memory;
     let unattributed = total_tokens.map(|total| total.saturating_sub(estimated));
     let window = if limit.unwrap_or(0) > 0 {
         json!({"tokens": limit, "source": "usage"})
+    } else if overflow_limit.unwrap_or(0) > 0 {
+        json!({"tokens": overflow_limit, "source": "overflow"})
     } else {
         json!({"tokens": null, "source": null})
     };
@@ -545,13 +611,54 @@ fn managed_breakdown(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutco
         None,
         json!({
             "managed": {"value": true},
-            "as_of": {"step_ref": null, "at_ms": at_ms},
+            "estimation_source": "legacy_estimate",
+            "as_of": {"step_ref": step_ref, "at_ms": at_ms},
             "total": {"tokens": total_tokens, "source": total_source},
             "context_window": window,
             "parts": parts,
             "unattributed": unattributed,
         }),
     )
+}
+
+fn render_cache(
+    conn: &rusqlite::Connection,
+    session: &str,
+    key: &str,
+) -> rusqlite::Result<Option<String>> {
+    let inline: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_meta') WHERE name = ?1)",
+        [key],
+        |row| row.get(0),
+    )?;
+    let value = if inline {
+        conn.query_row(
+            &format!("SELECT {key} FROM session_meta WHERE session_id = ?1"),
+            [session],
+            |row| row.get::<_, rusqlite::types::Value>(0),
+        )
+        .optional()?
+    } else {
+        conn.query_row(
+            "SELECT value FROM session_render_cache WHERE session_id = ?1 AND cache_key = ?2",
+            params![session, key],
+            |row| row.get::<_, rusqlite::types::Value>(0),
+        )
+        .optional()?
+    };
+    Ok(match value {
+        Some(rusqlite::types::Value::Text(value)) => Some(value),
+        Some(rusqlite::types::Value::Blob(bytes)) => String::from_utf8(bytes).ok(),
+        _ => None,
+    })
+}
+
+fn wrapped_bytes(text: &str, tag: &str) -> Option<usize> {
+    let opening = format!("<{tag}>");
+    let closing = format!("</{tag}>");
+    let start = text.find(&opening)?;
+    let end = text[start..].find(&closing)? + start + closing.len();
+    Some(end - start)
 }
 
 fn unmanaged_breakdown_reply(ctx: &AppReadContext) -> HandlerOutcome {
@@ -586,7 +693,7 @@ fn subagents(
     session: &SessionRef,
     params: &Map<String, Value>,
 ) -> HandlerOutcome {
-    if let Err(refusal) = locate(ctx, session, false) {
+    if let Err(refusal) = locate(ctx, session, false, "subagents") {
         return refusal;
     }
     let limit = match page_limit(params, 100, 200, "params.limit") {
@@ -615,7 +722,7 @@ fn subagents(
         let mut page = Page::new(ctx.row_budget());
         let mut last = None;
         let mut hit_limit = false;
-        while let Some(row) = rows.next()? {
+        while let Some(row) = super::next_row(&mut rows, &mut hit_limit)? {
             if ctx.expired(started) {
                 hit_limit = true;
                 break;
@@ -673,21 +780,39 @@ const SUBAGENTS_SQL: &str =
      WHERE session_id = ?1 AND (?2 IS NULL OR started_at < ?2 OR (started_at = ?2 AND id < ?3)) \
      ORDER BY started_at DESC, id DESC";
 
-fn subagent_totals(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutcome {
-    if let Err(refusal) = locate(ctx, session, false) {
+fn subagent_totals(
+    ctx: &AppReadContext,
+    session: &SessionRef,
+    params: &Map<String, Value>,
+) -> HandlerOutcome {
+    if let Err(refusal) = locate(ctx, session, false, "subagent_totals") {
         return refusal;
     }
     let started = Instant::now();
+    let digest = digest_of(&[("session", &json!(session.session))]);
+    let cursor = match decode_cursor(
+        opt_cursor(params),
+        OP,
+        "subagent_totals",
+        &digest,
+        ctx.now_ms(),
+        None,
+    ) {
+        Ok(cursor) => cursor,
+        Err(refusal) => return refusal,
+    };
+    let after = cursor.and_then(|cursor| cursor.keys.into_iter().next());
     let session_id = session.session.clone();
     let outcome = ctx.context(|conn| {
         ctx.note_sql(TOTALS_SQL);
         let mut statement = prepare(conn, TOTALS_SQL)?;
-        let mut rows = statement.query([&session_id])?;
+        let mut rows = statement.query(params![session_id, after])?;
         let mut page = Page::new(ctx.row_budget());
-        let mut complete = true;
-        while let Some(row) = rows.next()? {
+        let mut hit_limit = false;
+        let mut last = None;
+        while let Some(row) = super::next_row(&mut rows, &mut hit_limit)? {
             if ctx.expired(started) {
-                complete = false;
+                hit_limit = true;
                 break;
             }
             let value = json!({
@@ -698,23 +823,19 @@ fn subagent_totals(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutcome
                 "cache_read_tokens": row.get::<_, i64>(4)?,
                 "cache_write_tokens": row.get::<_, i64>(5)?,
             });
+            let subagent = value["subagent"].as_str().unwrap().to_string();
             if !page.try_push(value) {
-                complete = false;
+                hit_limit = true;
                 break;
             }
+            last = Some(vec![subagent]);
         }
-        Ok((page, complete))
+        Ok((page, !hit_limit, last))
     });
     match outcome {
-        Ok((page, complete)) => list_reply(
-            OP,
-            "subagent_totals",
-            ctx.now_ms(),
-            None,
-            complete && !page.stopped_for_budget(),
-            page.rows(),
-            None,
-        ),
+        Ok((page, complete, last)) => {
+            emit_page(ctx, "subagent_totals", None, page, complete, last, &digest)
+        }
         Err(refusal) => refusal,
     }
 }
@@ -722,7 +843,7 @@ fn subagent_totals(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutcome
 const TOTALS_SQL: &str = "SELECT subagent, COUNT(*), COALESCE(SUM(input_tokens), 0), \
      COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_read_tokens), 0), \
      COALESCE(SUM(cache_write_tokens), 0) FROM subagent_invocations \
-     WHERE session_id = ?1 GROUP BY subagent ORDER BY subagent";
+      WHERE session_id = ?1 AND (?2 IS NULL OR subagent > ?2) GROUP BY subagent ORDER BY subagent";
 
 fn emit_page(
     ctx: &AppReadContext,
@@ -1036,6 +1157,11 @@ mod tests {
 
     #[test]
     fn meta_reads_the_serving_store_not_the_path_resolver() {
+        if super::super::tests::isolated(
+            "app_read::session_data::tests::meta_reads_the_serving_store_not_the_path_resolver",
+        ) {
+            return;
+        }
         let served = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
         let resolver = other.path().join("cortexkit").join("magic-context");
@@ -1051,6 +1177,12 @@ mod tests {
             "UPDATE session_meta SET last_input_tokens = 22 WHERE session_id = 'ses';",
         );
         std::env::set_var("MAGIC_CONTEXT_TEST_DATA_DIR", other.path());
+        std::env::set_var("XDG_DATA_HOME", other.path());
+        std::env::remove_var("MAGIC_CONTEXT_STORAGE_DIR");
+        assert_eq!(
+            crate::host_store::resolve_context_db_path(),
+            resolver.join("context.db")
+        );
         let reply = response(&read(
             &caller(),
             &ctx,
@@ -1060,5 +1192,94 @@ mod tests {
         ));
         std::env::remove_var("MAGIC_CONTEXT_TEST_DATA_DIR");
         assert_eq!(reply["row"]["last_input_tokens"], 11);
+    }
+
+    #[test]
+    fn every_session_list_stops_under_budget_and_resumes_without_gaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, db) = ctx(dir.path());
+        apply_sql(&db, include_str!("../../testdata/app-read-g/lists.sql"));
+        for (section, id, budget, expected) in [
+            ("compartments", "ordinal", 650, vec![4, 3, 2, 1]),
+            ("facts", "fact_id", 12000, vec![4, 3, 2, 1]),
+            ("notes", "note_id", 12000, vec![4, 3, 2, 1]),
+            ("subagents", "id", 6000, vec![4, 3, 2, 1]),
+            ("subagent_totals", "subagent", 300, vec![1, 2, 3, 4]),
+        ] {
+            ctx.set_row_budget(budget);
+            let mut params = json!({"section": section, "session": session()});
+            let mut found = Vec::new();
+            for attempt in 0..8 {
+                let reply = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+                let rows = reply["rows"].as_array().unwrap();
+                assert!(!rows.is_empty(), "{section}: {reply}");
+                assert!(
+                    serde_json::to_vec(rows).unwrap().len() <= budget,
+                    "{section}"
+                );
+                for row in rows {
+                    found.push(if id == "subagent" {
+                        row[id]
+                            .as_str()
+                            .unwrap()
+                            .trim_start_matches("agent-")
+                            .parse()
+                            .unwrap()
+                    } else {
+                        row[id].as_i64().unwrap()
+                    });
+                    if section == "compartments" {
+                        assert_eq!(row["summary_bytes"], 6);
+                    }
+                }
+                if attempt == 0 {
+                    assert_eq!(reply["complete"], false, "{section}");
+                }
+                if reply["complete"] == true {
+                    assert!(reply["next_cursor"].is_null());
+                    break;
+                }
+                assert!(reply["next_cursor"].is_string(), "{section}");
+                params["cursor"] = reply["next_cursor"].clone();
+            }
+            assert_eq!(found, expected, "{section}");
+        }
+    }
+
+    #[test]
+    fn compartment_versions_echo_and_change_with_summary_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, db) = ctx(dir.path());
+        apply_sql(&db, include_str!("../../testdata/app-read-g/lists.sql"));
+        let mut params = json!({"section": "compartments", "session": session()});
+        let first = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+        params["if_version"] = first["version"].clone();
+        let same = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+        assert_eq!(same["state"], "unchanged");
+        assert!(same.get("rows").is_none());
+        apply_sql(
+            &db,
+            "UPDATE compartments SET title = 'edited' WHERE session_id = 'ses' AND sequence = 4;",
+        );
+        let changed = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+        assert_ne!(changed["version"], first["version"]);
+        assert_eq!(changed["rows"][0]["title"], "edited");
+    }
+
+    #[test]
+    fn facts_without_an_authoritative_counter_always_return_in_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, db) = ctx(dir.path());
+        apply_sql(&db, include_str!("../../testdata/app-read-g/lists.sql"));
+        let reply = response(&read(
+            &caller(),
+            &ctx,
+            json!({"section":"facts","session":session(),"if_version":"old-facts-version"})
+                .as_object()
+                .unwrap(),
+        ));
+        assert!(reply["version"].is_null());
+        assert!(reply.get("state").is_none());
+        assert_eq!(reply["rows"].as_array().unwrap().len(), 4);
     }
 }

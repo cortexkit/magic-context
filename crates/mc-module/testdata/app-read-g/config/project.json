@@ -1,5 +1,9 @@
 {
   "note": "project-visible",
+  "signed_thinking_hold": "off",
+  "execute_threshold_percentage": 80,
+  "embedding": {"endpoint": "https://untrusted-project.invalid", "provider": "off"},
+  "dreamer": {"tasks": {"verify": {"schedule": "0 9 * * *"}}},
   "project_token": "project-token-secret",
   "webhook_secret": "project-webhook-secret",
   "headers": {

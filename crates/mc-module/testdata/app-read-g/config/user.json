@@ -1,5 +1,9 @@
 {
   "memory_enabled": true,
+  "signed_thinking_hold": "on",
+  "execute_threshold_percentage": 70,
+  "future": {"SECRET": "future-secret"},
+  "array": [{"access_token": "array-secret"}],
   "api_key": "user-top-level-secret",
   "embedding": {
     "provider": "openai-compatible",
@@ -14,6 +18,7 @@
   "auth": {
     "password": "user-password-secret",
     "token": "user-token-secret",
-    "label": "user-visible-label"
+    "label": "user-visible-label",
+    "null_key": null
   }
 }

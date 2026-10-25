@@ -42,6 +42,42 @@ pub fn read(
         Some(section) if !section.is_empty() => section,
         _ => return invalid("params.section", "type"),
     };
+    let keys: &[&str] = match section {
+        "memories" => &[
+            "section",
+            "project",
+            "workspace_id",
+            "filters",
+            "query",
+            "limit",
+            "cursor",
+        ],
+        "memory_stats" => &["section", "project", "workspace_id"],
+        "mural" => &["section", "project"],
+        "mural_image" => &["section", "project", "offset"],
+        "primers" => &["section", "project", "filters", "limit", "cursor"],
+        "primer_candidates" => &["section", "project", "limit", "cursor"],
+        "user_memories" => &["section", "filters", "limit", "cursor"],
+        "user_memory_candidates" | "workspaces" => &["section", "limit", "cursor"],
+        _ => return invalid("params.section", "unknown"),
+    };
+    if let Err(refusal) = allow(params, keys, "params") {
+        return refusal;
+    }
+    if let Err(refusal) = opt_str(params, "cursor", "params") {
+        return refusal;
+    }
+    if section == "primers" || section == "user_memories" {
+        if let Some(filters) = params.get("filters") {
+            let object = match super::envelope::object(filters, "params.filters") {
+                Ok(object) => object,
+                Err(refusal) => return refusal,
+            };
+            if let Err(refusal) = allow(object, &["status"], "params.filters") {
+                return refusal;
+            }
+        }
+    }
     match section {
         "memories" => memories(ctx, params),
         "memory_stats" => memory_stats(ctx, params),
@@ -92,8 +128,27 @@ fn project_scope(
         if project.is_empty() || project.contains('\\') || project.starts_with('/') {
             return Err(invalid("params.project", "range"));
         }
+        let mut projects = vec![project.clone()];
+        let resolver = crate::project_identity::ProjectIdentityResolver::new();
+        for root in ctx.bound_roots() {
+            if resolver.resolve(root).ok().as_deref() == Some(&project) {
+                projects.push(root.to_string_lossy().into_owned());
+            }
+        }
+        projects.sort();
+        projects.dedup();
+        let exists = ctx.context(|conn| conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_state WHERE project_path IN (SELECT value FROM json_each(?1)) UNION ALL SELECT 1 FROM memories WHERE project_path IN (SELECT value FROM json_each(?1)))",
+            [json!(projects).to_string()], |row| row.get::<_, bool>(0),
+        ))?;
+        if !exists && ctx.identity_root(&project).is_none() {
+            return Err(named(
+                "project_not_found",
+                "No stored project has that identity.",
+            ));
+        }
         return Ok(Scope {
-            projects: vec![project.clone()],
+            projects,
             digest_project: project,
         });
     }
@@ -131,7 +186,9 @@ fn memories(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
         Err(refusal) => return refusal,
     };
     let query = match opt_str(params, "query", "params") {
-        Ok(query) => query,
+        Ok(query) => query
+            .map(|query| query.trim().to_string())
+            .filter(|query| !query.is_empty()),
         Err(refusal) => return refusal,
     };
     if query.is_none() && status.is_empty() && category.is_empty() {
@@ -147,13 +204,18 @@ fn memories(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
     };
     let digest = digest_of(&[
         ("project", &json!(scope.digest_project)),
+        ("members", &json!(scope.projects)),
         ("status", &json!(status)),
         ("category", &json!(category)),
         ("query", &json!(query)),
     ]);
-    let ranked = query
-        .as_ref()
-        .is_some_and(|query| query.chars().count() >= 3 && !query.starts_with('#'));
+    let ranked = query.as_ref().is_some_and(|query| {
+        query.chars().count() >= 3
+            && query
+                .strip_prefix('#')
+                .and_then(|id| id.parse::<i64>().ok())
+                .is_none()
+    });
     let cursor = match decode_cursor(
         params.get("cursor").and_then(Value::as_str),
         OP,
@@ -181,10 +243,19 @@ fn memories(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
                     .projects
                     .iter()
                     .any(|project| row["project_path"] == *project)
+                    && (status.is_empty() || status.iter().any(|value| row["status"] == *value))
+                    && (category.is_empty()
+                        || category.iter().any(|value| row["category"] == *value))
                 {
                     let mut page = Page::new(ctx.row_budget());
                     page.try_push(row);
-                    return Ok((page, true, None, Some(0)));
+                    return Ok((
+                        page,
+                        true,
+                        None,
+                        None,
+                        scope_version(conn, &scope.projects)?,
+                    ));
                 }
             }
         }
@@ -194,9 +265,9 @@ fn memories(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
             MEMORY_FILTER_SQL
         };
         ctx.note_sql(sql);
-        let project = scope.projects.first().cloned().unwrap_or_default();
-        let status_one = status.first().cloned();
-        let category_one = category.first().cloned();
+        let projects = json!(scope.projects).to_string();
+        let statuses = json!(status).to_string();
+        let categories = json!(category).to_string();
         let like = query.clone().unwrap_or_default();
         let like = if !ranked && query.is_some() {
             format!("%{}%", like.replace(['%', '_'], ""))
@@ -226,16 +297,17 @@ fn memories(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
         let mut statement = prepare(conn, sql)?;
         let mut rows = if ranked {
             statement.query(params![
-                project,
+                projects,
                 query.unwrap_or_default(),
-                offset,
-                limit as i64 + 1
+                statuses,
+                categories,
+                offset
             ])?
         } else {
             statement.query(params![
-                project,
-                status_one,
-                category_one,
+                projects,
+                statuses,
+                categories,
                 if query.is_some() { Some(like) } else { None },
                 updated,
                 id
@@ -245,7 +317,7 @@ fn memories(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
         let mut last = None;
         let mut hit = false;
         let mut seen = 0i64;
-        while let Some(row) = rows.next()? {
+        while let Some(row) = super::next_row(&mut rows, &mut hit)? {
             if ctx.expired(started) {
                 hit = true;
                 break;
@@ -266,12 +338,23 @@ fn memories(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
             }
             last = Some(keys);
         }
-        Ok((page, !hit, last, ranked.then_some(ctx.now_ms())))
+        Ok((
+            page,
+            !hit,
+            last,
+            ranked.then_some(
+                cursor
+                    .as_ref()
+                    .and_then(|cursor| cursor.issued_at_ms)
+                    .unwrap_or(ctx.now_ms()),
+            ),
+            scope_version(conn, &scope.projects)?,
+        ))
     });
     match outcome {
-        Ok((page, complete, last, issued)) => {
-            finish(ctx, "memories", None, page, complete, last, &digest, issued)
-        }
+        Ok((page, complete, last, issued, version)) => finish(
+            ctx, "memories", version, page, complete, last, &digest, issued,
+        ),
         Err(refusal) => refusal,
     }
 }
@@ -279,7 +362,7 @@ fn memories(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome
 fn memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let content: String = row.get(4)?;
     let (text, truncated, bytes) = cut_text(&content, 16 * 1024);
-    Ok(json!({
+    let mut value = json!({
         "id": row.get::<_, i64>(0)?,
         "revision": row.get::<_, i64>(1)?,
         "project_path": row.get::<_, String>(2)?,
@@ -309,7 +392,9 @@ fn memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "shareable": row.get::<_, i64>(24)? != 0,
         "has_embedding": row.get::<_, i64>(25)? != 0,
         "source_display_name": Value::Null,
-    }))
+    });
+    super::cap_field(&mut value, "metadata_json", 16 * 1024, true);
+    Ok(value)
 }
 
 const MEMORY_FILTER_SQL: &str = "SELECT m.id, m.revision, m.project_path, m.category, m.content, m.normalized_hash, \
@@ -318,7 +403,9 @@ const MEMORY_FILTER_SQL: &str = "SELECT m.id, m.revision, m.project_path, m.cate
      m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json, m.importance, m.scope, \
      m.shareable, EXISTS(SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.id) \
      FROM memories m INDEXED BY idx_memories_project_status_category \
-     WHERE m.project_path = ?1 AND (?2 IS NULL OR m.status = ?2) AND (?3 IS NULL OR m.category = ?3) \
+      WHERE m.project_path IN (SELECT value FROM json_each(?1)) \
+        AND (json_array_length(?2) = 0 OR m.status IN (SELECT value FROM json_each(?2))) \
+        AND (json_array_length(?3) = 0 OR m.category IN (SELECT value FROM json_each(?3))) \
        AND (?4 IS NULL OR m.content LIKE ?4) \
        AND (?5 IS NULL OR m.updated_at < ?5 OR (m.updated_at = ?5 AND m.id < ?6)) \
      ORDER BY m.updated_at DESC, m.id DESC";
@@ -329,8 +416,10 @@ const MEMORY_FTS_SQL: &str = "SELECT m.id, m.revision, m.project_path, m.categor
      m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json, m.importance, m.scope, \
      m.shareable, EXISTS(SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.id) \
      FROM memories_fts f JOIN memories m ON m.id = f.rowid \
-     WHERE m.project_path = ?1 AND memories_fts MATCH ?2 \
-     ORDER BY rank LIMIT -1 OFFSET ?3";
+      WHERE m.project_path IN (SELECT value FROM json_each(?1)) AND memories_fts MATCH ?2 \
+        AND (json_array_length(?3) = 0 OR m.status IN (SELECT value FROM json_each(?3))) \
+        AND (json_array_length(?4) = 0 OR m.category IN (SELECT value FROM json_each(?4))) \
+      ORDER BY rank, m.id LIMIT -1 OFFSET ?5";
 
 const MEMORY_BY_ID_SQL: &str = "SELECT m.id, m.revision, m.project_path, m.category, m.content, m.normalized_hash, \
      m.source_session_id, m.source_type, m.seen_count, m.retrieval_count, m.first_seen_at, m.created_at, \
@@ -344,7 +433,7 @@ fn memory_stats(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOut
         Ok(scope) => scope,
         Err(refusal) => return refusal,
     };
-    let project = scope.projects.first().cloned().unwrap_or_default();
+    let project = json!(scope.projects).to_string();
     let started = Instant::now();
     if ctx.expired(started) {
         return named(
@@ -371,7 +460,7 @@ fn memory_stats(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOut
         }
         ctx.note_sql(EMBEDDED_SQL);
         let embedded: i64 = conn.query_row(EMBEDDED_SQL, [&project], |row| row.get(0))?;
-        let version = version_for(conn, &project)?;
+        let version = scope_version(conn, &scope.projects)?;
         Ok((by_status, by_category, embedded, version))
     });
     match outcome {
@@ -390,8 +479,22 @@ fn memory_stats(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOut
     }
 }
 
-const STATS_SQL: &str = "SELECT status, category, COUNT(*) FROM memories WHERE project_path = ?1 GROUP BY status, category";
-const EMBEDDED_SQL: &str = "SELECT COUNT(*) FROM memories m WHERE m.project_path = ?1 AND EXISTS(SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.id)";
+const STATS_SQL: &str = "SELECT status, category, COUNT(*) FROM memories INDEXED BY idx_memories_project_status_category WHERE project_path IN (SELECT value FROM json_each(?1)) GROUP BY status, category";
+const EMBEDDED_SQL: &str = "SELECT COUNT(*) FROM memories m INDEXED BY idx_memories_project_status_category WHERE m.project_path IN (SELECT value FROM json_each(?1)) AND EXISTS(SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.id)";
+
+fn scope_version(
+    conn: &rusqlite::Connection,
+    projects: &[String],
+) -> rusqlite::Result<Option<String>> {
+    let counters = projects
+        .iter()
+        .map(|project| Ok(json!([project, version_for(conn, project)?])))
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some(format!(
+        "pm1:{}",
+        digest_of(&[("projects", &json!(counters))])
+    )))
+}
 
 fn version_for(conn: &rusqlite::Connection, project: &str) -> rusqlite::Result<Option<String>> {
     let state = conn
@@ -409,7 +512,8 @@ fn version_for(conn: &rusqlite::Connection, project: &str) -> rusqlite::Result<O
         )
         .optional()?
         .flatten();
-    Ok(state.map(|(epoch, profile)| format!("{epoch}:{profile}:{}", mutation.unwrap_or(0))))
+    let (epoch, profile) = state.unwrap_or((0, 0));
+    Ok(Some(format!("{epoch}:{profile}:{}", mutation.unwrap_or(0))))
 }
 
 fn mural(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome {
@@ -445,7 +549,7 @@ fn mural(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome {
         else {
             return Ok(None);
         };
-        let hash = hash_image(conn, &project, usize::try_from(bytes).unwrap_or(0))?;
+        let hash = hash_image(ctx, conn, &project)?;
         Ok(Some(json!({
             "project": project_path,
             "rendered_at_ms": rendered,
@@ -505,19 +609,21 @@ fn mural_image(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutc
             return Ok(None);
         };
         let total = usize::try_from(total).unwrap_or(0);
-        let start = offset.min(total);
+        if offset > total {
+            return Ok(Some(json!({"invalid_offset": true, "total_bytes": total})));
+        }
+        let start = offset;
         let end = (start + 300 * 1024).min(total);
-        ctx.note_sql("SELECT substr(image, ?1, ?2) FROM mural_manifest WHERE project_path = ?3");
+        let rowid: i64 = conn.query_row("SELECT rowid FROM mural_manifest WHERE project_path = ?1", [&project], |row| row.get(0))?;
+        let blob = conn.blob_open(rusqlite::DatabaseName::Main, "mural_manifest", "image", rowid, true)?;
         let bytes: Vec<u8> = if end > start {
-            conn.query_row(
-                "SELECT substr(image, ?1, ?2) FROM mural_manifest WHERE project_path = ?3",
-                params![start as i64 + 1, (end - start) as i64, project],
-                |row| row.get(0),
-            )?
+            let mut chunk = vec![0u8; end - start];
+            blob.read_at_exact(&mut chunk, start)?;
+            chunk
         } else {
             Vec::new()
         };
-        let hash = hash_image(conn, &project, total)?;
+        let hash = hash_image(ctx, conn, &project)?;
         Ok(Some(json!({
             "offset": start,
             "bytes_base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes),
@@ -527,6 +633,11 @@ fn mural_image(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutc
         })))
     });
     match outcome {
+        Ok(Some(row)) if row["invalid_offset"] == true => super::envelope::invalid_field(
+            "params.offset",
+            "range",
+            row["total_bytes"].as_u64().map(|value| value as usize),
+        ),
         Ok(Some(row)) => row_reply(OP, Some("mural_image"), ctx.now_ms(), None, row),
         Ok(None) => named("mural_not_found", "No mural is stored for that project."),
         Err(refusal) => refusal,
@@ -534,19 +645,35 @@ fn mural_image(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutc
 }
 
 fn hash_image(
+    ctx: &AppReadContext,
     conn: &rusqlite::Connection,
     project: &str,
-    total: usize,
 ) -> rusqlite::Result<String> {
+    let started = Instant::now();
+    let rowid: i64 = conn.query_row(
+        "SELECT rowid FROM mural_manifest WHERE project_path = ?1",
+        [project],
+        |row| row.get(0),
+    )?;
+    let blob = conn.blob_open(
+        rusqlite::DatabaseName::Main,
+        "mural_manifest",
+        "image",
+        rowid,
+        true,
+    )?;
+    let total = blob.len();
     let mut hasher = sha2::Sha256::new();
     let mut start = 0usize;
     while start < total {
-        let len = (total - start).min(8192) as i64;
-        let chunk: Vec<u8> = conn.query_row(
-            "SELECT substr(image, ?1, ?2) FROM mural_manifest WHERE project_path = ?3",
-            params![start as i64 + 1, len, project],
-            |row| row.get(0),
-        )?;
+        if ctx.expired(started) {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+                None,
+            ));
+        }
+        let mut chunk = vec![0u8; (total - start).min(8192)];
+        blob.read_at_exact(&mut chunk, start)?;
         hasher.update(&chunk);
         start += chunk.len().max(1);
         if chunk.is_empty() {
@@ -582,7 +709,7 @@ fn primer_candidates(ctx: &AppReadContext, params: &Map<String, Value>) -> Handl
     )
 }
 
-const PRIMERS_SQL: &str = "SELECT id, project_path, question, answer, status, total_support, last_observed_at, answer_refreshed_at, source_candidate_ids, created_at, updated_at FROM primers WHERE project_path = ?1 AND (?2 IS NULL OR status = ?2) AND (?3 IS NULL OR status > ?3 OR (status = ?3 AND COALESCE(last_observed_at, 0) < ?4) OR (status = ?3 AND COALESCE(last_observed_at, 0) = ?4 AND id > ?5)) ORDER BY status ASC, last_observed_at DESC, id ASC";
+const PRIMERS_SQL: &str = "SELECT id, project_path, question, answer, status, total_support, last_observed_at, answer_refreshed_at, source_candidate_ids, created_at, updated_at FROM primers WHERE project_path = ?1 AND (json_array_length(?2) = 0 OR status IN (SELECT value FROM json_each(?2))) AND (?3 IS NULL OR status > ?3 OR (status = ?3 AND COALESCE(last_observed_at, 0) < ?4) OR (status = ?3 AND COALESCE(last_observed_at, 0) = ?4 AND id > ?5)) ORDER BY status ASC, last_observed_at DESC, id ASC";
 const CANDIDATES_SQL: &str = "SELECT id, project_path, question, session_id, source_compartment_start, source_compartment_end, source_message_time, created_at FROM primer_candidates WHERE project_path = ?1 AND (?2 IS NULL OR source_message_time < ?2 OR (source_message_time = ?2 AND id < ?3)) ORDER BY source_message_time DESC, id DESC";
 
 #[allow(clippy::too_many_arguments)]
@@ -625,7 +752,7 @@ fn keyed_page(
     let outcome = ctx.context(|conn| {
         ctx.note_sql(sql);
         let mut statement = prepare(conn, sql)?;
-        let status_one = status.first().cloned();
+        let statuses = json!(status).to_string();
         let mut rows = if primer {
             let key_status = cursor
                 .as_ref()
@@ -638,7 +765,7 @@ fn keyed_page(
                 .as_ref()
                 .and_then(|cursor| cursor.keys.get(2))
                 .and_then(|value| value.parse::<i64>().ok());
-            statement.query(params![project, status_one, key_status, observed, id])?
+            statement.query(params![project, statuses, key_status, observed, id])?
         } else {
             let time = cursor
                 .as_ref()
@@ -653,7 +780,7 @@ fn keyed_page(
         let mut page = Page::new(ctx.row_budget());
         let mut last = None;
         let mut hit = false;
-        while let Some(row) = rows.next()? {
+        while let Some(row) = super::next_row(&mut rows, &mut hit)? {
             if ctx.expired(started) {
                 hit = true;
                 break;
@@ -698,7 +825,7 @@ fn keyed_page(
 }
 
 fn primer_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
-    Ok(json!({
+    let mut value = json!({
         "id": row.get::<_, i64>(0)?,
         "project_path": row.get::<_, String>(1)?,
         "question": row.get::<_, String>(2)?,
@@ -710,11 +837,14 @@ fn primer_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "source_candidate_ids": row.get::<_, String>(8)?,
         "created_at_ms": row.get::<_, i64>(9)?,
         "updated_at_ms": row.get::<_, i64>(10)?,
-    }))
+    });
+    super::cap_field(&mut value, "question", 16 * 1024, false);
+    super::cap_field(&mut value, "answer", 16 * 1024, false);
+    Ok(value)
 }
 
 fn candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
-    Ok(json!({
+    let mut value = json!({
         "id": row.get::<_, i64>(0)?,
         "project_path": row.get::<_, String>(1)?,
         "question": row.get::<_, String>(2)?,
@@ -723,7 +853,9 @@ fn candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "source_compartment_end": row.get::<_, Option<i64>>(5)?,
         "source_message_time_ms": row.get::<_, i64>(6)?,
         "created_at_ms": row.get::<_, i64>(7)?,
-    }))
+    });
+    super::cap_field(&mut value, "question", 16 * 1024, false);
+    Ok(value)
 }
 
 fn workspaces(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome {
@@ -755,7 +887,7 @@ fn workspaces(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutco
         let mut page = Page::new(ctx.row_budget());
         let mut last = None;
         let mut hit = false;
-        while let Some(row) = rows.next()? {
+        while let Some(row) = super::next_row(&mut rows, &mut hit)? {
             if ctx.expired(started) {
                 hit = true;
                 break;
@@ -835,16 +967,16 @@ fn user_memories(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOu
         .as_ref()
         .and_then(|cursor| cursor.keys.get(1))
         .and_then(|value| value.parse::<i64>().ok());
-    let status_one = status.first().cloned();
+    let statuses = json!(status).to_string();
     let started = Instant::now();
     let outcome = ctx.context(|conn| {
         ctx.note_sql(USER_MEMORIES_SQL);
         let mut statement = prepare(conn, USER_MEMORIES_SQL)?;
-        let mut rows = statement.query(params![status_one, created, id])?;
+        let mut rows = statement.query(params![statuses, created, id])?;
         let mut page = Page::new(ctx.row_budget());
         let mut last = None;
         let mut hit = false;
-        while let Some(row) = rows.next()? {
+        while let Some(row) = super::next_row(&mut rows, &mut hit)? {
             if ctx.expired(started) {
                 hit = true;
                 break;
@@ -887,7 +1019,8 @@ fn user_memories(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOu
     }
 }
 
-const USER_MEMORIES_SQL: &str = "SELECT id, content, status, promoted_at, source_candidate_ids, created_at, updated_at FROM user_memories WHERE (?1 IS NULL OR status = ?1) AND status >= '' AND (?2 IS NULL OR created_at < ?2 OR (created_at = ?2 AND id < ?3)) ORDER BY created_at DESC, id DESC";
+// User memories are a curated profile list, so a progress-budgeted full sort is acceptable until idx_um_created(created_at DESC, id DESC) is available.
+const USER_MEMORIES_SQL: &str = "SELECT id, content, status, promoted_at, source_candidate_ids, created_at, updated_at FROM user_memories INDEXED BY idx_um_status WHERE (json_array_length(?1) = 0 OR status IN (SELECT value FROM json_each(?1))) AND (?2 IS NULL OR created_at < ?2 OR (created_at = ?2 AND id < ?3)) ORDER BY created_at DESC, id DESC";
 
 fn user_memory_candidates(ctx: &AppReadContext, params: &Map<String, Value>) -> HandlerOutcome {
     let limit = match page_limit(params, 100, 200, "params.limit") {
@@ -922,7 +1055,7 @@ fn user_memory_candidates(ctx: &AppReadContext, params: &Map<String, Value>) -> 
         let mut page = Page::new(ctx.row_budget());
         let mut last = None;
         let mut hit = false;
-        while let Some(row) = rows.next()? {
+        while let Some(row) = super::next_row(&mut rows, &mut hit)? {
             if ctx.expired(started) {
                 hit = true;
                 break;
@@ -977,6 +1110,12 @@ fn finish(
     digest: &str,
     issued: Option<i64>,
 ) -> HandlerOutcome {
+    if !complete && page.len() == 0 {
+        return named(
+            "read_budget_exceeded",
+            "The memory read exceeded its time budget before a row was available.",
+        );
+    }
     let next = if complete {
         None
     } else if let Some(keys) = last {
@@ -1087,5 +1226,223 @@ mod tests {
         assert_eq!(second["rows"][0]["content"], "b");
         let plan = explain(&db, USER_MEMORIES_SQL);
         assert!(plan.contains("idx_um_status"), "{plan}");
+    }
+
+    #[test]
+    fn memory_filters_include_every_value_and_every_workspace_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, db) = ready(dir.path());
+        apply_sql(&db, include_str!("../../testdata/app-read-g/lists.sql"));
+        apply_sql(&db, "INSERT INTO memories(project_path, category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at, status) VALUES ('git:b','OTHER','needle second project','b',1,1,8,1,'permanent'), ('git:a','OTHER','needle excluded','c',1,1,9,1,'archived');");
+        let params = json!({"section":"memories", "workspace_id":1, "filters":{"status":["active","permanent"], "category":["CONSTRAINTS","OTHER"]}});
+        let reply = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+        assert_eq!(reply["rows"].as_array().unwrap().len(), 5);
+        assert_eq!(reply["rows"][0]["project_path"], "git:b");
+        let mut fts = params.clone();
+        fts["query"] = json!("needle");
+        let reply = response(&read(&caller(), &ctx, fts.as_object().unwrap()));
+        assert_eq!(reply["rows"].as_array().unwrap().len(), 5);
+        assert!(reply["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["status"] != "archived"));
+        let stats = response(&read(
+            &caller(),
+            &ctx,
+            json!({"section":"memory_stats","workspace_id":1})
+                .as_object()
+                .unwrap(),
+        ));
+        assert_eq!(stats["row"]["by_status"]["active"], 4);
+        assert_eq!(stats["row"]["by_status"]["permanent"], 1);
+        assert_eq!(stats["row"]["by_category"]["OTHER"], 1);
+        assert!(stats["version"].as_str().unwrap().starts_with("pm1:"));
+    }
+
+    #[test]
+    fn oversized_memory_metadata_is_null_not_invalid_partial_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, db) = ready(dir.path());
+        apply_sql(&db, include_str!("../../testdata/app-read-g/lists.sql"));
+        let metadata = format!("{{\"note\":\"{}\"}}", "😀".repeat(5000));
+        apply_sql(
+            &db,
+            &format!("UPDATE memories SET metadata_json = '{metadata}' WHERE id=1;"),
+        );
+        let reply = response(&read(
+            &caller(),
+            &ctx,
+            json!({"section":"memories","project":"git:a","query":"#1"})
+                .as_object()
+                .unwrap(),
+        ));
+        let row = &reply["rows"][0];
+        assert!(row["metadata_json"].is_null());
+        assert_eq!(row["metadata_json_truncated"], true);
+        assert_eq!(row["metadata_json_bytes"], metadata.len());
+    }
+
+    #[test]
+    fn every_memory_list_stops_under_budget_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, db) = ready(dir.path());
+        apply_sql(&db, include_str!("../../testdata/app-read-g/lists.sql"));
+        for (section, query, budget) in [
+            ("memories", None, 12000),
+            ("memories", Some("needle"), 12000),
+            ("primers", None, 12000),
+            ("primer_candidates", None, 350),
+            ("workspaces", None, 600),
+            ("user_memories", None, 12000),
+            ("user_memory_candidates", None, 12000),
+        ] {
+            ctx.set_row_budget(budget);
+            let mut params = json!({"section":section});
+            if matches!(section, "memories" | "primers" | "primer_candidates") {
+                params["project"] = json!("git:a");
+            }
+            if section == "memories" {
+                params["filters"] = json!({"status":["active"]});
+            }
+            if let Some(query) = query {
+                params["query"] = json!(query);
+            }
+            let mut found = Vec::new();
+            for attempt in 0..8 {
+                let reply = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+                let rows = reply["rows"].as_array().unwrap();
+                assert!(!rows.is_empty(), "{section}: {reply}");
+                assert!(
+                    serde_json::to_vec(rows).unwrap().len() <= budget,
+                    "{section}"
+                );
+                found.extend(rows.iter().map(|row| row["id"].as_i64().unwrap()));
+                if attempt == 0 {
+                    assert_eq!(reply["complete"], false, "{section}");
+                }
+                if reply["complete"] == true {
+                    break;
+                }
+                params["cursor"] = reply["next_cursor"].clone();
+                assert!(params["cursor"].is_string(), "{section}");
+            }
+            found.sort();
+            assert_eq!(found, vec![1, 2, 3, 4], "{section}/{query:?}");
+        }
+        for (sql, index) in [
+            (PRIMERS_SQL, "idx_primers_project_status_observed"),
+            (CANDIDATES_SQL, "idx_primer_candidates_project_time"),
+            (WORKSPACES_SQL, "sqlite_autoindex_workspaces"),
+            (MEMBERS_SQL, "sqlite_autoindex_workspace_members"),
+            (MEMBER_COUNT_SQL, "idx_memories_project_status"),
+            (USER_MEMORIES_SQL, "idx_um_status"),
+            (USER_CANDIDATES_SQL, "idx_umc_created"),
+            (STATS_SQL, "idx_memories_project_status_category"),
+            (EMBEDDED_SQL, "idx_memories_project_status_category"),
+            (MURAL_SQL, "sqlite_autoindex_mural_manifest"),
+            (MEMORY_BY_ID_SQL, "INTEGER PRIMARY KEY"),
+            (MEMORY_FTS_SQL, "VIRTUAL TABLE INDEX"),
+        ] {
+            let plan = explain(&db, sql);
+            assert!(plan.contains(index), "{sql}: {plan}");
+        }
+    }
+
+    #[test]
+    fn ranked_cursor_is_bound_to_filters_and_expires_from_the_first_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, db) = ready(dir.path());
+        apply_sql(&db, include_str!("../../testdata/app-read-g/lists.sql"));
+        let mut params = json!({"section":"memories","project":"git:a","query":"needle","limit":1});
+        let first = response(&read(&caller(), &ctx, params.as_object().unwrap()));
+        params["cursor"] = first["next_cursor"].clone();
+        params["filters"] = json!({"status":["archived"]});
+        assert!(
+            matches!(read(&caller(),&ctx,params.as_object().unwrap()),HandlerOutcome::Error {code,..} if code=="cursor_mismatch")
+        );
+        params.as_object_mut().unwrap().remove("filters");
+        ctx.now_ms += RANKED_TTL_MS + 1;
+        assert!(
+            matches!(read(&caller(),&ctx,params.as_object().unwrap()),HandlerOutcome::ErrorWithDetail {code,..} if code=="cursor_expired")
+        );
+    }
+
+    #[test]
+    fn mural_chunks_reassemble_exactly_and_refuse_an_out_of_range_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, db) = ready(dir.path());
+        let image: Vec<u8> = (0..700_000).map(|n| (n % 251) as u8).collect();
+        let hex: String = image.iter().map(|byte| format!("{byte:02x}")).collect();
+        apply_sql(&db,&format!("INSERT INTO mural_manifest(project_path,image,content_hash,rendered_at) VALUES ('git:a',x'{hex}','hash',1);"));
+        let manifest = response(&read(
+            &caller(),
+            &ctx,
+            json!({"section":"mural","project":"git:a"})
+                .as_object()
+                .unwrap(),
+        ));
+        assert_eq!(manifest["row"]["image_bytes"], image.len());
+        let mut actual = Vec::new();
+        while actual.len() < image.len() {
+            let reply = response(&read(
+                &caller(),
+                &ctx,
+                json!({"section":"mural_image","project":"git:a","offset":actual.len()})
+                    .as_object()
+                    .unwrap(),
+            ));
+            let bytes = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                reply["row"]["bytes_base64"].as_str().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(bytes.len(), (image.len() - actual.len()).min(300 * 1024));
+            assert!(reply.to_string().len() < super::super::envelope::REPLY_LIMIT);
+            assert_eq!(
+                reply["row"]["image_sha256"],
+                manifest["row"]["image_sha256"]
+            );
+            actual.extend(bytes);
+        }
+        assert_eq!(actual, image);
+        let outcome = read(
+            &caller(),
+            &ctx,
+            json!({"section":"mural_image","project":"git:a","offset":700001})
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(
+            crate::app_read::tests_support::detail_field(&outcome)["field"],
+            "params.offset"
+        );
+    }
+
+    #[test]
+    fn curated_user_profile_sort_handles_five_thousand_rows_within_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, db) = ready(dir.path());
+        apply_sql(&db,"WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<5000) INSERT INTO user_memories(content,promoted_at,created_at,updated_at) SELECT 'curated profile item',x,x,x FROM n;");
+        let started = Instant::now();
+        let reply = response(&read(
+            &caller(),
+            &ctx,
+            json!({"section":"user_memories","limit":200})
+                .as_object()
+                .unwrap(),
+        ));
+        let elapsed = started.elapsed();
+        println!(
+            "USER_PROFILE_5000 elapsed_us={} budget_us=250000",
+            elapsed.as_micros()
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "{elapsed:?}"
+        );
+        assert_eq!(reply["rows"].as_array().unwrap().len(), 200);
+        assert_eq!(reply["rows"][0]["id"], 5000);
+        assert!(reply["next_cursor"].is_string());
     }
 }
