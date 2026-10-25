@@ -91,6 +91,36 @@ async fn produced_sources_and_message_pair_match_frozen_ts_without_sorting() {
     }
 }
 
+#[tokio::test]
+async fn retrieval_reply_bytes_match_pre_extraction_goldens() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let mut actual = Vec::new();
+    for (index, case) in vectors()["cases"].as_array().unwrap().iter().enumerate() {
+        let name = case["name"].as_str().unwrap();
+        if index >= 5 && !matches!(name, "fused_limited" | "rerank_tie" | "rerank_all_tie") {
+            continue;
+        }
+        let (mut handler, _, _dir, _) = fixture_handler(true);
+        if name.starts_with("rerank_") {
+            handler.retrieval_reranker = Some(Arc::new(SynapseFixture::default()));
+        }
+        let HandlerOutcome::Response(bytes) = handler.dispatch_value(7, search_request(case)).await
+        else {
+            panic!("retrieval did not return a reply for {name}");
+        };
+        actual.push(json!({"name":name,"reply_base64":STANDARD.encode(bytes)}));
+    }
+    let expected: Value = serde_json::from_str(include_str!(
+        "../../testdata/app-read-e/retrieval-replies.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        json!(actual),
+        expected,
+        "full agent-facing retrieval reply bytes"
+    );
+}
+
 #[derive(Default)]
 struct SynapseFixture {
     calls: Mutex<Vec<Value>>,
