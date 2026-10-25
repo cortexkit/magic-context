@@ -643,7 +643,7 @@ impl<'a> AsyncCompactionSave<'a> {
                 )? as u64;
             }
             if !entries.is_empty() {
-                let mut insert = conn.prepare_cached("INSERT INTO mc_async_compaction_entries(session_ref,session,ordinal,entry_json,index_json) VALUES(?1,?2,?3,?4,?5)")?;
+                let mut insert = conn.prepare_cached("INSERT INTO mc_async_compaction_entries(session_ref,session,ordinal,entry_json,index_json,mid) VALUES(?1,?2,?3,?4,?5,CASE WHEN json_valid(?4) THEN json_extract(?4,'$.mid') END)")?;
                 for (ordinal, entry, index) in entries {
                     rows += insert.execute(params![session_ref, session, ordinal, entry, index])? as u64;
                     bytes += entry.len() + index.len();

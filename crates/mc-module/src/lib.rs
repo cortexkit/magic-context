@@ -38,6 +38,8 @@ mod private_permissions_source_test;
 pub mod agent_data;
 mod agent_fragments;
 mod app_read;
+#[cfg(test)]
+mod app_read_test_store;
 pub mod boundary;
 pub mod caveman;
 mod child_retention;

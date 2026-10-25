@@ -3372,6 +3372,7 @@ const MIGRATIONS: &[Migration] = &[
         version: 74,
         statements: include_str!("migrations/store_074_async_compaction.sql"),
     },
+    Migration { version: 75, statements: include_str!("migrations/store_075_app_read_indexes.sql") },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.

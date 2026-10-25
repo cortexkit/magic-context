@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Section-inventory protocol version serialized in move manifests.
 pub const INVENTORY_VERSION: u32 = 9;
 pub const CONTEXT_SCHEMA_VERSION: u32 = 103;
-pub const STORE_SCHEMA_VERSION: u32 = 74;
+pub const STORE_SCHEMA_VERSION: u32 = 75;
 pub const GLOBAL_USER_PROFILE_PROJECT_PATH: &str = "__global__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2865,7 +2865,7 @@ pub const TABLES: &[TableInventory] = &[
     // baselines that no longer exist, so they ship with it.
     table!(Module, "mc_async_compaction_entries", Ship,
         RowSelector::Predicate("session = ?1"),
-        &["session_ref", "ordinal"], &["session_ref", "session", "ordinal", "entry_json", "index_json"],
+        &["session_ref", "ordinal"], &["session_ref", "session", "ordinal", "entry_json", "index_json", "mid"],
         &[], Some(KeyPolicy::PreserveOrRefuseCollision), None),
     table!(Module, "mc_async_compaction_views", Ship,
         RowSelector::Predicate("session = ?1"),
