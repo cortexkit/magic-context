@@ -498,6 +498,30 @@ fn secret_key(key: &str) -> bool {
         || key == "authorization"
 }
 
+fn secret_text(value: &Value) -> bool {
+    match value {
+        Value::String(_) => true,
+        Value::Array(items) => !items.is_empty() && items.iter().all(secret_text),
+        Value::Object(object) => !object.is_empty() && object.values().all(secret_text),
+        _ => false,
+    }
+}
+
+/// Secret-like names also describe budgets; hide textual leaves without losing numeric or boolean settings.
+fn redact_secret(value: &mut Value) {
+    // Keep the existing unset-secret shape so the app can distinguish an absent credential.
+    if value.is_null() || secret_text(value) {
+        let present = !value.is_null();
+        *value = json!({"redacted": true, "present": present});
+    } else {
+        match value {
+            Value::Array(items) => items.iter_mut().for_each(redact_secret),
+            Value::Object(object) => object.values_mut().for_each(redact_secret),
+            _ => {}
+        }
+    }
+}
+
 fn redact(value: &mut Value, in_headers: bool) {
     let Value::Object(object) = value else {
         if let Value::Array(items) = value {
@@ -512,8 +536,7 @@ fn redact(value: &mut Value, in_headers: bool) {
         let child = object.get_mut(&key).unwrap();
         let headers = key.eq_ignore_ascii_case("headers");
         if in_headers || secret_key(&key) || (headers && !child.is_object()) {
-            let present = !child.is_null();
-            *child = json!({"redacted": true, "present": present});
+            redact_secret(child);
         } else if headers {
             redact(child, true);
         } else {
@@ -887,6 +910,86 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn redaction_preserves_non_text_values_and_hides_secret_text_containers() {
+        let mut value = json!({
+            "api_key": 123,
+            "token_ratio": 0.5,
+            "password_enabled": true,
+            "unset_secret": null,
+            "plain_null": null,
+            "future_secret": "unknown-secret",
+            "api_keys": ["one", "two"],
+            "secret_object": {"first": "one", "nested": {"second": "two"}},
+            "mixed_secret": {"text": "hidden", "budget": 64, "enabled": false, "unset": null},
+            "token_limits": {"default": 512, "large": 1024},
+            "empty_keys": [],
+            "headers": {"x-custom": "header-secret", "retries": 3, "enabled": true},
+            "label": "visible"
+        });
+        redact(&mut value, false);
+        assert_eq!(
+            value,
+            json!({
+                "api_key": 123,
+                "token_ratio": 0.5,
+                "password_enabled": true,
+                "unset_secret": {"redacted": true, "present": false},
+                "plain_null": null,
+                "future_secret": {"redacted": true, "present": true},
+                "api_keys": {"redacted": true, "present": true},
+                "secret_object": {"redacted": true, "present": true},
+                "mixed_secret": {"text": {"redacted": true, "present": true}, "budget": 64, "enabled": false, "unset": {"redacted": true, "present": false}},
+                "token_limits": {"default": 512, "large": 1024},
+                "empty_keys": [],
+                "headers": {"x-custom": {"redacted": true, "present": true}, "retries": 3, "enabled": true},
+                "label": "visible"
+            })
+        );
+    }
+
+    #[test]
+    fn config_read_keeps_numeric_budgets_and_non_text_api_keys_visible() {
+        let (ctx, _dir) = ctx();
+        let (user_path, project_file) = ctx.config_files().unwrap();
+        std::fs::write(
+            user_path,
+            serde_json::to_vec(&json!({
+                "protected_tokens": 20000,
+                "keep_reasoning_tokens": 12000,
+                "historian": {"context_limit_tokens": 64000},
+                "memory": {"injection_budget_tokens": 5000, "user_profile_budget_tokens": 2500},
+                "execute_threshold_tokens": {"default": 7000},
+                "api_key": 123
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(project_file.unwrap(), br#"{"protected_tokens":30000}"#).unwrap();
+        let reply = crate::app_read::tests_support::response(&read(
+            &caller(),
+            &ctx,
+            json!({"project":"git:fixture"}).as_object().unwrap(),
+        ));
+        let config = &reply["row"]["config"];
+        for (field, expected) in [
+            ("protected_tokens_user", 20000.0),
+            ("protected_tokens_project", 30000.0),
+            ("keep_reasoning_tokens", 12000.0),
+            ("historian_context_limit_tokens", 64000.0),
+            ("memory_budget_tokens", 5000.0),
+            ("user_profile_budget_tokens", 2500.0),
+        ] {
+            assert_eq!(config[field].as_f64(), Some(expected), "{field}");
+        }
+        assert_eq!(
+            config["execute_threshold_tokens"]["default"].as_f64(),
+            Some(7000.0)
+        );
+        // A numeric api_key is configuration data, not credential text, and is intentionally shown.
+        assert_eq!(config["api_key"], 123);
     }
 
     #[test]
