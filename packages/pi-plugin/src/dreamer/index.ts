@@ -592,13 +592,6 @@ function createPiDreamerClient(
 
 			const userMessage = extractUserMessage(args);
 			const systemPrompt = extractSystemPrompt(args);
-			// Per-task model override (Dreamer v2): the SHARED executor
-			// (promptSyncWithValidatedOutputRetry) owns fallback iteration — it
-			// rewrites body.model to each candidate (per-task model, then the
-			// per-task fallback chain) and calls this facade once per attempt. So
-			// we use body.model as the current attempt's model and pass
-			// fallbackModels: undefined; passing the dreamer-level chain here would
-			// double-iterate and override a task's own (possibly empty) chain.
 			const perTaskModel = extractBodyModel(args);
 			const requestedAgent = extractBodyAgent(args) ?? "magic-context-dreamer";
 			const accountingTask = accountingTaskFromTitle(dreamSession.title);
@@ -627,11 +620,8 @@ function createPiDreamerClient(
 				systemPrompt,
 				userMessage,
 				model: perTaskModel,
-				fallbackModels: undefined,
-				// The executor enforces the per-task timeout via its abort signal;
-				// give the subprocess a generous ceiling so the signal is the
-				// authority (not a second, conflicting wall-clock here).
-				timeoutMs: 30 * 60 * 1000,
+				fallbackModels: taskConfig?.fallbackModels,
+				timeoutMs: (taskConfig?.timeoutMinutes ?? 30) * 60 * 1000,
 				cwd: dreamSession.directory,
 				signal: args.signal
 					? AbortSignal.any([args.signal, controller.signal])

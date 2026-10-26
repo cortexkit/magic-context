@@ -76,8 +76,8 @@ import {
  * and apply the agent's verified/update/archive manifest HOST-side.
  *
  * Per-memory verified_at (no global watermark): a timed-out batch banks what it
- * checked; the next run continues. Cost is unique-file-bounded like map, but
- * verify uses small batches because deeper reads replay more prompt tokens.
+ * checked; the next run continues. Cost is unique-file-bounded like map, and
+ * ten-memory batches amortize child startup while per-input budgets bound replay.
  * Closed individual verdicts survive interruption; unfinished claims stay pending.
  *
  * Apply is cache-NEUTRAL: update/archive route through queueMemoryMutation,
@@ -85,7 +85,7 @@ import {
  * must never bust the prompt cache.
  */
 
-export const VERIFY_BATCH_SIZE = 5;
+export const VERIFY_BATCH_SIZE = 10;
 // Completed nightly runs spent 22,103,259 prompt tokens for 295 banked verdicts
 // (~74,926 each). Round up to 100k per input, with no spare allocation for a short batch.
 // All memories checked in one verifier child session share its batch token budget;
@@ -100,12 +100,12 @@ export const VERIFY_RUN_SLICE_MS = 240_000;
 /**
  * Extra time a batch that is already running at the run deadline may take to
  * finish. Cutting such a batch off throws away the tokens it already spent, and
- * finishing it costs little more. On 2026-10-20 live data, five-memory batches
- * finished in 64 s at the median, 90 s at p90 and 96 s at worst. Batches under
- * the 500k token envelope finished in 103 s at p95. The slowest full batch
- * consumed about 4.6k prompt tokens per second, so its token budget runs out
- * after roughly 110 s. 120 s therefore covers nearly every batch that can still
- * finish, and the slice timer stops a runaway batch at deadline + 120 s.
+ * finishing it costs little more. Historical five-memory batches (500k tokens)
+ * finished in 64 s at the median, 90 s at p90 and 96 s at worst; batches under
+ * that envelope finished in 103 s at p95. At the observed 4.6k prompt tokens per
+ * second, a ten-memory batch's 1M token envelope takes about 217 s to exhaust.
+ * The 240 s batch slice bounds its runtime; the grace lets an in-flight batch
+ * continue past the run deadline, up to that limit.
  */
 export const VERIFY_IN_FLIGHT_GRACE_MS = 120_000;
 

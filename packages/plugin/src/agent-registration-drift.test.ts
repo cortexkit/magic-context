@@ -344,7 +344,7 @@ describe("hidden-agent registration drift guard", () => {
             expect(tools).not.toContain(denied);
         }
         expect(byId(DREAMER_DOCS_AGENT)?.lockPermissions).toBe(true);
-        expect(byId(DREAMER_DOCS_AGENT)?.maxSteps).toBe(60);
+        expect(byId(DREAMER_DOCS_AGENT)?.maxSteps).toBe(400);
     });
 
     test("dreamer-reviewer is a zero-tool locked JSON reviewer", () => {
@@ -362,7 +362,7 @@ describe("hidden-agent registration drift guard", () => {
             expect(tools).not.toContain(denied);
         }
         expect(byId(DREAMER_MEMORY_MAPPER_AGENT)?.lockPermissions).toBe(true);
-        expect(byId(DREAMER_MEMORY_MAPPER_AGENT)?.maxSteps).toBe(60);
+        expect(byId(DREAMER_MEMORY_MAPPER_AGENT)?.maxSteps).toBe(400);
     });
 
     test("retrospective inline allow-list is ctx_search only", () => {

@@ -1580,8 +1580,8 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 			process.env.XDG_DATA_HOME = testDataDir;
 			closeDatabase();
 			try {
-				const model = "unknown-provider/model-not-installed";
-				const suggestion = "unknown-provider/model-available";
+				const model = "missing-provider/model-not-installed";
+				const suggestion = "missing-provider/model-available";
 				const resultPromise = runner.run({
 					...baseOptions,
 					model,
@@ -1612,7 +1612,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 				);
 				expect(row).toMatchObject({
 					harness: targetHarness,
-					providerId: "unknown-provider",
+					providerId: "missing-provider",
 					modelId: "model-not-installed",
 					status: "empty",
 				});
@@ -4486,7 +4486,7 @@ describe("Pi dreamer prompt-token budget", () => {
 
 	it("finalizes the mapper before its step cap and retains a partial manifest below token budget", async () => {
 		const { child, run } = await started(3_000_000);
-		for (let step = 1; step <= 58; step++)
+		for (let step = 1; step <= 398; step++)
 			child.writeStdoutLine({
 				type: "message_end",
 				message: {
@@ -4511,7 +4511,7 @@ describe("Pi dreamer prompt-token budget", () => {
 		child.emitClose();
 		expect(await run).toMatchObject({
 			ok: true,
-			meta: { tokenBudget: { spent: 59, finalizeFired: true } },
+			meta: { tokenBudget: { spent: 399, finalizeFired: true } },
 		});
 		expect(steered).toBe(true);
 		expect(child.stdinText.match(/dreamer-finalize/g)).toHaveLength(1);

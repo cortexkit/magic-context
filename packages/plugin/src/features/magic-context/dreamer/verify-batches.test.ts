@@ -16,6 +16,7 @@ import { acquireLease } from "./lease";
 import { createDreamTokenBudget, DreamTokenBudgetExceeded } from "./token-budget";
 import {
     runVerify,
+    VERIFY_BATCH_SIZE,
     VERIFY_IN_FLIGHT_GRACE_MS,
     VERIFY_RUN_SLICE_MS,
     VERIFY_TOKENS_PER_MEMORY,
@@ -86,10 +87,11 @@ function toolOnlyHistory(whitespace = false) {
 }
 
 test("verify allocates at most 100k prompt tokens per input including a short batch", () => {
+    expect(VERIFY_BATCH_SIZE).toBe(10);
     expect(VERIFY_TOKENS_PER_MEMORY).toBe(100_000);
-    expect(verifyBatchTokenBudget(5, 2_500_000)).toBe(500_000);
+    expect(verifyBatchTokenBudget(10, 2_500_000)).toBe(1_000_000);
     expect(verifyBatchTokenBudget(1)).toBe(100_000);
-    expect(verifyBatchTokenBudget(5, 40_000)).toBe(40_000);
+    expect(verifyBatchTokenBudget(10, 40_000)).toBe(40_000);
     const guard = createDreamTokenBudget(verifyBatchTokenBudget(1));
     expect(guard.charge(80_000, 0, 0)).toBe("finalize");
     expect(guard.charge(20_000, 0, 0)).toBe("stop");
@@ -149,7 +151,7 @@ test("verify prefilters identifier candidates asynchronously without replacing b
     }
 });
 
-test("fake provider emits five-memory progress and banks an interrupted verdict at the wall slice", async () => {
+test("fake provider emits ten-memory progress and banks an interrupted verdict at the wall slice", async () => {
     const f = fixture(12);
     const sizes: number[] = [];
     const budgets: number[] = [];
@@ -195,7 +197,7 @@ test("fake provider emits five-memory progress and banks an interrupted verdict 
                     ].map((m) => Number(m[1]));
                     sizes.push(ids.length);
                     text = `<verify>${ids
-                        .slice(0, child === 1 ? 5 : 1)
+                        .slice(0, child === 1 ? 10 : 1)
                         .map((id) => `<verified id="${id}" files="src/fact.ts"/>`)
                         .join("")}${child === 1 ? "</verify>" : ""}`;
                     if (child > 1) await new Promise(() => {});
@@ -208,20 +210,20 @@ test("fake provider emits five-memory progress and banks an interrupted verdict 
                 close: async () => {},
             } as never,
         });
-        expect(sizes).toEqual([5, 5]);
-        expect(budgets).toEqual([500_000, 500_000]);
+        expect(sizes).toEqual([10, 2]);
+        expect(budgets).toEqual([1_000_000, 200_000]);
         expect(calls).toBe(2);
-        expect(progress).toEqual([5, 6]);
+        expect(progress).toEqual([10, 11]);
         expect(result).toMatchObject({
-            verified: 6,
-            remaining: 6,
+            verified: 11,
+            remaining: 1,
             complete: false,
             stopReason: "batch-timeout",
         });
         const stored = getMemoryVerifications(f.db, f.ids);
-        expect([...stored.values()].filter((m) => m.verifiedAt > 1_000)).toHaveLength(6);
+        expect([...stored.values()].filter((m) => m.verifiedAt > 1_000)).toHaveLength(11);
         console.log(
-            `FAKE VERIFY: batch sizes=${sizes}; progress=${progress}; stop=${result.stopReason}; durable=6; fallback not started; settlement_tail_ms=${Date.now() - sliceFiredAt}`,
+            `FAKE VERIFY: batch sizes=${sizes}; progress=${progress}; stop=${result.stopReason}; durable=11; fallback not started; settlement_tail_ms=${Date.now() - sliceFiredAt}`,
         );
     } finally {
         timer.mockRestore();
@@ -340,20 +342,20 @@ async function runOnFakeClock(count: number, durations: number[]) {
 test("verify lets a batch in flight at the run deadline finish and bank its verdicts", async () => {
     // The second batch starts 200 s into the run and needs 90 s, so it is still
     // running when the 240 s run deadline passes.
-    const run = await runOnFakeClock(10, [200_000, 90_000]);
+    const run = await runOnFakeClock(20, [200_000, 90_000]);
     expect(run.opened).toEqual([0, 200_000]);
     expect(run.abortedAt).toEqual([]);
-    expect(run.result).toMatchObject({ verified: 10, remaining: 0, complete: true, batches: 2 });
+    expect(run.result).toMatchObject({ verified: 20, remaining: 0, complete: true, batches: 2 });
     expect(run.result.stopReason).toBeUndefined();
 });
 
 test("verify does not start a batch once the run deadline has passed", async () => {
     // The second batch ends exactly at the run deadline; plenty of in-flight
     // grace remains, but that grace is only for batches already running.
-    const run = await runOnFakeClock(15, [120_000, VERIFY_RUN_SLICE_MS - 120_000]);
+    const run = await runOnFakeClock(25, [120_000, VERIFY_RUN_SLICE_MS - 120_000]);
     expect(run.opened).toEqual([0, 120_000]);
     expect(run.result).toMatchObject({
-        verified: 10,
+        verified: 20,
         remaining: 5,
         complete: false,
         batches: 2,
@@ -362,7 +364,7 @@ test("verify does not start a batch once the run deadline has passed", async () 
 });
 
 test("verify still aborts a runaway batch at the hard stop after the run deadline", async () => {
-    const run = await runOnFakeClock(10, [200_000, Number.POSITIVE_INFINITY]);
+    const run = await runOnFakeClock(20, [200_000, Number.POSITIVE_INFINITY]);
     const hardStop = VERIFY_RUN_SLICE_MS + VERIFY_IN_FLIGHT_GRACE_MS;
     expect(run.opened).toEqual([0, 200_000]);
     // The runaway child moves the clock in 10 s steps, so the slice timer fires
@@ -370,8 +372,8 @@ test("verify still aborts a runaway batch at the hard stop after the run deadlin
     expect(run.abortedAt).toHaveLength(1);
     expect(run.abortedAt[0]).toBeLessThanOrEqual(hardStop + 10_000);
     expect(run.result).toMatchObject({
-        verified: 5,
-        remaining: 5,
+        verified: 10,
+        remaining: 10,
         complete: false,
         stopReason: "batch-timeout",
     });
@@ -422,10 +424,10 @@ test("fixed replay fixture compares provider-reported tokens per verified memory
             } as never,
         });
         const before = replayCost(20, 20);
-        expect(sizes).toEqual([5, 5, 5, 5]);
+        expect(sizes).toEqual([10, 10]);
         expect(result.verified).toBe(20);
         expect(before).toBe(1_952_000);
-        expect(spent).toBe(608_000);
+        expect(spent).toBe(1_054_000);
         console.log(
             `FIXED TRACE: before=${before / 20} tokens/verified memory; after=${spent / result.verified}; verified=20/20 (synthetic usage, not live quota)`,
         );
@@ -434,8 +436,8 @@ test("fixed replay fixture compares provider-reported tokens per verified memory
     }
 });
 
-test("verify shares the run token ceiling across five children and records each child's spend", async () => {
-    const f = fixture(30);
+test("verify shares the run token ceiling across batches and records each child's spend", async () => {
+    const f = fixture(60);
     const budgets: number[] = [];
     const updates: Array<{ sessionId?: string; spent: number }> = [];
     let text = "";
@@ -470,11 +472,11 @@ test("verify shares the run token ceiling across five children and records each 
                 close: async () => {},
             } as never,
         });
-        expect(budgets).toEqual([500_000, 500_000, 500_000, 500_000, 500_000]);
-        expect(result).toMatchObject({ verified: 25, remaining: 5, stopReason: "token-budget" });
+        expect(budgets).toEqual([1_000_000, 1_000_000, 1_000_000, 1_000_000, 500_000]);
+        expect(result).toMatchObject({ verified: 50, remaining: 10, stopReason: "token-budget" });
         expect(new Set(updates.map((s) => s.sessionId)).size).toBe(5);
         console.log(
-            "FAKE RUN CAP: 5 children x 500000 = 2500000 prompt tokens; no sixth child; 25 durable verdicts",
+            "FAKE RUN CAP: five 500000-token spends = 2500000 prompt tokens; no sixth batch; 50 durable verdicts",
         );
     } finally {
         f.db.close();
@@ -490,6 +492,7 @@ test("a failing fake provider exhausts one 500k envelope without retrying and ba
     try {
         const result = await runVerify({
             ...f.args,
+            tokenBudget: 500_000,
             fallbackModels: ["fixture/fallback"],
             hiddenCompletionExecutor: {
                 capabilities: { tools: true },
@@ -561,7 +564,7 @@ test("verify run slice is shared across batches, not renewed after progress", as
             } as never,
         });
         expect(children).toBe(1);
-        expect(result).toMatchObject({ verified: 5, remaining: 20, stopReason: "deadline" });
+        expect(result).toMatchObject({ verified: 10, remaining: 15, stopReason: "deadline" });
     } finally {
         now.mockRestore();
         f.db.close();
@@ -782,7 +785,7 @@ test("fixed navigation fixture measures exact replay bytes for whole reads versu
                     close: async () => {},
                 } as never,
             });
-            expect(result).toMatchObject({ verified: 20, complete: true, batches: 4 });
+            expect(result).toMatchObject({ verified: 20, complete: true, batches: 2 });
             return {
                 traces,
                 sourceBytes: Buffer.byteLength(source),
@@ -800,20 +803,20 @@ test("fixed navigation fixture measures exact replay bytes for whole reads versu
     const whole = await measure("whole-file");
     const navigation = await measure("navigation");
     expect(whole.traces.map((trace) => trace.toolCalls)).toEqual(
-        Array.from({ length: 4 }, () => ["read"]),
+        Array.from({ length: 2 }, () => ["read"]),
     );
     expect(navigation.traces.map((trace) => trace.toolCalls)).toEqual(
-        Array.from({ length: 4 }, () => ["aft_outline", "aft_zoom"]),
+        Array.from({ length: 2 }, () => ["aft_outline", "aft_zoom"]),
     );
     expect(navigation.traces.map((trace) => [trace.systemBytes, trace.userBytes])).toEqual(
         whole.traces.map((trace) => [trace.systemBytes, trace.userBytes]),
     );
-    expect(whole.totalBytes).toBe(69_970);
-    expect(navigation.totalBytes).toBe(62_699);
-    expect(whole.tokens).toBe(17_496);
-    expect(navigation.tokens).toBe(15_679);
-    expect(whole.traces.map((trace) => trace.systemBytes)).toEqual([3_448, 3_448, 3_448, 3_448]);
-    expect(whole.traces.map((trace) => trace.userBytes)).toEqual([1_002, 1_003, 1_012, 1_012]);
+    expect(whole.totalBytes).toBe(36_666);
+    expect(navigation.totalBytes).toBe(33_871);
+    expect(whole.tokens).toBe(9_168);
+    expect(navigation.tokens).toBe(8_470);
+    expect(whole.traces.map((trace) => trace.systemBytes)).toEqual([3_448, 3_448]);
+    expect(whole.traces.map((trace) => trace.userBytes)).toEqual([1_398, 1_417]);
     expect(navigation.tokens).toBeLessThan(whole.tokens);
     console.log(
         `NAVIGATION FIXTURE: ${JSON.stringify({ whole, navigation, tokensPerVerdict: { whole: whole.tokens / whole.verified, navigation: navigation.tokens / navigation.verified } })}`,
