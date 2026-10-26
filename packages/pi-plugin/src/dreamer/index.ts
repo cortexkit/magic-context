@@ -620,7 +620,7 @@ function createPiDreamerClient(
 				systemPrompt,
 				userMessage,
 				model: perTaskModel,
-				fallbackModels: taskConfig?.fallbackModels,
+				fallbackModels: undefined,
 				timeoutMs: (taskConfig?.timeoutMinutes ?? 30) * 60 * 1000,
 				cwd: dreamSession.directory,
 				signal: args.signal
