@@ -28796,7 +28796,14 @@ pub(crate) mod tests {
             }
             age_episode_tools_past_newest_three(&s);
             let mut loaded = s.load("ses").unwrap();
+            assert!(
+                loaded.meta.has_prior_emergency_drop,
+                "escape {escape}: the episode is spent before the escape"
+            );
             loaded.meta.last_execute_ordinal = 5;
+            // The emergency selector records an assessment on every pass it runs. Clear the
+            // first batch's record so the escape pass shows whether the selector ran again.
+            loaded.meta.emergency_drop_assessment = None;
             if escape == "refresh" {
                 loaded.meta.soft_refresh_pending = true;
             }
@@ -28817,10 +28824,19 @@ pub(crate) mod tests {
                 _ => {}
             }
             transform(&s, &request, &context).unwrap();
-            // The escape re-arms the force episode, but the aged arc is age-sweep work, which
-            // never first-applies in the force band (the emergency selector, which finds no
-            // candidate in this fixture, owns tool reclaim there). The first rebuilding pass
-            // below the band applies it.
+            // The escape re-arms the spent episode: the emergency selector runs again on this
+            // pass (a still-latched episode never reaches it, so no assessment is recorded).
+            assert!(
+                s.load("ses")
+                    .unwrap()
+                    .meta
+                    .emergency_drop_assessment
+                    .is_some(),
+                "escape {escape} must re-arm the spent force episode"
+            );
+            // The aged arc is age-sweep work, which never first-applies in the force band (the
+            // emergency selector, which finds no candidate in this fixture, owns tool reclaim
+            // there). The first rebuilding pass below the band applies it.
             let mut loaded = s.load("ses").unwrap();
             loaded.meta.soft_refresh_pending = true;
             s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
