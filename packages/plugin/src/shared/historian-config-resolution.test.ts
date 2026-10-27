@@ -2,9 +2,13 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../config/schema/magic-context";
-import { rustWrapupHistorianFields } from "../hooks/magic-context/module-session-kernel";
+import {
+    resolveHistorianProducerLimits,
+    resolveKnownHistorianContextLimit,
+} from "../hooks/magic-context/derive-budgets";
+import type { TransformDeps } from "../hooks/magic-context/transform";
 import { type ModelHarness, resolveHistorianModel } from "./model-resolution";
-import { clearModelsDevCache } from "./models-dev-cache";
+import { clearModelsDevCache, getSdkOutputLimit, getSdkWindowGeometry } from "./models-dev-cache";
 
 /**
  * Drift check for the historian settings ck-mc resolves from its own config.
@@ -22,8 +26,7 @@ import { clearModelsDevCache } from "./models-dev-cache";
  * The resolution is the one the plugin uses everywhere it hands the module a
  * chain: `resolveHistorianModel` (model-resolution.ts), the timeout default from
  * `sampleHistorian` (hooks/magic-context/hook.ts), `historian.maxTokens` as the
- * output cap and `rustWrapupHistorianFields`
- * (hooks/magic-context/module-session-kernel.ts) for the chain, variants and
+ * output cap and `historianFieldsFromConfig` below for the chain, variants and
  * limits. ck-mc has no model catalog, so the matrix is resolved with an empty
  * catalog: every per-model limit entry is then empty, as it is in ck-mc.
  */
@@ -244,7 +247,7 @@ function resolveHistorianSettings(entry: MatrixCase): Record<string, unknown> {
         historian?: { maxTokens?: number };
     };
     const attempts = resolveHistorianModel(config, entry.harness as ModelHarness);
-    return rustWrapupHistorianFields({
+    return historianFieldsFromConfig({
         historianModel: attempts.primary,
         fallbackModels: attempts.fallbacks,
         timeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
@@ -253,7 +256,7 @@ function resolveHistorianSettings(entry: MatrixCase): Record<string, unknown> {
     });
 }
 
-/** The chain exactly as the bridge pushed it with `state_sync` (opencode-adapter.ts `sync`). */
+/** The chain straight from `resolveHistorianModel`: primary first, then fallbacks, deduplicated. */
 function bridgeChain(entry: MatrixCase): string[] {
     const attempts = resolveHistorianModel(entry.config, entry.harness as ModelHarness);
     const models = [attempts.primary, ...attempts.fallbacks]
@@ -278,7 +281,7 @@ describe("historian config resolution fixture", () => {
         expect(committed).toEqual(fixture);
     });
 
-    it("resolves the same chain the bridge pushed with state_sync", () => {
+    it("keeps the chain order resolveHistorianModel gives", () => {
         clearModelsDevCache();
         for (const entry of MATRIX) {
             expect(resolveHistorianSettings(entry).historian_model_chain, entry.name).toEqual(
@@ -287,3 +290,67 @@ describe("historian config resolution fixture", () => {
         }
     });
 });
+
+/** The historian fields resolved from the current config, as ck-mc resolves them. */
+function historianFieldsFromConfig(
+    historian: Pick<TransformDeps, "historianModel" | "fallbackModels"> & {
+        timeoutMs: number;
+        maxOutputTokens?: number;
+    },
+): Record<string, unknown> {
+    const models = [historian.historianModel, ...(historian.fallbackModels ?? [])];
+    const chain = [
+        ...new Set(
+            models
+                .map((entry) => (typeof entry === "string" ? entry : entry?.model))
+                .filter((model): model is string => typeof model === "string" && model.length > 0),
+        ),
+    ];
+    const variants: Record<string, string> = {};
+    const seen = new Set<string>();
+    for (const entry of models) {
+        const model = typeof entry === "string" ? entry : entry?.model;
+        if (typeof model !== "string" || model.length === 0 || seen.has(model)) continue;
+        seen.add(model);
+        const variant = typeof entry === "string" ? undefined : entry?.qualifier;
+        if (variant) variants[model] = variant;
+    }
+    const limits = Object.fromEntries(
+        chain.map((key) => {
+            const [provider, ...parts] = key.split("/");
+            const output =
+                provider && parts.length ? getSdkOutputLimit(provider, parts.join("/")) : undefined;
+            const producer = resolveHistorianProducerLimits(key);
+            const known =
+                producer.input === undefined ? resolveKnownHistorianContextLimit(key) : undefined;
+            const learned =
+                provider && parts.length
+                    ? getSdkWindowGeometry(provider, parts.join("/"))?.derivation.window
+                    : undefined;
+            const context =
+                producer.context ??
+                (known === undefined
+                    ? learned
+                    : learned === undefined
+                      ? known
+                      : Math.min(known, learned));
+            return [
+                key,
+                {
+                    ...(context !== undefined ? { context } : {}),
+                    ...(producer.input !== undefined ? { input: producer.input } : {}),
+                    ...(output !== undefined ? { output } : {}),
+                },
+            ];
+        }),
+    );
+    return {
+        historian_model_chain: chain,
+        historian_model_limits: limits,
+        historian_model_variants: variants,
+        historian_timeout_ms: historian.timeoutMs,
+        ...(historian.maxOutputTokens !== undefined
+            ? { historian_max_output_tokens: historian.maxOutputTokens }
+            : {}),
+    };
+}

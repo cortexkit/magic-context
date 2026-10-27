@@ -82,7 +82,6 @@ export function registerV2DreamScheduleTimer(args: {
                 dreamerConfig: current.dreamer ?? dreamer,
                 mural: current.mural,
                 gitCommitIndexing: current.memory.git_commit_indexing,
-                rustBackgroundEnabled: current.rust_background_enabled === true,
             };
         },
         // Scheduled and manual runs share one capability filter, so a host

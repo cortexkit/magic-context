@@ -167,7 +167,6 @@ import {
     type LkgSlot,
     releaseWithheldServedCapture,
 } from "./lkg-slot";
-import type { ModuleSessionClient } from "./module-session-kernel";
 import { onNoteTrigger } from "./note-nudger";
 import { logNudgeEvaluation } from "./nudge-evaluation-log";
 import {
@@ -714,17 +713,6 @@ export interface TransformDeps {
     promptSurface?: PromptSurfaceConfig;
     /** Resolves trusted USER guidance files before crossing the module boundary. */
     promptSurfaceRuntime?: PromptSurfaceRuntime;
-    /** Module transport injected by the hook; tests use a deterministic mock. */
-    rustModeModuleClient?: ModuleSessionClient;
-    rustModeProjectRoot?: string;
-    onRustEngineReconnectRefusal?: (args: {
-        sessionId: string;
-        projectRoot: string;
-        refusedUserMessageId: string;
-        providerProvenEmergency: boolean;
-        compactionOff: boolean;
-    }) => void;
-    rustMemorySyncRequestedSessions?: Set<string>;
     /**
      * Which projection of the OpenCode store this host serves. Supplied by the
      * OpenCode 1 and OpenCode 2 hooks; omitted by every other harness, which

@@ -250,47 +250,6 @@ export class SubcModuleTransport {
     private connectionPromise: Promise<SubcClient> | null = null;
     private backoffMs = CONNECT_BACKOFF_INITIAL_MS;
     private connectionGeneration = 0;
-    private stateSyncCapabilityCache: {
-        generation: number;
-        capabilities: { state_sync_deltas?: boolean; state_sync_resume?: boolean };
-    } | null = null;
-
-    /** Returns the capability snapshot for the currently live SUBC connection. */
-    getCachedStateSyncCapabilities():
-        | { state_sync_deltas?: boolean; state_sync_resume?: boolean }
-        | undefined {
-        const cached = this.stateSyncCapabilityCache;
-        if (!cached || cached.generation !== this.connectionGeneration) return undefined;
-        return cached.capabilities;
-    }
-
-    /** Clears the snapshot after a module signal that can change its wire capabilities. */
-    invalidateStateSyncCapabilities(): void {
-        this.stateSyncCapabilityCache = null;
-    }
-
-    async stateSyncCapabilities(args: {
-        sessionId: string;
-        projectRoot: string;
-    }): Promise<{ state_sync_deltas?: boolean; state_sync_resume?: boolean }> {
-        const cached = this.getCachedStateSyncCapabilities();
-        if (cached) return cached;
-        const response = await this.call({
-            sessionId: args.sessionId,
-            projectRoot: args.projectRoot,
-            method: "session.status",
-            body: { method: "session.status", v: 1, session_id: args.sessionId },
-        });
-        const raw = isRecord(response) ? response : {};
-        const value = isRecord(raw.result) ? raw.result : raw;
-        const epochs = isRecord(value.epochs) ? value.epochs : {};
-        const capabilities = {
-            state_sync_deltas: epochs.state_sync_deltas === true,
-            ...(epochs.state_sync_resume === true ? { state_sync_resume: true } : {}),
-        };
-        this.stateSyncCapabilityCache = { generation: this.connectionGeneration, capabilities };
-        return capabilities;
-    }
 
     constructor(
         connectionFile: string,
@@ -461,8 +420,6 @@ export class SubcModuleTransport {
         sessionId: string;
         projectRoot: string;
         method:
-            | "state_sync"
-            | "transform"
             | "compaction.delete"
             | "session.status"
             | "session.delete"
@@ -470,7 +427,6 @@ export class SubcModuleTransport {
             | "session.recomp"
             | "session.wrapup"
             | "todo_state.set"
-            | "agent_drops.append"
             | "ctx_note"
             | "ctx_memory"
             | "memory.curate"
@@ -478,13 +434,8 @@ export class SubcModuleTransport {
             | "memory.restore.preview"
             | "memory.restore"
             | "memory.edit"
-            | "note.evaluate"
             | "dreamer.run_task"
-            | "memory.set_classification"
-            | "historian.pending"
-            | "historian.claim"
-            | "historian.heartbeat"
-            | "historian.complete";
+            | "memory.set_classification";
         body: unknown;
         /** Per-call durations; responseWait includes the client's opaque receive and decode. */
         onTimings?: (timings: ModuleCallTimings) => void;
@@ -553,22 +504,6 @@ export class SubcModuleTransport {
             }
         } catch (error) {
             finishWrapupTracking();
-            if (args.method === "state_sync" && isDeadlineFailure(error)) {
-                const body = isRecord(args.body) ? args.body : {};
-                throw Object.assign(
-                    new Error(
-                        `state_sync timeout stage=correctness_lane page=${body.seed_batch_index ?? 0}/${body.seed_batch_total ?? 1} series=${body.seed_id ?? "delta"} budget_ms=${attemptTimeoutMs}`,
-                    ),
-                    {
-                        code: "state_sync_timeout",
-                        stage: "correctness_lane",
-                        page: body.seed_batch_index ?? 0,
-                        pages: body.seed_batch_total ?? 1,
-                        series: body.seed_id ?? null,
-                        cause: error,
-                    },
-                );
-            }
             throw error;
         }
         timings.lane = monotonicNow() - callStartedAt;
@@ -687,22 +622,6 @@ export class SubcModuleTransport {
                     if (migration) throw migration;
                     const storeAhead = storeAheadOfBinaryFailure(error);
                     if (storeAhead) throw storeAhead;
-                    if (args.method === "state_sync" && isDeadlineFailure(error)) {
-                        const body = isRecord(args.body) ? args.body : {};
-                        throw Object.assign(
-                            new Error(
-                                `state_sync timeout stage=module_ack page=${body.seed_batch_index ?? 0}/${body.seed_batch_total ?? 1} series=${body.seed_id ?? "delta"} budget_ms=${attemptTimeoutMs}`,
-                            ),
-                            {
-                                code: "state_sync_timeout",
-                                stage: "module_ack",
-                                page: body.seed_batch_index ?? 0,
-                                pages: body.seed_batch_total ?? 1,
-                                series: body.seed_id ?? null,
-                                cause: error,
-                            },
-                        );
-                    }
                     if (
                         args.attemptClass === "transform_series_execute" &&
                         isDeadlineFailure(error)
@@ -1011,7 +930,6 @@ export class SubcModuleTransport {
     private invalidateConnection(client: SubcClient | null = this.client): void {
         if (client && this.client !== client) return;
         this.connectionGeneration += 1;
-        this.invalidateStateSyncCapabilities();
         this.client = null;
         this.routes.clear();
         this.routeOpenings.clear();

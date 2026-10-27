@@ -180,7 +180,6 @@ describe("executeStatus", () => {
             undefined,
             undefined,
             undefined,
-            false,
             {
                 cacheTtlConfig: { default: "5m", "anthropic/claude-opus-5": "1h" },
                 cacheTtlConfigured: true,
@@ -200,35 +199,5 @@ describe("executeStatus", () => {
         if (originalOpenCodeDb === undefined) delete process.env.OPENCODE_DB;
         else process.env.OPENCODE_DB = originalOpenCodeDb;
         resetOpenCodeDbPathStateForTesting();
-    });
-
-    test("shows module-routed host paths only in Rust mode", () => {
-        const db = new Database(":memory:");
-        initializeDatabase(db);
-        getOrCreateSessionMeta(db, SESSION_ID);
-
-        const tsStatus = executeStatus(db, SESSION_ID);
-        const rustStatus = executeStatus(
-            db,
-            SESSION_ID,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            true,
-        );
-
-        expect(rustStatus).toContain("### Rust Mode");
-        expect(rustStatus).toContain(
-            "Host backends → MODULE: ctx_memory, ctx_note; historian: module-side",
-        );
-        expect(tsStatus).not.toContain("Host backends → MODULE");
-        db.close();
     });
 });

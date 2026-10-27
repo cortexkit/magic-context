@@ -39,7 +39,6 @@ import {
     resolveOpenCodeDbPath,
 } from "../../shared/opencode-db-path";
 import type { TailHygieneStatus } from "../../shared/rpc-types";
-import { RUST_MODE_HOST_PATHS_LINE } from "../../shared/rust-mode-status";
 import type { Database } from "../../shared/sqlite";
 import { renderUserStatusSummary } from "../../shared/status-summary";
 import { formatTailHygiene } from "../../shared/tail-hygiene-status";
@@ -104,7 +103,6 @@ export function executeStatus(
     windowGeometry?: WindowGeometryResult,
     tailHygiene?: TailHygieneStatus,
     contextUsage?: { inputTokens: number; percentage: number },
-    rustMode = false,
     display?: {
         cacheTtlConfig: MagicContextConfig["cache_ttl"];
         cacheTtlConfigured: boolean;
@@ -224,8 +222,6 @@ export function executeStatus(
 
         const storage = getMagicContextStorageResolution();
         lines.push("", `**Storage:** ${storage.path} (${storage.source})`);
-
-        if (rustMode) lines.push("", "### Rust Mode", `- ${RUST_MODE_HOST_PATHS_LINE}`);
 
         if (tailHygiene !== undefined) {
             lines.push(
