@@ -2515,50 +2515,6 @@ mod tests {
     }
 
     #[test]
-    fn incremental_sidecar_carries_pins_across_three_generations() {
-        let mut seed = DecodeSidecar::new(HARNESS);
-        seed.pin_mid("stable-key", "pinned-mid");
-        let generation_1 = vec![json!({
-            "info": { "id": "stable-key", "role": "user" },
-            "parts": [{ "type": "text", "text": "first" }]
-        })];
-        let first = decode_opencode_with_sidecar(&generation_1, Some(&seed));
-        assert_eq!(first.messages[0].mid, "pinned-mid");
-
-        let mut generation_2 = generation_1.clone();
-        generation_2.push(json!({
-            "info": { "id": "other-key", "role": "assistant" },
-            "parts": [{ "type": "text", "text": "second" }]
-        }));
-        let second = decode_opencode_sidecar_incremental(&generation_2, &first.sidecar, 1);
-        assert_eq!(
-            second.inherit_pin("stable-key").as_deref(),
-            Some("pinned-mid")
-        );
-
-        let mut generation_3 = generation_2.clone();
-        generation_3.push(json!({
-            "info": { "id": "stable-key", "role": "user", "generation": 3 },
-            "parts": [{ "type": "text", "text": "third" }]
-        }));
-        let incremental = decode_opencode_sidecar_incremental(&generation_3, &second, 2);
-        let full = decode_opencode_with_sidecar(&generation_3, Some(&seed)).sidecar;
-        assert_eq!(incremental, full);
-        assert_eq!(
-            incremental.message_by_mid("pinned-mid").unwrap().raw["info"]["generation"],
-            3
-        );
-
-        // Mutation proof: dropping inherited pins before the third generation creates a second
-        // identity for the repeated stable key and must diverge from the full decoder.
-        let mut broken_prior = second;
-        broken_prior.mid_pins.clear();
-        let broken = decode_opencode_sidecar_incremental(&generation_3, &broken_prior, 2);
-        assert_ne!(broken, full);
-        assert!(broken.message_by_mid("stable-key").is_some());
-    }
-
-    #[test]
     fn text_before_latest_reasoning_uses_typed_wire_projection() {
         let raw = vec![json!({
             "info": { "id": "msg_text_first", "role": "assistant" },

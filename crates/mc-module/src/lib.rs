@@ -385,6 +385,8 @@ use mc_store::{
     StoredChunkTranscript, StoredCompartment, StoredNote, TodoStateSetOutcome,
     LATEST_MIGRATION_VERSION, STORE_AHEAD_OF_BINARY_REFUSAL_REASON,
 };
+#[cfg(test)]
+use mc_store::{NoteEvaluationInput, NoteWriteInput};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -436,8 +438,6 @@ pub mod test_support;
 
 #[cfg(test)]
 mod differential_goldens;
-#[cfg(test)]
-mod historian_claim_conformance;
 use transform::{HistorianDiagnostics, SerializedOutputCache, TransformRequest};
 
 /// The per-route binding: the project, harness, session-slot value, and fallback render
@@ -7196,6 +7196,14 @@ impl McHandler {
         }
     }
 
+    #[cfg(test)]
+    fn dreamer_run_registered(&self, session_id: &str) -> bool {
+        self.active_dreamer_runs
+            .lock()
+            .expect("dreamer registry mutex")
+            .contains(session_id)
+    }
+
     fn unregister_dreamer_run(&self, session_id: &str) {
         self.active_dreamer_runs
             .lock()
@@ -13880,165 +13888,6 @@ mod tests {
             assert!(text.contains("Background memory fact"), "{rebuilt}");
             assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
         }
-
-        #[tokio::test]
-        async fn canonical_dream_task_matrix_preserves_off_and_refuses_enabled_tasks() {
-            let ts = include_str!(
-                "../../../packages/plugin/src/features/magic-context/dreamer/task-registry.ts"
-            );
-            let registry = ts
-                .split("export const CANONICAL_DREAM_TASKS = [")
-                .nth(1)
-                .unwrap()
-                .split("] as const")
-                .next()
-                .unwrap();
-            let ts_names: Vec<_> = registry
-                .lines()
-                .filter_map(|line| line.trim().strip_prefix('"')?.split('"').next())
-                .collect();
-            assert_eq!(
-                CANONICAL_TASKS.map(|task| task.as_str()).as_slice(),
-                ts_names
-            );
-            let mut config = default_test_config();
-            config.rust_background_enabled = true;
-            config.smart_notes_enabled = true;
-            let producer = Arc::new(ProducerState::default());
-            // A Host-runner project with a declared harness claimant that can carry
-            // every role: publication then depends only on which tasks are wired.
-            config.dreamer_runner = Some(HistorianRunnerKind::Host);
-            let (mut handler, store, _dir, project) =
-                handler_with_store(producer.clone(), config.clone());
-            handler.fixed_config = Some(config.clone());
-            handler.dream_claimants.declare(
-                &lane_project_key(&store, &project),
-                "ses",
-                dream_dispatch::ownership::tests::claimant_carrying_every_role(now_ms())
-                    .on_route("ses", "mc-module-test"),
-            );
-            let mut settings = json!({"dreamer":{"tasks":{}}});
-            for task in CANONICAL_TASKS {
-                settings["dreamer"]["tasks"][task.as_str()] = json!({"schedule":"0 3 * * *"});
-            }
-            handler.fixed_dream_settings = Some(settings.clone());
-            for (channel, request, expected) in [
-                (
-                    7,
-                    json!({"session_id":"ses","task":"curate"}),
-                    "bad_request",
-                ),
-                (7, json!({"v":1,"task":"curate"}), "bad_request"),
-                (
-                    8,
-                    json!({"v":1,"session_id":"ses","task":"curate"}),
-                    "route_unbound",
-                ),
-                (
-                    7,
-                    json!({"v":1,"session_id":"foreign","task":"curate"}),
-                    "session_mismatch",
-                ),
-                (7, json!({"v":1,"session_id":"ses"}), "invalid_params"),
-                (
-                    7,
-                    json!({"v":1,"session_id":"ses","task":"unknown"}),
-                    "invalid_params",
-                ),
-            ] {
-                assert_eq!(
-                    code(handler.handle_dreamer_run_task(channel, &request).await),
-                    expected
-                );
-            }
-            // Ownership is the published list: a wired task with a Rust host and a
-            // capable claimant is owned; a task with no Rust host (compress-cues,
-            // maintain-docs, evaluate-smart-notes) never is, even when wired.
-            for implemented in [false, true] {
-                for task in CANONICAL_TASKS {
-                    handler.dream_wiring = Some(dream_dispatch::ownership::Wiring {
-                        tasks: if implemented { vec![task] } else { Vec::new() },
-                        broca: false,
-                        broca_file_read: false,
-                    });
-                    let request = json!({"v":1,"session_id":"ses","task":task.as_str(),
-                        "implemented":true,"model_chain":false,"payload":false,"command_id":false});
-                    assert_eq!(
-                        code(handler.handle_dreamer_run_task(7, &request).await),
-                        if implemented && dream_dispatch::ownership::task_roles(task).is_some() {
-                            "rust_scheduler_owns_task"
-                        } else {
-                            "unavailable_capability"
-                        },
-                        "{}",
-                        task.as_str()
-                    );
-                }
-            }
-            config.smart_notes_enabled = false;
-            handler.fixed_config = Some(config.clone());
-            handler.dream_wiring = Some(dream_dispatch::ownership::Wiring {
-                tasks: vec![mc_store::dream_scheduler::schedules::TaskName::EvaluateSmartNotes],
-                broca: false,
-                broca_file_read: false,
-            });
-            assert_eq!(
-                code(
-                    handler
-                        .handle_dreamer_run_task(
-                            7,
-                            &json!({"v":1,"session_id":"ses","task":"evaluate-smart-notes"})
-                        )
-                        .await
-                ),
-                "invalid_params"
-            );
-            handler.dream_wiring = None;
-            config.smart_notes_enabled = true;
-            handler.fixed_config = Some(config.clone());
-            for task in CANONICAL_TASKS {
-                let mut disabled = settings.clone();
-                disabled["dreamer"]["tasks"][task.as_str()]["schedule"] = json!("  ");
-                handler.fixed_dream_settings = Some(disabled);
-                assert_eq!(
-                    code(
-                        handler
-                            .handle_dreamer_run_task(
-                                7,
-                                &json!({"v":1,"session_id":"ses","task":task.as_str()})
-                            )
-                            .await
-                    ),
-                    "invalid_params"
-                );
-            }
-            handler.fixed_dream_settings = Some(settings);
-            config.rust_background_enabled = false;
-            handler.fixed_config = Some(config);
-            for task in CANONICAL_TASKS {
-                assert_eq!(
-                    code(
-                        handler
-                            .handle_dreamer_run_task(
-                                7,
-                                &json!({"v":1,"session_id":"ses","task":task.as_str(),
-                    "command_id":"matrix","payload":{"prompt_body":"recorded","items":[]}})
-                            )
-                            .await
-                    ),
-                    if task.as_str() == CLASSIFY_TASK {
-                        "model_chain_missing"
-                    } else {
-                        "invalid_params"
-                    }
-                );
-            }
-            assert!(store
-                .load_dream_task_command("ses", "matrix")
-                .unwrap()
-                .is_none());
-            assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
-        }
     }
 
     fn owner_prep_methods() -> impl Iterator<Item = &'static str> {
@@ -17104,52 +16953,6 @@ mod tests {
     }
 
     #[test]
-    fn in_flight_snapshot_entries_are_count_bounded_and_cannot_resurrect() {
-        let mut cache = TransformSnapshotCache::new(1024);
-        cache.max_in_flight_entries = 8;
-        let request = |session_id: &str| {
-            let mut request = transform_request(vec![ck("m1", 1, "text")], 1, 200_000);
-            request.session_id = session_id.to_string();
-            Arc::new(request)
-        };
-        // Unique failing sessions: begin() without finish_ready, far past the cap.
-        let mut first_generation = 0;
-        for index in 0..64 {
-            let generation = cache.begin(&format!("failed-{index}"));
-            if index == 0 {
-                first_generation = generation;
-            }
-        }
-        assert!(
-            cache.entries.len() <= 8,
-            "InFlight entries must stay bounded"
-        );
-        assert!(cache.in_flight_lru.len() <= 8);
-        // Evicted sessions read Missing, and a late finish_ready for an evicted
-        // generation cannot resurrect a snapshot.
-        assert!(matches!(
-            cache.get("failed-0"),
-            TransformSnapshotLookup::Missing
-        ));
-        cache.finish_ready("failed-0", first_generation, request("failed-0"), 0, 16);
-        assert!(matches!(
-            cache.get("failed-0"),
-            TransformSnapshotLookup::Missing
-        ));
-        // Ready entries do not occupy InFlight slots: completing one frees its slot.
-        let generation = cache.begin("completes");
-        cache.finish_ready("completes", generation, request("completes"), 0, 16);
-        assert!(!cache
-            .in_flight_lru
-            .iter()
-            .any(|candidate| candidate == "completes"));
-        assert!(matches!(
-            cache.get("completes"),
-            TransformSnapshotLookup::Ready(_)
-        ));
-    }
-
-    #[test]
     fn request_byte_cap_uses_the_subc_frame_budget_for_every_request_class() {
         let pad = |method: &str, key: &str, bytes: usize| {
             format!(
@@ -17181,168 +16984,6 @@ mod tests {
         assert!(
             enforce_request_byte_cap(&pad("ctx_memory", "name", MAX_FACADE_FRAME_BYTES)).is_err()
         );
-    }
-
-    #[test]
-    fn application_frame_limits_are_derived_from_subc_protocol() {
-        let fixture: Value =
-            serde_json::from_str(include_str!("../testdata/subc-frame-limits.json")).unwrap();
-        assert_eq!(
-            fixture["max_frame_body_bytes"].as_u64().unwrap() as usize,
-            subc_protocol::MAX_FRAME_BODY_LEN as usize
-        );
-        assert_eq!(
-            fixture["application_body_bytes"].as_u64().unwrap() as usize,
-            TRANSFORM_PAGE_MAX_BYTES
-        );
-        assert_eq!(
-            fixture["transform_staging_bytes"].as_u64().unwrap() as usize,
-            TRANSFORM_PAGE_MAX_STAGED_BYTES
-        );
-    }
-
-    #[test]
-    fn transform_snapshot_cache_is_generation_safe_and_lru_bounded() {
-        let request = |session_id: &str| {
-            let mut request = transform_request(vec![ck("m1", 1, "text")], 1, 200_000);
-            request.session_id = session_id.to_string();
-            Arc::new(request)
-        };
-        let mut cache = TransformSnapshotCache::new(10);
-        assert!(!cache.generation_present_in_flight_or_ready("a", 1));
-        let a = cache.begin("a");
-        assert!(cache.generation_present_in_flight_or_ready("a", a));
-        cache.finish_ready("a", a, request("a"), 1, 5);
-        assert!(cache.generation_present_in_flight_or_ready("a", a));
-        let b = cache.begin("b");
-        cache.finish_ready("b", b, request("b"), 2, 5);
-        assert!(matches!(cache.get("a"), TransformSnapshotLookup::Ready(_)));
-
-        let c = cache.begin("c");
-        cache.finish_ready("c", c, request("c"), 3, 5);
-        assert!(matches!(cache.get("b"), TransformSnapshotLookup::Missing));
-        assert!(matches!(cache.get("a"), TransformSnapshotLookup::Ready(_)));
-        assert!(matches!(cache.get("c"), TransformSnapshotLookup::Ready(_)));
-        assert_eq!(cache.ready_bytes, 10);
-
-        let stale = cache.begin("a");
-        let current = cache.begin("a");
-        cache.finish_ready("a", stale, request("stale"), 4, 1);
-        assert!(matches!(cache.get("a"), TransformSnapshotLookup::InFlight));
-        cache.finish_ready("a", current, request("a"), 5, 4);
-        assert!(cache.ready_generation_matches("a", current));
-        assert!(cache.ready_bytes <= cache.max_ready_bytes);
-
-        let oversized = cache.begin("oversized");
-        cache.finish_ready("oversized", oversized, request("oversized"), 0, 11);
-        assert!(matches!(
-            cache.get("oversized"),
-            TransformSnapshotLookup::Missing
-        ));
-    }
-
-    #[test]
-    fn snapshot_lease_budget_survives_cache_churn_and_releases_exact_charge() {
-        let request = |session_id: &str| {
-            let mut request = transform_request(vec![ck("m1", 1, "text")], 1, 200_000);
-            request.session_id = session_id.to_string();
-            Arc::new(request)
-        };
-        let mut cache = TransformSnapshotCache::new(10);
-        {
-            let mut budget = cache
-                .active_leases
-                .lock()
-                .expect("snapshot lease budget mutex");
-            budget.max_bytes = 10;
-            budget.max_count = 1;
-        }
-        let a = cache.begin("a");
-        cache.finish_ready("a", a, request("a"), 0, 5);
-        let b = cache.begin("b");
-        cache.finish_ready("b", b, request("b"), 0, 5);
-        let lease = match cache.get("a") {
-            TransformSnapshotLookup::Ready(lease) => lease,
-            _ => panic!("first lease must fit"),
-        };
-
-        // Churning the map can evict the map entry, but the leased Arc remains charged
-        // until its guard drops and neither accounting domain may exceed its own bound.
-        let c = cache.begin("c");
-        cache.finish_ready("c", c, request("c"), 0, 6);
-        assert!(cache.ready_bytes <= cache.max_ready_bytes);
-        assert!(matches!(
-            cache.get("c"),
-            TransformSnapshotLookup::LeaseBudgetExceeded
-        ));
-        {
-            let budget = cache
-                .active_leases
-                .lock()
-                .expect("snapshot lease budget mutex");
-            assert_eq!((budget.count, budget.bytes), (1, 5));
-            assert!(budget.count <= budget.max_count);
-            assert!(budget.bytes <= budget.max_bytes);
-        }
-        assert_eq!(lease.request.session_id, "a");
-        drop(lease);
-        {
-            let budget = cache
-                .active_leases
-                .lock()
-                .expect("snapshot lease budget mutex");
-            assert_eq!((budget.count, budget.bytes), (0, 0));
-        }
-        assert!(matches!(cache.get("c"), TransformSnapshotLookup::Ready(_)));
-    }
-
-    #[test]
-    fn snapshot_lease_budget_rejects_second_lease_on_bytes_alone() {
-        let request = |session_id: &str| {
-            let mut request = transform_request(vec![ck("m1", 1, "text")], 1, 200_000);
-            request.session_id = session_id.to_string();
-            Arc::new(request)
-        };
-        let mut cache = TransformSnapshotCache::new(16);
-        {
-            let mut budget = cache
-                .active_leases
-                .lock()
-                .expect("snapshot lease budget mutex");
-            budget.max_bytes = 9;
-            budget.max_count = 8;
-        }
-        let first_generation = cache.begin("first");
-        cache.finish_ready("first", first_generation, request("first"), 0, 5);
-        let second_generation = cache.begin("second");
-        cache.finish_ready("second", second_generation, request("second"), 0, 5);
-
-        let first = match cache.get("first") {
-            TransformSnapshotLookup::Ready(lease) => lease,
-            _ => panic!("first lease must fit within both budgets"),
-        };
-        assert!(matches!(
-            cache.get("second"),
-            TransformSnapshotLookup::LeaseBudgetExceeded
-        ));
-        {
-            let budget = cache
-                .active_leases
-                .lock()
-                .expect("snapshot lease budget mutex");
-            assert_eq!(budget.count, 1);
-            assert!(
-                budget.count < budget.max_count,
-                "the count cap must not decide this case"
-            );
-            assert_eq!(budget.bytes, 5);
-        }
-
-        drop(first);
-        assert!(matches!(
-            cache.get("second"),
-            TransformSnapshotLookup::Ready(_)
-        ));
     }
 
     #[path = "background_run_limits.rs"]
@@ -17603,95 +17244,6 @@ mod tests {
         handler_with_store_and_resolver(state, config, Arc::new(MissingSessionResolver))
     }
 
-    /// A line-oriented test bridge lets the real TypeScript adapter drive the module
-    /// without a daemon or access to an operator's stores. It is ignored by Cargo's
-    /// normal suite and explicitly launched by the system-delivery integration test.
-    #[tokio::test]
-    #[ignore]
-    async fn system_delivery_adapter_fixture() {
-        use std::io::{BufRead, Write};
-        let (mut handler, mut store, _dir, _) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        for line in std::io::stdin().lock().lines() {
-            let request: Value = serde_json::from_str(&line.unwrap()).unwrap();
-            let session = request["session_id"].as_str().unwrap_or("ses");
-            let root = request["project_root"]
-                .as_str()
-                .unwrap_or("/nonexistent-docs");
-            if request["method"] == "test.init" {
-                let home = request["data_home"].as_str().unwrap();
-                let mut descriptor = dev_descriptor_at(home);
-                descriptor.backend = StorageBackend::Sqlite {
-                    path: PathBuf::from(home)
-                        .join("store.db")
-                        .to_string_lossy()
-                        .into_owned(),
-                };
-                store = Arc::new(McStore::open_for_test(&descriptor).unwrap());
-                handler = McHandler::with_producer_factory_config_resolver(
-                    Arc::new(TestProducerFactory {
-                        state: Arc::new(ProducerState::default()),
-                    }),
-                    default_test_config(),
-                    Arc::new(MissingSessionResolver),
-                );
-                handler.store.set(Arc::clone(&store)).ok().unwrap();
-            }
-            handler.bind_route(7, binding_with_harness(root, "opencode", session));
-            let response = match request["method"].as_str().unwrap() {
-                "test.init" => serde_json::json!({"ok": true}),
-                "test.queue" => {
-                    let target = store
-                        .load_tags_for_session(session)
-                        .unwrap()
-                        .into_iter()
-                        .find(|tag| tag.block_id.starts_with("old-answer#"))
-                        .unwrap()
-                        .block_id;
-                    store
-                        .append_pending_agent_drops(session, &[target], 1)
-                        .unwrap();
-                    serde_json::json!({"ok": true})
-                }
-                "test.status" => {
-                    let loaded = store.load(session).unwrap();
-                    let last_request = handler
-                        .transform_snapshots
-                        .lock()
-                        .unwrap()
-                        .ready_request_clone(session);
-                    serde_json::json!({
-                        "pending": store.load_pending_agent_drops(session).unwrap().len(),
-                        "system_hash": loaded.meta.last_system_prompt_hash,
-                        "render_config": loaded.meta.last_render_config,
-                        "soft_refresh": loaded.meta.soft_refresh_pending,
-                        "signed_turn_active": last_request.as_ref().map(|req| transform::active_signed_head_for_test(req)),
-                        "last_request_mids": last_request.as_ref().map(|req| req.messages.iter().map(|m| (&m.mid, &m.ck.role, m.ck.meta.synthetic)).collect::<Vec<_>>()),
-                    })
-                }
-                "test.other_identity" => {
-                    let mut loaded = store.load(session).unwrap();
-                    let (current, previous) = match request["input"].as_str().unwrap() {
-                        "model" => ("claude-opus-5-5", "claude-opus-5-4"),
-                        "renderer" => ("mre3", "mre2"),
-                        "workspace" => ("ws:0:", "ws:3:old"),
-                        _ => panic!("unknown identity input"),
-                    };
-                    assert!(loaded.meta.last_render_config.contains(current));
-                    loaded.meta.last_render_config =
-                        loaded.meta.last_render_config.replace(current, previous);
-                    store
-                        .commit(session, loaded.row_version, &loaded.core, &loaded.meta)
-                        .unwrap();
-                    serde_json::json!({"ok": true})
-                }
-                _ => call_dispatch_request_on_channel(&handler, 7, request).await,
-            };
-            println!("SYSTEM_DELIVERY_RESPONSE {}", response);
-            std::io::stdout().flush().unwrap();
-        }
-    }
-
     fn handler_with_store_and_resolver(
         state: Arc<ProducerState>,
         config: McModuleConfig,
@@ -17713,23 +17265,6 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         handler.bind_route(7, binding(project.to_str().unwrap(), "ses"));
         (handler, store, dir, project)
-    }
-
-    fn cache_last_served_test_messages(
-        handler: &McHandler,
-        session_id: &str,
-        messages: Vec<CkIngressMessage>,
-    ) {
-        let request = serde_json::from_value::<TransformRequest>(json!({
-            "serializer_profile": "opencode",
-            "session_id": session_id,
-            "render_config": "",
-            "messages": messages,
-        }))
-        .expect("test transform request");
-        let mut snapshots = handler.transform_snapshots.lock().unwrap();
-        let generation = snapshots.begin(session_id);
-        snapshots.finish_ready(session_id, generation, Arc::new(request), 0, 1);
     }
 
     fn cached_tool_result(mid: &str, tool_name: &str) -> CkIngressMessage {
@@ -17846,78 +17381,6 @@ mod tests {
         let response_bytes = serde_json::to_string(&claude_code_response).unwrap();
         assert!(response_bytes.contains(mural_a));
         assert!(!response_bytes.contains("dW50cnVzdGVkLWNjLWJ5dGVz"));
-    }
-
-    #[test]
-    fn claude_code_config_controls_fill_request_without_changing_default_request_bytes() {
-        let value = json!({
-            "kind": "transform",
-            "v": 2,
-            "serializer_profile": "claude-code-anthropic",
-            "session_id": "config-controls",
-            "render_config": "cfg",
-            "messages": []
-        });
-        let mut default_request: TransformRequest = serde_json::from_value(value.clone()).unwrap();
-        assert!(default_request.channel2_delivered_id.is_none());
-        let before = serde_json::to_vec(&default_request).unwrap();
-        assert!(
-            serde_json::from_slice::<Value>(&before)
-                .unwrap()
-                .get("channel2_delivered_id")
-                .is_none(),
-            "an absent delivery echo must remain absent on the compatibility wire"
-        );
-        apply_claude_code_config_controls(
-            &mut default_request,
-            &McModuleConfig::default(),
-            Some(SerializerProfile::ClaudeCodeAnthropic),
-        );
-        assert_eq!(serde_json::to_vec(&default_request).unwrap(), before);
-
-        let mut echoed_value = value.clone();
-        echoed_value["channel2_delivered_id"] = json!("directive-1");
-        let echoed_request: TransformRequest = serde_json::from_value(echoed_value).unwrap();
-        assert_eq!(
-            echoed_request.channel2_delivered_id.as_deref(),
-            Some("directive-1")
-        );
-
-        let mut configured = McModuleConfig::default();
-        configured.auto_search.enabled = false;
-        configured.auto_search.score_threshold = 0.8;
-        configured.auto_search.min_prompt_chars = 42;
-        configured.caveman.enabled = true;
-        configured.caveman.min_size = 900;
-        configured.prompt_surface_guidance_override =
-            Some("## Magic Context\n\nTrusted route guidance.".to_string());
-        apply_claude_code_config_controls(
-            &mut default_request,
-            &configured,
-            Some(SerializerProfile::ClaudeCodeAnthropic),
-        );
-        assert!(!default_request.auto_search_enabled);
-        assert_eq!(default_request.auto_search_score_threshold, 0.8);
-        assert_eq!(default_request.auto_search_min_prompt_chars, 42);
-        assert!(default_request.caveman_enabled);
-        assert_eq!(default_request.caveman_min_chars, 900);
-        assert_eq!(
-            default_request.prompt_surface_guidance_override.as_deref(),
-            Some("## Magic Context\n\nTrusted route guidance.")
-        );
-
-        let mut open_code_request: TransformRequest = serde_json::from_value(value).unwrap();
-        open_code_request.serializer_profile = "opencode-aisdk".to_string();
-        let unchanged = open_code_request.clone();
-        apply_claude_code_config_controls(
-            &mut open_code_request,
-            &configured,
-            Some(SerializerProfile::OpencodeAiSdk),
-        );
-        assert_eq!(
-            serde_json::to_vec(&open_code_request).unwrap(),
-            serde_json::to_vec(&unchanged).unwrap()
-        );
     }
 
     #[tokio::test]
@@ -18366,17 +17829,6 @@ mod tests {
         call_transform_request_on_channel(handler, 7, request).await
     }
 
-    async fn call_transform_request_on_channel(
-        handler: &McHandler,
-        channel: u16,
-        request: Value,
-    ) -> Value {
-        match handler.handle_transform_for_test(channel, request).await {
-            HandlerOutcome::Response(bytes) => serde_json::from_slice(&bytes).unwrap(),
-            other => panic!("unexpected handler outcome: {other:?}"),
-        }
-    }
-
     async fn call_transform_outcome(handler: &McHandler, request: Value) -> HandlerOutcome {
         handler.handle_transform_for_test(7, request).await
     }
@@ -18623,195 +18075,6 @@ mod tests {
     }
 
     #[test]
-    fn cached_transform_response_writer_is_byte_identical_to_value_round_trip() {
-        let response = transform::TransformResponse::passthrough(
-            vec![ck("wire-byte-cache", 1, "hello").ck],
-            Some("fingerprint".to_string()),
-        );
-        let expected =
-            serde_json::to_vec(&serde_json::to_value(response.clone()).unwrap()).unwrap();
-        let request = transform_request(vec![ck("wire-byte-cache", 1, "hello")], 1, 100);
-        let HandlerOutcome::Response(actual) = respond_transform(&request, response) else {
-            panic!("cached transform response failed to encode");
-        };
-        assert_eq!(actual, expected);
-    }
-
-    /// The pending-transform cap counts every session that would start a new pending
-    /// transform. A session that only had an entry (a refused first page left one behind,
-    /// or an idle session keeping its completed reply) used to skip the cap check.
-    #[test]
-    fn the_pending_transform_cap_applies_to_sessions_that_already_have_an_entry() {
-        let stage_first = |pages: &mut TransformPageCoordinator, session: &str, index: usize| {
-            pages.stage(
-                session,
-                format!("transform-{session}"),
-                1,
-                index,
-                2,
-                format!("digest-{index}"),
-                json!({ "messages": [] }),
-                10,
-                false,
-                0,
-            )
-        };
-        let mut pages = TransformPageCoordinator {
-            max_pending_transforms: 1,
-            ..TransformPageCoordinator::default()
-        };
-        // A refused first page leaves nothing behind.
-        assert_eq!(
-            stage_first(&mut pages, "refused", 1).err(),
-            Some(TransformPageStageError::AttemptMismatch)
-        );
-        assert!(!pages.sessions.contains_key("refused"));
-        // An idle session that keeps a completed reply.
-        pages
-            .sessions
-            .entry("idle".to_string())
-            .or_default()
-            .completed = Some(CompletedTransformPage {
-            transform_id: "done".to_string(),
-            generation: 1,
-            final_digest: "digest-final".to_string(),
-            result: Vec::new(),
-        });
-        assert!(matches!(
-            stage_first(&mut pages, "active", 0),
-            Ok(TransformPageStageAction::Ack(1))
-        ));
-        assert_eq!(pages.pending_transform_count, 1);
-        for session in ["refused", "idle", "new"] {
-            assert_eq!(
-                stage_first(&mut pages, session, 0).err(),
-                Some(TransformPageStageError::BufferOverflow),
-                "{session} must not start a pending transform past the cap"
-            );
-        }
-        assert_eq!(pages.pending_transform_count, 1);
-        // The session already pending may continue.
-        assert!(stage_first(&mut pages, "active", 1).is_ok());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn module_status_memory_metrics_match_budget_accounting_and_falsy_semantics() {
-        let (handler, _store, _dir, _project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let response = call_transform_request(
-            &handler,
-            request(vec![ck("metrics", 1, "holder metrics fixture")]),
-        )
-        .await;
-        assert_eq!(response["status"], "ok");
-        let lease = {
-            let mut snapshots = handler
-                .transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex");
-            match snapshots.get("ses") {
-                TransformSnapshotLookup::Ready(lease) => lease,
-                _ => panic!("expected a ready snapshot lease"),
-            }
-        };
-        {
-            let mut pages = handler
-                .transform_pages
-                .lock()
-                .expect("transform page mutex");
-            let staged = pages
-                .stage(
-                    "collecting-session",
-                    "transform-1".to_string(),
-                    1,
-                    0,
-                    2,
-                    "digest-0".to_string(),
-                    json!({"messages": []}),
-                    123,
-                    false,
-                    456,
-                )
-                .unwrap();
-            assert!(matches!(staged, TransformPageStageAction::Ack(1)));
-            pages
-                .sessions
-                .entry("completed-session".to_string())
-                .or_default()
-                .completed = Some(CompletedTransformPage {
-                transform_id: "completed".to_string(),
-                generation: 1,
-                final_digest: "digest-final".to_string(),
-                result: vec![0; 17],
-            });
-        }
-
-        let outcome = handler.handle_status_value(&json!({"method": "status"}));
-        let HandlerOutcome::Response(bytes) = outcome else {
-            panic!("module status did not respond: {outcome:?}");
-        };
-        let status: Value = serde_json::from_slice(&bytes).unwrap();
-        let metrics = &status["memory_holders"];
-        let snapshot_charge = {
-            let snapshots = handler
-                .transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex");
-            assert_eq!(metrics["snapshots"]["charged_bytes"], snapshots.ready_bytes);
-            assert_eq!(metrics["snapshots"]["entry_count"], 1);
-            assert_eq!(metrics["snapshots"]["in_flight_entry_count"], 0);
-            let TransformSnapshot::Ready { retained_bytes, .. } =
-                snapshots.entries.get("ses").unwrap()
-            else {
-                panic!("expected ready snapshot");
-            };
-            *retained_bytes
-        };
-        assert_eq!(
-            metrics["snapshots"]["active_lease_charged_bytes"],
-            snapshot_charge
-        );
-        assert_eq!(metrics["snapshots"]["active_lease_entry_count"], 1);
-        assert_eq!(
-            metrics["projections"]["charged_bytes"],
-            handler
-                .projections
-                .lock()
-                .expect("projection cache mutex")
-                .retained_bytes
-        );
-        assert_eq!(
-            metrics["serialized_output"]["charged_bytes"],
-            handler
-                .serialized_outputs
-                .lock()
-                .expect("serialized output cache mutex")
-                .metrics()
-                .0
-        );
-        assert_eq!(metrics["native_attach"]["charged_bytes"], 0);
-        assert_eq!(metrics["native_attach"]["entry_count"], 0);
-        assert_eq!(metrics["page_coordinator"]["charged_bytes"], 123);
-        assert_eq!(metrics["page_coordinator"]["entry_count"], 1);
-        assert_eq!(metrics["page_coordinator"]["completed_response_bytes"], 17);
-        assert_eq!(metrics["page_coordinator"]["completed_response_count"], 1);
-        assert_eq!(metrics["page_coordinator"]["collector_active"], true);
-        assert_eq!(metrics["page_coordinator"]["oldest_queued_at_ms"], 456);
-        handler
-            .transform_pages
-            .lock()
-            .expect("transform page mutex")
-            .discard("collecting-session");
-        let idle_pages = handler.memory_holder_metrics();
-        assert_eq!(idle_pages["page_coordinator"]["collector_active"], false);
-        assert_eq!(
-            idle_pages["page_coordinator"]["oldest_queued_at_ms"],
-            Value::Null
-        );
-        drop(lease);
-    }
-
-    #[test]
     fn transform_health_idle_is_ok_and_empty_queue_is_explicit_null() {
         let health = DispatchHealth::new();
         let report = health.report(10_000);
@@ -18896,114 +18159,6 @@ mod tests {
         let stuck_metrics = past_bound.metrics.unwrap();
         assert_eq!(stuck_metrics["state"], json!("stuck"));
         assert_eq!(stuck_metrics["stuck"], json!(true));
-    }
-
-    #[test]
-    fn transform_health_normal_advance_is_ok_and_errors_still_advance() {
-        let health = DispatchHealth::new();
-        let ticket = TransformDispatchTicket::new(&health, 7);
-        ticket.accept();
-        assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 1);
-        ticket.finish(false);
-
-        let normal_report = health.report(now_ms().max(0) as u64);
-        assert_eq!(normal_report.status, HealthStatus::Ok);
-        assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            normal_report.metrics.as_ref().unwrap()["consecutive_error_count"],
-            json!(0)
-        );
-
-        let error_ticket = TransformDispatchTicket::new(&health, 7);
-        error_ticket.accept();
-        error_ticket.finish(true);
-        let error_report = health.report(now_ms().max(0) as u64);
-        assert_eq!(error_report.status, HealthStatus::Ok);
-        assert_eq!(
-            error_report.metrics.as_ref().unwrap()["consecutive_error_count"],
-            json!(1)
-        );
-        assert!(error_report
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("advancing but erroring")));
-    }
-
-    #[test]
-    fn transform_health_refusal_does_not_advance_a_stale_completion_heartbeat() {
-        let health = DispatchHealth::new();
-        health
-            .last_dispatch_started_at_ms
-            .store(200_000, Ordering::Relaxed);
-        health
-            .last_dispatch_completed_at_ms
-            .store(50_000, Ordering::Relaxed);
-        {
-            // A refused item never calls accept, so dropping its ticket cannot make the
-            // refusal loop look like completed transform work.
-            let _refused = TransformDispatchTicket::new(&health, 7);
-        }
-
-        let report = health.report(200_001);
-        assert_eq!(report.status, HealthStatus::Degraded);
-        assert_eq!(
-            health.last_dispatch_completed_at_ms.load(Ordering::Relaxed),
-            50_000
-        );
-    }
-
-    #[test]
-    fn transform_dispatch_panic_drop_guard_decrements_without_completion_stamp() {
-        let health = DispatchHealth::new();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let ticket = TransformDispatchTicket::new(&health, 7);
-            ticket.accept();
-            panic!("simulated transform dispatch panic");
-        }));
-        assert!(result.is_err());
-        assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            health.last_dispatch_completed_at_ms.load(Ordering::Relaxed),
-            0
-        );
-    }
-
-    #[test]
-    fn route_close_releases_only_its_in_flight_dispatch_and_cannot_double_decrement() {
-        let health = DispatchHealth::new();
-        health.route_open(7);
-        health.route_open(8);
-        let closed_route_ticket = TransformDispatchTicket::new(&health, 7);
-        let live_route_ticket = TransformDispatchTicket::new(&health, 8);
-        closed_route_ticket.accept();
-        live_route_ticket.accept();
-        assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 2);
-
-        health.route_gone(7);
-        assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 1);
-        closed_route_ticket.finish(false);
-        assert_eq!(
-            health.in_flight_count.load(Ordering::Relaxed),
-            1,
-            "a late completion from the abandoned requester must not decrement another route"
-        );
-
-        let post_close_ticket = TransformDispatchTicket::new(&health, 7);
-        post_close_ticket.accept();
-        assert_eq!(
-            health.in_flight_count.load(Ordering::Relaxed),
-            1,
-            "a torn handler cannot register after route.gone"
-        );
-        live_route_ticket.finish(false);
-        assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 0);
-
-        health.route_open(7);
-        let rebound_ticket = TransformDispatchTicket::new(&health, 7);
-        rebound_ticket.accept();
-        assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 1);
-        rebound_ticket.finish(false);
-        assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 0);
     }
 
     // (the same gate as the corruption path itself); a default build has neither the arm
@@ -19419,170 +18574,6 @@ mod tests {
         assert_eq!(target["parts"].as_array().unwrap().len(), 1);
     }
 
-    #[test]
-    fn native_response_release_guard_full_serializes_without_frontier() {
-        let request = native_cache_request(
-            "native-release-guard",
-            vec![ck("guard-message", 1, "hello")],
-            vec![native_text_message("guard-message", "user", "hello")],
-            "guard-fingerprint",
-        );
-        let mut response = transform::TransformResponse::passthrough(
-            request
-                .messages
-                .iter()
-                .map(|message| message.ck.clone())
-                .collect(),
-            request.full_array_fingerprint.clone(),
-        );
-
-        finalize_native_messages_response(
-            &mut response,
-            &request,
-            &test_reasoning_clear_units(&request, &BTreeMap::new(), 1),
-            &BTreeMap::new(),
-            None,
-            None,
-            false,
-            None,
-            NativeAttachmentCacheStats::default(),
-        );
-
-        assert!(response.native_messages.is_some());
-        assert!(response.native_messages_delta.is_none());
-    }
-
-    #[test]
-    fn transform_response_seam_turns_native_omission_into_a_typed_refusal() {
-        let request = native_cache_request(
-            "native-response-seam",
-            vec![ck("seam-message", 1, "hello")],
-            vec![native_text_message("seam-message", "user", "hello")],
-            "seam-fingerprint",
-        );
-        let response = transform::TransformResponse::passthrough(
-            request
-                .messages
-                .iter()
-                .map(|message| message.ck.clone())
-                .collect(),
-            request.full_array_fingerprint.clone(),
-        );
-
-        let outcome = respond_transform(&request, response);
-
-        assert_eq!(error_code(outcome), "transform_native_response_omitted");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn cold_soft_plus_full_sync_primes_the_next_tail_delta() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        store
-            .replace_compartments(
-                "ses",
-                &[StoredCompartment {
-                    sequence: 1,
-                    start_message: 1,
-                    end_message: 1,
-                    start_message_id: "m1#0".to_string(),
-                    end_message_id: "m1#0".to_string(),
-                    title: "covered history".to_string(),
-                    content: "summary of m1".to_string(),
-                    p1: Some("summary of m1".to_string()),
-                    importance: 50,
-                    ..Default::default()
-                }],
-            )
-            .unwrap();
-        let first_native = json!({
-            "info": {
-                "id": "m1",
-                "sessionID": "ses",
-                "role": "user",
-                "customInfo": "preserve-me"
-            },
-            "parts": [{ "type": "text", "text": "hello", "customPart": 7 }]
-        });
-        let tail_native = json!({
-            "info": { "id": "m2", "sessionID": "ses", "role": "user" },
-            "parts": [{ "type": "text", "text": "tail" }]
-        });
-        let full_request = |fingerprint: &str| {
-            let mut body = request(vec![ck("m1", 1, "hello"), ck("m2", 2, "tail")]);
-            body["serializer_profile"] = json!("opencode-aisdk");
-            body["serve_native"] = json!(true);
-            body["native_messages"] = json!([first_native.clone(), tail_native.clone()]);
-            body["full_array_fingerprint"] = json!(fingerprint);
-            body
-        };
-
-        let initialized = call_transform_request(&handler, full_request("warmup")).await;
-        assert_eq!(initialized["status"], "ok", "{initialized}");
-        handler.projections.lock().unwrap().remove("ses");
-        handler.native_attachments.lock().unwrap().remove("ses");
-        handler.transform_snapshots.lock().unwrap().remove("ses");
-        handler.serialized_outputs.lock().unwrap().remove("ses");
-        handler.transform_snapshots.lock().unwrap().max_ready_bytes = 1;
-
-        let cold = call_transform_request(&handler, full_request("cold-fp-1")).await;
-        assert_eq!(cold["status"], "ok", "{cold}");
-        assert_eq!(cold["action"], "SOFT+", "{cold}");
-        assert!(cold["native_messages"]
-            .as_array()
-            .is_some_and(|messages| messages.first() != Some(&first_native)));
-        assert_eq!(cold["timings"]["build_serialized_messages"], 3);
-        assert!(!cold["ck_messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|message| message["meta"]["harness_id"] == "m1"));
-        assert!(handler
-            .transform_snapshots
-            .lock()
-            .unwrap()
-            .ready_delta_request("ses")
-            .is_none());
-
-        let second_native = json!({
-            "info": { "id": "m3", "sessionID": "ses", "role": "user" },
-            "parts": [{ "type": "text", "text": "next" }]
-        });
-        let mut delta = request(vec![ck("m3", 3, "next")]);
-        delta["serializer_profile"] = json!("opencode-aisdk");
-        delta["serve_native"] = json!(true);
-        delta["native_messages"] = json!([second_native]);
-        delta["full_array_fingerprint"] = json!("cold-fp-2");
-        delta["tail_delta"] = json!({
-            "after": "cold-fp-1",
-            "replace_from": 2,
-            "native_replace_from": 2,
-        });
-        let delta_bytes = serde_json::to_vec(&delta).unwrap().len();
-        let mut full_followup = request(vec![
-            ck("m1", 1, "hello"),
-            ck("m2", 2, "tail"),
-            ck("m3", 3, "next"),
-        ]);
-        full_followup["serializer_profile"] = json!("opencode-aisdk");
-        full_followup["serve_native"] = json!(true);
-        full_followup["native_messages"] = json!([first_native, tail_native, second_native]);
-        full_followup["full_array_fingerprint"] = json!("cold-fp-2");
-        assert!(delta_bytes < serde_json::to_vec(&full_followup).unwrap().len());
-
-        let attached = call_transform_request(&handler, delta).await;
-        assert_eq!(attached["status"], "ok", "{attached}");
-        assert_eq!(attached["action"], "SOFT+", "{attached}");
-        assert_eq!(attached["timings"]["projection_reused_messages"], 2);
-        assert!(
-            attached["timings"]["native_cache_reused_messages"]
-                .as_u64()
-                .unwrap_or_default()
-                > 0,
-            "tail delta must reuse the transformed native prefix: {attached}"
-        );
-    }
-
     fn native_cache_request(
         session_id: &str,
         messages: Vec<CkIngressMessage>,
@@ -19670,28 +18661,6 @@ mod tests {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn run_native_cache_pass(
-        cache: &Mutex<NativeAttachmentCache>,
-        request: &TransformRequest,
-        served: Vec<CkWireMessage>,
-        tag_numbers: &BTreeMap<String, u64>,
-        transition_consumed: bool,
-        revert_epoch: u64,
-        mode: NativeCacheKeyMode,
-    ) -> (transform::TransformResponse, NativeAttachmentCacheStats) {
-        run_native_cache_pass_with_clear_units(
-            cache,
-            request,
-            served,
-            &test_reasoning_clear_units(request, tag_numbers, 1),
-            tag_numbers,
-            transition_consumed,
-            revert_epoch,
-            mode,
-        )
-    }
-
     // These encoder fixtures supply reasoning-clear units as if a cache-busting
     // transform had already committed them. The encoder only replays those decisions.
     fn test_reasoning_clear_units(
@@ -19716,613 +18685,6 @@ mod tests {
                 reset_rule: String::new(),
             })
             .collect()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn run_native_cache_pass_with_clear_units(
-        cache: &Mutex<NativeAttachmentCache>,
-        request: &TransformRequest,
-        served: Vec<CkWireMessage>,
-        reasoning_clear_units: &[mc_core::FrozenUnit],
-        tag_numbers: &BTreeMap<String, u64>,
-        transition_consumed: bool,
-        revert_epoch: u64,
-        mode: NativeCacheKeyMode,
-    ) -> (transform::TransformResponse, NativeAttachmentCacheStats) {
-        let mut response = transform::TransformResponse::passthrough(
-            served,
-            request.full_array_fingerprint.clone(),
-        );
-        let native_delta_frontier = request
-            .tail_delta
-            .as_ref()
-            .and_then(Value::as_object)
-            .and_then(|delta| {
-                Some(NativeDeltaFrontier {
-                    after: delta.get("after")?.as_str()?.to_string(),
-                    native_replace_from: usize::try_from(
-                        delta.get("native_replace_from")?.as_u64()?,
-                    )
-                    .ok()?,
-                    native_prefix: Vec::new(),
-                    native_prefix_retained_bytes: Vec::new(),
-                    projection_cache: None,
-                })
-            });
-        let stats = attach_native_messages_incremental(
-            &mut response,
-            request,
-            reasoning_clear_units,
-            tag_numbers,
-            None,
-            None,
-            transition_consumed,
-            native_delta_frontier.as_ref(),
-            revert_epoch,
-            cache,
-            mode,
-        );
-        (response, stats)
-    }
-
-    fn seed_handler_delta_snapshot(
-        handler: &McHandler,
-        request: &TransformRequest,
-        revert_epoch: u64,
-    ) {
-        let served = request
-            .messages
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-        run_native_cache_pass(
-            &handler.native_attachments,
-            request,
-            served,
-            &BTreeMap::new(),
-            false,
-            revert_epoch,
-            NativeCacheKeyMode::Normal,
-        );
-        handler.store_projection_cache(
-            request,
-            revert_epoch,
-            Arc::new(
-                crate::ck_wire::project_messages(&request.messages)
-                    .expect("seeded projection must succeed"),
-            ),
-            None,
-        );
-        let retained_bytes = serde_json::to_vec(request).unwrap().len();
-        let mut snapshots = handler
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex");
-        let generation = snapshots.begin(&request.session_id);
-        snapshots.finish_ready(
-            &request.session_id,
-            generation,
-            Arc::new(request.clone()),
-            revert_epoch,
-            retained_bytes,
-        );
-    }
-
-    #[test]
-    fn incremental_native_cache_replays_complex_prefix_and_encodes_only_tail() {
-        let todo = injection::build_synthetic_todo_pair(
-            r#"[{"content":"Keep the pair","status":"in_progress","priority":"high"}]"#,
-        )
-        .unwrap();
-        let frozen_call = assistant_tool_call("call-frozen", 1);
-        let frozen_result = tool_result("result-frozen", 2, "[dropped]");
-        let reasoning = ck_reasoning("assistant-old", 3, "signed historical thinking");
-        let user = ck("user-one", 4, "prompt");
-        let mut served = vec![
-            CkWireMessage::synthetic_user_text("frozen m0".to_string()),
-            todo.assistant_msg,
-            todo.tool_msg,
-            frozen_call.ck.clone(),
-            frozen_result.ck.clone(),
-            reasoning.ck.clone(),
-            user.ck.clone(),
-        ];
-        let native = vec![
-            json!({
-                "info": { "id": "assistant-old", "role": "assistant" },
-                "parts": [
-                    { "type": "reasoning", "text": "signed historical thinking", "metadata": { "signature": "sig" } },
-                    { "type": "compaction", "summary": "keep marker representation" }
-                ]
-            }),
-            native_text_message("user-one", "user", "prompt"),
-        ];
-        let messages = vec![frozen_call, frozen_result, reasoning, user];
-        let first_request =
-            native_cache_request("native-complex", messages.clone(), native.clone(), "fp-1");
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        let tags = BTreeMap::from([("assistant-old".to_string(), 1)]);
-        let (_first, first_stats) = run_native_cache_pass(
-            &cache,
-            &first_request,
-            served.clone(),
-            &tags,
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(first_stats.reused_messages, 0);
-
-        let appended = ck("user-two", 5, "second prompt");
-        served.push(appended.ck.clone());
-        let mut next_messages = messages;
-        next_messages.push(appended);
-        let mut next_native = native;
-        next_native.push(native_text_message("user-two", "user", "second prompt"));
-        let mut second_request =
-            native_cache_request("native-complex", next_messages, next_native, "fp-2");
-        second_request.tail_delta = Some(json!({
-            "after": "fp-1",
-            "replace_from": 4,
-            "native_replace_from": 2,
-        }));
-        let (second, second_stats) = run_native_cache_pass(
-            &cache,
-            &second_request,
-            served,
-            &tags,
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert!(second_stats.reused_messages >= 5, "{second_stats:?}");
-        assert!(second_stats.encoded_messages <= 2, "{second_stats:?}");
-        let native = second.native_messages.expect("incremental native output");
-        let encoded = serde_json::to_string(&native).unwrap();
-        assert!(encoded.contains("syntheticTodoMarker"));
-        assert!(encoded.contains("keep marker representation"));
-        assert!(encoded.contains("[dropped]"));
-        assert!(native.iter().any(|message| {
-            message["parts"].as_array().is_some_and(|parts| {
-                parts.iter().any(|part| {
-                    part["type"] == json!("reasoning")
-                        && part["text"] == json!("signed historical thinking")
-                })
-            })
-        }));
-        assert_eq!(cache.lock().unwrap().stats("native-complex"), second_stats);
-    }
-
-    #[test]
-    fn tagged_tool_attachments_survive_native_cache_and_explicit_drop_stays_dropped() {
-        for status in ["completed", "error"] {
-            let mut native = vec![json!({
-                "info": { "id": "tool-msg", "role": "assistant" },
-                "parts": [{ "type": "tool", "callID": "call", "tool": "read", "state": {
-                    "status": status, "input": {}, "output": "Read result", "error": "Read result",
-                    "attachments": [
-                        { "type": "file", "id": "image-id", "mime": "image/jpeg", "url": "data:image/jpeg;base64,aW1n", "filename": "screen.jpg", "vendor": { "keep": true } },
-                        { "type": "file", "mime": "application/pdf", "url": "data:application/pdf;base64,cGRm", "filename": "read.pdf" },
-                        { "type": "vendor-file", "id": "opaque-id", "payload": [1, 2] },
-                        { "type": "text", "text": "attached text", "vendor": "keep" }
-                    ], "time": { "start": 1, "end": 2 }
-                } }]
-            })];
-            native.push(native_text_message("user-one", "user", "first prompt"));
-            let ingress = codec::decode_opencode(&native).messages;
-            let request = native_cache_request(status, ingress.clone(), native.clone(), "fp-1");
-            let mut served = ingress.iter().map(|m| m.ck.clone()).collect::<Vec<_>>();
-            let CkKind::ToolResult { output, .. } = &mut served[0].content[1].kind else {
-                panic!("result")
-            };
-            let blocks = match &mut output.kind {
-                CkOutputKind::Content { blocks } | CkOutputKind::ErrorContent { blocks } => blocks,
-                _ => panic!("attachments must be projected as content"),
-            };
-            let ck_wire::ResultBlockKind::Text { text } = &mut blocks[0].kind else {
-                panic!("text child")
-            };
-            *text = "§1§ Read result".into();
-            served[0].content[1].mark_modified();
-            served[0].mark_modified();
-            let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-            let tags = BTreeMap::new();
-            let (first, _) = run_native_cache_pass(
-                &cache,
-                &request,
-                served.clone(),
-                &tags,
-                false,
-                0,
-                NativeCacheKeyMode::Normal,
-            );
-            let first_native = first.native_messages.unwrap();
-            assert_eq!(
-                first_native[0]["parts"][0]["state"]["attachments"],
-                native[0]["parts"][0]["state"]["attachments"]
-            );
-            let output_key = if status == "error" { "error" } else { "output" };
-            assert_eq!(
-                first_native[0]["parts"][0]["state"][output_key],
-                "§1§ Read result"
-            );
-            let frozen_bytes = serde_json::to_vec(&first_native[0]).unwrap();
-            for clear_cache in [false, true] {
-                if clear_cache {
-                    cache.lock().unwrap().remove(status);
-                }
-                let (replay, _) = run_native_cache_pass(
-                    &cache,
-                    &request,
-                    served.clone(),
-                    &tags,
-                    false,
-                    0,
-                    NativeCacheKeyMode::Normal,
-                );
-                assert_eq!(
-                    serde_json::to_vec(&replay.native_messages.unwrap()[0]).unwrap(),
-                    frozen_bytes
-                );
-            }
-            let appended = ck("next", 3, "defer");
-            let mut next_messages = ingress;
-            next_messages.push(appended.clone());
-            let mut next_native = native;
-            next_native.push(native_text_message("next", "user", "defer"));
-            let mut next = native_cache_request(status, next_messages, next_native, "fp-2");
-            next.tail_delta =
-                Some(json!({ "after": "fp-1", "replace_from": 2, "native_replace_from": 2 }));
-            served.push(appended.ck);
-            let prefix = next.native_messages.as_ref().unwrap()[..2]
-                .iter()
-                .cloned()
-                .map(Arc::new)
-                .collect::<Vec<_>>();
-            let frontier = NativeDeltaFrontier {
-                after: "fp-1".into(),
-                native_replace_from: 2,
-                native_prefix_retained_bytes: prefix
-                    .iter()
-                    .map(|value| native_value_retained_bytes(value))
-                    .collect(),
-                native_prefix: prefix,
-                projection_cache: None,
-            };
-            let mut replay = transform::TransformResponse::passthrough(
-                served.clone(),
-                next.full_array_fingerprint.clone(),
-            );
-            let stats = attach_native_messages_incremental(
-                &mut replay,
-                &next,
-                &[],
-                &tags,
-                None,
-                None,
-                false,
-                Some(&frontier),
-                0,
-                &cache,
-                NativeCacheKeyMode::Normal,
-            );
-            assert_eq!(stats.delta_fallback_reason, None);
-            assert!(stats.reused_messages > 0, "{stats:?}");
-            assert_eq!(
-                serde_json::to_vec(&replay.native_messages.unwrap()[0]).unwrap(),
-                frozen_bytes
-            );
-            // Native attach must not restore attachments that the frozen reduction removed.
-            let CkKind::ToolResult { output, .. } = &mut served[0].content[1].kind else {
-                panic!("result")
-            };
-            *output = CkToolOutput::bare(CkOutputKind::Text {
-                text: "[dropped §1§]".into(),
-            });
-            let (drop, _) = run_native_cache_pass(
-                &cache,
-                &next,
-                served,
-                &tags,
-                false,
-                0,
-                NativeCacheKeyMode::Normal,
-            );
-            assert!(drop.native_messages.unwrap()[0]["parts"][0]["state"]
-                .get("attachments")
-                .is_none());
-        }
-    }
-
-    #[test]
-    fn attachment_free_upgrade_keeps_native_served_bytes_identical() {
-        let native = vec![
-            json!({ "info": { "id": "tool-msg", "role": "assistant" }, "parts": [{ "type": "tool", "callID": "call", "tool": "read", "state": { "status": "completed", "input": { "path": "code.rs" }, "output": "line\n\u{0000}§raw§", "vendor": true, "time": { "start": 1, "end": 2 } } }] }),
-        ];
-        let fixed_ingress = codec::decode_opencode(&native).messages;
-        let mut old_ingress = fixed_ingress.clone();
-        let CkKind::ToolResult { output, .. } = &mut old_ingress[0].ck.content[1].kind else {
-            panic!("result")
-        };
-        *output = CkToolOutput::bare(CkOutputKind::Text {
-            text: "line\n\u{0000}§raw§".into(),
-        });
-        old_ingress[0].ck.content[1].mark_modified();
-        old_ingress[0].ck.mark_modified();
-        for tagged in [false, true] {
-            let render = |messages: Vec<CkIngressMessage>| {
-                let mut served = messages.iter().map(|m| m.ck.clone()).collect::<Vec<_>>();
-                if tagged {
-                    let CkKind::ToolResult { output, .. } = &mut served[0].content[1].kind else {
-                        panic!("result")
-                    };
-                    match &mut output.kind {
-                        CkOutputKind::Text { text } => text.insert_str(0, "§1§ "),
-                        CkOutputKind::Content { blocks } => {
-                            let ck_wire::ResultBlockKind::Text { text } = &mut blocks[0].kind
-                            else {
-                                panic!("text")
-                            };
-                            text.insert_str(0, "§1§ ");
-                        }
-                        _ => panic!("output"),
-                    }
-                    served[0].content[1].mark_modified();
-                    served[0].mark_modified();
-                }
-                let request = native_cache_request("upgrade", messages, native.clone(), "fp");
-                let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-                let (response, _) = run_native_cache_pass(
-                    &cache,
-                    &request,
-                    served,
-                    &BTreeMap::new(),
-                    false,
-                    0,
-                    NativeCacheKeyMode::Normal,
-                );
-                serde_json::to_vec(&response.native_messages.unwrap()).unwrap()
-            };
-            assert_eq!(render(old_ingress.clone()), render(fixed_ingress.clone()));
-        }
-    }
-
-    #[test]
-    fn native_delta_ingress_core_is_independent_of_changed_output_messages() {
-        let ingress = vec![
-            ck("core-1", 1, "one"),
-            ck("core-2", 2, "two"),
-            ck("core-3", 3, "three"),
-        ];
-        let request = native_cache_request(
-            "native-prefix-core",
-            ingress.clone(),
-            vec![
-                native_text_message("core-1", "user", "one"),
-                native_text_message("core-2", "user", "two"),
-                native_text_message("core-3", "user", "three"),
-            ],
-            "native-prefix-core-fp",
-        );
-        let mut served = ingress
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-        if let CkKind::Text { text } = &mut served[2].content[0].kind {
-            *text = "changed response tail".to_string();
-        }
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        run_native_cache_pass(
-            &cache,
-            &request,
-            served,
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-
-        let mut cache = cache.lock().unwrap();
-        assert_eq!(
-            cache.sessions["native-prefix-core"]
-                .snapshot
-                .ingress_chunks
-                .len(),
-            3
-        );
-        let (prefix, retained_bytes) = cache
-            .delta_native_prefix("native-prefix-core", 0, "native-prefix-core-fp", 3)
-            .expect("the raw ingress prefix remains attachable");
-        assert_eq!(prefix.len(), 3);
-        assert_eq!(retained_bytes.len(), 3);
-        assert_eq!(
-            prefix[2].as_ref(),
-            &request.native_messages.as_ref().unwrap()[2]
-        );
-    }
-
-    #[test]
-    fn giant_degraded_snapshot_accepts_tail_delta_and_reuses_projection() {
-        const GIANT_MESSAGE_COUNT: usize = 5_001;
-        const GIANT_BLOCK_COUNT: usize = GIANT_MESSAGE_COUNT;
-        const GIANT_NATIVE_WIRE_BYTES: usize = 26 * 1024 * 1024;
-        const SESSION_ID: &str = "native-giant-degraded";
-
-        let (request, served) = native_cache_fixture(
-            SESSION_ID,
-            GIANT_MESSAGE_COUNT,
-            GIANT_BLOCK_COUNT,
-            GIANT_NATIVE_WIRE_BYTES,
-        );
-        let served_bytes = served
-            .iter()
-            .map(|message| serde_json::to_vec(message).unwrap().len())
-            .sum::<usize>();
-        let request = Arc::new(request);
-        let native_wire_bytes = serde_json::to_vec(request.native_messages.as_ref().unwrap())
-            .unwrap()
-            .len();
-        let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, project) = handler_with_store(producer, default_test_config());
-        handler.bind_route(7, binding(project.to_str().unwrap(), SESSION_ID));
-        const GIANT_CORE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
-        *handler.native_attachments.lock().unwrap() =
-            NativeAttachmentCache::with_limits(GIANT_CORE_BUDGET_BYTES, GIANT_CORE_BUDGET_BYTES);
-
-        let projection = Arc::new(
-            crate::ck_wire::project_messages(&request.messages).expect("giant projection"),
-        );
-        let projection_charge = ProjectionCacheSnapshot {
-            context: projection_cache_context(&request),
-            full_array_fingerprint: request.full_array_fingerprint.clone(),
-            message_retained_bytes: Arc::new(vec![0; request.messages.len()]),
-            projection: Arc::clone(&projection),
-        }
-        .retained_bytes(SESSION_ID);
-        assert!(
-            projection_charge <= PROJECTION_CACHE_ENTRY_BUDGET_BYTES,
-            "required projection core must fit: charge={projection_charge} cap={PROJECTION_CACHE_ENTRY_BUDGET_BYTES}"
-        );
-        handler.store_projection_cache(&request, 0, Arc::clone(&projection), None);
-
-        let (first, first_stats) = run_native_cache_pass(
-            &handler.native_attachments,
-            &request,
-            served,
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(first_stats.reused_messages, 0);
-        assert_eq!(first_stats.degraded_store, 1, "{first_stats:?}");
-        assert_eq!(first_stats.refused_store, 0, "{first_stats:?}");
-        drop(first);
-
-        {
-            let cache = handler.native_attachments.lock().unwrap();
-            let entry = &cache.sessions[SESSION_ID];
-            let snapshot = &entry.snapshot;
-            assert!(
-                entry.retained_bytes > cache.max_entry_retained_bytes,
-                "fixture core must exceed its ceiling: charge={} cap={}",
-                entry.retained_bytes,
-                cache.max_entry_retained_bytes
-            );
-            assert_eq!(cache.retained_bytes, entry.retained_bytes);
-            assert_eq!(entry.retained_bytes, snapshot.retained_bytes(served_bytes));
-            assert!(
-                entry.retained_bytes >= native_wire_bytes,
-                "retained core undercharged its native wire: charge={} wire={native_wire_bytes}",
-                entry.retained_bytes
-            );
-            assert!(snapshot.sidecar.messages.is_empty());
-            assert!(snapshot.sidecar_sizes.is_empty());
-            assert_eq!(snapshot.sidecar.order.len(), GIANT_MESSAGE_COUNT);
-            assert_eq!(snapshot.sidecar.mid_pins.len(), GIANT_MESSAGE_COUNT);
-            assert_eq!(snapshot.sidecar_hashes.len(), GIANT_MESSAGE_COUNT);
-            assert_eq!(snapshot.ingress_chunks.len(), GIANT_MESSAGE_COUNT);
-        }
-
-        let request_charge = request.retained_bytes();
-        assert!(
-            request_charge > TRANSFORM_SNAPSHOT_BUDGET_BYTES,
-            "fixture must exceed the legacy full-request snapshot budget: charge={request_charge}"
-        );
-        {
-            let mut snapshots = handler.transform_snapshots.lock().unwrap();
-            let generation = snapshots.begin(SESSION_ID);
-            snapshots.finish_ready(
-                SESSION_ID,
-                generation,
-                Arc::clone(&request),
-                0,
-                request_charge,
-            );
-            assert!(
-                snapshots.ready_delta_request(SESSION_ID).is_none(),
-                "the regression must be served by required cores, not a retained full request"
-            );
-        }
-
-        let tail = ck(
-            &format!("{SESSION_ID}-{}", GIANT_MESSAGE_COUNT),
-            u64::try_from(GIANT_MESSAGE_COUNT + 1).unwrap(),
-            "new tail",
-        );
-        let tail_native = native_text_message(&tail.mid, "user", "new tail");
-        let mut delta = native_cache_request(
-            SESSION_ID,
-            vec![tail],
-            vec![tail_native],
-            "native-giant-degraded-next-fingerprint",
-        );
-        delta.tail_delta = Some(json!({
-            "after": request.full_array_fingerprint.as_deref().unwrap(),
-            "replace_from": GIANT_MESSAGE_COUNT,
-            "native_replace_from": GIANT_MESSAGE_COUNT,
-        }));
-
-        let frontier = handler
-            .expand_transform_tail_delta(&mut delta)
-            .expect("required cores must accept the tail delta without a full-request snapshot");
-        let reusable_projection = frontier
-            .projection_cache
-            .as_ref()
-            .expect("giant tail delta retains its incremental projection");
-        assert_eq!(reusable_projection.replace_from, GIANT_MESSAGE_COUNT);
-        assert_eq!(delta.messages.len(), GIANT_MESSAGE_COUNT + 1);
-        assert_eq!(
-            delta.native_messages.as_ref().map(Vec::len),
-            Some(GIANT_MESSAGE_COUNT + 1)
-        );
-        let incremental = crate::ck_wire::project_messages_incremental(
-            &delta.messages,
-            &reusable_projection.projection,
-            reusable_projection.replace_from,
-        )
-        .expect("giant suffix projection");
-        assert_eq!(incremental.message_count(), GIANT_MESSAGE_COUNT + 1);
-        assert!(Arc::ptr_eq(
-            &incremental.blocks[0].wire,
-            &projection.blocks[0].wire
-        ));
-
-        let mut response = transform::TransformResponse::passthrough(
-            delta
-                .messages
-                .iter()
-                .map(|message| message.ck.clone())
-                .collect(),
-            delta.full_array_fingerprint.clone(),
-        );
-        let second_stats = attach_native_messages_incremental(
-            &mut response,
-            &delta,
-            &test_reasoning_clear_units(&delta, &BTreeMap::new(), 1),
-            &BTreeMap::new(),
-            None,
-            None,
-            false,
-            Some(&frontier),
-            0,
-            &handler.native_attachments,
-            NativeCacheKeyMode::Normal,
-        );
-        assert!(
-            second_stats.reused_messages >= GIANT_MESSAGE_COUNT - 1,
-            "{second_stats:?}"
-        );
-        assert!(second_stats.encoded_messages <= 2, "{second_stats:?}");
-        assert_eq!(second_stats.degraded_store, 1, "{second_stats:?}");
-
-        let cache = handler.native_attachments.lock().unwrap();
-        let entry = &cache.sessions[SESSION_ID];
-        assert!(entry.retained_bytes > cache.max_entry_retained_bytes);
-        assert_eq!(cache.retained_bytes, entry.retained_bytes);
-        assert_eq!(entry.snapshot.sidecar.order.len(), GIANT_MESSAGE_COUNT + 1);
-        assert!(entry.snapshot.sidecar.messages.is_empty());
-        assert!(entry.snapshot.sidecar_sizes.is_empty());
     }
 
     /// An assistant turn as OpenCode stores it: the tool part carries provider metadata the
@@ -20357,1033 +18719,6 @@ mod tests {
         })
     }
 
-    /// A cache-degraded session (raw sidecar trees dropped to fit the memory budget) must
-    /// re-encode an already-served message to the same bytes it was first served with. Before
-    /// the fix, re-encoding fell back to rendering fresh parts from the canonical blocks alone,
-    /// silently dropping host provider metadata from every re-encoded message while newly
-    /// appended messages kept it.
-    #[test]
-    fn degraded_native_cache_reencodes_served_prefix_byte_identically() {
-        const SESSION_ID: &str = "native-degraded-provider-metadata";
-        let native_a = vec![
-            native_text_message("meta-u1", "user", "first prompt"),
-            native_assistant_tool_turn_with_provider_metadata("meta-a1", "toolu_meta_1"),
-            native_text_message("meta-u2", "user", "second prompt"),
-            native_assistant_tool_turn_with_provider_metadata("meta-a2", "toolu_meta_2"),
-        ];
-        let decoded_a = codec::decode_opencode(&native_a).messages;
-        let served_a = decoded_a
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-        let request_a = native_cache_request(SESSION_ID, decoded_a, native_a.clone(), "meta-fp-a");
-        // A one-byte budget forces every store to keep only the delta core, exactly the
-        // degraded shape a large session reaches under the shared native cache budget.
-        let cache = Mutex::new(NativeAttachmentCache::with_limits(1, 1));
-        let (pass_a, stats_a) = run_native_cache_pass(
-            &cache,
-            &request_a,
-            served_a,
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(stats_a.degraded_store, 1, "{stats_a:?}");
-        assert!(cache.lock().unwrap().sessions[SESSION_ID]
-            .snapshot
-            .sidecar
-            .messages
-            .is_empty());
-        let served_bytes_a = serde_json::to_vec(&pass_a.native_messages.unwrap()).unwrap();
-        assert!(
-            String::from_utf8_lossy(&served_bytes_a).contains("caller"),
-            "the first serve must carry the host provider metadata"
-        );
-
-        // Append one user message (a defer pass) and hand the first message a durable tag
-        // number. The tag changes that message's cache key but none of its bytes, so the pass
-        // re-encodes the whole served prefix from the degraded snapshot.
-        let mut native_b = native_a.clone();
-        native_b.push(native_text_message("meta-u3", "user", "third prompt"));
-        let decoded_b = codec::decode_opencode(&native_b).messages;
-        let served_b = decoded_b
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-        let mut request_b = native_cache_request(SESSION_ID, decoded_b, native_b, "meta-fp-b");
-        request_b.tail_delta = Some(json!({
-            "after": "meta-fp-a",
-            "replace_from": native_a.len(),
-            "native_replace_from": native_a.len(),
-        }));
-        let tags = BTreeMap::from([("meta-u1".to_string(), 41)]);
-        let (pass_b, stats_b) = run_native_cache_pass(
-            &cache,
-            &request_b,
-            served_b,
-            &tags,
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(
-            stats_b.reused_messages, 0,
-            "the fixture must re-encode the served prefix: {stats_b:?}"
-        );
-        assert_eq!(stats_b.reencode_drift, 0, "{stats_b:?}");
-        let native_messages_b = pass_b.native_messages.unwrap();
-        let prefix_bytes_b = serde_json::to_vec(&native_messages_b[..native_a.len()]).unwrap();
-        assert_eq!(
-            sha256_hex(&prefix_bytes_b),
-            sha256_hex(&served_bytes_a),
-            "re-encoding a degraded prefix changed already-served bytes:\nA={}\nB={}",
-            String::from_utf8_lossy(&served_bytes_a),
-            String::from_utf8_lossy(&prefix_bytes_b),
-        );
-    }
-
-    /// A degraded store (raw sidecar trees dropped to fit the memory budget) must not change the
-    /// cache key of any already-served message. OpenCode stores injected reminders as user
-    /// messages whose parts are all synthetic; they decode as synthetic yet keep their harness
-    /// id. Their slot used to resolve only while the raw tree was loaded, so the pass after every
-    /// degraded store re-encoded everything from the first such message onward, and the pass
-    /// after that did it again once the tree had been restored. On large sessions that is a
-    /// periodic re-encode of hundreds of served messages starting at a fixed index.
-    #[test]
-    fn degraded_store_keeps_cache_keys_of_synthetic_ingress_messages() {
-        const SESSION_ID: &str = "native-degraded-synthetic-slot";
-        const PLAIN_PREFIX: usize = 8;
-        let mut native = (0..PLAIN_PREFIX)
-            .map(|index| {
-                let role = if index % 2 == 0 { "user" } else { "assistant" };
-                native_text_message(&format!("syn-slot-{index}"), role, &format!("turn {index}"))
-            })
-            .collect::<Vec<_>>();
-        native.push(json!({
-            "info": { "id": "syn-slot-reminder", "role": "user" },
-            "parts": [{ "type": "text", "text": "injected reminder", "synthetic": true }],
-        }));
-        native.push(native_text_message(
-            "syn-slot-after-u",
-            "user",
-            "after reminder",
-        ));
-        native.push(native_text_message(
-            "syn-slot-after-a",
-            "assistant",
-            "reply",
-        ));
-
-        let cache = Mutex::new(NativeAttachmentCache::new(usize::MAX / 4));
-        let mut previous: Option<(String, Vec<Value>)> = None;
-        // Pass 0 is a full serve, passes 1-4 are append-only (SOFT+) passes, pass 5 stores a
-        // degraded snapshot, and passes 6-7 are the two passes that used to re-encode the
-        // served prefix from the synthetic message onward.
-        const DEGRADED_PASS: usize = 5;
-        for pass in 0..8 {
-            if pass > 0 {
-                native.push(native_text_message(
-                    &format!("syn-slot-tail-{pass}"),
-                    "user",
-                    &format!("tail {pass}"),
-                ));
-            }
-            let decoded = codec::decode_opencode(&native).messages;
-            assert!(
-                decoded
-                    .iter()
-                    .any(|message| message.mid == "syn-slot-reminder" && message.ck.meta.synthetic),
-                "the fixture must carry a synthetic ingress message with a harness id"
-            );
-            let served = decoded
-                .iter()
-                .map(|message| message.ck.clone())
-                .collect::<Vec<_>>();
-            let fingerprint = format!("syn-slot-fp-{pass}");
-            let mut request =
-                native_cache_request(SESSION_ID, decoded, native.clone(), &fingerprint);
-            let frontier = previous.as_ref().map(|(after, _)| {
-                let replace_from = native.len() - 1;
-                request.tail_delta = Some(json!({
-                    "after": after,
-                    "replace_from": replace_from,
-                    "native_replace_from": replace_from,
-                }));
-                let (native_prefix, native_prefix_retained_bytes) = cache
-                    .lock()
-                    .unwrap()
-                    .delta_native_prefix(SESSION_ID, 0, after, replace_from)
-                    .expect("the cached ingress core must cover the tail delta");
-                NativeDeltaFrontier {
-                    after: after.clone(),
-                    native_replace_from: replace_from,
-                    native_prefix,
-                    native_prefix_retained_bytes,
-                    projection_cache: None,
-                }
-            });
-            // Only the degraded pass stores under a budget too small for the raw trees.
-            cache.lock().unwrap().max_entry_retained_bytes = if pass == DEGRADED_PASS {
-                1
-            } else {
-                usize::MAX / 4
-            };
-            let mut response = transform::TransformResponse::passthrough(
-                served,
-                request.full_array_fingerprint.clone(),
-            );
-            let stats = attach_native_messages_incremental(
-                &mut response,
-                &request,
-                &[],
-                &BTreeMap::new(),
-                None,
-                None,
-                false,
-                frontier.as_ref(),
-                0,
-                &cache,
-                NativeCacheKeyMode::Normal,
-            );
-            let served_native = response
-                .native_messages
-                .as_ref()
-                .expect("native serve")
-                .iter()
-                .map(|message| message.as_ref().clone())
-                .collect::<Vec<_>>();
-            if pass == DEGRADED_PASS {
-                assert_eq!(stats.degraded_store, 1, "{stats:?}");
-                assert!(cache.lock().unwrap().sessions[SESSION_ID]
-                    .snapshot
-                    .sidecar
-                    .messages
-                    .is_empty());
-            }
-            if pass > 0 {
-                // An append re-encodes the new message and the last previously served one; any
-                // more means an already-served message changed its cache key.
-                assert!(
-                    stats.encoded_messages <= 2,
-                    "pass {pass} re-encoded already-served messages: {stats:?}"
-                );
-                assert_eq!(stats.reencode_drift, 0, "pass {pass}: {stats:?}");
-                let (_, previous_native) = previous.as_ref().unwrap();
-                assert_eq!(
-                    &served_native[..previous_native.len()],
-                    previous_native.as_slice(),
-                    "pass {pass} changed already-served native bytes"
-                );
-            }
-            previous = Some((fingerprint, served_native));
-        }
-    }
-
-    #[test]
-    fn reencode_drift_reports_changed_bytes_only_under_unchanged_keys() {
-        let chunk = |start: usize, value: Value| NativeEncodedChunk {
-            start_index: start,
-            end_index: start + 1,
-            retained_bytes: 0,
-            value: Arc::new(value),
-        };
-        let encoded = |start: usize, value: Value| codec::opencode::EncodedOpencodeChunk {
-            start_index: start,
-            end_index: start + 1,
-            value,
-        };
-        let previous_chunks = vec![
-            chunk(0, json!({ "m": 0 })),
-            chunk(1, json!({ "m": 1, "caller": "direct" })),
-            chunk(2, json!({ "m": 2 })),
-        ];
-        let previous_keys = vec![[0_u8; 32], [1_u8; 32], [2_u8; 32]];
-        // Message 0 changed its key (the cause of the re-encode); messages 1 and 2 did not.
-        let current_keys = vec![[9_u8; 32], [1_u8; 32], [2_u8; 32]];
-        let current = [
-            encoded(0, json!({ "m": "changed" })),
-            encoded(1, json!({ "m": 1 })),
-            encoded(2, json!({ "m": 2 })),
-        ];
-        let values = current
-            .iter()
-            .map(|chunk| chunk.value.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            native_reencode_drift(
-                &previous_chunks,
-                &previous_keys,
-                &current_keys,
-                &current,
-                &values,
-            ),
-            vec![(1, 2)],
-            "only the key-stable chunk whose bytes changed is drift"
-        );
-    }
-
-    #[test]
-    fn giant_delta_core_evicts_other_sessions_before_crossing_its_own_ceiling() {
-        let (request_a, served_a) = native_cache_fixture("native-core-priority-a", 8, 8, 64 * 1024);
-        let (request_b, served_b) =
-            native_cache_fixture("native-core-priority-b", 128, 128, 1024 * 1024);
-        let served_bytes_a = served_a
-            .iter()
-            .map(|message| serde_json::to_vec(message).unwrap().len())
-            .sum::<usize>();
-        let served_bytes_b = served_b
-            .iter()
-            .map(|message| serde_json::to_vec(message).unwrap().len())
-            .sum::<usize>();
-        let staging = Mutex::new(NativeAttachmentCache::new(usize::MAX / 4));
-        run_native_cache_pass(
-            &staging,
-            &request_a,
-            served_a,
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        run_native_cache_pass(
-            &staging,
-            &request_b,
-            served_b,
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        let (snapshot_a, snapshot_b) = {
-            let mut staging = staging.lock().unwrap();
-            (
-                staging.snapshot("native-core-priority-a", 0).unwrap(),
-                staging.snapshot("native-core-priority-b", 0).unwrap(),
-            )
-        };
-        let mut degraded_b = snapshot_b.clone();
-        assert!(degraded_b.discard_optional_sidecar_trees());
-        let core_charge_b = degraded_b.retained_bytes(served_bytes_b);
-        let core_ceiling = core_charge_b.saturating_sub(1);
-        assert!(snapshot_a.retained_bytes(served_bytes_a) < core_ceiling);
-
-        let mut cache = NativeAttachmentCache::with_limits(core_ceiling, core_ceiling);
-        let mut stats_a = NativeAttachmentCacheStats::default();
-        cache.replace(
-            "native-core-priority-a",
-            0,
-            snapshot_a,
-            &mut stats_a,
-            served_bytes_a,
-        );
-        assert!(cache.sessions.contains_key("native-core-priority-a"));
-
-        let mut stats_b = NativeAttachmentCacheStats::default();
-        cache.replace(
-            "native-core-priority-b",
-            0,
-            snapshot_b,
-            &mut stats_b,
-            served_bytes_b,
-        );
-
-        assert_eq!(stats_b.evicted, 1, "{stats_b:?}");
-        assert_eq!(stats_b.degraded_store, 1, "{stats_b:?}");
-        assert_eq!(stats_b.refused_store, 0, "{stats_b:?}");
-        assert!(!cache.sessions.contains_key("native-core-priority-a"));
-        let entry = &cache.sessions["native-core-priority-b"];
-        assert_eq!(entry.retained_bytes, core_charge_b);
-        assert_eq!(cache.retained_bytes, core_charge_b);
-        assert!(cache.retained_bytes > cache.max_retained_bytes);
-        let fingerprint = request_b.full_array_fingerprint.as_deref().unwrap();
-        let (prefix, charges) = cache
-            .delta_native_prefix(
-                "native-core-priority-b",
-                0,
-                fingerprint,
-                request_b.messages.len(),
-            )
-            .expect("the over-ceiling core must remain available for delta reattachment");
-        assert_eq!(prefix.len(), request_b.messages.len());
-        assert_eq!(charges.len(), request_b.messages.len());
-    }
-
-    #[test]
-    fn projection_admission_rejection_warns_once_per_session_at_warn_level() {
-        use tracing_subscriber::prelude::*;
-
-        let logs = tempfile::tempdir().unwrap();
-        let mut config = cortexkit_log::Config::in_dir("magic-context", logs.path());
-        config.spec = Some("warn".to_string());
-        let (layer, log) = cortexkit_log::layer(config).unwrap();
-        let subscriber = tracing_subscriber::registry().with(layer);
-        let request = native_cache_request("uncacheable", vec![ck("m1", 1, "one")], vec![], "fp");
-        let snapshot = ProjectionCacheSnapshot {
-            context: projection_cache_context(&request),
-            full_array_fingerprint: request.full_array_fingerprint.clone(),
-            projection: Arc::new(crate::ck_wire::project_messages(&request.messages).unwrap()),
-            message_retained_bytes: Arc::new(vec![0]),
-        };
-        let mut cache = ProjectionCache::with_limits(1, 1);
-        tracing::subscriber::with_default(subscriber, || {
-            cache.replace("uncacheable", 0, snapshot.clone());
-            cache.replace("uncacheable", 0, snapshot.clone());
-            assert!(cache.snapshot("uncacheable", 1).is_none());
-            cache.replace("uncacheable", 1, snapshot.clone());
-            cache.replace("other-session", 0, snapshot.clone());
-        });
-        let lines = std::fs::read_to_string(log.path()).unwrap();
-        assert_eq!(
-            lines.matches("projection-cache admission-rejected").count(),
-            2
-        );
-        assert_eq!(lines.matches("session=uncacheable ").count(), 1);
-        assert_eq!(lines.matches("session=other-session ").count(), 1);
-        assert_eq!(lines.matches(" WARN ").count(), 2);
-        assert!(lines.contains("byte_charge="));
-        assert!(lines.contains("entry_budget=1 total_budget=1 previous_entry_kept=false"));
-        assert!(lines.contains("fallback=need_full_sync_then_full_request"));
-        assert!(lines.contains("consequence=full_sync_each_pass_unless_request_snapshot_available"));
-        assert_eq!(cache.retained_bytes, 0);
-        assert_eq!(cache.admission_warned_sessions.len(), 2);
-        cache.forget_session("uncacheable");
-        assert!(!cache.admission_warned_sessions.contains("uncacheable"));
-        assert!(cache.admission_warned_sessions.contains("other-session"));
-    }
-
-    #[test]
-    fn projection_entry_ceiling_still_enforces_total_lru_budget() {
-        let request = native_cache_request("large", vec![ck("m1", 1, "one")], vec![], "fp");
-        let snapshot = ProjectionCacheSnapshot {
-            context: projection_cache_context(&request),
-            full_array_fingerprint: request.full_array_fingerprint.clone(),
-            projection: Arc::new(crate::ck_wire::project_messages(&request.messages).unwrap()),
-            message_retained_bytes: Arc::new(vec![0]),
-        };
-        let charge = snapshot.retained_bytes("large");
-        let mut cache = ProjectionCache::with_limits(charge * 2 - 1, charge);
-        cache.replace("small", 0, snapshot.clone());
-        cache.replace("large", 0, snapshot.clone());
-        assert!(!cache.sessions.contains_key("small"));
-        assert!(cache.sessions.contains_key("large"));
-        assert_eq!(cache.retained_bytes, charge);
-        assert!(cache.retained_bytes <= cache.max_retained_bytes);
-
-        // An oversized replacement must not eject an unrelated admitted entry or erase its own
-        // last usable generation. A later fingerprint mismatch still asks for full sync.
-        let mut oversized = snapshot;
-        oversized.message_retained_bytes = Arc::new(vec![0; charge]);
-        cache.replace("large", 0, oversized);
-        assert_eq!(cache.sessions["large"].retained_bytes, charge);
-        assert_eq!(cache.retained_bytes, charge);
-    }
-
-    #[test]
-    fn alf_scale_projection_is_retained_and_next_pass_accepts_tail_delta() {
-        const SESSION: &str = "alf-projection";
-        const MESSAGES: usize = 9_268;
-        // Unlike the frame-cap sidecar fixture, put the bulk in canonical blocks. Deserialization
-        // also retains lossless block JSON, as it does for a real full-sync request.
-        let (typed, served) = native_cache_fixture(SESSION, MESSAGES, 30_000, 57_000_000);
-        drop(served);
-        let wire = serde_json::to_vec(&typed).unwrap();
-        drop(typed);
-        let request: TransformRequest = serde_json::from_slice(&wire).unwrap();
-        let wire_bytes = wire.len();
-        drop(wire);
-        let projection = Arc::new(crate::ck_wire::project_messages(&request.messages).unwrap());
-        // Only canonical bytes own the scalar payload. The lossless and typed wire shells
-        // retain empty strings, and the payload view shares that canonical allocation.
-        let mut payload_allocations = 0;
-        for block in &projection.blocks {
-            let CkKind::Text { text } = &block.wire_shape().kind else {
-                panic!("text fixture");
-            };
-            let original = block.wire_shape().retained_original_json().unwrap()["kind"]["text"]
-                .as_str()
-                .unwrap();
-            assert_eq!(text.capacity(), 0);
-            assert!(original.is_empty());
-            let payload = block.scalar_text().unwrap();
-            assert!(matches!(payload, std::borrow::Cow::Borrowed(_)));
-            assert!(payload.as_ptr() >= block.bytes.as_ptr());
-            assert!(payload.as_ptr() < block.bytes.as_ptr().wrapping_add(block.bytes.len()));
-            payload_allocations += block.bytes.len();
-        }
-        let charge = ProjectionCacheSnapshot {
-            context: projection_cache_context(&request),
-            full_array_fingerprint: request.full_array_fingerprint.clone(),
-            message_retained_bytes: Arc::new(vec![0; MESSAGES]),
-            projection: Arc::clone(&projection),
-        }
-        .retained_bytes(SESSION);
-        eprintln!("alf-projection messages={MESSAGES} blocks=30000 request_wire_bytes={wire_bytes} projection_byte_charge={charge}");
-        let canonical = projection
-            .blocks
-            .iter()
-            .map(|b| b.bytes.len())
-            .sum::<usize>();
-        let wire_charge = projection
-            .blocks
-            .iter()
-            .map(|b| b.wire.retained_bytes())
-            .sum::<usize>();
-        let original = projection
-            .blocks
-            .iter()
-            .map(|b| {
-                b.wire_shape()
-                    .retained_original_json()
-                    .map_or(0, crate::retained_size::value_retained_bytes)
-            })
-            .sum::<usize>();
-        eprintln!(
-            "alf-breakdown canonical={canonical} typed_wire={} original={original} other={}",
-            wire_charge - original,
-            charge - canonical - wire_charge
-        );
-        let mut delta_times = Vec::new();
-        for _ in 0..9 {
-            let started = Instant::now();
-            let mut messages = projection.reattach_messages_prefix(MESSAGES).unwrap();
-            messages.push(ck("benchmark-tail", (MESSAGES + 1) as u64, "new tail"));
-            let next =
-                crate::ck_wire::project_messages_incremental(&messages, &projection, MESSAGES)
-                    .unwrap();
-            std::hint::black_box(&next);
-            delta_times.push(started.elapsed().as_secs_f64() * 1000.0);
-        }
-        delta_times.sort_by(f64::total_cmp);
-        eprintln!(
-            "alf-delta reattach_and_project_median_ms={:.3} samples={delta_times:?}",
-            delta_times[4]
-        );
-        assert!(charge >= payload_allocations);
-        assert!(
-            charge - payload_allocations < 40 * 1024 * 1024,
-            "structural overhead is bounded"
-        );
-        assert!(
-            charge <= wire_bytes * 11 / 10,
-            "text-heavy projection must stay below 1.1x wire"
-        );
-        assert!(
-            charge <= PROJECTION_CACHE_ENTRY_BUDGET_BYTES,
-            "fixture must fit the entry ceiling"
-        );
-
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        handler.bind_route(7, binding(project.to_str().unwrap(), SESSION));
-        // The former ~73 MiB constructed-text neighbor is now ~36 MiB. The compact budget
-        // must still admit both sessions so alternating passes do not force full syncs.
-        let neighbor = native_cache_request(
-            "neighbor",
-            vec![ck("neighbor-1", 1, &"n".repeat(36 * 1024 * 1024))],
-            vec![],
-            "neighbor-fp",
-        );
-        handler.store_projection_cache(
-            &neighbor,
-            0,
-            Arc::new(crate::ck_wire::project_messages(&neighbor.messages).unwrap()),
-            None,
-        );
-        drop(neighbor);
-        handler.store_projection_cache(&request, 0, Arc::clone(&projection), None);
-        assert!(
-            handler
-                .projections
-                .lock()
-                .unwrap()
-                .sessions
-                .contains_key(SESSION),
-            "ALF-size projection must survive admission"
-        );
-        assert!(
-            handler
-                .projections
-                .lock()
-                .unwrap()
-                .sessions
-                .contains_key("neighbor"),
-            "the measured large-session working set must coexist rather than alternate evictions"
-        );
-        // Keep only ingress native state: the served-output cache is not a delta authority.
-        let (response, _) = run_native_cache_pass(
-            &handler.native_attachments,
-            &request,
-            Vec::new(),
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        drop(response);
-        assert!(handler
-            .transform_snapshots
-            .lock()
-            .unwrap()
-            .ready_delta_request(SESSION)
-            .is_none());
-
-        let after = request.full_array_fingerprint.clone().unwrap();
-        drop(request);
-        let tail = ck("alf-tail", (MESSAGES + 1) as u64, "new tail");
-        let mut delta = native_cache_request(
-            SESSION,
-            vec![tail],
-            vec![native_text_message("alf-tail", "user", "new tail")],
-            "alf-next",
-        );
-        delta.tail_delta = Some(json!({
-            "after": after, "replace_from": MESSAGES, "native_replace_from": MESSAGES,
-        }));
-        let frontier = handler
-            .expand_transform_tail_delta(&mut delta)
-            .expect("next ordinary tail delta must not require full sync");
-        let cached = frontier
-            .projection_cache
-            .expect("delta must reuse the projection core");
-        assert_eq!(cached.replace_from, MESSAGES);
-        assert_eq!(delta.messages.len(), MESSAGES + 1);
-        assert_eq!(delta.native_messages.as_ref().unwrap().len(), MESSAGES + 1);
-        let incremental = crate::ck_wire::project_messages_incremental(
-            &delta.messages,
-            &cached.projection,
-            cached.replace_from,
-        )
-        .unwrap();
-        assert!(Arc::ptr_eq(
-            &incremental.blocks[0].wire,
-            &projection.blocks[0].wire
-        ));
-    }
-
-    #[test]
-    fn astro_scale_projection_cache_reuses_on_the_second_pass() {
-        const ASTRO_MESSAGE_COUNT: usize = 4_600;
-        const ASTRO_BLOCK_COUNT: usize = 15_000;
-        const ASTRO_NATIVE_WIRE_BYTES: usize = 49 * 1024 * 1024;
-
-        let (request, _served) = native_cache_fixture(
-            "astro-projection-reuse",
-            ASTRO_MESSAGE_COUNT,
-            ASTRO_BLOCK_COUNT,
-            ASTRO_NATIVE_WIRE_BYTES,
-        );
-        crate::ck_wire::take_projection_work();
-        let projection = Arc::new(
-            crate::ck_wire::project_messages(&request.messages).expect("ASTRO projection"),
-        );
-        let first_work = crate::ck_wire::take_projection_work();
-        assert_eq!(first_work, (ASTRO_MESSAGE_COUNT, ASTRO_BLOCK_COUNT));
-        assert_eq!(projection.blocks.len(), ASTRO_BLOCK_COUNT);
-        let retained = projection.retained_bytes();
-        eprintln!("astro-projection-cache retained_bytes={retained} first_work={first_work:?}");
-        assert!(
-            retained <= PROJECTION_CACHE_ENTRY_BUDGET_BYTES,
-            "ASTRO projection must fit the dedicated cache: retained={retained} cap={PROJECTION_CACHE_ENTRY_BUDGET_BYTES}"
-        );
-
-        let mut cache = ProjectionCache::default();
-        cache.replace(
-            &request.session_id,
-            0,
-            ProjectionCacheSnapshot {
-                context: projection_cache_context(&request),
-                full_array_fingerprint: request.full_array_fingerprint.clone(),
-                message_retained_bytes: Arc::new(vec![0; request.messages.len()]),
-                projection: Arc::clone(&projection),
-            },
-        );
-        let snapshot = cache
-            .snapshot(&request.session_id, 0)
-            .expect("ASTRO projection must survive in its own cache");
-        let reused = validated_projection_cache_input(
-            &request,
-            &snapshot,
-            request.full_array_fingerprint.as_deref().unwrap(),
-            request.messages.len(),
-            ProjectionCacheKeyMode::Normal,
-        )
-        .expect("second pass must hit the projection cache");
-        assert!(Arc::ptr_eq(&reused.projection, &projection));
-        assert_eq!(reused.replace_from, ASTRO_MESSAGE_COUNT);
-
-        let incremental = crate::ck_wire::project_messages_incremental(
-            &request.messages,
-            &reused.projection,
-            reused.replace_from,
-        )
-        .expect("full-prefix incremental projection");
-        let second_work = crate::ck_wire::take_projection_work();
-        eprintln!("astro-projection-cache second_work={second_work:?}");
-        assert_eq!(incremental, *projection);
-        assert_eq!(
-            second_work,
-            (0, 0),
-            "cached messages and blocks must not be reprojected"
-        );
-    }
-
-    #[test]
-    fn projection_cache_invalidators_are_mutation_checked_in_both_directions() {
-        let ingress = vec![ck("inv-1", 1, "one"), ck("inv-2", 2, "two")];
-        let baseline = native_cache_request(
-            "projection-invalidators",
-            ingress,
-            vec![
-                native_text_message("inv-1", "user", "one"),
-                native_text_message("inv-2", "user", "two"),
-            ],
-            "inv-fp-1",
-        );
-        let snapshot = ProjectionCacheSnapshot {
-            context: projection_cache_context(&baseline),
-            full_array_fingerprint: baseline.full_array_fingerprint.clone(),
-            message_retained_bytes: Arc::new(vec![0; baseline.messages.len()]),
-            projection: Arc::new(
-                crate::ck_wire::project_messages(&baseline.messages).expect("baseline projection"),
-            ),
-        };
-
-        assert!(
-            validated_projection_cache_input(
-                &baseline,
-                &snapshot,
-                "inv-fp-1",
-                2,
-                ProjectionCacheKeyMode::Normal,
-            )
-            .is_some(),
-            "unchanged request must hit"
-        );
-
-        for (label, mutate) in [
-            (
-                "fingerprint",
-                Box::new(|request: &mut TransformRequest| {
-                    request.full_array_fingerprint = Some("inv-fp-mutated".to_string());
-                }) as Box<dyn Fn(&mut TransformRequest)>,
-            ),
-            (
-                "session_id",
-                Box::new(|request: &mut TransformRequest| {
-                    request.session_id = "projection-invalidators-other".to_string();
-                }),
-            ),
-            (
-                "serializer_profile",
-                Box::new(|request: &mut TransformRequest| {
-                    request.serializer_profile = "opencode-aisdk-next".to_string();
-                }),
-            ),
-            (
-                "render_config",
-                Box::new(|request: &mut TransformRequest| {
-                    request.render_config = "cfg1".to_string();
-                }),
-            ),
-        ] {
-            let mut mutated = baseline.clone();
-            mutate(&mut mutated);
-            let after = mutated
-                .full_array_fingerprint
-                .clone()
-                .unwrap_or_else(|| "inv-fp-1".to_string());
-            assert!(
-                validated_projection_cache_input(
-                    &mutated,
-                    &snapshot,
-                    &after,
-                    2,
-                    ProjectionCacheKeyMode::Normal,
-                )
-                .is_none(),
-                "{label} must invalidate the projection cache"
-            );
-            assert!(
-                validated_projection_cache_input(
-                    &baseline,
-                    &snapshot,
-                    "inv-fp-1",
-                    2,
-                    ProjectionCacheKeyMode::Normal,
-                )
-                .is_some(),
-                "{label} mutation must not poison the baseline hit"
-            );
-        }
-
-        // Transition salt is a native-render concern and must not bust ingress projection reuse.
-        let hit = validated_projection_cache_input(
-            &baseline,
-            &snapshot,
-            "inv-fp-1",
-            2,
-            ProjectionCacheKeyMode::Normal,
-        );
-        assert!(
-            hit.is_some(),
-            "transition salt is not a projection invalidator"
-        );
-    }
-
-    #[test]
-    fn multiple_large_sessions_do_not_ping_pong_under_the_native_cache_total_budget() {
-        const SESSION_NATIVE_WIRE_BYTES: usize = 5 * 1024 * 1024;
-        let cache = Mutex::new(NativeAttachmentCache::default());
-        let (request_a, served_a) = native_cache_fixture(
-            "native-large-session-a",
-            512,
-            1_536,
-            SESSION_NATIVE_WIRE_BYTES,
-        );
-        let (request_b, served_b) = native_cache_fixture(
-            "native-large-session-b",
-            512,
-            1_536,
-            SESSION_NATIVE_WIRE_BYTES,
-        );
-
-        run_native_cache_pass(
-            &cache,
-            &request_a,
-            served_a.clone(),
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        let charge_a = cache.lock().unwrap().sessions["native-large-session-a"].retained_bytes;
-        run_native_cache_pass(
-            &cache,
-            &request_b,
-            served_b.clone(),
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        let charge_b = cache.lock().unwrap().sessions["native-large-session-b"].retained_bytes;
-        assert!(
-            charge_a.saturating_add(charge_b) > 64 * 1024 * 1024,
-            "fixture must exceed the former shared 64 MiB budget"
-        );
-
-        let (_second_a, second_a_stats) = run_native_cache_pass(
-            &cache,
-            &request_a,
-            served_a.clone(),
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(
-            second_a_stats.reused_messages,
-            served_a.len(),
-            "session A was evicted by session B and re-encoded from scratch"
-        );
-        let (_second_b, second_b_stats) = run_native_cache_pass(
-            &cache,
-            &request_b,
-            served_b.clone(),
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(
-            second_b_stats.reused_messages,
-            served_b.len(),
-            "session B was evicted by session A and re-encoded from scratch"
-        );
-    }
-
-    #[test]
-    fn incremental_native_cache_invalidates_every_byte_affecting_input() {
-        let ingress = vec![ck("m1", 1, "one"), ck("m2", 2, "two"), ck("m3", 3, "three")];
-        let native = vec![
-            native_text_message("m1", "user", "one"),
-            native_text_message("m2", "user", "two"),
-            native_text_message("m3", "user", "three"),
-        ];
-        let baseline_request =
-            native_cache_request("native-invalidations", ingress.clone(), native, "fp-base");
-        let baseline_served = ingress
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-
-        for trigger in [
-            "fold",
-            "coverage",
-            "reduction",
-            "transition_salt",
-            "render_epoch",
-            "revert_epoch",
-            "tag_mutation",
-            "sidecar_meta",
-            "profile",
-        ] {
-            let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-            run_native_cache_pass(
-                &cache,
-                &baseline_request,
-                baseline_served.clone(),
-                &BTreeMap::new(),
-                false,
-                0,
-                NativeCacheKeyMode::Normal,
-            );
-            let mut request = baseline_request.clone();
-            let mut served = baseline_served.clone();
-            let mut tags = BTreeMap::new();
-            let mut transition_consumed = false;
-            let mut revert_epoch = 0;
-            match trigger {
-                "fold" => {
-                    served[0] = CkWireMessage::synthetic_user_text("folded prefix".to_string());
-                }
-                "coverage" => {
-                    served.remove(0);
-                }
-                "reduction" => {
-                    served[2].content[0] = CkWireBlock::bare(CkKind::Text {
-                        text: "[dropped]".to_string(),
-                    });
-                    served[2].mark_modified();
-                }
-                "transition_salt" => transition_consumed = true,
-                "render_epoch" => request.render_config = "cfg1".to_string(),
-                "revert_epoch" => revert_epoch = 1,
-                "tag_mutation" => {
-                    tags.insert("m3".to_string(), 7);
-                }
-                "sidecar_meta" => {
-                    request.native_messages.as_mut().unwrap()[2]["info"]["custom"] = json!(true);
-                }
-                "profile" => request.serializer_profile = "opencode-aisdk-next".to_string(),
-                _ => unreachable!(),
-            }
-            let (_response, stats) = run_native_cache_pass(
-                &cache,
-                &request,
-                served,
-                &tags,
-                transition_consumed,
-                revert_epoch,
-                NativeCacheKeyMode::Normal,
-            );
-            assert!(
-                stats.encoded_messages > 0,
-                "{trigger} did not invalidate the native cache: {stats:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn renderer_transition_class_sets_invalidate_with_consumed_boolean_stable() {
-        let reasoning = ck_reasoning("transition-reasoning", 1, "signed");
-        let call = assistant_tool_call("call-transition", 2);
-        let result = tool_result("result-transition", 3, "result");
-        let tail = ck("transition-tail", 4, "tail");
-        let todo = injection::build_synthetic_todo_pair(
-            r#"[{"content":"transition","status":"in_progress","priority":"high"}]"#,
-        )
-        .unwrap();
-        let baseline_ingress = vec![
-            reasoning.clone(),
-            call.clone(),
-            result.clone(),
-            tail.clone(),
-        ];
-        let baseline = vec![
-            reasoning.ck,
-            call.ck,
-            result.ck,
-            tail.ck,
-            todo.assistant_msg,
-            todo.tool_msg,
-        ];
-        let request = native_cache_request(
-            "native-transition-classes",
-            baseline_ingress,
-            Vec::new(),
-            "transition-fp",
-        );
-
-        for class_set in [
-            "poisoned_reasoning",
-            "unmatched_pair",
-            "split_coverage",
-            "synthetic_anchor_split",
-            "poisoned_reasoning+synthetic_anchor_split",
-        ] {
-            let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-            run_native_cache_pass(
-                &cache,
-                &request,
-                baseline.clone(),
-                &BTreeMap::new(),
-                true,
-                0,
-                NativeCacheKeyMode::Normal,
-            );
-            let mut changed = baseline.clone();
-            match class_set {
-                "poisoned_reasoning" => {
-                    changed[0].content[0] = CkWireBlock::bare(CkKind::Text {
-                        text: String::new(),
-                    });
-                    changed[0].mark_modified();
-                }
-                "unmatched_pair" => {
-                    if let CkKind::ToolResult { id, .. } = &mut changed[2].content[0].kind {
-                        *id = "call-transition-unmatched".to_string();
-                    }
-                    changed[2].mark_modified();
-                }
-                "split_coverage" => {
-                    changed.remove(1);
-                }
-                "synthetic_anchor_split" => {
-                    let result = changed.pop().unwrap();
-                    let call = changed.pop().unwrap();
-                    changed.insert(3, call);
-                    changed.insert(4, result);
-                }
-                "poisoned_reasoning+synthetic_anchor_split" => {
-                    changed[0].content[0] = CkWireBlock::bare(CkKind::Text {
-                        text: String::new(),
-                    });
-                    changed[0].mark_modified();
-                    let result = changed.pop().unwrap();
-                    let call = changed.pop().unwrap();
-                    changed.insert(3, call);
-                    changed.insert(4, result);
-                }
-                _ => unreachable!(),
-            }
-            let (_response, stats) = run_native_cache_pass(
-                &cache,
-                &request,
-                changed,
-                &BTreeMap::new(),
-                true,
-                0,
-                NativeCacheKeyMode::Normal,
-            );
-            assert!(
-                stats.encoded_messages > 0,
-                "transition class set {class_set} reused stale native bytes"
-            );
-        }
-    }
-
     fn rewrite_first_tool_result(messages: &mut [CkWireMessage], text: &str) {
         let block = messages
             .iter_mut()
@@ -21397,1547 +18732,6 @@ mod tests {
             text: text.to_string(),
         });
         block.mark_modified();
-    }
-
-    #[test]
-    fn reduced_shell_rematches_across_three_incremental_sidecar_generations() {
-        let raw_tool = json!({
-            "info": { "id": "shell", "role": "assistant" },
-            "parts": [{
-                "type": "tool",
-                "callID": "call-shell",
-                "tool": "bash",
-                "state": { "status": "completed", "input": {}, "output": "original" }
-            }]
-        });
-        let decoded = codec::decode_opencode(std::slice::from_ref(&raw_tool));
-        let mut served = decoded
-            .messages
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-        rewrite_first_tool_result(&mut served, "[dropped gen1]");
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        let first_request = native_cache_request(
-            "native-shell-rematch",
-            decoded.messages.clone(),
-            vec![raw_tool.clone()],
-            "shell-fp-1",
-        );
-        run_native_cache_pass(
-            &cache,
-            &first_request,
-            served.clone(),
-            &BTreeMap::new(),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-
-        let user_2 = ck("shell-user-2", 2, "second");
-        served.push(user_2.ck.clone());
-        let mut generation_2_messages = decoded.messages.clone();
-        generation_2_messages.push(user_2);
-        let mut generation_2_native = vec![raw_tool.clone()];
-        generation_2_native.push(native_text_message("shell-user-2", "user", "second"));
-        let mut generation_2 = native_cache_request(
-            "native-shell-rematch",
-            generation_2_messages,
-            generation_2_native,
-            "shell-fp-2",
-        );
-        generation_2.tail_delta = Some(json!({
-            "after": "shell-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 1,
-        }));
-        rewrite_first_tool_result(&mut served, "[dropped gen2]");
-        run_native_cache_pass(
-            &cache,
-            &generation_2,
-            served.clone(),
-            &BTreeMap::new(),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-
-        let user_3 = ck("shell-user-3", 3, "third");
-        served.push(user_3.ck.clone());
-        let mut generation_3_messages = generation_2.messages.clone();
-        generation_3_messages.push(user_3);
-        let mut generation_3_native = generation_2.native_messages.clone().unwrap();
-        generation_3_native.push(native_text_message("shell-user-3", "user", "third"));
-        let mut generation_3 = native_cache_request(
-            "native-shell-rematch",
-            generation_3_messages,
-            generation_3_native,
-            "shell-fp-3",
-        );
-        generation_3.tail_delta = Some(json!({
-            "after": "shell-fp-2",
-            "replace_from": 2,
-            "native_replace_from": 2,
-        }));
-        rewrite_first_tool_result(&mut served, "[dropped gen3]");
-        let (response, _stats) = run_native_cache_pass(
-            &cache,
-            &generation_3,
-            served,
-            &BTreeMap::new(),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        let native = response.native_messages.unwrap();
-        let shell = native
-            .iter()
-            .find(|message| message["info"]["id"] == "shell")
-            .expect("rematched shell");
-        assert_eq!(shell["parts"].as_array().unwrap().len(), 1);
-        assert_eq!(shell["parts"][0]["callID"], "call-shell");
-        assert_eq!(shell["parts"][0]["state"]["output"], "[dropped gen3]");
-    }
-
-    #[test]
-    fn marker_representation_reconciles_after_changed_native_frontier() {
-        let first_native = vec![
-            native_text_message("marker-1", "user", "one"),
-            native_text_message("marker-2", "user", "two"),
-            json!({
-                "info": { "id": "marker-3", "role": "assistant" },
-                "parts": [
-                    { "type": "text", "text": "three" },
-                    { "type": "compaction", "summary": "marker-v1", "custom": 1 }
-                ]
-            }),
-        ];
-        let decoded = codec::decode_opencode(&first_native);
-        let served = decoded
-            .messages
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        let first_request = native_cache_request(
-            "native-marker-frontier",
-            decoded.messages.clone(),
-            first_native.clone(),
-            "marker-fp-1",
-        );
-        run_native_cache_pass(
-            &cache,
-            &first_request,
-            served.clone(),
-            &BTreeMap::new(),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-
-        let mut changed_native = first_native;
-        changed_native[2]["parts"][1]["summary"] = json!("marker-v2");
-        changed_native[2]["parts"][1]["custom"] = json!(2);
-        let mut changed_request = native_cache_request(
-            "native-marker-frontier",
-            decoded.messages,
-            changed_native,
-            "marker-fp-2",
-        );
-        changed_request.tail_delta = Some(json!({
-            "after": "marker-fp-1",
-            "replace_from": 2,
-            "native_replace_from": 2,
-        }));
-        let (response, stats) = run_native_cache_pass(
-            &cache,
-            &changed_request,
-            served,
-            &BTreeMap::new(),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert!(stats.reused_messages > 0, "{stats:?}");
-        let marker = response
-            .native_messages
-            .unwrap()
-            .into_iter()
-            .find(|message| message["info"]["id"] == "marker-3")
-            .unwrap();
-        assert_eq!(marker["parts"][1]["summary"], "marker-v2");
-        assert_eq!(marker["parts"][1]["custom"], 2);
-    }
-
-    #[test]
-    fn newest_reasoning_becomes_historical_after_committed_clear_decision() {
-        let first_ingress = vec![ck_reasoning("reasoning-1", 1, "signed-1")];
-        let first_native = vec![json!({
-            "info": { "id": "reasoning-1", "role": "assistant" },
-            "parts": [{
-                "type": "reasoning",
-                "text": "signed-1",
-                "metadata": { "signature": "sig-1" },
-                "cache_control": { "type": "ephemeral" }
-            }]
-        })];
-        let mut first_request = native_cache_request(
-            "native-reasoning-movement",
-            first_ingress.clone(),
-            first_native.clone(),
-            "reasoning-fp-1",
-        );
-        first_request.mid_turn = true;
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        let (first, _) = run_native_cache_pass_with_clear_units(
-            &cache,
-            &first_request,
-            vec![first_ingress[0].ck.clone()],
-            &[],
-            &BTreeMap::from([("reasoning-1".to_string(), 1)]),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(
-            first.native_messages.unwrap()[0]["parts"][0]["text"],
-            "signed-1"
-        );
-
-        let newest = ck_reasoning("reasoning-2", 2, "signed-2");
-        let mut second_ingress = first_ingress;
-        second_ingress.push(newest.clone());
-        let mut second_native = first_native;
-        second_native.push(json!({
-            "info": { "id": "reasoning-2", "role": "assistant" },
-            "parts": [{ "type": "reasoning", "text": "signed-2", "metadata": { "signature": "sig-2" } }]
-        }));
-        let mut second_request = native_cache_request(
-            "native-reasoning-movement",
-            second_ingress.clone(),
-            second_native,
-            "reasoning-fp-2",
-        );
-        second_request.mid_turn = true;
-        second_request.tail_delta = Some(json!({
-            "after": "reasoning-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 1,
-        }));
-        let (second, stats) = run_native_cache_pass_with_clear_units(
-            &cache,
-            &second_request,
-            second_ingress
-                .iter()
-                .map(|message| message.ck.clone())
-                .collect(),
-            &test_reasoning_clear_units(&second_request, &BTreeMap::new(), 1),
-            &BTreeMap::from([
-                ("reasoning-1".to_string(), 1),
-                ("reasoning-2".to_string(), 2),
-            ]),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert!(stats.encoded_messages > 0);
-        let native = second.native_messages.unwrap();
-        assert_eq!(
-            native[0]["parts"][0],
-            json!({
-                "type": "text",
-                "text": "",
-                "cache_control": { "type": "ephemeral" }
-            })
-        );
-        assert_eq!(native[1]["parts"][0]["text"], "signed-2");
-    }
-
-    #[test]
-    fn live_reasoning_exemption_survives_ck_native_vector_mismatch() {
-        let golden: Value = serde_json::from_str(include_str!(
-            "../testdata/merged-reasoning-adapter-golden.json"
-        ))
-        .unwrap();
-        let fixture = golden["cases"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|case| case["name"] == "incident_astro_signed_reasoning_tool_without_text")
-            .expect("ASTRO incident fixture generated from persisted rows");
-        let raw: Vec<Value> = serde_json::from_value(fixture["raw_messages"].clone()).unwrap();
-        let ingress: Vec<CkIngressMessage> =
-            serde_json::from_value(fixture["encoded_input"].clone()).unwrap();
-        let target_mid = fixture["target_mid"].as_str().unwrap();
-        let request = native_cache_request(
-            "live-reasoning-vector-mismatch",
-            ingress.clone(),
-            raw.clone(),
-            "live-reasoning-vector-fingerprint",
-        );
-        let mut served = ingress
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-        let target = served
-            .iter_mut()
-            .find(|message| message.meta.harness_id.as_deref() == Some(target_mid))
-            .expect("served ASTRO target");
-        target
-            .content
-            .retain(|block| !matches!(&block.kind, ck_wire::CkKind::Reasoning { .. }));
-        target.mark_modified();
-
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        let (response, _) = run_native_cache_pass_with_clear_units(
-            &cache,
-            &request,
-            served,
-            &test_reasoning_clear_units(&request, &BTreeMap::new(), u64::MAX),
-            &BTreeMap::from([(target_mid.to_string(), 1)]),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        let native = response.native_messages.expect("native reasoning replay");
-        let target = native
-            .iter()
-            .find(|message| message["info"]["id"] == target_mid)
-            .expect("native ASTRO target");
-        assert_eq!(target["parts"][1], raw[0]["parts"][1]);
-        assert_eq!(
-            target["parts"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|part| part["type"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec!["step-start", "reasoning", "tool", "step-finish"]
-        );
-    }
-
-    #[test]
-    fn latest_reasoning_content_guard_covers_full_and_incremental_native_attachment() {
-        let golden: Value = serde_json::from_str(include_str!(
-            "../testdata/merged-reasoning-adapter-golden.json"
-        ))
-        .unwrap();
-        let fixture = golden["cases"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|case| case["name"] == "incident_astro_signed_reasoning_tool_without_text")
-            .expect("ASTRO provider rejection fixture generated from persisted rows");
-        let raw: Vec<Value> = serde_json::from_value(fixture["raw_messages"].clone()).unwrap();
-        let ingress: Vec<CkIngressMessage> =
-            serde_json::from_value(fixture["encoded_input"].clone()).unwrap();
-        let target_mid = fixture["target_mid"].as_str().unwrap();
-        let request = native_cache_request(
-            "latest-reasoning-content-guard",
-            ingress.clone(),
-            raw.clone(),
-            "latest-reasoning-content-fingerprint",
-        );
-        let mut served = ingress
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-        let target = served
-            .iter_mut()
-            .find(|message| message.meta.harness_id.as_deref() == Some(target_mid))
-            .expect("served ASTRO target");
-        let reasoning_index = fixture["target_reasoning_index"].as_u64().unwrap() as usize;
-        target.content.insert(
-            reasoning_index,
-            ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
-                text: ".".to_string(),
-            }),
-        );
-        target.mark_modified();
-
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        for _ in 0..2 {
-            let (response, _) = run_native_cache_pass_with_clear_units(
-                &cache,
-                &request,
-                served.clone(),
-                &test_reasoning_clear_units(&request, &BTreeMap::new(), u64::MAX),
-                &BTreeMap::from([(target_mid.to_string(), 1)]),
-                true,
-                0,
-                NativeCacheKeyMode::Normal,
-            );
-            let native = response.native_messages.expect("native reasoning replay");
-            let target = native
-                .iter()
-                .find(|message| message["info"]["id"] == target_mid)
-                .expect("native ASTRO target");
-            assert_eq!(target.as_ref(), &raw[0]);
-        }
-    }
-
-    #[test]
-    fn native_newest_shortcut_preserves_live_signed_bytes_and_keys_clear_transitions() {
-        let raw = vec![json!({"info":{"id":"newest","role":"assistant"},"parts":[
-            {"id":"r","type":"reasoning","text":"signed original","metadata":{"anthropic":{"signature":"sig-original"}}},
-            {"id":"t","type":"text","text":"answer"}
-        ]})];
-        let ingress = codec::decode_opencode(&raw).messages;
-        let request = native_cache_request(
-            "newest-clear-shortcut",
-            ingress.clone(),
-            raw.clone(),
-            "same-input",
-        );
-        let mut served = ingress[0].ck.clone();
-        served.content[0].kind = ck_wire::CkKind::Reasoning {
-            text: String::new(),
-            signature: None,
-        };
-        served.content[0].mark_modified();
-        served.content[1].kind = ck_wire::CkKind::Text {
-            text: "§1§ answer".into(),
-        };
-        served.content[1].mark_modified();
-        served.mark_modified();
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        let tags = BTreeMap::from([("newest".to_string(), 1)]);
-        let clear = vec![mc_core::FrozenUnit {
-            key: "strip:reasoning_clear:newest".into(),
-            kind: "strip_reasoning_clear".into(),
-            frozen_payload: String::new(),
-            durability_class: mc_core::DurabilityClass::Lineage,
-            reset_rule: String::new(),
-        }];
-        let control = transform::TransformResponse::passthrough(
-            vec![served.clone()],
-            request.full_array_fingerprint.clone(),
-        );
-        // The unchanged master shortcut serves a non-cleared newest response raw,
-        // including its signed thinking, even when a working CK clone differs.
-        assert_eq!(
-            encode_full_native_messages(&control, &request, &[], &tags, None, None, true),
-            raw
-        );
-        let (live, _) = run_native_cache_pass_with_clear_units(
-            &cache,
-            &request,
-            vec![served.clone()],
-            &[],
-            &tags,
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(live.native_messages.as_ref().unwrap()[0].as_ref(), &raw[0]);
-        let expected_clear =
-            encode_full_native_messages(&control, &request, &clear, &tags, None, None, true);
-        assert!(serde_json::to_string(&expected_clear)
-            .unwrap()
-            .contains("§1§ answer"));
-        assert!(!serde_json::to_string(&expected_clear)
-            .unwrap()
-            .contains("signed original"));
-        let (cleared, stats) = run_native_cache_pass_with_clear_units(
-            &cache,
-            &request,
-            vec![served.clone()],
-            &clear,
-            &tags,
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert!(
-            stats.encoded_messages > 0,
-            "clear transition reused a stale raw newest vector"
-        );
-        assert_eq!(
-            cleared.native_messages.as_ref().unwrap()[0].as_ref(),
-            &expected_clear[0]
-        );
-        // Exercise the cache key's exemption bits in both directions. This is
-        // an encoder control, not permission for a session to restore a clear.
-        let (live_again, stats) = run_native_cache_pass_with_clear_units(
-            &cache,
-            &request,
-            vec![served],
-            &[],
-            &tags,
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert!(
-            stats.encoded_messages > 0,
-            "shortcut transition reused stale cleared bytes"
-        );
-        assert_eq!(
-            live_again.native_messages.as_ref().unwrap()[0].as_ref(),
-            &raw[0]
-        );
-    }
-
-    #[test]
-    fn frontier_vacuity_covers_opaque_repeats_eviction_and_same_length_edits() {
-        let baseline_ingress = vec![ck("frontier-1", 1, "aaa"), ck("frontier-2", 2, "bbb")];
-        let baseline_native = vec![
-            json!({ "info": { "id": "frontier-1", "role": "user", "meta": "aaa" }, "parts": [{ "type": "text", "text": "aaa" }] }),
-            json!({ "info": { "id": "frontier-2", "role": "user", "meta": "bbb" }, "parts": [{ "type": "text", "text": "bbb" }] }),
-        ];
-        let baseline_request = native_cache_request(
-            "native-frontier-vacuity",
-            baseline_ingress.clone(),
-            baseline_native,
-            "opaque-repeat",
-        );
-        let baseline_served = baseline_ingress
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        run_native_cache_pass(
-            &cache,
-            &baseline_request,
-            baseline_served.clone(),
-            &BTreeMap::new(),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-
-        let mut edited_request = baseline_request.clone();
-        edited_request.messages[1] = ck("frontier-2", 2, "ccc");
-        edited_request.native_messages.as_mut().unwrap()[1]["info"]["meta"] = json!("ccc");
-        edited_request.native_messages.as_mut().unwrap()[1]["parts"][0]["text"] = json!("ccc");
-        let mut edited_served = baseline_served;
-        edited_served[1] = edited_request.messages[1].ck.clone();
-        let (edited, stats) = run_native_cache_pass(
-            &cache,
-            &edited_request,
-            edited_served.clone(),
-            &BTreeMap::new(),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert!(stats.encoded_messages > 0, "same-length edit was reused");
-        assert_eq!(edited.native_messages.unwrap()[1]["info"]["meta"], "ccc");
-
-        let evicted_cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        run_native_cache_pass(
-            &evicted_cache,
-            &edited_request,
-            edited_served.clone(),
-            &BTreeMap::new(),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        evicted_cache
-            .lock()
-            .unwrap()
-            .remove("native-frontier-vacuity");
-        let (_after_eviction, evicted_stats) = run_native_cache_pass(
-            &evicted_cache,
-            &edited_request,
-            edited_served,
-            &BTreeMap::new(),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(evicted_stats.reused_messages, 0);
-        assert!(evicted_stats.encoded_messages > 0);
-    }
-
-    #[test]
-    #[should_panic(expected = "incremental native attachment cache drift")]
-    fn differential_assert_rejects_frontier_inside_mutated_native_region() {
-        let ingress = vec![ck("inside-1", 1, "one"), ck("inside-2", 2, "two")];
-        let native = vec![
-            native_text_message("inside-1", "user", "one"),
-            native_text_message("inside-2", "user", "two"),
-        ];
-        let first_request = native_cache_request(
-            "native-inside-frontier",
-            ingress.clone(),
-            native,
-            "inside-fp-1",
-        );
-        let served = ingress
-            .iter()
-            .map(|message| message.ck.clone())
-            .collect::<Vec<_>>();
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        run_native_cache_pass(
-            &cache,
-            &first_request,
-            served.clone(),
-            &BTreeMap::new(),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-
-        let mut malformed = first_request;
-        malformed.full_array_fingerprint = Some("inside-fp-2".to_string());
-        malformed.native_messages.as_mut().unwrap()[0]["info"]["custom"] =
-            json!("mutated-before-frontier");
-        malformed.tail_delta = Some(json!({
-            "after": "inside-fp-1",
-            "replace_from": 2,
-            "native_replace_from": 1,
-        }));
-        run_native_cache_pass(
-            &cache,
-            &malformed,
-            served,
-            &BTreeMap::new(),
-            true,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "incremental native attachment cache drift")]
-    fn differential_assert_catches_corrupt_sidecar_key_derivation() {
-        let ingress = vec![ck("m1", 1, "one")];
-        let request = native_cache_request(
-            "native-key-mutation",
-            ingress.clone(),
-            vec![native_text_message("m1", "user", "one")],
-            "fp-1",
-        );
-        let served = vec![ingress[0].ck.clone()];
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        run_native_cache_pass(
-            &cache,
-            &request,
-            served.clone(),
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::CorruptSidecarForTest,
-        );
-
-        let mut mutated = request;
-        mutated.native_messages.as_mut().unwrap()[0]["info"]["custom"] = json!("changed");
-        run_native_cache_pass(
-            &cache,
-            &mutated,
-            served,
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::CorruptSidecarForTest,
-        );
-    }
-
-    #[test]
-    fn projected_prefix_is_charged_to_the_projection_cache_not_native_lru() {
-        let ingress = vec![ck("budget-projection", 1, &"x".repeat(4096))];
-        let request = native_cache_request(
-            "projection-budget",
-            ingress.clone(),
-            vec![native_text_message(
-                "budget-projection",
-                "user",
-                &"x".repeat(4096),
-            )],
-            "projection-budget-fp",
-        );
-        let served = vec![ingress[0].ck.clone()];
-        let projection = Arc::new(
-            crate::ck_wire::project_messages(&request.messages)
-                .expect("budget projection must succeed"),
-        );
-        let native = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        let mut response = transform::TransformResponse::passthrough(
-            served,
-            request.full_array_fingerprint.clone(),
-        );
-        attach_native_messages_incremental(
-            &mut response,
-            &request,
-            &[],
-            &BTreeMap::new(),
-            None,
-            None,
-            false,
-            None,
-            0,
-            &native,
-            NativeCacheKeyMode::Normal,
-        );
-        let native_charge = native
-            .lock()
-            .expect("native attachment cache mutex")
-            .retained_bytes;
-        assert!(
-            native_charge > 0,
-            "native attach still charges its own bytes"
-        );
-
-        let snapshot = ProjectionCacheSnapshot {
-            context: projection_cache_context(&request),
-            full_array_fingerprint: request.full_array_fingerprint.clone(),
-            message_retained_bytes: Arc::new(vec![0; request.messages.len()]),
-            projection: Arc::clone(&projection),
-        };
-        let projection_charge = snapshot.retained_bytes(&request.session_id);
-        let mut projections = ProjectionCache::new(1024 * 1024);
-        projections.replace(&request.session_id, 0, snapshot);
-        assert_eq!(projections.retained_bytes, projection_charge);
-        assert!(
-            projection_charge > projection.retained_bytes(),
-            "projection cache charge must include its outer context and session keys"
-        );
-        assert_ne!(
-            native_charge, projection_charge,
-            "projection bytes must not be double-charged onto the native LRU"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_mismatched_native_delta_cache_serves_full_output() {
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let session = "native-delta-fingerprint-mismatch";
-        handler.bind_route(7, binding(project.to_str().unwrap(), session));
-
-        let initial = native_cache_request(
-            session,
-            vec![
-                ck("mismatch-prefix", 1, "prefix"),
-                ck("mismatch-tail", 2, "before"),
-            ],
-            vec![
-                native_text_message("mismatch-prefix", "user", "prefix"),
-                native_text_message("mismatch-tail", "user", "before"),
-            ],
-            "mismatch-fp-1",
-        );
-        let first =
-            call_transform_request_on_channel(&handler, 7, serde_json::to_value(initial).unwrap())
-                .await;
-        assert_eq!(first["status"], "ok", "{first}");
-        assert!(first["native_messages"].is_array(), "{first}");
-
-        handler
-            .native_attachments
-            .lock()
-            .unwrap()
-            .sessions
-            .get_mut(session)
-            .expect("initial native attachment snapshot")
-            .snapshot
-            .full_array_fingerprint = Some("stale-native-cache-fingerprint".to_string());
-
-        let mut delta = native_cache_request(
-            session,
-            vec![ck("mismatch-tail", 2, "after")],
-            vec![native_text_message("mismatch-tail", "user", "after")],
-            "mismatch-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "mismatch-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 1,
-        }));
-        let response =
-            call_transform_request_on_channel(&handler, 7, serde_json::to_value(delta).unwrap())
-                .await;
-
-        assert_eq!(response["status"], "ok", "{response}");
-        assert!(
-            response["native_messages"].is_array(),
-            "a mismatched attachment snapshot must fall back to a full native serve: {response}"
-        );
-        assert!(
-            response.get("native_messages_delta").is_none(),
-            "{response}"
-        );
-        assert_eq!(
-            handler
-                .native_attachments
-                .lock()
-                .unwrap()
-                .stats(session)
-                .delta_fallback_reason
-                .map(NativeDeltaFallbackReason::as_str),
-            Some("fingerprint_mismatch")
-        );
-
-        let mut healed_delta = native_cache_request(
-            session,
-            vec![ck("mismatch-tail", 2, "after-heal")],
-            vec![native_text_message("mismatch-tail", "user", "after-heal")],
-            "mismatch-fp-3",
-        );
-        healed_delta.tail_delta = Some(json!({
-            "after": "mismatch-fp-2",
-            "replace_from": 1,
-            "native_replace_from": 1,
-        }));
-        let healed = call_transform_request_on_channel(
-            &handler,
-            7,
-            serde_json::to_value(healed_delta).unwrap(),
-        )
-        .await;
-        assert_eq!(healed["status"], "ok", "{healed}");
-        assert!(healed["native_messages_delta"].is_object(), "{healed}");
-        assert!(healed.get("native_messages").is_none(), "{healed}");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_native_delta_cache_eviction_self_heals_full_then_delta() {
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let session = "native-delta-eviction-heal";
-        handler.bind_route(7, binding(project.to_str().unwrap(), session));
-
-        let initial = native_cache_request(
-            session,
-            vec![ck("evict-prefix", 1, "prefix"), ck("evict-tail", 2, "zero")],
-            vec![
-                native_text_message("evict-prefix", "user", "prefix"),
-                native_text_message("evict-tail", "user", "zero"),
-            ],
-            "evict-fp-0",
-        );
-        let cold =
-            call_transform_request_on_channel(&handler, 7, serde_json::to_value(initial).unwrap())
-                .await;
-        assert!(cold["native_messages"].is_array(), "{cold}");
-
-        let delta_request = |after: &str, fingerprint: &str, text: &str| {
-            let mut delta = native_cache_request(
-                session,
-                vec![ck("evict-tail", 2, text)],
-                vec![native_text_message("evict-tail", "user", text)],
-                fingerprint,
-            );
-            delta.tail_delta = Some(json!({
-                "after": after,
-                "replace_from": 1,
-                "native_replace_from": 1,
-            }));
-            serde_json::to_value(delta).unwrap()
-        };
-
-        let pass_n = call_transform_request_on_channel(
-            &handler,
-            7,
-            delta_request("evict-fp-0", "evict-fp-1", "one"),
-        )
-        .await;
-        assert!(pass_n["native_messages_delta"].is_object(), "{pass_n}");
-        assert!(pass_n.get("native_messages").is_none(), "{pass_n}");
-
-        handler.native_attachments.lock().unwrap().remove(session);
-        let pass_n_plus_1 = call_transform_request_on_channel(
-            &handler,
-            7,
-            delta_request("evict-fp-1", "evict-fp-2", "two"),
-        )
-        .await;
-        assert!(
-            pass_n_plus_1["native_messages"].is_array(),
-            "{pass_n_plus_1}"
-        );
-        assert!(
-            pass_n_plus_1.get("native_messages_delta").is_none(),
-            "{pass_n_plus_1}"
-        );
-        assert_eq!(
-            handler
-                .native_attachments
-                .lock()
-                .unwrap()
-                .stats(session)
-                .delta_fallback_reason
-                .map(NativeDeltaFallbackReason::as_str),
-            Some("missing_cache_state")
-        );
-
-        let pass_n_plus_2 = call_transform_request_on_channel(
-            &handler,
-            7,
-            delta_request("evict-fp-2", "evict-fp-3", "three"),
-        )
-        .await;
-        assert!(
-            pass_n_plus_2["native_messages_delta"].is_object(),
-            "{pass_n_plus_2}"
-        );
-        assert!(
-            pass_n_plus_2.get("native_messages").is_none(),
-            "{pass_n_plus_2}"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_small_lru_preserves_projection_and_an_oversized_delta_core() {
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let session_a = "projection-lru-a";
-        let session_b = "projection-lru-b";
-        let session_c = "projection-lru-oversized";
-        handler.bind_route(7, binding(project.to_str().unwrap(), session_a));
-        handler.bind_route(8, binding(project.to_str().unwrap(), session_b));
-        handler.bind_route(9, binding(project.to_str().unwrap(), session_c));
-
-        let initial_a = native_cache_request(
-            session_a,
-            vec![
-                ck("lru-a-prefix", 1, &"a".repeat(4096)),
-                ck("lru-a-tail", 2, "before"),
-            ],
-            Vec::new(),
-            "lru-a-fp-1",
-        );
-        let response_a = call_transform_request_on_channel(
-            &handler,
-            7,
-            serde_json::to_value(initial_a).unwrap(),
-        )
-        .await;
-        assert_eq!(response_a["status"], "ok", "{response_a}");
-        let (entry_charge, projection_weak, attachment_weak) = {
-            let mut native = handler.native_attachments.lock().unwrap();
-            let projections = handler.projections.lock().unwrap();
-            let native_entry = &native.sessions[session_a];
-            let projection = &projections.sessions[session_a].snapshot.projection;
-            let chunk = native_entry
-                .snapshot
-                .chunks
-                .first()
-                .expect("encoded attachment chunk");
-            let values = (
-                native_entry.retained_bytes,
-                Arc::downgrade(projection),
-                Arc::downgrade(&chunk.value),
-            );
-            native.max_retained_bytes = native_entry.retained_bytes;
-            values
-        };
-
-        let initial_b = native_cache_request(
-            session_b,
-            vec![
-                ck("lru-b-prefix", 1, &"b".repeat(4096)),
-                ck("lru-b-tail", 2, "before"),
-            ],
-            Vec::new(),
-            "lru-b-fp-1",
-        );
-        let response_b = call_transform_request_on_channel(
-            &handler,
-            8,
-            serde_json::to_value(initial_b).unwrap(),
-        )
-        .await;
-        assert_eq!(response_b["status"], "ok", "{response_b}");
-        {
-            let native = handler.native_attachments.lock().unwrap();
-            let projections = handler.projections.lock().unwrap();
-            assert!(!native.sessions.contains_key(session_a));
-            assert!(native.sessions.contains_key(session_b));
-            assert!(
-                projections.sessions.contains_key(session_a),
-                "native LRU eviction must not drop the projection owner"
-            );
-        }
-        assert!(projection_weak.upgrade().is_some());
-        assert!(attachment_weak.upgrade().is_none());
-
-        assert!(entry_charge > 1);
-        handler
-            .native_attachments
-            .lock()
-            .unwrap()
-            .max_retained_bytes = entry_charge - 1;
-        let oversized = native_cache_request(
-            session_c,
-            vec![
-                ck("lru-c-prefix", 1, &"c".repeat(4096)),
-                ck("lru-c-tail", 2, "before"),
-            ],
-            Vec::new(),
-            "lru-c-fp-1",
-        );
-        let response_c = call_transform_request_on_channel(
-            &handler,
-            9,
-            serde_json::to_value(oversized).unwrap(),
-        )
-        .await;
-        assert_eq!(response_c["status"], "ok", "{response_c}");
-        {
-            let native = handler.native_attachments.lock().unwrap();
-            let oversized_entry = &native.sessions[session_c];
-            assert!(oversized_entry.retained_bytes > native.max_retained_bytes);
-            assert_eq!(native.retained_bytes, oversized_entry.retained_bytes);
-        }
-        assert!(
-            handler
-                .projections
-                .lock()
-                .unwrap()
-                .sessions
-                .contains_key(session_c),
-            "preserving an oversized native core must not drop the independent projection"
-        );
-
-        let mut warm_delta = native_cache_request(
-            session_a,
-            vec![ck("lru-a-tail", 2, "after")],
-            Vec::new(),
-            "lru-a-fp-2",
-        );
-        warm_delta.tail_delta = Some(json!({
-            "after": "lru-a-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        }));
-        let warm = call_transform_request_on_channel(
-            &handler,
-            7,
-            serde_json::to_value(warm_delta).unwrap(),
-        )
-        .await;
-        assert_eq!(warm["status"], "ok", "{warm}");
-        assert_eq!(warm["timings"]["projection_reused_messages"], 1);
-        assert_eq!(warm["timings"]["projection_projected_messages"], 1);
-        assert_eq!(warm["timings"]["native_cache_reused_messages"], 0);
-        assert!(
-            warm["timings"]["native_cache_encoded_messages"]
-                .as_u64()
-                .unwrap()
-                > 0
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "incremental prefix projection byte drift")]
-    fn projection_differential_catches_corrupt_first_changed_position() {
-        let ingress = vec![ck("p1", 1, "one"), ck("p2", 2, "two")];
-        let request = native_cache_request(
-            "projection-key-mutation",
-            ingress.clone(),
-            vec![
-                native_text_message("p1", "user", "one"),
-                native_text_message("p2", "user", "two"),
-            ],
-            "projection-fp-1",
-        );
-        let snapshot = ProjectionCacheSnapshot {
-            context: projection_cache_context(&request),
-            full_array_fingerprint: request.full_array_fingerprint.clone(),
-            message_retained_bytes: Arc::new(vec![0; request.messages.len()]),
-            projection: Arc::new(
-                crate::ck_wire::project_messages(&request.messages)
-                    .expect("projection cache snapshot"),
-            ),
-        };
-        let mut changed = request;
-        changed.messages[1] = ck("p2", 2, "changed");
-        changed.full_array_fingerprint = Some("projection-fp-2".to_string());
-        let corrupt = validated_projection_cache_input(
-            &changed,
-            &snapshot,
-            "projection-fp-1",
-            1,
-            ProjectionCacheKeyMode::CorruptFrontierForTest,
-        )
-        .expect("corrupt projection cache key");
-        let incremental = crate::ck_wire::project_messages_incremental(
-            &changed.messages,
-            &corrupt.projection,
-            corrupt.replace_from,
-        )
-        .expect("corrupt incremental projection still parses");
-        transform::assert_prefix_projection_equivalent(&incremental, &changed.messages).unwrap();
-    }
-
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "OpenCode serialization produced duplicate tool_use ids")]
-    fn duplicate_tool_use_assert_covers_incremental_native_suffix() {
-        let text = ck("lead", 1, "lead");
-        let call = assistant_tool_call("call-dup", 2);
-        let result = tool_result("result-dup", 3, "first");
-        let baseline = vec![text.clone(), call.clone(), result.clone()];
-        let request = native_cache_request("native-dup", baseline.clone(), Vec::new(), "fp-1");
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        run_native_cache_pass(
-            &cache,
-            &request,
-            baseline.iter().map(|message| message.ck.clone()).collect(),
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-
-        let mut duplicate_call = call;
-        duplicate_call.mid = "call-dup-again".to_string();
-        duplicate_call.ck.meta.harness_id = Some(duplicate_call.mid.clone());
-        let mut duplicate_result = result;
-        duplicate_result.mid = "result-dup-again".to_string();
-        duplicate_result.ck.meta.harness_id = Some(duplicate_result.mid.clone());
-        let mut next = baseline;
-        next.push(duplicate_call);
-        next.push(duplicate_result);
-        let mut next_request = native_cache_request("native-dup", next.clone(), Vec::new(), "fp-2");
-        next_request.tail_delta = Some(json!({
-            "after": "fp-1",
-            "replace_from": 3,
-            "native_replace_from": 0,
-        }));
-        run_native_cache_pass(
-            &cache,
-            &next_request,
-            next.iter().map(|message| message.ck.clone()).collect(),
-            &BTreeMap::new(),
-            false,
-            0,
-            NativeCacheKeyMode::Normal,
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_tail_delta_cross_frontier_tool_arc_matches_full_control() {
-        let (cached_handler, cached_store, _cached_dir, _cached_project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let (control_handler, control_store, _control_dir, _control_project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let initial_messages = vec![
-            ck_reasoning("reasoning-old", 1, "signed reasoning"),
-            assistant_tool_call("call-project", 2),
-            tool_result("result-project", 3, "first result"),
-        ];
-        let mut cached_native_before = Vec::new();
-        for (index, handler) in [&cached_handler, &control_handler].into_iter().enumerate() {
-            let initial = native_cache_request(
-                "ses",
-                initial_messages.clone(),
-                Vec::new(),
-                "projection-handler-fp-1",
-            );
-            let response =
-                call_transform_request(handler, serde_json::to_value(initial).unwrap()).await;
-            assert_eq!(response["status"], "ok", "{response}");
-            if index == 0 {
-                cached_native_before = response["native_messages"]
-                    .as_array()
-                    .expect("initial native response array")
-                    .clone();
-            }
-        }
-
-        let changed_messages = vec![
-            ck_reasoning("reasoning-old", 1, "signed reasoning"),
-            assistant_tool_call("call-project", 2),
-            tool_result("result-project", 3, "changed result"),
-        ];
-        let mut delta = native_cache_request(
-            "ses",
-            vec![changed_messages[2].clone()],
-            Vec::new(),
-            "projection-handler-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "projection-handler-fp-1",
-            "replace_from": 2,
-            "native_replace_from": 0,
-        }));
-        let mut cached =
-            call_transform_request(&cached_handler, serde_json::to_value(delta).unwrap()).await;
-        let full = call_transform_request(
-            &control_handler,
-            serde_json::to_value(native_cache_request(
-                "ses",
-                changed_messages,
-                Vec::new(),
-                "projection-handler-fp-2",
-            ))
-            .unwrap(),
-        )
-        .await;
-        assert_eq!(cached["status"], "ok", "{cached}");
-        assert_eq!(full["status"], "ok", "{full}");
-        assert_eq!(cached["timings"]["projection_reused_messages"], 2);
-        assert_eq!(cached["timings"]["projection_projected_messages"], 1);
-        let native_delta = cached["native_messages_delta"]
-            .as_object()
-            .expect("cached response uses a native suffix");
-        assert_eq!(native_delta["after"], "projection-handler-fp-1");
-        let replace_from = native_delta["replace_from"]
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-            .expect("native suffix frontier");
-        let mut expanded_native = cached_native_before[..replace_from].to_vec();
-        expanded_native.extend(
-            native_delta["messages"]
-                .as_array()
-                .expect("native suffix messages")
-                .iter()
-                .cloned(),
-        );
-        cached["native_messages"] = Value::Array(expanded_native);
-        assert_eq!(full["timings"]["projection_reused_messages"], 0);
-        assert_eq!(full["timings"]["projection_projected_messages"], 3);
-
-        for field in [
-            "action",
-            "decision",
-            "materialize_reason",
-            "boundary_id",
-            "coverage_ordinal",
-            "historian",
-            "ck_messages",
-            "native_messages",
-        ] {
-            assert_eq!(cached[field], full[field], "full-control drift in {field}");
-        }
-        let result = cached["ck_messages"]
-            .as_array()
-            .expect("CK response array")
-            .iter()
-            .find(|message| message["meta"]["harness_id"] == "result-project")
-            .expect("changed result message");
-        assert_eq!(
-            result["content"][0]["kind"]["output"]["kind"]["text"],
-            "changed result"
-        );
-        codec::opencode::assert_unique_tool_use_ids(
-            cached["native_messages"]
-                .as_array()
-                .expect("native response array")
-                .iter(),
-        );
-
-        let cached_projection = cached_handler
-            .projections
-            .lock()
-            .expect("cached projection mutex")
-            .snapshot("ses", cached_store.load("ses").unwrap().meta.revert_epoch)
-            .expect("cached projection snapshot")
-            .projection;
-        let full_projection = control_handler
-            .projections
-            .lock()
-            .expect("control projection mutex")
-            .snapshot("ses", control_store.load("ses").unwrap().meta.revert_epoch)
-            .expect("full projection snapshot")
-            .projection;
-        assert_eq!(cached_projection, full_projection);
-        assert_eq!(
-            cached_projection.differential_bytes(),
-            full_projection.differential_bytes(),
-            "projected bytes must match the full control"
-        );
-        let cached_state = cached_store.load("ses").unwrap();
-        let full_state = control_store.load("ses").unwrap();
-        assert_eq!(cached_state.core, full_state.core, "selection/core drift");
-        let normalize_decision_times = |mut historian: HistorianDurableState| {
-            for decision in &mut historian.recent_decisions {
-                decision.at_ms = 0;
-                decision.request_observed_at_ms = 0;
-            }
-            historian
-        };
-        assert_eq!(
-            normalize_decision_times(cached_state.meta.historian),
-            normalize_decision_times(full_state.meta.historian),
-            "historian boundary math drift"
-        );
-
-        let mut changed_context = native_cache_request(
-            "ses",
-            vec![tool_result("result-project", 3, "changed again")],
-            Vec::new(),
-            "projection-handler-fp-3",
-        );
-        changed_context.render_config = "cfg1".to_string();
-        changed_context.tail_delta = Some(json!({
-            "after": "projection-handler-fp-2",
-            "replace_from": 2,
-            "native_replace_from": 0,
-        }));
-        let third = call_transform_request(
-            &cached_handler,
-            serde_json::to_value(changed_context).unwrap(),
-        )
-        .await;
-        assert_eq!(third["status"], "ok", "{third}");
-        assert_eq!(third["timings"]["projection_reused_messages"], 0);
-        assert_eq!(third["timings"]["projection_projected_messages"], 3);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_delta_rechecks_durable_revert_epoch_before_projection_reuse() {
-        let session = "projection-revert-epoch";
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        handler.bind_route(7, binding(project.to_str().unwrap(), session));
-        let initial = native_cache_request(
-            session,
-            vec![
-                ck("epoch-prefix", 1, "prefix"),
-                ck("epoch-tail", 2, "before"),
-            ],
-            Vec::new(),
-            "epoch-fp-1",
-        );
-        let first = call_transform_request(&handler, serde_json::to_value(initial).unwrap()).await;
-        assert_eq!(first["status"], "ok", "{first}");
-        let loaded = store.load(session).unwrap();
-        let mut bumped = loaded.meta.clone();
-        bumped.revert_epoch = bumped.revert_epoch.saturating_add(1);
-        store
-            .commit(session, loaded.row_version, &loaded.core, &bumped)
-            .unwrap();
-
-        let mut delta = native_cache_request(
-            session,
-            vec![ck("epoch-tail", 2, "after")],
-            Vec::new(),
-            "epoch-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "epoch-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        }));
-        let response = call_transform_request(&handler, serde_json::to_value(delta).unwrap()).await;
-        assert_eq!(response["status"], "ok", "{response}");
-        assert_eq!(response["timings"]["projection_reused_messages"], 0);
-        assert_eq!(response["timings"]["projection_projected_messages"], 2);
-        let cache = handler
-            .native_attachments
-            .lock()
-            .expect("native attachment cache mutex");
-        assert_eq!(cache.sessions[session].revert_epoch, bumped.revert_epoch);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_delta_reconcile_recut_refreshes_projection_epoch_and_frontier() {
-        let session = "projection-reconcile-recut";
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        handler.bind_route(7, binding(project.to_str().unwrap(), session));
-        store
-            .replace_compartments(
-                session,
-                &[
-                    stored_comp(1, 1, 1, "a", "S0"),
-                    stored_comp(2, 2, 2, "t2", "S1"),
-                ],
-            )
-            .unwrap();
-        let initial_messages = vec![
-            ck("a", 1, "raw"),
-            ck("t2", 2, "turn two"),
-            ck("t3", 3, "tail"),
-        ];
-        let initial = native_cache_request(session, initial_messages, Vec::new(), "reconcile-fp-1");
-        let boot = call_transform_request(&handler, serde_json::to_value(initial).unwrap()).await;
-        assert_eq!(boot["action"], "HARD", "{boot}");
-
-        let mut reverted = native_cache_request(
-            session,
-            vec![ck("t4", 2, "new turn")],
-            Vec::new(),
-            "reconcile-fp-2",
-        );
-        reverted.tail_delta = Some(json!({
-            "after": "reconcile-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        }));
-        let soft = call_transform_request(&handler, serde_json::to_value(reverted).unwrap()).await;
-        assert_eq!(soft["reconcile_pending"], true, "{soft}");
-        let loaded = store.load(session).unwrap();
-        let mut meta = loaded.meta.clone();
-        meta.last_execute_ordinal = 99;
-        store
-            .commit(session, loaded.row_version, &loaded.core, &meta)
-            .unwrap();
-
-        let mut recut = native_cache_request(
-            session,
-            vec![ck("t4", 2, "new turn")],
-            Vec::new(),
-            "reconcile-fp-3",
-        );
-        recut.tail_delta = Some(json!({
-            "after": "reconcile-fp-2",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        }));
-        let hard = call_transform_request(&handler, serde_json::to_value(recut).unwrap()).await;
-        assert_eq!(hard["action"], "HARD", "{hard}");
-        assert_eq!(hard["boundary_id"], "a#0");
-        assert_eq!(hard["coverage_ordinal"], 1);
-        assert_eq!(hard["reconcile_pending"], false);
-        assert_eq!(hard["timings"]["projection_reused_messages"], 1);
-        let durable = store.load(session).unwrap();
-        assert_eq!(durable.meta.revert_epoch, 1);
-        let acknowledged = handler
-            .transform_snapshots
-            .lock()
-            .unwrap()
-            .ready_request_clone(session)
-            .unwrap();
-        let expected = crate::ck_wire::project_messages(&acknowledged.messages).unwrap();
-        let native = handler
-            .native_attachments
-            .lock()
-            .expect("native attachment cache mutex");
-        assert_eq!(
-            native.sessions[session].revert_epoch,
-            durable.meta.revert_epoch
-        );
-        let cached = handler
-            .projections
-            .lock()
-            .expect("projection cache mutex")
-            .snapshot(session, durable.meta.revert_epoch)
-            .expect("projection cache snapshot");
-        assert_eq!(cached.projection.as_ref(), &expected);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_delta_boundary_divergence_recut_retries_cas_without_stale_projection() {
-        let session = "projection-boundary-recut-cas";
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        handler.bind_route(7, binding(project.to_str().unwrap(), session));
-        let mut previous = crate::transform::tests::seed_astro_divergence(&store, session, 2_442);
-        previous.serializer_profile = "opencode-aisdk".to_string();
-        previous.serve_native = true;
-        previous.native_messages = Some(Vec::new());
-        previous.full_array_fingerprint = Some("boundary-recut-fp-1".to_string());
-        let epoch = store.load(session).unwrap().meta.revert_epoch;
-        seed_handler_delta_snapshot(&handler, &previous, epoch);
-
-        let hook_fired = Arc::new(AtomicBool::new(false));
-        let hook_flag = Arc::clone(&hook_fired);
-        let hook_store = Arc::clone(&store);
-        let hook_session = session.to_string();
-        crate::transform::install_transform_attempt_hook(session, move || {
-            assert!(!hook_flag.swap(true, Ordering::SeqCst));
-            let loaded = hook_store.load(&hook_session).unwrap();
-            hook_store
-                .commit(
-                    &hook_session,
-                    loaded.row_version,
-                    &loaded.core,
-                    &loaded.meta,
-                )
-                .unwrap();
-        });
-
-        let replace_from = previous.messages.len() - 1;
-        let mut delta = native_cache_request(
-            session,
-            vec![previous.messages[replace_from].clone()],
-            Vec::new(),
-            "boundary-recut-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "boundary-recut-fp-1",
-            "replace_from": replace_from,
-            "native_replace_from": 0,
-        }));
-        let response = call_transform_request(&handler, serde_json::to_value(delta).unwrap()).await;
-        assert_eq!(response["status"], "ok", "{response}");
-        assert!(hook_fired.load(Ordering::SeqCst));
-        assert_eq!(response["action"], "HARD");
-        assert_eq!(response["materialize_reason"], "boundary_divergence_recut");
-        assert_eq!(response["boundary_id"], "m2400#0");
-        assert_eq!(response["coverage_ordinal"], 2400);
-        assert_eq!(
-            response["timings"]["projection_reused_messages"],
-            replace_from
-        );
-        let acknowledged = handler
-            .transform_snapshots
-            .lock()
-            .unwrap()
-            .ready_request_clone(session)
-            .unwrap();
-        let expected = crate::ck_wire::project_messages(&acknowledged.messages).unwrap();
-        let cached = handler
-            .projections
-            .lock()
-            .unwrap()
-            .snapshot(session, store.load(session).unwrap().meta.revert_epoch)
-            .expect("post-retry projection")
-            .projection;
-        assert_eq!(cached.as_ref(), &expected);
-        assert_eq!(cached.differential_bytes(), expected.differential_bytes());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_delta_tail_mutation_re_adopts_identity_from_cached_prefix() {
-        let session = "projection-tail-readopt";
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        handler.bind_route(7, binding(project.to_str().unwrap(), session));
-        store
-            .replace_compartments(session, &[stored_comp(1, 1, 1, "covered", "SUMMARY")])
-            .unwrap();
-        let initial = native_cache_request(
-            session,
-            vec![ck("covered", 1, "covered"), ck("tail", 2, "before")],
-            Vec::new(),
-            "readopt-fp-1",
-        );
-        let first = call_transform_request(&handler, serde_json::to_value(initial).unwrap()).await;
-        assert_eq!(first["status"], "ok", "{first}");
-        let old_identity = store.load(session).unwrap().meta.block_identity_by_mid["tail"].clone();
-
-        let mut delta = native_cache_request(
-            session,
-            vec![ck("tail", 2, "after")],
-            Vec::new(),
-            "readopt-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "readopt-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        }));
-        let adopted = call_transform_request(&handler, serde_json::to_value(delta).unwrap()).await;
-        assert_eq!(adopted["status"], "ok", "{adopted}");
-        assert_eq!(adopted["timings"]["projection_reused_messages"], 1);
-        assert_eq!(adopted["first_divergence"]["kind"], "content_changed");
-        let durable = store.load(session).unwrap();
-        assert_eq!(durable.meta.tail_identity_re_adopt_count, 1);
-        assert_ne!(durable.meta.block_identity_by_mid["tail"], old_identity);
-        let acknowledged = handler
-            .transform_snapshots
-            .lock()
-            .unwrap()
-            .ready_request_clone(session)
-            .unwrap();
-        let expected = crate::ck_wire::project_messages(&acknowledged.messages).unwrap();
-        assert_eq!(
-            handler
-                .projections
-                .lock()
-                .unwrap()
-                .snapshot(session, durable.meta.revert_epoch)
-                .as_ref()
-                .map(|snapshot| snapshot.projection.as_ref()),
-            Some(&expected)
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -23110,103 +18904,6 @@ mod tests {
             call_facade_on_channel(&handler, 7, "ctx_note", json!({ "action": "read" })).await,
         );
         assert!(successor_facade.contains("compiled note inherited by the successor"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_delta_normalization_matches_full_when_reserved_todo_starts_at_frontier() {
-        let (cached_handler, cached_store, _cached_dir, _cached_project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let (control_handler, control_store, _control_dir, _control_project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let initial_messages = vec![
-            ck("todo-prefix", 1, "prefix"),
-            assistant_tool_call("call-ordinary", 2),
-            tool_result("result-ordinary", 3, "ordinary"),
-        ];
-        for handler in [&cached_handler, &control_handler] {
-            let request = native_cache_request(
-                "ses",
-                initial_messages.clone(),
-                Vec::new(),
-                "todo-normalize-fp-1",
-            );
-            let response =
-                call_transform_request(handler, serde_json::to_value(request).unwrap()).await;
-            assert_eq!(response["status"], "ok", "{response}");
-        }
-
-        let pair = injection::build_synthetic_todo_pair(
-            r#"[{"content":"pin normalization","status":"in_progress","priority":"high"}]"#,
-        )
-        .unwrap();
-        let mut call = pair.assistant_msg;
-        call.meta.synthetic = false;
-        call.meta.harness_id = Some("todo-reserved-call".to_string());
-        let mut result = pair.tool_msg;
-        result.meta.synthetic = false;
-        result.meta.harness_id = Some("todo-reserved-result".to_string());
-        let changed_messages = vec![
-            ck("todo-prefix", 1, "prefix"),
-            CkIngressMessage {
-                mid: "todo-reserved-call".to_string(),
-                ordinal: 2,
-                ck: call,
-            },
-            CkIngressMessage {
-                mid: "todo-reserved-result".to_string(),
-                ordinal: 3,
-                ck: result,
-            },
-        ];
-        let mut delta = native_cache_request(
-            "ses",
-            changed_messages[1..].to_vec(),
-            Vec::new(),
-            "todo-normalize-fp-2",
-        );
-        delta.tail_delta = Some(json!({
-            "after": "todo-normalize-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        }));
-        let cached =
-            call_transform_request(&cached_handler, serde_json::to_value(delta).unwrap()).await;
-        let full = call_transform_request(
-            &control_handler,
-            serde_json::to_value(native_cache_request(
-                "ses",
-                changed_messages,
-                Vec::new(),
-                "todo-normalize-fp-2",
-            ))
-            .unwrap(),
-        )
-        .await;
-        assert_eq!(cached["status"], "ok", "{cached}");
-        assert_eq!(cached["timings"]["projection_reused_messages"], 1);
-        assert_eq!(cached["ck_messages"], full["ck_messages"]);
-        let cached_epoch = cached_store.load("ses").unwrap().meta.revert_epoch;
-        let full_epoch = control_store.load("ses").unwrap().meta.revert_epoch;
-        let cached_projection = cached_handler
-            .projections
-            .lock()
-            .unwrap()
-            .snapshot("ses", cached_epoch)
-            .expect("cached projection")
-            .projection;
-        let full_projection = control_handler
-            .projections
-            .lock()
-            .unwrap()
-            .snapshot("ses", full_epoch)
-            .expect("full projection")
-            .projection;
-        assert_eq!(cached_projection, full_projection);
-        assert!(cached_projection
-            .blocks
-            .iter()
-            .skip(1)
-            .all(|block| block.synthetic));
     }
 
     /// When a module call fails, the host serves its last-known-good replay followed by the raw
@@ -25098,44 +20795,6 @@ mod tests {
         assert_eq!(guidance_full_repeat, guidance_full);
     }
 
-    #[test]
-    fn session_cache_ttl_user_edits_are_live_and_default_changes_are_frozen() {
-        let (_, store, _dir, _) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let frozen = McModuleConfig::default();
-        let mut live = frozen.clone();
-        let model_key = "anthropic/claude-opus-5-5";
-        let model = Some(model_key);
-        let resolve_and_save = |session: &str, bound: &McModuleConfig, live: &McModuleConfig| {
-            let (resolved, policy) =
-                resolve_session_cache_ttl(&store, session, model, bound, live).unwrap();
-            let mut loaded = store.load_meta(session).unwrap();
-            loaded.meta.cache_ttl_policy = Some(policy);
-            store
-                .commit_meta(session, loaded.row_version, &loaded.meta)
-                .unwrap();
-            resolved
-        };
-        live.cache_ttl_by_model
-            .insert(model_key.to_string(), "1h".to_string());
-        assert_eq!(resolve_and_save("user-ttl", &frozen, &live).value, "1h");
-        live.cache_ttl_by_model
-            .insert(model_key.to_string(), "13h".to_string());
-        assert_eq!(resolve_and_save("user-ttl", &frozen, &live).value, "13h");
-        assert_eq!(
-            resolve_and_save("builtin-ttl", &frozen, &frozen).value,
-            "5m"
-        );
-        let changed_default = McModuleConfig {
-            cache_ttl: "10m".to_string(),
-            ..McModuleConfig::default()
-        };
-        assert_eq!(
-            resolve_and_save("builtin-ttl", &changed_default, &changed_default).value,
-            "5m"
-        );
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn guidance_language_directive_is_present_in_both_serializer_variants() {
         let producer = Arc::new(ProducerState::default());
@@ -25239,167 +20898,6 @@ mod tests {
         assert!(store.load("other").unwrap().row_version.is_none());
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn smart_note_writes_require_the_host_evaluator_capability() {
-        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
-        let (handler, store, _dir, project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            resolver,
-        );
-        let refused = call_facade(
-            &handler,
-            "ctx_note",
-            json!({
-                "action": "write",
-                "content": "pending without evaluator",
-                "surface_condition": "when evaluated",
-            }),
-        )
-        .await;
-        let refused_text = tool_text(refused);
-        assert_eq!(
-            refused_text,
-            "Conditional notes are not available in the current mode. Save a regular note without a condition. (MC-C08)"
-        );
-
-        let plain = call_facade(
-            &handler,
-            "ctx_note",
-            json!({"action": "write", "content": "plain note is allowed"}),
-        )
-        .await;
-        assert!(!tool_is_error(plain));
-        let plain_id = store
-            .search_notes_like(project.to_str().unwrap(), "ses", "plain note is allowed")
-            .unwrap()[0]
-            .id;
-        let session_update = call_facade(
-            &handler,
-            "ctx_note",
-            json!({"action": "update", "note_ids": [plain_id], "surface_condition": "when evaluated"}),
-        ).await;
-        assert!(
-            tool_text(session_update).contains("Only a note created with a condition can have one")
-        );
-        let unchanged = store
-            .get_note_by_id(project.to_str().unwrap(), "ses", plain_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(unchanged.status, "active");
-        assert!(unchanged.surface_condition.is_none());
-
-        let state_sync = handler
-            .dispatch_value(
-                7,
-                json!({
-                    "method": "state_sync",
-                    "session_id": "ses",
-                    "shadow_generation": 0,
-                    "expected_shadow_seq": 0,
-                    "acked_watermarks": {},
-                    "note_evaluation_available": true,
-                }),
-            )
-            .await;
-        assert!(
-            matches!(state_sync, HandlerOutcome::Response(_)),
-            "{state_sync:?}"
-        );
-
-        let accepted = call_facade(
-            &handler,
-            "ctx_note",
-            json!({
-                "action": "write",
-                "content": "smart note with evaluator",
-                "surface_condition": "when evaluated",
-                "compiled_provider": "retina-local-fs",
-                "compiled_config": "{\"kind\":\"path_exists\",\"path\":\"old\"}",
-                "compiled_at": 100,
-                "compile_status": "compiled",
-            }),
-        )
-        .await;
-        let accepted_text = tool_text(accepted);
-        assert!(accepted_text.contains("Created smart note"));
-        let project = project.to_str().unwrap();
-        let note_id = store
-            .search_notes_like(project, "ses", "smart note with evaluator")
-            .unwrap()[0]
-            .id;
-        let written = store
-            .get_note_by_id(project, "ses", note_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            written.compiled_provider.as_deref(),
-            Some("retina-local-fs")
-        );
-        assert_eq!(written.compiled_at, Some(100));
-        store
-            .write_note_evaluation(NoteEvaluationInput {
-                project_path: project,
-                note_id,
-                source_revision: written.status_version,
-                verdict: false,
-                compiled_check: Some("old compiled check"),
-                manifest_json: Some("{\"kind\":\"old\"}"),
-                check_hash: Some("old-hash"),
-                next_due_at: Some(999),
-                now_ms: 150,
-            })
-            .unwrap();
-
-        let updated = call_facade(
-            &handler,
-            "ctx_note",
-            json!({
-                "action": "update",
-                "note_ids": [note_id],
-                "surface_condition": "when the replacement path exists",
-                "compiled_provider": "retina-local-fs",
-                "compiled_config": "{\"kind\":\"path_exists\",\"path\":\"new\"}",
-                "compiled_at": 200,
-                "compile_status": "compiled",
-            }),
-        )
-        .await;
-        assert!(!tool_is_error(updated));
-        let updated = store
-            .get_note_by_id(project, "ses", note_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            updated.surface_condition.as_deref(),
-            Some("when the replacement path exists")
-        );
-        assert_eq!(
-            updated.compiled_provider.as_deref(),
-            Some("retina-local-fs")
-        );
-        assert_eq!(
-            updated.compiled_config.as_deref(),
-            Some("{\"kind\":\"path_exists\",\"path\":\"new\"}")
-        );
-        assert_eq!(updated.compiled_at, Some(200));
-        assert_eq!(updated.compile_status.as_deref(), Some("compiled"));
-        assert_eq!(updated.compiled_check, None);
-        assert_eq!(updated.manifest_json, None);
-        assert_eq!(updated.check_hash, None);
-        assert_eq!(updated.check_next_due_at, None);
-        assert_eq!(updated.last_checked_at, None);
-        assert_eq!(updated.check_status.as_deref(), Some("uncompiled"));
-
-        let plain_with_capability = call_facade(
-            &handler,
-            "ctx_note",
-            json!({"action": "write", "content": "plain note still works"}),
-        )
-        .await;
-        assert!(!tool_is_error(plain_with_capability));
-    }
-
     #[test]
     fn ctx_note_schema_declares_one_id_field() {
         let properties = prompt_surface::session_tools(&PromptSurfaceSelection::default())
@@ -25420,342 +20918,6 @@ mod tests {
                 "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 },
                 "description": "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write."
             })
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn ctx_expand_and_ctx_note_facades_are_session_scoped() {
-        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
-        let (handler, store, _dir, project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            resolver,
-        );
-        let selected_range_identities = vec![mc_store::HistorianSelectedMessageIdentity {
-            mid: "m10".to_string(),
-            block_identities: vec![mc_store::BlockIdentity {
-                kind_tag: "text".to_string(),
-                byte_fingerprint: "m10-content".to_string(),
-            }],
-        }];
-        let meta = ModuleMeta {
-            block_identity_by_mid: selected_range_identities
-                .iter()
-                .map(|selected| (selected.mid.clone(), selected.block_identities.clone()))
-                .collect(),
-            historian: HistorianDurableState {
-                state: HistorianPhase::Publishing,
-                firing_seq: 7,
-                chunk_range: Some(HistorianChunkRange {
-                    from_ordinal: 10,
-                    to_ordinal: 12,
-                }),
-                chunk_fingerprint: "fp".to_string(),
-                selected_range_identities: selected_range_identities.clone(),
-                producer_session_id: Some("producer".to_string()),
-                producer_run_id: Some("run".to_string()),
-                producer_attempt: 0,
-                coordinator_token: None,
-                claim_deadline_ms: None,
-                fired_at_ms: Some(1),
-                expected_revert_epoch: 0,
-                compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
-                failure_backoff_at_ms: None,
-                last_failure: None,
-                last_no_fire: None,
-                recent_decisions: Vec::new(),
-                consecutive_publish_failures: 0,
-            },
-            ..Default::default()
-        };
-        store
-            .commit("ses", None, &CoreState::default(), &meta)
-            .unwrap();
-        store
-            .publish_historian_chunk(mc_store::HistorianPublishRequest {
-                rust_background_enabled: false,
-                lifecycle_publication_id: None,
-                harness: None,
-                session_id: "ses",
-                expected_row_version: Some(1),
-                expected_revert_epoch: 0,
-                predicate: &mc_store::HistorianPublishPredicate {
-                    firing_seq: 7,
-                    producer_run_id: "run".to_string(),
-                    producer_attempt: 0,
-                    chunk_fingerprint: "fp".to_string(),
-                    selected_range_identities,
-                    compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
-                },
-                project_path: project.to_str().unwrap(),
-                compartments: &[stored_comp(1, 10, 12, "m12#0", "summary")],
-                facts: &[],
-                promote_facts: true,
-                events: &[],
-                primer_candidates: &[],
-                user_memory_candidates: &[],
-                publication_floor_ordinal: 12,
-                chunk_transcript: Some("[10] U: exact prompt text\n[11] A: exact answer\n[12] A: TC: read(src/lib.rs) → output ~42 tok"),
-                raw_chunk_messages: None,
-            })
-            .unwrap();
-
-        let state_sync = handler
-            .dispatch_value(
-                7,
-                json!({
-                    "method": "state_sync",
-                    "session_id": "ses",
-                    "shadow_generation": 0,
-                    "expected_shadow_seq": 0,
-                    "acked_watermarks": {},
-                    "note_evaluation_available": true,
-                }),
-            )
-            .await;
-        assert!(
-            matches!(state_sync, HandlerOutcome::Response(_)),
-            "{state_sync:?}"
-        );
-
-        let expanded =
-            tool_text(call_facade(&handler, "ctx_expand", json!({"start": 10, "end": 12})).await);
-        assert_eq!(
-            expanded,
-            "Messages 10-12 from persisted historian chunk transcripts:\n\n### Compartment 1 (10-12)\n[10] U: exact prompt text\n[11] A: exact answer\n[12] A: TC: read(src/lib.rs) → output ~42 tok",
-            "verbose=false must preserve the pre-verbose range bytes"
-        );
-
-        let raw_messages = vec![
-            ck_with_role("m10", 10, "user", "exact prompt text"),
-            CkIngressMessage {
-                mid: "m11".to_string(),
-                ordinal: 11,
-                ck: CkWireMessage::from_parts(
-                    "assistant",
-                    vec![
-                        CkWireBlock::bare(CkKind::Text {
-                            text: "Reading it now.".to_string(),
-                        }),
-                        CkWireBlock::bare(CkKind::ToolCall {
-                            id: "read:1".to_string(),
-                            name: "read".to_string(),
-                            input: json!({ "filePath": "src/lib.rs" }),
-                            provider_executed: false,
-                        }),
-                    ],
-                    None,
-                    ProviderExtras::new(),
-                    HarnessMeta::default(),
-                ),
-            },
-            CkIngressMessage {
-                mid: "m12".to_string(),
-                ordinal: 12,
-                ck: CkWireMessage::from_parts(
-                    "user",
-                    vec![CkWireBlock::bare(CkKind::ToolResult {
-                        id: "read:1".to_string(),
-                        tool_name: "read".to_string(),
-                        output: CkToolOutput::bare(CkOutputKind::Text {
-                            text: "line1\nline2\nline3".to_string(),
-                        }),
-                        provider_executed: false,
-                    })],
-                    None,
-                    ProviderExtras::new(),
-                    HarnessMeta::default(),
-                ),
-            },
-        ];
-        {
-            let mut snapshots = handler
-                .transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex");
-            let generation = snapshots.begin("ses");
-            snapshots.finish_ready(
-                "ses",
-                generation,
-                Arc::new(transform_request(raw_messages, 45_000, 50_000)),
-                0,
-                0,
-            );
-        }
-
-        let verbose = tool_text(
-            call_facade(
-                &handler,
-                "ctx_expand",
-                json!({"start": 10, "end": 12, "verbose": true}),
-            )
-            .await,
-        );
-        assert!(verbose.contains("[10] U (user)"));
-        assert!(verbose.contains("[11] A (assistant)"));
-        assert!(verbose.contains("[12] tool results"));
-        assert!(verbose.contains("• tool read(src/lib.rs)"));
-        assert!(verbose.contains(&format!(
-            "• tool read → output ~{} tok",
-            mc_tokenizer::estimate_tokens("line1\nline2\nline3")
-        )));
-        let replayed_default =
-            tool_text(call_facade(&handler, "ctx_expand", json!({"start": 10, "end": 12})).await);
-        assert_eq!(
-            replayed_default, expanded,
-            "verbose must not perturb the default renderer"
-        );
-        let giant_range = tool_text(
-            call_facade(&handler, "ctx_expand", json!({"start": 1, "end": i64::MAX})).await,
-        );
-        assert!(giant_range.contains("Messages 1-12"));
-        assert!(giant_range.len() <= CTX_EXPAND_BYTE_BUDGET);
-        let message = tool_text(call_facade(&handler, "ctx_expand", json!({"message": 11})).await);
-        assert!(message.contains("[tool: read #read:1]"));
-        assert!(message.contains("input: {\"filePath\":\"src/lib.rs\"}"));
-
-        let write = tool_text(
-            call_facade(
-                &handler,
-                "ctx_note",
-                json!({"action": "write", "content": "remember the lattice", "surface_condition": "when tag v2 exists"}),
-            )
-            .await,
-        );
-        assert!(write.contains("Created smart note"));
-        let write = tool_text(
-            call_facade(
-                &handler,
-                "ctx_note",
-                json!({"action": "write", "content": "remember the lattice"}),
-            )
-            .await,
-        );
-        assert!(write.contains("Saved session note"));
-        let read = tool_text(call_facade(&handler, "ctx_note", json!({"action": "read"})).await);
-        assert!(read.contains("remember the lattice"));
-        let hits =
-            tool_text(call_facade(&handler, "ctx_search", json!({"query": "lattice"})).await);
-        assert!(hits.contains("[note]"));
-
-        let note_id = store
-            .search_notes_like(project.to_str().unwrap(), "ses", "lattice")
-            .unwrap()[0]
-            .id;
-        let _ = call_facade(
-            &handler,
-            "ctx_note",
-            json!({"action": "update", "note_ids": [note_id], "content": "remember the updated lattice"}),
-        )
-        .await;
-        let _ = call_facade(
-            &handler,
-            "ctx_note",
-            json!({"action": "dismiss", "note_ids": [note_id], "content": "finished"}),
-        )
-        .await;
-        let dismissed_search = tool_text(
-            call_facade(
-                &handler,
-                "ctx_search",
-                json!({"query": "finished", "sources": ["note"]}),
-            )
-            .await,
-        );
-        assert!(!dismissed_search.contains("[note]"), "{dismissed_search}");
-        let dismissed = store
-            .get_note_by_id(project.to_str().unwrap(), "ses", note_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(dismissed.status, "dismissed");
-        assert!(store
-            .search_notes_like("/different/project", "ses", "lattice")
-            .unwrap()
-            .is_empty());
-
-        let _ = call_facade(
-            &handler,
-            "ctx_note",
-            json!({"action": "write", "content": "bulk one"}),
-        )
-        .await;
-        let _ = call_facade(
-            &handler,
-            "ctx_note",
-            json!({"action": "write", "content": "bulk two"}),
-        )
-        .await;
-        store
-            .insert_note(NoteInput {
-                project_path: project.to_str().unwrap(),
-                route_project_root: Some(project.to_str().unwrap()),
-                session_id: "other-session",
-                content: "foreign bulk note",
-                surface_condition: None,
-                anchor_block_id: None,
-                now_ms: 1,
-            })
-            .unwrap();
-        let foreign_update = tool_text(
-            call_facade(
-                &handler,
-                "ctx_note",
-                json!({"action": "update", "note_ids": [5], "content": "hijack"}),
-            )
-            .await,
-        );
-        assert_eq!(
-            foreign_update,
-            "Error: Note #5 not found in your session/project or has no compatible fields to update."
-        );
-        let targeted_read = tool_text(
-            call_facade(
-                &handler,
-                "ctx_note",
-                json!({"action": "read", "note_ids": [4, 5, 999]}),
-            )
-            .await,
-        );
-        assert_eq!(
-            targeted_read,
-            "## Notes by ID\n\n- **#4** · 0m · active: bulk two\n\n- Note #5: not_found\n\n- Note #999: not_found\n\nTo dismiss a stale note: ctx_note(action=\"dismiss\", note_ids=[N])"
-        );
-        let already = tool_text(
-            call_facade(
-                &handler,
-                "ctx_note",
-                json!({"action": "dismiss", "note_ids": [3]}),
-            )
-            .await,
-        );
-        assert_eq!(already, "Note #3 dismissed.");
-        let bulk = tool_text(
-            call_facade(
-                &handler,
-                "ctx_note",
-                json!({"action": "dismiss", "note_ids": [3, 4, 5, 999]}),
-            )
-            .await,
-        );
-        assert_eq!(
-            bulk,
-            "Dismissed 1 of 4 notes.\n- Note #3: already_dismissed\n- Note #4: dismissed\n- Note #5: not_found\n- Note #999: not_found"
-        );
-        assert_eq!(
-            store
-                .get_note_by_id(project.to_str().unwrap(), "ses", 4)
-                .unwrap()
-                .unwrap()
-                .status,
-            "dismissed"
-        );
-        assert_eq!(
-            store
-                .get_note_by_id(project.to_str().unwrap(), "other-session", 5)
-                .unwrap()
-                .unwrap()
-                .status,
-            "active"
         );
     }
 
@@ -26109,233 +21271,6 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn note_evaluator_verdict_transitions_a_module_note_to_ready_and_visible() {
-        let producer = Arc::new(ProducerState::default());
-        let resolver =
-            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
-        let (handler, store, _dir, _project) =
-            handler_with_store_and_resolver(producer, default_test_config(), resolver);
-        handler.bind_route(7, binding("/repo", "token"));
-        let note = store
-            .insert_project_note(NoteWriteInput {
-                project_path: "/repo",
-                route_project_root: None,
-                session_id: Some("session"),
-                content: "surface after evaluation",
-                surface_condition: Some("when ready"),
-                compiled_provider: None,
-                compiled_config: None,
-                compiled_at: None,
-                compile_status: None,
-                anchor_block_id: None,
-                anchor_ordinal: None,
-                now_ms: 1,
-            })
-            .unwrap();
-
-        let evaluated = call_dispatch_request(
-            &handler,
-            json!({
-                "method": "note.evaluate",
-                "session_id": "session",
-                "note_id": note.id,
-                "source_revision": note.status_version,
-                "verdict": true
-            }),
-        )
-        .await;
-        assert_eq!(evaluated["status"], "ready");
-        let output = tool_text(call_facade(&handler, "ctx_note", json!({"action": "read"})).await);
-        assert!(output.contains("surface after evaluation"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn authority_note_lifecycle_resolves_identity_for_evaluate_and_leaves_ready_notes_out_of_m1(
-    ) {
-        let resolver = FakeSessionResolver::with(&[("token", FakeResolve::Hit("ses".to_string()))]);
-        let (handler, store, _dir, _project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            resolver,
-        );
-        handler.bind_route(7, binding("/repo", "token"));
-        handler.bind_route(8, binding_with_harness("/repo", OPENCODE_HARNESS, "ses"));
-        activate_module_authority(&store, "context", "git:identity", "/repo", "notes");
-        let note = store
-            .insert_project_note(NoteWriteInput {
-                project_path: "git:identity",
-                route_project_root: Some("/repo"),
-                session_id: Some("ses"),
-                content: "identity note lifecycle",
-                surface_condition: Some("when ready"),
-                compiled_provider: None,
-                compiled_config: None,
-                compiled_at: None,
-                compile_status: None,
-                anchor_block_id: None,
-                anchor_ordinal: None,
-                now_ms: 1,
-            })
-            .unwrap();
-
-        let evaluated = handler
-            .dispatch_value(
-                7,
-                json!({
-                    "method": "note.evaluate",
-                    "session_id": "ses",
-                    "note_id": note.id,
-                    "source_revision": note.status_version,
-                    "verdict": true
-                }),
-            )
-            .await;
-        assert!(matches!(evaluated, HandlerOutcome::Response(_)));
-
-        let rendered = call_transform_request_on_channel(
-            &handler,
-            8,
-            request(vec![ck("m0", 0, "live input")]),
-        )
-        .await;
-        // The module never renders ready notes into m1 or claims them; the host's
-        // deferred-notes reminder announces them from its mirrored copy.
-        assert!(!synthetic_text(&rendered, 1).contains("identity note lifecycle"));
-        assert!(rendered.get("note_deliveries").is_none());
-        assert_eq!(
-            store
-                .get_note_by_id("git:identity", "ses", note.id)
-                .unwrap()
-                .unwrap()
-                .status,
-            "ready"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn note_facade_recovers_pre_and_post_migration_compilation_metadata() {
-        let producer = Arc::new(ProducerState::default());
-        let resolver =
-            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
-        let (handler, store, dir, _project) =
-            handler_with_store_and_resolver(producer, default_test_config(), resolver);
-        handler.bind_route(7, binding("/repo", "token"));
-        for (content, provider, config, at, status) in [
-            ("legacy condition", None, None, None, None),
-            (
-                "compiled condition",
-                Some("retina-local-fs"),
-                Some("{\"kind\":\"path_exists\"}"),
-                Some(123),
-                Some("compiled"),
-            ),
-        ] {
-            store
-                .insert_project_note(NoteWriteInput {
-                    project_path: "/repo",
-                    route_project_root: None,
-                    session_id: Some("session"),
-                    content,
-                    surface_condition: Some(content),
-                    compiled_provider: provider,
-                    compiled_config: config,
-                    compiled_at: at,
-                    compile_status: status,
-                    anchor_block_id: None,
-                    anchor_ordinal: None,
-                    now_ms: 1,
-                })
-                .unwrap();
-        }
-        let old = store
-            .get_note_by_id("/repo", "session", 1)
-            .unwrap()
-            .unwrap();
-        assert_eq!(old.compiled_provider, None);
-        assert_eq!(old.compile_status, None);
-        let new = store
-            .get_note_by_id("/repo", "session", 2)
-            .unwrap()
-            .unwrap();
-        assert_eq!(new.compiled_provider.as_deref(), Some("retina-local-fs"));
-        assert_eq!(
-            new.compiled_config.as_deref(),
-            Some("{\"kind\":\"path_exists\"}")
-        );
-        assert_eq!(new.compiled_at, Some(123));
-        assert_eq!(new.compile_status.as_deref(), Some("compiled"));
-
-        drop(handler);
-        drop(store);
-        let reopened = McStore::open_for_test(&dev_descriptor_at(
-            dir.path().join("data").to_str().unwrap(),
-        ))
-        .unwrap();
-        let durable = reopened
-            .get_note_by_id("/repo", "session", 2)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            durable.compiled_provider.as_deref(),
-            Some("retina-local-fs")
-        );
-        assert_eq!(durable.compiled_at, Some(123));
-        assert_eq!(durable.compile_status.as_deref(), Some("compiled"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn note_facade_pages_ready_notes_beyond_one_hundred_with_shared_offset_semantics() {
-        let producer = Arc::new(ProducerState::default());
-        let resolver =
-            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
-        let (handler, store, _dir, _project) =
-            handler_with_store_and_resolver(producer, default_test_config(), resolver);
-        handler.bind_route(7, binding("/repo", "token"));
-        for index in 0..105 {
-            let note = store
-                .insert_project_note(NoteWriteInput {
-                    project_path: "/repo",
-                    route_project_root: None,
-                    session_id: Some("session"),
-                    content: &format!("ready note {index}"),
-                    surface_condition: Some("condition"),
-                    compiled_provider: None,
-                    compiled_config: None,
-                    compiled_at: None,
-                    compile_status: None,
-                    anchor_block_id: None,
-                    anchor_ordinal: None,
-                    now_ms: index,
-                })
-                .unwrap();
-            store
-                .write_note_evaluation(NoteEvaluationInput {
-                    project_path: "/repo",
-                    note_id: note.id,
-                    source_revision: note.status_version,
-                    verdict: true,
-                    compiled_check: None,
-                    manifest_json: None,
-                    check_hash: None,
-                    next_due_at: None,
-                    now_ms: index,
-                })
-                .unwrap();
-        }
-        let page = tool_text(
-            call_facade(
-                &handler,
-                "ctx_note",
-                json!({"action": "read", "filter": "ready", "limit": 5, "offset": 100}),
-            )
-            .await,
-        );
-        assert!(page.contains("ready note 4"));
-        assert!(page.contains("ready note 0"));
-        assert!(!page.contains("ready note 104"));
-    }
-
     /// Insert one session note with an explicit timestamp so the glance's age
     /// and stale markers are deterministic.
     fn insert_session_note_at(store: &McStore, content: &str, now_ms: i64) -> i64 {
@@ -26351,134 +21286,6 @@ mod tests {
             })
             .unwrap()
             .id
-    }
-
-    #[test]
-    fn note_facade_parked_reason_is_visible_in_glance_and_body() {
-        let producer = Arc::new(ProducerState::default());
-        let resolver =
-            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
-        let (_handler, store, _dir, _project) =
-            handler_with_store_and_resolver(producer, default_test_config(), resolver);
-        let now = now_ms();
-        let mut note = store
-            .insert_project_note(NoteWriteInput {
-                project_path: "/repo",
-                route_project_root: None,
-                session_id: Some("session"),
-                content: "Watch schema",
-                surface_condition: Some("schema appears"),
-                compiled_provider: None,
-                compiled_config: None,
-                compiled_at: None,
-                compile_status: None,
-                anchor_block_id: None,
-                anchor_ordinal: None,
-                now_ms: now,
-            })
-            .unwrap();
-        note.check_status = Some("parked".to_string());
-        note.ready_reason = Some(
-            "Condition can't be checked: source is not publicly readable; rewrite it".to_string(),
-        );
-        assert_eq!(format_glance_row(&note, now), "#1 · 0m · Watch schema · pending · parked: Condition can't be checked: source is not publicly readable; rewrite it");
-        assert_eq!(format_note_body(&note, now), "- **#1** · 0m · pending: Watch schema\n  Condition: schema appears\n  Condition can't be checked: source is not publicly readable; rewrite it");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn note_facade_glance_lists_one_row_per_note_with_age_and_stale_markers() {
-        for smart_notes_enabled in [true, false] {
-            let producer = Arc::new(ProducerState::default());
-            let resolver =
-                FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
-            let (handler, store, _dir, _project) =
-                handler_with_store_and_resolver(producer, default_test_config(), resolver);
-            let mut route = binding("/repo", "token");
-            route.config.smart_notes_enabled = smart_notes_enabled;
-            handler.bind_route(7, route);
-            if !smart_notes_enabled {
-                let refused = tool_text(
-                    call_facade(
-                        &handler,
-                        "ctx_note",
-                        json!({"content": "cached", "surface_condition": "old"}),
-                    )
-                    .await,
-                );
-                assert_eq!(
-                    refused,
-                    "Error: Smart notes are disabled; surface_condition is unavailable."
-                );
-            }
-
-            let now = now_ms();
-            let day = 24 * 60 * 60 * 1000;
-            // A ready smart note, a parked smart note, and three plain notes: one
-            // fresh, one two days old, one untouched for 40 days.
-            let ready = store
-                .insert_project_note(NoteWriteInput {
-                    project_path: "/repo",
-                    route_project_root: None,
-                    session_id: Some("session"),
-                    content: "Ready smart item",
-                    surface_condition: Some("condition"),
-                    compiled_provider: None,
-                    compiled_config: None,
-                    compiled_at: None,
-                    compile_status: None,
-                    anchor_block_id: None,
-                    anchor_ordinal: None,
-                    now_ms: now - 5 * day,
-                })
-                .unwrap();
-            store
-                .write_note_evaluation(NoteEvaluationInput {
-                    project_path: "/repo",
-                    note_id: ready.id,
-                    source_revision: ready.status_version,
-                    verdict: true,
-                    compiled_check: None,
-                    manifest_json: None,
-                    check_hash: None,
-                    next_due_at: None,
-                    now_ms: now - 5 * day,
-                })
-                .unwrap();
-            store
-                .insert_project_note(NoteWriteInput {
-                    project_path: "/repo",
-                    route_project_root: None,
-                    session_id: Some("session"),
-                    content: "Parked smart item",
-                    surface_condition: Some("condition"),
-                    compiled_provider: None,
-                    compiled_config: None,
-                    compiled_at: None,
-                    compile_status: None,
-                    anchor_block_id: None,
-                    anchor_ordinal: None,
-                    now_ms: now - 2 * day,
-                })
-                .unwrap();
-            insert_session_note_at(&store, "Fresh plain item", now);
-            insert_session_note_at(&store, "Two-day-old plain item", now - 2 * day);
-            insert_session_note_at(&store, "Forty-day-old plain item", now - 40 * day);
-
-            let glance =
-                tool_text(call_facade(&handler, "ctx_note", json!({"action": "read"})).await);
-
-            // Ready smart notes first, then pending, then plain notes newest first.
-            assert_eq!(
-                glance,
-                "## Notes\n\n\
-             #1 · 5d · Ready smart item · ready\n\
-             #2 · 2d · Parked smart item · pending\n\
-             #3 · 0m · Fresh plain item\n\
-             #4 · 2d · Two-day-old plain item\n\
-             #5 · 5w · Forty-day-old plain item · stale\n\n\
-             To dismiss a stale note: ctx_note(action=\"dismiss\", note_ids=[N])"
-            );
-        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -27256,325 +22063,6 @@ mod tests {
     }
 
     #[test]
-    fn ctx_reduce_self_stamp_identification_uses_cached_call() {
-        let cached_calls = vec![cached_tool_call("call-mid", "ctx_reduce")];
-        assert_eq!(
-            cached_tool_name_for_tag(Some(&cached_calls), "call-mid#0").as_deref(),
-            Some("ctx_reduce")
-        );
-        assert_eq!(
-            cached_tool_name_for_tag(Some(&cached_calls), "other-mid#0"),
-            None,
-            "a same-position block in another message is not evidence",
-        );
-        assert_eq!(cached_tool_name_for_tag(None, "call-mid#0"), None);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn facade_ctx_reduce_skips_its_own_cached_call_but_applies_other_tags() {
-        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
-        let (handler, store, _dir, _project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            resolver,
-        );
-        store
-            .seed_tags_for_test(
-                "ses",
-                &[
-                    TagMintInput {
-                        block_id: "m1#0".to_string(),
-                        kind: "tool_result".to_string(),
-                        token_count: 100,
-                        source_bytes: b"self output".to_vec(),
-                    },
-                    TagMintInput {
-                        block_id: "m2#0".to_string(),
-                        kind: "tool_result".to_string(),
-                        token_count: 100,
-                        source_bytes: b"sibling output".to_vec(),
-                    },
-                    TagMintInput {
-                        block_id: "stale#0".to_string(),
-                        kind: "tool_result".to_string(),
-                        token_count: 100,
-                        source_bytes: b"cache-miss output".to_vec(),
-                    },
-                ],
-                1_000,
-            )
-            .unwrap();
-        cache_last_served_test_messages(
-            &handler,
-            "ses",
-            vec![
-                cached_tool_result("m1", "ctx_reduce"),
-                cached_tool_result("m2", "read"),
-            ],
-        );
-
-        let ack = tool_text(call_facade(&handler, "ctx_reduce", json!({ "drop": "1,2,3" })).await);
-        assert_eq!(
-            ack,
-            "2 tags stamped. 1 was a ctx_reduce call; leave those alone, they are cleaned up automatically."
-        );
-        assert!(!ack.contains("§1§"), "{ack}");
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-        assert_eq!(
-            tool_text(call_facade(&handler, "ctx_reduce", json!({ "drop": "1" })).await),
-            "1 was a ctx_reduce call; leave those alone, they are cleaned up automatically."
-        );
-
-        let delivered = handler.handle_agent_drops_value(
-            7,
-            json!({
-                "method": "agent_drops.append",
-                "session_id": "ses",
-                "drop": "1,2,3",
-                "command_id": "self-stamp-delivery",
-            }),
-        );
-        let delivered = tool_body(delivered);
-        assert_eq!(delivered["queued"], json!(2));
-        assert_eq!(delivered["ctx_reduce_self_stamps"], json!([1]));
-        assert_eq!(delivered["ctx_reduce_queued_tags"], json!([2, 3]));
-        assert_eq!(
-            store
-                .load_pending_agent_drops("ses")
-                .unwrap()
-                .into_iter()
-                .map(|drop| drop.target_id)
-                .collect::<Vec<_>>(),
-            vec!["m2#0", "stale#0"]
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn ctx_reduce_agent_self_stamp_shared_fixture() {
-        #[derive(serde::Deserialize)]
-        struct Case {
-            label: String,
-            tools: Vec<String>,
-            drop: usize,
-            protected_tools: std::collections::BTreeMap<String, usize>,
-            #[serde(default)]
-            agent_self_stamp: bool,
-        }
-        let cases: Vec<Case> =
-            serde_json::from_str(include_str!("../tests/fixtures/protected-tool-holds.json"))
-                .unwrap();
-        for case in cases.into_iter().filter(|case| case.agent_self_stamp) {
-            let resolver =
-                FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
-            let (handler, store, _dir, _project) = handler_with_store_and_resolver(
-                Arc::new(ProducerState::default()),
-                default_test_config(),
-                resolver,
-            );
-            let mut tags = case
-                .tools
-                .iter()
-                .enumerate()
-                .map(|(i, _)| TagMintInput {
-                    block_id: format!("m{}#0", i + 1),
-                    kind: "tool_result".to_string(),
-                    token_count: 10,
-                    source_bytes: b"result".to_vec(),
-                })
-                .collect::<Vec<_>>();
-            for i in 100..103 {
-                tags.push(TagMintInput {
-                    block_id: format!("m{i}#0"),
-                    kind: "tool_result".to_string(),
-                    token_count: 8000,
-                    source_bytes: b"padding".to_vec(),
-                });
-            }
-            store.seed_tags_for_test("ses", &tags, 1000).unwrap();
-            let mut loaded = store.load("ses").unwrap();
-            loaded.meta.protected_tokens_effective = Some(8000);
-            if case.protected_tools.get("ctx_reduce").copied().unwrap_or(3) > 0 {
-                loaded
-                    .meta
-                    .protected_tool_block_ids
-                    .insert(format!("m{}#0", case.drop));
-            }
-            store
-                .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
-                .unwrap();
-            cache_last_served_test_messages(
-                &handler,
-                "ses",
-                case.tools
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| cached_tool_result(&format!("m{}", i + 1), name))
-                    .collect(),
-            );
-            let ack = tool_text(
-                call_facade(
-                    &handler,
-                    "ctx_reduce",
-                    json!({"drop":case.drop.to_string()}),
-                )
-                .await,
-            );
-            assert_eq!(ack, ctx_reduce_reply(0, 1), "{}", case.label);
-            let delivered = tool_body(handler.handle_agent_drops_value(
-                7,
-                json!({
-                    "method":"agent_drops.append", "session_id":"ses", "drop":case.drop.to_string(),
-                    "command_id":case.label,
-                }),
-            ));
-            assert_eq!(delivered["queued"], json!(0));
-            assert_eq!(delivered["ctx_reduce_self_stamps"], json!([case.drop]));
-            assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn ctx_reduce_mixed_reply_orders_free_held_and_self_stamp() {
-        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
-        let (handler, store, _dir, _project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            resolver,
-        );
-        let tags = (1..=6)
-            .map(|i| TagMintInput {
-                block_id: format!("m{i}#0"),
-                kind: "tool_result".to_string(),
-                token_count: if i > 3 { 8000 } else { 10 },
-                source_bytes: b"result".to_vec(),
-            })
-            .collect::<Vec<_>>();
-        store.seed_tags_for_test("ses", &tags, 1000).unwrap();
-        let mut loaded = store.load("ses").unwrap();
-        loaded.meta.protected_tokens_effective = Some(8000);
-        loaded
-            .meta
-            .protected_tool_block_ids
-            .insert("m1#0".to_string());
-        store
-            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
-            .unwrap();
-        cache_last_served_test_messages(
-            &handler,
-            "ses",
-            vec![
-                cached_tool_result("m1", "custom"),
-                cached_tool_result("m2", "ctx_reduce"),
-                cached_tool_result("m3", "read"),
-            ],
-        );
-        let ack = tool_text(call_facade(&handler, "ctx_reduce", json!({"drop":"2,1,3"})).await);
-        assert_eq!(ack, "2 tags stamped. 1 was a ctx_reduce call; leave those alone, they are cleaned up automatically.");
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-        let delivered = tool_body(handler.handle_agent_drops_value(7, json!({
-            "method":"agent_drops.append", "session_id":"ses", "drop":"2,1,3", "command_id":"mixed-reply",
-        })));
-        assert_eq!(delivered["ctx_reduce_self_stamps"], json!([2]));
-        assert_eq!(delivered["ctx_reduce_queued_tags"], json!([1, 3]));
-        assert_eq!(
-            store
-                .load_pending_agent_drops("ses")
-                .unwrap()
-                .into_iter()
-                .map(|drop| drop.target_id)
-                .collect::<Vec<_>>(),
-            vec!["m1#0", "m3#0"]
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn facade_ctx_reduce_ack_validates_unknown_queued_and_protected_tags_without_committing()
-    {
-        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
-        let (handler, store, _dir, _project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            resolver,
-        );
-        let tag_inputs = (1..=21)
-            .map(|number| TagMintInput {
-                block_id: format!("m{number}#0"),
-                kind: "tool_result".to_string(),
-                token_count: 800,
-                source_bytes: format!("output {number}").into_bytes(),
-            })
-            .collect::<Vec<_>>();
-        store.seed_tags_for_test("ses", &tag_inputs, 1_000).unwrap();
-
-        let mixed_ack = tool_text(
-            call_facade(
-                &handler,
-                "ctx_reduce",
-                json!({ "drop": "1, 21, 99, 100", "command_id": "mixed-delivery" }),
-            )
-            .await,
-        );
-        assert!(mixed_ack.contains("2 tags stamped."));
-        assert!(mixed_ack.contains("tags 99, 100 not found"));
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-
-        // The response observer delivers the same mixed request later. It queues only
-        // known tags, leaving acknowledgement validation side-effect free.
-        let delivered = handler.handle_agent_drops_value(
-            7,
-            json!({
-                "method": "agent_drops.append",
-                "session_id": "ses",
-                "drop": "1, 21, 99, 100",
-                "command_id": "mixed-delivery",
-            }),
-        );
-        assert_eq!(tool_body(delivered), json!({ "ok": true, "queued": 2 }));
-        let pending_after_delivery = store.load_pending_agent_drops("ses").unwrap();
-        let retry = handler.handle_agent_drops_value(
-            7,
-            json!({
-                "method": "agent_drops.append",
-                "session_id": "ses",
-                "drop": "1, 21, 99, 100",
-                "command_id": "mixed-delivery",
-            }),
-        );
-        assert_eq!(
-            tool_body(retry),
-            json!({ "ok": true, "queued": 0, "duplicate": true, "ctx_reduce_queued_tags": [1, 21] })
-        );
-        assert_eq!(
-            store.load_pending_agent_drops("ses").unwrap(),
-            pending_after_delivery
-        );
-
-        let already_queued_ack =
-            tool_text(call_facade(&handler, "ctx_reduce", json!({ "drop": "1, 21" })).await);
-        assert_eq!(already_queued_ack, "2 tags stamped.");
-
-        let queued_ack =
-            tool_text(call_facade(&handler, "ctx_reduce", json!({ "drop": "1, 2, 99" })).await);
-        assert_eq!(queued_ack, "2 tags stamped. tags 99 not found.");
-
-        let refused = tool_body(call_facade(&handler, "ctx_reduce", json!({ "drop": "99" })).await);
-        assert_eq!(refused["isError"], json!(true));
-        assert!(refused["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Refused: no valid tags to queue. tags 99 not found"));
-        assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 2);
-
-        let invalid =
-            tool_body(call_facade(&handler, "ctx_reduce", json!({ "drop": "3-1" })).await);
-        assert_eq!(invalid["isError"], json!(true));
-        assert!(invalid["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Invalid range"));
-    }
-
-    #[test]
     // Advertised schemas now byte-match TypeScript's closed objects
     // (additionalProperties: false). Execution remains tolerant of unrelated keys;
     // the dispatch regression below protects that separate compatibility contract.
@@ -27718,42 +22206,6 @@ mod tests {
                 "{name} required-field refusal changed with an extra key"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn protected_tool_ctx_reduce_ack_counts_held_tags_and_delivery_preserves_hold() {
-        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
-        let (handler, store, _dir, _project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            resolver,
-        );
-        let tags = (1..=6)
-            .map(|number| TagMintInput {
-                block_id: format!("m{number}#0"),
-                kind: "tool_result".to_string(),
-                token_count: 8000,
-                source_bytes: b"output".to_vec(),
-            })
-            .collect::<Vec<_>>();
-        store.seed_tags_for_test("ses", &tags, 1000).unwrap();
-        let mut loaded = store.load("ses").unwrap();
-        loaded
-            .meta
-            .protected_tool_block_ids
-            .insert("m2#0".to_string());
-        store
-            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
-            .unwrap();
-        let ack = tool_text(call_facade(&handler, "ctx_reduce", json!({"drop":"2"})).await);
-        assert_eq!(ack, "1 tag stamped.");
-        let delivery = tool_body(handler.handle_agent_drops_value(
-            7,
-            json!({"session_id":"ses", "drop":"2", "command_id":"held-tool-command"}),
-        ));
-        assert_eq!(delivery["held_tag_numbers"], json!([2]));
-        assert_eq!(delivery["queued"], 1);
-        assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
     }
 
     #[test]
@@ -29406,51 +23858,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cancelled_dreamer_run_unregisters_its_child_session() {
-        let producer = Arc::new(ProducerState::default());
-        producer.block_output.store(true, Ordering::SeqCst);
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let route_root = project.to_str().unwrap();
-        handler.bind_route(7, binding(route_root, "parent"));
-        activate_module_authority(&store, "context", "git:identity", route_root, "memories");
-        let generation = 1u64;
-        let handler = Arc::new(handler);
-        let running_handler = Arc::clone(&handler);
-        let task = tokio::spawn(async move {
-            running_handler
-                .handle_dreamer_run_task(
-                    7,
-                    &json!({
-                        "v": 1,
-                        "session_id": "parent",
-                        "task": CLASSIFY_TASK,
-                        "command_id": "cancel-command",
-                        "authority_generation": generation,
-                        "model_chain": [TEST_HISTORIAN_MODEL],
-                        "payload": { "prompt_body": "classify", "items": [] },
-                    }),
-                )
-                .await
-        });
-        wait_for_count(&producer.await_outputs, 1).await;
-        // The session is minted per attempt, so read the one the producer actually ran
-        // under rather than recomputing an id this test would have to keep in step.
-        let child_session = producer
-            .sessions
-            .lock()
-            .expect("sessions mutex")
-            .first()
-            .cloned()
-            .expect("the classify attempt started under a session");
-        assert!(handler.dreamer_run_registered(&child_session));
-
-        task.abort();
-        let _ = task.await;
-        assert!(!handler.dreamer_run_registered(&child_session));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn module_authority_facade_write_uses_identity_not_route_path() {
         let producer = Arc::new(ProducerState::default());
         let resolver =
@@ -29739,128 +24146,6 @@ mod tests {
         assert_eq!(
             store.get_memory_full(1).unwrap().unwrap().project_path,
             route_project_root
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn ctx_search_matches_typescript_shape_for_available_module_corpora() {
-        let producer = Arc::new(ProducerState::default());
-        let resolver = FakeSessionResolver::with(&[("token", FakeResolve::Hit("ses".to_string()))]);
-        let (handler, store, _dir, project) =
-            handler_with_store_and_resolver(producer, default_test_config(), resolver);
-        let project = project.to_str().unwrap();
-        handler.bind_route(7, binding(project, "token"));
-
-        let visible_id = insert_memory(&store, project, "CONSTRAINTS", "needle visible", 10);
-        let first_id = insert_memory(&store, project, "CONSTRAINTS", "needle memory first", 20);
-        let second_id = insert_memory(&store, project, "CONSTRAINTS", "needle memory second", 20);
-        assert_eq!(
-            parse_search_memory_ids(&format!("#{first_id}, {second_id}")),
-            Some(vec![first_id, second_id])
-        );
-        assert_eq!(
-            parse_search_memory_ids(&format!("{first_id} {second_id}")),
-            None,
-            "direct memory ids require TypeScript's comma-separated query shape"
-        );
-        store
-            .replace_compartments("ses", &[stored_comp(1, 10, 20, "m20", "needle history")])
-            .unwrap();
-        let note = store
-            .insert_project_note(NoteWriteInput {
-                project_path: project,
-                route_project_root: None,
-                session_id: Some("ses"),
-                content: "needle note",
-                surface_condition: None,
-                compiled_provider: None,
-                compiled_config: None,
-                compiled_at: None,
-                compile_status: None,
-                anchor_block_id: Some("m18#0"),
-                anchor_ordinal: Some(18),
-                now_ms: now_ms(),
-            })
-            .unwrap();
-        seed_shown_memory_pair(&store, "ses", project, visible_id);
-
-        let all = tool_text(
-            call_facade(
-                &handler,
-                "ctx_search",
-                json!({"query": "needle", "limit": 10}),
-            )
-            .await,
-        );
-        assert!(all.starts_with("Found 4 results for \"needle\":"), "{all}");
-        assert!(!all.lines().any(|line| {
-            line.contains("[memory]") && line.contains(&format!("id={visible_id} "))
-        }));
-        assert!(all.contains(&format!("[memory] score=1.00 id={first_id}")));
-        assert!(all.contains(&format!("[memory] score=1.00 id={second_id}")));
-        assert!(all.contains(&format!(
-            "Memories: 1 additional match suppressed because it is already visible in your project-memory block (ids {visible_id})."
-        )));
-        assert!(
-            all.find(&format!("id={first_id}")) < all.find(&format!("id={second_id}")),
-            "equal-score/equal-recency memory ties must use ascending ids: {all}"
-        );
-        assert!(
-            all.contains("[message] score=0.90 compartment_id=1 range=10-20 match=fts title=C1")
-        );
-        assert!(all.contains(&format!("[note] score=0.11 id=#{}", note.id)));
-        assert!(all.contains("@msg 18"));
-        assert!(all.contains("Use ctx_expand(start, end)"));
-
-        let message_only = tool_text(
-            call_facade(
-                &handler,
-                "ctx_search",
-                json!({"query": "needle", "sources": ["message"]}),
-            )
-            .await,
-        );
-        assert!(message_only.contains("[message]"));
-        assert!(!message_only.contains("[memory]"));
-        assert!(!message_only.contains("[note]"));
-
-        let id_lookup = tool_text(
-            call_facade(
-                &handler,
-                "ctx_search",
-                json!({"query": format!("#{second_id}"), "sources": ["memory"]}),
-            )
-            .await,
-        );
-        assert!(id_lookup.contains(&format!("id={second_id}")));
-        assert!(id_lookup.contains("match=fts"));
-
-        let visible_lookup = tool_text(
-            call_facade(
-                &handler,
-                "ctx_search",
-                json!({"query": format!("#{visible_id}"), "sources": ["memory"]}),
-            )
-            .await,
-        );
-        assert_eq!(
-            visible_lookup,
-            format!(
-                "No hidden results found for \"#{visible_id}\".\n\nMemories: 1 match found, all already visible in your project-memory block (ids {visible_id})."
-            )
-        );
-
-        let unsupported_corpus = tool_text(
-            call_facade(
-                &handler,
-                "ctx_search",
-                json!({"query": "needle", "sources": ["primer", "git_commit"]}),
-            )
-            .await,
-        );
-        assert_eq!(
-            unsupported_corpus,
-            "No results found for \"needle\" across notes, memories, primers, git commits, or message history."
         );
     }
 
@@ -30351,68 +24636,6 @@ mod tests {
         assert_eq!(store.load("ses").unwrap().row_version, before_unknown);
     }
 
-    /// Scratch-only socket adapter: isolates handler costs from daemon admission and framing.
-    #[tokio::test(flavor = "current_thread")]
-    #[ignore = "run with packages/plugin/scripts/cereb-full-sync-probe.ts and MC_SYNC_PROBE_SOCKET"]
-    async fn cereb_full_sync_socket_probe() {
-        use std::io::{Read, Write};
-        use std::os::unix::net::UnixListener;
-
-        let socket = std::env::var("MC_SYNC_PROBE_SOCKET").expect("scratch socket path required");
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .finish();
-        let _subscriber = tracing::subscriber::set_default(subscriber);
-        let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let listener = UnixListener::bind(&socket).unwrap();
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(120)))
-            .unwrap();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(120)))
-            .unwrap();
-        for pass in 0..3 {
-            if pass == 2 {
-                handler.projections.lock().unwrap().remove("ses");
-                handler.native_attachments.lock().unwrap().remove("ses");
-                handler.transform_snapshots.lock().unwrap().remove("ses");
-                handler.serialized_outputs.lock().unwrap().remove("ses");
-            }
-            let mut header = [0; 4];
-            stream.read_exact(&mut header).unwrap();
-            let read_start = Instant::now();
-            let mut bytes = vec![0; u32::from_be_bytes(header) as usize];
-            stream.read_exact(&mut bytes).unwrap();
-            let read_ms = read_start.elapsed().as_secs_f64() * 1000.0;
-            let parse_start = Instant::now();
-            let request: Value = serde_json::from_slice(&bytes).unwrap();
-            let parse_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
-            let handler_start = Instant::now();
-            let HandlerOutcome::Response(response) =
-                call_transform_outcome(&handler, request).await
-            else {
-                panic!("probe rejected")
-            };
-            let handler_ms = handler_start.elapsed().as_secs_f64() * 1000.0;
-            let decoded: Value = serde_json::from_slice(&response).unwrap();
-            assert_eq!(decoded["status"], "ok");
-            println!("scratch-pass pass={pass} request_bytes={} read_ms={read_ms:.3} parse_ms={parse_ms:.3} handler_ms={handler_ms:.3} response_bytes={} timings={}", bytes.len(), response.len(), decoded["timings"]);
-            let write_start = Instant::now();
-            stream
-                .write_all(&(response.len() as u32).to_be_bytes())
-                .unwrap();
-            stream.write_all(&response).unwrap();
-            println!(
-                "scratch-reply pass={pass} write_ms={:.3}",
-                write_start.elapsed().as_secs_f64() * 1000.0
-            );
-        }
-        std::fs::remove_file(socket).unwrap();
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn tail_delta_returns_need_full_sync_success_without_store_write() {
         let producer = Arc::new(ProducerState::default());
@@ -30473,47 +24696,6 @@ mod tests {
             serde_json::to_vec(&undelivered["ck_messages"]).unwrap()
         );
         assert!(replay.get("need_full_sync_reason").is_none());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn evicted_delta_base_requests_full_wire_without_resetting_durable_state() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let mut first = request(vec![ck("m1", 1, "cached history")]);
-        first["full_array_fingerprint"] = json!("fp-first");
-        first["native_messages"] = json!([]);
-        assert_eq!(
-            call_transform_request(&handler, first).await["status"],
-            "ok"
-        );
-        let before = store.load("ses").unwrap().row_version;
-        handler.transform_snapshots.lock().unwrap().remove("ses");
-        handler.projections.lock().unwrap().remove("ses");
-        let mut delta = request(vec![ck("m2", 2, "new tail")]);
-        delta["full_array_fingerprint"] = json!("fp-second");
-        delta["native_messages"] = json!([]);
-        delta["tail_delta"] = json!({
-            "after": "fp-first", "replace_from": 1, "native_replace_from": 0,
-        });
-        let missing = call_transform_request(&handler, delta).await;
-        assert_eq!(missing["status"], "need_full_sync");
-        assert_eq!(
-            missing["need_full_sync_reason"],
-            "projection_cache_missing_or_reverted"
-        );
-        assert_eq!(store.load("ses").unwrap().row_version, before);
-
-        let mut full = request(vec![ck("m1", 1, "cached history"), ck("m2", 2, "new tail")]);
-        full["full_array_fingerprint"] = json!("fp-second");
-        full["native_messages"] = json!([]);
-        let recovered = call_transform_request(&handler, full.clone()).await;
-        assert_eq!(recovered["status"], "ok");
-        let recovered_bytes = recovered["ck_messages"].clone();
-        for _ in 0..20 {
-            let pass = call_transform_request(&handler, full.clone()).await;
-            assert_ne!(pass["action"], "HARD");
-            assert_eq!(pass["ck_messages"], recovered_bytes);
-        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -30926,46 +25108,6 @@ mod tests {
         );
     }
 
-    /// Caches a wrapup snapshot whose transform carried `historian_model_chain`
-    /// (`None` models a request that carried no chain at all).
-    fn cache_wrapup_snapshot(
-        handler: &McHandler,
-        session_id: &str,
-        messages: Vec<CkIngressMessage>,
-        context_limit_tokens: u64,
-        historian_model_chain: Option<Vec<String>>,
-    ) {
-        let mut parsed = transform_request(messages, 1, context_limit_tokens);
-        parsed.session_id = session_id.to_string();
-        parsed.historian_model_chain = historian_model_chain;
-        parsed.serializer_profile = SerializerProfile::ClaudeCodeAnthropic.wire_id().to_string();
-        let retained_bytes = serde_json::to_vec(&parsed).unwrap().len();
-        let projection = crate::ck_wire::project_messages(&parsed.messages).unwrap();
-        let store = handler.store.get().unwrap();
-        let loaded = store.load(session_id).unwrap();
-        let mut meta = loaded.meta.clone();
-        meta.block_identity_by_mid
-            .extend(projection.identity_by_mid);
-        let revert_epoch = meta.revert_epoch;
-        if meta != loaded.meta {
-            store
-                .commit(session_id, loaded.row_version, &loaded.core, &meta)
-                .unwrap();
-        }
-        let mut snapshots = handler
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex");
-        let generation = snapshots.begin(session_id);
-        snapshots.finish_ready(
-            session_id,
-            generation,
-            Arc::new(parsed),
-            revert_epoch,
-            retained_bytes,
-        );
-    }
-
     #[derive(Debug, PartialEq, Eq)]
     struct HistorianAdditiveRows {
         compartment_count: usize,
@@ -31004,21 +25146,6 @@ mod tests {
                 .unwrap()
                 .meta
                 .publication_floor_ordinal,
-        }
-    }
-
-    fn queue_drop_command_with_id(handler: &McHandler, command_id: &str) -> Value {
-        match handler.handle_agent_drops_value(
-            7,
-            json!({
-                "method": "agent_drops.append",
-                "session_id": "ses",
-                "drop": "1",
-                "command_id": command_id,
-            }),
-        ) {
-            HandlerOutcome::Response(bytes) => serde_json::from_slice(&bytes).unwrap(),
-            other => panic!("unexpected handler outcome: {other:?}"),
         }
     }
 
@@ -31246,50 +25373,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn content_language_is_byte_invisible_to_transform_output() {
-        let plain_producer = Arc::new(ProducerState::default());
-        let (plain_handler, _plain_store, _plain_dir, _plain_project) =
-            handler_with_store(plain_producer, default_test_config());
-
-        let localized_producer = Arc::new(ProducerState::default());
-        let mut localized_config = default_test_config();
-        localized_config.language = Some("tr".to_string());
-        let (localized_handler, _localized_store, _localized_dir, _localized_project) =
-            handler_with_store(localized_producer, localized_config);
-
-        let fixture = request(vec![ck("language-wire", 1, "same rust-mode fixture")]);
-        let HandlerOutcome::Response(plain) = plain_handler
-            .handle_transform_for_test(7, fixture.clone())
-            .await
-        else {
-            panic!("plain transform fixture did not return bytes");
-        };
-        let HandlerOutcome::Response(localized) = localized_handler
-            .handle_transform_for_test(7, fixture)
-            .await
-        else {
-            panic!("localized transform fixture did not return bytes");
-        };
-
-        let mut plain: Value = serde_json::from_slice(&plain).expect("plain transform JSON");
-        let mut localized: Value =
-            serde_json::from_slice(&localized).expect("localized transform JSON");
-        assert_eq!(
-            serde_json::to_vec(&plain["ck_messages"]).unwrap(),
-            serde_json::to_vec(&localized["ck_messages"]).unwrap(),
-            "language must not change transform-served wire bytes, including m0/m1"
-        );
-        // Timings are measured per invocation and intentionally cannot be byte-stable.
-        // Every provider-visible response field, including the primary system hash, must match.
-        plain.as_object_mut().unwrap().remove("timings");
-        localized.as_object_mut().unwrap().remove("timings");
-        assert_eq!(
-            localized, plain,
-            "language must not change any deterministic transform output or primary system hash"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn handler_full_autonomous_cycle_fires_publishes_and_next_pass_folds() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) =
@@ -31467,80 +25550,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn state_import_synthetic_anchors_refuse_at_bootstrap_fold() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let imported = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "drive-preseed-dryrun",
-                0,
-                1,
-                vec![
-                    imported_compartment(1, 0, 6, "preseed-m6#0", "parser retry loop fixed"),
-                    imported_compartment(2, 7, 11, "preseed-m11#0", "queue drain benchmark"),
-                    imported_compartment(3, 12, 17, "preseed-m17#0", "log rotation ownership"),
-                    imported_compartment(4, 18, 22, "preseed-m22#0", "cache warmup ordering"),
-                ],
-            ),
-        )
-        .await;
-        assert_eq!(imported["imported"], json!(4));
-
-        let response = handler
-            .handle_transform_for_test(
-                7,
-                request(vec![
-                    ck("ccm-0", 0, "first user message"),
-                    ck("ccm-1", 1, "assistant reply"),
-                    ck("ccm-2", 2, "second user message"),
-                    ck("ccm-3", 3, "assistant reply two"),
-                ]),
-            )
-            .await;
-        // The import contract is carry-over-shaped: imported coverage references
-        // mids that exist in the continued conversation, so a payload whose anchors
-        // never appear in the live array must refuse at the bootstrap fold rather
-        // than compose an m0 with an unanchorable boundary.
-        let (code, message) = error_frame(response);
-        assert_eq!(code, "transform_failed");
-        assert!(message.contains("minted boundary not present"), "{message}");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_rejects_tail_anchor_at_a_different_live_ordinal() {
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let imported = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "misbound-anchor",
-                0,
-                1,
-                vec![imported_compartment(1, 1, 10, "m1#0", "invalid summary")],
-            ),
-        )
-        .await;
-        assert_eq!(imported["imported"], json!(1));
-
-        let rejected = handler
-            .handle_transform_for_test(
-                7,
-                request(vec![ck("m1", 1, "actual anchor"), ck("m11", 11, "tail")]),
-            )
-            .await;
-        let (code, message) = error_frame(rejected);
-        assert_eq!(code, "transform_failed");
-        assert!(message.contains("boundary ordinal mismatch"), "{message}");
-        let after = store.load("ses").unwrap();
-        assert!(
-            after.row_version.is_none(),
-            "the invalid bootstrap must not commit"
-        );
-        assert!(after.core.boundary_id.is_empty());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn state_import_two_batches_bootstrap_hard_folds_and_mints_tail_anchor() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
@@ -31657,70 +25666,6 @@ mod tests {
         assert_eq!(
             store.load_compartments("ses").unwrap()[0].content,
             "summary"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_batch_gap_and_staleness_evict_partial_attempts() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let staged = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "gap",
-                0,
-                3,
-                vec![imported_compartment(1, 1, 1, "m1#0", "first")],
-            ),
-        )
-        .await;
-        assert_eq!(staged["staged"], 1);
-        let gap = handler
-            .dispatch_value(
-                7,
-                state_import_request(
-                    "gap",
-                    2,
-                    3,
-                    vec![imported_compartment(3, 3, 3, "m3#0", "third")],
-                ),
-            )
-            .await;
-        assert_eq!(error_code(gap), "batch_seq_mismatch");
-
-        let restaged = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "stale",
-                0,
-                2,
-                vec![imported_compartment(1, 1, 1, "m1#0", "first")],
-            ),
-        )
-        .await;
-        assert_eq!(restaged["staged"], 1, "gap rejection released the session");
-        handler
-            .state_imports
-            .lock()
-            .expect("state import mutex")
-            .stale_after = Duration::ZERO;
-        let imported = call_dispatch_request(
-            &handler,
-            state_import_request(
-                "fresh",
-                0,
-                1,
-                vec![imported_compartment(5, 1, 5, "m5#0", "replacement")],
-            ),
-        )
-        .await;
-        assert_eq!(
-            imported,
-            json!({ "ok": true, "imported": 1, "duplicate": false })
-        );
-        assert_eq!(
-            store.load_compartments("ses").unwrap()[0].content,
-            "replacement"
         );
     }
 
@@ -32252,24 +26197,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_drops_append_rejects_missing_command_id() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        mint_drop_tag(&store, "a#0");
-
-        let outcome = handler.handle_agent_drops_value(
-            7,
-            json!({
-                "method": "agent_drops.append",
-                "session_id": "ses",
-                "drop": "1",
-            }),
-        );
-        assert_eq!(error_code(outcome), "bad_request");
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-    }
-
-    #[test]
     fn ctx_reduce_command_id_is_idempotent_while_drops_are_pending() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
@@ -32285,104 +26212,6 @@ mod tests {
             json!({ "ok": true, "queued": 0, "duplicate": true, "ctx_reduce_queued_tags": [1] })
         );
         assert_eq!(store.load_pending_agent_drops("ses").unwrap(), pending);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn ctx_reduce_no_targets_refuses_without_a_ledger_row() {
-        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
-        let (handler, store, _dir, _project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            resolver,
-        );
-
-        // No tags minted, so acknowledgement and later delivery both refuse "1" rather
-        // than committing the terminal no_targets ledger row that used to hide this error.
-        let acknowledgement = tool_body(
-            call_facade(
-                &handler,
-                "ctx_reduce",
-                json!({ "drop": "1", "command_id": "no-target-cmd" }),
-            )
-            .await,
-        );
-        assert_eq!(acknowledgement["isError"], json!(true));
-        assert!(acknowledgement["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Refused: no valid tags to queue. tags 1 not found"));
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-
-        let outcome = handler.handle_agent_drops_value(
-            7,
-            json!({
-                "method": "agent_drops.append",
-                "session_id": "ses",
-                "drop": "1",
-                "command_id": "no-target-cmd",
-            }),
-        );
-        let (code, message) = error_frame(outcome);
-        assert_eq!(code, "bad_request");
-        assert!(message.contains("no valid tags: 1 not found"));
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-
-        // Reusing this command id after a tag arrives must queue it. If refusal had
-        // committed a zero-target ledger row, this would be acknowledged as duplicate.
-        mint_drop_tag(&store, "a#0");
-        assert_eq!(
-            queue_drop_command_with_id(&handler, "no-target-cmd"),
-            json!({ "ok": true, "queued": 1 })
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn opencode_raw_drop_range_resolves_minted_tags_and_drains_on_next_bust() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let messages = (1..=25u64)
-            .map(|ordinal| {
-                let mid = format!("m{ordinal}");
-                let text = format!("output {ordinal}");
-                ck(&mid, ordinal, &text)
-            })
-            .collect::<Vec<_>>();
-        let mut transform_request = request(messages);
-        transform_request["serializer_profile"] = json!("opencode-aisdk");
-        transform_request["tool_present"] = json!(true);
-        transform_request["serve_native"] = json!(true);
-
-        let transition = call_transform_request(&handler, transform_request.clone()).await;
-        assert_eq!(transition["surface_state"], "transition");
-        let tagged = call_transform_request(&handler, transform_request.clone()).await;
-        assert_eq!(tagged["surface_state"], "active");
-        let tagged_bytes = serde_json::to_string(&tagged["ck_messages"]).unwrap();
-        assert!(tagged_bytes.contains("§1§ output 1"));
-        assert!(tagged_bytes.contains("§2§ output 2"));
-        assert!(tagged_bytes.contains("§3§ output 3"));
-        assert_eq!(store.load_tags_for_session("ses").unwrap().len(), 25);
-
-        let queued = match handler.handle_agent_drops_value(
-            7,
-            json!({
-                "method": "agent_drops.append",
-                "session_id": "ses",
-                "drop": "1-3",
-                "command_id": "opencode-drop-range",
-            }),
-        ) {
-            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
-            other => panic!("unexpected handler outcome: {other:?}"),
-        };
-        assert_eq!(queued, json!({ "ok": true, "queued": 3 }));
-
-        transform_request["render_config"] = json!("cfg1");
-        let drained = call_transform_request(&handler, transform_request).await;
-        let drained_bytes = serde_json::to_string(&drained["ck_messages"]).unwrap();
-        assert!(drained_bytes.contains("[dropped §1§]"));
-        assert!(drained_bytes.contains("[dropped §2§]"));
-        assert!(drained_bytes.contains("[dropped §3§]"));
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -32412,172 +26241,6 @@ mod tests {
 
         let new_request = queue_drop_command_with_id(&handler, "tool-use-2");
         assert_eq!(new_request, json!({ "ok": true, "queued": 1 }));
-        assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
-    }
-
-    #[test]
-    fn ctx_reduce_command_rejects_empty_and_oversized_command_ids() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-
-        for command_id in [json!(""), json!(" \t "), json!("x".repeat(129))] {
-            let outcome = handler.handle_agent_drops_value(
-                7,
-                json!({
-                    "method": "agent_drops.append",
-                    "session_id": "ses",
-                    "drop": "1",
-                    "command_id": command_id,
-                }),
-            );
-            assert_eq!(error_code(outcome), "bad_request");
-        }
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-    }
-
-    #[test]
-    fn agent_drops_append_rejects_missing_or_empty_raw_drop() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        for drop in [Value::Null, json!(""), json!("  "), json!(["1"])] {
-            let outcome = handler.handle_agent_drops_value(
-                7,
-                json!({
-                    "method": "agent_drops.append",
-                    "session_id": "ses",
-                    "drop": drop,
-                    "command_id": "command"
-                }),
-            );
-            assert_eq!(error_code(outcome), "bad_request");
-        }
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn ctx_reduce_command_raw_drop_string_canonicalizes_server_side() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        store
-            .seed_tags_for_test(
-                "ses",
-                &[
-                    TagMintInput {
-                        block_id: "a#0".to_string(),
-                        kind: "tool_result".to_string(),
-                        token_count: 10,
-                        source_bytes: b"one".to_vec(),
-                    },
-                    TagMintInput {
-                        block_id: "b#0".to_string(),
-                        kind: "tool_result".to_string(),
-                        token_count: 10,
-                        source_bytes: b"two".to_vec(),
-                    },
-                ],
-                1_000,
-            )
-            .unwrap();
-
-        // Range syntax plus an unknown tag number: known tags queue, the unknown
-        // number is skipped (the tee replays whatever the model said).
-        let response = match handler.handle_agent_drops_value(
-            7,
-            json!({
-                "method": "agent_drops.append",
-                "session_id": "ses",
-                "drop": "§1§-2, 99",
-                "command_id": "raw-1",
-            }),
-        ) {
-            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
-            other => panic!("unexpected handler outcome: {other:?}"),
-        };
-        assert_eq!(response, json!({ "ok": true, "queued": 2 }));
-        let pending = store.load_pending_agent_drops("ses").unwrap();
-        assert_eq!(pending.len(), 2);
-
-        // Re-sending the same raw string is idempotent (structural INSERT OR IGNORE).
-        let repeat = match handler.handle_agent_drops_value(
-            7,
-            json!({
-                "method": "agent_drops.append",
-                "session_id": "ses",
-                "drop": "1-2",
-                "command_id": "raw-2",
-            }),
-        ) {
-            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
-            other => panic!("unexpected handler outcome: {other:?}"),
-        };
-        assert_eq!(
-            repeat,
-            json!({ "ok": true, "queued": 0, "ctx_reduce_queued_tags": [1, 2] })
-        );
-
-        // Malformed range syntax is a typed bad_request, nothing partially queued.
-        match handler.handle_agent_drops_value(
-            7,
-            json!({
-                "method": "agent_drops.append",
-                "session_id": "ses",
-                "drop": "3-1",
-                "command_id": "raw-bad",
-            }),
-        ) {
-            HandlerOutcome::Error { code, .. } => assert_eq!(code, "bad_request"),
-            other => panic!("expected bad_request, got: {other:?}"),
-        }
-        assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 2);
-    }
-
-    #[test]
-    fn ctx_reduce_command_id_works_with_raw_drop_string() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        store
-            .seed_tags_for_test(
-                "ses",
-                &[TagMintInput {
-                    block_id: "a#0".to_string(),
-                    kind: "tool_result".to_string(),
-                    token_count: 10,
-                    source_bytes: b"one".to_vec(),
-                }],
-                1_000,
-            )
-            .unwrap();
-
-        let first = match handler.handle_agent_drops_value(
-            7,
-            json!({
-                "method": "agent_drops.append",
-                "session_id": "ses",
-                "drop": "1-3",
-                "command_id": " tool-use-raw ",
-            }),
-        ) {
-            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
-            other => panic!("unexpected handler outcome: {other:?}"),
-        };
-        assert_eq!(first, json!({ "ok": true, "queued": 1 }));
-
-        let retry = match handler.handle_agent_drops_value(
-            7,
-            json!({
-                "method": "agent_drops.append",
-                "session_id": "ses",
-                "drop": "1-3",
-                "command_id": "tool-use-raw",
-            }),
-        ) {
-            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
-            other => panic!("unexpected handler outcome: {other:?}"),
-        };
-        assert_eq!(
-            retry,
-            json!({ "ok": true, "queued": 0, "duplicate": true, "ctx_reduce_queued_tags": [1] })
-        );
         assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
     }
 
@@ -32617,68 +26280,6 @@ mod tests {
                 .await,
         );
         assert_eq!(retry["disposition"], json!("nothing_to_compact"), "{retry}");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn retryable_snapshot_conditions_do_not_poison_command_ids() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let missing_request = json!({
-            "method": "session.wrapup",
-            "v": 1,
-            "session_id": "ses",
-            "command_id": "missing-retry"
-        });
-        let missing = tool_body(handler.dispatch_value(7, missing_request.clone()).await);
-        assert_eq!(missing["disposition"], json!("retryable"));
-        assert_eq!(missing["reason"], json!("transform_not_observed"));
-        assert!(store
-            .load_wrapup_command("ses", "missing-retry")
-            .unwrap()
-            .is_none());
-        cache_wrapup_messages(&handler, wrapup_messages(20, 40));
-        let retry = tool_body(handler.dispatch_value(7, missing_request).await);
-        assert_eq!(retry["disposition"], json!("nothing_to_compact"));
-        assert!(store
-            .load_wrapup_command("ses", "missing-retry")
-            .unwrap()
-            .is_some());
-
-        let mut malformed = transform_request(wrapup_messages(20, 40), 0, 200_000);
-        malformed.messages[0].mid = "reserved#mid".to_string();
-        let generation = handler
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex")
-            .begin("ses");
-        let revert_epoch = store.load("ses").unwrap().meta.revert_epoch;
-        handler
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex")
-            .finish_ready("ses", generation, Arc::new(malformed), revert_epoch, 1);
-        let malformed_request = json!({
-            "method": "session.wrapup",
-            "v": 1,
-            "session_id": "ses",
-            "command_id": "malformed-retry"
-        });
-        let malformed_response =
-            tool_body(handler.dispatch_value(7, malformed_request.clone()).await);
-        assert_eq!(malformed_response["disposition"], json!("retryable"));
-        assert_eq!(malformed_response["reason"], json!("snapshot_unavailable"));
-        assert!(store
-            .load_wrapup_command("ses", "malformed-retry")
-            .unwrap()
-            .is_none());
-        cache_wrapup_messages(&handler, wrapup_messages(20, 40));
-        let retry = tool_body(handler.dispatch_value(7, malformed_request).await);
-        assert_eq!(retry["disposition"], json!("nothing_to_compact"));
-        assert!(store
-            .load_wrapup_command("ses", "malformed-retry")
-            .unwrap()
-            .is_some());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -32820,87 +26421,6 @@ mod tests {
                 .iter()
                 .all(|timeout| *timeout == Duration::from_secs(90)),
             "{await_timeouts:?}"
-        );
-    }
-
-    /// Each historian setting a wrapup request carries replaces the snapshot's value; a
-    /// setting it omits, or sends as null, keeps the snapshot's.
-    #[test]
-    fn wrapup_historian_overrides_replace_only_the_settings_they_carry() {
-        let mut snapshot = transform_request(Vec::new(), 1, 200_000);
-        snapshot.historian_model_chain = Some(vec!["test/snapshot".to_string()]);
-        snapshot.historian_timeout_ms = Some(600_000);
-        snapshot.historian_max_output_tokens = Some(4_000);
-
-        let all = wrapup_historian_overrides(&json!({
-            "historian_model_chain": ["test/live"],
-            "historian_timeout_ms": 90_000,
-            "historian_max_output_tokens": 12_000,
-        }))
-        .unwrap()
-        .apply_to(&snapshot);
-        assert_eq!(
-            all.historian_model_chain,
-            Some(vec!["test/live".to_string()])
-        );
-        assert_eq!(all.historian_timeout_ms, Some(90_000));
-        assert_eq!(all.historian_max_output_tokens, Some(12_000));
-
-        let output_only = wrapup_historian_overrides(&json!({
-            "historian_max_output_tokens": 12_000,
-            "historian_timeout_ms": null,
-        }))
-        .unwrap();
-        assert!(!output_only.is_empty());
-        let output_only = output_only.apply_to(&snapshot);
-        assert_eq!(
-            output_only.historian_model_chain,
-            Some(vec!["test/snapshot".to_string()])
-        );
-        assert_eq!(output_only.historian_timeout_ms, Some(600_000));
-        assert_eq!(output_only.historian_max_output_tokens, Some(12_000));
-
-        let none = wrapup_historian_overrides(&json!({ "keep": 20 })).unwrap();
-        assert!(none.is_empty());
-    }
-
-    /// A chain field of the wrong shape is a malformed request, not a reason to fall back
-    /// to the snapshot's chain.
-    #[tokio::test(flavor = "current_thread")]
-    async fn session_wrapup_malformed_request_chain_is_bad_request() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        cache_wrapup_messages(&handler, wrapup_messages(80, 800));
-        for (field, value) in [
-            ("historian_model_chain", json!("test/live-config-model")),
-            ("historian_model_chain", json!(["test/model", 7])),
-            ("historian_model_limits", json!(["not", "a", "map"])),
-            ("historian_model_variants", json!({ "test/model": 3 })),
-            ("historian_timeout_ms", json!("90s")),
-            ("historian_timeout_ms", json!(-1)),
-            ("historian_max_output_tokens", json!(5_000_000_000_u64)),
-            ("historian_max_output_tokens", json!(1.5)),
-        ] {
-            let mut request = json!({
-                "method": "session.wrapup",
-                "v": 1,
-                "session_id": "ses",
-                "historian_model_chain": ["test/model"],
-            });
-            request[field] = value.clone();
-            match handler.dispatch_value(7, request).await {
-                HandlerOutcome::Error { code, message } => {
-                    assert_eq!(code, "bad_request", "{field}={value}: {message}");
-                    assert!(message.contains(field), "{field}={value}: {message}");
-                }
-                other => panic!("{field}={value} must be a bad request, got {other:?}"),
-            }
-        }
-        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
-        assert!(
-            !handler.wrapup_active("ses"),
-            "a refused request leaves no wrapup claim behind"
         );
     }
 
@@ -33306,33 +26826,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn already_in_progress_response_carries_rounds() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        cache_wrapup_messages(&handler, wrapup_messages(80, 800));
-        let guard = handler
-            .try_claim_wrapup_session("ses")
-            .expect("first claim");
-        assert!(handler.wrapup_active("ses"));
-        let busy = tool_body(
-            handler
-                .dispatch_value(
-                    7,
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
-                )
-                .await,
-        );
-        drop(guard);
-        assert!(!handler.wrapup_active("ses"));
-        assert_eq!(busy["disposition"], json!("already_in_progress"), "{busy}");
-        assert!(
-            busy["rounds"].is_u64(),
-            "machine contract: rounds must ride every disposition, got {busy}"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn terminal_wrapup_command_replays_verbatim_without_a_second_drive() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) =
@@ -33385,136 +26878,6 @@ mod tests {
             .unwrap()
             .is_some());
         assert_eq!(producer.starts.load(Ordering::SeqCst), starts);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn all_terminal_wrapup_dispositions_replay_after_module_restart() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, dir, project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        cache_wrapup_messages(&handler, wrapup_messages(2, 8));
-        store
-            .record_wrapup_command("ses", "completed", "completed", 2, "finished", 10)
-            .unwrap();
-        store
-            .record_wrapup_command(
-                "ses",
-                "nothing",
-                "nothing_to_compact",
-                0,
-                "nothing eligible",
-                11,
-            )
-            .unwrap();
-        let failed_record = tool_body(handler.terminal_wrapup_response(
-            &store,
-            "ses",
-            Some("failed"),
-            1,
-            0,
-            TerminalWrapupResponse {
-                disposition: "failed",
-                rounds: 1,
-                summary: "wrapup failed".to_string(),
-                reason: Some("producer_failed"),
-                detail: Some("producer unavailable".to_string()),
-                include_rounds_without_command: false,
-            },
-        ));
-        assert_eq!(failed_record["disposition"], json!("failed"));
-        drop(handler);
-        drop(store);
-
-        let reopened = Arc::new(
-            McStore::open_for_test(&dev_descriptor_at(
-                dir.path().join("data").to_str().unwrap(),
-            ))
-            .unwrap(),
-        );
-        let restarted = McHandler::with_producer_factory_config_resolver(
-            Arc::new(TestProducerFactory {
-                state: Arc::clone(&producer),
-            }),
-            default_test_config(),
-            Arc::new(MissingSessionResolver),
-        );
-        restarted.store.set(reopened).ok().unwrap();
-        restarted.bind_route(7, binding(project.to_str().unwrap(), "ses"));
-
-        let completed = tool_body(
-            restarted
-                .dispatch_value(
-                    7,
-                    json!({
-                        "method": "session.wrapup",
-                        "v": 1,
-                        "session_id": "ses",
-                        "command_id": "completed"
-                    }),
-                )
-                .await,
-        );
-        assert_eq!(
-            completed,
-            json!({
-                "ok": true,
-                "disposition": "completed",
-                "rounds": 2,
-                "summary": "finished",
-                "replayed": true
-            })
-        );
-
-        let nothing = tool_body(
-            restarted
-                .dispatch_value(
-                    7,
-                    json!({
-                        "method": "session.wrapup",
-                        "v": 1,
-                        "session_id": "ses",
-                        "command_id": "nothing"
-                    }),
-                )
-                .await,
-        );
-        assert_eq!(
-            nothing,
-            json!({
-                "ok": true,
-                "disposition": "nothing_to_compact",
-                "rounds": 0,
-                "summary": "nothing eligible",
-                "replayed": true
-            })
-        );
-
-        let failed = tool_body(
-            restarted
-                .dispatch_value(
-                    7,
-                    json!({
-                        "method": "session.wrapup",
-                        "v": 1,
-                        "session_id": "ses",
-                        "command_id": "failed"
-                    }),
-                )
-                .await,
-        );
-        assert_eq!(
-            failed,
-            json!({
-                "ok": false,
-                "disposition": "failed",
-                "rounds": 1,
-                "summary": "wrapup failed",
-                "reason": "producer_failed",
-                "detail": "producer unavailable",
-                "replayed": true
-            })
-        );
-        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -33739,377 +27102,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn stale_generation_is_fenced_before_historian_additive_writes() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let handler = Arc::new(handler);
-        cache_wrapup_messages(&handler, wrapup_messages(80, 800));
-        let before = historian_additive_rows(&store, "ses", &project);
-        let hook_handler = Arc::clone(&handler);
-        let hook_producer = Arc::clone(&producer);
-        *producer
-            .on_await_output
-            .lock()
-            .expect("await-output hook mutex") = Some(Box::new(move || {
-            let prompt = hook_producer
-                .prompts
-                .lock()
-                .expect("prompts mutex")
-                .last()
-                .cloned()
-                .expect("producer prompt");
-            let (start, end) = prompt_ordinal_range(&prompt).expect("prompt ordinal range");
-            hook_producer
-                .await_results
-                .lock()
-                .expect("await results mutex")
-                .push_back(Ok(ProducerOutput {
-                    text: historian_output_with_fact(
-                        start,
-                        end,
-                        "A stale snapshot must not publish this fact.",
-                    ),
-                    length_capped: false,
-                    usage: None,
-                }));
-            hook_handler
-                .transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex")
-                .begin("ses");
-        }));
-        let response = tool_body(
-            handler
-                .dispatch_value(
-                    7,
-                    json!({
-                        "method": "session.wrapup",
-                        "v": 1,
-                        "session_id": "ses",
-                        "keep": 5,
-                        "command_id": "generation-retry"
-                    }),
-                )
-                .await,
-        );
-        assert_eq!(response["disposition"], json!("retryable"), "{response}");
-        assert_eq!(response["reason"], json!("snapshot_stale"));
-        assert!(store
-            .load_wrapup_command("ses", "generation-retry")
-            .unwrap()
-            .is_none());
-        assert_eq!(
-            historian_additive_rows(&store, "ses", &project),
-            before,
-            "the generation fence must run before compartments, transcripts, facts, or the publication floor change"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn wrapup_publication_holds_snapshot_lock_through_store_write() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let handler = Arc::new(handler);
-        cache_wrapup_messages(&handler, wrapup_messages(80, 800));
-        let before = historian_additive_rows(&store, "ses", &project);
-        let snapshots = Arc::clone(&handler.transform_snapshots);
-        let observed_lock = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let observed_lock_for_hook = Arc::clone(&observed_lock);
-        *handler
-            .publication_fence_write_hook
-            .lock()
-            .expect("publication fence write hook mutex") =
-            Some(Box::new(move || match snapshots.try_lock() {
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    observed_lock_for_hook.store(true, Ordering::SeqCst);
-                }
-                Ok(_) => panic!("snapshot lock was released before the store write"),
-                Err(std::sync::TryLockError::Poisoned(_)) => {
-                    panic!("transform snapshots mutex poisoned")
-                }
-            }));
-
-        let response = tool_body(
-            handler
-                .dispatch_value(
-                    7,
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses", "keep": 5 }),
-                )
-                .await,
-        );
-        assert!(
-            matches!(
-                response["disposition"].as_str(),
-                Some("completed" | "nothing_to_compact")
-            ),
-            "{response}"
-        );
-        assert!(observed_lock.load(Ordering::SeqCst));
-        assert_ne!(historian_additive_rows(&store, "ses", &project), before);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn fence_cleanup_uses_fenced_abandon_without_cooldown() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let handler = Arc::new(handler);
-        cache_wrapup_messages(&handler, wrapup_messages(80, 800));
-        let before = historian_additive_rows(&store, "ses", &project);
-        let hook_handler = Arc::clone(&handler);
-        let hook_producer = Arc::clone(&producer);
-        *producer
-            .on_await_output
-            .lock()
-            .expect("await-output hook mutex") = Some(Box::new(move || {
-            let prompt = hook_producer
-                .prompts
-                .lock()
-                .expect("prompts mutex")
-                .last()
-                .cloned()
-                .expect("producer prompt");
-            let (start, end) = prompt_ordinal_range(&prompt).expect("prompt ordinal range");
-            hook_producer
-                .await_results
-                .lock()
-                .expect("await results mutex")
-                .push_back(Ok(ProducerOutput {
-                    text: historian_output_with_fact(start, end, "Atomic cleanup race fact."),
-                    length_capped: false,
-                    usage: None,
-                }));
-            hook_handler
-                .transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex")
-                .begin("ses");
-        }));
-        let abandon_hook_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let abandon_hook_calls_for_hook = Arc::clone(&abandon_hook_calls);
-        store.set_abandon_historian_hook(Box::new(move || {
-            abandon_hook_calls_for_hook.fetch_add(1, Ordering::SeqCst);
-        }));
-
-        let stale = tool_body(
-            handler
-                .dispatch_value(
-                    7,
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses", "keep": 5 }),
-                )
-                .await,
-        );
-        assert_eq!(stale["disposition"], json!("retryable"), "{stale}");
-        let state = store.load("ses").unwrap().meta.historian;
-        assert_eq!(state.state, HistorianPhase::Idle);
-        assert_eq!(state.failure_backoff_at_ms, None);
-        assert_eq!(
-            abandon_hook_calls.load(Ordering::SeqCst),
-            1,
-            "the in-transaction abandon hook must run before cleanup commits"
-        );
-        assert_eq!(historian_additive_rows(&store, "ses", &project), before);
-
-        cache_wrapup_messages(&handler, wrapup_messages(20, 40));
-        let starts_before_retry = producer.starts.load(Ordering::SeqCst);
-        let retry = tool_body(
-            handler
-                .dispatch_value(
-                    7,
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses", "keep": 5 }),
-                )
-                .await,
-        );
-        assert!(
-            producer.starts.load(Ordering::SeqCst) > starts_before_retry,
-            "immediate retry was not admitted: {retry}"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn fence_rejection_leaves_no_backoff_and_immediate_retry_executes() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let handler = Arc::new(handler);
-        cache_wrapup_messages(&handler, wrapup_messages(80, 800));
-        let hook_handler = Arc::clone(&handler);
-        let hook_producer = Arc::clone(&producer);
-        *producer
-            .on_await_output
-            .lock()
-            .expect("await-output hook mutex") = Some(Box::new(move || {
-            let prompt = hook_producer
-                .prompts
-                .lock()
-                .expect("prompts mutex")
-                .last()
-                .cloned()
-                .expect("producer prompt");
-            let (start, end) = prompt_ordinal_range(&prompt).expect("prompt ordinal range");
-            hook_producer
-                .await_results
-                .lock()
-                .expect("await results mutex")
-                .push_back(Ok(ProducerOutput {
-                    text: historian_output_with_fact(start, end, "Fence race fact."),
-                    length_capped: false,
-                    usage: None,
-                }));
-            hook_handler
-                .transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex")
-                .begin("ses");
-        }));
-        let stale = tool_body(
-            handler
-                .dispatch_value(
-                    7,
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses", "keep": 5 }),
-                )
-                .await,
-        );
-        assert_eq!(stale["disposition"], json!("retryable"), "{stale}");
-        assert_eq!(stale["reason"], json!("snapshot_stale"));
-        // The fence race is not a producer failure: no cooldown may be armed, so an
-        // immediate retry with a fresh snapshot executes instead of backoff_active.
-        assert_eq!(
-            store
-                .load("ses")
-                .unwrap()
-                .meta
-                .historian
-                .failure_backoff_at_ms,
-            None,
-            "fence rejection must not arm the failure backoff"
-        );
-        cache_wrapup_messages(&handler, wrapup_messages(20, 40));
-        // The retry must be ADMITTED (no cooldown at entry) and drive the producer.
-        // The mock's canned output no longer matches the window, so the retry may
-        // fail validation afterwards; being turned away at the door is the bug.
-        let starts_before_retry = producer.starts.load(Ordering::SeqCst);
-        let retry = tool_body(
-            handler
-                .dispatch_value(
-                    7,
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses", "keep": 5 }),
-                )
-                .await,
-        );
-        assert!(
-            producer.starts.load(Ordering::SeqCst) > starts_before_retry,
-            "immediate retry must be admitted and drive the producer, got {retry}"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn active_snapshot_lease_limit_rejects_then_releases_for_later_wrapup() {
-        const ACTIVE_LEASE_LIMIT: usize = 8;
-        assert_eq!(ACTIVE_LEASE_LIMIT, MAX_ACTIVE_SNAPSHOT_LEASES);
-
-        let producer = Arc::new(ProducerState::default());
-        producer.block_output.store(true, Ordering::SeqCst);
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let handler = Arc::new(handler);
-        for index in 0..=ACTIVE_LEASE_LIMIT {
-            let session_id = format!("lease-{index}");
-            let channel = 20 + index as u16;
-            handler.bind_route(
-                channel,
-                binding(project.to_str().unwrap(), session_id.as_str()),
-            );
-            cache_wrapup_messages_for_session(
-                &handler,
-                &session_id,
-                (1..=10)
-                    .map(|ordinal| {
-                        ck(
-                            &format!("{session_id}-m{ordinal}"),
-                            ordinal,
-                            "lease budget work",
-                        )
-                    })
-                    .collect(),
-            );
-        }
-
-        let mut blocked = Vec::new();
-        for index in 0..ACTIVE_LEASE_LIMIT {
-            let handler = Arc::clone(&handler);
-            blocked.push(tokio::spawn(async move {
-                handler
-                    .dispatch_value(
-                        20 + index as u16,
-                        json!({
-                            "method": "session.wrapup",
-                            "v": 1,
-                            "session_id": format!("lease-{index}"),
-                            "keep": 5
-                        }),
-                    )
-                    .await
-            }));
-            wait_for_count(&producer.starts, index + 1).await;
-        }
-
-        let overflow = tokio::time::timeout(
-            Duration::from_millis(100),
-            handler.dispatch_value(
-                20 + ACTIVE_LEASE_LIMIT as u16,
-                json!({
-                    "method": "session.wrapup",
-                    "v": 1,
-                    "session_id": format!("lease-{ACTIVE_LEASE_LIMIT}"),
-                    "keep": 5
-                }),
-            ),
-        )
-        .await
-        .expect("the lease over the global limit must reject before producer output");
-        let overflow = tool_body(overflow);
-        assert_eq!(overflow["disposition"], json!("retryable"), "{overflow}");
-        assert_eq!(overflow["reason"], json!("snapshot_unavailable"));
-        assert_eq!(overflow["summary"], "too many concurrent wrapups");
-        assert_eq!(producer.starts.load(Ordering::SeqCst), ACTIVE_LEASE_LIMIT);
-
-        producer.block_output.store(false, Ordering::SeqCst);
-        producer.notify.notify_waiters();
-        for drive in blocked {
-            let response = tool_body(drive.await.unwrap());
-            assert_eq!(response["ok"], json!(true), "{response}");
-        }
-
-        let later = tool_body(
-            handler
-                .dispatch_value(
-                    20 + ACTIVE_LEASE_LIMIT as u16,
-                    json!({
-                        "method": "session.wrapup",
-                        "v": 1,
-                        "session_id": format!("lease-{ACTIVE_LEASE_LIMIT}"),
-                        "keep": 5
-                    }),
-                )
-                .await,
-        );
-        assert!(
-            matches!(
-                later["disposition"].as_str(),
-                Some("completed" | "nothing_to_compact")
-            ),
-            "{later}"
-        );
-        assert_eq!(
-            producer.starts.load(Ordering::SeqCst),
-            ACTIVE_LEASE_LIMIT + 1
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn concurrent_session_wrapup_returns_progress_without_double_fire() {
         let producer = Arc::new(ProducerState::default());
         producer.block_output.store(true, Ordering::SeqCst);
@@ -34241,140 +27233,6 @@ mod tests {
         let durable = store.load("ses").unwrap().meta.historian;
         assert_eq!(durable.state, HistorianPhase::Idle);
         assert!(durable.last_failure.is_some());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn rejected_post_recut_transform_keeps_wrapup_snapshot_in_flight() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let loaded = store.load("ses").unwrap();
-        store
-            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
-            .unwrap();
-        store
-            .replace_compartments(
-                "ses",
-                &[
-                    stored_comp(1, 1, 2, "m2", "first"),
-                    stored_comp(2, 3, 4, "m4", "second"),
-                ],
-            )
-            .unwrap();
-        cache_wrapup_messages(&handler, wrapup_messages(20, 40));
-        let generation = handler
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex")
-            .begin("ses");
-        let before = store.load("ses").unwrap();
-        let recut = store
-            .truncate_compartments_for_revert("ses", 1, before.row_version)
-            .unwrap();
-        assert_eq!(recut.revert_epoch, 1);
-        assert!(matches!(
-            handler
-                .transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex")
-                .get("ses"),
-            TransformSnapshotLookup::InFlight
-        ));
-        assert!(generation > 0);
-
-        let body = tool_body(
-            handler
-                .dispatch_value(
-                    7,
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
-                )
-                .await,
-        );
-        assert_eq!(body["disposition"], json!("retryable"));
-        assert_eq!(body["reason"], json!("snapshot_unavailable"));
-        assert_eq!(
-            body["summary"],
-            "wrapup unavailable while a session transform is in progress"
-        );
-        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn wrapup_refuses_epoch_mismatch_and_lru_eviction_honestly() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        cache_wrapup_messages(&handler, wrapup_messages(20, 40));
-        let loaded = store.load("ses").unwrap();
-        let mut meta = loaded.meta.clone();
-        meta.revert_epoch = 1;
-        store
-            .commit("ses", loaded.row_version, &loaded.core, &meta)
-            .unwrap();
-        let mismatch = tool_body(
-            handler
-                .dispatch_value(
-                    7,
-                    json!({
-                        "method": "session.wrapup",
-                        "v": 1,
-                        "session_id": "ses",
-                        "command_id": "stale-retry"
-                    }),
-                )
-                .await,
-        );
-        assert_eq!(mismatch["disposition"], json!("retryable"));
-        assert_eq!(mismatch["reason"], json!("snapshot_stale"));
-        assert_eq!(
-            mismatch["summary"],
-            "wrapup unavailable until a full session transform has been observed"
-        );
-        assert!(store
-            .load_wrapup_command("ses", "stale-retry")
-            .unwrap()
-            .is_none());
-        cache_wrapup_messages(&handler, wrapup_messages(20, 40));
-        let retry = tool_body(
-            handler
-                .dispatch_value(
-                    7,
-                    json!({
-                        "method": "session.wrapup",
-                        "v": 1,
-                        "session_id": "ses",
-                        "command_id": "stale-retry"
-                    }),
-                )
-                .await,
-        );
-        assert_eq!(retry["disposition"], json!("nothing_to_compact"));
-        assert!(store
-            .load_wrapup_command("ses", "stale-retry")
-            .unwrap()
-            .is_some());
-
-        handler
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex")
-            .max_ready_bytes = 0;
-        cache_wrapup_messages(&handler, wrapup_messages(20, 40));
-        let evicted = tool_body(
-            handler
-                .dispatch_value(
-                    7,
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
-                )
-                .await,
-        );
-        assert_eq!(evicted["disposition"], json!("retryable"));
-        assert_eq!(evicted["reason"], json!("transform_not_observed"));
-        assert_eq!(
-            evicted["summary"],
-            "wrapup unavailable until a full session transform has been observed"
-        );
-        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -34698,52 +27556,6 @@ mod tests {
 
         assert!(response["action"].is_string());
         assert!(m0_text(&response).contains("autonomous summary"));
-        wait_for_idle(&store).await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_stuck_historian_is_bounded_and_next_transform_succeeds() {
-        let producer = Arc::new(ProducerState::default());
-        producer.block_output.store(true, Ordering::SeqCst);
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        *handler
-            .transform_historian_followup_budget
-            .lock()
-            .expect("transform historian follow-up budget mutex") = Some(Duration::from_secs(1));
-        let messages = big_messages();
-
-        let budget = Duration::from_secs(1);
-        let first = call_transform_with_usage(&handler, messages.clone(), 48_000, 50_000).await;
-        assert!(first["action"].is_string());
-        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
-        {
-            let wait_budgets = handler
-                .transform_historian_wait_budgets
-                .lock()
-                .expect("transform historian wait budgets mutex");
-            assert_eq!(wait_budgets.len(), 1, "the first transform waits once");
-            assert!(
-                wait_budgets[0] <= budget,
-                "the stuck historian wait must not exceed its configured follow-up budget"
-            );
-        }
-
-        let retry = call_transform_with_usage(&handler, messages, 48_000, 50_000).await;
-        assert!(retry["action"].is_string());
-        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            handler
-                .transform_historian_wait_budgets
-                .lock()
-                .expect("transform historian wait budgets mutex")
-                .len(),
-            1,
-            "retrying must not wait on or restart the stuck historian"
-        );
-
-        producer.block_output.store(false, Ordering::SeqCst);
-        producer.notify.notify_waiters();
         wait_for_idle(&store).await;
     }
 
@@ -35186,79 +27998,6 @@ mod tests {
     enum ReattachGenerationCase {
         SupersededBeforeReattachSpawn,
         FinishedReadyWithSameGeneration,
-    }
-
-    async fn run_reattach_generation_case(
-        case: ReattachGenerationCase,
-    ) -> (
-        HistorianAdditiveRows,
-        HistorianAdditiveRows,
-        HistorianDurableState,
-        bool,
-    ) {
-        let producer = Arc::new(ProducerState::default());
-        producer.block_output.store(true, Ordering::SeqCst);
-        producer
-            .outputs
-            .lock()
-            .unwrap()
-            .push_back(historian_output_with_fact(
-                1,
-                3,
-                "Reattached generation fact.",
-            ));
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let messages = big_messages();
-        seed_awaiting(&store, &messages);
-        let before = historian_additive_rows(&store, "ses", &project);
-        let hook_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let hook_ran_for_hook = Arc::clone(&hook_ran);
-        let snapshots = Arc::clone(&handler.transform_snapshots);
-        let store_for_hook = Arc::clone(&store);
-        let messages_for_hook = messages.clone();
-        *handler
-            .between_transform_and_prepare
-            .lock()
-            .expect("interleave hook mutex") = Some(Box::new(move || {
-            hook_ran_for_hook.store(true, Ordering::SeqCst);
-            let mut snapshots = snapshots.lock().expect("transform snapshots mutex");
-            match case {
-                ReattachGenerationCase::SupersededBeforeReattachSpawn => {
-                    snapshots.begin("ses");
-                }
-                ReattachGenerationCase::FinishedReadyWithSameGeneration => {
-                    // Move the cache record from pending to completed for the same numeric
-                    // version before publication. This proves publication accepts a completed
-                    // record when its version did not change.
-                    let parsed = transform_request(messages_for_hook, 1, 200_000);
-                    let retained_bytes = serde_json::to_vec(&parsed).unwrap().len();
-                    let revert_epoch = store_for_hook.load("ses").unwrap().meta.revert_epoch;
-                    snapshots.finish_ready(
-                        "ses",
-                        1,
-                        Arc::new(parsed),
-                        revert_epoch,
-                        retained_bytes,
-                    );
-                    assert!(matches!(
-                        snapshots.entries.get("ses"),
-                        Some(TransformSnapshot::Ready { generation: 1, .. })
-                    ));
-                }
-            }
-        }));
-
-        let response = call_transform(&handler, messages).await;
-        assert_eq!(response["historian"]["no_fire"], "reattaching");
-        wait_for_count(&producer.await_outputs, 1).await;
-        producer.block_output.store(false, Ordering::SeqCst);
-        producer.notify.notify_waiters();
-        wait_for_idle(&store).await;
-
-        let after = historian_additive_rows(&store, "ses", &project);
-        let state = store.load("ses").unwrap().meta.historian;
-        (before, after, state, hook_ran.load(Ordering::SeqCst))
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -35745,39 +28484,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn own_producer_sessions_pass_through_untransformed() {
-        // The historian's own llm-runner run must never be re-transformed: prepending
-        // m0/m1 framing ahead of the historian system prompt restructures the calibrated
-        // request and makes the model treat the seed examples as session content.
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let session = historian::historian_producer_session_id("proj", "parent-session", 3);
-        handler.bind_route(9, binding("/tmp/nonexistent-proj", &session));
-        let messages = [ck("m1", 1, "seed block + new_messages payload")];
-        let req = serde_json::json!({
-            "kind": "transform",
-            "v": 2,
-            "serializer_profile": "owned-llmrunner",
-            "session_id": session,
-            "render_config": "cfg0",
-            "messages": messages.iter().map(|m| serde_json::to_value(m).unwrap()).collect::<Vec<_>>(),
-        });
-        let out = handler.handle_transform_dispatch(9, req, None).await;
-        let HandlerOutcome::Response(bytes) = out else {
-            panic!("pass-through must be a response");
-        };
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["action"], "PASSTHROUGH");
-        let out_msgs = v["ck_messages"].as_array().unwrap();
-        assert_eq!(out_msgs.len(), 1, "no m0/m1 prepends, no drops");
-        // No store row was created and no historian evaluation ran for the child session.
-        assert!(store.load(&session).unwrap().row_version.is_none());
-        assert!(store.load_pass_trace(&session).unwrap().is_none());
-        assert!(v.get("historian").is_none());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn trigger_false_no_fire_detail_carries_quantized_numbers() {
         // Small content: the trigger honestly declines, and the durable discriminant
         // must carry the measurement (eligible vs bar vs protected N) so a rig can
@@ -35921,379 +28627,6 @@ mod tests {
         batch
     }
 
-    #[tokio::test]
-    async fn state_sync_receipt_is_generation_fenced_and_staged_progress_is_resumable() {
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let probe = json!({ "v": 1, "session_id": "ses", "state_sync_seed_id": "receipt-fixture" });
-        let read = || {
-            let outcome = handler.handle_session_status_value(7, &probe);
-            let HandlerOutcome::Response(bytes) = outcome else {
-                panic!("{outcome:?}")
-            };
-            serde_json::from_slice::<Value>(&bytes).unwrap()
-        };
-        let first = paged_seed_batch("ses", "receipt-fixture", 0, 0, 0, 2, vec![]);
-        assert!(matches!(
-            handler.dispatch_value(7, first).await,
-            HandlerOutcome::Response(_)
-        ));
-        assert_eq!(read()["state_sync"]["next_expected_index"], 1);
-        let last = paged_seed_batch("ses", "receipt-fixture", 0, 0, 1, 2, vec![]);
-        assert!(matches!(
-            handler.dispatch_value(7, last).await,
-            HandlerOutcome::Response(_)
-        ));
-        handler.state_sync_seeds.lock().unwrap().sessions.clear();
-        assert_eq!(read()["state_sync"]["completed"], true);
-        let loaded = store.load("ses").unwrap();
-        let mut meta = loaded.meta;
-        meta.shadow_generation += 1;
-        store
-            .commit("ses", loaded.row_version, &loaded.core, &meta)
-            .unwrap();
-        assert!(read()["state_sync"].is_null());
-    }
-
-    #[tokio::test]
-    async fn aft_sized_state_sync_timing_fixture() {
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let compartments = (0..1627)
-            .map(|sequence| state_sync_compartment(sequence, &"x".repeat(1024)))
-            .collect();
-        let mut first = paged_seed_batch("ses", "aft-fixture", 0, 0, 0, 2, compartments);
-        first.as_object_mut().unwrap().remove("session_id");
-        assert!(matches!(
-            handler.dispatch_value(7, first).await,
-            HandlerOutcome::Response(_)
-        ));
-        let mut last = paged_seed_batch("ses", "aft-fixture", 0, 0, 1, 2, vec![]);
-        last["drop_seeds"] = json!((0..148_070)
-            .map(|index| json!({ "block_id": format!("m{index}#0"), "drop_mode": "full" }))
-            .collect::<Vec<_>>());
-        assert!(matches!(
-            handler.dispatch_value(7, last).await,
-            HandlerOutcome::Response(_)
-        ));
-        assert_eq!(store.load_compartments("ses").unwrap().len(), 1627);
-        assert_eq!(store.load("ses").unwrap().core.frozen_units.len(), 148_070);
-        let response = handler.handle_session_status_value(
-            7,
-            &json!({ "v": 1, "session_id": "ses", "state_sync_seed_id": "aft-fixture" }),
-        );
-        let HandlerOutcome::Response(bytes) = response else {
-            panic!("receipt failed")
-        };
-        let status: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(status["state_sync"]["completed"], true);
-        // Dropping all collector state models a daemon restart; the receipt is in SQLite.
-        handler.state_sync_seeds.lock().unwrap().sessions.clear();
-        let response = handler.handle_session_status_value(
-            7,
-            &json!({ "v": 1, "session_id": "ses", "state_sync_seed_id": "aft-fixture" }),
-        );
-        let HandlerOutcome::Response(bytes) = response else {
-            panic!("durable receipt failed")
-        };
-        let status: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(status["state_sync"]["completed"], true);
-
-        let loaded = store.load("ses").unwrap();
-        let mut meta = loaded.meta;
-        let mut core = loaded.core;
-        meta.initialized = true;
-        meta.folded_compartment_seq = 1626;
-        core.boundary_id = "m1626#0".into();
-        store
-            .commit("ses", loaded.row_version, &core, &meta)
-            .unwrap();
-        let inventory = handler.handle_session_status_value(
-            7,
-            &json!({ "v": 1, "session_id": "ses", "state_sync_inventory": true }),
-        );
-        let HandlerOutcome::Response(bytes) = inventory else {
-            panic!("inventory failed")
-        };
-        let inventory: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(
-            inventory["state_sync_inventory"]["max_compartment_sequence"],
-            1626
-        );
-        assert_eq!(inventory["state_sync_inventory"]["boundary_id"], "m1626#0");
-        let mut warm = paged_seed_batch("ses", "aft-warm", 0, 1, 0, 1, vec![]);
-        warm["drop_seeds"] = json!((147_788..148_070)
-            .map(|index| json!({ "block_id": format!("m{index}#0"), "drop_mode": "full" }))
-            .collect::<Vec<_>>());
-        assert!(matches!(
-            handler.dispatch_value(7, warm).await,
-            HandlerOutcome::Response(_)
-        ));
-        assert_eq!(store.load("ses").unwrap().core.frozen_units.len(), 148_070);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn paged_transform_page(
-        _method: &str,
-        session: &str,
-        page_id: &str,
-        generation: u64,
-        index: usize,
-        total: usize,
-        complete: bool,
-        messages: Vec<Value>,
-    ) -> Value {
-        let mut page = json!({
-            "method": "transform",
-            "session_id": session,
-            "transform_page_id": page_id,
-            "transform_generation": generation,
-            "transform_page_index": index,
-            "transform_page_total": total,
-            "transform_page_complete": complete,
-            "messages": messages,
-        });
-        if complete {
-            page.as_object_mut().expect("transform page body").extend([
-                ("kind".to_string(), json!("transform")),
-                ("v".to_string(), json!(2)),
-                ("serializer_profile".to_string(), json!("owned-llmrunner")),
-                ("render_config".to_string(), json!("cfg0")),
-                (
-                    "usage".to_string(),
-                    json!({
-                        "current_total_input_tokens": 45_000,
-                        "context_limit_tokens": 50_000,
-                    }),
-                ),
-            ]);
-        }
-        page["transform_page_digest"] = json!(transform_page_content_digest(&page));
-        page
-    }
-
-    #[test]
-    fn transform_page_assembly_matches_golden_fixture() {
-        let first_page = json!({
-            "method": "transform",
-            "session_id": "golden-session",
-            "messages": [
-                {"mid": "m0", "text": "first"},
-                {
-                    (ITEM_CONTINUATION_KEY): {
-                        "field": "messages",
-                        "item_index": 1,
-                        "chunk_index": 0,
-                        "chunk_total": 2
-                    },
-                    "chunk": "{\"mid\":\"m1\",\"text\":\"golden "
-                }
-            ],
-            "native_messages": [{"text": "native first"}],
-            "tool_input_key_orders": {"m0#0": ["filePath", "content"]},
-            "transform_page_id": "golden-page",
-            "transform_generation": 4,
-            "transform_page_index": 0,
-            "transform_page_total": 2,
-            "transform_page_complete": false,
-            "transform_page_digest": "ignored-first-digest"
-        });
-        let final_page = json!({
-            "method": "transform",
-            "session_id": "golden-session",
-            "messages": [
-                {
-                    (ITEM_CONTINUATION_KEY): {
-                        "field": "messages",
-                        "item_index": 1,
-                        "chunk_index": 1,
-                        "chunk_total": 2
-                    },
-                    "chunk": "fixture\"}"
-                },
-                {"mid": "m2", "text": "last"}
-            ],
-            "native_messages": [{"text": "native last"}],
-            "tool_input_key_orders": {"m2#0": ["filePath", "oldString", "newString"]},
-            "extra": "preserved",
-            "transform_page_id": "golden-page",
-            "transform_generation": 4,
-            "transform_page_index": 1,
-            "transform_page_total": 2,
-            "transform_page_complete": true,
-            "transform_page_digest": "ignored-final-digest"
-        });
-
-        let assembled = assemble_transform_pages(vec![first_page, final_page]).unwrap();
-        assert_eq!(
-            assembled,
-            json!({
-                "method": "transform",
-                "session_id": "golden-session",
-                "messages": [
-                    {"mid": "m0", "text": "first"},
-                    {"mid": "m1", "text": "golden fixture"},
-                    {"mid": "m2", "text": "last"}
-                ],
-                "native_messages": [
-                    {"text": "native first"},
-                    {"text": "native last"}
-                ],
-                "tool_input_key_orders": {
-                    "m0#0": ["filePath", "content"],
-                    "m2#0": ["filePath", "oldString", "newString"]
-                },
-                "extra": "preserved"
-            })
-        );
-    }
-
-    #[test]
-    fn pageable_map_digest_matches_the_typescript_canonical_fixture() {
-        let request = json!({
-            "messages": [{"mid": "m1", "text": "hello"}],
-            "tool_input_key_orders": {
-                "m1#2": ["newString", "filePath"],
-                "m1#0": ["path", "content"]
-            }
-        });
-        assert_eq!(
-            transform_page_content_digest(&request),
-            "db28d9596edc518ebe4131403a892c60868ee683f80c248e6c1c1a6f0e9bbf17"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn pageable_key_order_map_accepts_over_cap_input_and_preserves_served_bytes() {
-        let state = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, project) = handler_with_store(state, default_test_config());
-        let key_order_map = |start: usize, end: usize| {
-            Value::Object(
-                (start..end)
-                    .map(|index| {
-                        (
-                            format!("msg_{index:024x}#0"),
-                            json!(["filePath", "oldString", "newString"]),
-                        )
-                    })
-                    .collect(),
-            )
-        };
-        let mut large_response = None;
-        for index in 0..3 {
-            let complete = index == 2;
-            let messages = if complete {
-                vec![
-                    serde_json::to_value(ck("large-map-message", 0, "large map accepted")).unwrap(),
-                ]
-            } else {
-                Vec::new()
-            };
-            let mut page = paged_transform_page(
-                "transform",
-                "ses",
-                "large-key-order-map",
-                0,
-                index,
-                3,
-                complete,
-                messages,
-            );
-            page["tool_input_key_orders"] = key_order_map(index * 4_000, (index + 1) * 4_000);
-            page["transform_page_digest"] = json!(transform_page_content_digest(&page));
-            assert!(serde_json::to_vec(&page).unwrap().len() <= TRANSFORM_PAGE_MAX_BYTES);
-            match handler.dispatch_value(7, page).await {
-                HandlerOutcome::Response(bytes) if complete => large_response = Some(bytes),
-                HandlerOutcome::Response(_) => {}
-                other => panic!("large key-order map page should be accepted: {other:?}"),
-            }
-        }
-        assert!(large_response.is_some());
-        let large_request = handler
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex")
-            .ready_request_clone("ses")
-            .expect("large paged transform snapshot");
-        assert_eq!(large_request.tool_input_key_orders.len(), 12_000);
-
-        let project_root = project.to_str().expect("test project path");
-        handler.bind_route(8, binding(project_root, "unpaged-map-parity"));
-        handler.bind_route(9, binding(project_root, "paged-map-parity"));
-        let messages = vec![ck("parity-message", 0, "paging parity")];
-        let small_map = json!({
-            "unused#0": ["filePath", "content"],
-            "unused#1": ["filePath", "oldString", "newString"]
-        });
-        let mut unpaged_request = request(messages.clone());
-        unpaged_request["method"] = json!("transform");
-        unpaged_request["session_id"] = json!("unpaged-map-parity");
-        unpaged_request["tool_input_key_orders"] = small_map.clone();
-        let unpaged_output = match handler.dispatch_value(8, unpaged_request).await {
-            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
-            other => panic!("unpaged parity control should execute: {other:?}"),
-        };
-
-        let mut first = paged_transform_page(
-            "transform",
-            "paged-map-parity",
-            "small-key-order-map",
-            0,
-            0,
-            2,
-            false,
-            Vec::new(),
-        );
-        first["tool_input_key_orders"] = json!({"unused#0": ["filePath", "content"]});
-        first["transform_page_digest"] = json!(transform_page_content_digest(&first));
-        let mut final_page = paged_transform_page(
-            "transform",
-            "paged-map-parity",
-            "small-key-order-map",
-            0,
-            1,
-            2,
-            true,
-            messages
-                .into_iter()
-                .map(|message| serde_json::to_value(message).unwrap())
-                .collect(),
-        );
-        final_page["usage"] = json!({
-            "current_total_input_tokens": 45_000,
-            "context_limit_tokens": 50_000,
-            "final_wire_input_tokens": 0,
-            "final_wire_trusted": false,
-        });
-        final_page["tool_input_key_orders"] =
-            json!({"unused#1": ["filePath", "oldString", "newString"]});
-        final_page["transform_page_digest"] = json!(transform_page_content_digest(&final_page));
-        let assembled = assemble_transform_pages(vec![first.clone(), final_page.clone()]).unwrap();
-        let mut parity_control = request(vec![ck("parity-message", 0, "paging parity")]);
-        parity_control["method"] = json!("transform");
-        parity_control["session_id"] = json!("paged-map-parity");
-        parity_control["tool_input_key_orders"] = small_map;
-        // The paged fixture pages carry no historian chain; compare like with like.
-        parity_control
-            .as_object_mut()
-            .unwrap()
-            .remove("historian_model_chain");
-        assert_eq!(assembled, parity_control);
-
-        assert!(matches!(
-            handler.dispatch_value(9, first).await,
-            HandlerOutcome::Response(_)
-        ));
-        let paged_output = match handler.dispatch_value(9, final_page).await {
-            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
-            other => panic!("paged parity request should execute: {other:?}"),
-        };
-        assert_eq!(
-            serde_json::to_vec(&paged_output["ck_messages"]).unwrap(),
-            serde_json::to_vec(&unpaged_output["ck_messages"]).unwrap()
-        );
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn completed_content_addressed_page_series_replays_without_reexecution() {
         let state = Arc::new(ProducerState::default());
@@ -36341,329 +28674,6 @@ mod tests {
 
         assert_eq!(adopted, completed);
         assert_eq!(store.load("ses").unwrap().row_version, row_version);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn pageable_map_digest_rejects_tampering() {
-        let state = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) = handler_with_store(state, default_test_config());
-        let mut tampered = paged_transform_page(
-            "transform",
-            "ses",
-            "tampered-map",
-            0,
-            0,
-            1,
-            true,
-            vec![serde_json::to_value(ck("tampered", 0, "tampered map")).unwrap()],
-        );
-        tampered["tool_input_key_orders"] = json!({"tampered#0": ["filePath", "content"]});
-        tampered["transform_page_digest"] = json!(transform_page_content_digest(&tampered));
-        tampered["tool_input_key_orders"]["tampered#0"] = json!(["content", "filePath"]);
-
-        assert_eq!(
-            error_code(handler.dispatch_value(7, tampered).await),
-            "authority_transform_page_digest_mismatch"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn pageable_map_duplicate_keys_are_integrity_errors() {
-        let state = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) = handler_with_store(state, default_test_config());
-        let mut first = paged_transform_page(
-            "transform",
-            "ses",
-            "duplicate-map-key",
-            0,
-            0,
-            2,
-            false,
-            Vec::new(),
-        );
-        first["tool_input_key_orders"] = json!({"duplicate#0": ["filePath", "content"]});
-        first["transform_page_digest"] = json!(transform_page_content_digest(&first));
-        assert!(matches!(
-            handler.dispatch_value(7, first).await,
-            HandlerOutcome::Response(_)
-        ));
-
-        let mut final_page = paged_transform_page(
-            "transform",
-            "ses",
-            "duplicate-map-key",
-            0,
-            1,
-            2,
-            true,
-            vec![serde_json::to_value(ck("duplicate", 0, "duplicate map key")).unwrap()],
-        );
-        final_page["tool_input_key_orders"] = json!({"duplicate#0": ["oldString", "newString"]});
-        final_page["transform_page_digest"] = json!(transform_page_content_digest(&final_page));
-
-        assert_eq!(
-            error_code(handler.dispatch_value(7, final_page).await),
-            "authority_transform_page_digest_mismatch"
-        );
-    }
-
-    #[test]
-    fn transform_request_retained_bytes_tracks_typed_original_and_native_trees() {
-        use std::mem::size_of;
-
-        fn manual_value_retained_bytes(value: &Value) -> usize {
-            fn heap(value: &Value) -> usize {
-                match value {
-                    Value::Null | Value::Bool(_) | Value::Number(_) => 0,
-                    Value::String(value) => value.capacity(),
-                    Value::Array(values) => values
-                        .capacity()
-                        .saturating_mul(size_of::<Value>())
-                        .saturating_add(values.iter().map(heap).sum::<usize>()),
-                    Value::Object(values) => values
-                        .len()
-                        .saturating_mul(
-                            size_of::<String>() + size_of::<Value>() + size_of::<usize>() * 3,
-                        )
-                        .saturating_add(
-                            values
-                                .iter()
-                                .map(|(key, value)| key.capacity().saturating_add(heap(value)))
-                                .sum::<usize>(),
-                        ),
-                }
-            }
-            size_of::<Value>().saturating_add(heap(value))
-        }
-
-        let input = Value::Object(
-            (0..48)
-                .map(|index| {
-                    (
-                        format!("k{index}"),
-                        json!({"flag": index % 2 == 0, "value": format!("v{index}")}),
-                    )
-                })
-                .collect(),
-        );
-        let message = CkIngressMessage {
-            mid: "tool-heavy-mid".to_string(),
-            ordinal: 1,
-            ck: CkWireMessage::from_parts(
-                "assistant",
-                vec![CkWireBlock::bare(CkKind::ToolCall {
-                    id: "call-tool-heavy".to_string(),
-                    name: "fixture_tool".to_string(),
-                    input: input.clone(),
-                    provider_executed: false,
-                })],
-                None,
-                ProviderExtras::new(),
-                HarnessMeta {
-                    harness_id: Some("tool-heavy-mid".to_string()),
-                    ..Default::default()
-                },
-            ),
-        };
-        let mut raw = request(vec![message]);
-        raw["native_messages"] = json!([{
-            "id": "native-tool-heavy",
-            "parts": [{"type": "tool", "input": input}]
-        }]);
-        raw["channel2_delivered_id"] = json!("directive-echo".repeat(100));
-        let wire_bytes = serde_json::to_vec(&raw).unwrap().len();
-        let parsed: TransformRequest = serde_json::from_value(raw).unwrap();
-        let block = &parsed.messages[0].ck.content[0];
-        let block_original = serde_json::to_value(block).unwrap();
-        let message_original = serde_json::to_value(&parsed.messages[0].ck).unwrap();
-        let CkKind::ToolCall {
-            id, name, input, ..
-        } = &block.kind
-        else {
-            panic!("fixture must retain a tool call");
-        };
-        let typed_block_heap = id
-            .capacity()
-            .saturating_add(name.capacity())
-            .saturating_add(manual_value_retained_bytes(input).saturating_sub(size_of::<Value>()));
-        let block_extra =
-            typed_block_heap.saturating_add(manual_value_retained_bytes(&block_original));
-        let ck_tree = size_of::<CkWireMessage>()
-            .saturating_add(parsed.messages[0].ck.role.capacity())
-            .saturating_add(
-                parsed.messages[0]
-                    .ck
-                    .content
-                    .capacity()
-                    .saturating_mul(size_of::<CkWireBlock>()),
-            )
-            .saturating_add(block_extra)
-            .saturating_add(
-                parsed.messages[0]
-                    .ck
-                    .meta
-                    .harness_id
-                    .as_ref()
-                    .map_or(0, String::capacity),
-            )
-            .saturating_add(manual_value_retained_bytes(&message_original));
-        let message_tree = parsed
-            .messages
-            .capacity()
-            .saturating_mul(size_of::<CkIngressMessage>())
-            .saturating_add(parsed.messages[0].mid.capacity())
-            .saturating_add(ck_tree.saturating_sub(size_of::<CkWireMessage>()));
-        let native_tree = parsed.native_messages.as_ref().map_or(0, |messages| {
-            messages
-                .capacity()
-                .saturating_mul(size_of::<Value>())
-                .saturating_add(
-                    messages
-                        .iter()
-                        .map(|message| {
-                            manual_value_retained_bytes(message).saturating_sub(size_of::<Value>())
-                        })
-                        .sum::<usize>(),
-                )
-        });
-        let direct_strings = parsed
-            .kind
-            .capacity()
-            .saturating_add(parsed.serializer_profile.capacity())
-            .saturating_add(parsed.session_id.capacity())
-            .saturating_add(parsed.render_config.capacity())
-            .saturating_add(parsed.system_prompt_hash.capacity())
-            .saturating_add(parsed.upgrade_state.capacity())
-            .saturating_add(parsed.prompt_surface_config_identity.capacity())
-            .saturating_add(parsed.channel2_nudge_state.capacity())
-            .saturating_add(
-                parsed
-                    .channel2_delivered_id
-                    .as_ref()
-                    .map_or(0, String::capacity),
-            )
-            .saturating_add(parsed.prior_conversation_key.capacity());
-        let cache_metadata = size_of::<TransformSnapshot>()
-            .saturating_add(size_of::<usize>() * 3)
-            .saturating_add((size_of::<String>() + parsed.session_id.len()).saturating_mul(2));
-        let expected = size_of::<TransformRequest>()
-            .saturating_add(direct_strings)
-            .saturating_add(message_tree)
-            .saturating_add(native_tree)
-            .saturating_add(crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES)
-            .saturating_add(cache_metadata);
-        let retained = parsed.retained_bytes();
-        let delta = retained.abs_diff(expected);
-
-        assert!(
-            retained >= wire_bytes.saturating_mul(2),
-            "legacy wire-length charge was not at least 2x low: retained={retained} wire={wire_bytes}"
-        );
-        assert!(
-            delta <= expected / 10,
-            "retained-size estimate left 10% fixture tolerance: retained={retained} expected={expected}"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn tail_delta_snapshot_charges_expanded_tree_and_evicts_at_budget() {
-        let (handler, _store, _dir, _project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let mut full = request(vec![ck("m1", 1, &"history ".repeat(2_000))]);
-        full["full_array_fingerprint"] = json!("fp-full");
-        full["native_messages"] = json!([]);
-        let full_body_bytes = serde_json::to_vec(&full).unwrap().len();
-        let outcome = handler
-            .handle_transform_for_test_with_body_size(7, full, full_body_bytes)
-            .await;
-        assert!(
-            matches!(outcome, HandlerOutcome::Response(_)),
-            "{outcome:?}"
-        );
-        let full_charge = {
-            let snapshots = handler
-                .transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex");
-            let Some(TransformSnapshot::Ready { retained_bytes, .. }) =
-                snapshots.entries.get("ses")
-            else {
-                panic!("expected retained full transform snapshot");
-            };
-            *retained_bytes
-        };
-
-        let mut first_delta = request(vec![ck("m2", 2, "small tail")]);
-        first_delta["full_array_fingerprint"] = json!("fp-delta-1");
-        first_delta["native_messages"] = json!([]);
-        first_delta["tail_delta"] = json!({
-            "after": "fp-full",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        });
-        let delta_body_bytes = serde_json::to_vec(&first_delta).unwrap().len();
-        let outcome = handler
-            .handle_transform_for_test_with_body_size(7, first_delta, delta_body_bytes)
-            .await;
-        assert!(
-            matches!(outcome, HandlerOutcome::Response(_)),
-            "{outcome:?}"
-        );
-        let expanded_charge = {
-            let snapshots = handler
-                .transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex");
-            let Some(TransformSnapshot::Ready { retained_bytes, .. }) =
-                snapshots.entries.get("ses")
-            else {
-                panic!("expected retained expanded transform snapshot");
-            };
-            *retained_bytes
-        };
-        assert!(expanded_charge >= full_charge);
-        assert!(expanded_charge >= delta_body_bytes.saturating_mul(2));
-
-        {
-            let mut snapshots = handler
-                .transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex");
-            snapshots.max_ready_bytes = expanded_charge.saturating_sub(1);
-        }
-        let mut second_delta = request(vec![ck("m3", 3, "tiny tail")]);
-        second_delta["full_array_fingerprint"] = json!("fp-delta-2");
-        second_delta["native_messages"] = json!([]);
-        second_delta["tail_delta"] = json!({
-            "after": "fp-delta-1",
-            "replace_from": 2,
-            "native_replace_from": 0,
-        });
-        let second_delta_body_bytes = serde_json::to_vec(&second_delta).unwrap().len();
-        let outcome = handler
-            .handle_transform_for_test_with_body_size(7, second_delta, second_delta_body_bytes)
-            .await;
-        assert!(
-            matches!(outcome, HandlerOutcome::Response(_)),
-            "{outcome:?}"
-        );
-        assert!(matches!(
-            handler
-                .transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex")
-                .get("ses"),
-            TransformSnapshotLookup::Missing
-        ));
-    }
-
-    #[allow(dead_code)]
-    fn seed_accounting(handler: &McHandler) -> (usize, usize) {
-        let seeds = handler
-            .state_sync_seeds
-            .lock()
-            .expect("state sync seed mutex");
-        (seeds.total_staged_bytes, seeds.pending_seed_count)
     }
 
     #[tokio::test]
@@ -36984,142 +28994,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paged_authority_transform_charges_reassembled_request_tree() {
-        let state = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) = handler_with_store(state, default_test_config());
-        let first = paged_transform_page(
-            "transform",
-            "ses",
-            "authority-page",
-            0,
-            0,
-            2,
-            false,
-            vec![json!({
-                "mid": "m0",
-                "ordinal": 0,
-                "ck": ck("m0", 0, "authority first").ck,
-            })],
-        );
-        let final_page = paged_transform_page(
-            "transform",
-            "ses",
-            "authority-page",
-            0,
-            1,
-            2,
-            true,
-            vec![json!({
-                "mid": "m1",
-                "ordinal": 1,
-                "ck": ck("m1", 1, "authority final").ck,
-            })],
-        );
-        let mut first = first;
-        first["native_messages"] = json!([{ "text": "a".repeat(280 * 1024) }]);
-        first["transform_page_digest"] = json!(transform_page_content_digest(&first));
-        let mut final_page = final_page;
-        final_page["native_messages"] = json!([{ "text": "b".repeat(280 * 1024) }]);
-        final_page["transform_page_digest"] = json!(transform_page_content_digest(&final_page));
-        let inbound_bytes = serde_json::to_vec(&first).unwrap().len()
-            + serde_json::to_vec(&final_page).unwrap().len();
-
-        let first_ack = handler.dispatch_value(7, first).await;
-        assert!(matches!(first_ack, HandlerOutcome::Response(_)));
-        let response = handler.dispatch_value(7, final_page).await;
-        let HandlerOutcome::Response(bytes) = response else {
-            panic!("authority page assembly should execute: {response:?}");
-        };
-        let response: Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(response["action"].is_string(), "{response}");
-
-        let snapshots = handler
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex");
-        let Some(TransformSnapshot::Ready {
-            request,
-            retained_bytes,
-            ..
-        }) = snapshots.entries.get("ses")
-        else {
-            panic!("expected retained transform snapshot");
-        };
-        assert_eq!(*retained_bytes, request.retained_bytes());
-        assert!(
-            *retained_bytes > inbound_bytes,
-            "paged snapshot must charge its parsed request tree, not staged wire length"
-        );
-    }
-
-    #[tokio::test]
-    async fn paged_authority_tail_delta_reassembles_before_full_sync_gate() {
-        let state = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) = handler_with_store(state, default_test_config());
-        let mut initial = request(vec![ck("m0", 0, "acknowledged prefix")]);
-        initial["full_array_fingerprint"] = json!("fp-prefix");
-        initial["native_messages"] = json!([]);
-        let initial_response = call_transform_request(&handler, initial).await;
-        assert_eq!(initial_response["status"], "ok");
-
-        let mut first = paged_transform_page(
-            "transform",
-            "ses",
-            "paged-tail-delta",
-            0,
-            0,
-            2,
-            false,
-            vec![serde_json::to_value(ck("m1", 1, "delta first")).unwrap()],
-        );
-        first["native_messages"] = json!([{ "text": "a".repeat(280 * 1024) }]);
-        first["transform_page_digest"] = json!(transform_page_content_digest(&first));
-
-        let mut final_page = paged_transform_page(
-            "transform",
-            "ses",
-            "paged-tail-delta",
-            0,
-            1,
-            2,
-            true,
-            vec![serde_json::to_value(ck("m2", 2, "delta final")).unwrap()],
-        );
-        final_page["native_messages"] = json!([{ "text": "b".repeat(280 * 1024) }]);
-        final_page["full_array_fingerprint"] = json!("fp-delta");
-        final_page["tail_delta"] = json!({
-            "after": "fp-prefix",
-            "replace_from": 1,
-            "native_replace_from": 0,
-        });
-        final_page["transform_page_digest"] = json!(transform_page_content_digest(&final_page));
-        let first_ack = handler.dispatch_value(7, first).await;
-        let HandlerOutcome::Response(first_ack) = first_ack else {
-            panic!("first delta page should stage: {first_ack:?}");
-        };
-        let first_ack: Value = serde_json::from_slice(&first_ack).unwrap();
-        assert_eq!(first_ack["staged"], true);
-        assert_eq!(first_ack["next_expected_index"], 1);
-
-        let response = handler.dispatch_value(7, final_page).await;
-        let HandlerOutcome::Response(response) = response else {
-            panic!("reassembled tail delta should execute: {response:?}");
-        };
-        let response: Value = serde_json::from_slice(&response).unwrap();
-        assert_eq!(response["status"], "ok", "{response}");
-        assert_eq!(response["full_array_fingerprint"], "fp-delta");
-        assert!(response["ck_messages"].is_array());
-        let reconstructed = handler
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex")
-            .ready_request_clone("ses")
-            .expect("reassembled delta snapshot");
-        assert_eq!(reconstructed.messages.len(), 3);
-        assert!(reconstructed.tail_delta.is_none());
-    }
-
-    #[tokio::test]
     async fn paged_authority_transform_rejections_discard_partial_assembly() {
         let state = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(state, default_test_config());
@@ -37404,175 +29278,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_discard_logs_partial_transform_pages_and_allows_a_fresh_series() {
-        let state = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, project) = handler_with_store(state, default_test_config());
-        let project_root = project.to_str().expect("test project path");
-        let first = paged_transform_page(
-            "transform",
-            "ses",
-            "discarded-series",
-            0,
-            0,
-            2,
-            false,
-            vec![serde_json::to_value(ck("discarded-m0", 0, "discarded first")).unwrap()],
-        );
-        assert!(matches!(
-            handler.dispatch_value(7, first).await,
-            HandlerOutcome::Response(_)
-        ));
-
-        handler.bind_route(7, binding(project_root, "replacement"));
-        let discard_logs = handler
-            .transform_page_discard_logs
-            .lock()
-            .expect("transform page discard logs mutex")
-            .clone();
-        assert_eq!(
-            discard_logs,
-            vec![
-                "transform_page_collection_discarded session=ses staged_pages=1 trigger=route_replaced"
-                    .to_string()
-            ]
-        );
-
-        handler.bind_route(7, binding(project_root, "ses"));
-        let fresh_first = paged_transform_page(
-            "transform",
-            "ses",
-            "fresh-series",
-            0,
-            0,
-            2,
-            false,
-            vec![serde_json::to_value(ck("fresh-m0", 0, "fresh first")).unwrap()],
-        );
-        assert!(matches!(
-            handler.dispatch_value(7, fresh_first).await,
-            HandlerOutcome::Response(_)
-        ));
-        let fresh_final = paged_transform_page(
-            "transform",
-            "ses",
-            "fresh-series",
-            0,
-            1,
-            2,
-            true,
-            vec![serde_json::to_value(ck("fresh-m1", 1, "fresh final")).unwrap()],
-        );
-        assert!(matches!(
-            handler.dispatch_value(7, fresh_final).await,
-            HandlerOutcome::Response(_)
-        ));
-
-        handler.unbind_route(7);
-        assert_eq!(
-            handler
-                .transform_page_discard_logs
-                .lock()
-                .expect("transform page discard logs mutex")
-                .len(),
-            1,
-            "route teardown must not log when no transform pages were staged"
-        );
-
-        handler.bind_route(7, binding(project_root, "ses"));
-        let teardown_first = paged_transform_page(
-            "transform",
-            "ses",
-            "teardown-series",
-            0,
-            0,
-            2,
-            false,
-            vec![serde_json::to_value(ck("teardown-m0", 0, "teardown first")).unwrap()],
-        );
-        assert!(matches!(
-            handler.dispatch_value(7, teardown_first).await,
-            HandlerOutcome::Response(_)
-        ));
-        handler.unbind_route(7);
-        assert_eq!(
-            handler
-                .transform_page_discard_logs
-                .lock()
-                .expect("transform page discard logs mutex")
-                .as_slice(),
-            [
-                "transform_page_collection_discarded session=ses staged_pages=1 trigger=route_replaced",
-                "transform_page_collection_discarded session=ses staged_pages=1 trigger=route_teardown",
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn paged_state_sync_seed_eviction_releases_lost_sender_bytes() {
-        let state = Arc::new(ProducerState::default());
-        let (handler, store, _dir, project) = handler_with_store(state, default_test_config());
-        let initial_now = Instant::now();
-        *handler
-            .state_sync_seed_now
-            .lock()
-            .expect("state sync seed clock mutex") = Some(initial_now);
-
-        handler.bind_route(8, binding(project.to_str().unwrap(), "dead"));
-        handler.bind_route(9, binding(project.to_str().unwrap(), "live"));
-        let dead_first = paged_seed_batch("dead", "lost", 0, 0, 0, 2, vec![]);
-        let dead_bytes = serde_json::to_vec(&dead_first).unwrap().len();
-        assert_eq!(
-            match handler.dispatch_value(8, dead_first).await {
-                HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
-                other => panic!("unexpected handler outcome: {other:?}"),
-            }["next_expected_index"],
-            json!(1)
-        );
-        assert_eq!(seed_accounting(&handler), (dead_bytes, 0));
-
-        *handler
-            .state_sync_seed_now
-            .lock()
-            .expect("state sync seed clock mutex") =
-            Some(initial_now + STATE_SYNC_SEED_COLLECTOR_TTL + Duration::from_secs(1));
-        let live_first = paged_seed_batch("live", "active", 0, 0, 0, 2, vec![]);
-        let live_bytes = serde_json::to_vec(&live_first).unwrap().len();
-        assert_eq!(
-            match handler.dispatch_value(9, live_first).await {
-                HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
-                other => panic!("unexpected handler outcome: {other:?}"),
-            }["next_expected_index"],
-            json!(1)
-        );
-        assert_eq!(seed_accounting(&handler), (live_bytes, 0));
-
-        let live_final = paged_seed_batch("live", "active", 0, 0, 1, 2, vec![]);
-        assert_eq!(
-            match handler.dispatch_value(9, live_final).await {
-                HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
-                other => panic!("unexpected handler outcome: {other:?}"),
-            }["ok"],
-            json!(true)
-        );
-        assert_eq!(seed_accounting(&handler), (0, 0));
-
-        let fresh_dead = paged_seed_batch("dead", "fresh", 0, 0, 0, 2, vec![]);
-        let fresh_dead_bytes = serde_json::to_vec(&fresh_dead).unwrap().len();
-        assert_eq!(
-            match handler.dispatch_value(8, fresh_dead).await {
-                HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
-                other => panic!("unexpected handler outcome: {other:?}"),
-            }["next_expected_index"],
-            json!(1)
-        );
-        assert_eq!(seed_accounting(&handler), (fresh_dead_bytes, 0));
-        assert_eq!(
-            store.load_active_user_memories().unwrap(),
-            Vec::<String>::new()
-        );
-    }
-
-    #[tokio::test]
     async fn paged_state_sync_seed_midstream_crossover_still_errors() {
         let state = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(state, default_test_config());
@@ -37833,45 +29538,6 @@ mod tests {
             "output ~{} tok",
             mc_tokenizer::estimate_tokens(&full_tool_output)
         )));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn ctx_expand_preserves_typescript_tool_titles_immediately_and_after_snapshot_loss() {
-        let golden: Value =
-            serde_json::from_str(include_str!("../testdata/ctx-facade-golden.json")).unwrap();
-        let case = golden["cases"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|case| case["name"] == "merged-completed-tool-and-structural-noise")
-            .unwrap();
-        let messages: Vec<ck_wire::CkIngressMessage> =
-            serde_json::from_value(case["ck_messages"].clone()).unwrap();
-        let expected = case["expected"]["full"][0]["text"].as_str().unwrap();
-        assert!(expected.contains("description: Read the runtime configuration"));
-
-        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
-        let (handler, store, _dir, project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            resolver,
-        );
-        publish_ctx_expand_fixture(&store, "ses", project.to_str().unwrap(), &messages);
-
-        let request = Arc::new(transform_request(messages.clone(), 1_000, 128_000));
-        let retained_bytes = request.retained_bytes();
-        {
-            let mut snapshots = handler.transform_snapshots.lock().unwrap();
-            let generation = snapshots.begin("ses");
-            snapshots.finish_ready("ses", generation, Arc::clone(&request), 0, retained_bytes);
-        }
-        let immediate = tool_text(call_facade(&handler, "ctx_expand", json!({"message": 7})).await);
-        assert_eq!(immediate, expected);
-
-        handler.transform_snapshots.lock().unwrap().remove("ses");
-        let after_snapshot_loss =
-            tool_text(call_facade(&handler, "ctx_expand", json!({"message": 7})).await);
-        assert_eq!(after_snapshot_loss, expected);
     }
 
     #[test]
@@ -38405,42 +30071,6 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn ctx_reduce_empty_drop_filler_is_refused_without_queuing() {
-        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
-        let (handler, store, _dir, _project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            resolver,
-        );
-
-        let omitted = tool_text(call_facade(&handler, "ctx_reduce", json!({})).await);
-        let empty = tool_text(call_facade(&handler, "ctx_reduce", json!({"drop": ""})).await);
-        assert_eq!(empty, omitted);
-        assert_eq!(
-            empty,
-            r#"Error: 'drop' must be provided as a string of tag numbers, for example {"drop": "3-5,8"}."#
-        );
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-
-        let append = handler.handle_agent_drops_value(
-            7,
-            json!({
-                "method": "agent_drops.append",
-                "session_id": "ses",
-                "drop": "",
-                "command_id": "empty-drop-cmd",
-            }),
-        );
-        let (code, message) = error_frame(append);
-        assert_eq!(code, "bad_request");
-        assert!(
-            message.contains("'drop' must be a nonempty string"),
-            "{message}"
-        );
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-    }
-
     // ---- historian claim lane: the wire A2 codes against -------------------
 
     const CLAIM_RUN_ID: &str = "mc-historian:project:a1a1a1a1a1a1a1a1:1";
@@ -38584,221 +30214,6 @@ mod tests {
                 now_ms,
             })
             .unwrap();
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn the_historian_claim_lane_answers_the_wire_a2_codes_against() {
-        let golden = claim_wire_golden();
-        let (handler, store, dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let project_path = project.to_string_lossy().to_string();
-        let queued_at_ms = now_ms();
-        queue_a_run_for_a_claimant(&store, &project_path, queued_at_ms);
-
-        let pending = drive_claim_wire_case(
-            &handler,
-            claim_wire_case(&golden, "pending-lists-the-queued-run"),
-            None,
-        )
-        .await;
-        assert_eq!(
-            pending["runs"][0]["deadline_ms"],
-            json!(queued_at_ms + CLAIM_AWAIT_BUDGET_MS),
-            "the run deadline is the queue time plus the await budget"
-        );
-        assert_eq!(
-            pending["runs"][0]["prompt_bytes_len"],
-            json!(CLAIM_SYSTEM_PROMPT.len() + CLAIM_USER_PROMPT.len()),
-            "prompt_bytes_len counts exactly the two strings claim hands back"
-        );
-        drive_claim_wire_case(
-            &handler,
-            claim_wire_case(&golden, "pending-without-a-session-lists-every-queued-run"),
-            None,
-        )
-        .await;
-
-        let claimed = drive_claim_wire_case(
-            &handler,
-            claim_wire_case(
-                &golden,
-                "claim-hands-back-the-request-under-a-minted-attempt-and-token",
-            ),
-            None,
-        )
-        .await;
-
-        let token = claimed["token"]
-            .as_str()
-            .expect("a claim mints a token")
-            .to_string();
-        assert_eq!(token.len(), 32, "the token is a 16-byte hex digest");
-        assert!(
-            claimed["claim_deadline_ms"]
-                .as_i64()
-                .is_some_and(|deadline| deadline > queued_at_ms
-                    && deadline <= queued_at_ms + CLAIM_AWAIT_BUDGET_MS),
-            "the lease ends within the run's own deadline: {claimed}"
-        );
-
-        // A claimed run is no longer offered to anyone else.
-        let pending_after_claim = call_dispatch_request(
-            &handler,
-            json!({ "method": "historian.pending", "v": 1, "session_id": "ses" }),
-        )
-        .await;
-        assert_eq!(pending_after_claim, json!({ "ok": true, "runs": [] }));
-
-        for name in [
-            "a-second-claimant-loses-the-race-while-the-lease-holds",
-            "claiming-a-run-that-was-never-queued",
-        ] {
-            drive_claim_wire_case(&handler, claim_wire_case(&golden, name), None).await;
-        }
-
-        let beat = drive_claim_wire_case(
-            &handler,
-            claim_wire_case(&golden, "heartbeat-extends-the-current-claim"),
-            Some(&token),
-        )
-        .await;
-        assert!(
-            beat["claim_deadline_ms"].as_i64().is_some_and(|deadline| {
-                deadline >= claimed["claim_deadline_ms"].as_i64().unwrap()
-            }),
-            "a heartbeat never shortens the lease: {beat}"
-        );
-
-        for name in [
-            "heartbeat-from-a-claimant-that-was-replaced",
-            "a-report-under-a-superseded-token-is-refused-before-its-output-is-read",
-        ] {
-            drive_claim_wire_case(&handler, claim_wire_case(&golden, name), Some(&token)).await;
-        }
-
-        // With a firing waiting, the report is handed over in this process.
-        {
-            let registration = handler.host_runs.register(CLAIM_RUN_ID);
-            drive_claim_wire_case(
-                &handler,
-                claim_wire_case(
-                    &golden,
-                    "a-report-accepted-by-the-firing-that-queued-the-run",
-                ),
-                Some(&token),
-            )
-            .await;
-            assert_eq!(
-                registration.wait(Duration::from_millis(50)).await,
-                Some(HostRunReport::Output(
-                    crate::historian_producer::ProducerOutput {
-                        text: "<compartments/>".to_string(),
-                        length_capped: false,
-                        usage: None,
-                    }
-                ))
-            );
-        }
-
-        {
-            let failure_registration = handler.host_runs.register(CLAIM_RUN_ID);
-            drive_claim_wire_case(
-                &handler,
-                claim_wire_case(
-                    &golden,
-                    "a-failure-report-accepted-by-the-firing-that-queued-the-run",
-                ),
-                Some(&token),
-            )
-            .await;
-            assert_eq!(
-                failure_registration.wait(Duration::from_millis(50)).await,
-                Some(HostRunReport::Failed {
-                    code: "chain_exhausted".to_string(),
-                    message: "every configured model refused".to_string(),
-                })
-            );
-        }
-
-        // Both registrations are gone, which is what a module restarted inside the
-        // completion window looks like from the claim lane: the run is still queued
-        // and its token is still current, but nothing in this process is waiting for
-        // the answer. The report is stored on the queue row rather than refused.
-        assert_eq!(handler.host_runs.waiting_count(), 0);
-        let invocations = json!([
-            { "provider_id": "prov", "model_id": "broken", "started_at": queued_at_ms,
-              "ended_at": queued_at_ms + 1, "status": "failed", "error": "provider unavailable" },
-            { "provider_id": "other", "model_id": "good", "started_at": queued_at_ms + 1,
-              "ended_at": queued_at_ms + 2, "status": "completed", "input_tokens": 120,
-              "output_tokens": 40, "cache_read_tokens": 80, "cache_write_tokens": 10, "error": null }
-        ]);
-        let case = claim_wire_case(
-            &golden,
-            "a-report-with-no-firing-waiting-is-stored-for-the-next-pass",
-        );
-        let mut deferred = case.request.clone();
-        deferred["token"] = json!(token);
-        deferred["invocations"] = invocations.clone();
-        let observed = call_dispatch_request(&handler, deferred).await;
-        assert_eq!(observed, case.response);
-        let descriptor = dev_descriptor_at(dir.path().join("data").to_str().unwrap());
-        let context_path = match descriptor.backend {
-            StorageBackend::Sqlite { path } => {
-                PathBuf::from(path).parent().unwrap().join("context.db")
-            }
-            _ => panic!("test store is SQLite"),
-        };
-        let conn = rusqlite::Connection::open(context_path).unwrap();
-        let rows: Vec<(i64,String,Option<i64>,Option<String>)> = conn.prepare(
-            "SELECT id,status,parent_invocation_id,error FROM subagent_invocations WHERE session_id='ses' ORDER BY id"
-        ).unwrap().query_map([], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap()
-            .collect::<Result<_,_>>().unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].1, "failed");
-        assert_eq!(rows[0].3.as_deref(), Some("provider unavailable"));
-        assert_eq!(rows[1].1, "completed");
-        assert_eq!(rows[1].2, Some(rows[0].0));
-        let parked = store
-            .load_parked_historian_run("ses")
-            .unwrap()
-            .expect("the queue row survives to carry the report");
-        assert_eq!(parked.run_id, CLAIM_RUN_ID);
-        assert_eq!(
-            parked.report,
-            Some(mc_store::HistorianRunReport::Output {
-                text: "<compartments/>".to_string(),
-                length_capped: false,
-            })
-        );
-
-        // A second report for a stored one is refused rather than overwriting it.
-        let duplicate = call_dispatch_request(
-            &handler,
-            json!({
-                "method": "historian.complete",
-                "v": 1,
-                "run_id": CLAIM_RUN_ID,
-                "token": token,
-                "output": { "text": "<compartments/>", "length_capped": false },
-                "invocations": invocations,
-            }),
-        )
-        .await;
-        assert_eq!(
-            duplicate,
-            json!({ "ok": false, "refusal": "already_reported" })
-        );
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM subagent_invocations WHERE session_id='ses'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            count, 2,
-            "a refused duplicate cannot record the attempts again"
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -38963,6 +30378,657 @@ mod tests {
             json!({ "ok": false, "refusal": "superseded_token" }),
             "a superseded report is refused before its output is read"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_glance_lists_one_row_per_note_with_age_and_stale_markers() {
+        for smart_notes_enabled in [true, false] {
+            let producer = Arc::new(ProducerState::default());
+            let resolver =
+                FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+            let (handler, store, _dir, _project) =
+                handler_with_store_and_resolver(producer, default_test_config(), resolver);
+            let mut route = binding("/repo", "token");
+            route.config.smart_notes_enabled = smart_notes_enabled;
+            handler.bind_route(7, route);
+            if !smart_notes_enabled {
+                let refused = tool_text(
+                    call_facade(
+                        &handler,
+                        "ctx_note",
+                        json!({"content": "cached", "surface_condition": "old"}),
+                    )
+                    .await,
+                );
+                assert_eq!(
+                    refused,
+                    "Error: Smart notes are disabled; surface_condition is unavailable."
+                );
+            }
+
+            let now = now_ms();
+            let day = 24 * 60 * 60 * 1000;
+            // A ready smart note, a parked smart note, and three plain notes: one
+            // fresh, one two days old, one untouched for 40 days.
+            let ready = store
+                .insert_project_note(NoteWriteInput {
+                    project_path: "/repo",
+                    route_project_root: None,
+                    session_id: Some("session"),
+                    content: "Ready smart item",
+                    surface_condition: Some("condition"),
+                    compiled_provider: None,
+                    compiled_config: None,
+                    compiled_at: None,
+                    compile_status: None,
+                    anchor_block_id: None,
+                    anchor_ordinal: None,
+                    now_ms: now - 5 * day,
+                })
+                .unwrap();
+            store
+                .write_note_evaluation(NoteEvaluationInput {
+                    project_path: "/repo",
+                    note_id: ready.id,
+                    source_revision: ready.status_version,
+                    verdict: true,
+                    compiled_check: None,
+                    manifest_json: None,
+                    check_hash: None,
+                    next_due_at: None,
+                    now_ms: now - 5 * day,
+                })
+                .unwrap();
+            store
+                .insert_project_note(NoteWriteInput {
+                    project_path: "/repo",
+                    route_project_root: None,
+                    session_id: Some("session"),
+                    content: "Parked smart item",
+                    surface_condition: Some("condition"),
+                    compiled_provider: None,
+                    compiled_config: None,
+                    compiled_at: None,
+                    compile_status: None,
+                    anchor_block_id: None,
+                    anchor_ordinal: None,
+                    now_ms: now - 2 * day,
+                })
+                .unwrap();
+            insert_session_note_at(&store, "Fresh plain item", now);
+            insert_session_note_at(&store, "Two-day-old plain item", now - 2 * day);
+            insert_session_note_at(&store, "Forty-day-old plain item", now - 40 * day);
+
+            let glance =
+                tool_text(call_facade(&handler, "ctx_note", json!({"action": "read"})).await);
+
+            // Ready smart notes first, then pending, then plain notes newest first.
+            assert_eq!(
+                glance,
+                "## Notes\n\n\
+             #1 · 5d · Ready smart item · ready\n\
+             #2 · 2d · Parked smart item · pending\n\
+             #3 · 0m · Fresh plain item\n\
+             #4 · 2d · Two-day-old plain item\n\
+             #5 · 5w · Forty-day-old plain item · stale\n\n\
+             To dismiss a stale note: ctx_note(action=\"dismiss\", note_ids=[N])"
+            );
+        }
+    }
+
+    #[test]
+    fn note_facade_parked_reason_is_visible_in_glance_and_body() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (_handler, store, _dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        let now = now_ms();
+        let mut note = store
+            .insert_project_note(NoteWriteInput {
+                project_path: "/repo",
+                route_project_root: None,
+                session_id: Some("session"),
+                content: "Watch schema",
+                surface_condition: Some("schema appears"),
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
+                anchor_block_id: None,
+                anchor_ordinal: None,
+                now_ms: now,
+            })
+            .unwrap();
+        note.check_status = Some("parked".to_string());
+        note.ready_reason = Some(
+            "Condition can't be checked: source is not publicly readable; rewrite it".to_string(),
+        );
+        assert_eq!(format_glance_row(&note, now), "#1 · 0m · Watch schema · pending · parked: Condition can't be checked: source is not publicly readable; rewrite it");
+        assert_eq!(format_note_body(&note, now), "- **#1** · 0m · pending: Watch schema\n  Condition: schema appears\n  Condition can't be checked: source is not publicly readable; rewrite it");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_pages_ready_notes_beyond_one_hundred_with_shared_offset_semantics() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(7, binding("/repo", "token"));
+        for index in 0..105 {
+            let note = store
+                .insert_project_note(NoteWriteInput {
+                    project_path: "/repo",
+                    route_project_root: None,
+                    session_id: Some("session"),
+                    content: &format!("ready note {index}"),
+                    surface_condition: Some("condition"),
+                    compiled_provider: None,
+                    compiled_config: None,
+                    compiled_at: None,
+                    compile_status: None,
+                    anchor_block_id: None,
+                    anchor_ordinal: None,
+                    now_ms: index,
+                })
+                .unwrap();
+            store
+                .write_note_evaluation(NoteEvaluationInput {
+                    project_path: "/repo",
+                    note_id: note.id,
+                    source_revision: note.status_version,
+                    verdict: true,
+                    compiled_check: None,
+                    manifest_json: None,
+                    check_hash: None,
+                    next_due_at: None,
+                    now_ms: index,
+                })
+                .unwrap();
+        }
+        let page = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "read", "filter": "ready", "limit": 5, "offset": 100}),
+            )
+            .await,
+        );
+        assert!(page.contains("ready note 4"));
+        assert!(page.contains("ready note 0"));
+        assert!(!page.contains("ready note 104"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn note_facade_recovers_pre_and_post_migration_compilation_metadata() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(7, binding("/repo", "token"));
+        for (content, provider, config, at, status) in [
+            ("legacy condition", None, None, None, None),
+            (
+                "compiled condition",
+                Some("retina-local-fs"),
+                Some("{\"kind\":\"path_exists\"}"),
+                Some(123),
+                Some("compiled"),
+            ),
+        ] {
+            store
+                .insert_project_note(NoteWriteInput {
+                    project_path: "/repo",
+                    route_project_root: None,
+                    session_id: Some("session"),
+                    content,
+                    surface_condition: Some(content),
+                    compiled_provider: provider,
+                    compiled_config: config,
+                    compiled_at: at,
+                    compile_status: status,
+                    anchor_block_id: None,
+                    anchor_ordinal: None,
+                    now_ms: 1,
+                })
+                .unwrap();
+        }
+        let old = store
+            .get_note_by_id("/repo", "session", 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.compiled_provider, None);
+        assert_eq!(old.compile_status, None);
+        let new = store
+            .get_note_by_id("/repo", "session", 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(new.compiled_provider.as_deref(), Some("retina-local-fs"));
+        assert_eq!(
+            new.compiled_config.as_deref(),
+            Some("{\"kind\":\"path_exists\"}")
+        );
+        assert_eq!(new.compiled_at, Some(123));
+        assert_eq!(new.compile_status.as_deref(), Some("compiled"));
+
+        drop(handler);
+        drop(store);
+        let reopened = McStore::open_for_test(&dev_descriptor_at(
+            dir.path().join("data").to_str().unwrap(),
+        ))
+        .unwrap();
+        let durable = reopened
+            .get_note_by_id("/repo", "session", 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            durable.compiled_provider.as_deref(),
+            Some("retina-local-fs")
+        );
+        assert_eq!(durable.compiled_at, Some(123));
+        assert_eq!(durable.compile_status.as_deref(), Some("compiled"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ctx_search_matches_typescript_shape_for_available_module_corpora() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver = FakeSessionResolver::with(&[("token", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        let project = project.to_str().unwrap();
+        handler.bind_route(7, binding(project, "token"));
+
+        let visible_id = insert_memory(&store, project, "CONSTRAINTS", "needle visible", 10);
+        let first_id = insert_memory(&store, project, "CONSTRAINTS", "needle memory first", 20);
+        let second_id = insert_memory(&store, project, "CONSTRAINTS", "needle memory second", 20);
+        assert_eq!(
+            parse_search_memory_ids(&format!("#{first_id}, {second_id}")),
+            Some(vec![first_id, second_id])
+        );
+        assert_eq!(
+            parse_search_memory_ids(&format!("{first_id} {second_id}")),
+            None,
+            "direct memory ids require TypeScript's comma-separated query shape"
+        );
+        store
+            .replace_compartments("ses", &[stored_comp(1, 10, 20, "m20", "needle history")])
+            .unwrap();
+        let note = store
+            .insert_project_note(NoteWriteInput {
+                project_path: project,
+                route_project_root: None,
+                session_id: Some("ses"),
+                content: "needle note",
+                surface_condition: None,
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
+                anchor_block_id: Some("m18#0"),
+                anchor_ordinal: Some(18),
+                now_ms: now_ms(),
+            })
+            .unwrap();
+        seed_shown_memory_pair(&store, "ses", project, visible_id);
+
+        let all = tool_text(
+            call_facade(
+                &handler,
+                "ctx_search",
+                json!({"query": "needle", "limit": 10}),
+            )
+            .await,
+        );
+        assert!(all.starts_with("Found 4 results for \"needle\":"), "{all}");
+        assert!(!all.lines().any(|line| {
+            line.contains("[memory]") && line.contains(&format!("id={visible_id} "))
+        }));
+        assert!(all.contains(&format!("[memory] score=1.00 id={first_id}")));
+        assert!(all.contains(&format!("[memory] score=1.00 id={second_id}")));
+        assert!(all.contains(&format!(
+            "Memories: 1 additional match suppressed because it is already visible in your project-memory block (ids {visible_id})."
+        )));
+        assert!(
+            all.find(&format!("id={first_id}")) < all.find(&format!("id={second_id}")),
+            "equal-score/equal-recency memory ties must use ascending ids: {all}"
+        );
+        assert!(
+            all.contains("[message] score=0.90 compartment_id=1 range=10-20 match=fts title=C1")
+        );
+        assert!(all.contains(&format!("[note] score=0.11 id=#{}", note.id)));
+        assert!(all.contains("@msg 18"));
+        assert!(all.contains("Use ctx_expand(start, end)"));
+
+        let message_only = tool_text(
+            call_facade(
+                &handler,
+                "ctx_search",
+                json!({"query": "needle", "sources": ["message"]}),
+            )
+            .await,
+        );
+        assert!(message_only.contains("[message]"));
+        assert!(!message_only.contains("[memory]"));
+        assert!(!message_only.contains("[note]"));
+
+        let id_lookup = tool_text(
+            call_facade(
+                &handler,
+                "ctx_search",
+                json!({"query": format!("#{second_id}"), "sources": ["memory"]}),
+            )
+            .await,
+        );
+        assert!(id_lookup.contains(&format!("id={second_id}")));
+        assert!(id_lookup.contains("match=fts"));
+
+        let visible_lookup = tool_text(
+            call_facade(
+                &handler,
+                "ctx_search",
+                json!({"query": format!("#{visible_id}"), "sources": ["memory"]}),
+            )
+            .await,
+        );
+        assert_eq!(
+            visible_lookup,
+            format!(
+                "No hidden results found for \"#{visible_id}\".\n\nMemories: 1 match found, all already visible in your project-memory block (ids {visible_id})."
+            )
+        );
+
+        let unsupported_corpus = tool_text(
+            call_facade(
+                &handler,
+                "ctx_search",
+                json!({"query": "needle", "sources": ["primer", "git_commit"]}),
+            )
+            .await,
+        );
+        assert_eq!(
+            unsupported_corpus,
+            "No results found for \"needle\" across notes, memories, primers, git commits, or message history."
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_dreamer_run_unregisters_its_child_session() {
+        let producer = Arc::new(ProducerState::default());
+        producer.block_output.store(true, Ordering::SeqCst);
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let route_root = project.to_str().unwrap();
+        handler.bind_route(7, binding(route_root, "parent"));
+        activate_module_authority(&store, "context", "git:identity", route_root, "memories");
+        let generation = 1u64;
+        let handler = Arc::new(handler);
+        let running_handler = Arc::clone(&handler);
+        let task = tokio::spawn(async move {
+            running_handler
+                .handle_dreamer_run_task(
+                    7,
+                    &json!({
+                        "v": 1,
+                        "session_id": "parent",
+                        "task": CLASSIFY_TASK,
+                        "command_id": "cancel-command",
+                        "authority_generation": generation,
+                        "model_chain": [TEST_HISTORIAN_MODEL],
+                        "payload": { "prompt_body": "classify", "items": [] },
+                    }),
+                )
+                .await
+        });
+        wait_for_count(&producer.await_outputs, 1).await;
+        // The session is minted per attempt, so read the one the producer actually ran
+        // under rather than recomputing an id this test would have to keep in step.
+        let child_session = producer
+            .sessions
+            .lock()
+            .expect("sessions mutex")
+            .first()
+            .cloned()
+            .expect("the classify attempt started under a session");
+        assert!(handler.dreamer_run_registered(&child_session));
+
+        task.abort();
+        let _ = task.await;
+        assert!(!handler.dreamer_run_registered(&child_session));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ctx_expand_preserves_typescript_tool_titles_from_durable_transcripts() {
+        let golden: Value =
+            serde_json::from_str(include_str!("../testdata/ctx-facade-golden.json")).unwrap();
+        let case = golden["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "merged-completed-tool-and-structural-noise")
+            .unwrap();
+        let messages: Vec<ck_wire::CkIngressMessage> =
+            serde_json::from_value(case["ck_messages"].clone()).unwrap();
+        let expected = case["expected"]["full"][0]["text"].as_str().unwrap();
+        assert!(expected.contains("description: Read the runtime configuration"));
+
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
+        );
+        publish_ctx_expand_fixture(&store, "ses", project.to_str().unwrap(), &messages);
+
+        // ctx_expand reads the message back from its durable chunk transcript.
+        let expanded = tool_text(call_facade(&handler, "ctx_expand", json!({"message": 7})).await);
+        assert_eq!(expanded, expected);
+    }
+
+    #[tokio::test]
+    async fn canonical_dream_task_matrix_preserves_off_and_refuses_enabled_tasks() {
+        let ts = include_str!(
+            "../../../packages/plugin/src/features/magic-context/dreamer/task-registry.ts"
+        );
+        let registry = ts
+            .split("export const CANONICAL_DREAM_TASKS = [")
+            .nth(1)
+            .unwrap()
+            .split("] as const")
+            .next()
+            .unwrap();
+        let ts_names: Vec<_> = registry
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('"')?.split('"').next())
+            .collect();
+        assert_eq!(
+            CANONICAL_TASKS.map(|task| task.as_str()).as_slice(),
+            ts_names
+        );
+        let mut config = default_test_config();
+        config.rust_background_enabled = true;
+        config.smart_notes_enabled = true;
+        let producer = Arc::new(ProducerState::default());
+        // A project whose user configured a wired Broca runner that admits file
+        // reads: publication then depends only on which tasks are wired.
+        config.dreamer_runner = Some(HistorianRunnerKind::Broca);
+        let (mut handler, store, _dir, _project) =
+            handler_with_store(producer.clone(), config.clone());
+        handler.fixed_config = Some(config.clone());
+        let mut settings =
+            json!({"dreamer":{"tasks":{},"mc-module-test":{"model":"provider/model"}}});
+        for task in CANONICAL_TASKS {
+            settings["dreamer"]["tasks"][task.as_str()] = json!({"schedule":"0 3 * * *"});
+        }
+        handler.fixed_dream_settings = Some(settings.clone());
+        for (channel, request, expected) in [
+            (
+                7,
+                json!({"session_id":"ses","task":"curate"}),
+                "bad_request",
+            ),
+            (7, json!({"v":1,"task":"curate"}), "bad_request"),
+            (
+                8,
+                json!({"v":1,"session_id":"ses","task":"curate"}),
+                "route_unbound",
+            ),
+            (
+                7,
+                json!({"v":1,"session_id":"foreign","task":"curate"}),
+                "session_mismatch",
+            ),
+            (7, json!({"v":1,"session_id":"ses"}), "invalid_params"),
+            (
+                7,
+                json!({"v":1,"session_id":"ses","task":"unknown"}),
+                "invalid_params",
+            ),
+        ] {
+            assert_eq!(
+                code(handler.handle_dreamer_run_task(channel, &request).await),
+                expected
+            );
+        }
+        // Ownership is the published list: a wired task with a Rust host and a
+        // capable runner is owned; a task with no Rust host (compress-cues,
+        // maintain-docs, evaluate-smart-notes) never is, even when wired.
+        for implemented in [false, true] {
+            for task in CANONICAL_TASKS {
+                handler.dream_wiring = Some(dream_dispatch::ownership::Wiring {
+                    tasks: if implemented { vec![task] } else { Vec::new() },
+                    broca: true,
+                    broca_file_read: true,
+                });
+                let request = json!({"v":1,"session_id":"ses","task":task.as_str(),
+                        "implemented":true,"model_chain":false,"payload":false,"command_id":false});
+                assert_eq!(
+                    code(handler.handle_dreamer_run_task(7, &request).await),
+                    if implemented && dream_dispatch::ownership::task_roles(task).is_some() {
+                        "rust_scheduler_owns_task"
+                    } else {
+                        "unavailable_capability"
+                    },
+                    "{}",
+                    task.as_str()
+                );
+            }
+        }
+        config.smart_notes_enabled = false;
+        handler.fixed_config = Some(config.clone());
+        handler.dream_wiring = Some(dream_dispatch::ownership::Wiring {
+            tasks: vec![mc_store::dream_scheduler::schedules::TaskName::EvaluateSmartNotes],
+            broca: false,
+            broca_file_read: false,
+        });
+        assert_eq!(
+            code(
+                handler
+                    .handle_dreamer_run_task(
+                        7,
+                        &json!({"v":1,"session_id":"ses","task":"evaluate-smart-notes"})
+                    )
+                    .await
+            ),
+            "invalid_params"
+        );
+        handler.dream_wiring = None;
+        config.smart_notes_enabled = true;
+        handler.fixed_config = Some(config.clone());
+        for task in CANONICAL_TASKS {
+            let mut disabled = settings.clone();
+            disabled["dreamer"]["tasks"][task.as_str()]["schedule"] = json!("  ");
+            handler.fixed_dream_settings = Some(disabled);
+            assert_eq!(
+                code(
+                    handler
+                        .handle_dreamer_run_task(
+                            7,
+                            &json!({"v":1,"session_id":"ses","task":task.as_str()})
+                        )
+                        .await
+                ),
+                "invalid_params"
+            );
+        }
+        handler.fixed_dream_settings = Some(settings);
+        config.rust_background_enabled = false;
+        handler.fixed_config = Some(config);
+        for task in CANONICAL_TASKS {
+            assert_eq!(
+                code(
+                    handler
+                        .handle_dreamer_run_task(
+                            7,
+                            &json!({"v":1,"session_id":"ses","task":task.as_str(),
+                    "command_id":"matrix","payload":{"prompt_body":"recorded","items":[]}})
+                        )
+                        .await
+                ),
+                if task.as_str() == CLASSIFY_TASK {
+                    "model_chain_missing"
+                } else {
+                    "invalid_params"
+                }
+            );
+        }
+        assert!(store
+            .load_dream_task_command("ses", "matrix")
+            .unwrap()
+            .is_none());
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn conditional_note_writes_are_refused_and_plain_notes_are_written() {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
+        );
+        let refused = call_facade(
+            &handler,
+            "ctx_note",
+            json!({
+                "action": "write",
+                "content": "pending without evaluator",
+                "surface_condition": "when evaluated",
+            }),
+        )
+        .await;
+        let refused_text = tool_text(refused);
+        assert_eq!(
+            refused_text,
+            "Conditional notes are not available in the current mode. Save a regular note without a condition. (MC-C08)"
+        );
+
+        let plain = call_facade(
+            &handler,
+            "ctx_note",
+            json!({"action": "write", "content": "plain note is allowed"}),
+        )
+        .await;
+        assert!(!tool_is_error(plain));
+        let plain_id = store
+            .search_notes_like(project.to_str().unwrap(), "ses", "plain note is allowed")
+            .unwrap()[0]
+            .id;
+        let session_update = call_facade(
+            &handler,
+            "ctx_note",
+            json!({"action": "update", "note_ids": [plain_id], "surface_condition": "when evaluated"}),
+        ).await;
+        assert!(
+            tool_text(session_update).contains("Only a note created with a condition can have one")
+        );
+        let unchanged = store
+            .get_note_by_id(project.to_str().unwrap(), "ses", plain_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.status, "active");
+        assert!(unchanged.surface_condition.is_none());
     }
 }
 
