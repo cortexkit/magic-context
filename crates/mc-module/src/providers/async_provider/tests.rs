@@ -11,6 +11,7 @@ mod held_copies_probe;
 mod moved_session;
 mod offline_first_pass;
 mod open_tool_notice;
+mod pruned_reasoning_review;
 mod pruned_reasoning_tests;
 mod published_contract;
 mod read_outcomes;
