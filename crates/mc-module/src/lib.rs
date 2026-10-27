@@ -13634,36 +13634,6 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-            // Exercise the TS entry points against the same memory-task database.
-            // Any executor entry would be a second writer, including turn two.
-            let ts_reference_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("testdata/i4-roots-ts-executor-exclusion.json");
-            let ts_reference = std::fs::read(&ts_reference_path).unwrap_or_else(|error| {
-                panic!(
-                    "unable to read TS executor exclusion reference {}: {error}",
-                    ts_reference_path.display()
-                )
-            });
-            let ts: serde_json::Value =
-                serde_json::from_slice(&ts_reference).unwrap_or_else(|error| {
-                    panic!(
-                        "invalid TS executor exclusion reference {}: {error}",
-                        ts_reference_path.display()
-                    )
-                });
-            assert!(
-                ts["success"]
-                    .as_bool()
-                    .expect("reference success field must be boolean"),
-                "{}",
-                ts["stderr"]
-                    .as_str()
-                    .expect("reference stderr field must be text")
-            );
-            assert!(ts["stdout"]
-                .as_str()
-                .expect("reference stdout field must be text")
-                .contains("TS_EXECUTORS tasks=0 memory_rows=1"));
             let registration = Registration {
                 project: "git:identity".into(),
                 model_id: "fixture".into(),

@@ -39,27 +39,6 @@ const CONNECT_BACKOFF_WAIT_BUDGET_MS = 12_000;
 const CONNECT_BACKOFF_WAIT_JITTER_MS = 100;
 const HANDSHAKE_TIMEOUT_MS = 2_000;
 const MODULE_SEND_TIMEOUT_MS = 15_000;
-export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS = 15_000;
-export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_PER_MESSAGE_MS = 2;
-export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MAX_MS = 90_000;
-
-/**
- * Cold execution includes full projection and native encoding after the final page lands.
- * The hermetic 9.6k-message/8k-tool cold gate completes module-side in 8.0s at load 9 and
- * 10.2s at load 18 after the cold-path fixes, and this box routinely runs at load 40+ during
- * release gates. A 15s floor plus two milliseconds per message keeps ~3x margin over the
- * measured cold time (30s for ENGRAM's 7.4k messages, 34s for ASTRO's 9.6k); a miss is no
- * longer fatal because a completed series the requester abandoned is adopted by the next
- * identical pass, but each miss still costs the user one refused turn.
- */
-export function transformColdStartExecuteTimeoutMs(seedMessageCount: number): number {
-    const messages = Number.isSafeInteger(seedMessageCount) ? Math.max(0, seedMessageCount) : 0;
-    return Math.min(
-        TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MAX_MS,
-        TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS +
-            messages * TRANSFORM_COLD_START_EXECUTE_TIMEOUT_PER_MESSAGE_MS,
-    );
-}
 
 /** Consumer deadline for the module's exported historian::MAX_WRAPUP_REQUEST_BUDGET. */
 export const MAX_WRAPUP_REQUEST_BUDGET_MS = 3_800_000;
@@ -107,16 +86,6 @@ function isStaleOrDeadRouteFailure(error: unknown): boolean {
             name === "StaleRouteHandleError" ||
             /route handle \(\d+,\s*\d+\) is not live on the current connection/i.test(message) ||
             /\b(?:unknown|unrecognized) channel\b/i.test(message)
-        );
-    });
-}
-
-function isDeadlineFailure(error: unknown): boolean {
-    if (error instanceof SocketTimeoutError) return true;
-    return errorChainSome(error, (current) => {
-        const code = typeof current.code === "string" ? current.code : "";
-        return ["ETIMEDOUT", "request_deadline", "deadline_exceeded_no_drop_observed"].includes(
-            code,
         );
     });
 }
@@ -443,8 +412,6 @@ export class SubcModuleTransport {
         generationSensitive?: boolean;
         /** Producer-backed calls can outlive the default transport budget. */
         timeoutMs?: number;
-        /** Distinguishes cheap page admission from the cold execute on the completed series. */
-        attemptClass?: "transform_page_upload" | "transform_series_execute";
         /**
          * Bypass the per-session correctness lane only for a health probe or a
          * content-addressed transform resend. The ordinary request keeps owning
@@ -467,9 +434,7 @@ export class SubcModuleTransport {
             (args.method === "session.wrapup" ||
             (args.method === "session.status" && wrapupInFlight)
                 ? MAX_WRAPUP_REQUEST_BUDGET_MS
-                : args.attemptClass === "transform_series_execute"
-                  ? TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS
-                  : this.requestTimeoutMs);
+                : this.requestTimeoutMs);
         const tracksWrapup = args.method === "session.wrapup";
         if (tracksWrapup) {
             this.wrapupSessions.set(
@@ -619,15 +584,6 @@ export class SubcModuleTransport {
                     if (migration) throw migration;
                     const storeAhead = storeAheadOfBinaryFailure(error);
                     if (storeAhead) throw storeAhead;
-                    if (
-                        args.attemptClass === "transform_series_execute" &&
-                        isDeadlineFailure(error)
-                    ) {
-                        // A request deadline on the completed page series fails this pass. The
-                        // module may still finish the cold execute, so preserve the live route and
-                        // never turn the timeout into a generation change/re-upload loop.
-                        throw error;
-                    }
                     if (isConnectionFailure(error)) {
                         const previousGeneration =
                             ensuredRoute?.generation ?? this.connectionGeneration;
