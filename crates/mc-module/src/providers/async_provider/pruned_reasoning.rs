@@ -25,10 +25,13 @@
 //! already rebuilt since the last notice (`rode_since_notice`).
 //!
 //! Bytes ck-mc authors for a pruned message must never carry what the prune
-//! removed: `restores_pruned` and `replacement_restores` check every edit and
-//! replacement a view sends once the runner has reported a prune.
+//! removed. Every edit and replacement a view sends is checked, once the
+//! runner has reported a prune, with llm-runner's per-profile reference
+//! (`restored_by_edit_in`, `restored_part_in`) against the runner's prune
+//! record (`pruned_parts`): see `without_restored_content` and
+//! `replacement_restores_pruned`.
 use super::*;
-use cortexkit_role_llm_runner::archive_prunes_reasoning::{kinds, PrunedReasoning};
+use cortexkit_role_llm_runner::archive_prunes_reasoning::{self, PrunedPartAt, PrunedReasoning};
 
 /// The runner's prune state, as `session.head` reports it.
 pub(super) type PruneState = cortexkit_role_llm_runner::archive_prunes_reasoning::ReasoningPruned;
@@ -87,49 +90,45 @@ fn part_at<'a>(message: &'a Value, pointer: &str, whole: bool, index: usize) -> 
     parts.as_array()?.get(index)
 }
 
-/// A reasoning part in any of the formats ck-mc reads: owned-broca and
-/// OpenCode `reasoning`, owned-broca `redacted_reasoning`, Anthropic and Pi
-/// `thinking` and `redacted_thinking`.
-fn reasoning_like(part: &Value) -> bool {
-    matches!(
-        part.get("type").and_then(Value::as_str),
-        Some("reasoning" | "redacted_reasoning" | "thinking" | "redacted_thinking")
-    )
+/// Whether `part`, in serializer profile `profile`'s stored format, carries
+/// content a prune of `kind` removes: llm-runner's per-profile reference
+/// (`carries_pruned_content_in`). A profile the rules do not name carries
+/// nothing ck-mc could check, so it is treated as carrying nothing here and
+/// refused where acceptance depends on it (`pruned_as`).
+fn carries(profile: &str, kind: &str, part: &Value) -> bool {
+    archive_prunes_reasoning::carries_pruned_content_in(profile, kind, part).unwrap_or(false)
 }
 
-/// A member that holds a provider signature: `signature`,
-/// `thought_signature`, OpenCode's `thoughtSignature`, and the like.
-fn signature_key(key: &str) -> bool {
-    key.to_ascii_lowercase().contains("signature")
+/// Whether a reference check found restored content. A profile the
+/// per-profile rules do not name cannot be checked, so it counts as
+/// restoring: nothing is sent that could not be checked.
+fn restored<T>(found: Result<Option<T>, archive_prunes_reasoning::UnsupportedProfile>) -> bool {
+    !matches!(found, Ok(None))
 }
 
-/// One way a pruned part differs from the part as written.
-enum Change {
-    /// A member is gone.
-    Removed(Vec<String>),
-    /// A string is now empty.
-    Emptied(Vec<String>),
+/// One step along a part's members: an object member, an array index, or
+/// into the JSON a string holds (owned-broca `redacted_reasoning.data`, pi
+/// `thinkingSignature`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Step {
+    Member(String),
+    Index(usize),
+    Json,
 }
 
-impl Change {
-    fn path(&self) -> &[String] {
-        match self {
-            Self::Removed(path) | Self::Emptied(path) => path,
-        }
-    }
+/// One way a pruned part differs from the part as written: the member at
+/// the path is gone, or the string at the path is now empty.
+#[derive(Clone, Debug)]
+struct Change {
+    path: Vec<Step>,
 }
 
 /// Compare `served` with `held`, recording each removed member and each
-/// emptied string. Anything else (a new member, a changed value, a reordered
-/// or resized array) makes the comparison fail. A string that holds JSON
-/// (owned-broca's `redacted_reasoning.data`) is compared as that JSON, so a
-/// member removed inside it is a removal too.
-fn compare(
-    held: &Value,
-    served: &Value,
-    path: &mut Vec<String>,
-    changes: &mut Vec<Change>,
-) -> bool {
+/// emptied string. Anything else (a new member, a changed value, a resized
+/// array) makes the comparison fail. A string that holds a JSON object or
+/// array is compared as that JSON, so a member removed inside it is a
+/// removal too.
+fn compare(held: &Value, served: &Value, path: &mut Vec<Step>, changes: &mut Vec<Change>) -> bool {
     if held == served {
         return true;
     }
@@ -139,7 +138,7 @@ fn compare(
                 let Some(original) = held.get(key) else {
                     return false;
                 };
-                path.push(key.clone());
+                path.push(Step::Member(key.clone()));
                 let same = compare(original, value, path, changes);
                 path.pop();
                 if !same {
@@ -148,14 +147,14 @@ fn compare(
             }
             for key in held.keys().filter(|key| !served.contains_key(*key)) {
                 let mut removed = path.clone();
-                removed.push(key.clone());
-                changes.push(Change::Removed(removed));
+                removed.push(Step::Member(key.clone()));
+                changes.push(Change { path: removed });
             }
             true
         }
         (Value::Array(held), Value::Array(served)) if held.len() == served.len() => {
             for (index, (original, value)) in held.iter().zip(served).enumerate() {
-                path.push(index.to_string());
+                path.push(Step::Index(index));
                 let same = compare(original, value, path, changes);
                 path.pop();
                 if !same {
@@ -165,7 +164,7 @@ fn compare(
             true
         }
         (Value::String(_), Value::String(served)) if served.is_empty() => {
-            changes.push(Change::Emptied(path.clone()));
+            changes.push(Change { path: path.clone() });
             true
         }
         (Value::String(held), Value::String(served)) => {
@@ -174,7 +173,7 @@ fn compare(
                 serde_json::from_str::<Value>(served),
             ) {
                 (Ok(held @ (Value::Object(_) | Value::Array(_))), Ok(served)) => {
-                    path.push("<json>".into());
+                    path.push(Step::Json);
                     let same = compare(&held, &served, path, changes);
                     path.pop();
                     same
@@ -186,54 +185,95 @@ fn compare(
     }
 }
 
-/// Whether `served` is the part `held` after a prune of `kind`, and nothing
-/// else (llm-runner §9.14.1):
+/// `target` with the value at `path` set as `source` has it there: copied
+/// when `source` has a value, removed when it has none. Strings holding JSON
+/// are parsed, changed and written back. `None` when the path does not lead
+/// through `target`.
+fn take_from(target: &Value, source: &Value, path: &[Step]) -> Option<Value> {
+    let Some((step, rest)) = path.split_first() else {
+        return Some(source.clone());
+    };
+    let mut target = target.clone();
+    match step {
+        Step::Json => {
+            let inner: Value = serde_json::from_str(target.as_str()?).ok()?;
+            let original: Value = serde_json::from_str(source.as_str()?).ok()?;
+            let changed = take_from(&inner, &original, rest)?;
+            return Some(Value::String(changed.to_string()));
+        }
+        Step::Member(key) => {
+            let members = target.as_object_mut()?;
+            match (rest.is_empty(), source.get(key)) {
+                (true, None) => {
+                    members.remove(key);
+                }
+                (true, Some(original)) => {
+                    members.insert(key.clone(), original.clone());
+                }
+                (false, original) => {
+                    let changed = take_from(members.get(key)?, original?, rest)?;
+                    members.insert(key.clone(), changed);
+                }
+            }
+        }
+        Step::Index(index) => {
+            let items = target.as_array_mut()?;
+            let changed = take_from(items.get(*index)?, source.get(*index)?, rest)?;
+            items[*index] = changed;
+        }
+    }
+    Some(target)
+}
+
+/// Whether `served` is the part `held` after a prune of `kind` in
+/// serializer profile `profile`, and nothing else (llm-runner §9.14.1,
+/// per-profile table):
 ///
-/// - `reasoning` empties a reasoning part: strings emptied, optional members
-///   such as a signature removed;
-/// - `opaque_reasoning` removes only encrypted or opaque members of a
-///   reasoning part, so its readable summary stays byte-identical;
-/// - `signature` removes or empties only a provider signature on a part that
-///   is not reasoning, so its text and call arguments stay byte-identical.
-///
-/// A part's type never changes. A kind the contract does not define is not
-/// trusted, so a part listed with one is never accepted.
-fn pruned_as(kind: &str, held: &Value, served: &Value) -> bool {
+/// - the part keeps its type, and differs from `held` only by removed
+///   members and emptied strings;
+/// - `served` no longer carries the kind's content
+///   (`carries_pruned_content_in`);
+/// - every one of those changes removes the kind's content: putting any one
+///   of them back makes the part carry it again. So a `signature` prune
+///   cannot empty text, an `opaque_reasoning` prune cannot touch readable
+///   reasoning or a summary, and a kind that does not apply to the part
+///   (one the profile cannot carry, or one this crate does not define)
+///   accepts no change at all.
+fn pruned_as(profile: &str, kind: &str, held: &Value, served: &Value) -> bool {
     if held.get("type") != served.get("type") {
+        return false;
+    }
+    if !archive_prunes_reasoning::kinds_carried(profile)
+        .is_ok_and(|carried| carried.contains(&kind))
+    {
         return false;
     }
     let mut changes = Vec::new();
     if !compare(held, served, &mut Vec::new(), &mut changes) {
         return false;
     }
-    match kind {
-        kinds::REASONING => reasoning_like(held),
-        kinds::OPAQUE_REASONING => {
-            reasoning_like(held)
-                && changes.iter().all(|change| {
-                    !change
-                        .path()
-                        .iter()
-                        .any(|key| key.to_ascii_lowercase().contains("summary"))
-                })
-        }
-        kinds::SIGNATURE => {
-            !reasoning_like(held)
-                && changes
-                    .iter()
-                    .all(|change| change.path().iter().any(|key| signature_key(key)))
-        }
-        _ => false,
+    if changes.is_empty() {
+        return true;
     }
+    !carries(profile, kind, served)
+        && changes.iter().all(|change| {
+            take_from(served, held, &change.path)
+                .is_some_and(|put_back| carries(profile, kind, &put_back))
+        })
 }
 
-/// Whether `fresh`, a re-read of the held message `held`, differs from it
-/// only as the contract's re-read rule allows: every member but the message
-/// body is unchanged, every part the page does not list is byte-identical,
-/// and every listed part keeps its index and key, carries its write-time
-/// digest, and differs from the held part only as its kind allows
-/// (`pruned_as`).
-pub(super) fn accepts(held: &ReadMessage, fresh: &ReadMessage, listed: &[PrunedReasoning]) -> bool {
+/// Whether `fresh`, a re-read of the held message `held` in serializer
+/// profile `profile`, differs from it only as the contract's re-read rule
+/// allows: every member but the message body is unchanged, every part the
+/// page does not list is byte-identical, and every listed part keeps its
+/// index and key, carries its write-time digest, and differs from the held
+/// part only as its kind allows (`pruned_as`).
+pub(super) fn accepts(
+    profile: &str,
+    held: &ReadMessage,
+    fresh: &ReadMessage,
+    listed: &[PrunedReasoning],
+) -> bool {
     if listed.is_empty()
         || held.ordinal != fresh.ordinal
         || held.mid != fresh.mid
@@ -272,7 +312,7 @@ pub(super) fn accepts(held: &ReadMessage, fresh: &ReadMessage, listed: &[PrunedR
         ) else {
             return false;
         };
-        if !pruned_as(&row.kind, original, served) {
+        if !pruned_as(profile, &row.kind, original, served) {
             return false;
         }
         // Put the held part back where the pruned one is served: if the
@@ -287,29 +327,45 @@ pub(super) fn accepts(held: &ReadMessage, fresh: &ReadMessage, listed: &[PrunedR
     candidate == held.message
 }
 
-/// Every string a part holds, with the member path that leads to it. A
-/// string that holds JSON is walked as that JSON too.
-fn strings(value: &Value, path: &mut Vec<String>, out: &mut Vec<(Vec<String>, String)>) {
-    match value {
-        Value::Object(members) => {
-            for (key, member) in members {
-                path.push(key.clone());
-                strings(member, path, out);
+/// Every place in `sent` where the held part has an empty string or no
+/// member at all: the only places an edit built from a pre-prune copy can
+/// differ from the reconciled one in what a prune removed. Paths stop at
+/// the first member the held part lacks.
+fn missing_in_held(
+    held: Option<&Value>,
+    sent: &Value,
+    path: &mut Vec<Step>,
+    out: &mut Vec<Vec<Step>>,
+) {
+    let Some(held) = held else {
+        out.push(path.clone());
+        return;
+    };
+    match (held, sent) {
+        (Value::String(held), Value::String(sent)) if held.is_empty() && !sent.is_empty() => {
+            out.push(path.clone());
+        }
+        (Value::String(held), Value::String(sent)) if held != sent => {
+            if let (Ok(held @ (Value::Object(_) | Value::Array(_))), Ok(sent)) = (
+                serde_json::from_str::<Value>(held),
+                serde_json::from_str::<Value>(sent),
+            ) {
+                path.push(Step::Json);
+                missing_in_held(Some(&held), &sent, path, out);
                 path.pop();
             }
         }
-        Value::Array(items) => {
-            for (index, item) in items.iter().enumerate() {
-                path.push(index.to_string());
-                strings(item, path, out);
+        (Value::Object(held), Value::Object(sent)) => {
+            for (key, value) in sent {
+                path.push(Step::Member(key.clone()));
+                missing_in_held(held.get(key), value, path, out);
                 path.pop();
             }
         }
-        Value::String(text) => {
-            out.push((path.clone(), text.clone()));
-            if let Ok(inner @ (Value::Object(_) | Value::Array(_))) = serde_json::from_str(text) {
-                path.push("<json>".into());
-                strings(&inner, path, out);
+        (Value::Array(held), Value::Array(sent)) => {
+            for (index, value) in sent.iter().enumerate() {
+                path.push(Step::Index(index));
+                missing_in_held(held.get(index), value, path, out);
                 path.pop();
             }
         }
@@ -317,119 +373,15 @@ fn strings(value: &Value, path: &mut Vec<String>, out: &mut Vec<(Vec<String>, St
     }
 }
 
-/// The string at `path` in `value`, following the paths `strings` records.
-fn string_at(value: &Value, path: &[String]) -> Option<String> {
-    let Some((first, rest)) = path.split_first() else {
-        return value.as_str().map(str::to_owned);
-    };
-    if first == "<json>" {
-        let inner: Value = serde_json::from_str(value.as_str()?).ok()?;
-        return string_at(&inner, rest);
-    }
-    let next = match value {
-        Value::Object(members) => members.get(first)?,
-        Value::Array(items) => items.get(first.parse::<usize>().ok()?)?,
-        _ => return None,
-    };
-    string_at(next, rest)
-}
-
-/// Whether `sent`, the bytes a part edit sends for the held part `held`,
-/// puts back content a prune removed from it: a provider signature the held
-/// copy no longer carries (a call's thought signature, a text part's
-/// provider-state signature), or reasoning content where the held reasoning
-/// part is now empty. A held copy is the runner's current one once ck-mc
-/// reconciled it, so an edit built from it never trips this; one replayed
-/// from bytes captured before the prune does.
-pub(super) fn restores_pruned(held: &Value, sent: &Value) -> bool {
-    let mut found = Vec::new();
-    strings(sent, &mut Vec::new(), &mut found);
-    let reasoning = reasoning_like(held) || reasoning_like(sent);
-    found.into_iter().any(|(path, text)| {
-        if text.is_empty() {
-            return false;
-        }
-        let kept = string_at(held, &path);
-        if path.iter().any(|key| signature_key(key)) {
-            return kept.as_deref() != Some(text.as_str());
-        }
-        reasoning && kept.as_deref().is_none_or(str::is_empty)
-    })
-}
-
-/// `sent` with every provider signature the held copy no longer carries
-/// put back as the held copy has it: emptied where the held part keeps an
-/// empty one, removed where it has none. What the edit changes on purpose
-/// (an output, a text) stays as it is. `None` when the bytes still restore
-/// pruned content after that (reasoning content in a pruned reasoning part).
-fn without_restored(held: &Value, sent: &Value) -> Option<Value> {
-    fn repair(held: Option<&Value>, sent: &mut Value) {
-        let Value::Object(members) = sent else {
-            if let Value::Array(items) = sent {
-                for (index, item) in items.iter_mut().enumerate() {
-                    repair(held.and_then(|held| held.get(index)), item);
-                }
-            }
-            return;
-        };
-        let keys = members.keys().cloned().collect::<Vec<_>>();
-        for key in keys {
-            let original = held.and_then(|held| held.get(&key));
-            if signature_key(&key) && members.get(&key) != original {
-                match original {
-                    Some(original) => {
-                        members.insert(key, original.clone());
-                    }
-                    None => {
-                        members.remove(&key);
-                    }
-                }
-            } else if let Some(member) = members.get_mut(&key) {
-                repair(original, member);
-            }
-        }
-    }
-    let mut repaired = sent.clone();
-    repair(Some(held), &mut repaired);
-    (!restores_pruned(held, &repaired)).then_some(repaired)
-}
-
-/// Whether replacement messages ck-mc authored carry content of the kinds a
-/// prune removes: a reasoning part with any payload, or any provider
-/// signature. ck-mc authors history heads, emptied messages and cut splits;
-/// none of them carries either, so this holds only if held bytes leaked in.
-pub(super) fn replacement_restores(bytes: &str) -> bool {
-    let Ok(messages) = serde_json::from_str::<Value>(bytes) else {
-        return false;
-    };
-    let mut found = Vec::new();
-    strings(&messages, &mut Vec::new(), &mut found);
-    if found
-        .iter()
-        .any(|(path, text)| !text.is_empty() && path.iter().any(|key| signature_key(key)))
-    {
-        return true;
-    }
-    fn reasoning_with_payload(value: &Value) -> bool {
-        match value {
-            Value::Object(members) => {
-                (reasoning_like(value)
-                    && members.iter().any(|(key, member)| {
-                        key != "type" && member.as_str().is_some_and(|text| !text.is_empty())
-                    }))
-                    || members.values().any(reasoning_with_payload)
-            }
-            Value::Array(items) => items.iter().any(reasoning_with_payload),
-            _ => false,
-        }
-    }
-    reasoning_with_payload(&messages)
-}
-
 impl AsyncRecord {
     /// The prune generation these held copies were last reconciled with.
     pub(super) fn reasoning_pruned_generation(&self) -> Option<u64> {
         self.reasoning_pruned.map(|state| state.generation)
+    }
+
+    /// The serializer profile this conversation's stored messages follow.
+    pub(super) fn serializer_profile(&self) -> Result<&'static str, HandlerOutcome> {
+        Ok(codec::Codec::from_params(&Value::Object(self.setup.params.clone()))?.wire_id())
     }
 
     /// Whether the session's Setup answer lets the runner prune it.
@@ -465,6 +417,35 @@ impl AsyncRecord {
         Ok(())
     }
 
+    /// Record the parts a page lists as pruned for the held message at
+    /// `ordinal`: the runner's prune record, which the view checks follow
+    /// (`restored_by_edit_in`, `restored_part_in`).
+    pub(super) fn record_pruned_parts(&mut self, ordinal: u64, listed: &[PrunedReasoning]) {
+        if listed.is_empty() {
+            return;
+        }
+        let parts = self.pruned_parts.entry(ordinal).or_default();
+        for row in listed {
+            parts.insert(row.part.clone(), row.kind.clone());
+        }
+    }
+
+    /// The runner's prune record for the held messages, as llm-runner's
+    /// reference functions take it.
+    fn pruned_part_list(&self, ordinal: Option<u64>) -> Vec<PrunedPartAt> {
+        let range = match ordinal {
+            Some(ordinal) => self.pruned_parts.range(ordinal..=ordinal),
+            None => self.pruned_parts.range(..),
+        };
+        range
+            .flat_map(|(ordinal, parts)| {
+                parts
+                    .iter()
+                    .map(|(part, kind)| PrunedPartAt::new(*ordinal, part.clone(), kind.clone()))
+            })
+            .collect()
+    }
+
     /// Hold `fresh` in place of `held`, the held copy of the same message,
     /// when it differs only as the page's listed prunes allow (`accepts`).
     /// The stored row is rewritten on the next save. Everything this record
@@ -478,7 +459,7 @@ impl AsyncRecord {
         fresh: &ReadMessage,
         listed: &[PrunedReasoning],
     ) -> Result<bool, HandlerOutcome> {
-        if !accepts(held, fresh, listed) {
+        if !accepts(self.serializer_profile()?, held, fresh, listed) {
             return Ok(false);
         }
         let entry = HeldEntry::from_read(fresh)?;
@@ -486,6 +467,7 @@ impl AsyncRecord {
         let entry = entry.counted_as(self.reference());
         self.entries.insert(fresh.ordinal, Arc::new(entry));
         self.journal.replaced.insert(fresh.ordinal);
+        self.record_pruned_parts(fresh.ordinal, listed);
         self.logical_prefix = None;
         self.prefix_input_proof = None;
         self.cut_signature = None;
@@ -518,10 +500,9 @@ impl AsyncRecord {
     }
 
     /// Repair every keep-range edit that would put back what a prune
-    /// removed (see `restores_pruned`): its signatures are taken from the
-    /// held copy, and what the edit changes on purpose stays. An edit that
-    /// cannot be repaired is dropped, so its part goes out as the runner's
-    /// own bytes. Only a session the runner reported pruned is checked.
+    /// removed (see `without_restored_content`). An edit that cannot be
+    /// repaired is dropped, so its part goes out as the runner's own bytes.
+    /// Only a session the runner reported pruned is checked.
     pub(super) fn repair_restoring_edits(
         &self,
         ranges: &mut [view::ViewRange],
@@ -547,10 +528,13 @@ impl AsyncRecord {
         Ok(())
     }
 
-    /// `edit`, or the same edit with the signatures its held part no longer
-    /// carries taken out, when its bytes would put back what a prune removed;
-    /// `None` when they cannot be taken out. A drop, and an edit of a part
-    /// whose bytes carry nothing pruned, are returned unchanged.
+    /// `edit` unchanged when it puts back nothing the runner pruned from its
+    /// message (llm-runner's `restored_by_edit_in` for this conversation's
+    /// serializer profile, over the runner's prune record). Otherwise the
+    /// same edit with the pruned members taken from the reconciled held part
+    /// (emptied or removed as the runner serves them), keeping everything
+    /// the edit changes on purpose, such as a trimmed output; `None` when
+    /// that still puts pruned content back.
     pub(super) fn without_restored_content(
         &self,
         edit: view::PartEdit,
@@ -561,45 +545,102 @@ impl AsyncRecord {
         let Some(bytes) = &edit.bytes else {
             return Ok(Some(edit));
         };
-        let Some(entry) = self.entries.get(&edit.ordinal) else {
-            return Ok(Some(edit));
-        };
-        let entry = entry.read()?;
-        let Some(index) = entry.tags.iter().position(|row| row.part == edit.part) else {
-            return Ok(Some(edit));
-        };
-        let Some(held) = parts(&entry.message)?.get(index).cloned() else {
-            return Ok(Some(edit));
-        };
-        let sent: Value = serde_json::from_str(bytes).map_err(transient)?;
-        if !restores_pruned(&held, &sent) {
+        let pruned = self.pruned_part_list(Some(edit.ordinal));
+        if pruned.is_empty() {
             return Ok(Some(edit));
         }
-        Ok(without_restored(&held, &sent)
-            .map(|repaired| {
-                serde_json::to_string(&repaired).map(|bytes| {
-                    view::PartEdit::replace(edit.ordinal, &edit.mid, &edit.part, bytes)
-                })
-            })
-            .transpose()
-            .map_err(transient)?)
+        let profile = self.serializer_profile()?;
+        let restores = |part: &Value| {
+            restored(archive_prunes_reasoning::restored_by_edit_in(
+                profile,
+                &pruned,
+                edit.ordinal,
+                &edit.part,
+                part,
+            ))
+        };
+        let sent: Value = serde_json::from_str(bytes).map_err(transient)?;
+        if !restores(&sent) {
+            return Ok(Some(edit));
+        }
+        let held = self
+            .entries
+            .get(&edit.ordinal)
+            .map(|entry| entry.read())
+            .transpose()?
+            .and_then(|entry| {
+                let index = entry.tags.iter().position(|row| row.part == edit.part)?;
+                parts(&entry.message).ok()?.get(index).cloned()
+            });
+        let Some(held) = held else {
+            return Ok(None);
+        };
+        // Take every candidate member from the held part, then put back each
+        // one whose own value does not restore pruned content, so the edit
+        // keeps all it changes on purpose.
+        let mut candidates = Vec::new();
+        missing_in_held(Some(&held), &sent, &mut Vec::new(), &mut candidates);
+        let mut repaired = sent.clone();
+        for path in &candidates {
+            repaired = take_from(&repaired, &held, path).unwrap_or(repaired);
+        }
+        if restores(&repaired) {
+            return Ok(None);
+        }
+        for path in &candidates {
+            if let Some(trial) = take_from(&repaired, &sent, path).filter(|trial| !restores(trial))
+            {
+                repaired = trial;
+            }
+        }
+        Ok(Some(view::PartEdit::replace(
+            edit.ordinal,
+            &edit.mid,
+            &edit.part,
+            serde_json::to_string(&repaired).map_err(transient)?,
+        )))
     }
 
     /// Whether a replace range of this view would carry content of the kinds
-    /// a prune removes for an ordinal the runner pruned through. The first
-    /// range of a lineage that begins above 0 stands for every ordinal below
-    /// it as well.
-    pub(super) fn replacement_restores_pruned(&self, ranges: &[view::ViewRange]) -> bool {
+    /// a prune removes, for an ordinal at or below the runner's
+    /// `through_ordinal` (llm-runner's `restored_part_in` for this
+    /// conversation's serializer profile). The first range of a lineage that
+    /// begins above 0 stands for every ordinal below it as well. ck-mc does
+    /// not hold the prune record for copies below its cut, so a range is
+    /// checked against every kind the profile can carry.
+    pub(super) fn replacement_restores_pruned(
+        &self,
+        ranges: &[view::ViewRange],
+    ) -> Result<bool, HandlerOutcome> {
         let Some(state) = self.reasoning_pruned else {
-            return false;
+            return Ok(false);
         };
-        ranges.iter().enumerate().any(|(index, range)| match range {
-            view::ViewRange::Replace { from, bytes, .. } => {
-                let start = if index == 0 { 0 } else { *from };
-                start <= state.through_ordinal && replacement_restores(bytes)
+        let profile = self.serializer_profile()?;
+        let carried = archive_prunes_reasoning::kinds_carried(profile).unwrap_or(&[]);
+        for (index, range) in ranges.iter().enumerate() {
+            let view::ViewRange::Replace { from, to, bytes } = range else {
+                continue;
+            };
+            let start = if index == 0 { 0 } else { *from };
+            if start > state.through_ordinal {
+                continue;
             }
-            _ => false,
-        })
+            let Ok(messages) = serde_json::from_str::<Value>(bytes) else {
+                continue;
+            };
+            let pruned = carried
+                .iter()
+                .map(|kind| PrunedPartAt::new(start, "", *kind))
+                .chain(self.pruned_part_list(None))
+                .collect::<Vec<_>>();
+            let stands_for = start..(*to).max(start + 1);
+            if restored(archive_prunes_reasoning::restored_part_in(
+                profile, &pruned, stands_for, &messages,
+            )) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -674,10 +715,12 @@ impl McHandler {
                         return Err(transient("async transcript gap"));
                     };
                     let held = held.read()?;
+                    let rows = pruned.get(&entry.mid).map_or(&[][..], Vec::as_slice);
                     if stable_entry(&held, &entry) {
+                        // Already held as pruned (read after the prune).
+                        state.record_pruned_parts(entry.ordinal, rows);
                         continue;
                     }
-                    let rows = pruned.get(&entry.mid).map_or(&[][..], Vec::as_slice);
                     if !state.accept_pruned_reread(&held, &entry, rows)? {
                         return Err(transient("async entry changed on re-read"));
                     }

@@ -264,6 +264,11 @@ pub(crate) struct AsyncRecord {
     /// engine pass declares them until one succeeds.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pruned_readopt: BTreeSet<String>,
+    /// The runner's prune record for held messages, from the pages that
+    /// served them: ordinal, then part key to prune kind. Views are checked
+    /// against it (`pruned_reasoning`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pruned_parts: BTreeMap<u64, BTreeMap<String, String>>,
     /// Held copies changed by a prune: the runner's next request no longer
     /// matches its prompt cache from the first pruned message on, so the next
     /// engine pass runs once as a rebuild, as a ride does, and lands pending
@@ -2133,8 +2138,10 @@ impl State {
         self.engine = transform::compaction::State::new(self.reference(), self.engine.preset);
         self.produced_view = None;
         self.applied_view = None;
-        // The next generation's engine holds no identity to re-adopt.
+        // The next generation's engine holds no identity to re-adopt, and the
+        // transcript is read again with its prune record.
         self.pruned_readopt.clear();
+        self.pruned_parts.clear();
         for (version, view) in &self.published_engine {
             if let Some(edits) = &view.frozen_edits {
                 self.retired_frozen
@@ -2837,6 +2844,7 @@ impl McHandler {
             engine_failed: false,
             reasoning_pruned: request.reasoning_pruned.filter(|state| state.valid()),
             pruned_readopt: BTreeSet::new(),
+            pruned_parts: BTreeMap::new(),
             pruned_rebuild_pending: false,
             rode_since_notice: false,
             page_reasoning_pruned: None,
@@ -4888,6 +4896,10 @@ impl McHandler {
                     #[cfg(test)]
                     let held = held.counted_as(state.reference());
                     state.entries.insert(entry.ordinal, Arc::new(held));
+                    state.record_pruned_parts(
+                        entry.ordinal,
+                        pruned.get(&entry.mid).map_or(&[][..], Vec::as_slice),
+                    );
                     // Undo can reintroduce an archived source after the first
                     // post-Setup read. Look up the newly held window again so
                     // an acknowledged drop cannot disappear on a later page.
@@ -5490,7 +5502,7 @@ impl McHandler {
         // still carry a pruned signature: that part goes out as the runner's
         // own bytes instead.
         state.repair_restoring_edits(&mut ranges)?;
-        if state.replacement_restores_pruned(&ranges) {
+        if state.replacement_restores_pruned(&ranges)? {
             // Defence in depth: ck-mc authors no replacement that carries
             // reasoning or a signature. Publish nothing on this pass.
             tracing::warn!(session_ref=%state.reference(), reason="pruned_reasoning_restored", "async view withheld: a replace range would carry pruned content");

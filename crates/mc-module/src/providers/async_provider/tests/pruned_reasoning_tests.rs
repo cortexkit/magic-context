@@ -254,160 +254,216 @@ fn read_message(ordinal: u64, message: Value, tags: Vec<tags::PartTag>) -> ReadM
     ReadMessage::new(ordinal, format!("m{ordinal}"), message).with_tags(tags)
 }
 
+/// The message `part` sits alone in, in serializer profile `profile`'s
+/// container.
+fn message_in(profile: &str, part: Value) -> Value {
+    match profile {
+        "opencode-aisdk" => {
+            json!({"info":{"id":"m1","role":"assistant","time":{"created":1}},"parts":[part]})
+        }
+        "pi" => {
+            json!({"type":"message","id":"m1","parentId":"m0","timestamp":"2026-05-01T16:52:33.700Z","message":{"role":"assistant","content":[part]}})
+        }
+        _ => json!({"role":"assistant","content":[part]}),
+    }
+}
+
+/// Whether a re-read serving `served` in place of `original`, its one part
+/// listed as pruned with `kind`, is accepted as a pruning.
+fn accepted(profile: &str, kind: &str, original: &Value, served: &Value) -> bool {
+    let held = read_message(
+        1,
+        message_in(profile, original.clone()),
+        vec![tags::PartTag::untagged("m1#0")],
+    );
+    let fresh = read_message(
+        1,
+        message_in(profile, served.clone()),
+        vec![tags::PartTag::untagged("m1#0")],
+    );
+    let row = row(1, "m1#0", kind, original);
+    pruned_reasoning::accepts(
+        profile,
+        &held,
+        &fresh,
+        &[serde_json::from_value(row).unwrap()],
+    )
+}
+
 /// Item 2 (review P3-1): a listed part is accepted only in the way its kind
-/// allows. `reasoning` empties a reasoning part; `opaque_reasoning` removes
-/// encrypted members and keeps the readable summary; `signature` removes a
-/// signature and keeps text and call arguments byte-identical. A kind the
-/// contract does not define, a kind on the wrong sort of part, and any other
-/// change are refused.
+/// allows in the session's serializer profile (llm-runner §9.14.1,
+/// per-profile table). Every prune llm-runner 0.7.11 publishes for each
+/// profile is accepted. A change the kind does not make is refused: text
+/// rewritten or emptied under `signature`, readable reasoning touched under
+/// `opaque_reasoning`, a kind the profile cannot carry or this crate does
+/// not define, a member the profile's table does not list as a signature,
+/// item state that is not a signature, and any unlisted change.
 #[test]
 fn a_listed_part_is_accepted_only_as_its_kind_prunes_it() {
-    let message = |parts: Value| json!({"info":{"id":"m1","role":"assistant","time":{"created":1}},"parts":parts});
-    let reasoning = json!({"id":"r","type":"reasoning","text":"thinking it over","metadata":{"anthropic":{"signature":"sig-r"}}});
-    let opaque = json!({"type":"redacted_reasoning","data":"{\"encrypted_content\":\"cipher\",\"summary\":[{\"text\":\"door\",\"type\":\"summary_text\"}],\"type\":\"reasoning\"}","provider_format":"example"});
-    let call = json!({"id":"c","type":"tool","tool":"read","callID":"call1","state":{"status":"completed","input":{"path":"a"},"output":"done"},"metadata":{"google":{"thoughtSignature":"sig-c"}}});
-    let text = json!({"id":"t","type":"text","text":"the answer","metadata":{"openai":{"signature":"sig-t"}}});
-    let original = message(json!([reasoning, opaque, call, text]));
-    let tags = vec![
-        tags::PartTag::untagged("0"),
-        tags::PartTag::untagged("1"),
-        tags::PartTag::tagged("2", "§1§"),
-        tags::PartTag::tagged("3", "§2§"),
-    ];
-    let held = read_message(1, original.clone(), tags.clone());
-    let digest_of = |index: usize| served_part_digest(&held, &index.to_string()).unwrap();
-    let listed = |index: usize, kind: &str| PrunedReasoningRow {
-        mid: "m1".into(),
-        part: index.to_string(),
-        kind: kind.into(),
-        sha256: digest_of(index),
-    };
-    let served = |index: usize, part: Value| {
-        let mut message = original.clone();
-        message["parts"][index] = part;
-        read_message(1, message, tags.clone())
-    };
-    let check = |index: usize, kind: &str, part: Value| {
-        pruned_reasoning::accepts(&held, &served(index, part), &[listed(index, kind).decode()])
-    };
-    // reasoning
-    assert!(check(
-        0,
-        kinds::REASONING,
-        json!({"id":"r","type":"reasoning","text":""})
-    ));
-    assert!(!check(
-        0,
-        kinds::REASONING,
-        json!({"id":"r","type":"reasoning","text":"other thoughts"})
-    ));
-    assert!(
-        !check(
-            3,
-            kinds::REASONING,
-            json!({"id":"t","type":"text","text":""})
-        ),
-        "reasoning kind on a text part"
-    );
-    // opaque_reasoning
-    assert!(check(
-        1,
-        kinds::OPAQUE_REASONING,
-        json!({"type":"redacted_reasoning","data":"{\"summary\":[{\"text\":\"door\",\"type\":\"summary_text\"}],\"type\":\"reasoning\"}","provider_format":"example"})
-    ));
-    assert!(
-        !check(
-            1,
-            kinds::OPAQUE_REASONING,
-            json!({"type":"redacted_reasoning","data":"{\"type\":\"reasoning\"}","provider_format":"example"})
-        ),
-        "summary removed"
-    );
-    assert!(
-        !check(
-            1,
-            kinds::OPAQUE_REASONING,
-            json!({"type":"redacted_reasoning","data":"{\"summary\":[{\"text\":\"window\",\"type\":\"summary_text\"}],\"type\":\"reasoning\"}","provider_format":"example"})
-        ),
-        "summary rewritten"
-    );
-    // signature
-    assert!(check(
-        2,
-        kinds::SIGNATURE,
-        json!({"id":"c","type":"tool","tool":"read","callID":"call1","state":{"status":"completed","input":{"path":"a"},"output":"done"},"metadata":{"google":{}}})
-    ));
-    assert!(check(
-        3,
-        kinds::SIGNATURE,
-        json!({"id":"t","type":"text","text":"the answer","metadata":{"openai":{"signature":""}}})
-    ));
-    assert!(
-        !check(
-            2,
-            kinds::SIGNATURE,
-            json!({"id":"c","type":"tool","tool":"read","callID":"call1","state":{"status":"completed","input":{"path":"b"},"output":"done"},"metadata":{"google":{}}})
-        ),
-        "call arguments changed"
-    );
-    assert!(
-        !check(
-            3,
-            kinds::SIGNATURE,
-            json!({"id":"t","type":"text","text":"text the model never wrote","metadata":{"openai":{}}})
-        ),
-        "text rewritten"
-    );
-    assert!(
-        !check(
-            3,
-            kinds::SIGNATURE,
-            json!({"id":"t","type":"text","text":"","metadata":{"openai":{"signature":"sig-t"}}})
-        ),
-        "text emptied"
-    );
-    assert!(
-        !check(
-            0,
-            kinds::SIGNATURE,
-            json!({"id":"r","type":"reasoning","text":"thinking it over","metadata":{"anthropic":{}}})
-        ),
-        "signature kind on reasoning"
-    );
-    // anything else
-    assert!(!check(
-        0,
-        "future_kind",
-        json!({"id":"r","type":"reasoning","text":""})
-    ));
-    let mut other = served(0, json!({"id":"r","type":"reasoning","text":""}));
-    other.message["parts"][3]["text"] = json!("unlisted change");
-    assert!(!pruned_reasoning::accepts(
-        &held,
-        &other,
-        &[listed(0, kinds::REASONING).decode()]
-    ));
-    let mut wrong_digest = listed(0, kinds::REASONING);
-    wrong_digest.sha256 = "0".repeat(64);
-    assert!(!pruned_reasoning::accepts(
-        &held,
-        &served(0, json!({"id":"r","type":"reasoning","text":""})),
-        &[wrong_digest.decode()]
-    ));
-}
-
-/// A page row, built field by field (the published type is non-exhaustive).
-struct PrunedReasoningRow {
-    mid: String,
-    part: String,
-    kind: String,
-    sha256: String,
-}
-
-impl PrunedReasoningRow {
-    fn decode(&self) -> cortexkit_role_llm_runner::archive_prunes_reasoning::PrunedReasoning {
-        serde_json::from_value(json!({"mid":self.mid,"part":self.part,"kind":self.kind,"bytes":1,"sha256":self.sha256})).unwrap()
+    let vectors: Value = serde_json::from_str(
+        cortexkit_role_llm_runner::vectors::file("reasoning-pruned-profiles.json").unwrap(),
+    )
+    .unwrap();
+    let mut accepted_cases = 0;
+    for profile in vectors["profiles"].as_array().unwrap() {
+        let name = profile["profile"].as_str().unwrap();
+        for case in profile["prunes"].as_array().unwrap() {
+            assert!(
+                accepted(
+                    name,
+                    case["kind"].as_str().unwrap(),
+                    &case["original"],
+                    &case["served"]
+                ),
+                "{name} {}: a published prune is accepted",
+                case["name"]
+            );
+            assert!(
+                !accepted(name, "future_kind", &case["original"], &case["served"]),
+                "{name} {}: an undefined kind is not trusted",
+                case["name"]
+            );
+            accepted_cases += 1;
+        }
     }
+    assert!(accepted_cases >= 30, "{accepted_cases}");
+    let refused = [
+        // owned-broca
+        (
+            "owned-broca",
+            kinds::OPAQUE_REASONING,
+            json!({"type":"reasoning","text":"thinking it over","signature":"sig"}),
+            json!({"type":"reasoning","text":""}),
+            "opaque_reasoning keeps the text",
+        ),
+        (
+            "owned-broca",
+            kinds::SIGNATURE,
+            json!({"type":"tool_call","tool_call_id":"c","tool_name":"open","input":{"door":1},"thought_signature":"sig"}),
+            json!({"type":"tool_call","tool_call_id":"c","tool_name":"open","input":{"door":2}}),
+            "call arguments changed",
+        ),
+        (
+            "owned-broca",
+            kinds::SIGNATURE,
+            json!({"type":"text_with_state","text":"noted","provider_state":{"format":"gemini","data":"{\"thoughtSignature\":\"sig\"}"}}),
+            json!({"type":"text_with_state","text":"","provider_state":{"format":"gemini","data":""}}),
+            "text emptied",
+        ),
+        (
+            "owned-broca",
+            kinds::SIGNATURE,
+            json!({"type":"text_with_state","text":"noted","provider_state":{"format":"open_ai_responses","data":"{\"id\":\"msg\",\"phase\":\"final_answer\"}"}}),
+            json!({"type":"text_with_state","text":"noted","provider_state":{"format":"open_ai_responses","data":""}}),
+            "Responses item state is no signature",
+        ),
+        (
+            "owned-broca",
+            kinds::REASONING,
+            json!({"type":"text","text":"the answer"}),
+            json!({"type":"text","text":""}),
+            "reasoning kind on a text part",
+        ),
+        // anthropic-messages
+        (
+            "anthropic-messages",
+            kinds::SIGNATURE,
+            json!({"type":"thinking","thinking":"plan","signature":"sig"}),
+            json!({"type":"thinking","thinking":"plan","signature":""}),
+            "anthropic-messages carries no signature kind",
+        ),
+        (
+            "anthropic-messages",
+            kinds::OPAQUE_REASONING,
+            json!({"type":"thinking","thinking":"plan","signature":"sig"}),
+            json!({"type":"thinking","thinking":"","signature":""}),
+            "opaque_reasoning keeps the thinking text",
+        ),
+        // opencode-aisdk
+        (
+            "opencode-aisdk",
+            kinds::SIGNATURE,
+            json!({"id":"t","type":"text","text":"the answer","metadata":{"google":{"thoughtSignature":"sig"}}}),
+            json!({"id":"t","type":"text","text":"text the model never wrote","metadata":{"google":{}}}),
+            "text rewritten",
+        ),
+        (
+            "opencode-aisdk",
+            kinds::SIGNATURE,
+            json!({"id":"t","type":"text","text":"the answer","metadata":{"openai":{"signature":"sig"}}}),
+            json!({"id":"t","type":"text","text":"the answer","metadata":{"openai":{}}}),
+            "an entry the table does not list",
+        ),
+        (
+            "opencode-aisdk",
+            kinds::OPAQUE_REASONING,
+            json!({"id":"r","type":"reasoning","text":"summary","metadata":{"openai":{"itemId":"rs","reasoningEncryptedContent":"cipher"}}}),
+            json!({"id":"r","type":"reasoning","text":"","metadata":{"openai":{"itemId":"rs"}}}),
+            "opaque_reasoning keeps the summary text",
+        ),
+        // pi
+        (
+            "pi",
+            kinds::SIGNATURE,
+            json!({"type":"text","text":"closing","textSignature":"{\"v\":1,\"id\":\"msg\",\"phase\":\"final_answer\"}"}),
+            json!({"type":"text","text":"closing"}),
+            "Responses text item state is no signature",
+        ),
+    ];
+    for (profile, kind, original, served, why) in refused {
+        assert!(
+            !accepted(profile, kind, &original, &served),
+            "{profile}: {why}"
+        );
+    }
+    // Witness shape: an unlisted part changed beside a listed pruning.
+    let original = json!({"type":"reasoning","text":"thinking","signature":"sig"});
+    let held = read_message(
+        1,
+        json!({"role":"assistant","content":[original.clone(),{"type":"text","text":"answer"}]}),
+        vec![
+            tags::PartTag::untagged("m1#0"),
+            tags::PartTag::untagged("m1#1"),
+        ],
+    );
+    let fresh = read_message(
+        1,
+        json!({"role":"assistant","content":[{"type":"reasoning","text":""},{"type":"text","text":"changed"}]}),
+        vec![
+            tags::PartTag::untagged("m1#0"),
+            tags::PartTag::untagged("m1#1"),
+        ],
+    );
+    let listed: cortexkit_role_llm_runner::archive_prunes_reasoning::PrunedReasoning =
+        serde_json::from_value(row(1, "m1#0", kinds::REASONING, &original)).unwrap();
+    assert!(!pruned_reasoning::accepts(
+        "owned-broca",
+        &held,
+        &fresh,
+        std::slice::from_ref(&listed)
+    ));
+    let mut wrong_digest = listed.clone();
+    wrong_digest.sha256 = "0".repeat(64);
+    let pruned_only = read_message(
+        1,
+        json!({"role":"assistant","content":[{"type":"reasoning","text":""},{"type":"text","text":"answer"}]}),
+        vec![
+            tags::PartTag::untagged("m1#0"),
+            tags::PartTag::untagged("m1#1"),
+        ],
+    );
+    assert!(pruned_reasoning::accepts(
+        "owned-broca",
+        &held,
+        &pruned_only,
+        std::slice::from_ref(&listed)
+    ));
+    assert!(!pruned_reasoning::accepts(
+        "owned-broca",
+        &held,
+        &pruned_only,
+        &[wrong_digest]
+    ));
 }
 
 /// Forty messages, message 39 with signed reasoning, a view built by the
@@ -655,10 +711,12 @@ async fn an_edited_text_part_never_resends_a_pruned_text_signature() {
         let mut entries = rig.runner.entries.lock().unwrap();
         let entry = entries.iter_mut().find(|e| e.ordinal == 24).unwrap();
         assert_eq!(entry.message["parts"][0]["type"], "text");
-        entry.message["parts"][0]["metadata"] = json!({"openai":{"signature":signature}});
+        // A Gemini text part's thought signature, as OpenCode copies the
+        // provider metadata into `part.metadata`.
+        entry.message["parts"][0]["metadata"] = json!({"google":{"thoughtSignature":signature}});
         let original = part_of(&entry.message, 0);
         let mut pruned = entry.message.clone();
-        pruned["parts"][0]["metadata"] = json!({"openai":{"signature":""}});
+        pruned["parts"][0]["metadata"] = json!({"google":{}});
         (original, pruned)
     };
     rig.notice(1, 1_000, None).await;
@@ -781,12 +839,12 @@ fn broca_fill(rig: &Rig, count: u64) {
         .collect();
 }
 
-/// The published probe's checks, over ck-mc's owned-broca format
-/// (compaction-provider 0.7.3 `held_copies_follow_reasoning_pruned`; its own
-/// scripted transcript has shapes no ck-mc serializer profile decodes): after
+/// The published probe's checks, over the owned-broca shapes ck-mc's codec
+/// reads (`held_copies_follow_reasoning_pruned` runs separately, on its own
+/// transcripts; see `held_copies_probe`): after
 /// a prune of reasoning and call signatures and the post-prune Setup, every
 /// held ordinal through the prune was read again, every view passes the
-/// published `CompactionView::restored_pruned_part`, and a notice with the
+/// published `CompactionView::restored_pruned_part_in`, and a notice with the
 /// same generation re-reads nothing held.
 #[tokio::test]
 async fn owned_broca_views_pass_the_published_restore_check_after_a_prune() {
@@ -874,7 +932,10 @@ async fn owned_broca_views_pass_the_published_restore_check_after_a_prune() {
         checked,
         "the view edits or replaces a pruned message: {after:?}"
     );
-    assert_eq!(after.restored_pruned_part(&parts, 0), None);
+    assert_eq!(
+        after.restored_pruned_part_in("owned-broca", &parts, 0),
+        Ok(None)
+    );
     rig.runner.reads.lock().unwrap().clear();
     rig.notice(3, 1_000, Some(after.view_version)).await;
     assert!(
@@ -886,36 +947,4 @@ async fn owned_broca_views_pass_the_published_restore_check_after_a_prune() {
         rig.runner.read_starts()
     );
     assert_eq!(rig.newest(), Some(after.view_version));
-}
-
-/// The guard's own rules, for a reviewer: an edit keeping the held part's
-/// signatures passes; one carrying a signature the held copy no longer has,
-/// or reasoning where the held copy is empty, is caught; ck-mc-authored
-/// replacements with reasoning or a signature are caught.
-#[test]
-fn restore_checks_find_pruned_content_by_its_shape() {
-    let held = json!({"type":"tool","state":{"output":"out"},"metadata":{"google":{}}});
-    assert!(!pruned_reasoning::restores_pruned(
-        &held,
-        &json!({"type":"tool","state":{"output":"[trimmed]"},"metadata":{"google":{}}})
-    ));
-    assert!(pruned_reasoning::restores_pruned(
-        &held,
-        &json!({"type":"tool","state":{"output":"[trimmed]"},"metadata":{"google":{"thoughtSignature":"s"}}})
-    ));
-    let signed = json!({"type":"tool","metadata":{"google":{"thoughtSignature":"s"}}});
-    assert!(!pruned_reasoning::restores_pruned(&signed, &signed));
-    assert!(pruned_reasoning::restores_pruned(
-        &json!({"type":"reasoning","text":""}),
-        &json!({"type":"reasoning","text":"back again"})
-    ));
-    assert!(!pruned_reasoning::replacement_restores(
-        r#"[{"role":"user","content":[{"type":"text","text":"history summary"}]}]"#
-    ));
-    assert!(pruned_reasoning::replacement_restores(
-        r#"[{"role":"assistant","content":[{"type":"reasoning","text":"thought"}]}]"#
-    ));
-    assert!(pruned_reasoning::replacement_restores(
-        r#"[{"role":"assistant","content":[{"type":"tool_call","thought_signature":"s"}]}]"#
-    ));
 }
