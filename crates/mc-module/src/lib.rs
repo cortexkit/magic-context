@@ -22366,7 +22366,10 @@ mod tests {
 
         let (code, _, detail) = detailed_error_frame(handler.store_refusal());
         assert_eq!(code, SINGLE_STORE_MIGRATION_REQUIRED_REASON);
-        assert_eq!(detail["reason_code"], SINGLE_STORE_MIGRATION_REQUIRED_REASON);
+        assert_eq!(
+            detail["reason_code"],
+            SINGLE_STORE_MIGRATION_REQUIRED_REASON
+        );
 
         // The runner lane's async compaction op and a session op, through request
         // dispatch. The dispatch fence answers before any binding check, so no
@@ -22377,8 +22380,14 @@ mod tests {
         ] {
             let (lane_code, _, lane_detail) =
                 detailed_error_frame(handler.dispatch_value(7, request.clone()).await);
-            assert_eq!(lane_code, SINGLE_STORE_MIGRATION_REQUIRED_REASON, "{request}");
-            assert_eq!(lane_detail["reason_code"], SINGLE_STORE_MIGRATION_REQUIRED_REASON);
+            assert_eq!(
+                lane_code, SINGLE_STORE_MIGRATION_REQUIRED_REASON,
+                "{request}"
+            );
+            assert_eq!(
+                lane_detail["reason_code"],
+                SINGLE_STORE_MIGRATION_REQUIRED_REASON
+            );
         }
 
         let (tool_code, tool_message, _) = detailed_error_frame(
@@ -22488,9 +22497,8 @@ mod tests {
         let never_acked = McHandler::new();
         never_acked.bind_route(7, binding(data_home.to_str().unwrap(), "ses"));
         let status_request = json!({ "method": "session.status", "v": 1, "session_id": "ses" });
-        let (code, message) = error_frame(
-            never_acked.dispatch_value(7, status_request.clone()).await,
-        );
+        let (code, message) =
+            error_frame(never_acked.dispatch_value(7, status_request.clone()).await);
         assert_eq!(code, "store_unavailable");
         assert!(
             message.contains("no HELLO_ACK has arrived"),
@@ -22509,8 +22517,7 @@ mod tests {
         waiting.bind_route(7, binding(data_home.to_str().unwrap(), "ses"));
         waiting.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
         wait_for_store_open_phase(&waiting, STORE_OPEN_WAITING).await;
-        let (lease_code, _) =
-            error_frame(waiting.dispatch_value(7, status_request).await);
+        let (lease_code, _) = error_frame(waiting.dispatch_value(7, status_request).await);
         assert_eq!(lease_code, "store_lease_wait");
         assert_ne!(
             code, lease_code,
@@ -22525,8 +22532,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn status_and_health_surface_pass_trace_for_rejected_sessions() {
         let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(producer, default_test_config());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
 
         store
             .trace_pass_received("ses", "legacy-1", now_ms())
@@ -22581,8 +22587,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn request_trace_ring_records_attempt_lifecycle_and_caps_at_thirty_two() {
         let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(producer, default_test_config());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
 
         for index in 0..35 {
             let attempt = format!("attempt-{index}");
@@ -22649,8 +22654,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn runtime_store_error_preserves_distinct_failure_codes_in_status_and_health() {
         let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) =
-            handler_with_store(producer, default_test_config());
+        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
 
         handler
             .runtime_store_errors
@@ -22686,10 +22690,7 @@ mod tests {
             call_dispatch_request(&handler, json!({ "kind": "health", "session_id": "ses" })).await;
 
         assert_eq!(status["runtime_store_error"]["code"], "store_write_failed");
-        assert_eq!(
-            status["runtime_store_error"]["message"],
-            "first diagnostic"
-        );
+        assert_eq!(status["runtime_store_error"]["message"], "first diagnostic");
         assert_eq!(status["runtime_store_error"]["at_ms"], 101);
         assert_eq!(health["runtime_store_error"]["code"], "store_unavailable");
         assert_eq!(
@@ -22710,8 +22711,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn sqlite_busy_session_flush_is_typed_and_visible_in_status_and_health() {
         let producer = Arc::new(ProducerState::default());
-        let (handler, store, dir, _project) =
-            handler_with_store(producer, default_test_config());
+        let (handler, store, dir, _project) = handler_with_store(producer, default_test_config());
 
         let descriptor = dev_descriptor_at(dir.path().join("data").to_str().unwrap());
         let StorageBackend::Sqlite { path } = descriptor.backend else {
@@ -22771,8 +22771,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn session_status_surfaces_publish_failure_health_and_reset() {
         let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(producer, default_test_config());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
 
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
@@ -22837,15 +22836,12 @@ mod tests {
         // directive belongs only on the producer request's system prompt, never
         // on the served surface. So compare systems off the fire request and
         // data off the assembled firing.
-        fn firing_system_and_data(
-            language: Option<&str>,
-        ) -> (String, String, String, String) {
+        fn firing_system_and_data(language: Option<&str>) -> (String, String, String, String) {
             let producer = Arc::new(ProducerState::default());
             let mut config = default_test_config();
             config.rust_background_enabled = true;
             config.language = language.map(str::to_string);
-            let (handler, store, _dir, project) =
-                handler_with_store(producer, config.clone());
+            let (handler, store, _dir, project) = handler_with_store(producer, config.clone());
             let mut route = binding(project.to_str().unwrap(), "ses");
             route.config = config;
             route.principal = Some(subc_protocol::Principal::Reserved {
