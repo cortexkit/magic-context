@@ -16750,23 +16750,6 @@ mod tests {
         }
     }
 
-    fn big_messages_from(start_ordinal: u64) -> Vec<CkIngressMessage> {
-        (0..80)
-            .map(|idx| {
-                let ordinal = start_ordinal + idx;
-                ck(
-                    &format!("m{ordinal}"),
-                    ordinal,
-                    &format!("message {ordinal} {}", "word ".repeat(800)),
-                )
-            })
-            .collect()
-    }
-
-    pub(super) fn big_messages() -> Vec<CkIngressMessage> {
-        big_messages_from(1)
-    }
-
     fn request_with_usage(
         messages: Vec<CkIngressMessage>,
         current_total_input_tokens: u64,
@@ -18071,15 +18054,15 @@ mod tests {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
 
-        // A flat body with kind="transform" routes to the transform handler.
+        // A flat body with kind="transform" names a retired route and is refused by name.
         let transform = handler
             .dispatch_value(7, request(vec![ck("m1", 1, "hello")]))
             .await;
-        let transform_body: Value = match transform {
-            HandlerOutcome::Response(bytes) => serde_json::from_slice(&bytes).unwrap(),
-            other => panic!("transform should respond, got {other:?}"),
-        };
-        assert_eq!(transform_body["status"], "ok");
+        assert!(
+            matches!(&transform, HandlerOutcome::Error { code, message }
+                if code == RETIRED_ROUTE_CODE && message == "transform"),
+            "{transform:?}"
+        );
 
         // Explicit echo: opt-in debugging arm still works when asked for by name.
         let echo = handler
@@ -20623,17 +20606,6 @@ mod tests {
     /// though it completes fine. Time-bounded polling makes the wait load-immune.
     const TEST_WAIT_BUDGET: Duration = Duration::from_secs(10);
     const TEST_WAIT_POLL: Duration = Duration::from_millis(2);
-
-    async fn wait_for_idle(store: &McStore) {
-        let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
-        while std::time::Instant::now() < deadline {
-            if store.load("ses").unwrap().meta.historian.state == HistorianPhase::Idle {
-                return;
-            }
-            tokio::time::sleep(TEST_WAIT_POLL).await;
-        }
-        panic!("historian did not return to idle");
-    }
 
     async fn wait_for_count(value: &AtomicUsize, expected: usize) {
         let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;

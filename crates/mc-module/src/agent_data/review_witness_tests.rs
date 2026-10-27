@@ -255,7 +255,7 @@ async fn review_session_diagnostics_refuse_released_data() {
     let mut p = params(&refs);
     p["holder"] = json!("other-Mac");
     reply(call(&h, role::ops::RELEASE, p).await);
-    for method in ["transform", "status", "health", "diagnostics"] {
+    for method in ["session.status", "status", "health", "diagnostics"] {
         assert_eq!(
             refusal(
                 h.dispatch_value(1, json!({"method":method,"session_id":SESSION}))

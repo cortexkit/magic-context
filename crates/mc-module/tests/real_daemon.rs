@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
-    sync::{Mutex, OnceLock},
+    sync::OnceLock,
     time::Duration,
 };
 

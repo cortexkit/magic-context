@@ -68,7 +68,13 @@ fn route(harness: &str, activated: bool, broca: bool) -> Route {
         ..Default::default()
     });
     let mut settings = json!({"dreamer": {"tasks": {}}});
-    settings["dreamer"][harness] = json!({"model": "anthropic/claude-sonnet-4-5"});
+    // Models resolve under the harness's own key; OpenCode 2 reads OpenCode's.
+    let key = if harness == "opencode2" {
+        "opencode"
+    } else {
+        harness
+    };
+    settings["dreamer"][key] = json!({"model": "anthropic/claude-sonnet-4-5"});
     handler.fixed_dream_settings = Some(settings);
     handler.dream_wiring = Some(Wiring {
         broca,
