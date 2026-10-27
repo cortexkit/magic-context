@@ -34288,6 +34288,7 @@ pub(crate) mod tests {
     include!("transform/temporal_admission_tests.rs");
     include!("transform/tool_arc_admission_tests.rs");
     include!("transform/pass_decision_vector_tests.rs");
+    include!("transform/pass_decision_review_witness_tests.rs");
     include!("tests/signed_prefix_hold.rs");
     include!("tests/signed_prefix_hold_review.rs");
     include!("tests/image_stripping_review_witness.rs");
