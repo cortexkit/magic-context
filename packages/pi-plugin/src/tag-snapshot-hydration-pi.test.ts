@@ -1052,6 +1052,7 @@ function controlledHydration(db: Database) {
 		finish: () => void;
 	}> = [];
 	let changed = Promise.withResolvers<void>();
+	let finishing = false;
 	__setPiTagSnapshotWorkerForTests(db, (request) => {
 		const result = Promise.withResolvers<WorkerResult>();
 		const release = Promise.withResolvers<void>();
@@ -1065,16 +1066,18 @@ function controlledHydration(db: Database) {
 				generation: { revision: "0", durable: 0 },
 			});
 		};
+		const finish = () => {
+			publish();
+			release.resolve();
+		};
 		jobs.push({
 			sessionId: request.sessionId,
 			cancellations: () => cancellations,
 			publish,
 			release: () => release.resolve(),
-			finish: () => {
-				publish();
-				release.resolve();
-			},
+			finish,
 		});
+		if (finishing) finish();
 		const notification = changed;
 		changed = Promise.withResolvers<void>();
 		notification.resolve();
@@ -1091,49 +1094,85 @@ function controlledHydration(db: Database) {
 		while (jobs.length <= index) await changed.promise;
 		return jobs[index]!;
 	};
-	return { jobs, next };
+	return {
+		jobs,
+		next,
+		finishAll() {
+			// Releasing one worker can start queued reads during teardown. Finish
+			// those too so a failed assertion cannot block drainPiTagSnapshotSession.
+			finishing = true;
+			for (const job of jobs) job.finish();
+		},
+	};
 }
 
 it("returning to a preempted hydration waits for release and does not poison the next session", async () => {
 	for (const resolveBeforeCancel of [false, true]) {
 		const { db, close } = fixture();
 		const controlled = controlledHydration(db);
-		try {
-			prewarmPiTagSnapshot(db, "a");
-			const first = await controlled.next(0);
-			if (resolveBeforeCancel) first.publish();
-			prewarmPiTagSnapshot(db, "b");
-			prewarmPiTagSnapshot(db, "a");
+		const budgets: PiContextBudget[] = [];
+		const turns: Promise<unknown>[] = [];
+		const turn = (sessionId: string) => {
+			const budget = new PiContextBudget();
+			budgets.push(budget);
 			const ready = Promise.resolve(
-				ensurePiTagSnapshotReady(db, "a", new PiContextBudget()),
+				ensurePiTagSnapshotReady(db, sessionId, budget),
 			).then(
 				() => "ready",
 				(error: unknown) => error,
 			);
+			turns.push(ready);
+			return ready;
+		};
+		try {
+			prewarmPiTagSnapshot(db, "a");
+			const first = await controlled.next(0);
+			if (resolveBeforeCancel) first.publish();
+			// Only a foreground turn may preempt another session's unclaimed prewarm.
+			const bReady = turn("b");
+			prewarmPiTagSnapshot(db, "a");
+			const ready = turn("a");
+			await new Promise<void>((resolve) => setImmediate(resolve));
 			expect(first.cancellations()).toBe(1);
 			expect(controlled.jobs).toHaveLength(1);
+			expect(() => getPiTagSnapshotView(db, "a")).toThrow(
+				"tag snapshot is not ready",
+			);
 			first.release();
 			const outcome = await Promise.race([
 				controlled.next(1).then(() => "started"),
 				ready,
+				bReady,
 			]);
 			expect(outcome).toBe("started");
 			const second = await controlled.next(1);
-			expect(second.sessionId).toBe("a");
+			expect(second.sessionId).toBe("b");
+			expect(second.cancellations()).toBe(0);
 			second.finish();
-			expect(await ready).toBe("ready");
-			const nextReady = Promise.resolve(
-				ensurePiTagSnapshotReady(db, "b", new PiContextBudget()),
-			);
-			const third = await controlled.next(2);
-			expect(third.sessionId).toBe("b");
-			third.finish();
-			await nextReady;
+			expect(await bReady).toBe("ready");
 			expect(getPiTagSnapshotView(db, "b")).toEqual([]);
+			const third = await controlled.next(2);
+			expect(third.sessionId).toBe("a");
+			expect(() => getPiTagSnapshotView(db, "a")).toThrow(
+				"tag snapshot is not ready",
+			);
+			third.finish();
+			expect(await ready).toBe("ready");
+			expect(getPiTagSnapshotView(db, "a")).toEqual([]);
+			expect(first.cancellations()).toBe(1);
+			const nextReady = turn("c");
+			const fourth = await controlled.next(3);
+			expect(fourth.sessionId).toBe("c");
+			fourth.finish();
+			expect(await nextReady).toBe("ready");
+			expect(getPiTagSnapshotView(db, "c")).toEqual([]);
 		} finally {
-			for (const job of controlled.jobs) job.finish();
+			for (const budget of budgets) budget.cancel();
+			controlled.finishAll();
+			await Promise.allSettled(turns);
 			await drainPiTagSnapshotSession("a");
 			await drainPiTagSnapshotSession("b");
+			await drainPiTagSnapshotSession("c");
 			close();
 		}
 	}
@@ -1164,7 +1203,7 @@ it("cancelled prewarm is never shared by readiness before its worker releases", 
 		expect(await ready).toBe("ready");
 		expect(getPiTagSnapshotView(db, "a")).toEqual([]);
 	} finally {
-		for (const job of controlled.jobs) job.finish();
+		controlled.finishAll();
 		await drainPiTagSnapshotSession("a");
 		close();
 	}
