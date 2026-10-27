@@ -117,6 +117,7 @@ fn ck_mc_pass_decision(inputs: &PassDecisionVectorInputs) -> PassDecisionVectorO
         render_config_changed: false,
         cached_m1_missing: false,
         hard_fold_prices_mutations: inputs.executed_fold,
+        idle_only_hard_fold: idle_ttl_fired && !inputs.executed_fold,
         reconcile_hard_due: false,
         lineage_force_hard: false,
         m1_changed,

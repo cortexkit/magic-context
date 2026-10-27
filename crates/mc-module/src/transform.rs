@@ -6088,6 +6088,12 @@ fn apply_once(
         render_config_changed,
         cached_m1_missing: cached_m1_missing(&loaded.core),
         hard_fold_prices_mutations,
+        idle_only_hard_fold: idle_fold_due
+            && !(pre_snapshot_inputs_changed
+                || first_fold_due
+                || boundary_divergence_recut.is_some()
+                || system_absorb_hard_due
+                || external_revision_changed),
         reconcile_hard_due,
         lineage_force_hard: lineage_state.force_hard,
         m1_changed: current_m1_digest != applied_m1_revision,
@@ -6104,7 +6110,7 @@ fn apply_once(
     // A rebuild that is not the emergency itself. It is the only thing that waives the
     // emergency minimum: the force-band edge and the 95% backstop permit a rewrite but do
     // not pay for one.
-    let emergency_minimum_waived = rides.independent_rebuild;
+    let emergency_minimum_waived = rides.rewrite_already_priced;
     // Invariant 3's bounded execute exception applies to a primary execute pass that no
     // other ride rebuilds. A summary that can still come (a historian or wrap-up run in
     // flight, or a publication waiting behind a frozen signed head) holds the queued work
@@ -10231,6 +10237,8 @@ struct PassRideInputs {
     render_config_changed: bool,
     cached_m1_missing: bool,
     hard_fold_prices_mutations: bool,
+    /// The only HARD trigger on this pass is the expired provider cache (`idle_fold_due`).
+    idle_only_hard_fold: bool,
     reconcile_hard_due: bool,
     lineage_force_hard: bool,
     /// Published history or memory changed the m1 this pass would render.
@@ -10256,6 +10264,12 @@ struct PassRides {
     subagent_execute_permitted: bool,
     /// Any ride at all: the shared permission every reduction lane consults.
     supersession_ride_available: bool,
+    /// A rewrite this pass pays for whatever the emergency does: the independent rebuild
+    /// without an expired cache that only refolds. Mirrors the TypeScript
+    /// `emergencyRewriteAlreadyPriced`, where an idle expiry prices the pass only while a
+    /// signed turn is held (`heldIdleExpiryRebuild`) or when its fold changes the served
+    /// prefix. It re-arms a spent force episode and waives the emergency minimum.
+    rewrite_already_priced: bool,
 }
 
 fn pass_rides(inputs: &PassRideInputs) -> PassRides {
@@ -10268,6 +10282,7 @@ fn pass_rides(inputs: &PassRideInputs) -> PassRides {
         render_config_changed,
         cached_m1_missing,
         hard_fold_prices_mutations,
+        idle_only_hard_fold,
         reconcile_hard_due,
         lineage_force_hard,
         m1_changed,
@@ -10278,23 +10293,28 @@ fn pass_rides(inputs: &PassRideInputs) -> PassRides {
         head_rebuild_forced,
         force_episode_available,
     } = *inputs;
-    let independent_rebuild = raw_rebuild
-        || (prefix_materialization_enabled
-            && (!initialized
-                || render_config_changed
-                || cached_m1_missing
-                || hard_fold_prices_mutations
-                || reconcile_hard_due
-                || lineage_force_hard
-                || (pass != scheduler::PassDecision::Defer && m1_changed)))
-        || (flush_armed && !signed_prefix_hold)
-        || (prefix_materialization_enabled && idle_ttl_fired)
-        // An active signed turn keeps the optional m0/m1 rebuilds above disabled, but a pass
-        // whose head cannot be replayed, or whose provider cache already expired, is a full
-        // cache write like any other: queued work is applied on it, to blocks after the kept
-        // signed thinking only (`active_thinking_prefix_edit_ids`). On the expired pass the
-        // head itself still replays (`signed_head_frozen`).
-        || (open_signed_turn && (head_rebuild_forced || (!is_subagent && idle_ttl_fired)));
+    let rebuild_without_idle = |hard_fold: bool| {
+        raw_rebuild
+            || (prefix_materialization_enabled
+                && (!initialized
+                    || render_config_changed
+                    || cached_m1_missing
+                    || hard_fold
+                    || reconcile_hard_due
+                    || lineage_force_hard
+                    || (pass != scheduler::PassDecision::Defer && m1_changed)))
+            || (flush_armed && !signed_prefix_hold)
+            // An active signed turn keeps the optional m0/m1 rebuilds above disabled, but a
+            // pass whose head cannot be replayed, or whose provider cache already expired, is a
+            // full cache write like any other: queued work is applied on it, to blocks after
+            // the kept signed thinking only (`active_thinking_prefix_edit_ids`). On the expired
+            // pass the head itself still replays (`signed_head_frozen`).
+            || (open_signed_turn && (head_rebuild_forced || (!is_subagent && idle_ttl_fired)))
+    };
+    let independent_rebuild = rebuild_without_idle(hard_fold_prices_mutations)
+        || (prefix_materialization_enabled && idle_ttl_fired);
+    let rewrite_already_priced =
+        rebuild_without_idle(hard_fold_prices_mutations && !idle_only_hard_fold);
     // A subagent's only permission to apply queued drops and cleanup is a non-Defer scheduler
     // decision. A signed-prefix hold withholds it exactly as a scheduler Defer would, so a
     // held subagent pass also replays its previous bytes.
@@ -10308,6 +10328,7 @@ fn pass_rides(inputs: &PassRideInputs) -> PassRides {
             || (is_subagent && subagent_execute_permitted)
             || force_episode_available
             || pass == scheduler::PassDecision::Emergency95,
+        rewrite_already_priced,
     }
 }
 
