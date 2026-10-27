@@ -427,10 +427,10 @@ async fn probe_passes(profile: &'static str) {
     }
 }
 
-// compaction-provider 0.7.4's profile transcripts do not get past the
-// probe's first notice in ck-mc yet, before any prune, for reasons outside
-// archive pruning. Each run is kept so it can be run on demand
-// (`--ignored`) once the cause named on it is fixed.
+// compaction-provider 0.7.4's profile transcripts stop the probe in ck-mc
+// before any prune is checked, for reasons outside archive pruning. Each run
+// is kept so it can be run on demand (`--ignored`) once the fixture named on
+// it is fixed.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "kit fixture serves shapes Broca never serves (compaction-provider 0.7.5 fixes): `text_with_state` parts, which Broca's serializer writes as plain `text`, and array `tool_result` outputs, which Broca always serves as `{kind: ...}`"]
@@ -439,19 +439,19 @@ async fn held_copies_follow_reasoning_pruned_owned_broca() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "kit transcript defect: the probe's pages name message `probe-m<o>` while the OpenCode body's `info.id` is `msg_probe_<o>`; ck-mc requires the runner's own id (history_unreadable: invalid OpenCode {info, parts} message)"]
+#[ignore = "kit transcript defect (compaction-provider 0.7.5 fixes): the probe's pages name message `probe-m<o>` while the OpenCode body's `info.id` is `msg_probe_<o>`; ck-mc requires the runner's own id (history_unreadable: invalid OpenCode {info, parts} message)"]
 async fn held_copies_follow_reasoning_pruned_opencode_aisdk() {
     probe_passes("opencode-aisdk").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "kit transcript defect: the probe's pages name message `probe-m<o>` while the pi entry's `id` is `probe-entry-<o>`; ck-mc requires the journal id (history_unreadable: Pi provider requires stable message entries)"]
+#[ignore = "kit transcript defect (compaction-provider 0.7.5 fixes): the probe's pages name message `probe-m<o>` while the pi entry's `id` is `probe-entry-<o>`; ck-mc requires the journal id (history_unreadable: Pi provider requires stable message entries)"]
 async fn held_copies_follow_reasoning_pruned_pi() {
     probe_passes("pi").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "kit transcript defect: the probe's first notice ends at an assistant tool_use whose result is not written, and ck-mc's engine refuses a pass that ends inside a tool arc (lineage protocol error: compaction range ends inside a tool arc)"]
+#[ignore = "kit transcript defect (compaction-provider 0.7.5 fixes): the probe's transcript ends at an assistant tool_use whose result is never written, so its notices complete but no view can compact through the open arc, and the probe needs a view after the prune"]
 async fn held_copies_follow_reasoning_pruned_anthropic_messages() {
     probe_passes("anthropic-messages").await;
 }
