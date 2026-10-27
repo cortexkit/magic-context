@@ -4680,13 +4680,28 @@ impl McHandler {
         let facts = self.decision_facts(&state);
         let already_completed = state.completed_seq >= notice.seq && !resynced;
         state.last_pass = None;
+        let mut waiting_for_result = false;
         if run_engine {
-            if let Err(error) = self.publish_async(0, &mut state, codec, resynced) {
-                drop(state);
-                self.mark_engine_failed(store, &notice.session_ref)?;
-                return Err(error);
+            match self.publish_async(0, &mut state, codec, resynced) {
+                Ok(_) => state.engine_failed = false,
+                // The transcript ends in a tool call whose result is not
+                // written yet. The runner sends a notice after every durable
+                // write, that call included (compaction-provider §5), so this
+                // notice is accepted like any other: nothing compacts through
+                // the open arc, and the notice completes. The engine pass is
+                // kept marked as failed so the result's own notice runs the
+                // pass rather than skipping it.
+                Err(error) if waiting_for_tool_result(&error) => {
+                    state.engine_failed = true;
+                    state.last_pass = None;
+                    waiting_for_result = true;
+                }
+                Err(error) => {
+                    drop(state);
+                    self.mark_engine_failed(store, &notice.session_ref)?;
+                    return Err(error);
+                }
             }
-            state.engine_failed = false;
         }
         let (decision, why) = match &state.last_pass {
             Some(pass) if pass.published => (
@@ -4697,6 +4712,10 @@ impl McHandler {
             None if already_completed => (
                 decision_log::Decision::Defer,
                 "notice_already_completed".into(),
+            ),
+            None if waiting_for_result => (
+                decision_log::Decision::Defer,
+                "waiting_for_tool_result".into(),
             ),
             None if run_engine => (decision_log::Decision::Defer, "nothing_to_read".into()),
             None => (
