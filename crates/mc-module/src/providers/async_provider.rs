@@ -19,6 +19,7 @@ mod historian_tail;
 mod history_expand;
 mod moved_session;
 pub(crate) mod offline_first_pass;
+mod pruned_reasoning;
 pub(crate) mod reminder_echoes;
 mod resident;
 #[cfg(test)]
@@ -252,6 +253,45 @@ pub(crate) struct AsyncRecord {
     /// skipped pass would not look at.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     engine_failed: bool,
+    /// The runner's archive-prune state (llm-runner `archive_prunes_reasoning`)
+    /// whose generation these held copies were last reconciled with; see
+    /// `pruned_reasoning`. Absent until the runner first reports a prune, so
+    /// records of sessions never pruned keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_pruned: Option<pruned_reasoning::PruneState>,
+    /// Messages whose held copy was replaced by the runner's pruned copy and
+    /// whose new block identity the engine has not committed yet. Every
+    /// engine pass declares them until one succeeds.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pruned_readopt: BTreeSet<String>,
+    /// The runner's prune record for held messages, from the pages that
+    /// served them: ordinal, then part key to prune kind. Views are checked
+    /// against it (`pruned_reasoning`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pruned_parts: BTreeMap<u64, BTreeMap<String, String>>,
+    /// Where a re-read for a new prune generation stopped when it ran out of
+    /// time, so the next Setup or notice carrying that generation continues
+    /// from there instead of reading the reconciled copies again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pruned_reconcile_cursor: Option<pruned_reasoning::ReconcileCursor>,
+    /// Held copies changed by a prune: the runner's next request no longer
+    /// matches its prompt cache from the first pruned message on, so the next
+    /// engine pass runs once as a rebuild, as a ride does, and lands pending
+    /// cleanup in it. Cleared by the first rebuild pass that succeeds.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pruned_rebuild_pending: bool,
+    /// A rewrite ride (`ttl_expired`, `model_change`, `account_change`,
+    /// `surface_change`) rebuilt this conversation since the last notice
+    /// completed. Its request rewrote the runner's prompt cache from the
+    /// runner's own current bytes, so a prune reconciled before the next
+    /// notice completes needs no second rebuild. Kept only for a session that
+    /// accepts pruning; cleared when a notice completes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    rode_since_notice: bool,
+    /// The prune state a `session.read` page reported during the current
+    /// read, when it differs from the reconciled one.
+    #[serde(skip)]
+    page_reasoning_pruned: Option<pruned_reasoning::PruneState>,
     /// What the last engine pass decided, for the notice decision log line.
     #[serde(skip)]
     last_pass: Option<decision_log::Pass>,
@@ -534,6 +574,39 @@ fn waiting_for_tool_result(failure: &HandlerOutcome) -> bool {
             && message == "lineage protocol error: compaction range ends inside a tool arc")
 }
 
+/// Whether the newest assistant turn holds a tool call with no result yet:
+/// the one open arc a later write of the transcript can still close. A
+/// result in the same message (an OpenCode tool part holds both) or in a
+/// later one answers the call.
+fn newest_turn_awaits_a_result(state: &State, codec: codec::Codec) -> Result<bool, HandlerOutcome> {
+    let mut answered = BTreeSet::new();
+    for entry in state.entries.values().rev() {
+        let decoded = decoded_entry(codec, &entry.inbound()?)?;
+        let mut calls = Vec::new();
+        for block in &decoded.ck.content {
+            match &block.kind {
+                ck_wire::CkKind::ToolResult {
+                    id,
+                    provider_executed: false,
+                    ..
+                } => {
+                    answered.insert(id.clone());
+                }
+                ck_wire::CkKind::ToolCall {
+                    id,
+                    provider_executed: false,
+                    ..
+                } => calls.push(id.clone()),
+                _ => {}
+            }
+        }
+        if decoded.ck.role == "assistant" {
+            return Ok(calls.iter().any(|id| !answered.contains(id)));
+        }
+    }
+    Ok(false)
+}
+
 /// Where an engine baseline (`last_produced` / `last_applied`) is stored.
 /// A baseline that is one of the retained published views is only named by
 /// version, so acknowledging a view never copies the whole transcript again.
@@ -584,6 +657,9 @@ struct Journal {
     forget_tags_of: Vec<String>,
     /// Stored entries below this ordinal go on the next save (a cut).
     truncate_below: Option<u64>,
+    /// Stored entries rewritten in place on the next save: held copies the
+    /// runner pruned at rest, reconciled by `pruned_reasoning`.
+    replaced: BTreeSet<u64>,
     /// The cut seed changed and is written on the next save.
     cut_seed_dirty: bool,
     /// Identities of the baselines as last stored.
@@ -1296,6 +1372,24 @@ impl State {
                 self.entry_index(*ordinal)?,
             ));
         }
+        // An entry not yet stored goes out with the appended ones, already in
+        // its replaced form; only stored ones are rewritten.
+        let mut replaced = Vec::new();
+        for ordinal in &self.journal.replaced {
+            if self
+                .journal
+                .persisted_through
+                .is_some_and(|through| *ordinal <= through)
+            {
+                if let Some(entry) = self.entries.get(ordinal) {
+                    replaced.push((
+                        *ordinal,
+                        entry.raw().to_owned(),
+                        self.entry_index(*ordinal)?,
+                    ));
+                }
+            }
+        }
         let namespace = self.namespace();
         self.prepare_cut_metadata(store)?;
         if self.journal.cut_seed_dirty {
@@ -1369,6 +1463,9 @@ impl State {
         for (ordinal, entry, index) in appended {
             save.append_entry(ordinal, entry, index);
         }
+        for (ordinal, entry, index) in replaced {
+            save.replace_entry(ordinal, entry, index);
+        }
         for (slot, view) in baselines {
             save.baseline(slot, view.map(|json| json.to_string()));
         }
@@ -1400,6 +1497,7 @@ impl State {
         }
         self.journal.truncate = None;
         self.journal.truncate_below = None;
+        self.journal.replaced.clear();
         self.journal.cut_seed_dirty = false;
         self.pending_cut_seeds.clear();
         self.pending_cut_metadata.clear();
@@ -2078,6 +2176,11 @@ impl State {
         self.engine = transform::compaction::State::new(self.reference(), self.engine.preset);
         self.produced_view = None;
         self.applied_view = None;
+        // The next generation's engine holds no identity to re-adopt, and the
+        // transcript is read again with its prune record.
+        self.pruned_readopt.clear();
+        self.pruned_parts.clear();
+        self.pruned_reconcile_cursor = None;
         for (version, view) in &self.published_engine {
             if let Some(edits) = &view.frozen_edits {
                 self.retired_frozen
@@ -2117,6 +2220,9 @@ fn with_checkpoint(answer: Value, checkpoint: Option<contract::setup::SetupCheck
     if let Some(wait) = decoded.ride_wait_ms() {
         built = built.with_ride_wait_ms(wait);
     }
+    // The pruning permission goes out exactly as the session's stored answer
+    // has it: absent for a session set up before ck-mc accepted pruning.
+    built = built.with_accepts(decoded.accepts().to_vec());
     if let Some(checkpoint) = checkpoint {
         built = built.with_checkpoint(checkpoint);
     }
@@ -2210,6 +2316,7 @@ fn load(store: &McStore, reference: &str) -> Result<Option<State>, HandlerOutcom
         indexed_through: through,
         truncate: None,
         truncate_below: None,
+        replaced: BTreeSet::new(),
         cut_seed_dirty: false,
         clear_published: false,
         forget_tags_of: Vec::new(),
@@ -2480,9 +2587,26 @@ impl McHandler {
             .transpose()?
             .unwrap_or(false);
         if request.descends_from.is_some() {
-            return self
+            let answer = self
                 .setup_cut_descent(binding, &request, existing, store)
-                .await;
+                .await?;
+            // A post-prune Setup can name the new lineage too: reconcile the
+            // window's held copies before the run renders from them.
+            if let Some(seen) = request.reasoning_pruned.filter(|seen| seen.valid()) {
+                let ready = serde_json::from_slice::<Value>(&answer)
+                    .is_ok_and(|answer| answer["answer"] == "ready");
+                if let Some(state) = load_head(store, &reference)?.filter(|state| {
+                    ready
+                        && state.lineage == request.lineage_id
+                        && state.reasoning_pruned_generation() != Some(seen.generation)
+                }) {
+                    drop(state);
+                    let mut initial = self.reconcile_at_setup(store, &reference, seen).await?;
+                    initial["request_id"] = json!(request.request_id);
+                    return bytes(&initial);
+                }
+            }
+            return Ok(answer);
         }
         if let Some(old) = existing
             .as_ref()
@@ -2495,6 +2619,11 @@ impl McHandler {
                 .map_err(transient)?;
             let mut state =
                 self.new_async_record(channel, binding, &request, key, None, generation)?;
+            // A new lineage of an existing conversation keeps its pruning
+            // permission as it was; only new conversations opt in here.
+            if !old.accepts_pruning() {
+                state.withdraw_pruning_permission()?;
+            }
             state.cache_policy = old.cache_policy.clone();
             state.published_cuts = old.published_cuts.clone();
             state.retired_cut_stages = old.retired_cut_stages.clone();
@@ -2590,6 +2719,16 @@ impl McHandler {
             {
                 return Err(invalid_field("params", "async setup plan is frozen"));
             }
+            // The post-prune Setup (compaction-provider §4): the runner
+            // pruned this session since ck-mc last reconciled, and calls
+            // Setup before any other call for its run. Re-read the held copies
+            // the prune can have changed before anything renders from them.
+            let reconciled = match request.reasoning_pruned.filter(|seen| seen.valid()) {
+                Some(seen) if state.reasoning_pruned_generation() != Some(seen.generation) => {
+                    Some(self.reconcile_at_setup(store, &reference, seen).await?)
+                }
+                _ => None,
+            };
             let checkpoint = state
                 .standalone_move
                 .as_ref()
@@ -2619,7 +2758,7 @@ impl McHandler {
             {
                 return bytes(&refusal);
             }
-            let mut answer = state.initial;
+            let mut answer = reconciled.unwrap_or(state.initial);
             answer["request_id"] = json!(request.request_id);
             return bytes(&with_checkpoint(answer, checkpoint));
         }
@@ -2742,6 +2881,13 @@ impl McHandler {
             partial_read_seq: None,
             failure: None,
             engine_failed: false,
+            reasoning_pruned: request.reasoning_pruned.filter(|state| state.valid()),
+            pruned_readopt: BTreeSet::new(),
+            pruned_parts: BTreeMap::new(),
+            pruned_reconcile_cursor: None,
+            pruned_rebuild_pending: false,
+            rode_since_notice: false,
+            page_reasoning_pruned: None,
             last_pass: None,
             last_discarded_drops: 0,
             last_transferred_drops: 0,
@@ -2855,7 +3001,11 @@ impl McHandler {
             decode(&serde_json::to_value(wire).map_err(transient)?)?,
         )
         .with_ceiling(CeilingPolicy::new(0.95, 300_000).with_on_overflow())
-        .with_cache_ttl(state.cache_policy.resolve(&request.model));
+        .with_cache_ttl(state.cache_policy.resolve(&request.model))
+        // A new record reconciles its held copies with every prune the runner
+        // reports (`pruned_reasoning`), so the runner may prune this session
+        // once it is archived and idle.
+        .with_accepts(vec![compact::setup::ACCEPTS_PRUNED_REASONING.into()]);
         if let Some(cap) = request.ride_wait_max_ms {
             if cap == 0 {
                 return Err(invalid_field("ride_wait_max_ms", "must be positive"));
@@ -3079,6 +3229,7 @@ impl McHandler {
         )?;
         template.logical_prefix = prefix;
         template.runner_owned_reminders = true;
+        template.pruned_reasoning_readopt = state.pruned_readopt.clone();
         template.native_reminder_strip_pending =
             state.reminder_cadence.as_ref().is_some_and(|cadence| {
                 state
@@ -4381,6 +4532,56 @@ impl McHandler {
         }
         let codec = codec::Codec::from_params(&Value::Object(state.setup.params.clone()))?;
         let mut resynced = state.resync || descended;
+        // Archive pruning (llm-runner `archive_prunes_reasoning`): a notice
+        // carrying a prune generation this record has not reconciled, or a
+        // refusal of a view that put pruned content back, re-reads the held
+        // copies the prune can have changed before anything renders.
+        let refused_restore = notice.events.iter().any(|event| {
+            matches!(event, notice::Event::ViewRefused { reason, .. }
+                if reason == notice::refusal_reasons::PRUNED_REASONING_RESTORED)
+        });
+        let mut seen_prune = notice.reasoning_pruned.filter(|seen| seen.valid());
+        if refused_restore && !duplicate {
+            // The refused view did not apply, so a ride since the last
+            // notice may not have rebuilt anything: a re-read below that
+            // replaces a held copy sets the prune's one rebuild
+            // (`accept_pruned_reread`). The refusal itself forces no rebuild:
+            // it can name a view older than the rebuild that already ran, and
+            // a re-read that replaces nothing leaves copies that are
+            // reconciled already, which the next view is built from.
+            state.rode_since_notice = false;
+            if seen_prune.is_none() {
+                seen_prune = self
+                    .runner_prune_state(&state, self.notice_read_budget())
+                    .await?;
+            }
+        }
+        if let Some(seen) = seen_prune.filter(|_| !resuming) {
+            match self
+                .reconcile_pruned_reasoning(&mut state, seen, self.notice_read_budget())
+                .await
+            {
+                Ok(pruned_reasoning::Reconciled::Complete) => {}
+                Ok(pruned_reasoning::Reconciled::Incomplete) => {
+                    // Keep the copies already replaced; the retry continues.
+                    state.save(store, &[])?;
+                    self.checkin(state);
+                    return Err(transient(
+                        "async prune reconcile incomplete; the retry continues it",
+                    ));
+                }
+                Err(error) => {
+                    // Not a pruning: the transcript changed. Read it again
+                    // from scratch, as for any changed re-read; what is read
+                    // then is the runner's pruned bytes.
+                    tracing::warn!(session_ref=%notice.session_ref, ?error, "async prune reconcile refused; reading the conversation again");
+                    state.reset(store)?;
+                    state.reasoning_pruned = Some(seen);
+                    state.save(store, &[])?;
+                    resynced = true;
+                }
+            }
+        }
         #[cfg(test)]
         let phase = scaling_tests::save_meter::start_kind(&notice.session_ref, "phase:read");
         for attempt in 0..2 {
@@ -4435,6 +4636,26 @@ impl McHandler {
                 read?;
                 tracing::warn!(session_ref=%notice.session_ref,"async digest mismatch; waiting for a matching notice");
                 return Ok(());
+            }
+        }
+        // A page reported a prune generation the notice did not carry.
+        if let Some(seen) = state.page_reasoning_pruned.take() {
+            match self
+                .reconcile_pruned_reasoning(&mut state, seen, self.notice_read_budget())
+                .await
+            {
+                Ok(pruned_reasoning::Reconciled::Complete) => {}
+                outcome => {
+                    if outcome.is_err() {
+                        state.reset(store)?;
+                        state.reasoning_pruned = Some(seen);
+                    }
+                    state.save_partial_read(store, codec)?;
+                    self.checkin(state);
+                    return Err(transient(
+                        "async prune reconcile did not finish; the retry continues it",
+                    ));
+                }
             }
         }
         #[cfg(test)]
@@ -4503,13 +4724,33 @@ impl McHandler {
         let facts = self.decision_facts(&state);
         let already_completed = state.completed_seq >= notice.seq && !resynced;
         state.last_pass = None;
+        let mut waiting_for_result = false;
         if run_engine {
-            if let Err(error) = self.publish_async(0, &mut state, codec, resynced) {
-                drop(state);
-                self.mark_engine_failed(store, &notice.session_ref)?;
-                return Err(error);
+            match self.publish_async(0, &mut state, codec, resynced) {
+                Ok(_) => state.engine_failed = false,
+                // The newest assistant turn ends in a tool call whose result
+                // is not written yet. The runner sends a notice after every
+                // durable write, that call included (compaction-provider
+                // §5), so this notice is accepted like any other: nothing
+                // compacts through the open arc, and the notice completes.
+                // The engine pass is kept marked as failed so the result's own
+                // notice runs the pass rather than skipping it. A call left
+                // unanswered earlier in the transcript is not waiting for
+                // anything, so it keeps the failure path.
+                Err(error)
+                    if waiting_for_tool_result(&error)
+                        && newest_turn_awaits_a_result(&state, codec).unwrap_or(false) =>
+                {
+                    state.engine_failed = true;
+                    state.last_pass = None;
+                    waiting_for_result = true;
+                }
+                Err(error) => {
+                    drop(state);
+                    self.mark_engine_failed(store, &notice.session_ref)?;
+                    return Err(error);
+                }
             }
-            state.engine_failed = false;
         }
         let (decision, why) = match &state.last_pass {
             Some(pass) if pass.published => (
@@ -4520,6 +4761,10 @@ impl McHandler {
             None if already_completed => (
                 decision_log::Decision::Defer,
                 "notice_already_completed".into(),
+            ),
+            None if waiting_for_result => (
+                decision_log::Decision::Defer,
+                "waiting_for_tool_result".into(),
             ),
             None if run_engine => (decision_log::Decision::Defer, "nothing_to_read".into()),
             None => (
@@ -4540,6 +4785,8 @@ impl McHandler {
                 .collect::<Vec<_>>(),
         ));
         state.completed_seq = state.seq;
+        // A ride from here on is a new rebuild the next prune can count on.
+        state.rode_since_notice = false;
         let drops_applied = store
             .load_pending_agent_drops(&state.namespace())
             .map_err(transient)?
@@ -4663,6 +4910,14 @@ impl McHandler {
             }
             state.lineage = Some(lineage.into());
             let entries: Vec<ReadMessage> = decode(&page["messages"])?;
+            let pruned = pruned_reasoning::listed(&page);
+            // A page repeats the runner's prune state; one newer than the
+            // reconciled state is reconciled once the read completes.
+            if let Some(reported) = pruned_reasoning::reported(&page)
+                .filter(|reported| state.reasoning_pruned_generation() != Some(reported.generation))
+            {
+                state.page_reasoning_pruned = Some(reported);
+            }
             if entries.is_empty()
                 && state
                     .entries
@@ -4684,8 +4939,14 @@ impl McHandler {
                     .checked_add(1)
                     .ok_or_else(|| invalid("ordinal exhausted"))?;
                 if let Some(held) = state.entries.get(&entry.ordinal) {
-                    if !stable_entry(&held.read()?, &entry) {
-                        return Err(transient("async entry changed on re-read"));
+                    let held = held.read()?;
+                    if !stable_entry(&held, &entry) {
+                        // The one change a re-read may carry: reasoning the
+                        // runner pruned at rest, listed on the page.
+                        let rows = pruned.get(&entry.mid).map_or(&[][..], Vec::as_slice);
+                        if !state.accept_pruned_reread(&held, &entry, rows)? {
+                            return Err(transient("async entry changed on re-read"));
+                        }
                     }
                 } else {
                     let codec =
@@ -4703,6 +4964,10 @@ impl McHandler {
                     #[cfg(test)]
                     let held = held.counted_as(state.reference());
                     state.entries.insert(entry.ordinal, Arc::new(held));
+                    state.record_pruned_parts(
+                        entry.ordinal,
+                        pruned.get(&entry.mid).map_or(&[][..], Vec::as_slice),
+                    );
                     // Undo can reintroduce an archived source after the first
                     // post-Setup read. Look up the newly held window again so
                     // an acknowledged drop cannot disappear on a later page.
@@ -5007,6 +5272,10 @@ impl McHandler {
         if state.resync || state.entries.is_empty() {
             return Ok(None);
         }
+        // Held copies the runner pruned make this one pass a rebuild, as a
+        // rewrite ride does.
+        let pruned_rebuild = state.pruned_rebuild_pending && !ride;
+        let ride = ride || state.pruned_rebuild_pending;
         let store = self
             .store
             .get()
@@ -5061,10 +5330,15 @@ impl McHandler {
 
         let (template, output) =
             self.async_engine(channel, &binding, state, codec, &status, &mut engine)?;
+        // The pass committed the pruned messages' identities and ran as the
+        // rebuild the prune called for.
+        state.pruned_readopt.clear();
+        state.pruned_rebuild_pending = false;
         state.last_pass = Some(decision_log::Pass {
             action: output.engine.response.action.clone(),
             reason: output.engine.response.materialize_reason.clone(),
             rebuild: ride,
+            pruned_rebuild,
             published: false,
         });
 
@@ -5185,9 +5459,13 @@ impl McHandler {
         #[cfg(test)]
         let _meter = scaling_tests::save_meter::start_kind(&state.reference(), "pub:ranges");
         let (mut ranges, kept) = ranges(state, codec, &wire, &candidate, coverage)?;
-        state
-            .frozen_edits
-            .apply(&state.mid_index, &state.entries, &kept, &mut ranges)?;
+        state.frozen_edits.apply_revised(
+            &state.mid_index,
+            &state.entries,
+            &kept,
+            &mut ranges,
+            |edit| state.without_restored_content(edit),
+        )?;
         if let Some(cadence) = &state.reminder_cadence {
             state.reminder_echoes.apply(
                 &cadence.ledger,
@@ -5285,6 +5563,21 @@ impl McHandler {
             // Empty window replacements can coalesce with the history head
             // during shaping. Keep the cut at an explicit range boundary.
             cut_runtime::split_head_at(&mut ranges, first);
+        }
+        // Never send back what the runner pruned (compaction-provider §7,
+        // `pruned_reasoning_restored`). Edits are built from reconciled held
+        // copies, but an acknowledged edit replayed from earlier bytes may
+        // still carry content the runner pruned: it is repaired from the
+        // reconciled held part when possible, and otherwise withheld so the
+        // part goes out as the runner's own bytes.
+        state.repair_restoring_edits(&mut ranges)?;
+        if state.replacement_restores_pruned(&ranges)? {
+            // Defence in depth: ck-mc authors no replacement that carries
+            // reasoning or a signature. Publish nothing on this pass.
+            tracing::warn!(session_ref=%state.reference(), reason="pruned_reasoning_restored", "async view withheld: a replace range would carry pruned content");
+            state.restored_head = restored_head;
+            state.adopt_engine(engine)?;
+            return Ok(None);
         }
         let version = store
             .reserve_async_compaction_version(&state.reference(), state.applied.unwrap_or(0))
@@ -5525,6 +5818,16 @@ impl McHandler {
             let cache_ttl = state.cache_ttl();
             let store = Arc::clone(store);
             let reference = request.session_ref.clone();
+            // A rewrite ride's request rewrites the runner's prompt cache from
+            // its own current bytes; a prune reconciled before the next
+            // notice completes then needs no rebuild of its own.
+            let rewrite = matches!(
+                request.cause,
+                ride::RideCause::TtlExpired
+                    | ride::RideCause::ModelChange
+                    | ride::RideCause::AccountChange
+                    | ride::RideCause::SurfaceChange
+            );
             let (view, pass) = tokio::task::spawn_blocking(move || {
                 let _serial = _serial;
                 let view = match worker.publish_async(0, &mut state, codec, true) {
@@ -5536,6 +5839,9 @@ impl McHandler {
                     }
                 };
                 state.engine_failed = false;
+                if rewrite && state.last_pass.is_some() && state.accepts_pruning() {
+                    state.rode_since_notice = true;
+                }
                 state.save(&store, &[])?;
                 let pass = state.last_pass.clone();
                 worker.checkin(state);
@@ -6347,6 +6653,7 @@ impl McHandler {
             ),
             (meta.last_model_key != model, "model_changed"),
             (state.engine_failed, "previous_engine_pass_failed"),
+            (state.pruned_rebuild_pending, "pruned_reasoning_rebuild"),
             (state.restored_head.is_some(), "restored_head"),
             (
                 state.engine.preset != transform::compaction::Preset::Head,

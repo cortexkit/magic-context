@@ -196,16 +196,21 @@ fn the_largest_well_formed_notice_fits_the_header_bound() {
     .with_last_usage(LastUsage::new(max, max, max, max))
     .with_applied_view_version(max)
     .with_descends_from(NoticeDescent::new("p".repeat(256), max, "b".repeat(64)))
+    .with_reasoning_pruned(
+        cortexkit_role_llm_runner::archive_prunes_reasoning::ReasoningPruned::new(max, max, max),
+    )
     .with_events(events);
     let encoded = notice.to_headers();
     assert!(encoded[notice::headers::EVENTS].len() <= notice::MAX_HEADER_VALUE_BYTES);
     assert_eq!(notice.check(), Ok(()));
     // Every value at its bound: `events` at 1,024 bytes, both lineage ids at
-    // 256, and the rest at their widest encodings.
+    // 256, and the rest at their widest encodings. compaction-provider 0.7.3
+    // added `reasoning_pruned` (`<generation>:<through>:<at_ms>`).
     let names: usize = notice::headers::NOTICE.iter().map(|n| n.len()).sum();
     let descent = 256 + 1 + 20 + 1 + 64;
-    let widest = names + 1024 + 4 * 20 + 3 + 256 + 32 + 64 + 5 * 20 + 256 + descent;
-    assert_eq!(widest, 2293);
+    let pruned = 3 * 20 + 2;
+    let widest = names + 1024 + 4 * 20 + 3 + 256 + 32 + 64 + 5 * 20 + 256 + descent + pruned;
+    assert_eq!(widest, 2371);
     assert!(widest <= notice::MAX_NOTICE_HEADER_BYTES);
     assert!(notice::header_bytes(&encoded) <= widest);
 }

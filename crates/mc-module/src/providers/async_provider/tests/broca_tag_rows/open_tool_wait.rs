@@ -145,8 +145,10 @@ async fn open_tool_ten_minutes_has_bounded_reads_and_passes() {
         (1, 1),
         "an open tool must wait for a notice"
     );
+    // The notice is accepted and completes; the engine pass stays marked
+    // failed so the result's notice runs it.
     assert!(rig.state().engine_failed);
-    assert_eq!(rig.state().completed_seq, 0);
+    assert_eq!(rig.state().completed_seq, 1);
     assert_eq!(numbers(&rig.state()), [1, 2, 3, 4]);
 }
 
@@ -157,7 +159,7 @@ async fn open_tool_result_notice_completes_without_changing_tags_or_view() {
     let rig = rig(dir.path(), &transcript[..5]).await;
     publish(&rig, 1).await;
     settle().await;
-    assert_eq!(rig.state().completed_seq, 0);
+    assert_eq!(rig.state().completed_seq, 1);
     *rig.runner.entries.lock().unwrap() = transcript.clone();
     rig.notice(2, 1_000, None).await;
     let state = rig.state();

@@ -254,12 +254,30 @@ impl FrozenEdits {
     /// a re-anchored drop must not leave its other side served. Last, each keep
     /// range's edits are put in the order the contract requires: by ordinal,
     /// then by the part's position in its message (`tool_arcs::sort_edits`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn apply(
         &self,
         mid_index: &BTreeMap<String, u64>,
         entries: &BTreeMap<u64, Arc<HeldEntry>>,
         kept: &tool_arcs::KeptMessages,
         ranges: &mut [view::ViewRange],
+    ) -> Result<(), HandlerOutcome> {
+        self.apply_revised(mid_index, entries, kept, ranges, |edit| Ok(Some(edit)))
+    }
+
+    /// `apply`, with each saved edit passed through `revise` first: it
+    /// returns the edit to replay, a corrected one (bytes acknowledged before
+    /// the runner pruned the part, rewritten as the runner rewrites its own
+    /// applied edits; see `pruned_reasoning`), or `None` to replay
+    /// nothing for that part, so the view keeps the edit this pass built from
+    /// the current held copy.
+    pub(super) fn apply_revised(
+        &self,
+        mid_index: &BTreeMap<String, u64>,
+        entries: &BTreeMap<u64, Arc<HeldEntry>>,
+        kept: &tool_arcs::KeptMessages,
+        ranges: &mut [view::ViewRange],
+        revise: impl Fn(view::PartEdit) -> Result<Option<view::PartEdit>, HandlerOutcome>,
     ) -> Result<(), HandlerOutcome> {
         let mut anchored: BTreeMap<u64, Vec<view::PartEdit>> = BTreeMap::new();
         let mut sources = HashMap::new();
@@ -279,6 +297,9 @@ impl FrozenEdits {
             let edit = match &part.bytes {
                 Some(bytes) => view::PartEdit::replace(*ordinal, &part.mid, &part.part, bytes),
                 None => view::PartEdit::drop(*ordinal, &part.mid, &part.part),
+            };
+            let Some(edit) = revise(edit)? else {
+                continue;
             };
             anchored.entry(*ordinal).or_default().push(edit);
         }

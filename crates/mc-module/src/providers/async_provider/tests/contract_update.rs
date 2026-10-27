@@ -174,18 +174,23 @@ async fn account_change_notice_event_is_recorded_and_never_rebuilds() {
     assert!(!line.contains(ACCOUNT), "the label is never logged: {line}");
 }
 
-/// ck-mc does not opt in to archive pruning: its Setup ready answer carries
-/// no `accepts` member, so no runner prunes reasoning in a session ck-mc
-/// compacts. Opting in waits for compaction-provider's revised pruning
-/// contract; until then a re-read that differs is refused and the session
-/// is read again from scratch, as before.
+/// compaction-provider 0.7.3: ck-mc reconciles its held copies with every
+/// prune the runner reports (`pruned_reasoning`), so a new session's Setup
+/// ready answer opts in with `accepts: ["pruned_reasoning"]`, and a repeat
+/// Setup answers it unchanged.
 #[tokio::test]
-async fn setup_answer_does_not_opt_in_to_archive_pruning() {
+async fn setup_answer_opts_new_sessions_in_to_archive_pruning() {
     let dir = tempfile::tempdir().unwrap();
     let rig = Rig::new(dir.path()).await;
     let answer: compact::setup::SetupAnswer = decode(&rig.state().initial).unwrap();
-    assert!(answer.accepts().is_empty());
-    assert!(rig.state().initial.get("accepts").is_none());
+    assert_eq!(
+        answer.accepts(),
+        &[compact::setup::ACCEPTS_PRUNED_REASONING]
+    );
+    let mut request = serde_json::to_value(&rig.state().setup).unwrap();
+    request["request_id"] = json!("again");
+    let again = rig.op("compaction.setup", request).await;
+    assert_eq!(again["accepts"], json!(["pruned_reasoning"]), "{again}");
 }
 
 /// A finished summary at low usage publishes nothing; the next notice at

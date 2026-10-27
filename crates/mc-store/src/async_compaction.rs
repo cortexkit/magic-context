@@ -545,6 +545,7 @@ impl McStore {
             truncate_entries: None,
             truncate_below: None,
             entries: Vec::new(),
+            replaced_entries: Vec::new(),
             baselines: Vec::new(),
             immutable_baselines: Vec::new(),
             active_cut_slot: None,
@@ -851,6 +852,7 @@ pub struct AsyncCompactionSave<'a> {
     truncate_entries: Option<Option<u64>>,
     truncate_below: Option<u64>,
     entries: Vec<(u64, String, String)>,
+    replaced_entries: Vec<(u64, String, String)>,
     baselines: Vec<(String, Option<String>)>,
     immutable_baselines: Vec<(String, String)>,
     active_cut_slot: Option<Option<String>>,
@@ -905,6 +907,23 @@ impl<'a> AsyncCompactionSave<'a> {
         self
     }
 
+    /// Rewrite one already stored held entry in place. Held entries are
+    /// otherwise immutable; the only rewrite the runner contract allows is
+    /// a re-read that differs from the stored copy in archive-pruned
+    /// reasoning alone (llm-runner `archive_prunes_reasoning`), whose
+    /// identities, ordering and write-time digests do not move. Rewriting an
+    /// ordinal that is not stored is an error, never an insert.
+    pub fn replace_entry(
+        &mut self,
+        ordinal: u64,
+        entry_json: String,
+        index_json: String,
+    ) -> &mut Self {
+        self.replaced_entries
+            .push((ordinal, entry_json, index_json));
+        self
+    }
+
     /// Store (`Some`) or remove (`None`) the baseline kept in `slot`.
     pub fn baseline(&mut self, slot: impl Into<String>, view_json: Option<String>) -> &mut Self {
         self.baselines.push((slot.into(), view_json));
@@ -952,6 +971,7 @@ impl<'a> AsyncCompactionSave<'a> {
             truncate_entries,
             truncate_below,
             ref entries,
+            ref replaced_entries,
             ref baselines,
             ref immutable_baselines,
             ref active_cut_slot,
@@ -983,6 +1003,19 @@ impl<'a> AsyncCompactionSave<'a> {
                 let mut insert = conn.prepare_cached("INSERT INTO mc_async_compaction_entries(session_ref,session,ordinal,entry_json,index_json,mid) VALUES(?1,?2,?3,?4,?5,CASE WHEN json_valid(?4) THEN json_extract(?4,'$.mid') END)")?;
                 for (ordinal, entry, index) in entries {
                     rows += insert.execute(params![session_ref, session, ordinal, entry, index])? as u64;
+                    bytes += entry.len() + index.len();
+                }
+            }
+            if !replaced_entries.is_empty() {
+                let mut update = conn.prepare_cached("UPDATE mc_async_compaction_entries SET entry_json=?3, index_json=?4 WHERE session_ref=?1 AND ordinal=?2")?;
+                for (ordinal, entry, index) in replaced_entries {
+                    let updated = update.execute(params![session_ref, ordinal, entry, index])?;
+                    if updated != 1 {
+                        // A replaced entry must already be stored: refusing here
+                        // keeps the whole save atomic instead of inserting a row.
+                        return Err(rusqlite::Error::QueryReturnedNoRows);
+                    }
+                    rows += updated as u64;
                     bytes += entry.len() + index.len();
                 }
             }
@@ -1503,5 +1536,47 @@ mod tests {
                 times[times.len() * 9 / 10]
             );
         }
+    }
+
+    /// Held entries are append-only except for one rewrite: a stored row
+    /// replaced in place (a re-read whose only change is reasoning the runner
+    /// pruned at rest). Replacing a row that is not stored refuses the whole
+    /// save rather than inserting it.
+    #[test]
+    fn replace_entry_rewrites_only_a_stored_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&StorageDescriptor {
+            module_id: "magic-context".into(),
+            storage_namespace: "mc_cache".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: dir.path().join("store.db").to_string_lossy().into_owned(),
+            },
+        })
+        .unwrap();
+        let mut save = store.async_compaction_save("ref", "key", "session", "{}");
+        save.append_entry(0, "original-0".into(), "[]".into());
+        save.append_entry(1, "original-1".into(), "[]".into());
+        save.commit().unwrap();
+        let mut save = store.async_compaction_save("ref", "key", "session", "{\"n\":1}");
+        save.replace_entry(1, "pruned-1".into(), "[]".into());
+        save.commit().unwrap();
+        assert_eq!(
+            store.load_async_compaction_entries("ref", 9).unwrap(),
+            vec![(0, "original-0".into()), (1, "pruned-1".into())]
+        );
+        let mut save = store.async_compaction_save("ref", "key", "session", "{\"n\":2}");
+        save.append_entry(2, "appended-2".into(), "[]".into());
+        save.replace_entry(5, "never-stored".into(), "[]".into());
+        assert!(save.commit().is_err());
+        assert_eq!(
+            store.load_async_compaction_entries("ref", 9).unwrap(),
+            vec![(0, "original-0".into()), (1, "pruned-1".into())],
+            "the refused save wrote nothing"
+        );
+        assert_eq!(
+            store.load_async_compaction("ref").unwrap().as_deref(),
+            Some("{\"n\":1}")
+        );
     }
 }
