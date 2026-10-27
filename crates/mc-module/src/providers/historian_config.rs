@@ -41,7 +41,8 @@ pub(crate) struct ConfiguredHistorian {
 
 impl ConfiguredHistorian {
     /// The settings as transform-request fields, in the shape the TypeScript plugin
-    /// sends them (`rustWrapupHistorianFields`, module-session-kernel.ts:105-166).
+    /// sends them (`historianFieldsFromConfig`,
+    /// packages/plugin/src/shared/historian-config-resolution.test.ts:295-355).
     pub(crate) fn request_fields(&self) -> Map<String, Value> {
         let mut fields = Map::new();
         fields.insert("historian_model_chain".into(), json!(self.model_chain));
@@ -519,10 +520,10 @@ fn attempts(settings: &Value, harness: &str) -> (Option<Attempt>, Vec<Attempt>) 
 /// The chain is the primary followed by the fallbacks, each model once in its first
 /// position. That is the chain the OpenCode bridge sent with `state_sync`
 /// (packages/plugin/src/hooks/magic-context/host-runner/opencode-adapter.ts:737-743,764)
-/// and the one `rustWrapupHistorianFields` builds
-/// (packages/plugin/src/hooks/magic-context/module-session-kernel.ts:111-118). A
+/// and the one `historianFieldsFromConfig` builds
+/// (packages/plugin/src/shared/historian-config-resolution.test.ts:295-317). A
 /// model's variant is the qualifier of its first attempt, so a qualifier written only
-/// on a later attempt of the same model is dropped (same file, :119-127).
+/// on a later attempt of the same model is dropped (same file, :311-316).
 ///
 /// This synchronous resolver builds the configured chain and its empty limit entries.
 pub(crate) fn resolve(settings: &Value, harness: &str) -> ConfiguredHistorian {

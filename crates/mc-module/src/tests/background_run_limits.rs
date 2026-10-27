@@ -48,7 +48,6 @@ fn prepare(
             rust_background_enabled: Some(true),
             now: now_ms(),
             publication_fence: None,
-            tag_snapshot: None,
             async_coverage: None,
             reclaim_ride_available: false,
             runner_lane: true,

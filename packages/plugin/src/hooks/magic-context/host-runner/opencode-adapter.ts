@@ -30,79 +30,11 @@ export function providerSubjectPart(tool: Part, index: number): string {
 function toolTextField(state: Part): "error" | "output" {
     return state.status === "error" && typeof state.error === "string" ? "error" : "output";
 }
-const publishedSources = new WeakMap<MessageLike, MessageLike>();
 const hostReplay = new WeakMap<MessageLike, () => unknown>();
 /** Defer copying v2 tool-result and host metadata until `providerIncoming` reads
  * the message; nothing else reads it. */
 export function rememberOpenCodeHostReplay(message: MessageLike, read: () => unknown): void {
     hostReplay.set(message, read);
-}
-/** Let v2 reuse its rendered content for the unchanged recorded message, even
- * though each publication gives the host a new, independently mutable copy. */
-export function providerMessageSource(message: MessageLike): MessageLike {
-    return publishedSources.get(message) ?? message;
-}
-// Publication copies the whole served window on every pass, so this walks each
-// value once without the intermediate arrays of entries/filter/fromEntries. It
-// copies the same own enumerable string keys in the same order.
-function copyPublishedData<T>(value: T): T {
-    if (Array.isArray(value)) {
-        const copy = new Array(value.length);
-        for (let index = 0; index < value.length; index++) {
-            if (index in value) copy[index] = copyPublishedData(value[index]);
-        }
-        return copy as T;
-    }
-    if (value && typeof value === "object") {
-        const source = value as Record<string, unknown>;
-        const copy: Record<string, unknown> = {};
-        for (const key of Object.keys(source)) {
-            const entry = source[key];
-            // Protocol messages are JSON data. An in-process transport's serializer
-            // method is not message data; copying must neither invoke nor publish it.
-            if (key === "toJSON" && typeof entry === "function") continue;
-            if (key === "__proto__") {
-                // An own `__proto__` key (JSON.parse can produce one) must stay a
-                // data property, as Object.fromEntries kept it, not set the prototype.
-                Object.defineProperty(copy, key, {
-                    value: copyPublishedData(entry),
-                    enumerable: true,
-                    writable: true,
-                    configurable: true,
-                });
-            } else copy[key] = copyPublishedData(entry);
-        }
-        return copy as T;
-    }
-    return value;
-}
-export function publishMessages(
-    output: { messages: unknown[] },
-    managed: readonly MessageLike[],
-): void {
-    // OpenCode may edit any object it receives. Copy only the live served window,
-    // never the retained history, and keep the host's array identity intact.
-    const published = managed.map((message) => {
-        const copy = copyPublishedData(message);
-        publishedSources.set(copy, message);
-        return copy;
-    });
-    output.messages.splice(0, output.messages.length, ...published);
-}
-export interface OpenCodeProviderProjection {
-    /** Owns the front projection's pointer cache, never a legacy LKG slot. */
-    owner: object;
-    ids: ReadonlyMap<string, number>;
-}
-const providerProjections = new Map<
-    string,
-    { owner: object; read: () => OpenCodeProviderProjection | undefined }
->();
-/** Only explicitly selected, active v2 provider sessions participate. */
-export function getOpenCodeProviderProjection(
-    sessionId: string,
-): OpenCodeProviderProjection | undefined {
-    return providerProjections.get(sessionId)?.read();
 }
 
 export function providerIncoming(message: MessageLike): Incoming<MessageLike> {

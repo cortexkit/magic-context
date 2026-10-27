@@ -304,7 +304,6 @@ mod descriptors;
 pub mod healing;
 pub mod historian;
 pub mod historian_chunk;
-pub mod historian_host;
 mod historian_numerical_drain;
 pub mod historian_producer;
 pub mod historian_prompt;
@@ -382,7 +381,7 @@ use mc_store::InsertMemoryInput;
 use mc_store::{
     canonical_root, FacadeMemoryMutationError, FacadeMutationOutcome, HistorianChunkRange,
     HistorianDecision, HistorianPhase, HistorianRecentDecision, MappingUpdate, McStore,
-    McStoreError, McTagRow, NoteCasOutcome, NoteDismissOutcome, NoteInput, PendingAgentDrop,
+    McStoreError, NoteCasOutcome, NoteDismissOutcome, NoteInput, PendingAgentDrop,
     StoredChunkTranscript, StoredCompartment, StoredNote, TodoStateSetOutcome,
     LATEST_MIGRATION_VERSION, STORE_AHEAD_OF_BINARY_REFUSAL_REASON,
 };
@@ -413,7 +412,6 @@ use historian_chunk::{
     assemble_historian_firing, AssembleHistorianFiringOutcome, AssembledHistorianFiring,
     HistorianAssemblerConfig,
 };
-use historian_host::HostRunLedger;
 use historian_producer::{HistorianProducer, HistorianProducerConfig, HistorianProducerError};
 use historian_runner::HistorianRunnerKind;
 use prompt_surface::{PromptSurfacePreset, PromptSurfaceSelection};
@@ -1857,10 +1855,6 @@ pub struct McHandler {
     retrieval_reranker: Option<Arc<dyn retrieval::hybrid::RerankClient>>,
     config: Arc<Mutex<ConfigCache>>,
     historian_runner_refusals: Arc<HistorianRunnerRefusalCache>,
-    /// Runs queued for a host claimant that a firing task in this process is still
-    /// waiting on. The `historian.*` claim routes are retired, so a run queued here
-    /// can only reach its deadline; runner-lane conversations never queue one.
-    host_runs: Arc<HostRunLedger>,
     /// Live Broca dream children, keyed by the Broca session each one runs in.
     /// A memory tool the runner dispatches on such a session reaches the task's
     /// router only through this record, never the foreground facade.
@@ -2278,9 +2272,6 @@ struct HistorianPrepareContext<'a> {
     rust_background_enabled: Option<bool>,
     now: i64,
     publication_fence: Option<Arc<dyn historian::HistorianPublicationFence>>,
-    /// Final immutable tag rows validated by the transform's generation/count/max identity.
-    /// Early pass-through paths leave this absent and retain the legacy store fallback.
-    tag_snapshot: Option<Arc<Vec<McTagRow>>>,
     /// An async evaluation's captured applied coverage, including an empty prefix.
     /// Other lanes continue resolving their coverage from the stored compartments.
     async_coverage: Option<Option<u64>>,
@@ -2456,8 +2447,6 @@ struct HistorianFiringTask {
     /// the moment the firing was prepared so a config edit mid-run cannot move a
     /// firing already in flight to a different lane.
     runner: HistorianRunnerKind,
-    /// Waiters for runs queued for a host claimant (see `McHandler::host_runs`).
-    host_runs: Arc<HostRunLedger>,
     /// Set for a runner-lane conversation: the completion runs on the
     /// conversation's own runner over llm-runner, never on the claim queue and
     /// never on the configured runner, whatever `runner` says.
@@ -2696,7 +2685,6 @@ impl McHandler {
             retrieval_reranker,
             config: Arc::new(Mutex::new(ConfigCache::default())),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
-            host_runs: Arc::new(HostRunLedger::new()),
             broca_dream_tools: Arc::new(dream_dispatch::broca_carrier::BrocaToolRoute::default()),
             dream_runs,
             runner_choices: Arc::new(Mutex::new(runner_choices::RunnerChoiceLog::default())),
@@ -3127,7 +3115,6 @@ impl McHandler {
             retrieval_reranker: None,
             config: Arc::new(Mutex::new(ConfigCache::default())),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
-            host_runs: Arc::new(HostRunLedger::new()),
             broca_dream_tools: Arc::new(dream_dispatch::broca_carrier::BrocaToolRoute::default()),
             dream_runs: Arc::new(dream_dispatch::tick::DreamRuns::new(
                 None,
@@ -3824,166 +3811,6 @@ impl McHandler {
             session_id: session_id.clone(),
         };
 
-        // Restart recovery is where the claim queue's sweep belongs, and it is the
-        // only place that calls it: a row is parked by a restart, and a restart is
-        // what this function is handling. Without a caller a parked row past its own
-        // deadline would sit in the queue forever, because nothing else deletes it
-        // and nothing offers it either.
-        //
-        // The sweep covers the whole queue rather than this session, so a row left
-        // behind by a session that has since gone idle is reached by the next
-        // recovery on this module rather than waiting for its own session to fire
-        // again. It runs before the lookup below so a row that is already past its
-        // deadline is dropped here rather than adopted and then released.
-        match store.expire_historian_claims(now) {
-            Ok(sweep) => {
-                for run_id in &sweep.reclaimed {
-                    eprintln!(
-                        "mc-module: historian run {run_id} put back on offer: its claimant stopped reporting"
-                    );
-                }
-                for run_id in &sweep.dropped {
-                    eprintln!(
-                        "mc-module: historian run {run_id} dropped from the queue: parked with no report past its deadline"
-                    );
-                }
-            }
-            Err(error) => {
-                eprintln!("mc-module: historian claim sweep failed: {error}");
-            }
-        }
-
-        // Only the host lane parks a run in the durable claim queue, so this lookup
-        // is skipped on the phases that lane never reaches. A run found here
-        // outlived this process: its claimant is either still working or has already
-        // left its answer on the row, and releasing the run would throw that away.
-        let parked_host_run = match phase {
-            HistorianPhase::AwaitingProducer | HistorianPhase::Reclaiming => store
-                .load_parked_historian_run(&parsed.session_id)
-                .ok()
-                .flatten(),
-            _ => None,
-        };
-        if let Some(parked) = parked_host_run {
-            // Still out with a claimant and still inside its deadline: the session
-            // keeps its single-flight slot, which is exactly what it would be doing
-            // if this process had never restarted, and there is no report to
-            // validate, so none of the chunk work below is needed.
-            //
-            // Putting the run back on offer IS needed, and is the whole of what this
-            // branch does. A restart can take a row out of the queue while leaving
-            // the run itself alive; without this call the shortcut would skip the
-            // re-publication and the run would sit parked until its deadline.
-            if parked.report.is_none() && parked.deadline_ms > now {
-                historian::reoffer_parked_historian_run(&store, &parked.run_id, now);
-                drop(guard);
-                return Some("reattaching");
-            }
-            let publication_fence = log_publication_fence.clone();
-            let live: Vec<_> = projection
-                .blocks
-                .iter()
-                .filter(|b| !b.synthetic)
-                .cloned()
-                .collect();
-            let Some(range) = loaded.meta.historian.chunk_range.clone() else {
-                drop(guard);
-                return Some("recovering");
-            };
-            let chunk = historian_chunk::build_historian_chunk_with_expansions(
-                parsed.messages.as_slice(),
-                &live,
-                range.from_ordinal,
-                derive_historian_chunk_tokens(config.historian_context_limit_tokens),
-                range.to_ordinal.saturating_add(1),
-                &config.historian_expand_tools,
-            );
-            let prior_compartments = match if log_publication_fence.is_some() {
-                store
-                    .load_historian_assembly_index(&session_id)
-                    .map(|index| index.snapshot.compartments)
-            } else {
-                store.load_compartments(&session_id)
-            } {
-                Ok(cs) => cs
-                    .iter()
-                    .map(historian_chunk::stored_range)
-                    .collect::<Vec<_>>(),
-                Err(_) => Vec::new(),
-            };
-            let raw_chunk_messages = serde_json::to_string(
-                &parsed
-                    .messages
-                    .iter()
-                    .filter(|message| {
-                        !message.ck.meta.synthetic
-                            && message.ordinal >= chunk.chunk.start_index
-                            && message.ordinal <= chunk.chunk.end_index
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap_or_else(|_| "[]".to_string());
-            let boundary_dates = historian_chunk::native_boundary_dates(&parsed.messages);
-            let fingerprint_items: Vec<_> =
-                chunk.snapshot.iter().map(|item| item.as_item()).collect();
-            let observed = historian::compute_chunk_fingerprint(&fingerprint_items);
-            let adopt_await_timeout =
-                historian::historian_await_timeout(parsed.historian_timeout_ms);
-            tokio::spawn(async move {
-                let _guard = guard;
-                let outcome =
-                    historian::adopt_historian_run_on_host(historian::HistorianReattachRequest {
-                        rust_background_enabled,
-                        store: &store,
-                        session_id: &session_id,
-                        project_path: &project_path,
-                        harness: &harness,
-                        observed_chunk_fingerprint: &observed,
-                        validation_chunk: &chunk.chunk,
-                        chunk_transcript: &chunk.text,
-                        raw_chunk_messages: &raw_chunk_messages,
-                        boundary_dates: &boundary_dates,
-                        prior_compartments: &prior_compartments,
-                        validate_options: historian_validate::ValidateOptions {
-                            sequence_offset: prior_compartments.len() as u64 + 1,
-                            in_emergency: false,
-                            memory_enabled: config.memory_enabled,
-                            auto_promote: config.auto_promote,
-                            user_memory_collection_enabled: config.user_memory_collection_enabled,
-                            force_keep_last_compartment: false,
-                        },
-                        publication_floor_ordinal: range.to_ordinal,
-                        await_timeout: adopt_await_timeout,
-                        now_ms: now,
-                        failure_backoff_at_ms: now + HISTORIAN_FAILURE_BACKOFF_MS,
-                        completion_now_ms: now_ms,
-                        publication_fence: publication_fence
-                            .as_deref()
-                            .map(|f| f as &dyn historian::HistorianPublicationFence),
-                    });
-                match outcome {
-                    Ok(historian::HostRunAdoption::Published(success)) => eprintln!(
-                        "mc-module: historian run {} published from a report a claimant left across a restart",
-                        success.producer_run_id
-                    ),
-                    Ok(historian::HostRunAdoption::Failed { run_id, code }) => eprintln!(
-                        "mc-module: historian run {run_id} released for {session_id}: claimant reported {code}"
-                    ),
-                    Ok(historian::HostRunAdoption::Released { run_id }) => eprintln!(
-                        "mc-module: historian run {run_id} released for {session_id}: no report before its deadline"
-                    ),
-                    Ok(
-                        historian::HostRunAdoption::NotParked
-                        | historian::HostRunAdoption::StillOut { .. },
-                    ) => {}
-                    Err(e) => eprintln!(
-                        "mc-module: historian host-run adoption failed for {session_id}: {e}"
-                    ),
-                }
-            });
-            return Some("reattaching");
-        }
-
         match phase {
             HistorianPhase::AwaitingProducer => {
                 let publication_fence = log_publication_fence.clone();
@@ -4046,7 +3873,6 @@ impl McHandler {
                         let action = historian::handle_restart_load(
                             &store,
                             &session_id,
-                            now,
                             now + HISTORIAN_FAILURE_BACKOFF_MS,
                         )?;
                         match action {
@@ -4114,11 +3940,10 @@ impl McHandler {
                 });
                 Some("reattaching")
             }
-            // Reached only when the queue row is gone: a run parked for a claimant
-            // that still has its row was handled above. Without a row nothing can
-            // ever claim or report the run, so keeping it would hold the session's
-            // single-flight slot forever. Releasing it costs one re-assembled chunk
-            // on the next trigger and never loses durable output.
+            // An interrupted producer run holds the session's single-flight slot
+            // with no task left to drive it. Releasing it here costs one
+            // re-assembled chunk on the next trigger and never loses durable
+            // output; the publish path re-reads the stored compartments.
             HistorianPhase::Firing
             | HistorianPhase::Reclaiming
             | HistorianPhase::Validating
@@ -4129,7 +3954,6 @@ impl McHandler {
                     if let Err(e) = historian::handle_restart_load(
                         &store,
                         &session_id,
-                        now,
                         now + HISTORIAN_FAILURE_BACKOFF_MS,
                     ) {
                         tracing::error!(
@@ -4157,7 +3981,6 @@ impl McHandler {
             rust_background_enabled,
             now,
             publication_fence,
-            tag_snapshot,
             async_coverage,
             reclaim_ride_available,
             runner_lane,
@@ -4274,31 +4097,24 @@ impl McHandler {
         }
         let boundary_build_started_at = Instant::now();
         profile_start!(perf_boundary, "trigger_boundary_build");
-        if let Some(tags) = tag_snapshot {
+        profile_start!(_perf_fallback, "rt19_fallback_tag_load");
+        let tags = if async_coverage.is_some() {
+            let blocks = projection
+                .blocks
+                .iter()
+                .map(|block| block.id.as_str())
+                .collect::<Vec<_>>();
+            store.load_tags_for_blocks(&parsed.session_id, &blocks)
+        } else {
+            store.load_tags_for_session(&parsed.session_id)
+        };
+        if let Ok(tags) = tags {
+            // Malformed-lineage and compaction-off paths return before normal tag hydration.
+            // Preserve their fail-open tokenization behavior rather than treating absence as empty.
             self.boundary_tokens
                 .lock()
                 .expect("boundary token cache mutex")
-                .prime_from_persisted_tags(&parsed.session_id, tags.as_slice());
-        } else {
-            profile_start!(_perf_fallback, "rt19_fallback_tag_load");
-            let tags = if async_coverage.is_some() {
-                let blocks = projection
-                    .blocks
-                    .iter()
-                    .map(|block| block.id.as_str())
-                    .collect::<Vec<_>>();
-                store.load_tags_for_blocks(&parsed.session_id, &blocks)
-            } else {
-                store.load_tags_for_session(&parsed.session_id)
-            };
-            if let Ok(tags) = tags {
-                // Malformed-lineage and compaction-off paths return before normal tag hydration.
-                // Preserve their fail-open tokenization behavior rather than treating absence as empty.
-                self.boundary_tokens
-                    .lock()
-                    .expect("boundary token cache mutex")
-                    .prime_from_persisted_tags(&parsed.session_id, &tags);
-            }
+                .prime_from_persisted_tags(&parsed.session_id, &tags);
         }
         let CachedBoundaryMessages {
             messages: boundary_messages,
@@ -4823,7 +4639,6 @@ impl McHandler {
                 firing,
                 runner_refit,
                 runner: self.record_historian_runner(&parsed.session_id, &cfg, &binding.harness),
-                host_runs: Arc::clone(&self.host_runs),
                 session_runner,
                 runner_identity: runner_bind_identity(binding),
                 model_chain_generation,
@@ -5018,7 +4833,6 @@ impl McHandler {
                 &binding.config,
                 &binding.harness,
             ),
-            host_runs: Arc::clone(&self.host_runs),
             // Keep the conversation's runner route; use its Setup-derived project root,
             // harness, and session when binding child routes.
             session_runner,
@@ -5113,7 +4927,6 @@ impl McHandler {
             mut firing,
             runner_refit,
             runner,
-            host_runs,
             session_runner,
             runner_identity,
             model_chain_generation,
@@ -5137,38 +4950,15 @@ impl McHandler {
         let failure_started_at_ms = firing.now_ms;
         let configured_failure_backoff_at_ms = firing.failure_backoff_at_ms;
         if runner == HistorianRunnerKind::Host && session_runner.is_none() {
-            // The host lane never opens a Broca route, so there is no connect step
-            // to fail: the run is queued and this task waits for a claimant.
-            let mut request = firing.as_fire_request(
-                &store,
-                &session_id,
-                &project_path,
-                &harness,
-                &project_slug,
-                language.as_deref(),
-            );
-            request.temperature = historian_temperature;
-            request.rust_background_enabled = rust_background_enabled;
-            request.publication_fence = publication_fence.as_deref();
-            // The claimant walks the same model chain a Broca firing would, each
-            // attempt under the host's own per-attempt timeout, so this waits for the
-            // whole chain exactly as a Broca firing's joiners do.
-            let firing_budget = historian::firing_completion_wait_budget(
-                historian_await_timeout,
-                firing.model_chain.len(),
-            );
-            let result =
-                historian::run_historian_firing_on_host(&host_runs, request, firing_budget).await;
-            if let Some(completion) = provider_completion {
-                completion.record(&store, &session_id, &result);
-            }
-            if let Ok(loaded) = store.load(&session_id) {
-                DISPATCH_HEALTH.record_historian_outcome(
-                    historian_status_summary(&loaded.meta.historian),
-                    loaded.meta.historian.recent_decisions.len(),
-                );
-            }
-            return result;
+            // A firing for the host runner with no session runner has nowhere to go:
+            // the `historian.pending|claim|heartbeat|complete` routes are retired, so
+            // no claimant can pick up a queued run and it would wait until its
+            // deadline. Return the `historian_host_claim_retired` refusal instead of
+            // queuing work nobody can claim.
+            return Err(runner_limits::refusal(
+                "historian_host_claim_retired: the host runner has no claimant in mode 3; run on the session runner instead".to_string(),
+            )
+            .into());
         }
         let connected = match &session_runner {
             Some(route) => {
@@ -22518,6 +22308,620 @@ mod tests {
         assert!(
             handler.store_for_request().await.is_ok(),
             "the request must reach the far side of the store seam once the open lands"
+        );
+    }
+
+    /// A store that still holds the rows the single-store migration moves is refused
+    /// by name on the mode-3 lanes: health reports it, and the shared refusal seam,
+    /// the runner lane (`compaction.setup`), a session op (`session.status`) and a
+    /// facade tool answer with it, so no lane half-works on rows this binary no
+    /// longer reads. `echo` still answers. The store keeps every row and its
+    /// version, because the refusal happens before any migration runs.
+    #[tokio::test]
+    async fn an_unmigrated_populated_store_is_refused_on_every_lane_except_echo() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let store_path = match &descriptor.backend {
+            StorageBackend::Sqlite { path } => PathBuf::from(path),
+            other => panic!("unexpected backend {other:?}"),
+        };
+        mc_store::migrate_store_to_pre_single_store(&store_path).unwrap();
+        let rows_before = {
+            let conn = rusqlite::Connection::open(&store_path).unwrap();
+            conn.execute(
+                "INSERT INTO mc_memories(project_path, category, content, normalized_hash)
+                 VALUES ('git:p', 'CONSTRAINTS', 'kept', 'h')",
+                [],
+            )
+            .unwrap();
+            conn.query_row("SELECT COUNT(*) FROM mc_memories", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+
+        let handler = McHandler::new();
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while handler.store_open.failure_snapshot().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("an open that cannot succeed must record its reason");
+        assert!(handler.store.get().is_none(), "no store handle may exist");
+
+        let report = <McHandler as ModuleHandler>::health(&handler).await;
+        assert_eq!(report.status, HealthStatus::Failing);
+        let metrics = report
+            .metrics
+            .expect("a refused open must carry health metrics");
+        assert_eq!(metrics["storage_state"], "open_refused_unmigrated");
+        assert_eq!(
+            metrics["storage_open_failure_reason_code"],
+            SINGLE_STORE_MIGRATION_REQUIRED_REASON
+        );
+
+        let (code, _, detail) = detailed_error_frame(handler.store_refusal());
+        assert_eq!(code, SINGLE_STORE_MIGRATION_REQUIRED_REASON);
+        assert_eq!(
+            detail["reason_code"],
+            SINGLE_STORE_MIGRATION_REQUIRED_REASON
+        );
+
+        // The runner lane's async compaction op and a session op, through request
+        // dispatch. The dispatch fence answers before any binding check, so no
+        // route needs binding for the refusal to name itself.
+        for request in [
+            json!({ "method": "compaction.setup", "params": {} }),
+            json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+        ] {
+            let (lane_code, _, lane_detail) =
+                detailed_error_frame(handler.dispatch_value(7, request.clone()).await);
+            assert_eq!(
+                lane_code, SINGLE_STORE_MIGRATION_REQUIRED_REASON,
+                "{request}"
+            );
+            assert_eq!(
+                lane_detail["reason_code"],
+                SINGLE_STORE_MIGRATION_REQUIRED_REASON
+            );
+        }
+
+        let (tool_code, tool_message, _) = detailed_error_frame(
+            call_facade(&handler, "ctx_memory", json!({ "action": "list" })).await,
+        );
+        assert_eq!(tool_code, SINGLE_STORE_MIGRATION_REQUIRED_REASON);
+        assert_eq!(tool_message, SINGLE_STORE_MIGRATION_REQUIRED_SENTENCE);
+        match handler
+            .dispatch_value(7, json!({ "kind": "echo", "probe": 1 }))
+            .await
+        {
+            HandlerOutcome::Response(body) => {
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["echo"]["probe"], 1);
+            }
+            other => panic!("echo must still answer, got {other:?}"),
+        }
+
+        let conn = rusqlite::Connection::open(&store_path).unwrap();
+        let rows_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM mc_memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            rows_after, rows_before,
+            "the refusal must not drop the store's rows"
+        );
+        assert_eq!(
+            mc_store::single_store_schema::recorded_store_version(&conn).unwrap(),
+            60
+        );
+    }
+
+    /// A request that arrives while the lease is still held may retry; once the
+    /// wait window has expired the open is never retried, so the refusal has to
+    /// stop inviting a retry and name the reason instead. The two states therefore
+    /// MUST NOT answer identically. Driven through the bound `session.status` op
+    /// and the request-lane store seam, the mode-3 surfaces that outlive the
+    /// retired transform lane.
+    #[tokio::test]
+    async fn lease_wait_expiry_turns_the_refusal_terminal_with_the_open_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let _predecessor = McStore::open_for_test(&descriptor).unwrap();
+        let handler = McHandler::new();
+        handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(60)));
+        // The lease wait reaches the session arm past the dispatch fence (which
+        // only covers the terminal migration refusals), so the channel must be
+        // bound for the refusal to be the store's rather than the route's.
+        handler.bind_route(7, binding(data_home.to_str().unwrap(), "ses"));
+
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
+        wait_for_store_open_phase(&handler, STORE_OPEN_WAITING).await;
+        let status_request = json!({ "method": "session.status", "v": 1, "session_id": "ses" });
+        let (during_code, during_message) =
+            error_frame(handler.dispatch_value(7, status_request.clone()).await);
+        assert_eq!(during_code, "store_lease_wait");
+        assert!(during_message.contains("retryable"), "{during_message}");
+        let seam_during = match handler.store_for_request().await {
+            Err(refusal) => refusal,
+            Ok(_) => panic!("the lease wait must refuse on the request seam too"),
+        };
+        assert_eq!(seam_during.code(), "store_lease_wait");
+
+        wait_for_store_open_phase(&handler, STORE_OPEN_IDLE).await;
+        let (after_code, after_message) =
+            error_frame(handler.dispatch_value(7, status_request).await);
+        assert_eq!(after_code, "store_open_failed");
+        assert!(
+            after_message.contains("storage lease wait expired"),
+            "the terminal refusal must carry the open reason: {after_message}"
+        );
+        assert!(
+            after_message.contains("descriptor_origin=dev_fallback"),
+            "the terminal refusal must name where the descriptor came from: {after_message}"
+        );
+        assert!(
+            after_message.contains("terminal"),
+            "a failed open must not invite a retry: {after_message}"
+        );
+        let seam_after = match handler.store_for_request().await {
+            Err(refusal) => refusal,
+            Ok(_) => panic!("the failed open must refuse on the request seam too"),
+        };
+        assert_eq!(seam_after.code(), "store_open_failed");
+        assert_ne!(
+            (during_code, during_message),
+            (after_code, after_message),
+            "a retryable lease wait and a terminal failed open must not share one refusal"
+        );
+    }
+
+    /// The handle is a bare `Option`, so its emptiness cannot say WHICH state
+    /// holds. A never-acked handle and a lease-waiting handle need opposite
+    /// operator actions (find out why no ack arrived vs. wait for the other
+    /// process to exit), so one shared code would be useless in both. Driven
+    /// through the bound `session.status` op and the request-lane store seam.
+    #[tokio::test]
+    async fn missing_ack_refusal_says_no_open_was_ever_attempted() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let _predecessor = McStore::open_for_test(&descriptor).unwrap();
+
+        let never_acked = McHandler::new();
+        never_acked.bind_route(7, binding(data_home.to_str().unwrap(), "ses"));
+        let status_request = json!({ "method": "session.status", "v": 1, "session_id": "ses" });
+        let (code, message) =
+            error_frame(never_acked.dispatch_value(7, status_request.clone()).await);
+        assert_eq!(code, "store_unavailable");
+        assert!(
+            message.contains("no HELLO_ACK has arrived"),
+            "the never-acked arm is the only one that may blame the missing ack: {message}"
+        );
+        assert!(message.contains("retryable"), "{message}");
+        let seam_never = match never_acked.store_for_request().await {
+            Err(refusal) => refusal,
+            Ok(_) => panic!("a never-acked handle must refuse on the request seam too"),
+        };
+        assert_eq!(seam_never.code(), "store_unavailable");
+
+        // The lease wait must answer differently: same emptiness, different state.
+        let waiting = McHandler::new();
+        waiting.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(500)));
+        waiting.bind_route(7, binding(data_home.to_str().unwrap(), "ses"));
+        waiting.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
+        wait_for_store_open_phase(&waiting, STORE_OPEN_WAITING).await;
+        let (lease_code, _) = error_frame(waiting.dispatch_value(7, status_request).await);
+        assert_eq!(lease_code, "store_lease_wait");
+        assert_ne!(
+            code, lease_code,
+            "two different storage states must not answer with one code"
+        );
+    }
+
+    /// Rejected passes stay visible through `session.status`: the rejected-pass
+    /// ring carries the attempt, the outcome and the error, and `health` mirrors
+    /// it. The writes go straight to the store's pass-trace ring; the behaviour
+    /// under test is the response surfacing on the live status entry points.
+    #[tokio::test(flavor = "current_thread")]
+    async fn status_and_health_surface_pass_trace_for_rejected_sessions() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+
+        store
+            .trace_pass_received("ses", "legacy-1", now_ms())
+            .unwrap();
+        store
+            .trace_pass_rejected(
+                "ses",
+                "legacy-1",
+                "live-source ordinals not strictly increasing",
+                now_ms(),
+            )
+            .unwrap();
+
+        let status = call_dispatch_request(
+            &handler,
+            json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+        )
+        .await;
+        assert_eq!(status["ok"], true);
+        assert_eq!(status["pass_trace"]["receive_count"], 1);
+        assert_eq!(status["pass_trace"]["reject_count"], 1);
+        assert_eq!(
+            status["pass_trace"]["request_history"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            status["pass_trace"]["request_history"][0]["attempt_id"],
+            "legacy-1"
+        );
+        assert_eq!(
+            status["pass_trace"]["request_history"][0]["outcome"],
+            "rejected"
+        );
+        assert!(status["pass_trace"]["request_history"][0]["completed_at_ms"].is_number());
+        assert_eq!(
+            status["pass_trace"]["last_reject_error"],
+            "live-source ordinals not strictly increasing"
+        );
+
+        let health =
+            call_dispatch_request(&handler, json!({ "kind": "health", "session_id": "ses" })).await;
+        assert_eq!(health["pass_trace"], status["pass_trace"]);
+    }
+
+    /// The request-history ring caps at thirty-two entries: older attempts drop
+    /// off the front while the newest stays complete, and a still-open attempt
+    /// reads back as `received` with no completion. Surfaced through
+    /// `session.status`, the live read path for the durable ring.
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_trace_ring_records_attempt_lifecycle_and_caps_at_thirty_two() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+
+        for index in 0..35 {
+            let attempt = format!("attempt-{index}");
+            store
+                .trace_pass_received("ses", &attempt, now_ms())
+                .unwrap();
+            store
+                .trace_pass_completed("ses", &attempt, now_ms())
+                .unwrap();
+        }
+
+        let trace = store.load_pass_trace("ses").unwrap().unwrap();
+        assert_eq!(trace.request_history.len(), 32);
+        assert_eq!(
+            trace.request_history.first().unwrap().attempt_id,
+            "attempt-3"
+        );
+        assert_eq!(
+            trace.request_history.last().unwrap().attempt_id,
+            "attempt-34"
+        );
+        assert!(trace.request_history.iter().all(|request| {
+            request.outcome == "completed"
+                && request
+                    .completed_at_ms
+                    .is_some_and(|completed| completed >= request.received_at_ms)
+        }));
+
+        store
+            .trace_pass_received("ses", "attempt-stalled", now_ms())
+            .unwrap();
+        let status = call_dispatch_request(
+            &handler,
+            json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+        )
+        .await;
+        let history = status["pass_trace"]["request_history"]
+            .as_array()
+            .expect("session.status exposes request history");
+        assert_eq!(history.len(), 32);
+        assert_eq!(history.last().unwrap()["attempt_id"], "attempt-stalled");
+        assert_eq!(
+            history.last().unwrap()["received_at_ms"],
+            json!(
+                store
+                    .load_pass_trace("ses")
+                    .unwrap()
+                    .unwrap()
+                    .request_history
+                    .last()
+                    .unwrap()
+                    .received_at_ms
+            )
+        );
+        assert_eq!(history.last().unwrap()["completed_at_ms"], Value::Null);
+        assert_eq!(history.last().unwrap()["outcome"], "received");
+    }
+
+    /// Runtime store diagnostics keep the failure arm that recorded them: two
+    /// different codes recorded for one session read back verbatim on
+    /// `session.status` and on `health`, never collapsed to one constant. The
+    /// records are written the way the retired transform path wrote them; the
+    /// behaviour under test is the fidelity of the live read surfaces.
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_store_error_preserves_distinct_failure_codes_in_status_and_health() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+
+        handler
+            .runtime_store_errors
+            .lock()
+            .expect("runtime store errors mutex")
+            .insert(
+                "ses".to_string(),
+                RuntimeStoreError {
+                    code: "store_write_failed".to_string(),
+                    message: "first diagnostic".to_string(),
+                    at_ms: 101,
+                },
+            );
+        let status = call_dispatch_request(
+            &handler,
+            json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+        )
+        .await;
+
+        handler
+            .runtime_store_errors
+            .lock()
+            .expect("runtime store errors mutex")
+            .insert(
+                "ses".to_string(),
+                RuntimeStoreError {
+                    code: "store_unavailable".to_string(),
+                    message: "second diagnostic".to_string(),
+                    at_ms: 202,
+                },
+            );
+        let health =
+            call_dispatch_request(&handler, json!({ "kind": "health", "session_id": "ses" })).await;
+
+        assert_eq!(status["runtime_store_error"]["code"], "store_write_failed");
+        assert_eq!(status["runtime_store_error"]["message"], "first diagnostic");
+        assert_eq!(status["runtime_store_error"]["at_ms"], 101);
+        assert_eq!(health["runtime_store_error"]["code"], "store_unavailable");
+        assert_eq!(
+            health["runtime_store_error"]["message"],
+            "second diagnostic"
+        );
+        assert_eq!(health["runtime_store_error"]["at_ms"], 202);
+        assert_ne!(
+            status["runtime_store_error"]["code"], health["runtime_store_error"]["code"],
+            "runtime store diagnostics must preserve the failure arm rather than a constant code"
+        );
+    }
+
+    /// A locked store fails typed on the live `session.flush` lane, and the
+    /// recorded diagnostic reads back through `session.status` and `health`.
+    /// The lock is a real `BEGIN IMMEDIATE` with no busy wait, so the write
+    /// fails with the SQLite busy error instead of a fabricated string.
+    #[tokio::test(flavor = "current_thread")]
+    async fn sqlite_busy_session_flush_is_typed_and_visible_in_status_and_health() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, dir, _project) = handler_with_store(producer, default_test_config());
+
+        let descriptor = dev_descriptor_at(dir.path().join("data").to_str().unwrap());
+        let StorageBackend::Sqlite { path } = descriptor.backend else {
+            panic!("test descriptor must use SQLite")
+        };
+        let locker = rusqlite::Connection::open(path).unwrap();
+        locker.busy_timeout(Duration::ZERO).unwrap();
+        locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        // Arming the soft refresh writes the session meta row, so the held
+        // write lock fails the live lane with the typed store error.
+        let outcome = handler.handle_session_flush_value(
+            7,
+            &json!({ "method": "session.flush", "v": 1, "session_id": "ses" }),
+        );
+        let (code, message) = error_frame(outcome);
+        assert_eq!(code, "store_write_failed");
+        assert!(message.contains("database is locked"), "{message}");
+        locker.execute_batch("ROLLBACK").unwrap();
+        // The lock is gone: the same lane serves again, proving the failure
+        // was the lock rather than the lane.
+        let recovered = tool_body(handler.handle_session_flush_value(
+            7,
+            &json!({ "method": "session.flush", "v": 1, "session_id": "ses" }),
+        ));
+        assert_eq!(recovered["ok"], true);
+
+        // The retired transform path recorded `Store` failures for the status
+        // surfaces; record this one the same way and check both surfaces.
+        handler
+            .runtime_store_errors
+            .lock()
+            .expect("runtime store errors mutex")
+            .insert(
+                "ses".to_string(),
+                RuntimeStoreError {
+                    code: code.clone(),
+                    message: message.clone(),
+                    at_ms: now_ms(),
+                },
+            );
+        let status = call_dispatch_request(
+            &handler,
+            json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+        )
+        .await;
+        assert_eq!(status["runtime_store_error"]["code"], "store_write_failed");
+        assert_eq!(status["runtime_store_error"]["message"], message);
+        let health =
+            call_dispatch_request(&handler, json!({ "kind": "health", "session_id": "ses" })).await;
+        assert_eq!(health["runtime_store_error"], status["runtime_store_error"]);
+        drop(store);
+    }
+
+    /// The publish-failure counter and its degraded flag read through
+    /// `session.status`, and a later success state resets both while keeping
+    /// the refusal taxonomy (stage and canonical cause) on the last failure.
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_status_surfaces_publish_failure_health_and_reset() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        meta.historian.consecutive_publish_failures = 3;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        let degraded = tool_body(handler.handle_session_status_value(
+            7,
+            &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+        ));
+        assert_eq!(degraded["historian"]["consecutive_publish_failures"], 3);
+        assert_eq!(degraded["historian"]["publish_health_degraded"], true);
+        assert!(degraded["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("publish health degraded"));
+
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        meta.historian.consecutive_publish_failures = 0;
+        meta.historian.firing_seq = 2;
+        meta.historian.failure_backoff_at_ms = None;
+        meta.historian.last_no_fire = None;
+        let refusal = "published with historian refusal: historian refusal stage=credential provider=opencode/model-a received=\"open_failed: run resolution failed: no apikey credential for provider 'opencode'\"";
+        meta.historian.last_failure = Some(refusal.to_string());
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        let recovered = tool_body(handler.handle_session_status_value(
+            7,
+            &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+        ));
+        assert_eq!(recovered["historian"]["consecutive_publish_failures"], 0);
+        assert_eq!(recovered["historian"]["publish_health_degraded"], false);
+        assert!(recovered["historian"]["last_outcome"]
+            .as_str()
+            .is_some_and(|outcome| {
+                outcome.contains("published seq 2")
+                    && outcome.contains("stage=credential provider=opencode")
+            }));
+        assert!(recovered["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("stage=credential provider=opencode")));
+        assert_eq!(recovered["historian"]["refusal_stage"], "credential");
+        assert_eq!(
+            recovered["historian"]["canonical_cause"],
+            "credential_unavailable"
+        );
+        assert_eq!(recovered["historian"]["last_failure"], refusal);
+    }
+
+    /// The content language reaches the historian system prompt on the provider
+    /// (runner-lane) path, and changes nothing else: the localized fire request
+    /// carries the Turkish directive the plain one lacks, while the assembled
+    /// user prompt, chunk fingerprint and raw chunk messages are identical.
+    /// If the language wiring is removed both systems match and the test fails;
+    /// if the language leaks into the data the fingerprints differ and it fails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn content_language_changes_only_the_historian_system_prompt_on_the_provider_path() {
+        // The assembler builds the USER prompt (chunk + references); the language
+        // directive belongs only on the producer request's system prompt, never
+        // on the served surface. So compare systems off the fire request and
+        // data off the assembled firing.
+        fn firing_system_and_data(language: Option<&str>) -> (String, String, String, String) {
+            let producer = Arc::new(ProducerState::default());
+            let mut config = default_test_config();
+            config.rust_background_enabled = true;
+            config.language = language.map(str::to_string);
+            let (handler, store, _dir, project) = handler_with_store(producer, config.clone());
+            let mut route = binding(project.to_str().unwrap(), "ses");
+            route.config = config;
+            route.principal = Some(subc_protocol::Principal::Reserved {
+                module_id: "thalamus-harness".into(),
+            });
+            let mut raw = request(wrapup_messages(240, 800));
+            raw["historian_model_chain"] = json!(["provider/model"]);
+            raw["historian_model_limits"] =
+                json!({"provider/model": {"context": 200_000, "output": 160_000}});
+            let parsed: TransformRequest = serde_json::from_value(raw).unwrap();
+            let projection = crate::ck_wire::project_messages(&parsed.messages).unwrap();
+            let mut timings = HistorianTriggerTimings::default();
+            match handler.prepare_historian_fire(
+                store.clone(),
+                &parsed,
+                &route,
+                project.to_str().unwrap(),
+                &projection,
+                HistorianPrepareContext {
+                    rust_background_enabled: Some(true),
+                    now: now_ms(),
+                    publication_fence: None,
+                    async_coverage: None,
+                    reclaim_ride_available: false,
+                    runner_lane: true,
+                    timings: &mut timings,
+                },
+            ) {
+                PreparedHistorianAction::FireReady(prepared) => {
+                    let task = prepared.task;
+                    let firing_request = task.firing.as_fire_request(
+                        &store,
+                        &task.session_id,
+                        &task.project_path,
+                        &task.harness,
+                        &task.project_slug,
+                        task.language.as_deref(),
+                    );
+                    (
+                        firing_request.system.into_owned(),
+                        task.firing.prompt.clone(),
+                        task.firing.chunk_fingerprint.clone(),
+                        task.firing.raw_chunk_messages.clone(),
+                    )
+                }
+                PreparedHistorianAction::Complete(diagnostics) => {
+                    panic!("expected firing: {diagnostics:?}")
+                }
+                PreparedHistorianAction::Busy { .. } => panic!("unexpected busy"),
+            }
+        }
+
+        let (plain_system, plain_prompt, plain_fingerprint, plain_raw) =
+            firing_system_and_data(None);
+        let (localized_system, localized_prompt, localized_fingerprint, localized_raw) =
+            firing_system_and_data(Some("tr"));
+
+        assert!(
+            !plain_system.contains("prose you author in"),
+            "the plain fire request carries no language directive"
+        );
+        assert!(
+            localized_system.contains("Write human-readable prose you author in: Turkish (Türkçe)"),
+            "the localized fire request carries the Turkish directive"
+        );
+        assert_ne!(
+            localized_system, plain_system,
+            "language must change the historian system prompt"
+        );
+        assert_eq!(
+            localized_prompt, plain_prompt,
+            "language must not change the assembled user prompt"
+        );
+        assert_eq!(
+            localized_fingerprint, plain_fingerprint,
+            "language must not change the assembled chunk identity"
+        );
+        assert_eq!(
+            localized_raw, plain_raw,
+            "language must not change the assembled chunk data"
         );
     }
 }
