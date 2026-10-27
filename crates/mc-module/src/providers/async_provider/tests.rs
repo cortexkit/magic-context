@@ -2135,9 +2135,13 @@ async fn anthropic_messages_session_publishes_part_edits_beside_signed_thinking(
         .filter(|edit| edit.ordinal == 21 || edit.ordinal == 22)
         .map(|edit| (edit.ordinal, edit.part.as_str(), edit.drop))
         .collect();
+    // At 90% the force band owns tool reclaim, so no age sweep turns the read arc into a
+    // skeleton first (the TypeScript `toolReclaimAdmitted` rule). The queued drop of its
+    // result removes the arc whole: the tool call leaves and the result keeps a
+    // placeholder, one of the two legal drop shapes.
     assert_eq!(
         near,
-        [(21, "1", false), (22, "0", false)],
+        [(21, "1", false), (21, "2", true), (22, "0", false)],
         "the dropped parts get their placeholders; the signed thinking part beside them is kept"
     );
     // The head insertion invalidates every later signature, but removing those
@@ -2154,7 +2158,7 @@ async fn anthropic_messages_session_publishes_part_edits_beside_signed_thinking(
     let rendered = rig.render_anthropic(&view);
     let applied = rendered
         .iter()
-        .find(|message| message["content"][2]["id"] == "toolu_21")
+        .find(|message| message["content"][0]["signature"] == "EqQBsig21+/==")
         .expect("message 21 stays in the rendered request");
     assert_eq!(
         bytes(&applied["content"][0]).unwrap(),
