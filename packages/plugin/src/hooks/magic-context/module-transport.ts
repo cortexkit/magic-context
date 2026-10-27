@@ -39,28 +39,6 @@ const CONNECT_BACKOFF_WAIT_BUDGET_MS = 12_000;
 const CONNECT_BACKOFF_WAIT_JITTER_MS = 100;
 const HANDSHAKE_TIMEOUT_MS = 2_000;
 const MODULE_SEND_TIMEOUT_MS = 15_000;
-export const TRANSFORM_PAGE_UPLOAD_TIMEOUT_MS = 5_000;
-export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS = 15_000;
-export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_PER_MESSAGE_MS = 2;
-export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MAX_MS = 90_000;
-
-/**
- * Cold execution includes full projection and native encoding after the final page lands.
- * The hermetic 9.6k-message/8k-tool cold gate completes module-side in 8.0s at load 9 and
- * 10.2s at load 18 after the cold-path fixes, and this box routinely runs at load 40+ during
- * release gates. A 15s floor plus two milliseconds per message keeps ~3x margin over the
- * measured cold time (30s for ENGRAM's 7.4k messages, 34s for ASTRO's 9.6k); a miss is no
- * longer fatal because a completed series the requester abandoned is adopted by the next
- * identical pass, but each miss still costs the user one refused turn.
- */
-export function transformColdStartExecuteTimeoutMs(seedMessageCount: number): number {
-    const messages = Number.isSafeInteger(seedMessageCount) ? Math.max(0, seedMessageCount) : 0;
-    return Math.min(
-        TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MAX_MS,
-        TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS +
-            messages * TRANSFORM_COLD_START_EXECUTE_TIMEOUT_PER_MESSAGE_MS,
-    );
-}
 
 /** Consumer deadline for the module's exported historian::MAX_WRAPUP_REQUEST_BUDGET. */
 export const MAX_WRAPUP_REQUEST_BUDGET_MS = 3_800_000;
@@ -108,16 +86,6 @@ function isStaleOrDeadRouteFailure(error: unknown): boolean {
             name === "StaleRouteHandleError" ||
             /route handle \(\d+,\s*\d+\) is not live on the current connection/i.test(message) ||
             /\b(?:unknown|unrecognized) channel\b/i.test(message)
-        );
-    });
-}
-
-function isDeadlineFailure(error: unknown): boolean {
-    if (error instanceof SocketTimeoutError) return true;
-    return errorChainSome(error, (current) => {
-        const code = typeof current.code === "string" ? current.code : "";
-        return ["ETIMEDOUT", "request_deadline", "deadline_exceeded_no_drop_observed"].includes(
-            code,
         );
     });
 }
@@ -250,47 +218,6 @@ export class SubcModuleTransport {
     private connectionPromise: Promise<SubcClient> | null = null;
     private backoffMs = CONNECT_BACKOFF_INITIAL_MS;
     private connectionGeneration = 0;
-    private stateSyncCapabilityCache: {
-        generation: number;
-        capabilities: { state_sync_deltas?: boolean; state_sync_resume?: boolean };
-    } | null = null;
-
-    /** Returns the capability snapshot for the currently live SUBC connection. */
-    getCachedStateSyncCapabilities():
-        | { state_sync_deltas?: boolean; state_sync_resume?: boolean }
-        | undefined {
-        const cached = this.stateSyncCapabilityCache;
-        if (!cached || cached.generation !== this.connectionGeneration) return undefined;
-        return cached.capabilities;
-    }
-
-    /** Clears the snapshot after a module signal that can change its wire capabilities. */
-    invalidateStateSyncCapabilities(): void {
-        this.stateSyncCapabilityCache = null;
-    }
-
-    async stateSyncCapabilities(args: {
-        sessionId: string;
-        projectRoot: string;
-    }): Promise<{ state_sync_deltas?: boolean; state_sync_resume?: boolean }> {
-        const cached = this.getCachedStateSyncCapabilities();
-        if (cached) return cached;
-        const response = await this.call({
-            sessionId: args.sessionId,
-            projectRoot: args.projectRoot,
-            method: "session.status",
-            body: { method: "session.status", v: 1, session_id: args.sessionId },
-        });
-        const raw = isRecord(response) ? response : {};
-        const value = isRecord(raw.result) ? raw.result : raw;
-        const epochs = isRecord(value.epochs) ? value.epochs : {};
-        const capabilities = {
-            state_sync_deltas: epochs.state_sync_deltas === true,
-            ...(epochs.state_sync_resume === true ? { state_sync_resume: true } : {}),
-        };
-        this.stateSyncCapabilityCache = { generation: this.connectionGeneration, capabilities };
-        return capabilities;
-    }
 
     constructor(
         connectionFile: string,
@@ -461,8 +388,6 @@ export class SubcModuleTransport {
         sessionId: string;
         projectRoot: string;
         method:
-            | "state_sync"
-            | "transform"
             | "compaction.delete"
             | "session.status"
             | "session.delete"
@@ -470,7 +395,6 @@ export class SubcModuleTransport {
             | "session.recomp"
             | "session.wrapup"
             | "todo_state.set"
-            | "agent_drops.append"
             | "ctx_note"
             | "ctx_memory"
             | "memory.curate"
@@ -478,13 +402,8 @@ export class SubcModuleTransport {
             | "memory.restore.preview"
             | "memory.restore"
             | "memory.edit"
-            | "note.evaluate"
             | "dreamer.run_task"
-            | "memory.set_classification"
-            | "historian.pending"
-            | "historian.claim"
-            | "historian.heartbeat"
-            | "historian.complete";
+            | "memory.set_classification";
         body: unknown;
         /** Per-call durations; responseWait includes the client's opaque receive and decode. */
         onTimings?: (timings: ModuleCallTimings) => void;
@@ -493,8 +412,6 @@ export class SubcModuleTransport {
         generationSensitive?: boolean;
         /** Producer-backed calls can outlive the default transport budget. */
         timeoutMs?: number;
-        /** Distinguishes cheap page admission from the cold execute on the completed series. */
-        attemptClass?: "transform_page_upload" | "transform_series_execute";
         /**
          * Bypass the per-session correctness lane only for a health probe or a
          * content-addressed transform resend. The ordinary request keeps owning
@@ -517,11 +434,7 @@ export class SubcModuleTransport {
             (args.method === "session.wrapup" ||
             (args.method === "session.status" && wrapupInFlight)
                 ? MAX_WRAPUP_REQUEST_BUDGET_MS
-                : args.attemptClass === "transform_series_execute"
-                  ? TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS
-                  : args.method === "transform"
-                    ? Math.min(this.requestTimeoutMs, TRANSFORM_PAGE_UPLOAD_TIMEOUT_MS)
-                    : this.requestTimeoutMs);
+                : this.requestTimeoutMs);
         const tracksWrapup = args.method === "session.wrapup";
         if (tracksWrapup) {
             this.wrapupSessions.set(
@@ -553,22 +466,6 @@ export class SubcModuleTransport {
             }
         } catch (error) {
             finishWrapupTracking();
-            if (args.method === "state_sync" && isDeadlineFailure(error)) {
-                const body = isRecord(args.body) ? args.body : {};
-                throw Object.assign(
-                    new Error(
-                        `state_sync timeout stage=correctness_lane page=${body.seed_batch_index ?? 0}/${body.seed_batch_total ?? 1} series=${body.seed_id ?? "delta"} budget_ms=${attemptTimeoutMs}`,
-                    ),
-                    {
-                        code: "state_sync_timeout",
-                        stage: "correctness_lane",
-                        page: body.seed_batch_index ?? 0,
-                        pages: body.seed_batch_total ?? 1,
-                        series: body.seed_id ?? null,
-                        cause: error,
-                    },
-                );
-            }
             throw error;
         }
         timings.lane = monotonicNow() - callStartedAt;
@@ -687,31 +584,6 @@ export class SubcModuleTransport {
                     if (migration) throw migration;
                     const storeAhead = storeAheadOfBinaryFailure(error);
                     if (storeAhead) throw storeAhead;
-                    if (args.method === "state_sync" && isDeadlineFailure(error)) {
-                        const body = isRecord(args.body) ? args.body : {};
-                        throw Object.assign(
-                            new Error(
-                                `state_sync timeout stage=module_ack page=${body.seed_batch_index ?? 0}/${body.seed_batch_total ?? 1} series=${body.seed_id ?? "delta"} budget_ms=${attemptTimeoutMs}`,
-                            ),
-                            {
-                                code: "state_sync_timeout",
-                                stage: "module_ack",
-                                page: body.seed_batch_index ?? 0,
-                                pages: body.seed_batch_total ?? 1,
-                                series: body.seed_id ?? null,
-                                cause: error,
-                            },
-                        );
-                    }
-                    if (
-                        args.attemptClass === "transform_series_execute" &&
-                        isDeadlineFailure(error)
-                    ) {
-                        // A request deadline on the completed page series fails this pass. The
-                        // module may still finish the cold execute, so preserve the live route and
-                        // never turn the timeout into a generation change/re-upload loop.
-                        throw error;
-                    }
                     if (isConnectionFailure(error)) {
                         const previousGeneration =
                             ensuredRoute?.generation ?? this.connectionGeneration;
@@ -739,15 +611,6 @@ export class SubcModuleTransport {
                             !args.generationSensitive
                         ) {
                             continue;
-                        }
-                        // A disconnected transform may already have committed. Never resend
-                        // its history automatically, including after a partial reply download.
-                        if (args.method === "transform") {
-                            if (!ensuredRoute) throw error;
-                            throw Object.assign(
-                                new Error("Transform transport interrupted; abandon this pass"),
-                                { code: "transform_transport_interrupted", cause: error },
-                            );
                         }
                         if (args.generationSensitive && !args.signal?.aborted) {
                             return {
@@ -1011,7 +874,6 @@ export class SubcModuleTransport {
     private invalidateConnection(client: SubcClient | null = this.client): void {
         if (client && this.client !== client) return;
         this.connectionGeneration += 1;
-        this.invalidateStateSyncCapabilities();
         this.client = null;
         this.routes.clear();
         this.routeOpenings.clear();

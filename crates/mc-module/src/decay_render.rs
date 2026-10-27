@@ -1175,7 +1175,6 @@ mod tests {
         let fixture = FixtureBuilder::tagged_session();
         let rendered = render_decayed_compartments(&fixture.compartments, 10_000.0, no_guard);
         assert!(rendered.contains("## 1-1 · Boundary"));
-        assert!(fixture.handle_transform()["messages"].is_array());
     }
 }
 

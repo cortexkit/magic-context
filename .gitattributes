@@ -6,3 +6,6 @@ crates/mc-module/testdata/*.json text eol=lf
 crates/mc-module/testdata/codec/*.json text eol=lf
 crates/mc-module/testdata/codec/*.ts text eol=lf
 crates/mc-module/testdata/broca/*.json text eol=lf
+crates/mc-module/testdata/app-read-samples/**/*.json text eol=lf
+crates/mc-module/testdata/app-read-samples/SHA256SUMS text eol=lf
+crates/mc-module/testdata/app-read-samples/README.md text eol=lf

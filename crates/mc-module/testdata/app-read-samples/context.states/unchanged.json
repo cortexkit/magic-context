@@ -1,0 +1,24 @@
+{
+  "name": "unchanged",
+  "request": {
+    "method": "context.states",
+    "params": {
+      "if_version": "cs1:f94646ae5b547870f4000448691c2fe5af72ad8cb53fdca830383c6b072a7004",
+      "message_ids": [
+        "raw"
+      ],
+      "session": {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "op": "context.states",
+    "schema": 1,
+    "state": "unchanged",
+    "version": "cs1:f94646ae5b547870f4000448691c2fe5af72ad8cb53fdca830383c6b072a7004"
+  }
+}

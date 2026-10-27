@@ -4,12 +4,11 @@
 //! `background::manual_dream`), which resolves the trusted config once for the
 //! whole run. From that one snapshot the run computes the published list
 //! (`ownership::publish`) for the project and dispatches only those tasks: a
-//! project whose claimant has gone, or whose user switched Rust off, gets nothing.
-//! Host children are queued on the declaring claimant's session, in its project
-//! root; a Broca run uses the configured Broca runner. A project last seen on a
-//! runner-lane conversation (a route the daemon stamped with that conversation's
-//! runner module) sends its children to that runner, under that session, through
-//! the same llm-runner carrier as Broca and without any host claimant.
+//! project whose user switched Rust off gets nothing. A Broca run uses the
+//! configured Broca runner. A project last seen on a runner-lane conversation (a
+//! route the daemon stamped with that conversation's runner module) sends its
+//! children to that runner, under that session, through the same llm-runner
+//! carrier as Broca.
 //!
 //! Before planning, each task's Rust schedule adopts the TypeScript scheduler's
 //! progress, and after the run the TypeScript row adopts Rust's (see
@@ -24,9 +23,8 @@ use super::broca_carrier::BrocaToolRoute;
 use super::broca_port::SubcBroca;
 use super::context::{Cancellation, Clock};
 use super::dispatcher::{DispatchOutcome, Dispatcher};
-use super::executor::{BrocaPorts, DreamExecutor, NoBroca, Transport};
-use super::host_carrier::DreamQueue;
-use super::ownership::{self, ClaimantRegistry, OwnershipInput, Wiring};
+use super::executor::{BrocaPorts, DreamExecutor, Transport};
+use super::ownership::{self, OwnershipInput, Wiring};
 use crate::background::{self, ConfigInput};
 use crate::config_parity::{ConfigResolveRequest, CoreConfigResolver};
 use crate::dream_runner::resolve_task_models;
@@ -183,8 +181,6 @@ pub struct ManualRun {
 #[derive(Clone)]
 pub struct DreamHandles {
     pub store: Arc<OnceLock<Arc<McStore>>>,
-    pub claimants: Arc<ClaimantRegistry>,
-    pub queue: Arc<DreamQueue>,
     pub broca_routes: Arc<BrocaToolRoute>,
     pub runs: Arc<DreamRuns>,
     pub wiring: Wiring,
@@ -215,27 +211,16 @@ impl DreamHandles {
     /// for it is already in flight.
     pub fn start(&self, project: &str, manual: Option<ManualRun>) -> Option<Job> {
         let store = self.store.get()?.clone();
-        // Declarations are stamped with the wall clock when they arrive, so their
-        // freshness is judged by the same clock.
-        let claimant = self.claimants.current(project, crate::now_ms());
-        let target = self.runs.target(project);
         // A project last seen on a runner lane runs on that conversation's runner,
-        // under that session, whatever claimant may still be declared. Otherwise
-        // host children are queued on the claimant's session in its root; without a
-        // claimant only a Broca run is possible, on the route the project was seen on.
-        let (directory, session, harness, session_runner) = match (&claimant, target) {
-            (_, Some(t)) if t.session_runner.is_some() => {
-                (t.directory, t.session, t.harness, t.session_runner)
-            }
-            (Some(c), _) if !c.directory.as_os_str().is_empty() => (
-                c.directory.clone(),
-                c.session.clone(),
-                c.harness.clone(),
-                None,
-            ),
-            (_, Some(t)) => (t.directory, t.session, t.harness, None),
-            _ => return None,
-        };
+        // under that session; otherwise only a Broca run is possible, on the route
+        // the project was seen on.
+        let target = self.runs.target(project)?;
+        let (directory, session, harness, session_runner) = (
+            target.directory,
+            target.session,
+            target.harness,
+            target.session_runner,
+        );
         {
             let mut in_flight = self.runs.in_flight.lock().ok()?;
             if !in_flight.insert(project.to_owned()) {
@@ -266,7 +251,6 @@ impl DreamHandles {
                 project: &project,
                 session: &session,
                 harness: &harness,
-                claimant: claimant.as_ref(),
                 session_runner: session_runner.as_ref(),
             };
             run.execute(captured, manual)
@@ -310,7 +294,6 @@ struct Run<'a> {
     project: &'a str,
     session: &'a str,
     harness: &'a str,
-    claimant: Option<&'a ownership::ClaimantDeclaration>,
     session_runner: Option<&'a SessionRunnerRoute>,
 }
 
@@ -331,7 +314,6 @@ impl Run<'_> {
                 settings: Some(&captured.effective),
                 harness: self.harness,
                 wiring: &self.handles.wiring,
-                claimant: self.claimant,
             },
             session_runner.map(|_| self.handles.runs.session_runner_wired()),
         );
@@ -344,9 +326,6 @@ impl Run<'_> {
             .ok_or("dream data directory unavailable")?
             .join("dream");
         mc_store::private_permissions::ensure_directory(&root, true).map_err(|e| e.to_string())?;
-        let fence_root = root.join("fences");
-        mc_store::private_permissions::ensure_directory(&fence_root, true)
-            .map_err(|e| e.to_string())?;
         let scheduler = Arc::new(
             SqliteDreamScheduler::open(root.join("scheduler.db"), captured.activated)
                 .map_err(|e| format!("{e:?}"))?,
@@ -392,21 +371,9 @@ impl Run<'_> {
                     manual,
                 )
             }
-            (None, HistorianRunnerKind::Host) => {
-                let transport = Transport::<NoBroca>::Host {
-                    queue: self.handles.queue.clone(),
-                    fence_root,
-                };
-                self.dispatch(
-                    transport,
-                    &scheduler,
-                    &scope,
-                    &captured,
-                    &configs,
-                    &published.published,
-                    manual,
-                )
-            }
+            // Off a runner lane, the host runner has no carrier: `ownership::publish`
+            // withholds every task for it, so a run never gets here.
+            (None, HistorianRunnerKind::Host) => return Ok(Vec::new()),
             (None, HistorianRunnerKind::Broca) => {
                 let Some((connection_file, route_targets)) = &self.handles.runs.broca else {
                     return Ok(Vec::new());

@@ -1,0 +1,346 @@
+{
+  "name": "effective",
+  "request": {
+    "method": "config.read",
+    "params": {
+      "project": "git:fixture"
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "op": "config.read",
+    "row": {
+      "config": {
+        "allow_home_project": false,
+        "api_key": {
+          "present": true,
+          "redacted": true
+        },
+        "array": [
+          {
+            "access_token": {
+              "present": true,
+              "redacted": true
+            }
+          }
+        ],
+        "auth": {
+          "label": "user-visible-label",
+          "null_key": {
+            "present": false,
+            "redacted": true
+          },
+          "password": {
+            "present": true,
+            "redacted": true
+          },
+          "token": {
+            "present": true,
+            "redacted": true
+          }
+        },
+        "auto_promote": true,
+        "auto_search": {
+          "enabled": true,
+          "min_prompt_chars": 20,
+          "score_threshold": 0.6
+        },
+        "cache_ttl": "5m",
+        "cache_ttl_by_model": {},
+        "catalog": {
+          "dreamer_runnable": true,
+          "prompt_surface_default": null,
+          "prompt_surface_models": {}
+        },
+        "caveman": {
+          "enabled": false,
+          "min_size": 500
+        },
+        "caveman_text_compression": {
+          "enabled": false,
+          "min_chars": 500
+        },
+        "commit_cluster_trigger": {
+          "enabled": true,
+          "min_clusters": 3
+        },
+        "compaction": {
+          "enabled": true
+        },
+        "compaction_enabled": true,
+        "debug_rpc": false,
+        "dreamer": {
+          "inject_docs": true,
+          "tasks": {
+            "classify-memories": {
+              "schedule": "0 6 * * *"
+            },
+            "compress-cues": {
+              "schedule": "0 4 * * *"
+            },
+            "curate": {
+              "schedule": "0 4 * * 0"
+            },
+            "evaluate-smart-notes": {
+              "schedule": "0 3 * * *"
+            },
+            "maintain-docs": {
+              "max_tokens": 12000,
+              "schedule": ""
+            },
+            "map-memories": {
+              "schedule": "0 2 * * *"
+            },
+            "promote-primers": {
+              "promotion_threshold": 2,
+              "schedule": "0 3 * * *"
+            },
+            "refresh-primers": {
+              "schedule": "0 3 * * *"
+            },
+            "retrospective": {
+              "recency_days": 30,
+              "schedule": "0 5 * * *"
+            },
+            "review-user-memories": {
+              "promotion_threshold": 3,
+              "schedule": "0 3 * * *"
+            },
+            "verify": {
+              "schedule": "0 9 * * *"
+            },
+            "verify-broad": {
+              "schedule": "0 4 * * 0"
+            }
+          }
+        },
+        "dreamer_runner": null,
+        "embedding": {
+          "api_key": {
+            "present": true,
+            "redacted": true
+          },
+          "endpoint": "https://embeddings.example.test/v1",
+          "model": "embed-test",
+          "provider": "openai-compatible"
+        },
+        "enabled": true,
+        "execute_threshold_percentage": 80.0,
+        "execute_threshold_project_config": 80.0,
+        "execute_threshold_user_config": 70.0,
+        "execute_threshold_user_configured": true,
+        "fail_closed_blocking": true,
+        "future": {
+          "SECRET": {
+            "present": true,
+            "redacted": true
+          }
+        },
+        "headers": {
+          "authorization": {
+            "present": true,
+            "redacted": true
+          },
+          "x-project": {
+            "present": true,
+            "redacted": true
+          },
+          "x-trace": {
+            "present": true,
+            "redacted": true
+          }
+        },
+        "historian": {
+          "runner": null,
+          "temperature": null
+        },
+        "historian_context_limit_known": false,
+        "historian_context_limit_tokens": 128000,
+        "historian_runner": null,
+        "historian_temperature": null,
+        "historian_timeout_ms": 600000,
+        "history_budget_percentage": 0.15,
+        "inject_docs": true,
+        "keep_reasoning_tokens": {
+          "present": false,
+          "redacted": true
+        },
+        "language": null,
+        "memory": {
+          "auto_promote": true,
+          "auto_search": {
+            "enabled": true,
+            "min_prompt_chars": 20,
+            "score_threshold": 0.6
+          },
+          "enabled": true,
+          "git_commit_indexing": {
+            "enabled": false,
+            "max_commits": 2000,
+            "since_days": 365
+          },
+          "injection_budget_tokens": 4000,
+          "retrieval_count_promotion_threshold": 3
+        },
+        "memory_budget_tokens": 4000.0,
+        "memory_enabled": true,
+        "mural": {
+          "enabled": false
+        },
+        "note": "project-visible",
+        "project_token": {
+          "present": true,
+          "redacted": true
+        },
+        "prompt_surface": {
+          "default": "full"
+        },
+        "protected_tokens_project": {
+          "present": false,
+          "redacted": true
+        },
+        "protected_tokens_user": {
+          "present": false,
+          "redacted": true
+        },
+        "protected_tools": {
+          "ctx_reduce": 3,
+          "todowrite": 1
+        },
+        "rust_background_enabled": false,
+        "rust_provider_preparation": false,
+        "shadow_embedding": {
+          "enabled": false
+        },
+        "signed_thinking_hold": "on",
+        "smart_drops": false,
+        "smart_notes": {
+          "enabled": true,
+          "retina_handoff": false
+        },
+        "smart_notes_enabled": true,
+        "sqlite": {
+          "cache_size_mb": 64,
+          "mmap_size_mb": 0
+        },
+        "storage": {
+          "enforce_private_permissions": true
+        },
+        "system_prompt_injection": {
+          "enabled": true,
+          "skip_signatures": [
+            "<!-- magic-context: skip -->"
+          ]
+        },
+        "temporal_awareness": true,
+        "transform_mode": "ts",
+        "user_memory_collection_enabled": true,
+        "user_observations_requested": true,
+        "user_profile_budget_tokens": 4000.0,
+        "webhook_secret": {
+          "present": true,
+          "redacted": true
+        }
+      },
+      "project_resolved": true,
+      "sources": [
+        {
+          "error": null,
+          "keys": [
+            "allow_home_project",
+            "auto_promote",
+            "auto_search",
+            "cache_ttl",
+            "cache_ttl_by_model",
+            "catalog",
+            "caveman",
+            "caveman_text_compression",
+            "commit_cluster_trigger",
+            "compaction",
+            "compaction_enabled",
+            "debug_rpc",
+            "dreamer_runner",
+            "embedding",
+            "enabled",
+            "execute_threshold_percentage",
+            "execute_threshold_project_config",
+            "execute_threshold_user_config",
+            "execute_threshold_user_configured",
+            "fail_closed_blocking",
+            "historian",
+            "historian_context_limit_known",
+            "historian_context_limit_tokens",
+            "historian_runner",
+            "historian_temperature",
+            "historian_timeout_ms",
+            "history_budget_percentage",
+            "inject_docs",
+            "keep_reasoning_tokens",
+            "keep_subagents",
+            "language",
+            "memory",
+            "memory_budget_tokens",
+            "memory_enabled",
+            "mural",
+            "prompt_surface",
+            "protected_tokens_project",
+            "protected_tokens_user",
+            "protected_tools",
+            "rust_background_enabled",
+            "rust_pipeline",
+            "rust_provider_preparation",
+            "shadow_embedding",
+            "signed_thinking_hold",
+            "smart_drops",
+            "smart_notes",
+            "smart_notes_enabled",
+            "sqlite",
+            "storage",
+            "system_prompt_injection",
+            "temporal_awareness",
+            "toast_duration_ms",
+            "todowrite",
+            "transform_mode",
+            "user_memory_collection_enabled",
+            "user_observations_requested",
+            "user_profile_budget_tokens"
+          ],
+          "layer": "built-in",
+          "loaded": true
+        },
+        {
+          "error": null,
+          "keys": [
+            "api_key",
+            "array",
+            "auth",
+            "embedding",
+            "execute_threshold_percentage",
+            "future",
+            "headers",
+            "memory_enabled",
+            "signed_thinking_hold"
+          ],
+          "layer": "user",
+          "loaded": true
+        },
+        {
+          "error": null,
+          "keys": [
+            "dreamer",
+            "embedding",
+            "execute_threshold_percentage",
+            "headers",
+            "note",
+            "project_token",
+            "signed_thinking_hold",
+            "webhook_secret"
+          ],
+          "layer": "project",
+          "loaded": true
+        }
+      ]
+    },
+    "schema": 1
+  }
+}

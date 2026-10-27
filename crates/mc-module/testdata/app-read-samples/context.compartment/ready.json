@@ -1,0 +1,66 @@
+{
+  "name": "ready",
+  "request": {
+    "method": "context.compartment",
+    "params": {
+      "compartment_id": "1",
+      "session": {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "compartment": {
+      "compartment_id": "1",
+      "created_at_ms": 20,
+      "episode_type": "implementation",
+      "facts": {
+        "attribution": "historian_run",
+        "by_category": {
+          "CONSTRAINT": 1,
+          "DECISION": 2
+        },
+        "session_facts_cursor": null
+      },
+      "first_at_ms": 100,
+      "first_message_id": "old-first",
+      "first_message_ordinal": 2,
+      "importance": 72,
+      "last_at_ms": 200,
+      "last_message_id": "summarized",
+      "last_message_ordinal": 3,
+      "legacy": false,
+      "message_count": 2,
+      "ordinal": 1,
+      "summary_markdown": "Stored prose",
+      "summary_markdown_bytes": 12,
+      "summary_markdown_truncated": false,
+      "tiers": {
+        "p1": "tier one",
+        "p2": "tier two",
+        "p3": "tier three",
+        "p4": "tier four"
+      },
+      "tiers_bytes": {
+        "p1": 8,
+        "p2": 8,
+        "p3": 10,
+        "p4": 9
+      },
+      "tiers_truncated": {
+        "p1": false,
+        "p2": false,
+        "p3": false,
+        "p4": false
+      },
+      "title": "A summary"
+    },
+    "op": "context.compartment",
+    "schema": 1,
+    "state": "ready",
+    "version": "cc1:b0a4f844afafe59a926b0fc081c918310a4f98c4dede1c0c417ee3afab8d7c85"
+  }
+}

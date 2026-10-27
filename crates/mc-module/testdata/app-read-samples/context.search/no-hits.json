@@ -1,0 +1,37 @@
+{
+  "name": "no-hits",
+  "request": {
+    "method": "context.search",
+    "params": {
+      "query": "zz-no-such-term",
+      "scope": {
+        "session": {
+          "harness": "pi",
+          "runner": "pi",
+          "session": "s"
+        }
+      },
+      "sources": [
+        "message"
+      ]
+    }
+  },
+  "response": {
+    "agent_resolution": "client",
+    "as_of_ms": 1700000000000,
+    "complete": true,
+    "diagnostics": {
+      "omitted_sessions": 0,
+      "project_resolution": {
+        "status": "ok"
+      }
+    },
+    "hits": [],
+    "next_cursor": null,
+    "op": "context.search",
+    "schema": 1,
+    "source_status": {
+      "message": "ok"
+    }
+  }
+}

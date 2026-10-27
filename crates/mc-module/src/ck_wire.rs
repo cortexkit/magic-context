@@ -16,37 +16,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-#[cfg(test)]
-thread_local! {
-    static UNCOMPACTED_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static PROJECTION_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
-}
-
-/// Take and reset actual message/block visits on this thread, not elapsed time.
-#[cfg(test)]
-pub(crate) fn take_projection_work() -> (usize, usize) {
-    PROJECTION_WORK.with(|work| work.replace((0, 0)))
-}
-
-/// Test-only reference to the former ownership model. Scope the flag to the current-thread
-/// replay so its wire clones cannot affect unrelated tests, including after a panic.
-#[cfg(test)]
-pub(crate) struct UncompactedProjectionGuard(bool);
-
-#[cfg(test)]
-impl UncompactedProjectionGuard {
-    pub(crate) fn enter() -> Self {
-        Self(UNCOMPACTED_REFERENCE.with(|flag| flag.replace(true)))
-    }
-}
-
-#[cfg(test)]
-impl Drop for UncompactedProjectionGuard {
-    fn drop(&mut self) {
-        UNCOMPACTED_REFERENCE.with(|flag| flag.set(self.0));
-    }
-}
-
 // The re-exported CK message/block serializers retain the original serde_json::Value
 // for pass-through. That must remain a Value-level replay path, not a typed-struct
 // round-trip, so harmless future CK fields are not silently dropped.
@@ -206,13 +175,6 @@ impl ProjectedWireBlock {
     }
 
     fn new(block: &CkWireBlock, bytes: &Arc<str>) -> Self {
-        #[cfg(test)]
-        if UNCOMPACTED_REFERENCE.with(|flag| flag.get()) {
-            return Self {
-                shell: block.clone(),
-                payload: None,
-            };
-        }
         let Some((text, path)) = scalar_text(&block.kind) else {
             return Self {
                 shell: block.clone(),
@@ -369,50 +331,6 @@ impl FlatProjection {
             return Some(0);
         }
         self.message_block_ends.get(prefix_messages - 1).copied()
-    }
-
-    pub(crate) fn reattach_messages_prefix(
-        &self,
-        prefix_messages: usize,
-    ) -> Option<Vec<CkIngressMessage>> {
-        profile_start!(_perf_reattach, "rt02_reattach_prefix");
-        if prefix_messages > self.message_count() || self.message_meta.len() != self.message_count()
-        {
-            return None;
-        }
-
-        let mut block_start = 0;
-        let mut messages = Vec::with_capacity(prefix_messages);
-        for (message_index, message) in self.message_meta.iter().take(prefix_messages).enumerate() {
-            let block_end = *self.message_block_ends.get(message_index)?;
-            if block_end < block_start || block_end > self.blocks.len() {
-                return None;
-            }
-            let content = self.blocks[block_start..block_end]
-                .iter()
-                .enumerate()
-                .map(|(block_index, block)| {
-                    (block.mid == message.mid
-                        && block.ordinal == message.ordinal
-                        && block.role == message.role
-                        && block.block_index == block_index)
-                        .then(|| block.wire().into_owned())
-                })
-                .collect::<Option<Vec<_>>>()?;
-            messages.push(CkIngressMessage {
-                mid: message.mid.clone(),
-                ordinal: message.ordinal,
-                ck: CkWireMessage::from_parts(
-                    message.role.clone(),
-                    content,
-                    message.origin.clone(),
-                    message.provider_extras.clone(),
-                    message.meta.clone(),
-                ),
-            });
-            block_start = block_end;
-        }
-        Some(messages)
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
@@ -663,11 +581,6 @@ fn project_messages_from_state(
     mut builder: FlatProjectionBuilder,
 ) -> Result<FlatProjection, CkWireError> {
     for msg in messages {
-        #[cfg(test)]
-        PROJECTION_WORK.with(|work| {
-            let (messages, blocks) = work.get();
-            work.set((messages + 1, blocks));
-        });
         if msg.mid.contains('#') {
             return Err(CkWireError::MidContainsReservedHash(msg.mid.clone()));
         }
@@ -703,11 +616,6 @@ fn project_messages_from_state(
 
         let mut identities = Vec::new();
         for (index, block) in msg.ck.content.iter().enumerate() {
-            #[cfg(test)]
-            PROJECTION_WORK.with(|work| {
-                let (messages, blocks) = work.get();
-                work.set((messages, blocks + 1));
-            });
             let id = block_id(&msg.mid, index);
             let arc_id = arc_for_block(
                 &msg.mid,
@@ -1660,60 +1568,5 @@ mod tests {
             .expect("media result block")
             .bytes
             .contains("file://capture.png"));
-    }
-
-    #[test]
-    fn incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state() {
-        let mut messages = vec![
-            text_msg("m0", 0, "user", "start"),
-            assistant_with_call("m1", 1, "toolu_1"),
-            CkIngressMessage {
-                mid: "m2".to_string(),
-                ordinal: 2,
-                ck: CkWireMessage::from_parts(
-                    "tool",
-                    vec![CkWireBlock::bare(CkKind::ToolResult {
-                        id: "toolu_1".to_string(),
-                        tool_name: "read".to_string(),
-                        output: CkToolOutput::bare(CkOutputKind::Text {
-                            text: "first result".into(),
-                        }),
-                        provider_executed: false,
-                    })],
-                    None,
-                    ProviderExtras::new(),
-                    HarnessMeta::default(),
-                ),
-            },
-        ];
-        let cached = project_messages(&messages).expect("initial projection");
-        let reattached = cached
-            .reattach_messages_prefix(2)
-            .expect("cached projection rebuilds its acknowledged ingress prefix");
-        assert_eq!(reattached, messages[..2]);
-        if let CkKind::ToolResult { output, .. } = &mut messages[2].ck.content[0].kind {
-            output.kind = CkOutputKind::Text {
-                text: "changed result".into(),
-            };
-        }
-
-        let incremental =
-            project_messages_incremental(&messages, &cached, 2).expect("incremental projection");
-        let full = project_messages(&messages).expect("full projection");
-        assert_eq!(incremental, full);
-        assert_eq!(incremental.differential_bytes(), full.differential_bytes());
-        assert!(Arc::ptr_eq(
-            &incremental.blocks[0].wire,
-            &cached.blocks[0].wire
-        ));
-        assert!(Arc::ptr_eq(
-            &incremental.blocks[0].bytes,
-            &cached.blocks[0].bytes
-        ));
-        assert_eq!(
-            incremental.blocks[2].arc_id.as_deref(),
-            Some("m1#1"),
-            "the cached frontier must carry the pending tool call into the suffix"
-        );
     }
 }

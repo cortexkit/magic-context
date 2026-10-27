@@ -397,7 +397,7 @@ function writeReport(): void {
 		"",
 		"Five ordered sessions use the real old/candidate materializeM0 renderer, both m[0] and m[1], defaults, frozen clock and an empty project-docs directory. This is the prefix renderer, not a live provider request. Rendering runs on separate copies so cache/render side effects cannot conceal migration loss.",
 		"",
-		"Crash barriers cover four uncommitted context migration transactions per implementation (including 103) and seven store migration transactions (including 74). Store crashes use an ignored unit-test helper to install a ledger hook on the real cortexkit-store migrator and McStore SQL chain; reopen uses McStore::open. SIGKILL step peak RSS is the paused child process VmHWM from /proc; all other peaks come from GNU time.",
+		"Crash barriers cover four uncommitted context migration transactions per implementation (including 103) and eight store migration transactions (including 75). Store crashes use an ignored unit-test helper to install a ledger hook on the real cortexkit-store migrator and McStore SQL chain; reopen uses McStore::open. SIGKILL step peak RSS is the paused child process VmHWM from /proc; all other peaks come from GNU time.",
 		"",
 		"Old plugin refusal and the placed release ck-mc offline command are checked on both paired and individually advanced stores, with DB/WAL hashes before/after. The release McStore opener is checked separately; the offline command is not a live subc handshake.",
 		"",
@@ -959,4 +959,4 @@ try {
 	rmSync(root, { recursive: true, force: true });
 }
 process.exitCode = findings.length ? 1 : 0;
-console.log(findings.length ? `REHEARSAL_FAIL findings=${findings.length}` : "REHEARSAL_PASS context=103 store=74 session_hosts=3 sample=10 crash_proofs=15 database_doctor=clean");
+console.log(findings.length ? `REHEARSAL_FAIL findings=${findings.length}` : "REHEARSAL_PASS context=103 store=75 session_hosts=3 sample=10 crash_proofs=15 database_doctor=clean");

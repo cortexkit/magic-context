@@ -1,0 +1,89 @@
+{
+  "name": "mode3-window",
+  "request": {
+    "method": "context.cache_why",
+    "params": {
+      "limit": 100,
+      "session": {
+        "harness": "pi",
+        "runner": "runner",
+        "session": "s"
+      },
+      "window": {}
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "cache_ttl": {
+      "model_key": null,
+      "ms": 300000,
+      "source": "session",
+      "value": "5m"
+    },
+    "context_limit": {
+      "model_key": null,
+      "source": "usage",
+      "tokens": 200000
+    },
+    "decisions": [
+      {
+        "at_ms": 101,
+        "cause": "mid_turn_boundary",
+        "cause_detail": null,
+        "changes": {
+          "model": null,
+          "system_prompt": null,
+          "tool_set": null
+        },
+        "decision": "defer",
+        "dropped_count": null,
+        "dropped_tokens": null,
+        "emergency": false,
+        "identity_delta": [
+          "system_hash"
+        ],
+        "input_tokens": null,
+        "materialized": null,
+        "producer_ref": null
+      },
+      {
+        "at_ms": 100,
+        "cause": null,
+        "cause_detail": null,
+        "changes": {
+          "model": null,
+          "system_prompt": null,
+          "tool_set": null
+        },
+        "decision": "Execute",
+        "dropped_count": null,
+        "dropped_tokens": null,
+        "emergency": false,
+        "identity_delta": [],
+        "input_tokens": null,
+        "materialized": null,
+        "producer_ref": null
+      }
+    ],
+    "join": "unavailable",
+    "join_reason": "runner_step_identity_not_recorded",
+    "last_transform_error": {
+      "at_ms": null,
+      "text": null
+    },
+    "managed": {
+      "by": "ck_mc",
+      "value": true
+    },
+    "missing": [],
+    "next_cursor": null,
+    "op": "context.cache_why",
+    "producer_ref_kind": null,
+    "retention": {
+      "max_rows": 256,
+      "oldest_retained_at_ms": 100
+    },
+    "schema": 1,
+    "session_kind": "mode3"
+  }
+}

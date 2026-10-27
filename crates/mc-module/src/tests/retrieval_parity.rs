@@ -91,6 +91,36 @@ async fn produced_sources_and_message_pair_match_frozen_ts_without_sorting() {
     }
 }
 
+#[tokio::test]
+async fn retrieval_reply_bytes_match_pre_extraction_goldens() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let mut actual = Vec::new();
+    for (index, case) in vectors()["cases"].as_array().unwrap().iter().enumerate() {
+        let name = case["name"].as_str().unwrap();
+        if index >= 5 && !matches!(name, "fused_limited" | "rerank_tie" | "rerank_all_tie") {
+            continue;
+        }
+        let (mut handler, _, _dir, _) = fixture_handler(true);
+        if name.starts_with("rerank_") {
+            handler.retrieval_reranker = Some(Arc::new(SynapseFixture::default()));
+        }
+        let HandlerOutcome::Response(bytes) = handler.dispatch_value(7, search_request(case)).await
+        else {
+            panic!("retrieval did not return a reply for {name}");
+        };
+        actual.push(json!({"name":name,"reply_base64":STANDARD.encode(bytes)}));
+    }
+    let expected: Value = serde_json::from_str(include_str!(
+        "../../testdata/app-read-e/retrieval-replies.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        json!(actual),
+        expected,
+        "full agent-facing retrieval reply bytes"
+    );
+}
+
 #[derive(Default)]
 struct SynapseFixture {
     calls: Mutex<Vec<Value>>,
@@ -1736,139 +1766,6 @@ mod ts_store_reference {
         println!(
             "Compared five production input reads with the 2D adapter across 20 TS fixture cases"
         );
-    }
-}
-
-// BEGIN SERVED DIFFERENTIAL
-mod served_differential {
-    use super::super::*;
-    use sha2::{Digest, Sha256};
-
-    fn fixture() -> (McHandler, Arc<McStore>, tempfile::TempDir, SessionBinding) {
-        let mut config = default_test_config();
-        config.inject_docs = false;
-        config.temporal_awareness = false;
-        config.cache_ttl = "never".into();
-        config.memory_budget_tokens = 0.0;
-        config.auto_search.min_prompt_chars = 0;
-        config.auto_search.score_threshold = 0.0;
-        let (handler, store, dir, _) =
-            handler_with_store(Arc::new(ProducerState::default()), config.clone());
-        let mut bound = binding_with_harness("/recorded/i3-project", "opencode", "ses");
-        bound.config = config;
-        store.set_route_identity_for_test("/recorded/i3-project", "git:i3-served");
-        store
-            .seed_memory(
-                1,
-                "git:i3-served",
-                "CONSTRAINTS",
-                "queue backpressure needs bounded drains",
-                80,
-            )
-            .unwrap();
-        store
-            .seed_memory(
-                10,
-                "git:i3-served",
-                "CONSTRAINTS",
-                "separate archive subject",
-                50,
-            )
-            .unwrap();
-        store
-            .seed_memory(
-                11,
-                "git:i3-served",
-                "CONSTRAINTS",
-                "unrelated fixture material",
-                50,
-            )
-            .unwrap();
-        handler.bind_route(7, bound.clone());
-        handler.set_guidance_now_ms_for_test(1768003200000);
-        (handler, store, dir, bound)
-    }
-
-    fn outcome_bytes(outcome: HandlerOutcome) -> Vec<u8> {
-        match outcome {
-            HandlerOutcome::Response(bytes) => bytes,
-            other => panic!("{other:?}"),
-        }
-    }
-    async fn facades(handler: &McHandler) -> Value {
-        let mut replies = Vec::new();
-        for (name, arguments) in [
-            ("ctx_search", json!({"query":"queue","sources":["memory"]})),
-            ("ctx_expand", json!({"message":1})),
-        ] {
-            replies.push(outcome_bytes(
-                handler
-                    .dispatch_value(7, json!({"name":name,"arguments":arguments}))
-                    .await,
-            ));
-        }
-        json!(replies)
-    }
-
-    async fn legacy_lane(delta: bool) -> Value {
-        let (handler, _, _dir, _) = fixture();
-        let mut passes = Vec::new();
-        for pass in 0..3 {
-            let messages = if pass == 0 {
-                vec![ck("m1", 1, "queue backpressure")]
-            } else if delta && pass == 1 {
-                vec![ck("m2", 2, "queue needs bounded drains")]
-            } else {
-                vec![
-                    ck("m1", 1, "queue backpressure"),
-                    ck("m2", 2, "queue needs bounded drains"),
-                ]
-            };
-            let mut body = request(messages);
-            body["native_messages"] = json!([]);
-            body["full_array_fingerprint"] = json!(format!("i3-{pass}"));
-            body["auto_search_enabled"] = json!(true);
-            body["auto_search_min_prompt_chars"] = json!(0);
-            body["auto_search_score_threshold"] = json!(0.0);
-            if delta && pass == 1 {
-                body["tail_delta"] =
-                    json!({"after":"i3-0","replace_from":1,"native_replace_from":0});
-            }
-            if pass == 2 {
-                body["model_key"] = json!("next-model");
-            }
-            let response = call_transform_request(&handler, body).await;
-            assert_eq!(response["status"], "ok");
-            assert!(response["ck_messages"].is_array());
-            assert!(response["decision"].is_string());
-            passes.push(json!({"pass_kind":response["decision"],"scheduler_decision":response["scheduler_decision"],
-                "served_bytes":serde_json::to_vec(&response["ck_messages"]).unwrap(),"native_bytes":serde_json::to_vec(&response["native_messages"]).unwrap()}));
-        }
-        json!({"passes":passes,"facades":facades(&handler).await})
-    }
-
-    #[tokio::test]
-    async fn served_dispatch_matches_pre_integration_bytes_on_full_array_lanes() {
-        for (lane, value, expected) in [
-            (
-                "current_rust",
-                legacy_lane(true).await,
-                "ee13bf2c5994c82fc20bfc901fdaccab634363b6da02cd70c762a9a3b5084e07",
-            ),
-            (
-                "full_array",
-                legacy_lane(false).await,
-                "ee13bf2c5994c82fc20bfc901fdaccab634363b6da02cd70c762a9a3b5084e07",
-            ),
-        ] {
-            let bytes = serde_json::to_vec(&value).unwrap();
-            let digest = format!("{:x}", Sha256::digest(&bytes));
-            println!(
-                "I3_SERVED {lane} passes=3 bytes={} sha256={digest}",
-                bytes.len()
-            );
-            assert_eq!(digest, expected, "{lane}");
-        }
     }
 }
 

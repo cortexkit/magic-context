@@ -1,9 +1,6 @@
 use super::*;
 use crate::DEFAULT_MODULE_ID;
-use crate::{
-    config::McModuleConfig,
-    test_support::{descriptor, FixtureBuilder},
-};
+use crate::{config::McModuleConfig, test_support::descriptor};
 use door::{DoorError, LookupSession, Position, ReadReply};
 use sha2::{Digest, Sha256};
 use subc_client_rs::{async_trait, ModuleHandler, RouteBindRequest, RouteHandle};
@@ -434,47 +431,6 @@ async fn activate_requires_exact_staged_set_and_replays_reordering() {
         refusal(call(&d, role::ops::ABORT, params(&refs)).await),
         "invalid_state"
     );
-}
-#[tokio::test]
-async fn round_trip_serves_identical_turn_and_released_source_refuses_by_name() {
-    let src = tempfile::tempdir().unwrap();
-    let dst = tempfile::tempdir().unwrap();
-    let door = Arc::new(FakeDoor::default());
-    let s = make(src.path(), door.clone()).await;
-    let d = make(dst.path(), door.clone()).await;
-    let mut fixture = FixtureBuilder::frozen_reductions();
-    fixture.session_id = SESSION.into();
-    observe(&s, SESSION).await;
-    let before = reply(s.dispatch_value(1, fixture.call_transform()).await);
-    let refs = vec![reference(SESSION)];
-    let prepare = prepared(&s, &door, &refs).await;
-    assert_eq!(prepare["items"][0]["stream"], stream(DEFAULT_MODULE_ID));
-    assert_eq!(
-        reply(call(&d, role::ops::DIVERGED, params(&refs)).await)["refs"][0]["state"],
-        "at_cut"
-    );
-    reply(call(&d, role::ops::IMPORT, params(&refs)).await);
-    reply(call(&d, role::ops::ACTIVATE, params(&refs)).await);
-    observe(&d, SESSION).await;
-    let after = reply(d.dispatch_value(1, fixture.call_transform()).await);
-    assert_eq!(after["ck_messages"], before["ck_messages"]);
-    assert!(
-        after["ck_messages"].is_array(),
-        "a real served turn must contain ck_messages: {after}"
-    );
-    let mut release = params(&refs);
-    release["holder"] = json!("destination-Mac");
-    assert_eq!(
-        reply(call(&s, role::ops::RELEASE, release).await),
-        json!({"enforced":true})
-    );
-    let refused = s.dispatch_value(1, fixture.call_transform()).await;
-    assert_eq!(refusal(refused.clone()), "session_moved");
-    if let HandlerOutcome::ErrorWithDetail { detail, .. } = refused {
-        assert_eq!(detail["holder"], "destination-Mac");
-    } else {
-        panic!("holder must be named");
-    }
 }
 
 #[tokio::test]

@@ -417,9 +417,9 @@ test("migration 103 audit rejects destination rows without an owner", () => {
 });
 
 test("effects manifest refuses an unreviewed schema head", () => {
-    assertEffects(103, 74);
-    expect(() => assertEffects(104, 74)).toThrow("manifest needs review");
-    expect(() => assertEffects(103, 75)).toThrow("manifest needs review");
+    assertEffects(103, 75);
+    expect(() => assertEffects(104, 75)).toThrow("manifest needs review");
+    expect(() => assertEffects(103, 76)).toThrow("manifest needs review");
 });
 
 const crashRecords = () => [
@@ -431,8 +431,8 @@ test("crash coverage requires context 103 on both implementations", () => {
     expect(() => assertCrashCoverage(crashRecords().filter((r) => r.name !== "typescript" || r.migration !== 103))).toThrow("typescript 103");
     expect(() => assertCrashCoverage(crashRecords().filter((r) => r.name !== "rust" || r.migration !== 103))).toThrow("rust 103");
 });
-test("crash coverage requires store 74", () => {
-    expect(() => assertCrashCoverage(crashRecords().filter((r) => r.name !== "store" || r.migration !== 74))).toThrow("store 74");
+test("crash coverage requires store 75", () => {
+    expect(() => assertCrashCoverage(crashRecords().filter((r) => r.name !== "store" || r.migration !== 75))).toThrow("store 75");
 });
 test("bundle gate requires both load probes", () => {
     assertBundles(["plugin", "pi-plugin"]);
@@ -512,7 +512,7 @@ test("production database doctor detects a damaged foreign-key relationship", ()
 });
 
 test("migration measurement gate requires each version and a real RSS observation", () => {
-    const rows = [["context",96,103],["store",64,74]].flatMap(([database,start,end]) => Array.from({length:Number(end)-Number(start)+1}, (_,i) => ({database:String(database),version:Number(start)+i,seconds:0.1,peakKiB:1000,beforeMainWal:[4096,0],afterMainWal:[8192,0]})));
+    const rows = [["context",96,103],["store",64,75]].flatMap(([database,start,end]) => Array.from({length:Number(end)-Number(start)+1}, (_,i) => ({database:String(database),version:Number(start)+i,seconds:0.1,peakKiB:1000,beforeMainWal:[4096,0],afterMainWal:[8192,0]})));
     assertMigrationMetrics(rows);
     expect(() => assertMigrationMetrics(rows.slice(1))).toThrow("context 96");
     expect(() => assertMigrationMetrics(rows.map((r) => ({...r,peakKiB:0})))).toThrow("measurement");

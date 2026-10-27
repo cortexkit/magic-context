@@ -311,7 +311,6 @@ impl McHandler {
             worker.reattaching_sessions = Arc::clone(&self.reattaching_sessions);
             worker.live_historian_sessions = Arc::clone(&self.live_historian_sessions);
             worker.wrapup_sessions = Arc::clone(&self.wrapup_sessions);
-            worker.transform_snapshots = Arc::clone(&self.transform_snapshots);
             worker.connect_failure_commit_hook = Arc::clone(&self.connect_failure_commit_hook);
             #[cfg(test)]
             {
@@ -753,7 +752,6 @@ impl McHandler {
                     HistorianPrepareContext {
                         rust_background_enabled: Some(rust_background_enabled),
                         now: now_ms(),
-                        snapshot_generation: None,
                         publication_fence: Some(Arc::new(LogPublicationFence {
                             // Firings and restart adoption retain the fence for
                             // their entire drive, so they retain admission too.

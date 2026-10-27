@@ -36,45 +36,7 @@ pub struct InProcessFixture {
     pub reductions: Vec<Value>,
 }
 
-impl InProcessFixture {
-    /// The JSON accepted by the state-import facade.
-    pub fn state_import(&self) -> Value {
-        json!({
-            "kind": "state_import",
-            "v": 1,
-            "session_id": self.session_id,
-            "import_id": "fixture-import",
-            "batch_seq": 0,
-            "batch_count": 1,
-            "compartments": self.compartments.iter().enumerate().map(|(seq, c)| json!({
-                "seq": seq as i64 + 1,
-                "start_message": c.start_message,
-                "end_message": c.end_message,
-                "end_message_id": format!("fixture-{}#0", c.end_message),
-                "title": c.title,
-                "p1": c.p1.clone().unwrap_or_else(|| c.content.clone()),
-            })).collect::<Vec<_>>(),
-        })
-    }
-
-    /// The canonical transform request used by handler tests.
-    pub fn handle_transform(&self) -> Value {
-        json!({
-            "kind": "transform",
-            "v": 2,
-            "serializer_profile": "owned-llmrunner",
-            "session_id": self.session_id,
-            "render_config": "fixture-config",
-            "messages": self.messages,
-            "reductions": self.reductions,
-        })
-    }
-
-    /// Alias documenting the in-process call seam used by facade tests.
-    pub fn call_transform(&self) -> Value {
-        self.handle_transform()
-    }
-}
+impl InProcessFixture {}
 
 pub struct FixtureBuilder;
 

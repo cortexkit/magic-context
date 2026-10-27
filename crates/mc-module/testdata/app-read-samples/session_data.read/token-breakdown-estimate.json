@@ -1,0 +1,88 @@
+{
+  "name": "token-breakdown-estimate",
+  "request": {
+    "method": "session_data.read",
+    "params": {
+      "section": "token_breakdown",
+      "session": {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "est"
+      }
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "op": "session_data.read",
+    "row": {
+      "as_of": {
+        "at_ms": null,
+        "step_ref": null
+      },
+      "context_window": {
+        "source": null,
+        "tokens": null
+      },
+      "estimation_source": "legacy_estimate",
+      "managed": {
+        "value": true
+      },
+      "parts": [
+        {
+          "estimate": false,
+          "part": "system_prompt",
+          "tokens": 0
+        },
+        {
+          "estimate": true,
+          "part": "tool_definitions",
+          "tokens": null
+        },
+        {
+          "count": 0,
+          "estimate": true,
+          "part": "memory",
+          "tokens": 0
+        },
+        {
+          "estimate": true,
+          "part": "project_docs",
+          "tokens": null
+        },
+        {
+          "estimate": true,
+          "part": "user_profile",
+          "tokens": null
+        },
+        {
+          "estimate": true,
+          "part": "history_summaries",
+          "tokens": 0
+        },
+        {
+          "estimate": true,
+          "part": "history_raw",
+          "tokens": null
+        },
+        {
+          "estimate": true,
+          "part": "tool_calls_results",
+          "tokens": null
+        },
+        {
+          "estimate": true,
+          "part": "last_user_message",
+          "tokens": null
+        }
+      ],
+      "total": {
+        "source": "estimate",
+        "tokens": 0
+      },
+      "unattributed": 0
+    },
+    "schema": 1,
+    "section": "token_breakdown",
+    "version": null
+  }
+}

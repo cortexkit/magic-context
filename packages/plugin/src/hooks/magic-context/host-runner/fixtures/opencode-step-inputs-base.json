@@ -1,6 +1,0 @@
-{
-    "source_commit": "27fa9e8e77d20e6f8324b728047269fc9a797c13",
-    "source_path": "packages/plugin/src/hooks/magic-context/host-runner/opencode-adapter.ts",
-    "inputs_sha256": "6737da86e28f3440310b200f7201086dede022cebef9b7046d9701d6832832e3",
-    "inputs_typescript": "    function inputs(id: string, messages: MessageLike[], meta: SessionMeta): StepInputs {\n        const usage = deps.contextUsageMap.get(id)?.usage;\n        return {\n            model: model(id, messages),\n            step_id: messages.at(-1)?.info.id ?? randomUUID(),\n            step_kind: \"model\",\n            context_window: meta.lastUsageContextLimit || 200_000,\n            previous_usage: usage\n                ? {\n                      input: usage.inputTokens,\n                      cache_read: 0,\n                      cache_write: 0,\n                      output: 0,\n                      completed_at: meta.lastResponseTime,\n                      finish_reason: \"stop\",\n                  }\n                : undefined,\n            estimate: { request_tokens: usage?.inputTokens ?? 0 },\n        };\n    }\n"
-}

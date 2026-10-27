@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use serde_json::{json, Map, Value};
 
@@ -264,43 +263,6 @@ pub fn decode_opencode_with_sidecar_and_base(
     }
 }
 
-pub(crate) fn decode_opencode_sidecar_incremental(
-    messages: &[MessageV2Json],
-    prior: &DecodeSidecar,
-    replace_from: usize,
-) -> DecodeSidecar {
-    debug_assert!(replace_from <= messages.len());
-    debug_assert!(replace_from <= prior.order.len());
-    if replace_from == messages.len() && replace_from == prior.order.len() {
-        return prior.clone();
-    }
-
-    let suffix = decode_opencode_with_sidecar_and_base(
-        &messages[replace_from..],
-        Some(prior),
-        replace_from as u64,
-    )
-    .sidecar;
-    let mut sidecar = DecodeSidecar::new(HARNESS);
-    sidecar.mid_pins = suffix.mid_pins;
-    for mid in prior.order.iter().take(replace_from) {
-        sidecar.order.push(mid.clone());
-        if let Some(meta) = prior.messages.get(mid) {
-            sidecar.messages.insert(mid.clone(), Arc::clone(meta));
-        }
-    }
-    for mid in suffix.order {
-        let Some(meta) = suffix.messages.get(&mid) else {
-            continue;
-        };
-        if !sidecar.order.contains(&mid) {
-            sidecar.order.push(mid.clone());
-        }
-        sidecar.messages.insert(mid, Arc::clone(meta));
-    }
-    sidecar
-}
-
 pub fn encode_opencode(
     messages: &[CkWireMessage],
     sidecar: &DecodeSidecar,
@@ -401,8 +363,6 @@ pub(crate) fn encode_opencode_with_transition_state_and_reasoning_exemption(
 
 #[derive(Debug, Clone)]
 pub(crate) struct EncodedOpencodeChunk {
-    pub(crate) start_index: usize,
-    pub(crate) end_index: usize,
     pub(crate) value: MessageV2Json,
 }
 
@@ -451,8 +411,6 @@ pub(crate) fn encode_opencode_chunks_with_transition_state(
             if let Some(part) = render_synthetic_todo_pair(&messages[index], next) {
                 let info = synthetic_message_info(&messages[index], session_id);
                 encoded.push(EncodedOpencodeChunk {
-                    start_index: absolute_index,
-                    end_index: absolute_index.saturating_add(2),
                     value: json!({
                         "info": info,
                         "parts": [part],
@@ -468,11 +426,7 @@ pub(crate) fn encode_opencode_chunks_with_transition_state(
                 if let Some(part) = render_adjacent_tool_pair(&messages[index], next) {
                     let mut message = encode_new_message(&messages[index], session_id);
                     set_value(&mut message, "parts", Value::Array(vec![part]));
-                    encoded.push(EncodedOpencodeChunk {
-                        start_index: absolute_index,
-                        end_index: absolute_index.saturating_add(2),
-                        value: message,
-                    });
+                    encoded.push(EncodedOpencodeChunk { value: message });
                     index += 2;
                     continue;
                 }
@@ -502,11 +456,7 @@ pub(crate) fn encode_opencode_chunks_with_transition_state(
                 enforce_latest_assistant_native_reasoning(&mut value, &meta.raw);
             }
         }
-        encoded.push(EncodedOpencodeChunk {
-            start_index: absolute_index,
-            end_index: absolute_index.saturating_add(1),
-            value,
-        });
+        encoded.push(EncodedOpencodeChunk { value });
         index += 1;
     }
     encoded
@@ -2562,50 +2512,6 @@ mod tests {
                 "copying the id from message {source} to message {target} must trip the guard"
             );
         }
-    }
-
-    #[test]
-    fn incremental_sidecar_carries_pins_across_three_generations() {
-        let mut seed = DecodeSidecar::new(HARNESS);
-        seed.pin_mid("stable-key", "pinned-mid");
-        let generation_1 = vec![json!({
-            "info": { "id": "stable-key", "role": "user" },
-            "parts": [{ "type": "text", "text": "first" }]
-        })];
-        let first = decode_opencode_with_sidecar(&generation_1, Some(&seed));
-        assert_eq!(first.messages[0].mid, "pinned-mid");
-
-        let mut generation_2 = generation_1.clone();
-        generation_2.push(json!({
-            "info": { "id": "other-key", "role": "assistant" },
-            "parts": [{ "type": "text", "text": "second" }]
-        }));
-        let second = decode_opencode_sidecar_incremental(&generation_2, &first.sidecar, 1);
-        assert_eq!(
-            second.inherit_pin("stable-key").as_deref(),
-            Some("pinned-mid")
-        );
-
-        let mut generation_3 = generation_2.clone();
-        generation_3.push(json!({
-            "info": { "id": "stable-key", "role": "user", "generation": 3 },
-            "parts": [{ "type": "text", "text": "third" }]
-        }));
-        let incremental = decode_opencode_sidecar_incremental(&generation_3, &second, 2);
-        let full = decode_opencode_with_sidecar(&generation_3, Some(&seed)).sidecar;
-        assert_eq!(incremental, full);
-        assert_eq!(
-            incremental.message_by_mid("pinned-mid").unwrap().raw["info"]["generation"],
-            3
-        );
-
-        // Mutation proof: dropping inherited pins before the third generation creates a second
-        // identity for the repeated stable key and must diverge from the full decoder.
-        let mut broken_prior = second;
-        broken_prior.mid_pins.clear();
-        let broken = decode_opencode_sidecar_incremental(&generation_3, &broken_prior, 2);
-        assert_ne!(broken, full);
-        assert!(broken.message_by_mid("stable-key").is_some());
     }
 
     #[test]

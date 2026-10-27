@@ -73,32 +73,27 @@ fn references_enabled(value: Option<&str>) -> bool {
 
 #[test]
 fn per_pass_differential_override_is_scoped_and_thread_local() {
-    let predicates = || {
-        (
-            crate::transform::prefix_projection_differential_enabled(),
-            native_attachment_differential_enabled(),
-        )
-    };
-    assert_eq!(predicates(), (true, true));
+    let predicates = crate::transform::prefix_projection_differential_enabled;
+    assert!(predicates());
     {
         let _off = DifferentialOverride::new(false);
-        assert_eq!(predicates(), (false, false));
+        assert!(!predicates());
         // The test default remains on on a separate worker thread.
-        assert_eq!(std::thread::spawn(predicates).join().unwrap(), (true, true));
+        assert!(std::thread::spawn(predicates).join().unwrap());
         {
             let _on = DifferentialOverride::new(true);
-            assert_eq!(predicates(), (true, true));
+            assert!(predicates());
         }
-        assert_eq!(predicates(), (false, false));
+        assert!(!predicates());
     }
-    assert_eq!(predicates(), (true, true));
+    assert!(predicates());
     let unwind = std::panic::catch_unwind(|| {
         let _off = DifferentialOverride::new(false);
-        assert_eq!(predicates(), (false, false));
+        assert!(!predicates());
         panic!("exercise scope cleanup");
     });
     assert!(unwind.is_err());
-    assert_eq!(predicates(), (true, true));
+    assert!(predicates());
 }
 
 #[test]

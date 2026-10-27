@@ -15,9 +15,8 @@
 //! The TypeScript side here is the real scheduler (`runDueTasksForProject`) run by
 //! Bun from `fixtures/dream-shared-schedule-ts.ts`. The Rust side is the real
 //! `Dispatcher` with a recording executor, wrapped the way the Rust tick
-//! (`dream_dispatch::tick`) wraps it: adopt the TypeScript row, tick, publish. A
-//! claimant decides only which tasks reach that dispatcher; the claimant-owned tick
-//! itself is covered by `dream_claim::tests::tick` in the library tests.
+//! (`dream_dispatch::tick`) wraps it: adopt the TypeScript row, tick, publish. The
+//! published list decides only which tasks reach that dispatcher.
 //!
 //! Requires Bun on PATH. Every file lives under a throwaway root; the Bun child gets
 //! that root as HOME, TMPDIR and XDG dirs.

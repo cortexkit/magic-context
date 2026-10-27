@@ -53,19 +53,17 @@ impl Harness for Subject {
     }
 
     async fn spawn(&self, _state_root: &Path) -> Result<Module, HarnessError> {
-        let (handler, store, dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        // An OpenCode route whose session one pass has made known to the module:
-        // the quick call below then resolves its session as in a live session,
+        // The OpenCode route's session resolves the way a live session would,
         // without asking a host the test does not have.
+        let (handler, store, dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]),
+        );
         handler.bind_route(
             CHANNEL,
             binding_with_harness(project.to_str().unwrap(), OPENCODE_HARNESS, "ses"),
         );
-        let pass = call_transform_request(&handler, request(vec![ck("m1", 1, "hello")])).await;
-        if pass["status"] != "ok" {
-            return Err(HarnessError::new(format!("the first pass failed: {pass}")));
-        }
         Ok(Module {
             handler: Arc::new(handler),
             _store: store,

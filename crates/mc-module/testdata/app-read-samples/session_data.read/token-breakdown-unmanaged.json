@@ -1,0 +1,34 @@
+{
+  "name": "token-breakdown-unmanaged",
+  "request": {
+    "method": "session_data.read",
+    "params": {
+      "section": "token_breakdown",
+      "session": {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "missing"
+      }
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "op": "session_data.read",
+    "row": {
+      "as_of": {
+        "at_ms": null,
+        "step_ref": null
+      },
+      "context_window": null,
+      "managed": {
+        "value": false
+      },
+      "parts": [],
+      "total": null,
+      "unattributed": null
+    },
+    "schema": 1,
+    "section": "token_breakdown",
+    "version": null
+  }
+}
