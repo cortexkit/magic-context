@@ -1143,8 +1143,8 @@ fn two_pass_batch_can_apply(ctx: &SelectionContext) -> bool {
     reclaim_ride_available(ctx)
 }
 
-/// A rebuild other than the emergency itself already rewrites the prefix on this pass:
-/// an independent rebuild known before selection, or queued agent drops applying now.
+/// This pass already pays for a rewrite other than the emergency itself: an independent
+/// rebuild known before selection, or a rebuilding pass on which queued agent drops land.
 /// Mirrors the TypeScript `emergencyRewriteAlreadyPriced`.
 fn emergency_rewrite_already_priced(ctx: &SelectionContext, agent_drops_applied: bool) -> bool {
     ctx.emergency_minimum_waived || agent_drops_applied

@@ -164,9 +164,10 @@ export function decidePassMutation(
 }
 
 /**
- * A rewrite this pass already pays for: newly applied queued drops, a fold that
- * busts the served prefix, or a rebuilt history injection. Replaying persisted drop
- * statuses restores bytes already served on every pass, so it never counts.
+ * This pass already pays for a rewrite other than the emergency itself: queued drops
+ * landed on it (so it is already rebuilding), a fold busts the served prefix, or the
+ * history injection was rebuilt. Replaying persisted drop statuses restores bytes
+ * already served on every pass, so it never counts.
  */
 export function emergencyRewriteAlreadyPriced(args: {
     pendingOpsDidMutate: boolean;
