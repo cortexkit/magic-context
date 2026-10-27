@@ -785,6 +785,32 @@ pub fn handle(
         Err(refusal) => return refusal,
     };
     match request.method.as_str() {
+        // The four context reads take the raw read connections, like their unit
+        // coverage does, so one read transaction per database spans the call.
+        "context.states" | "context.compartment" | "context.search" | "context.cache_why" => {
+            let params = Value::Object(request.params.clone());
+            match ctx.with_reads(|context, store| {
+                Ok(match request.method.as_str() {
+                    "context.states" => {
+                        context_states::context_states(context, store, caller, &params)
+                    }
+                    "context.compartment" => {
+                        compartment::compartment(context, store, caller, &params)
+                    }
+                    "context.search" => search::search(context, store, caller, &params),
+                    "context.cache_why" => cache_why::cache_why(
+                        context,
+                        store,
+                        caller,
+                        params.as_object().expect("params object"),
+                    ),
+                    _ => unreachable!(),
+                })
+            }) {
+                Ok(outcome) => outcome,
+                Err(refusal) => refusal,
+            }
+        }
         "session_data.read" | "project_memory.read" | "dreamer.read" | "store.health" => {
             match ctx.with_reads(|context, store| {
                 let ctx = ctx.borrowed(context, store);
@@ -1096,20 +1122,7 @@ mod tests {
                 "{method}"
             );
         }
-        for method in [
-            "context.states",
-            "context.compartment",
-            "context.search",
-            "context.cache_why",
-        ] {
-            let body =
-                serde_json::to_vec(&serde_json::json!({"method":method,"params":{}})).unwrap();
-            assert_eq!(
-                code(handler.handle_channel(1, body).await),
-                "app_op_unknown",
-                "unimplemented {method}"
-            );
-        }
+        // Every app method is dispatched above; only non-app methods refuse here.
     }
 
     #[tokio::test]
@@ -1119,6 +1132,10 @@ mod tests {
         }
         let handler = app_handler().await;
         for method in [
+            "context.states",
+            "context.compartment",
+            "context.search",
+            "context.cache_why",
             "session_data.read",
             "project_memory.read",
             "dreamer.read",
@@ -1156,6 +1173,10 @@ mod tests {
             },
         );
         for method in [
+            "context.states",
+            "context.compartment",
+            "context.search",
+            "context.cache_why",
             "session_data.read",
             "project_memory.read",
             "dreamer.read",
