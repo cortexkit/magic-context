@@ -10,6 +10,8 @@
   "origins": [
     "cacheLoss",
     "executedFold",
+    "signedPrefixRewrite",
+    "servedShapeRepair",
     "publishedHistory",
     "flush",
     "force",
@@ -39,6 +41,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -75,6 +84,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -113,6 +129,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -149,6 +172,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -187,6 +217,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -225,6 +262,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -261,6 +305,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": true,
@@ -301,6 +352,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": true,
@@ -337,6 +395,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -375,6 +440,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": true,
           "dedup": true,
@@ -414,6 +486,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": true,
           "dedup": true,
@@ -450,6 +529,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": true,
           "dedup": true,
@@ -490,6 +576,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": true,
           "dedup": true,
@@ -529,6 +622,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": true,
           "dedup": true,
@@ -568,6 +668,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -604,6 +711,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -642,6 +756,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -678,6 +799,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -714,6 +842,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -752,6 +887,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -788,6 +930,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -824,6 +973,13 @@
         "flush": false,
         "publishedHistory": true,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": true,
@@ -865,6 +1021,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": true,
@@ -901,6 +1064,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": true,
@@ -942,6 +1112,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": true,
@@ -983,6 +1160,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -1021,6 +1205,13 @@
         "flush": true,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -1057,6 +1248,13 @@
         "flush": true,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": true,
@@ -1098,6 +1296,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "idleExpiry",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": true,
@@ -1138,6 +1343,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "firstRender",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": false,
@@ -1174,6 +1386,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": true,
           "dedup": true,
@@ -1213,6 +1432,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": true,
           "dedup": true,
@@ -1253,6 +1479,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": true,
           "dedup": true,
@@ -1289,6 +1522,13 @@
         "flush": true,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": true,
           "dedup": true,
@@ -1328,6 +1568,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": true,
           "dedup": true,
@@ -1367,6 +1614,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": true,
           "dedup": true,
@@ -1403,6 +1657,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": true,
           "dedup": true,
@@ -1416,6 +1677,835 @@
         "lanes": [
           "emergencyDrop",
           "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-signed-hold-execute-queued-worth-it",
+      "note": "A pass held for recent signed thinking may not change its prefix: the execute pass is admitted and counted, but nothing applies.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": true,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 1
+      }
+    },
+    {
+      "name": "subagent-signed-hold-execute",
+      "note": "A held subagent execute pass replays its bytes.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": true,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-signed-hold-force-band-armed",
+      "note": "The force band lifts the hold: the emergency arm rides.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": true,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "force",
+        "lanes": [
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-signed-hold-parked-force-trigger",
+      "note": "A force trigger parked behind kept signed thinking takes no ride.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": true,
+        "forceTriggerPermitted": false,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-held-idle-expiry",
+      "note": "An expired cache on a held pass is a priced rebuild: queued work and cleanup ride it.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "idleExpiry",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": true,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "cacheLoss",
+        "lanes": [
+          "queuedDrops",
+          "dedup",
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-held-idle-expiry-spent-force-episode",
+      "note": "A held idle expiry prices the pass, so it re-arms a spent force episode.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": true,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "idleExpiry",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": true,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "cacheLoss",
+        "lanes": [
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-signed-prefix-rewrite",
+      "note": "Releasing signed thinking for a rewrite rebuilds the prefix; everything eligible rides it.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": true,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "signedPrefixRewrite",
+        "lanes": [
+          "queuedDrops",
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-served-shape-repair",
+      "note": "Repairing a served empty text slot rebuilds the prefix (TypeScript only).",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": true,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "servedShapeRepair",
+        "lanes": [
+          "queuedDrops",
+          "dedup",
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-refold-keeps-served-prefix",
+      "note": "A fold that reproduces the served prefix is no ride.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "refoldKeepsPrefix": true,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-idle-expiry-without-fold",
+      "note": "An expired cache whose refold keeps the bytes is still a ride below the force band.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "idleExpiry",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "cacheLoss",
+        "lanes": [
+          "queuedDrops",
+          "dedup",
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-idle-expiry-routine-already-applied",
+      "note": "Routine cleanup runs once per execute-pressure stretch on a primary; an idle expiry later in the stretch carries only the tool lanes.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "idleExpiry",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": true,
+        "routinePressureAlreadyApplied": true,
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "cacheLoss",
+        "lanes": [
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-execute-no-summary-routine-already-applied",
+      "note": "Queued drops landing price the pass, so routine cleanup rides even later in the stretch.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": true,
+        "routinePressureAlreadyApplied": true,
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "primaryExecuteNoSummary",
+        "lanes": [
+          "queuedDrops",
+          "dedup",
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "subagent-first-render",
+      "note": "Subagents never render m[0]/m[1], so they have no first render.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "firstRender",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "subagent-idle-expiry",
+      "note": "An expired cache on a subagent execute pass: the cache is rewritten anyway and every lane rides.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "idleExpiry",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "cacheLoss",
+        "lanes": [
+          "queuedDrops",
+          "dedup",
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-non-default-force-band-execute",
+      "note": "Execute threshold 88: the force band is 90%, so 88% is an ordinary execute pass.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 90,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "primaryExecuteNoSummary",
+        "lanes": [
+          "queuedDrops",
+          "dedup",
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-non-default-force-band-armed",
+      "note": "Execute threshold 88: at 91% the force band rides.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 91,
+        "forcePercent": 90,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "force",
+        "lanes": [
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-historian-in-flight-force-band",
+      "note": "A running historian does not veto the force band.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": true,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "force",
+        "lanes": [
+          "queuedDrops",
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-historian-in-flight-published-history",
+      "note": "Rendering already-published history is not vetoed by a running historian; queued drops ride it.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": true,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": true,
+        "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "publishedHistory",
+        "lanes": [
+          "queuedDrops",
+          "dedup",
+          "ageSweep",
+          "supersession"
         ],
         "heldPassesAfter": 0
       }
@@ -1442,6 +2532,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": true,
@@ -1478,6 +2575,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": true,
@@ -1514,6 +2618,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": true,
           "dedup": true,
@@ -1550,6 +2661,13 @@
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "none",
+        "refoldKeepsPrefix": false,
+        "signedThinkingHold": false,
+        "forceTriggerPermitted": true,
+        "signedPrefixRewrite": false,
+        "servedShapeRepair": false,
+        "alreadyRanThisTurn": false,
+        "routinePressureAlreadyApplied": false,
         "pendingWork": {
           "emergencyDrop": false,
           "dedup": true,

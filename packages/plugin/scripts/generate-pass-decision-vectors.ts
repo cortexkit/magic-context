@@ -43,6 +43,8 @@ type Lane = (typeof LANES)[number];
  * What permitted a prefix change, in the priority order used when several hold:
  * - `cacheLoss`: a first render or an expired provider cache rebuilds the head anyway;
  * - `executedFold`: a fold changed the served prefix;
+ * - `signedPrefixRewrite`: signed thinking was released so the prefix can be rewritten;
+ * - `servedShapeRepair`: a previously served array shape must be repaired;
  * - `publishedHistory`: freshly published history changed the served m[1];
  * - `flush`: a user `/ctx-flush`;
  * - `force`: the force band's emergency arm (or the absolute 95% arm);
@@ -55,6 +57,8 @@ type Lane = (typeof LANES)[number];
 const ORIGINS = [
     "cacheLoss",
     "executedFold",
+    "signedPrefixRewrite",
+    "servedShapeRepair",
     "publishedHistory",
     "flush",
     "force",
@@ -95,6 +99,20 @@ interface VectorInputs {
     publishedHistory: boolean;
     /** Why the provider cache is already lost on this pass, if it is. */
     cacheLoss: "none" | "idleExpiry" | "firstRender";
+    /** A fold ran but reproduced the served prefix byte for byte (no rewrite). */
+    refoldKeepsPrefix: boolean;
+    /** The pass is held for recent signed thinking on a prefix-bound model (strict hold). */
+    signedThinkingHold: boolean;
+    /** Trigger parking still lets the force band ride (false: a parked force trigger). */
+    forceTriggerPermitted: boolean;
+    /** Signed thinking is released so the pass rewrites the prefix (fit, mode switch). */
+    signedPrefixRewrite: boolean;
+    /** A previously served empty text slot must be repaired on this pass. */
+    servedShapeRepair: boolean;
+    /** Heuristics already ran for the current user turn. */
+    alreadyRanThisTurn: boolean;
+    /** A primary already applied routine cleanup in this execute-pressure stretch. */
+    routinePressureAlreadyApplied: boolean;
     /** Automatic lanes with eligible candidates waiting. */
     pendingWork: Record<Exclude<Lane, "queuedDrops">, boolean>;
 }
@@ -137,6 +155,13 @@ function base(overrides: Partial<VectorInputs>): VectorInputs {
         flush: false,
         publishedHistory: false,
         cacheLoss: "none",
+        refoldKeepsPrefix: false,
+        signedThinkingHold: false,
+        forceTriggerPermitted: true,
+        signedPrefixRewrite: false,
+        servedShapeRepair: false,
+        alreadyRanThisTurn: false,
+        routinePressureAlreadyApplied: false,
         pendingWork: NO_WORK,
         ...overrides,
     };
@@ -390,6 +415,97 @@ const CASES: Array<{ name: string; note: string; inputs: VectorInputs }> = [
         note: "At 95% the force ride and the emergency latch both yield.",
         inputs: base({ usagePercent: 96, emergencyEpisodeSpent: true, pendingWork: ALL_WORK }),
     },
+    // Inputs the first round pinned to constants, and the review's extra cases.
+    {
+        name: "primary-signed-hold-execute-queued-worth-it",
+        note: "A pass held for recent signed thinking may not change its prefix: the execute pass is admitted and counted, but nothing applies.",
+        inputs: base({ signedThinkingHold: true, queuedDrops: QUEUED_WORTH_IT, pendingWork: ALL_ROUTINE }),
+    },
+    {
+        name: "subagent-signed-hold-execute",
+        note: "A held subagent execute pass replays its bytes.",
+        inputs: base({ preset: "worker", signedThinkingHold: true, queuedDrops: QUEUED_WORTH_IT, pendingWork: ALL_ROUTINE }),
+    },
+    {
+        name: "primary-signed-hold-force-band-armed",
+        note: "The force band lifts the hold: the emergency arm rides.",
+        inputs: base({ signedThinkingHold: true, usagePercent: 88, pendingWork: ALL_WORK }),
+    },
+    {
+        name: "primary-signed-hold-parked-force-trigger",
+        note: "A force trigger parked behind kept signed thinking takes no ride.",
+        inputs: base({ signedThinkingHold: true, forceTriggerPermitted: false, usagePercent: 88, pendingWork: ALL_WORK }),
+    },
+    {
+        name: "primary-held-idle-expiry",
+        note: "An expired cache on a held pass is a priced rebuild: queued work and cleanup ride it.",
+        inputs: base({ signedThinkingHold: true, cacheLoss: "idleExpiry", queuedDrops: QUEUED_SMALL, pendingWork: ALL_ROUTINE }),
+    },
+    {
+        name: "primary-held-idle-expiry-spent-force-episode",
+        note: "A held idle expiry prices the pass, so it re-arms a spent force episode.",
+        inputs: base({ signedThinkingHold: true, cacheLoss: "idleExpiry", usagePercent: 88, emergencyEpisodeSpent: true, pendingWork: ALL_WORK }),
+    },
+    {
+        name: "primary-signed-prefix-rewrite",
+        note: "Releasing signed thinking for a rewrite rebuilds the prefix; everything eligible rides it.",
+        inputs: base({ scheduler: "defer", signedPrefixRewrite: true, queuedDrops: QUEUED_SMALL, pendingWork: ALL_ROUTINE }),
+    },
+    {
+        name: "primary-served-shape-repair",
+        note: "Repairing a served empty text slot rebuilds the prefix (TypeScript only).",
+        inputs: base({ scheduler: "defer", servedShapeRepair: true, queuedDrops: QUEUED_SMALL, pendingWork: ALL_ROUTINE }),
+    },
+    {
+        name: "primary-refold-keeps-served-prefix",
+        note: "A fold that reproduces the served prefix is no ride.",
+        inputs: base({ scheduler: "defer", refoldKeepsPrefix: true, queuedDrops: QUEUED_SMALL, pendingWork: ALL_ROUTINE }),
+    },
+    {
+        name: "primary-idle-expiry-without-fold",
+        note: "An expired cache whose refold keeps the bytes is still a ride below the force band.",
+        inputs: base({ cacheLoss: "idleExpiry", queuedDrops: QUEUED_SMALL, pendingWork: ALL_ROUTINE }),
+    },
+    {
+        name: "primary-idle-expiry-routine-already-applied",
+        note: "Routine cleanup runs once per execute-pressure stretch on a primary; an idle expiry later in the stretch carries only the tool lanes.",
+        inputs: base({ cacheLoss: "idleExpiry", alreadyRanThisTurn: true, routinePressureAlreadyApplied: true, pendingWork: ALL_ROUTINE }),
+    },
+    {
+        name: "primary-execute-no-summary-routine-already-applied",
+        note: "Queued drops landing price the pass, so routine cleanup rides even later in the stretch.",
+        inputs: base({ alreadyRanThisTurn: true, routinePressureAlreadyApplied: true, queuedDrops: QUEUED_WORTH_IT, pendingWork: ALL_ROUTINE }),
+    },
+    {
+        name: "subagent-first-render",
+        note: "Subagents never render m[0]/m[1], so they have no first render.",
+        inputs: base({ preset: "worker", scheduler: "defer", cacheLoss: "firstRender", pendingWork: ALL_ROUTINE }),
+    },
+    {
+        name: "subagent-idle-expiry",
+        note: "An expired cache on a subagent execute pass: the cache is rewritten anyway and every lane rides.",
+        inputs: base({ preset: "worker", cacheLoss: "idleExpiry", queuedDrops: QUEUED_SMALL, pendingWork: ALL_ROUTINE }),
+    },
+    {
+        name: "primary-non-default-force-band-execute",
+        note: "Execute threshold 88: the force band is 90%, so 88% is an ordinary execute pass.",
+        inputs: base({ usagePercent: 88, forcePercent: 90, queuedDrops: QUEUED_WORTH_IT, pendingWork: ALL_WORK }),
+    },
+    {
+        name: "primary-non-default-force-band-armed",
+        note: "Execute threshold 88: at 91% the force band rides.",
+        inputs: base({ usagePercent: 91, forcePercent: 90, pendingWork: ALL_WORK }),
+    },
+    {
+        name: "primary-historian-in-flight-force-band",
+        note: "A running historian does not veto the force band.",
+        inputs: base({ usagePercent: 88, historianInFlight: true, queuedDrops: QUEUED_SMALL, pendingWork: ALL_WORK }),
+    },
+    {
+        name: "primary-historian-in-flight-published-history",
+        note: "Rendering already-published history is not vetoed by a running historian; queued drops ride it.",
+        inputs: base({ historianInFlight: true, publishedHistory: true, queuedDrops: QUEUED_SMALL, pendingWork: ALL_ROUTINE }),
+    },
     // Compaction off.
     {
         name: "compaction-off-execute-never-reduces",
@@ -432,8 +548,24 @@ export function decideVector(inputs: VectorInputs): VectorExpected {
     const primary = inputs.preset === "head";
     let emergencySample = inputs.emergencyEpisodeSpent ? 1 : 0;
     let heldPassesAfter = inputs.queuedDrops.heldPassesBefore;
-    const firstRenderBust = inputs.cacheLoss === "firstRender";
+    // Host facts the phase derives before its gates, as `runPostTransformPhase` derives
+    // them. A pass held for recent signed thinking freezes the m[0]/m[1] head
+    // (`freezeM0M1`), so it cannot fold, refresh m[1] or take a parked flush
+    // (`isExplicitFlush` and `materializationRequested` are cleared). Only primary and
+    // compaction-off sessions render m[0]/m[1] (`m0M1EnabledForFold`), so only they can
+    // first-render; the strict hold parks that render too. Every session sees an expired
+    // cache (`idleExpiryRebuild`); while the hold is on it is the held expiry.
+    const hold = inputs.signedThinkingHold;
+    const rendersHead = primary || inputs.compactionOff;
+    const firstRenderBust = inputs.cacheLoss === "firstRender" && rendersHead && !hold;
     const idleExpiryRebuild = inputs.cacheLoss === "idleExpiry";
+    const heldIdleExpiryRebuild = hold && idleExpiryRebuild;
+    const foldBustsServedPrefix = inputs.executedFold && !hold;
+    const flush = inputs.flush && !hold;
+    const publishedHistory = inputs.publishedHistory && !hold;
+    // `/ctx-flush` also requests a history rebuild (`onFlush` in hook.ts), so a flush
+    // pass rebuilds the history injection.
+    const historyRebuiltThisPass = publishedHistory || flush;
     const decision = decidePassMutation(
         {
             fullFeatureMode: primary,
@@ -443,21 +575,19 @@ export function decideVector(inputs: VectorInputs): VectorExpected {
             forceMaterializationPercentage: inputs.forcePercent,
             contextUsageFromEstimate: inputs.usageFromEstimate,
             emergencyInputSample: () => emergencySample,
-            forceTriggerPermitted: true,
-            servedShapeRepair: false,
-            rewritingSignedPrefix: false,
-            foldBustsServedPrefix: inputs.executedFold,
+            forceTriggerPermitted: inputs.forceTriggerPermitted,
+            servedShapeRepair: inputs.servedShapeRepair,
+            rewritingSignedPrefix: inputs.signedPrefixRewrite,
+            foldBustsServedPrefix,
             firstRenderBust,
             idleExpiryRebuild,
-            heldIdleExpiryRebuild: false,
-            explicitFlush: inputs.flush,
-            publishedHistory: inputs.publishedHistory,
-            // `/ctx-flush` also requests a history rebuild (`onFlush` in hook.ts), so a
-            // flush pass rebuilds the history injection.
-            historyRebuiltThisPass: inputs.publishedHistory || inputs.flush,
-            materializationRequested: inputs.flush,
-            alreadyRanThisTurn: false,
-            signedThinkingHold: false,
+            heldIdleExpiryRebuild,
+            explicitFlush: flush,
+            publishedHistory,
+            historyRebuiltThisPass,
+            materializationRequested: flush,
+            alreadyRanThisTurn: inputs.alreadyRanThisTurn,
+            signedThinkingHold: hold,
         },
         ({ primaryExecute, alreadyBusting }) => {
             const outcome = decideExecuteReclaim({
@@ -478,10 +608,10 @@ export function decideVector(inputs: VectorInputs): VectorExpected {
     if (decision.shouldRunHeuristics) {
         const rewriteAlreadyPriced = emergencyRewriteAlreadyPriced({
             pendingOpsDidMutate: lanes.has("queuedDrops"),
-            foldBustsServedPrefix: inputs.executedFold,
+            foldBustsServedPrefix,
             firstRenderBust,
-            heldIdleExpiryRebuild: false,
-            historyRebuiltThisPass: inputs.publishedHistory || inputs.flush,
+            heldIdleExpiryRebuild,
+            historyRebuiltThisPass,
             compartmentInjectionRebuiltFromDb: false,
             rebuiltHistoryFromInitialPrepare: false,
         });
@@ -505,8 +635,8 @@ export function decideVector(inputs: VectorInputs): VectorExpected {
                 contextPercentage: inputs.usagePercent,
                 emergencyInputSample: () => emergencySample,
                 fullFeatureMode: primary,
-                routinePressureAlreadyApplied: false,
-                materializationRequested: inputs.flush,
+                routinePressureAlreadyApplied: inputs.routinePressureAlreadyApplied,
+                materializationRequested: flush,
                 rewriteAlreadyPriced,
             }) || emergencyDrops;
         if (emergencyDrops) lanes.add("emergencyDrop");
@@ -519,16 +649,20 @@ export function decideVector(inputs: VectorInputs): VectorExpected {
     const { rideSignals } = decision;
     const active: Record<Origin, boolean> = {
         cacheLoss: rideSignals.hardFold && (firstRenderBust || idleExpiryRebuild),
-        executedFold: rideSignals.hardFold && inputs.executedFold,
+        executedFold: rideSignals.hardFold && foldBustsServedPrefix,
+        signedPrefixRewrite: rideSignals.hardFold && inputs.signedPrefixRewrite,
+        servedShapeRepair: rideSignals.servedShapeRepair,
         publishedHistory: rideSignals.publishedHistory,
         flush: rideSignals.explicitFlush,
         force: rideSignals.force,
         primaryExecuteNoSummary: rideSignals.executeReclaim,
         subagentExecute: rideSignals.subagentExecute,
     };
-    // A fold, a published m[1] refresh and a lost cache rewrite the prefix by
-    // themselves; every other ride only permits lanes that find work.
-    const rewritesByItself = rideSignals.hardFold || rideSignals.publishedHistory;
+    // A fold, a signed-prefix rewrite, a served-shape repair, a published m[1] refresh
+    // and a lost cache rewrite the prefix by themselves; every other ride only permits
+    // lanes that find work.
+    const rewritesByItself =
+        rideSignals.hardFold || rideSignals.publishedHistory || rideSignals.servedShapeRepair;
     const busts = rewritesByItself || lanes.size > 0;
     return {
         busts,

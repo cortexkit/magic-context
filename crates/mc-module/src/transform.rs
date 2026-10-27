@@ -5912,11 +5912,13 @@ fn apply_once(
     // full provider-cache write anyway (an expired cache, discarded cache sections, a head
     // that cannot be replayed): queued work is then applied in this same pass. For a primary
     // with a replayable head, the head itself still replays unchanged.
-    let signed_drains_released = force_band_active
-        || scheduler_outcome.pass == scheduler::PassDecision::Emergency95
-        || scheduler_outcome.idle_ttl_fired
-        || cache_sections_discarded
-        || head_replay_impossible;
+    let signed_drains_released = signed_drains_released(
+        force_band_active,
+        scheduler_outcome.pass,
+        scheduler_outcome.idle_ttl_fired,
+        cache_sections_discarded,
+        head_replay_impossible,
+    );
     let signed_prefix_hold = open_signed_turn && !signed_drains_released;
     // The inputs below would re-render m0/m1, so a frozen head vetoes them; each is derived
     // from persisted state and fires on the first pass after the turn.
@@ -6079,53 +6081,52 @@ fn apply_once(
         protected_signed_prefix,
         held_release.has("force_episode"),
     );
-    let ride_inputs = PassRideInputs {
-        is_subagent: req.is_subagent,
-        pass: scheduler_outcome.pass,
-        raw_rebuild,
-        prefix_materialization_enabled,
-        initialized: loaded.meta.initialized,
-        render_config_changed,
-        cached_m1_missing: cached_m1_missing(&loaded.core),
-        hard_fold_prices_mutations,
-        idle_only_hard_fold: idle_fold_due
-            && !(pre_snapshot_inputs_changed
-                || first_fold_due
-                || boundary_divergence_recut.is_some()
-                || system_absorb_hard_due
-                || external_revision_changed),
-        reconcile_hard_due,
-        lineage_force_hard: lineage_state.force_hard,
-        m1_changed: current_m1_digest != applied_m1_revision,
-        flush_armed,
-        signed_prefix_hold,
-        idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
-        open_signed_turn,
-        head_rebuild_forced,
-        force_episode_available,
-    };
-    let rides = pass_rides(&ride_inputs);
-    let subagent_execute_permitted = rides.subagent_execute_permitted;
-    let supersession_ride_available = rides.supersession_ride_available;
-    // A rebuild that is not the emergency itself. It is the only thing that waives the
-    // emergency minimum: the force-band edge and the 95% backstop permit a rewrite but do
-    // not pay for one.
-    let emergency_minimum_waived = rides.rewrite_already_priced;
-    // Invariant 3's bounded execute exception applies to a primary execute pass that no
-    // other ride rebuilds. A summary that can still come (a historian or wrap-up run in
-    // flight, or a publication waiting behind a frozen signed head) holds the queued work
-    // for that summary's rebuild instead.
-    let execute_reclaim_candidate = !req.is_subagent
-        && scheduler_outcome.pass == scheduler::PassDecision::Execute
-        && !supersession_ride_available
-        && !pending_agent_drops.is_empty();
-    let summary_can_come = ctx.historian_active
-        || ctx.wrapup_active
-        || (signed_head_frozen
-            && (compartment_seq_changed_since_meta || current_m1_digest != applied_m1_revision));
+    let tail_reclaim_enabled = serializer_profile.is_none_or(healing::tail_reclaim);
+    let decision = PassDecision::new(PassDecisionFacts {
+        rides: PassRideInputs {
+            is_subagent: req.is_subagent,
+            pass: scheduler_outcome.pass,
+            raw_rebuild,
+            prefix_materialization_enabled,
+            initialized: loaded.meta.initialized,
+            render_config_changed,
+            cached_m1_missing: cached_m1_missing(&loaded.core),
+            hard_fold_prices_mutations,
+            idle_only_hard_fold: idle_fold_due
+                && !(pre_snapshot_inputs_changed
+                    || first_fold_due
+                    || boundary_divergence_recut.is_some()
+                    || system_absorb_hard_due
+                    || external_revision_changed),
+            reconcile_hard_due,
+            lineage_force_hard: lineage_state.force_hard,
+            m1_changed: current_m1_digest != applied_m1_revision,
+            flush_armed,
+            signed_prefix_hold,
+            signed_thinking_reset,
+            idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
+            open_signed_turn,
+            head_rebuild_forced,
+            force_episode_available,
+        },
+        emergency_latched: loaded.meta.has_prior_emergency_drop
+            || (trigger_holds_enabled
+                && protected_signed_prefix
+                && held_release.has("force_episode")),
+        historian_active: ctx.historian_active,
+        wrapup_active: ctx.wrapup_active,
+        signed_head_frozen,
+        publication_waiting: compartment_seq_changed_since_meta
+            || current_m1_digest != applied_m1_revision,
+        has_pending_agent_drops: !pending_agent_drops.is_empty(),
+        held_passes_before: loaded.meta.execute_reclaim_held_passes,
+        usable_window: context_limit_tokens,
+        tail_reclaim_enabled,
+    });
+    let subagent_execute_permitted = decision.rides.subagent_execute_permitted;
     let mut execute_reclaim_admitted = false;
-    // The count persisted at the end of this pass when it does not rebuild.
-    let mut execute_reclaim_held_passes = 0u64;
+    // The bounded execute exception's verdict, when this pass asked for one.
+    let mut execute_reclaim_decision = None;
     let tag_tokens_by_block: HashMap<&str, usize> = tag_rows
         .iter()
         .filter_map(|row| {
@@ -6164,9 +6165,9 @@ fn apply_once(
         mut plan,
     ) = loop {
         let pass_already_busting =
-            (supersession_ride_available || execute_reclaim_admitted) && !all_held;
+            decision.pass_already_busting(execute_reclaim_admitted, all_held);
         let supersession_ride_available = pass_already_busting;
-        let emergency_minimum_waived = emergency_minimum_waived && !all_held;
+        let selection_gates = decision.selection_gates(pass_already_busting, all_held);
         let calibration_candidate =
             crate::decision_calibration::DecisionCalibration::freeze_for_model(
                 req.model_key.as_deref(),
@@ -6191,18 +6192,11 @@ fn apply_once(
         // that OR-ed in the request-local tagging surface is gone: it existed only to grant the
         // then-verbatim-tail Claude Code profile reclaim on tool-present passes, and the
         // profile default now covers every pass directly.
-        let tail_reclaim_enabled = serializer_profile.is_none_or(healing::tail_reclaim);
         let cached_m1_missing_due = cached_m1_missing(&loaded.core);
-        let producer_gate = tail_reclaim_enabled
-            && producer_gate(scheduler_outcome.pass, producer_hard_advisory(&ride_inputs));
         // A closed producer gate or an all-held plan selects Defer, which emits no
         // reductions. Execute selection still needs pass_already_busting or
         // supersession_ride_available to permit shortening or dropping content.
-        let selection_class = if producer_gate && !all_held {
-            selection_pass_class(scheduler_outcome.pass)
-        } else {
-            PassClass::Defer
-        };
+        let selection_class = decision.selection_class(all_held);
         profile_start!(perf_selection_inputs, "rt04_selection_inputs");
         let mut tail_for_selection =
             tail_sel_items(&live, loaded.meta.coverage_ordinal, &tag_tokens_by_block);
@@ -6341,18 +6335,14 @@ fn apply_once(
                 prior_input_sample: loaded.meta.last_emergency_input_sample,
                 // The spent-episode latch as stored. Selection decides whether this pass
                 // re-arms it (`selection::lane_gates`).
-                has_prior_drop: loaded.meta.has_prior_emergency_drop
-                    || (trigger_holds_enabled
-                        && protected_signed_prefix
-                        && held_release.has("force_episode")),
+                has_prior_drop: selection_gates.has_prior_drop,
                 agent_drop_ids,
                 agent_drop_command_ids,
                 first_applied_agent_drop_ids,
-                pass_already_busting,
-                supersession_ride_available,
-                emergency_minimum_waived,
-                emergency_window_yields: scheduler_outcome.pass
-                    == scheduler::PassDecision::Emergency95,
+                pass_already_busting: selection_gates.pass_already_busting,
+                supersession_ride_available: selection_gates.supersession_ride_available,
+                emergency_minimum_waived: selection_gates.emergency_minimum_waived,
+                emergency_window_yields: selection_gates.emergency_window_yields,
                 tag_window_protected_block_ids: tag_window_protected_block_ids.clone(),
                 exempt_message_protected_block_ids,
             };
@@ -6371,7 +6361,7 @@ fn apply_once(
         let (mut selection_outcome, selection_frozen, selection_ctx, selection_config) =
             selection_outcome;
         timings.selection = elapsed_ms(selection_started_at);
-        if execute_reclaim_candidate && !execute_reclaim_admitted && !all_held {
+        if decision.execute_reclaim_candidate && !execute_reclaim_admitted && !all_held {
             // Count what the drain could actually remove now: run the same selection as if
             // the pass were rebuilding, and keep only the queued targets it would reduce.
             let probe = select_reductions_with_outcome(
@@ -6384,25 +6374,18 @@ fn apply_once(
                 },
                 &selection_config,
             );
-            let decision = decide_execute_reclaim(&ExecuteReclaimInputs {
-                held_passes: loaded.meta.execute_reclaim_held_passes,
-                primary_execute: true,
-                summary_can_come,
-                already_busting: pass_already_busting,
-                reclaimable_tokens: queued_drop_reclaim_tokens(
-                    &tail_for_selection,
-                    &probe.decisions,
-                    &pending_drop_target_ids,
-                    active_calibration,
-                ),
-                usable_window: context_limit_tokens,
-            });
-            execute_reclaim_held_passes = decision.held_passes;
-            if decision.admitted && !signed_prefix_hold {
+            let verdict = decision.admit_execute_reclaim(queued_drop_reclaim_tokens(
+                &tail_for_selection,
+                &probe.decisions,
+                &pending_drop_target_ids,
+                active_calibration,
+            ));
+            execute_reclaim_decision = Some(verdict);
+            if verdict.admitted {
                 tracing::info!(
                     "mc-module: [{}] execute pass rebuilds for queued work: no summary can come (held passes {})",
                     req.session_id,
-                    decision.held_passes
+                    verdict.held_passes
                 );
                 execute_reclaim_admitted = true;
                 continue;
@@ -6871,11 +6854,16 @@ fn apply_once(
         pass_plan_permits_prefix_mutation(&plan, marker_hard_serves_frozen_prefix);
     // A rebuilding pass resets the held execute-pass count, as the TypeScript plugin's
     // `clearExecuteReclaimState` does on every pass that changed bytes.
-    meta.execute_reclaim_held_passes = if is_provider_prefix_mutation_pass {
-        0
-    } else {
-        execute_reclaim_held_passes
-    };
+    meta.execute_reclaim_held_passes =
+        decision.held_passes_after(execute_reclaim_decision, is_provider_prefix_mutation_pass);
+    if let Some(origin) =
+        decision.origin(execute_reclaim_admitted, is_provider_prefix_mutation_pass)
+    {
+        tracing::debug!(
+            "mc-module: [{}] prefix rebuild permitted by ride={origin}",
+            req.session_id
+        );
+    }
     // The reductions-only child branch preserves inherited history and accepts
     // reduction units only. Image/system/age-reasoning strip units stay primary-only;
     // an execute ride must not silently widen that separate replay contract.
@@ -10189,15 +10177,33 @@ fn scheduler_config(execute_threshold_percentage: f64) -> SchedulerConfig {
     }
 }
 
+/// Whether a pass releases the hold that kept signed thinking places on queued drops and
+/// cleanup: it relieves pressure (force band, Emergency95), or it is a full provider-cache
+/// write anyway (an expired cache, discarded cache sections, a head that cannot be
+/// replayed).
+fn signed_drains_released(
+    force_band_active: bool,
+    pass: scheduler::PassDecision,
+    idle_ttl_fired: bool,
+    cache_sections_discarded: bool,
+    head_replay_impossible: bool,
+) -> bool {
+    force_band_active
+        || pass == scheduler::PassDecision::Emergency95
+        || idle_ttl_fired
+        || cache_sections_discarded
+        || head_replay_impossible
+}
+
 fn producer_gate(pass: scheduler::PassDecision, hard_advisory: bool) -> bool {
     !matches!(pass, scheduler::PassDecision::Defer) || hard_advisory
 }
 
 /// Work that lets a scheduler Defer pass select reductions: a rebuild of the head that
 /// happens anyway (a lineage descent or discarded cache sections force a HARD even when
-/// the scheduler defers), or a user `/ctx-flush`, which the TypeScript plugin drains on
-/// any pass. Queued work is selected now so it lands in that same rewrite instead of
-/// costing a second one later.
+/// the scheduler defers; a signed-thinking reset strips kept thinking), or a user
+/// `/ctx-flush`, which the TypeScript plugin drains on any pass. Queued work is selected
+/// now so it lands in that same rewrite instead of costing a second one later.
 fn producer_hard_advisory(inputs: &PassRideInputs) -> bool {
     !inputs.initialized
         || inputs.render_config_changed
@@ -10205,6 +10211,7 @@ fn producer_hard_advisory(inputs: &PassRideInputs) -> bool {
         || inputs.hard_fold_prices_mutations
         || inputs.cached_m1_missing
         || inputs.lineage_force_hard
+        || inputs.signed_thinking_reset
         || (inputs.flush_armed && !inputs.signed_prefix_hold)
 }
 
@@ -10246,6 +10253,8 @@ struct PassRideInputs {
     /// A user `/ctx-flush` is pending.
     flush_armed: bool,
     signed_prefix_hold: bool,
+    /// Kept signed thinking is stripped on this pass, so its prefix is rewritten.
+    signed_thinking_reset: bool,
     idle_ttl_fired: bool,
     open_signed_turn: bool,
     head_rebuild_forced: bool,
@@ -10288,6 +10297,7 @@ fn pass_rides(inputs: &PassRideInputs) -> PassRides {
         m1_changed,
         flush_armed,
         signed_prefix_hold,
+        signed_thinking_reset,
         idle_ttl_fired,
         open_signed_turn,
         head_rebuild_forced,
@@ -10311,8 +10321,11 @@ fn pass_rides(inputs: &PassRideInputs) -> PassRides {
             // pass the head itself still replays (`signed_head_frozen`).
             || (open_signed_turn && (head_rebuild_forced || (!is_subagent && idle_ttl_fired)))
     };
+    // Releasing kept signed thinking rewrites the prefix, so everything eligible rides it
+    // (TypeScript `rewritingSignedPrefix` in `hardFold`). It is not a priced rewrite.
     let independent_rebuild = rebuild_without_idle(hard_fold_prices_mutations)
-        || (prefix_materialization_enabled && idle_ttl_fired);
+        || (prefix_materialization_enabled && idle_ttl_fired)
+        || signed_thinking_reset;
     let rewrite_already_priced =
         rebuild_without_idle(hard_fold_prices_mutations && !idle_only_hard_fold);
     // A subagent's only permission to apply queued drops and cleanup is a non-Defer scheduler
@@ -10410,6 +10423,189 @@ fn decide_execute_reclaim(inputs: &ExecuteReclaimInputs) -> ExecuteReclaimDecisi
             && ((inputs.usable_window > 0.0
                 && inputs.reclaimable_tokens >= inputs.usable_window * 0.02)
                 || held_passes >= 3),
+    }
+}
+
+/// The facts `apply_once` gathers before it decides whether a pass may change the provider
+/// prefix. The shared decision vectors drive [`PassDecision`] with the same facts.
+#[derive(Debug, Clone, Copy)]
+struct PassDecisionFacts {
+    rides: PassRideInputs,
+    /// The stored force-episode latch, or a force episode parked behind kept thinking.
+    emergency_latched: bool,
+    /// A historian run is in flight (live, or stored in any phase but idle).
+    historian_active: bool,
+    wrapup_active: bool,
+    /// Kept signed thinking freezes the m0/m1 head on this pass.
+    signed_head_frozen: bool,
+    /// A published summary or m1 change waits to render.
+    publication_waiting: bool,
+    has_pending_agent_drops: bool,
+    /// The stored count of consecutive held execute passes.
+    held_passes_before: u64,
+    usable_window: f64,
+    tail_reclaim_enabled: bool,
+}
+
+/// The selection-context fields that carry this pass's permission to [`crate::selection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectionGates {
+    has_prior_drop: bool,
+    pass_already_busting: bool,
+    supersession_ride_available: bool,
+    emergency_minimum_waived: bool,
+    emergency_window_yields: bool,
+}
+
+/// One pass's rebuild decision. `apply_once` asks it, in order, for the rides, whether
+/// the primary execute pass rebuilds for queued work, the permission it hands selection,
+/// and, once the pass is classified, the held-pass count to store and the ride that
+/// permitted a rebuild. The TypeScript reference composes the same rules in
+/// `decidePassMutation`.
+#[derive(Debug, Clone, Copy)]
+struct PassDecision {
+    facts: PassDecisionFacts,
+    rides: PassRides,
+    /// A summary can still come and will rebuild the head itself, so queued work waits
+    /// for it: a historian or wrap-up run in flight, or a publication waiting behind a
+    /// frozen signed head. TypeScript `summaryCanCome`.
+    summary_can_come: bool,
+    /// Invariant 3's bounded execute exception may apply: a primary scheduler Execute
+    /// pass (below the force band) that no other ride rebuilds, with queued drops.
+    execute_reclaim_candidate: bool,
+}
+
+impl PassDecision {
+    fn new(facts: PassDecisionFacts) -> Self {
+        let rides = pass_rides(&facts.rides);
+        Self {
+            facts,
+            rides,
+            summary_can_come: facts.historian_active
+                || facts.wrapup_active
+                || (facts.signed_head_frozen && facts.publication_waiting),
+            execute_reclaim_candidate: !facts.rides.is_subagent
+                && facts.rides.pass == scheduler::PassDecision::Execute
+                && !rides.supersession_ride_available
+                && facts.has_pending_agent_drops,
+        }
+    }
+
+    /// Ask the bounded execute exception, given the calibrated tokens the queued drops
+    /// would remove. A pass held for kept signed thinking is counted but never admitted,
+    /// as the TypeScript permission gate (`prefixMutationPermitted`) withholds it.
+    fn admit_execute_reclaim(&self, reclaimable_tokens: f64) -> ExecuteReclaimDecision {
+        let verdict = decide_execute_reclaim(&ExecuteReclaimInputs {
+            held_passes: self.facts.held_passes_before,
+            primary_execute: true,
+            summary_can_come: self.summary_can_come,
+            already_busting: self.rides.supersession_ride_available,
+            reclaimable_tokens,
+            usable_window: self.facts.usable_window,
+        });
+        ExecuteReclaimDecision {
+            admitted: verdict.admitted && !self.facts.rides.signed_prefix_hold,
+            ..verdict
+        }
+    }
+
+    /// The one permission every reduction lane consults.
+    fn pass_already_busting(&self, execute_reclaim_admitted: bool, all_held: bool) -> bool {
+        (self.rides.supersession_ride_available || execute_reclaim_admitted) && !all_held
+    }
+
+    /// The selection class: Defer when the producer gate is closed or the plan is all held.
+    fn selection_class(&self, all_held: bool) -> PassClass {
+        let rides = &self.facts.rides;
+        if self.facts.tail_reclaim_enabled
+            && producer_gate(rides.pass, producer_hard_advisory(rides))
+            && !all_held
+        {
+            selection_pass_class(rides.pass)
+        } else {
+            PassClass::Defer
+        }
+    }
+
+    fn selection_gates(&self, pass_already_busting: bool, all_held: bool) -> SelectionGates {
+        SelectionGates {
+            has_prior_drop: self.facts.emergency_latched,
+            pass_already_busting,
+            supersession_ride_available: pass_already_busting,
+            emergency_minimum_waived: self.rides.rewrite_already_priced && !all_held,
+            emergency_window_yields: self.facts.rides.pass == scheduler::PassDecision::Emergency95,
+        }
+    }
+
+    /// The pass writes the provider prefix whatever the lanes do: the provider cache
+    /// expired, the head renders for the first time or cannot be replayed, a fold or an m1
+    /// refresh changes it, or kept signed thinking is stripped.
+    fn rewrites_head(&self) -> bool {
+        self.cache_loss()
+            || self.head_fold()
+            || self.published_history()
+            || self.rides_signed_reset()
+    }
+
+    fn cache_loss(&self) -> bool {
+        let r = &self.facts.rides;
+        r.idle_ttl_fired
+            || (r.prefix_materialization_enabled && (!r.initialized || r.cached_m1_missing))
+            || (r.open_signed_turn && r.head_rebuild_forced)
+    }
+
+    fn head_fold(&self) -> bool {
+        let r = &self.facts.rides;
+        r.raw_rebuild
+            || (r.prefix_materialization_enabled
+                && (r.render_config_changed
+                    || r.hard_fold_prices_mutations
+                    || r.reconcile_hard_due
+                    || r.lineage_force_hard))
+    }
+
+    fn published_history(&self) -> bool {
+        let r = &self.facts.rides;
+        r.prefix_materialization_enabled && r.pass != scheduler::PassDecision::Defer && r.m1_changed
+    }
+
+    fn rides_signed_reset(&self) -> bool {
+        self.facts.rides.signed_thinking_reset
+    }
+
+    /// The ride that permitted a rebuild, in the TypeScript vectors' priority order; None
+    /// when the pass did not rebuild. Queued drops are never an origin.
+    fn origin(&self, execute_reclaim_admitted: bool, busted: bool) -> Option<&'static str> {
+        let r = &self.facts.rides;
+        [
+            ("cacheLoss", self.cache_loss()),
+            ("executedFold", self.head_fold()),
+            ("signedPrefixRewrite", self.rides_signed_reset()),
+            ("publishedHistory", self.published_history()),
+            ("flush", r.flush_armed && !r.signed_prefix_hold),
+            (
+                "force",
+                r.force_episode_available || r.pass == scheduler::PassDecision::Emergency95,
+            ),
+            ("primaryExecuteNoSummary", execute_reclaim_admitted),
+            (
+                "subagentExecute",
+                r.is_subagent && self.rides.subagent_execute_permitted,
+            ),
+        ]
+        .into_iter()
+        .find(|(_, active)| busted && *active)
+        .map(|(name, _)| name)
+    }
+
+    /// The held execute-pass count to store: zero after any rebuild, otherwise this pass's
+    /// verdict (zero when it asked none).
+    fn held_passes_after(&self, verdict: Option<ExecuteReclaimDecision>, busted: bool) -> u64 {
+        if busted {
+            0
+        } else {
+            verdict.map_or(0, |verdict| verdict.held_passes)
+        }
     }
 }
 
