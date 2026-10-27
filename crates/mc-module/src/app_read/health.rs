@@ -1,0 +1,1 @@
+// Slice G: store.health.

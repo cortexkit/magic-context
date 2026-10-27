@@ -37,6 +37,9 @@ mod private_permissions_source_test;
 
 pub mod agent_data;
 mod agent_fragments;
+mod app_read;
+#[cfg(test)]
+mod app_read_test_store;
 pub mod boundary;
 pub mod caveman;
 mod child_retention;
@@ -4151,6 +4154,7 @@ struct RuntimeStoreError {
 /// and the per-route session bindings (route channel → {project, session}).
 pub struct McHandler {
     agent_data: Option<agent_data::AgentDataService>,
+    app_channels: Mutex<HashMap<u16, app_read::admission::AppCaller>>,
     move_visibility: Arc<agent_data::MoveVisibility>,
     registered_module_id: String,
     store: Arc<OnceLock<Arc<McStore>>>,
@@ -5233,6 +5237,7 @@ impl McHandler {
             .expect("bus connection file") = bus_connection_file;
         McHandler {
             agent_data,
+            app_channels: Mutex::default(),
             move_visibility,
             registered_module_id: module_id,
             store,
@@ -5692,6 +5697,7 @@ impl McHandler {
             agent_data,
             move_visibility,
             registered_module_id: DEFAULT_MODULE_ID.into(),
+            app_channels: Mutex::default(),
             store,
             log_directory: None,
             store_open: Arc::new(StoreOpenCoordinator::new()),
@@ -16722,14 +16728,34 @@ impl ModuleHandler for McHandler {
 
     /// Record the route's {project_root, session} so the transform path can resolve the
     /// project from the daemon-controlled channel (never a per-pass request field). Accept
-    /// every route — project resolution, not authorization, is the concern here.
+    /// session routes. The independent app service authorizes its caller first.
     async fn on_bind(&self, req: &RouteBindRequest) -> subc_client_rs::BindDecision {
+        self.app_channels
+            .lock()
+            .expect("app channels")
+            .remove(&req.handle.channel);
         if let Some(service) = &self.agent_data {
             service
                 .channels
                 .lock()
                 .expect("agent data channels")
                 .remove(&req.handle.channel);
+        }
+        if matches!(&req.target, subc_protocol::RouteTarget::InternalService { service_id, .. } if service_id == app_read::SERVICE_ID)
+        {
+            let allow_direct = !matches!(req.principal, Some(subc_protocol::Principal::Direct))
+                || config::user_app_read_allow_direct();
+            return match app_read::admission::admit(req, &self.registered_module_id, allow_direct) {
+                Ok(caller) => {
+                    self.unbind_route(req.handle.channel);
+                    self.app_channels
+                        .lock()
+                        .expect("app channels")
+                        .insert(req.handle.channel, caller);
+                    subc_client_rs::BindDecision::accept()
+                }
+                Err(refusal) => refusal,
+            };
         }
         if let subc_protocol::RouteTarget::InternalService {
             module_id,
@@ -16834,6 +16860,10 @@ impl ModuleHandler for McHandler {
     /// Drop the route's binding on teardown so a reused channel can't resolve a stale
     /// project and the map doesn't leak.
     async fn on_route_gone(&self, handle: &RouteHandle) {
+        self.app_channels
+            .lock()
+            .expect("app channels")
+            .remove(&handle.channel);
         if let Some(service) = &self.agent_data {
             service
                 .channels
@@ -16845,7 +16875,22 @@ impl ModuleHandler for McHandler {
     }
 
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
-        let channel = ctx.route_handle().channel;
+        self.handle_channel(ctx.route_handle().channel, body).await
+    }
+}
+
+impl McHandler {
+    async fn handle_channel(&self, channel: u16, body: Vec<u8>) -> HandlerOutcome {
+        let app_caller = self
+            .app_channels
+            .lock()
+            .expect("app channels")
+            .get(&channel)
+            .cloned();
+        if let Some(caller) = app_caller {
+            let allow_direct = !caller.is_direct() || config::user_app_read_allow_direct();
+            return app_read::handle(&caller, allow_direct, &body);
+        }
         // A flow-scoped route never takes the agent-data lane: it falls through to
         // the dispatcher, whose flow fence admits only the flow ops.
         if !self.flow_scoped(channel)
@@ -16896,12 +16941,28 @@ impl ModuleHandler for McHandler {
             return outcome;
         }
         let request = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
-        self.dispatch_value_with_inbound_bytes(
-            ctx.route_handle().channel,
-            request,
-            Some(body.len()),
-        )
-        .await
+        if request
+            .get("method")
+            .and_then(Value::as_str)
+            .is_some_and(|method| app_read::APP_READ_METHODS.contains(&method))
+        {
+            return HandlerOutcome::Error {
+                code: if self
+                    .bindings
+                    .lock()
+                    .expect("route bindings")
+                    .contains_key(&channel)
+                {
+                    "app_caller_forbidden"
+                } else {
+                    "route_unbound"
+                }
+                .into(),
+                message: "App read methods require a bound mc-app-read channel.".into(),
+            };
+        }
+        self.dispatch_value_with_inbound_bytes(channel, request, Some(body.len()))
+            .await
     }
 }
 
@@ -21745,6 +21806,15 @@ pub fn manifest_with_route_targets_and_smart_notes(
             sub_supervises: false,
         },
         subagent_invocations_read::management_role(),
+        ProviderRole::InternalService {
+            service_id: app_read::SERVICE_ID.into(),
+            transport: subc_protocol::manifest::InternalTransport::Bulk,
+            agent_facing: false,
+            operations: app_read::APP_READ_METHODS
+                .iter()
+                .map(|method| method.to_string())
+                .collect(),
+        },
     ];
     if agent_data::ENABLED {
         capabilities.push(cortexkit_role_agent_data::PROVIDES.to_string());
