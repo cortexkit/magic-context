@@ -327,52 +327,6 @@ pub(super) fn accepts(
     candidate == held.message
 }
 
-/// Every place in `sent` where the held part has an empty string or no
-/// member at all: the only places an edit built from a pre-prune copy can
-/// differ from the reconciled one in what a prune removed. Paths stop at
-/// the first member the held part lacks.
-fn missing_in_held(
-    held: Option<&Value>,
-    sent: &Value,
-    path: &mut Vec<Step>,
-    out: &mut Vec<Vec<Step>>,
-) {
-    let Some(held) = held else {
-        out.push(path.clone());
-        return;
-    };
-    match (held, sent) {
-        (Value::String(held), Value::String(sent)) if held.is_empty() && !sent.is_empty() => {
-            out.push(path.clone());
-        }
-        (Value::String(held), Value::String(sent)) if held != sent => {
-            if let (Ok(held @ (Value::Object(_) | Value::Array(_))), Ok(sent)) = (
-                serde_json::from_str::<Value>(held),
-                serde_json::from_str::<Value>(sent),
-            ) {
-                path.push(Step::Json);
-                missing_in_held(Some(&held), &sent, path, out);
-                path.pop();
-            }
-        }
-        (Value::Object(held), Value::Object(sent)) => {
-            for (key, value) in sent {
-                path.push(Step::Member(key.clone()));
-                missing_in_held(held.get(key), value, path, out);
-                path.pop();
-            }
-        }
-        (Value::Array(held), Value::Array(sent)) => {
-            for (index, value) in sent.iter().enumerate() {
-                path.push(Step::Index(index));
-                missing_in_held(held.get(index), value, path, out);
-                path.pop();
-            }
-        }
-        _ => {}
-    }
-}
-
 impl AsyncRecord {
     /// The prune generation these held copies were last reconciled with.
     pub(super) fn reasoning_pruned_generation(&self) -> Option<u64> {
@@ -531,10 +485,10 @@ impl AsyncRecord {
     /// `edit` unchanged when it puts back nothing the runner pruned from its
     /// message (llm-runner's `restored_by_edit_in` for this conversation's
     /// serializer profile, over the runner's prune record). Otherwise the
-    /// same edit with the pruned members taken from the reconciled held part
-    /// (emptied or removed as the runner serves them), keeping everything
-    /// the edit changes on purpose, such as a trimmed output; `None` when
-    /// that still puts pruned content back.
+    /// same edit as the runner itself holds it after the prune
+    /// (`prune_edit_in`), keeping everything the edit changes on purpose,
+    /// such as a trimmed output; `None` when the rule cannot express it, so
+    /// the part goes out as the runner's own (pruned) bytes.
     pub(super) fn without_restored_content(
         &self,
         edit: view::PartEdit,
@@ -563,35 +517,16 @@ impl AsyncRecord {
         if !restores(&sent) {
             return Ok(Some(edit));
         }
-        let held = self
-            .entries
-            .get(&edit.ordinal)
-            .map(|entry| entry.read())
-            .transpose()?
-            .and_then(|entry| {
-                let index = entry.tags.iter().position(|row| row.part == edit.part)?;
-                parts(&entry.message).ok()?.get(index).cloned()
-            });
-        let Some(held) = held else {
+        // llm-runner's own rule for an applied edit after a prune: the edit's
+        // bytes with each pruned kind of its message applied, so the edit
+        // keeps all it changes on purpose (a trimmed output, for one).
+        let Ok(repaired) =
+            archive_prunes_reasoning::prune_edit_in(profile, &pruned, edit.ordinal, &sent)
+        else {
             return Ok(None);
         };
-        // Take every candidate member from the held part, then put back each
-        // one whose own value does not restore pruned content, so the edit
-        // keeps all it changes on purpose.
-        let mut candidates = Vec::new();
-        missing_in_held(Some(&held), &sent, &mut Vec::new(), &mut candidates);
-        let mut repaired = sent.clone();
-        for path in &candidates {
-            repaired = take_from(&repaired, &held, path).unwrap_or(repaired);
-        }
         if restores(&repaired) {
             return Ok(None);
-        }
-        for path in &candidates {
-            if let Some(trial) = take_from(&repaired, &sent, path).filter(|trial| !restores(trial))
-            {
-                repaired = trial;
-            }
         }
         Ok(Some(view::PartEdit::replace(
             edit.ordinal,

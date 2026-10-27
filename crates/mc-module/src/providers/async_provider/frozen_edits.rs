@@ -267,8 +267,8 @@ impl FrozenEdits {
 
     /// `apply`, with each saved edit passed through `revise` first: it
     /// returns the edit to replay, a corrected one (bytes acknowledged before
-    /// the runner pruned the part, with the pruned content taken from the
-    /// reconciled held part; see `pruned_reasoning`), or `None` to replay
+    /// the runner pruned the part, rewritten as the runner rewrites its own
+    /// applied edits; see `pruned_reasoning`), or `None` to replay
     /// nothing for that part, so the view keeps the edit this pass built from
     /// the current held copy.
     pub(super) fn apply_revised(
