@@ -1,0 +1,93 @@
+{
+  "name": "standalone-producers",
+  "request": {
+    "method": "context.cache_why",
+    "params": {
+      "producers": [
+        {
+          "at_ms": 999,
+          "producer_ref": "host-assistant"
+        },
+        {
+          "at_ms": 50,
+          "producer_ref": "older-than-retention"
+        },
+        {
+          "at_ms": 100,
+          "producer_ref": "no-such-step"
+        }
+      ],
+      "session": {
+        "harness": "pi",
+        "runner": "pi",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "cache_ttl": {
+      "model_key": null,
+      "ms": 300000,
+      "source": "session",
+      "value": "5m"
+    },
+    "context_limit": {
+      "model_key": "model/a",
+      "source": "usage",
+      "tokens": 200000
+    },
+    "decisions": [
+      {
+        "at_ms": 100,
+        "cause": "ttl_idle",
+        "cause_detail": null,
+        "changes": {
+          "model": {
+            "new": "model/b",
+            "prev": "model/a"
+          },
+          "system_prompt": true,
+          "tool_set": false
+        },
+        "decision": "execute",
+        "dropped_count": 4,
+        "dropped_tokens": 12000,
+        "emergency": true,
+        "identity_delta": [],
+        "input_tokens": 83000,
+        "materialized": true,
+        "producer_ref": "host-assistant"
+      }
+    ],
+    "join": "available",
+    "join_reason": null,
+    "last_transform_error": {
+      "at_ms": null,
+      "text": "failed"
+    },
+    "managed": {
+      "by": "plugin",
+      "value": true
+    },
+    "missing": [
+      {
+        "producer_ref": "older-than-retention",
+        "reason": "not_retained"
+      },
+      {
+        "producer_ref": "no-such-step",
+        "reason": "no_decision"
+      }
+    ],
+    "next_cursor": null,
+    "op": "context.cache_why",
+    "producer_ref_kind": "assistant_message_id",
+    "retention": {
+      "max_rows": 2000,
+      "oldest_retained_at_ms": 90
+    },
+    "schema": 1,
+    "session_kind": "standalone"
+  }
+}

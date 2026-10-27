@@ -1,0 +1,21 @@
+{
+  "name": "refusal-resyncing",
+  "refusal": {
+    "code": "session_resyncing",
+    "detail": null,
+    "message": "The session is rebuilding its transcript."
+  },
+  "request": {
+    "method": "context.states",
+    "params": {
+      "message_ids": [
+        "m"
+      ],
+      "session": {
+        "harness": "pi",
+        "runner": "runner",
+        "session": "s"
+      }
+    }
+  }
+}

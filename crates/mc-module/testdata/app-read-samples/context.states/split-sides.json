@@ -1,0 +1,112 @@
+{
+  "name": "split-sides",
+  "request": {
+    "method": "context.states",
+    "params": {
+      "message_ids": [
+        "end",
+        "start",
+        "middle"
+      ],
+      "session": {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "compartments": [
+      {
+        "compartment_id": "1",
+        "first_message_id": null,
+        "last_message_id": "end",
+        "ordinal": 1
+      },
+      {
+        "compartment_id": "2",
+        "first_message_id": "start",
+        "last_message_id": null,
+        "ordinal": 2
+      },
+      {
+        "compartment_id": "3",
+        "first_message_id": "middle",
+        "last_message_id": "middle",
+        "ordinal": 3
+      }
+    ],
+    "messages": [
+      {
+        "compartment_id": null,
+        "dropped_parts": [],
+        "message_id": "end",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 0,
+          "stamped": 0,
+          "tagged": 3
+        },
+        "split": {
+          "compartment_id": "1",
+          "side": "end",
+          "through": {
+            "part_index": 2
+          }
+        },
+        "stamped_parts": [],
+        "state": "raw"
+      },
+      {
+        "compartment_id": null,
+        "dropped_parts": [],
+        "message_id": "start",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 0,
+          "stamped": 0,
+          "tagged": 3
+        },
+        "split": {
+          "compartment_id": "2",
+          "from": {
+            "part_index": 3
+          },
+          "side": "start"
+        },
+        "stamped_parts": [],
+        "state": "raw"
+      },
+      {
+        "compartment_id": null,
+        "dropped_parts": [],
+        "message_id": "middle",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 0,
+          "stamped": 0,
+          "tagged": 4
+        },
+        "split": {
+          "compartment_id": "3",
+          "from": {
+            "part_index": 2
+          },
+          "side": "middle",
+          "through": {
+            "part_index": 3
+          }
+        },
+        "stamped_parts": [],
+        "state": "raw"
+      }
+    ],
+    "moved_from_standalone": false,
+    "op": "context.states",
+    "schema": 1,
+    "session_kind": "standalone",
+    "state": "ready",
+    "version": "cs1:6f6f2eb28ab3914016a024e18995fecfb3f067d52e865ade14a7ed09ac50c2bf"
+  }
+}

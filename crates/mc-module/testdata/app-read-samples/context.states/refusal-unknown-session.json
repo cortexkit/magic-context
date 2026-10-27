@@ -1,0 +1,21 @@
+{
+  "name": "refusal-unknown-session",
+  "refusal": {
+    "code": "session_not_found",
+    "detail": null,
+    "message": "No session matches the reference."
+  },
+  "request": {
+    "method": "context.states",
+    "params": {
+      "message_ids": [
+        "m"
+      ],
+      "session": {
+        "harness": "pi",
+        "runner": "other",
+        "session": "missing"
+      }
+    }
+  }
+}

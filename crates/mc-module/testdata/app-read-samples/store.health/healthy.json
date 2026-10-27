@@ -1,0 +1,1028 @@
+{
+  "name": "healthy",
+  "request": {
+    "method": "store.health",
+    "params": {}
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "op": "store.health",
+    "row": {
+      "databases": [
+        {
+          "bytes": 1413120,
+          "freelist_count": 0,
+          "name": "context_db",
+          "page_count": 345,
+          "page_size": 4096,
+          "path": "<context_db>",
+          "rows": [
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "authority_capture_bounds"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "authority_managed"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "authority_repair_pending"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "compartment_chunk_embeddings"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "compartment_events"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "compartment_history_versions"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "compartment_score_revisions"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "compartment_score_selections"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "compartment_state_lease"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "compartments"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "compression_depth"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 1,
+              "table": "context_privilege_state"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "context_store_meta"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "domain_mutation_epoch"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "dream_queue"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "dream_runs"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "dream_state"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "embedding_identity_active"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "embedding_measurement_corpus"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "embedding_registrations"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "git_commit_embeddings"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "git_commit_fts_rowid_map"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "git_commits"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "git_commits_fts"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "git_commits_fts_config"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "git_commits_fts_content"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 10,
+              "table": "git_commits_fts_data"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "git_commits_fts_docsize"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "git_commits_fts_idx"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "git_sweep_coordinator"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "historian_runs"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "host_runner_entries"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "host_runner_ids"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "host_runner_state"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "host_runner_views"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "identity_merge_log"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "lkg_served_markers"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "lkg_slot_chunks"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "lkg_slots"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "m0_mutation_log"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memories"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "memories_fts"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "memories_fts_config"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 10,
+              "table": "memories_fts_data"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memories_fts_docsize"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "memories_fts_idx"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_activity_ledger"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_agent_fragments"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_applied_rows"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_applied_snapshots"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_check_attempts"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_classification_items"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_clause_evidence"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_conflict_links"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_decision_receipts"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_embedding_watermarks"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_embeddings"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_fact_block_links"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_fact_blocks"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_history"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_journal"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_mutation_log"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_pending_facts"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_publications"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_stage_attempts"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_successor_links"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_tool_proposals"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_verifications"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "message_fts_rowid_map"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "message_fts_rowid_map_backfill_state"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "message_history_fts"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "message_history_fts_config"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "message_history_fts_content"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 10,
+              "table": "message_history_fts_data"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "message_history_fts_docsize"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "message_history_fts_idx"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "message_history_index"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "message_history_orphan_sweep"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "message_history_source"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "message_time_backfill_state"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "migration_pending"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mirror_cursors"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mirror_identity"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mirror_live_memory_rows"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mirror_live_staging"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mirror_note_revisions"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mirror_pending_references"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mirror_resnapshot_state"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mural_manifest"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "notes"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "pending_ops"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "pending_session_cleanup"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "plugin_messages"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "primer_candidates"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "primers"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "primers_fts"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "primers_fts_config"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 10,
+              "table": "primers_fts_data"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "primers_fts_docsize"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "primers_fts_idx"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "project_key_files"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "project_key_files_version"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "project_state"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "recomp_compartments"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "recomp_facts"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "rescore_activation"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "rescore_attempts"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "rescore_batches"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "rescore_items"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "rescore_jobs"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "rescore_snapshots"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "retrospective_processed_windows"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 103,
+              "table": "schema_migrations"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "schema_migrations_meta"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "session_facts"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "session_meta"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "session_meta_chunks"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "session_meta_collection_revisions"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "session_projects"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "session_render_cache"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "session_replay_decisions"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "shadow_embedding_registrations"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 1,
+              "table": "single_store_state"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "source_contents"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "subagent_invocations"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "synapse_batch_ledger"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "tags"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "task_schedule_state"
+            },
+            {
+              "method": "not_estimated",
+              "rows": null,
+              "table": "temporal_decisions"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "tool_definition_measurements"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "tool_owner_backfill_state"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "transform_decisions"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "user_memories"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "user_memory_candidates"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "v22_backfill_failures"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "v22_identity_rekey_map"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "workspace_members"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "workspaces"
+            }
+          ],
+          "schema_version": 103,
+          "shm_bytes": 32768,
+          "wal_bytes": 0
+        },
+        {
+          "bytes": 4096,
+          "freelist_count": 0,
+          "name": "store_db",
+          "page_count": 188,
+          "page_size": 4096,
+          "path": "<store_db>",
+          "rows": [
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "cortexkit_fence"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 75,
+              "table": "cortexkit_schema_version"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_async_compaction"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_async_compaction_baselines"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_async_compaction_entries"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_async_compaction_views"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_block_identities"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_cache_frozen_chunks"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_cache_sections"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_cache_state"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_cache_state_digest"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_channel1_appends"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_chunk_transcripts"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_compartment_dates"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_dream_task_commands"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_facade_mutation_ledger"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_historian_pending_run"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_historian_side_channel_outbox"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_move_cuts"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_move_fences"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_move_installs"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_move_key_map"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_move_tag_epochs"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_overlay_frontiers"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_pass_trace"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_pass_trace_history"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 1,
+              "table": "mc_privilege_state"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_project_mural_artifacts"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_catalogs_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_consumed_tags_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_conversations_v2"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_hook_answers_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_legacy_tags_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_lineages_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_messages_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_pending_drops_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_policy_changes_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_policy_cuts_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_policy_overrides_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_policy_parts_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_policy_preparations_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_policy_revisions_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_policy_summaries_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_sessions_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_view_overrides_v1"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_provider_views_v2"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_recomp_commands"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_reduce_command_ledger"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_served_output_fingerprints"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_single_store_pending_publish"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_state_imports"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_tag_cache_generations"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_tags"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_temporal_marks"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_transform_session_roots"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_user_hints"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "mc_wrapup_commands"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "pending_agent_drops"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "shadow_divergences"
+            }
+          ],
+          "schema_version": null,
+          "shm_bytes": 32768,
+          "wal_bytes": 3094152
+        }
+      ],
+      "single_store_state": "migrated"
+    },
+    "schema": 1
+  }
+}

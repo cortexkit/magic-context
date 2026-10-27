@@ -1,0 +1,294 @@
+{
+  "name": "matrix-standalone",
+  "request": {
+    "method": "context.states",
+    "params": {
+      "message_ids": [
+        "raw",
+        "all",
+        "summarized",
+        "before",
+        "missing",
+        "compacted",
+        "zero",
+        "partial",
+        "owner",
+        "stamp",
+        "file"
+      ],
+      "session": {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "compartments": [
+      {
+        "compartment_id": "1",
+        "first_message_id": "old-first",
+        "last_message_id": "summarized",
+        "ordinal": 1
+      }
+    ],
+    "messages": [
+      {
+        "compartment_id": null,
+        "dropped_parts": [],
+        "message_id": "raw",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 0,
+          "stamped": 0,
+          "tagged": 1
+        },
+        "split": null,
+        "stamped_parts": [],
+        "state": "raw"
+      },
+      {
+        "compartment_id": null,
+        "dropped_parts": [
+          {
+            "drop_mode": "full",
+            "dropped_at_ms": null,
+            "dropped_at_source": "not_recorded",
+            "kind": "text",
+            "part_ref": {
+              "part_index": 1
+            },
+            "size": {
+              "bytes": 21,
+              "input_bytes": null,
+              "input_tokens": null,
+              "tokens": 7
+            }
+          },
+          {
+            "drop_mode": "full",
+            "dropped_at_ms": null,
+            "dropped_at_source": "not_recorded",
+            "kind": "text",
+            "part_ref": {
+              "part_index": 3
+            },
+            "size": {
+              "bytes": 23,
+              "input_bytes": null,
+              "input_tokens": null,
+              "tokens": 8
+            }
+          }
+        ],
+        "message_id": "all",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 2,
+          "stamped": 0,
+          "tagged": 2
+        },
+        "split": null,
+        "stamped_parts": [],
+        "state": "dropped"
+      },
+      {
+        "compartment_id": "1",
+        "dropped_parts": [],
+        "message_id": "summarized",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 0,
+          "stamped": 0,
+          "tagged": 0
+        },
+        "split": null,
+        "stamped_parts": [],
+        "state": "summarized"
+      },
+      {
+        "compartment_id": null,
+        "dropped_parts": [],
+        "message_id": "before",
+        "outside_reason": "before_first_compartment",
+        "parts": {
+          "dropped": 0,
+          "stamped": 0,
+          "tagged": 0
+        },
+        "split": null,
+        "stamped_parts": [],
+        "state": "outside"
+      },
+      {
+        "compartment_id": null,
+        "dropped_parts": [],
+        "message_id": "missing",
+        "outside_reason": "not_indexed",
+        "parts": {
+          "dropped": 0,
+          "stamped": 0,
+          "tagged": 0
+        },
+        "split": null,
+        "stamped_parts": [],
+        "state": "outside"
+      },
+      {
+        "compartment_id": null,
+        "dropped_parts": [],
+        "message_id": "compacted",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 0,
+          "stamped": 0,
+          "tagged": 0
+        },
+        "split": null,
+        "stamped_parts": [],
+        "state": "summarized"
+      },
+      {
+        "compartment_id": null,
+        "dropped_parts": [],
+        "message_id": "zero",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 0,
+          "stamped": 0,
+          "tagged": 0
+        },
+        "split": null,
+        "stamped_parts": [],
+        "state": "raw"
+      },
+      {
+        "compartment_id": null,
+        "dropped_parts": [
+          {
+            "drop_mode": "full",
+            "dropped_at_ms": null,
+            "dropped_at_source": "not_recorded",
+            "kind": "text",
+            "part_ref": {
+              "part_index": 4
+            },
+            "size": {
+              "bytes": 14,
+              "input_bytes": null,
+              "input_tokens": null,
+              "tokens": null
+            }
+          }
+        ],
+        "message_id": "partial",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 1,
+          "stamped": 0,
+          "tagged": 2
+        },
+        "split": null,
+        "stamped_parts": [],
+        "state": "raw"
+      },
+      {
+        "compartment_id": null,
+        "dropped_parts": [
+          {
+            "drop_mode": "skeleton_real",
+            "dropped_at_ms": null,
+            "dropped_at_source": "not_recorded",
+            "kind": "bash",
+            "part_ref": {
+              "call_id": "call_123"
+            },
+            "size": {
+              "bytes": 300,
+              "input_bytes": 50,
+              "input_tokens": 12,
+              "tokens": 75
+            }
+          }
+        ],
+        "message_id": "owner",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 1,
+          "stamped": 0,
+          "tagged": 1
+        },
+        "split": null,
+        "stamped_parts": [],
+        "state": "dropped"
+      },
+      {
+        "compartment_id": null,
+        "dropped_parts": [],
+        "message_id": "stamp",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 0,
+          "stamped": 1,
+          "tagged": 1
+        },
+        "split": null,
+        "stamped_parts": [
+          {
+            "kind": "text",
+            "part_ref": {
+              "part_index": 2
+            },
+            "size": {
+              "bytes": 64,
+              "input_bytes": null,
+              "input_tokens": null,
+              "tokens": 16
+            },
+            "stage": "queued",
+            "stamped_at_ms": 123,
+            "stamped_at_source": "recorded"
+          }
+        ],
+        "state": "raw"
+      },
+      {
+        "compartment_id": null,
+        "dropped_parts": [
+          {
+            "drop_mode": "full",
+            "dropped_at_ms": null,
+            "dropped_at_source": "not_recorded",
+            "kind": "file",
+            "part_ref": {
+              "part_index": 5
+            },
+            "size": {
+              "bytes": 42,
+              "input_bytes": null,
+              "input_tokens": null,
+              "tokens": 10
+            }
+          }
+        ],
+        "message_id": "file",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 1,
+          "stamped": 0,
+          "tagged": 1
+        },
+        "split": null,
+        "stamped_parts": [],
+        "state": "dropped"
+      }
+    ],
+    "moved_from_standalone": false,
+    "op": "context.states",
+    "schema": 1,
+    "session_kind": "standalone",
+    "state": "ready",
+    "version": "cs1:c0a8483b634c581b24bbb6b72bb304d7a32e9ecebfbcea9fec27a2fd56236bb6"
+  }
+}

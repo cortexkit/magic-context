@@ -1,0 +1,123 @@
+{
+  "name": "project-lanes-unavailable",
+  "request": {
+    "method": "context.search",
+    "params": {
+      "query": "needle",
+      "scope": {
+        "session": {
+          "harness": "pi",
+          "runner": "pi",
+          "session": "s"
+        }
+      }
+    }
+  },
+  "response": {
+    "agent_resolution": "client",
+    "as_of_ms": 1700000000000,
+    "complete": true,
+    "diagnostics": {
+      "omitted_sessions": 0,
+      "project_resolution": {
+        "lanes": [
+          "memory",
+          "git_commit",
+          "primer"
+        ],
+        "reason": "project_identity_not_recorded",
+        "status": "unavailable"
+      }
+    },
+    "hits": [
+      {
+        "agent_id": null,
+        "agent_resolution": "client",
+        "at_ms": 10,
+        "compartment_id": "1",
+        "match_ranges": [
+          [
+            8,
+            14
+          ]
+        ],
+        "message_id": "m2",
+        "ordinal": 2,
+        "project": null,
+        "project_source": null,
+        "ref": null,
+        "role": "assistant",
+        "score": 1.0,
+        "session": {
+          "harness": "pi",
+          "runner": "pi",
+          "session": "s"
+        },
+        "snippet": "another needle here",
+        "source": "message"
+      },
+      {
+        "agent_id": null,
+        "agent_resolution": "client",
+        "at_ms": 10,
+        "compartment_id": "1",
+        "match_ranges": [
+          [
+            4,
+            10
+          ]
+        ],
+        "message_id": "m1",
+        "ordinal": 1,
+        "project": null,
+        "project_source": null,
+        "ref": null,
+        "role": "assistant",
+        "score": 0.6666666666666667,
+        "session": {
+          "harness": "pi",
+          "runner": "pi",
+          "session": "s"
+        },
+        "snippet": "the needle in the haystack",
+        "source": "message"
+      },
+      {
+        "agent_id": null,
+        "agent_resolution": "client",
+        "at_ms": 10,
+        "compartment_id": null,
+        "match_ranges": [
+          [
+            2,
+            8
+          ]
+        ],
+        "message_id": "m3",
+        "ordinal": 3,
+        "project": null,
+        "project_source": null,
+        "ref": null,
+        "role": "user",
+        "score": 0.33333333333333337,
+        "session": {
+          "harness": "pi",
+          "runner": "pi",
+          "session": "s"
+        },
+        "snippet": "a needle far from any summary",
+        "source": "message"
+      }
+    ],
+    "next_cursor": null,
+    "op": "context.search",
+    "schema": 1,
+    "source_status": {
+      "git_commit": "unavailable",
+      "memory": "unavailable",
+      "message": "ok",
+      "note": "ok",
+      "primer": "unavailable"
+    }
+  }
+}
