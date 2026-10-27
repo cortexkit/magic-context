@@ -4509,10 +4509,14 @@ impl McHandler {
         });
         let mut seen_prune = notice.reasoning_pruned.filter(|seen| seen.valid());
         if refused_restore && !duplicate {
-            // The refused view did not apply, so no rebuild since the last
-            // notice took; the next pass builds one from reconciled copies.
+            // The refused view did not apply, so a ride since the last
+            // notice may not have rebuilt anything: a re-read below that
+            // replaces a held copy sets the prune's one rebuild
+            // (`accept_pruned_reread`). The refusal itself forces no rebuild:
+            // it can name a view older than the rebuild that already ran, and
+            // a re-read that replaces nothing leaves copies that are
+            // reconciled already, which the next view is built from.
             state.rode_since_notice = false;
-            state.pruned_rebuild_pending = true;
             if seen_prune.is_none() {
                 seen_prune = self
                     .runner_prune_state(&state, self.notice_read_budget())
