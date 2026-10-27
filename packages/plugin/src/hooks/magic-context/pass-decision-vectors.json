@@ -617,7 +617,7 @@
         "lanes": [
           "queuedDrops"
         ],
-        "heldPassesAfter": 1
+        "heldPassesAfter": 0
       }
     },
     {
@@ -727,7 +727,7 @@
         "lanes": [
           "queuedDrops"
         ],
-        "heldPassesAfter": 3
+        "heldPassesAfter": 0
       }
     },
     {
@@ -917,7 +917,7 @@
           "ageSweep",
           "supersession"
         ],
-        "heldPassesAfter": 1
+        "heldPassesAfter": 0
       }
     },
     {
@@ -1078,7 +1078,7 @@
     },
     {
       "name": "primary-idle-expiry",
-      "note": "The provider cache expired: the pass rebuilds anyway and eligible work rides it.",
+      "note": "The provider cache expired: the idle fold rebuilds the head anyway and eligible work rides it.",
       "inputs": {
         "preset": "head",
         "compactionOff": false,
@@ -1094,7 +1094,7 @@
           "heldPassesBefore": 0
         },
         "emergencyEpisodeSpent": false,
-        "executedFold": false,
+        "executedFold": true,
         "flush": false,
         "publishedHistory": false,
         "cacheLoss": "idleExpiry",
@@ -1264,6 +1264,83 @@
         "busts": false,
         "origin": null,
         "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-force-band-spent-episode-flush",
+      "note": "A flush admits routine cleanup but does not price the pass, so the spent emergency latch holds.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": true,
+        "executedFold": false,
+        "flush": true,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "flush",
+        "lanes": [
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-force-band-spent-episode-executed-fold",
+      "note": "An executed fold prices the pass and re-arms the spent episode.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": true,
+        "executedFold": true,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "executedFold",
+        "lanes": [
+          "emergencyDrop",
+          "dedup"
+        ],
         "heldPassesAfter": 0
       }
     },

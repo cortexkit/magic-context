@@ -335,8 +335,8 @@ const CASES: Array<{ name: string; note: string; inputs: VectorInputs }> = [
     },
     {
         name: "primary-idle-expiry",
-        note: "The provider cache expired: the pass rebuilds anyway and eligible work rides it.",
-        inputs: base({ cacheLoss: "idleExpiry", pendingWork: ALL_ROUTINE }),
+        note: "The provider cache expired: the idle fold rebuilds the head anyway and eligible work rides it.",
+        inputs: base({ cacheLoss: "idleExpiry", executedFold: true, pendingWork: ALL_ROUTINE }),
     },
     {
         name: "primary-first-render",
@@ -357,6 +357,28 @@ const CASES: Array<{ name: string; note: string; inputs: VectorInputs }> = [
         name: "primary-force-band-spent-episode",
         note: "One emergency batch per force episode; nothing else rebuilds.",
         inputs: base({ usagePercent: 88, emergencyEpisodeSpent: true, pendingWork: ALL_WORK }),
+    },
+    {
+        name: "primary-force-band-spent-episode-flush",
+        note: "A flush admits routine cleanup but does not price the pass, so the spent emergency latch holds.",
+        inputs: base({
+            scheduler: "defer",
+            usagePercent: 88,
+            emergencyEpisodeSpent: true,
+            flush: true,
+            pendingWork: ALL_WORK,
+        }),
+    },
+    {
+        name: "primary-force-band-spent-episode-executed-fold",
+        note: "An executed fold prices the pass and re-arms the spent episode.",
+        inputs: base({
+            scheduler: "defer",
+            usagePercent: 88,
+            emergencyEpisodeSpent: true,
+            executedFold: true,
+            pendingWork: ALL_WORK,
+        }),
     },
     {
         name: "primary-force-band-estimate-only",
@@ -510,7 +532,9 @@ export function decideVector(inputs: VectorInputs): VectorExpected {
         busts,
         origin: busts ? (ORIGINS.find((origin) => active[origin]) ?? null) : null,
         lanes: LANES.filter((lane) => lanes.has(lane)),
-        heldPassesAfter,
+        // `runPostTransformPhase` clears the held-pass count on every pass that
+        // changed bytes (`clearExecuteReclaimState` when `bustedThisPass`).
+        heldPassesAfter: busts ? 0 : heldPassesAfter,
     };
 }
 

@@ -212,6 +212,7 @@ export function planEmergencyDrop(input: {
     // The caller clears the persisted latch only after pressure exits or when
     // another mutation has already priced the pass, allowing the whole
     // accumulated set to ride that independent bust.
+    const absoluteEmergency = (input.usagePercentage ?? 0) >= 95;
     if (emergencyEpisodeLatched(hasPriorDrop, input.usagePercentage ?? 0)) {
         return noop(
             `pressure-episode-latched (prior sample ${priorInputSample}; awaiting exit or independent bust)`,
