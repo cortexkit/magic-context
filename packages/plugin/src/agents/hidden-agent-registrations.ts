@@ -126,9 +126,9 @@ export function buildHiddenAgentRegistrations(args: {
             // Documentation proposals may inspect source files but cannot mutate them.
             // Keep this list synchronized with DREAMER_DOCS_ALLOWED_TOOLS and locked against overrides.
             allowedTools: ["read", "grep", "glob", "aft_outline", "aft_zoom", "aft_search"],
-            // Documentation investigation reads the repository tree in a bounded loop,
-            // unlike whole-memory-pool tasks with a 150-step limit.
-            maxSteps: 60,
+            // Documentation investigations can span many files in larger repositories.
+            // Keep the read-only proposal loop bounded while allowing it to finish.
+            maxSteps: 400,
             overrides: args.dreamerOverrides,
             // Lock so a user override can't add the memory surface back.
             lockPermissions: true,
@@ -203,10 +203,9 @@ export function buildHiddenAgentRegistrations(args: {
             // ctx_search (these tasks check against local code, not cross-session
             // recall).
             allowedTools: ["read", "grep", "glob", "aft_outline", "aft_zoom", "aft_search"],
-            // Bounded read-only-lookup budget (mirrors the primer investigator) —
-            // NOT the dreamer's 150. A map/verify batch is a targeted file-lookup
-            // pass, and this bounds the per-batch cost of an unsupervised run.
-            maxSteps: 60,
+            // A map/verify batch can require many file lookups across larger repositories.
+            // Keep the investigation bounded while allowing complex batches to finish.
+            maxSteps: 400,
             overrides: args.dreamerOverrides,
             // A user dreamer `permission`/`tools` override must never re-grant the
             // denied write/bash/ctx_memory surface to this unsupervised agent.

@@ -1999,7 +1999,7 @@ export class PiSubagentRunner implements SubagentRunner {
 							rpcBudget,
 						);
 						// Reserve two turns: one for a queued investigation/refusal and
-						// one for the manifest. Keep the 60-step runaway ceiling intact.
+						// one for the manifest. Keep the configured step cap as the runaway ceiling.
 						if (
 							decision === "continue" &&
 							!finished &&

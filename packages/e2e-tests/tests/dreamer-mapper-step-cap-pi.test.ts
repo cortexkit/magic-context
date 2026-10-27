@@ -17,7 +17,7 @@ import { resolvePiHostInvocation } from "../src/pi-runner/spawn";
 import { verifyPromptIds } from "./dreamer-timeout-support";
 
 test.skipIf(process.env.MC_E2E_MAPPER_STEP_PROBE !== "1")(
-    "real Pi verify-broad banks a partial 20-memory manifest before the mapper step cap",
+    "real Pi verify-broad completes a 70-read batch under the mapper step cap",
     async () => {
         const root = realpathSync(tmpdir());
         expect(root).toContain("/magic-context/mapper-step-cap/");
@@ -71,18 +71,16 @@ test.skipIf(process.env.MC_E2E_MAPPER_STEP_PROBE !== "1")(
             const finalize = JSON.stringify(body).includes("You're out of token budget");
             if (finalize) {
                 finalizes++;
-                expect(batch).toHaveLength(20);
-                return { text: `<verify>${batch.slice(0, 2).map((id) => `<verified id="${id}"/>`).join("")}</verify>`, usage: { input_tokens: 10, output_tokens: 30 } };
+                expect(batch).toHaveLength(10);
+                return { text: `<verify>${batch.map((id) => `<verified id="${id}"/>`).join("")}</verify>`, usage: { input_tokens: 10, output_tokens: 30 } };
             }
-            // The first batch needs four serial lookups per memory (80 calls),
-            // exceeding 60. A finalize request banks only the two checked claims.
-            if (batch.length === 20 && calls < 80) {
+            expect(batch).toHaveLength(10);
+            // Seventy serial source lookups exceed the former 60-step cap but
+            // should finish below the mapper's new 400-step limit.
+            if (calls < 70) {
                 calls++;
                 return { content: [{ type: "tool_use", id: `toolu_lookup_${calls}`, name: "read", input: { path: "fact.txt" } }], stop_reason: "tool_use", usage: { input_tokens: 10, output_tokens: 10 } };
             }
-            // The next batch proves the omitted eighteen claims remain resumable.
-            expect(batch).toHaveLength(18);
-            expect(getMemoryVerifications(db, ids).get(ids[0]!)?.verifiedAt).toBeGreaterThan(1000);
             return { text: `<verify>${batch.map((id) => `<verified id="${id}"/>`).join("")}</verify>`, usage: { input_tokens: 10, output_tokens: 30 } };
         });
         const config = DreamerConfigSchema.parse({
@@ -94,14 +92,11 @@ test.skipIf(process.env.MC_E2E_MAPPER_STEP_PROBE !== "1")(
             registerPiDreamerProject({ db, projectDir: work, projectIdentity: identity, registrationOwner: owner, config, harness: "pi", embeddingConfig: { provider: "off" }, memoryEnabled: true, gitCommitIndexing: { enabled: false, since_days: 30, max_commits: 200 } });
             const result = await runPiDreamForProject(identity, "verify-broad", owner);
             console.log(`mapper-step-cap Pi ${JSON.stringify({ calls, finalizes, result, runs: getDreamRuns(db, identity) })}`);
-            expect(finalizes).toBe(1);
-            expect(calls).toBeGreaterThanOrEqual(58);
-            expect(calls).toBeLessThan(60);
+            expect(finalizes).toBe(0);
+            expect(calls).toBe(70);
             expect(result.failed).toEqual([]);
-            expect(ids.filter((id) => (getMemoryVerifications(db, ids).get(id)?.verifiedAt ?? 0) > 1000)).toHaveLength(2);
-            expect(JSON.parse(getDreamRuns(db, identity)[0]!.tasks_json)[0]).toMatchObject({ status: "completed", tokenBudget: { finalizeFired: true, banked: 2 } });
-            await runPiDreamForProject(identity, "verify-broad", owner);
-            expect(ids.filter((id) => (getMemoryVerifications(db, ids).get(id)?.verifiedAt ?? 0) > 1000)).toHaveLength(20);
+            const stored = getMemoryVerifications(db, ids);
+            expect(ids.filter((id) => (stored.get(id)?.verifiedAt ?? 0) > 1000)).toHaveLength(20);
             expect(JSON.stringify(getDreamRuns(db, identity))).not.toContain("MC-D10");
         } finally {
             __test.reset();

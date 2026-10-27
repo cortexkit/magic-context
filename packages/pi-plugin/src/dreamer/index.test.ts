@@ -1160,14 +1160,27 @@ describe("Pi dreamer wiring", () => {
 		db = createDb();
 		const attemptedModels: Array<string | undefined> = [];
 		const attemptedThinkingLevels: Array<string | undefined> = [];
+		const forwardedRunOptions: Array<{
+			fallbackModels?: unknown;
+			timeoutMs?: number;
+		}> = [];
 		__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
 		__test.setPiSubagentRunnerFactory(
 			() =>
 				({
 					run: mock(
-						async (args: { model?: string; thinkingLevel?: string }) => {
+						async (args: {
+							model?: string;
+							thinkingLevel?: string;
+							fallbackModels?: unknown;
+							timeoutMs?: number;
+						}) => {
 							attemptedModels.push(args.model);
 							attemptedThinkingLevels.push(args.thinkingLevel);
+							forwardedRunOptions.push({
+								fallbackModels: args.fallbackModels,
+								timeoutMs: args.timeoutMs,
+							});
 							return {
 								ok: true,
 								assistantText:
@@ -1202,6 +1215,7 @@ describe("Pi dreamer wiring", () => {
 							fallback_models: [
 								{ model: "fallback/curator", thinking_level: "low" },
 							],
+							timeout_minutes: 35,
 						},
 					},
 				},
@@ -1217,6 +1231,16 @@ describe("Pi dreamer wiring", () => {
 
 		expect(attemptedModels).toEqual(["primary/curator", "fallback/curator"]);
 		expect(attemptedThinkingLevels).toEqual(["high", "low"]);
+		expect(forwardedRunOptions).toHaveLength(2);
+		for (const { fallbackModels, timeoutMs } of forwardedRunOptions) {
+			expect(timeoutMs).toBe(35 * 60 * 1000);
+			expect(fallbackModels).toEqual([
+				expect.objectContaining({
+					model: "fallback/curator",
+					qualifier: "low",
+				}),
+			]);
+		}
 		expect(result.failed).toEqual([]);
 		expect(result.ran).toEqual(["curate"]);
 	});
