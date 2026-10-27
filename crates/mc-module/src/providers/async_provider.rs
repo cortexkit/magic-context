@@ -5499,8 +5499,9 @@ impl McHandler {
         // Never send back what the runner pruned (compaction-provider §7,
         // `pruned_reasoning_restored`). Edits are built from reconciled held
         // copies, but an acknowledged edit replayed from earlier bytes may
-        // still carry a pruned signature: that part goes out as the runner's
-        // own bytes instead.
+        // still carry content the runner pruned: it is repaired from the
+        // reconciled held part when possible, and otherwise withheld so the
+        // part goes out as the runner's own bytes.
         state.repair_restoring_edits(&mut ranges)?;
         if state.replacement_restores_pruned(&ranges)? {
             // Defence in depth: ck-mc authors no replacement that carries

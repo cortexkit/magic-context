@@ -7,6 +7,7 @@ mod contract_update_review;
 mod conversation_identity_probe;
 mod descriptors_read;
 mod full_array_setup;
+mod held_copies_probe;
 mod moved_session;
 mod offline_first_pass;
 mod pruned_reasoning_tests;

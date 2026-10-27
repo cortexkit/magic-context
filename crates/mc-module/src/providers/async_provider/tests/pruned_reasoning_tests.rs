@@ -1,4 +1,4 @@
-//! compaction-provider 0.7.3 / llm-runner 0.7.10 archive pruning: ck-mc
+//! compaction-provider 0.7.4 / llm-runner 0.7.11 archive pruning: ck-mc
 //! reconciles its held copies when the runner's prune generation changes,
 //! keeps its engine working across the identity change, rebuilds once, and
 //! never sends back what the runner pruned.
@@ -122,7 +122,7 @@ fn sent_bytes(view: &view::CompactionView) -> Vec<String> {
     sent
 }
 
-/// Item 1: a generation change re-reads the held copies from the lowest held
+/// A new prune generation re-reads the held copies from the lowest held
 /// ordinal through the prune's `through_ordinal`, replaces the pruned ones,
 /// records the generation, and reads nothing held again for the same
 /// generation. A session that was never pruned stores none of it.
@@ -213,7 +213,7 @@ async fn a_new_prune_generation_rereads_held_copies_through_the_prune_once() {
     );
 }
 
-/// Item 1: a reconciliation never reads below the cut. Copies held from
+/// A reconciliation never reads below the cut. Copies held from
 /// below it stay as they are; the ones above it are reconciled.
 #[tokio::test]
 async fn reconciling_never_reads_below_the_cut() {
@@ -290,7 +290,7 @@ fn accepted(profile: &str, kind: &str, original: &Value, served: &Value) -> bool
     )
 }
 
-/// Item 2 (review P3-1): a listed part is accepted only in the way its kind
+/// A listed part is accepted only in the way its kind
 /// allows in the session's serializer profile (llm-runner §9.14.1,
 /// per-profile table). Every prune llm-runner 0.7.11 publishes for each
 /// profile is accepted. A change the kind does not make is refused: text
@@ -490,7 +490,7 @@ async fn engine_ran_over_39(dir: &Path) -> (Rig, Value, Value, view::CompactionV
     (rig, reasoning, pruned, view)
 }
 
-/// Items 3 and 4 (review P0-1): after the post-prune Setup reconciles a
+/// After the post-prune Setup reconciles a
 /// message the engine already froze decisions for, the engine adopts its new
 /// block identity on the next pass, which runs once as a rebuild; later
 /// notices and rides keep working, and the frozen decisions stay.
@@ -534,7 +534,7 @@ async fn a_reconciled_message_with_frozen_decisions_keeps_the_engine_working() {
     assert!(ride.view_version > rebuilt, "a later ride still rebuilds");
 }
 
-/// Item 4 (review P2-1), Setup first: the post-prune Setup reconciles, the
+/// Setup first: the post-prune Setup reconciles, the
 /// runner then rides `ttl_expired` before its first request. The ride is
 /// the one rebuild; the notice that follows publishes nothing new.
 #[tokio::test]
@@ -564,7 +564,7 @@ async fn a_ride_after_the_post_prune_setup_is_the_one_rebuild() {
     assert!(!rig.state().engine_failed);
 }
 
-/// Item 4 (review P2-1), ride first: the runner rides `account_change`
+/// Ride first: the runner rides `account_change`
 /// before ck-mc learned of the prune; the notice that follows reconciles
 /// and does not rebuild again. Without the ride, the same notice rebuilds.
 #[tokio::test]
@@ -615,7 +615,7 @@ fn with_call_signature(rig: &Rig, ordinal: u64) -> (Value, Value) {
     (original, pruned)
 }
 
-/// Item 5: an edit that trims a tool output re-encodes the whole OpenCode
+/// An edit that trims a tool output re-encodes the whole OpenCode
 /// tool part, call included. After a `signature` prune of that part, no
 /// view sends the call's thought signature back: neither the edit built
 /// from the reconciled copy nor the edit acknowledged before the prune.
@@ -699,7 +699,7 @@ async fn a_trimmed_tool_output_never_resends_a_pruned_call_signature() {
     );
 }
 
-/// Item 5: a `signature` prune of an OpenCode text part the view edits:
+/// A `signature` prune of an OpenCode text part the view edits:
 /// the edited text never carries the pruned signature back.
 #[tokio::test]
 async fn an_edited_text_part_never_resends_a_pruned_text_signature() {
@@ -764,7 +764,7 @@ async fn an_edited_text_part_never_resends_a_pruned_text_signature() {
     );
 }
 
-/// Item 6: a session set up before ck-mc accepted pruning answers a repeat
+/// A session set up before ck-mc accepted pruning answers a repeat
 /// Setup without `accepts`, as it always did; only a post-prune Setup the
 /// contract allows (which reconciles) names the permission.
 #[tokio::test]
