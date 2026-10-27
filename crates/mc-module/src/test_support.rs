@@ -36,9 +36,7 @@ pub struct InProcessFixture {
     pub reductions: Vec<Value>,
 }
 
-impl InProcessFixture {
-
-}
+impl InProcessFixture {}
 
 pub struct FixtureBuilder;
 

@@ -994,4 +994,3 @@ fn provision_context_store(workspace: &Path, config: &Path, data: &Path) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
-

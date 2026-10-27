@@ -22609,6 +22609,64 @@ mod tests {
         assert_eq!(unchanged.status, "active");
         assert!(unchanged.surface_condition.is_none());
     }
+
+    /// Every route of the retired host-driven mode answers `transform_route_retired`
+    /// with its own name, under either discriminator field, on a bound or unbound
+    /// channel, so a stale caller never reads it as an unknown request.
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_retired_route_answers_transform_route_retired_by_name() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        assert_eq!(RETIRED_TRANSFORM_ROUTES.len(), 17);
+        for method in RETIRED_TRANSFORM_ROUTES {
+            for key in ["method", "kind"] {
+                for channel in [7, 99] {
+                    let mut request = json!({"v": 1, "session_id": "ses"});
+                    request[key] = json!(method);
+                    match handler.dispatch_value(channel, request).await {
+                        HandlerOutcome::Error { code, message } => {
+                            assert_eq!(code, RETIRED_ROUTE_CODE, "{method} {key} {channel}");
+                            assert_eq!(message, *method, "{key} {channel}");
+                        }
+                        other => panic!("{method} {key} {channel}: {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    /// An old-lane `session.wrapup` drove the historian over the request the last
+    /// `transform` pass left behind, so it can never succeed now: it answers the
+    /// named, non-retryable `transform_route_retired` instead of a retryable
+    /// refusal. Its envelope checks still run first.
+    #[tokio::test(flavor = "current_thread")]
+    async fn old_lane_session_wrapup_answers_transform_route_retired() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        for request in [
+            json!({"method": "session.wrapup", "v": 1, "session_id": "ses"}),
+            json!({"method": "session.wrapup", "v": 1, "session_id": "ses",
+                "command_id": "wrapup-1", "keep": 5}),
+        ] {
+            match handler.dispatch_value(7, request.clone()).await {
+                HandlerOutcome::Error { code, message } => {
+                    assert_eq!(code, RETIRED_ROUTE_CODE, "{request}");
+                    assert_eq!(message, "session.wrapup", "{request}");
+                }
+                other => panic!("{request}: {other:?}"),
+            }
+        }
+        let malformed = handler
+            .dispatch_value(
+                7,
+                json!({"method": "session.wrapup", "v": 1, "session_id": "ses", "command_id": ""}),
+            )
+            .await;
+        assert!(
+            matches!(&malformed, HandlerOutcome::Error { code, .. } if code == "bad_request"),
+            "{malformed:?}"
+        );
+    }
 }
 
 #[cfg(test)]

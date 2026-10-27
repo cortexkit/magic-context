@@ -465,3 +465,108 @@ async fn broca_verify_reads_the_repository_and_its_verdicts_land() {
         );
     }
 }
+
+/// The curate task runs through the production executor over a Broca runner: the
+/// child's `ctx_memory` update reaches the task router, the edit bumps the
+/// memory's revision, and the audited history keeps the prior text.
+#[tokio::test]
+async fn broca_curate_edit_runs_through_the_task_router_with_history_and_revisions() {
+    let update = json!({"action": "update", "ids": [1],
+        "content": "ARCHITECTURE entry 1 states its durable fact in clearer present-tense words."});
+    let run = through_broca(
+        TaskName::Curate,
+        BASE,
+        vec![
+            step(10, vec![("ctx_memory", update)]),
+            answer("Updated one memory."),
+        ],
+        None,
+        |store, project| {
+            store
+                .with_context_conn_for_test(|tx| {
+                    for id in 1..=10 {
+                        let content =
+                            format!("ARCHITECTURE entry {id} describes one durable fact.");
+                        insert_memory(tx, id, project, &content);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        },
+    )
+    .await;
+    assert_eq!(
+        run.outcome,
+        DispatchOutcome::Finished(ScheduleStatus::Completed),
+        "{:?}",
+        run.broca.state().results
+    );
+    let scalar = |sql: &str| -> i64 {
+        run.store
+            .with_context_read(|db| db.query_row(sql, [], |r| r.get(0)))
+            .unwrap()
+    };
+    assert_eq!(scalar("SELECT revision FROM memories WHERE id=1"), 2);
+    assert_eq!(
+        scalar("SELECT COUNT(*) FROM memory_history WHERE memory_id=1 AND revision=1 AND previous_text='ARCHITECTURE entry 1 describes one durable fact.' AND json_extract(before_json,'$.snapshot.content')=previous_text AND json_extract(after_json,'$.snapshot.revision')=2"),
+        1
+    );
+    assert_eq!(scalar("SELECT COUNT(*) FROM memory_journal"), 1);
+}
+
+/// review-user-memories runs through the production executor over a Broca
+/// runner and commits its verdict: promote, update, dismiss and consume.
+#[tokio::test]
+async fn broca_user_memory_review_commits_its_verdict() {
+    let verdict = r#"{"promote":[{"content":"Prefers bounded checks","candidate_ids":[1,2]}],"update_existing":[{"memory_id":1,"content":"Prefers concise reports","candidate_ids":[3]}],"dismiss_existing":[{"memory_id":2,"reason":"unsupported"}],"consume_candidate_ids":[1,2,3]}"#;
+    let run = through_broca(
+        TaskName::ReviewUserMemories,
+        BASE,
+        vec![answer(verdict)],
+        None,
+        |store, _project| {
+            store
+                .with_context_conn_for_test(|tx| {
+                    // Three candidates reach the default promotion threshold of 3.
+                    tx.execute_batch(
+                        "INSERT INTO user_memory_candidates(id,content,session_id,created_at,source_compartment_start,source_compartment_end) VALUES
+                            (1,'Prefers bounded checks','source-1',strftime('%s','now')*1000,10,20),
+                            (2,'Prefers bounded checks','source-2',strftime('%s','now')*1000,10,20),
+                            (3,'Prefers bounded checks','source-3',strftime('%s','now')*1000,10,20);
+                         INSERT INTO user_memories(id,content,status,promoted_at,created_at,updated_at) VALUES
+                            (1,'Prefers long reports','active',1,1,1),(2,'Likes guesses','active',1,1,1);",
+                    )
+                })
+                .unwrap();
+        },
+    )
+    .await;
+    assert_eq!(
+        run.outcome,
+        DispatchOutcome::Finished(ScheduleStatus::Completed)
+    );
+    let scalar = |sql: &str| -> i64 {
+        run.store
+            .with_context_read(|db| db.query_row(sql, [], |r| r.get(0)))
+            .unwrap()
+    };
+    assert_eq!(scalar("SELECT COUNT(*) FROM user_memory_candidates"), 0);
+    assert_eq!(
+        scalar("SELECT COUNT(*) FROM user_memories WHERE id=3 AND content='Prefers bounded checks' AND status='active'"),
+        1
+    );
+    assert_eq!(
+        scalar(
+            "SELECT COUNT(*) FROM user_memories WHERE id=1 AND content='Prefers concise reports'"
+        ),
+        1
+    );
+    assert_eq!(
+        scalar("SELECT COUNT(*) FROM user_memories WHERE id=2 AND status='dismissed'"),
+        1
+    );
+    assert_eq!(
+        scalar("SELECT COUNT(*) FROM memory_journal WHERE operation='user_profile_review'"),
+        1
+    );
+}

@@ -261,4 +261,3 @@ fn owned_broca_wire_aliases_fill_the_module_fields() {
     assert_eq!(parsed.cache_ttl, None);
     assert_eq!(parsed.provider_error, None);
 }
-

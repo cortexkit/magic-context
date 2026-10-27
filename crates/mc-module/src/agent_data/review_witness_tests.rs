@@ -525,8 +525,11 @@ async fn review_partial_activate_abort_restores_rows_and_does_not_fork() {
         assert_eq!(project_rows(&b), vec!["B project data"; 3]);
         assert_eq!(
             refusal(
-                a.dispatch_value(1, json!({"method":"session.status","v":1,"session_id":SESSION}))
-                    .await
+                a.dispatch_value(
+                    1,
+                    json!({"method":"session.status","v":1,"session_id":SESSION})
+                )
+                .await
             ),
             "session_moved"
         );
