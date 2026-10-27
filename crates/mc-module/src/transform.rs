@@ -810,6 +810,15 @@ pub struct TransformRequest {
     /// Pending async reminder stripping does not, by itself, authorize a rebuild.
     #[serde(skip)]
     pub(crate) native_reminder_strip_pending: bool,
+    /// Messages whose source the async provider replaced with the runner's
+    /// archive-pruned copy (llm-runner `archive_prunes_reasoning`) since its
+    /// last committed pass. The runner emptied reasoning or dropped
+    /// signatures in them; every part keeps its index, type and key, so the
+    /// frozen decisions that target them still apply. Their new block
+    /// identity is adopted instead of refused as drift. Set only by the async
+    /// provider, never by a wire request.
+    #[serde(skip)]
+    pub(crate) pruned_reasoning_readopt: BTreeSet<String>,
     #[serde(skip)]
     pub(crate) native_fold_prefix: Option<crate::providers::fold_prefix::FoldPrefix>,
     #[serde(skip)]
@@ -1319,6 +1328,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             logical_prefix: None,
             source_lineage_first_ordinal: None,
             native_reminder_strip_pending: false,
+            pruned_reasoning_readopt: BTreeSet::new(),
             native_fold_prefix: None,
             native_fold_sidecar: None,
             native_compartment_source_revision: None,
@@ -9444,7 +9454,14 @@ fn enforce_block_identity(
                 .is_some_and(|message| !is_tail(message.ordinal, meta.coverage_ordinal))
             && core.boundary_id != *mid
             && !split_block_id(&core.boundary_id).is_some_and(|(anchor, _)| anchor == mid);
-        if identity_drift_requires_reject(meta, req, core, mid) && !declared_tail_rebuild {
+        // A runner's archive prune changes only payloads the contract lists,
+        // never a part's index, type or key, and the provider checked that
+        // before declaring the message. Adopt the pruned identity.
+        let declared_prune = req.pruned_reasoning_readopt.contains(mid);
+        if identity_drift_requires_reject(meta, req, core, mid)
+            && !declared_tail_rebuild
+            && !declared_prune
+        {
             return Err(TransformError::IdentityDrift(mid.clone()));
         }
         re_adoptions.push(TailIdentityReAdoption {
@@ -23432,6 +23449,7 @@ pub(crate) mod tests {
             logical_prefix: None,
             source_lineage_first_ordinal: None,
             native_reminder_strip_pending: false,
+            pruned_reasoning_readopt: BTreeSet::new(),
             native_fold_prefix: None,
             native_fold_sidecar: None,
             native_compartment_source_revision: None,

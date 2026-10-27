@@ -4867,6 +4867,7 @@ mod tests {
             logical_prefix: None,
             source_lineage_first_ordinal: None,
             native_reminder_strip_pending: false,
+            pruned_reasoning_readopt: Default::default(),
             native_fold_prefix: None,
             native_fold_sidecar: None,
             native_compartment_source_revision: None,

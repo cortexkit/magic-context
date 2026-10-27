@@ -3,11 +3,13 @@ use cortexkit_bus_inmemory::{InMemoryBus, InMemoryConfig};
 mod broca_0_7;
 mod broca_tag_rows;
 mod contract_update;
+mod contract_update_review;
 mod conversation_identity_probe;
 mod descriptors_read;
 mod full_array_setup;
 mod moved_session;
 mod offline_first_pass;
+mod pruned_reasoning_tests;
 mod published_contract;
 mod read_outcomes;
 mod read_resume;
@@ -43,6 +45,13 @@ struct Runner {
     page_override: Mutex<Option<Value>>,
     /// A `session.head` answer to give instead of `{"first_ordinal":0}`.
     head_override: Mutex<Option<Value>>,
+    /// Messages served pruned at rest, by ordinal: the served body and the
+    /// page's `pruned_reasoning` rows for it. The entry in `entries` stays
+    /// the original, so its digests stay the write-time ones.
+    pruned: Mutex<BTreeMap<u64, (Value, Vec<Value>)>>,
+    /// The prune state (`reasoning_pruned`) the head and every page report,
+    /// once something was pruned.
+    reasoning_pruned: Mutex<Option<Value>>,
     history_requests: Mutex<Vec<Value>>,
 }
 
@@ -50,6 +59,43 @@ struct Runner {
 struct ReadGate {
     entered: tokio::sync::Notify,
     resume: tokio::sync::Notify,
+}
+
+impl Runner {
+    /// The prune state the runner reports, once it pruned something.
+    fn prune_state(&self) -> Option<pruned_reasoning::PruneState> {
+        self.reasoning_pruned
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|state| serde_json::from_value(state.clone()).unwrap())
+    }
+
+    /// Prune at rest, as a runner declaring `archive_prunes_reasoning` does:
+    /// serve message `ordinal` as `served`, list `rows` on every page that
+    /// serves it, and raise the generation in the same step, with
+    /// `through_ordinal` the highest ordinal any prune touched.
+    fn prune(&self, ordinal: u64, served: Value, rows: Vec<Value>) -> pruned_reasoning::PruneState {
+        self.pruned.lock().unwrap().insert(ordinal, (served, rows));
+        let previous = self.prune_state();
+        let state = pruned_reasoning::PruneState::new(
+            previous.map_or(1, |state| state.generation + 1),
+            previous.map_or(ordinal, |state| state.through_ordinal.max(ordinal)),
+            1_767_312_000_000,
+        );
+        *self.reasoning_pruned.lock().unwrap() = Some(serde_json::to_value(state).unwrap());
+        state
+    }
+
+    /// The ordinals the provider's `session.read` calls asked to start at.
+    fn read_starts(&self) -> Vec<u64> {
+        self.reads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|params| params["from_ordinal"].as_u64())
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -138,7 +184,11 @@ impl session_resolver::ProviderRunner for Runner {
             if let Some(head) = self.head_override.lock().unwrap().clone() {
                 return Ok(head);
             }
-            return Ok(json!({"first_ordinal":0}));
+            let mut head = json!({"first_ordinal":0});
+            if let Some(state) = self.reasoning_pruned.lock().unwrap().clone() {
+                head["reasoning_pruned"] = state;
+            }
+            return Ok(head);
         }
         if method == "session.history" {
             self.history_requests.lock().unwrap().push(params.clone());
@@ -201,18 +251,36 @@ impl session_resolver::ProviderRunner for Runner {
             .as_u64()
             .expect("range read, never tail");
         let entries = self.entries.lock().unwrap();
+        let pruned = self.pruned.lock().unwrap();
+        let mut pruned_rows = Vec::new();
+        let page_size = match self.page_size.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => 7,
+            size => size,
+        };
         let messages = entries
             .iter()
             .filter(|e| e.ordinal >= from)
             .take(
-                match self.page_size.load(std::sync::atomic::Ordering::Relaxed) {
-                    0 => 7,
-                    size => size,
-                },
+                params["limit"]
+                    .as_u64()
+                    .map_or(page_size, |limit| page_size.min(limit as usize)),
             )
-            .map(serve_descriptors)
+            .map(|entry| {
+                let mut served = serve_descriptors(entry);
+                if let Some((message, rows)) = pruned.get(&entry.ordinal) {
+                    served.message = message.clone();
+                    pruned_rows.extend(rows.iter().cloned());
+                }
+                served
+            })
             .collect::<Vec<_>>();
         let mut page = json!({"lineage_id":lineage,"messages":messages});
+        if !pruned_rows.is_empty() {
+            page["pruned_reasoning"] = json!(pruned_rows);
+        }
+        if let Some(state) = self.reasoning_pruned.lock().unwrap().clone() {
+            page["reasoning_pruned"] = state;
+        }
         if let Some(last) = messages
             .last()
             .filter(|last| entries.last().is_some_and(|end| end.ordinal > last.ordinal))
@@ -533,6 +601,9 @@ impl Rig {
         }
         if !events.is_empty() {
             notice = notice.with_events(events);
+        }
+        if let Some(state) = self.runner.prune_state() {
+            notice = notice.with_reasoning_pruned(state);
         }
         let mut headers = notice.to_headers();
         headers.insert(

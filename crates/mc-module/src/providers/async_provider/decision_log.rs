@@ -22,8 +22,10 @@ pub(super) struct Pass {
     pub action: String,
     /// Why the engine materialized, when it says.
     pub reason: Option<String>,
-    /// The pass ran as a rebuild (a ride).
+    /// The pass ran as a rebuild: a ride, or held copies the runner pruned.
     pub rebuild: bool,
+    /// The rebuild came from held copies the runner pruned at rest.
+    pub pruned_rebuild: bool,
     /// The pass published a new view.
     pub published: bool,
 }
@@ -106,7 +108,9 @@ pub(super) fn pass_why(pass: &Pass) -> String {
         why.push(':');
         why.push_str(reason);
     }
-    if pass.rebuild {
+    if pass.pruned_rebuild {
+        why.push_str("+pruned_reasoning_rebuild");
+    } else if pass.rebuild {
         why.push_str("+rebuild");
     }
     why

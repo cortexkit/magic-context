@@ -937,6 +937,8 @@ impl McHandler {
         if let Some(wait) = old.ride_wait_ms() {
             answer = answer.with_ride_wait_ms(wait);
         }
+        // The descent keeps the session's pruning permission as it was.
+        answer = answer.with_accepts(old.accepts().to_vec());
         state.initial = serde_json::to_value(answer).map_err(transient)?;
         state.initial["serializer_profile"] = json!(codec.wire_id());
         state.save(store, &[])?;
