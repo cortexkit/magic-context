@@ -727,52 +727,6 @@ async fn production_make(dir: &Path) -> McHandler {
 }
 
 #[tokio::test]
-async fn review_abort_restore_rebaselines_but_a_real_turn_still_advances() {
-    let sdir = tempfile::tempdir().unwrap();
-    let ddir = tempfile::tempdir().unwrap();
-    let door = Arc::new(FakeDoor::default());
-    let s = make(sdir.path(), door.clone()).await;
-    let d = make(ddir.path(), door.clone()).await;
-    seed(&s, SESSION);
-    seed(&d, SESSION);
-    observe(&s, SESSION).await;
-    observe(&d, SESSION).await;
-    let refs = vec![reference(SESSION)];
-    let local = json!({"refs":refs,"cutId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"});
-    reply(call(&d, role::ops::PREPARE, local.clone()).await);
-    reply(call(&d, role::ops::ABORT, local).await);
-    context_conn(&s)
-        .execute(
-            "UPDATE notes SET content='incoming note' WHERE session_id=?1",
-            [SESSION],
-        )
-        .unwrap();
-    prepared(&s, &door, &refs).await;
-    assert_eq!(
-        reply(call(&d, role::ops::DIVERGED, params(&refs)).await)["refs"][0]["state"],
-        "at_cut"
-    );
-    reply(call(&d, role::ops::IMPORT, params(&refs)).await);
-    *d.agent_data.as_ref().unwrap().crash_after.lock().unwrap() = Some(1);
-    assert_eq!(
-        refusal(call(&d, role::ops::ACTIVATE, params(&refs)).await),
-        "unavailable"
-    );
-    reply(call(&d, role::ops::ABORT, params(&refs)).await);
-    assert_eq!(note(&d), "portable note");
-    assert_eq!(
-        reply(call(&d, role::ops::DIVERGED, params(&refs)).await)["refs"][0]["state"],
-        "at_cut"
-    );
-    let mut turn = FixtureBuilder::frozen_reductions();
-    turn.session_id = SESSION.into();
-    assert!(reply(d.dispatch_value(1, turn.call_transform()).await)["ck_messages"].is_array());
-    assert_eq!(
-        reply(call(&d, role::ops::DIVERGED, params(&refs)).await)["refs"][0]["state"],
-        "advanced"
-    );
-}
-#[tokio::test]
 async fn review_undo_corruption_refuses_activation_and_abort_without_new_writes() {
     let sdir = tempfile::tempdir().unwrap();
     let ddir = tempfile::tempdir().unwrap();

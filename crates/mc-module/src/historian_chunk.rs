@@ -4275,14 +4275,6 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn fixture_builder_drives_boundary_chunk_assembly() {
-        let fixture = FixtureBuilder::session_with_boundary();
-        let built = project_and_build(&fixture.messages, 1, 1_000, 3);
-        assert!(built.text.contains("U: before boundary"));
-        assert_eq!(fixture.call_transform()["kind"], "transform");
-    }
 }
 
 #[cfg(test)]

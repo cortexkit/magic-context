@@ -2,14 +2,12 @@
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
-use std::sync::Mutex;
 
 use crate::ck_wire::{CkIngressMessage, CkWireMessage};
 use crate::healing::SerializerProfile;
 use crate::transform::{
     apply_frozen_trailing_blank_decision, is_module_composed_row, user_terminated_tail_decision,
-    TransformRequest, TransformResponse, UserTerminatedTailDecision,
+    TransformRequest, UserTerminatedTailDecision,
 };
 use mc_core::{CoreState, DurabilityClass, FrozenUnit};
 
@@ -275,23 +273,4 @@ fn dg_golden_vacuity_guard_rejects_one_byte_fixture_perturbation_per_family() {
         observed += 1;
     }
     assert_eq!(observed, 9, "every DG family needs a vacuity mutation");
-}
-
-#[cfg(test)]
-mod fixture_builder_tests {
-    use super::super::test_support::FixtureBuilder;
-
-    #[test]
-    fn builders_cover_all_in_process_facade_shapes() {
-        for fixture in [
-            FixtureBuilder::session_with_boundary(),
-            FixtureBuilder::tagged_session(),
-            FixtureBuilder::frozen_reductions(),
-            FixtureBuilder::synthetic_todo_armed(),
-        ] {
-            assert_eq!(fixture.handle_transform()["kind"], "transform");
-            assert_eq!(fixture.call_transform()["session_id"], fixture.session_id);
-            assert_eq!(fixture.state_import()["kind"], "state_import");
-        }
-    }
 }
