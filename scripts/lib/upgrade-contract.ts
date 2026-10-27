@@ -1,5 +1,5 @@
 export const CONTEXT_CRASH_VERSIONS = [96, 98, 100, 103] as const;
-export const STORE_CRASH_VERSIONS = [64, 66, 70, 71, 72, 73, 74] as const;
+export const STORE_CRASH_VERSIONS = [64, 66, 70, 71, 72, 73, 74, 75] as const;
 
 export const EFFECTS = {
     context: {
@@ -24,6 +24,7 @@ export const EFFECTS = {
         72: "discards undeployed provider projections introduced at 65+, adds policy facts/cuts/overrides/views; all released-63 rows remain audited",
         73: "resets only undeployed v1-view conversations and drops v1 views; v2 recipes replace them; released 63 has no such rows",
         74: "adds mc_async_compaction, mc_async_compaction_entries, mc_async_compaction_views and mc_async_compaction_baselines for async state, held transcripts, published views and engine baselines; additive tables only, no existing row reset or rewrite",
+        75: "adds a nullable mid column to held async entries backfilled from entry_json plus session and (session_ref, mid) indexes; existing rows and entry content unchanged",
     },
 } as const;
 
@@ -62,7 +63,7 @@ export function assertFullDoctorTarget(output: string, directory: string, host: 
 
 export type MigrationMetric = {database: string; version: number; seconds: number; peakKiB: number; beforeMainWal: number[]; afterMainWal: number[]};
 export function assertMigrationMetrics(metrics: MigrationMetric[]): void {
-    for (const [database, start, end] of [["context", 96, 103], ["store", 64, 74]] as const)
+    for (const [database, start, end] of [["context", 96, 103], ["store", 64, 75]] as const)
         for (let version = start; version <= end; version++) {
             const rows = metrics.filter((row) => row.database === database && row.version === version);
             if (rows.length !== 1 || !Number.isFinite(rows[0].seconds) || rows[0].seconds < 0 || !(rows[0].peakKiB > 0) || rows[0].beforeMainWal.length !== 2 || rows[0].afterMainWal.length !== 2)
