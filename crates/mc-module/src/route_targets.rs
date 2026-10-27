@@ -8,10 +8,6 @@ use subc_protocol::manifest::{
 };
 use subc_protocol::RouteTarget;
 
-#[cfg(test)]
-#[path = "../tests/support/executable.rs"]
-mod executable_staging;
-
 use crate::config::ConfiguredRunners;
 use crate::historian_runner::HistorianRunnerKind;
 
@@ -351,7 +347,6 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::executable_staging;
     use super::*;
 
     #[test]

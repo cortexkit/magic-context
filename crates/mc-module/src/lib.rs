@@ -376,8 +376,6 @@ use mc_store::single_store_schema::{
 };
 #[cfg(test)]
 use mc_store::InsertMemoryInput;
-#[cfg(test)]
-use mc_store::TagNumberRow;
 use mc_store::{
     canonical_root, FacadeMemoryMutationError, FacadeMutationOutcome, HistorianChunkRange,
     HistorianDecision, HistorianPhase, HistorianRecentDecision, MappingUpdate, McStore,
@@ -16597,16 +16595,6 @@ mod tests {
         (handler, store, dir, project)
     }
 
-    /// The project key the claim lane resolves for a channel bound to this project
-    /// root.
-    ///
-    /// The lane scopes every op to the caller's project, the identity the transform that
-    /// queued the run resolved. Unit tests key a route with no recorded session project by
-    /// its root path, so a test that reads the queue directly uses that key too.
-    fn lane_project_key(_store: &McStore, project_root: &std::path::Path) -> String {
-        project_root.to_string_lossy().to_string()
-    }
-
     #[test]
     fn wire_execute_threshold_overrides_config_and_absence_preserves_fallback_both_directions() {
         fn decision(wire_threshold: Option<f64>, config_threshold: f64) -> scheduler::BaseDecision {
@@ -16760,23 +16748,6 @@ mod tests {
             importance: 50,
             ..Default::default()
         }
-    }
-
-    fn imported_compartment(
-        seq: i64,
-        start_message: i64,
-        end_message: i64,
-        end_message_id: &str,
-        p1: &str,
-    ) -> Value {
-        json!({
-            "seq": seq,
-            "start_message": start_message,
-            "end_message": end_message,
-            "end_message_id": end_message_id,
-            "title": format!("Imported {seq}"),
-            "p1": p1,
-        })
     }
 
     fn big_messages_from(start_ordinal: u64) -> Vec<CkIngressMessage> {
@@ -21288,19 +21259,6 @@ mod tests {
         );
     }
 
-    fn state_sync_compartment(sequence: i64, content: &str) -> Value {
-        json!({
-            "sequence": sequence,
-            "start_message": sequence,
-            "end_message": sequence,
-            "start_message_id": format!("m{sequence}#0"),
-            "end_message_id": format!("m{sequence}#0"),
-            "title": format!("c{sequence}"),
-            "content": content,
-            "p1": format!("{content}-p1"),
-        })
-    }
-
     fn publish_ctx_expand_fixture(
         store: &McStore,
         session_id: &str,
@@ -22056,62 +22014,6 @@ mod tests {
     }
 
     // ---- historian claim lane: the wire A2 codes against -------------------
-
-    const CLAIM_RUN_ID: &str = "mc-historian:project:a1a1a1a1a1a1a1a1:1";
-    const CLAIM_SYSTEM_PROMPT: &str = "historian-system-prompt";
-    const CLAIM_USER_PROMPT: &str = "historian-user-prompt";
-    /// The budget the host runner queues a run under: the module's own completion
-    /// wait. It is deliberately longer than the lease ceiling, so a claimant's lease
-    /// can lapse while the run itself is still worth finishing.
-    const CLAIM_AWAIT_BUDGET_MS: i64 = 660_000;
-
-    /// Put `ses` in the phase a firing reaches just before its completion runs,
-    /// then queue that run for a claimant.
-    fn queue_a_run_for_a_claimant(store: &McStore, project_path: &str, now_ms: i64) {
-        let loaded = store.load("ses").unwrap();
-        let mut meta = loaded.meta.clone();
-        meta.historian = HistorianDurableState {
-            state: HistorianPhase::Firing,
-            firing_seq: 1,
-            chunk_range: Some(HistorianChunkRange {
-                from_ordinal: 1,
-                to_ordinal: 3,
-            }),
-            chunk_fingerprint: "fp-a1".to_string(),
-            selected_range_identities: Vec::new(),
-            producer_session_id: None,
-            producer_run_id: None,
-            producer_attempt: 0,
-            coordinator_token: None,
-            claim_deadline_ms: None,
-            fired_at_ms: Some(now_ms),
-            expected_revert_epoch: 0,
-            compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
-            failure_backoff_at_ms: None,
-            last_failure: None,
-            last_no_fire: None,
-            recent_decisions: Vec::new(),
-            consecutive_publish_failures: 0,
-        };
-        store
-            .commit("ses", loaded.row_version, &loaded.core, &meta)
-            .unwrap();
-        store
-            .publish_pending_historian_run(&mc_store::NewHistorianPendingRun {
-                run_id: CLAIM_RUN_ID.to_string(),
-                session_id: "ses".to_string(),
-                project_path: project_path.to_string(),
-                firing_seq: 1,
-                chunk_fingerprint: "fp-a1".to_string(),
-                system_prompt: CLAIM_SYSTEM_PROMPT.to_string(),
-                user_prompt: CLAIM_USER_PROMPT.to_string(),
-                model_chain: vec!["test/first".to_string(), "test/second".to_string()],
-                await_budget_ms: CLAIM_AWAIT_BUDGET_MS,
-                historian_timeout_ms: Some(600_000),
-                now_ms,
-            })
-            .unwrap();
-    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn note_facade_glance_lists_one_row_per_note_with_age_and_stale_markers() {
