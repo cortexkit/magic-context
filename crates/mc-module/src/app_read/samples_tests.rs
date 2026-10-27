@@ -626,6 +626,21 @@ fn mode3_window_sql() -> String {
 
 fn session_data_records() -> Vec<Record> {
     vec![
+        // The session row plus its compartment and queued-stamp counts. The
+        // states page fixture holds one compartment and two queued drops; the
+        // one inside the summarized message is not a listed stamp, so the
+        // count is 1, as the states pages sum to.
+        plain(
+            "meta",
+            "session_data.read/meta.json",
+            "session_data.read",
+            &states_matrix_sql(),
+            "",
+            json!({
+                "session": opencode_session("s"),
+                "section": "meta",
+            }),
+        ),
         // The pass recorded a provider-reported input total.
         plain(
             "token-breakdown-provider",
