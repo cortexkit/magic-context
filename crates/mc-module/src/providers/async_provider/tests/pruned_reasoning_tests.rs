@@ -43,7 +43,13 @@ fn with_reasoning(rig: &Rig, ordinal: u64) -> (Value, Value) {
         tags::PartTag::tagged("1", tag),
     ];
     let mut pruned = entry.message.clone();
-    pruned["parts"][0] = json!({"id":format!("p{ordinal}r"),"type":"reasoning","text":""});
+    // As llm-runner's rule writes the pruned part.
+    pruned["parts"][0] = cortexkit_role_llm_runner::archive_prunes_reasoning::prune_part_in(
+        "opencode-aisdk",
+        kinds::REASONING,
+        &reasoning,
+    )
+    .unwrap();
     (reasoning, pruned)
 }
 
@@ -363,14 +369,14 @@ fn accepted(profile: &str, kind: &str, original: &Value, served: &Value) -> bool
     )
 }
 
-/// A listed part is accepted only in the way its kind
-/// allows in the session's serializer profile (llm-runner §9.14.1,
-/// per-profile table). Every prune llm-runner 0.7.11 publishes for each
-/// profile is accepted. A change the kind does not make is refused: text
-/// rewritten or emptied under `signature`, readable reasoning touched under
-/// `opaque_reasoning`, a kind the profile cannot carry or this crate does
-/// not define, a member the profile's table does not list as a signature,
-/// item state that is not a signature, and any unlisted change.
+/// A listed part is accepted only as llm-runner's rule for its kind writes
+/// it in the session's serializer profile (llm-runner §9.14.1, per-profile
+/// table, `prune_part_in`). Every prune llm-runner publishes for each
+/// profile is accepted. Anything else is refused: text rewritten or emptied
+/// under `signature`, readable reasoning touched under `opaque_reasoning`, a
+/// kind the profile cannot carry or this crate does not define, a member the
+/// profile's table does not list as a signature, item state that is not a
+/// signature, and any unlisted change.
 #[test]
 fn a_listed_part_is_accepted_only_as_its_kind_prunes_it() {
     let vectors: Value = serde_json::from_str(

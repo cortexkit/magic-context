@@ -98,15 +98,6 @@ fn part_at<'a>(message: &'a Value, pointer: &str, whole: bool, index: usize) -> 
     parts.as_array()?.get(index)
 }
 
-/// Whether `part`, in serializer profile `profile`'s stored format, carries
-/// content a prune of `kind` removes: llm-runner's per-profile reference
-/// (`carries_pruned_content_in`). A profile the rules do not name carries
-/// nothing ck-mc could check, so it is treated as carrying nothing here and
-/// refused where acceptance depends on it (`pruned_as`).
-fn carries(profile: &str, kind: &str, part: &Value) -> bool {
-    archive_prunes_reasoning::carries_pruned_content_in(profile, kind, part).unwrap_or(false)
-}
-
 /// Whether a reference check found restored content. A profile the
 /// per-profile rules do not name cannot be checked, so it counts as
 /// restoring: nothing is sent that could not be checked.
@@ -193,97 +184,61 @@ fn compare(held: &Value, served: &Value, path: &mut Vec<Step>, changes: &mut Vec
     }
 }
 
-/// `target` with the value at `path` set as `source` has it there: copied
-/// when `source` has a value, removed when it has none. Strings holding JSON
-/// are parsed, changed and written back. `None` when the path does not lead
-/// through `target`.
-fn take_from(target: &Value, source: &Value, path: &[Step]) -> Option<Value> {
-    let Some((step, rest)) = path.split_first() else {
-        return Some(source.clone());
-    };
-    let mut target = target.clone();
-    match step {
-        Step::Json => {
-            let inner: Value = serde_json::from_str(target.as_str()?).ok()?;
-            let original: Value = serde_json::from_str(source.as_str()?).ok()?;
-            let changed = take_from(&inner, &original, rest)?;
-            return Some(Value::String(changed.to_string()));
-        }
-        Step::Member(key) => {
-            let members = target.as_object_mut()?;
-            match (rest.is_empty(), source.get(key)) {
-                (true, None) => {
-                    members.remove(key);
-                }
-                (true, Some(original)) => {
-                    members.insert(key.clone(), original.clone());
-                }
-                (false, original) => {
-                    let changed = take_from(members.get(key)?, original?, rest)?;
-                    members.insert(key.clone(), changed);
-                }
-            }
-        }
-        Step::Index(index) => {
-            let items = target.as_array_mut()?;
-            let changed = take_from(items.get(*index)?, source.get(*index)?, rest)?;
-            items[*index] = changed;
+impl std::fmt::Display for Step {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Member(key) => write!(f, "/{key}"),
+            Self::Index(index) => write!(f, "/{index}"),
+            Self::Json => write!(f, "/<json>"),
         }
     }
-    Some(target)
 }
 
-/// Whether `served` is the part `held` after a prune of `kind` in
-/// serializer profile `profile`, and nothing else (llm-runner §9.14.1,
-/// per-profile table):
-///
-/// - the part keeps its type, and differs from `held` only by removed
-///   members and emptied strings;
-/// - `served` no longer carries the kind's content
-///   (`carries_pruned_content_in`);
-/// - every one of those changes removes the kind's content: putting any one
-///   of them back makes the part carry it again. So a `signature` prune
-///   cannot empty text, an `opaque_reasoning` prune cannot touch readable
-///   reasoning or a summary, and a kind that does not apply to the part
-///   (one the profile cannot carry, or one this crate does not define)
-///   accepts no change at all.
-fn pruned_as(profile: &str, kind: &str, held: &Value, served: &Value) -> bool {
-    if held.get("type") != served.get("type") {
-        return false;
-    }
-    if !archive_prunes_reasoning::kinds_carried(profile)
-        .is_ok_and(|carried| carried.contains(&kind))
-    {
-        return false;
-    }
+/// For a refusal's log line only: how a served part differs from the held
+/// one, as the paths removed or emptied, or that it changed in some other
+/// way. Acceptance never depends on it.
+fn difference(held: &Value, served: &Value) -> String {
     let mut changes = Vec::new();
     if !compare(held, served, &mut Vec::new(), &mut changes) {
-        return false;
+        return "a value changed or a member was added".into();
     }
-    if changes.is_empty() {
-        return true;
-    }
-    !carries(profile, kind, served)
-        && changes.iter().all(|change| {
-            take_from(served, held, &change.path)
-                .is_some_and(|put_back| carries(profile, kind, &put_back))
-        })
+    let paths = changes
+        .iter()
+        .map(|change| change.path.iter().map(Step::to_string).collect::<String>())
+        .collect::<Vec<_>>();
+    format!("removed or emptied {paths:?}")
 }
 
 /// Whether `fresh`, a re-read of the held message `held` in serializer
 /// profile `profile`, differs from it only as the contract's re-read rule
-/// allows: every member but the message body is unchanged, every part the
-/// page does not list is byte-identical, and every listed part keeps its
-/// index and key, carries its write-time digest, and differs from the held
-/// part only as its kind allows (`pruned_as`).
+/// allows (`acceptance`).
 pub(super) fn accepts(
     profile: &str,
     held: &ReadMessage,
     fresh: &ReadMessage,
     listed: &[PrunedReasoning],
 ) -> bool {
-    if listed.is_empty()
-        || held.ordinal != fresh.ordinal
+    acceptance(profile, held, fresh, listed).is_ok()
+}
+
+/// `Ok` when `fresh`, a re-read of the held message `held`, is exactly what
+/// the runner's prune leaves of it: every member but the message body is
+/// unchanged, every part the page does not list is byte-identical, and
+/// every listed part keeps its index and key, carries its write-time
+/// digest, and is served as llm-runner's rule writes it
+/// (`prune_part_in(profile, kind, held part)`, applied for each kind the
+/// page lists for that part, in page order). Anything else, however close,
+/// is a changed transcript; the `Err` says why, for the log.
+pub(super) fn acceptance(
+    profile: &str,
+    held: &ReadMessage,
+    fresh: &ReadMessage,
+    listed: &[PrunedReasoning],
+) -> Result<(), String> {
+    if listed.is_empty() {
+        return Err("the page lists no pruned part".into());
+    }
+    if held.ordinal != fresh.ordinal
         || held.mid != fresh.mid
         || held.digest != fresh.digest
         || held.part_digests != fresh.part_digests
@@ -292,36 +247,62 @@ pub(super) fn accepts(
         || held.written_at != fresh.written_at
         || held.delivered_as != fresh.delivered_as
     {
-        return false;
+        return Err("a member other than the message body changed".into());
     }
     let (Some((pointer, whole)), Some(held_parts)) =
         (parts_pointer(&fresh.message), parts_pointer(&held.message))
     else {
-        return false;
+        return Err("no part array".into());
     };
     if (pointer, whole) != held_parts {
-        return false;
+        return Err("the part array moved".into());
     }
-    let mut candidate = fresh.message.clone();
+    // The kinds listed for each part, in page order.
+    let mut by_part: Vec<(&str, Vec<&str>)> = Vec::new();
     for row in listed {
         if row.mid != fresh.mid {
-            return false;
+            return Err(format!("a row names message {}", row.mid));
         }
-        let Some(index) = fresh.tags.iter().position(|tag| tag.part == row.part) else {
-            return false;
+        match by_part.iter_mut().find(|(part, _)| *part == row.part) {
+            Some((_, kinds)) => kinds.push(&row.kind),
+            None => by_part.push((&row.part, vec![&row.kind])),
+        }
+    }
+    let mut candidate = fresh.message.clone();
+    for (part, kinds) in by_part {
+        let Some(index) = fresh.tags.iter().position(|tag| tag.part == part) else {
+            return Err(format!("part {part} is not in the message"));
         };
-        match served_part_digest(held, &row.part) {
-            Ok(digest) if digest == row.sha256 => {}
-            _ => return false,
+        let written = listed
+            .iter()
+            .find(|row| row.part == part)
+            .map(|row| &row.sha256);
+        match served_part_digest(held, part) {
+            Ok(digest) if Some(&digest) == written => {}
+            _ => {
+                return Err(format!(
+                    "part {part}: the listed digest is not its write-time one"
+                ))
+            }
         }
         let (Some(served), Some(original)) = (
             part_at(&fresh.message, pointer, whole, index),
             part_at(&held.message, pointer, whole, index),
         ) else {
-            return false;
+            return Err(format!("part {part} is missing"));
         };
-        if !pruned_as(profile, &row.kind, original, served) {
-            return false;
+        let rule = kinds.iter().try_fold(original.clone(), |part, kind| {
+            archive_prunes_reasoning::prune_part_in(profile, kind, &part)
+        });
+        match rule {
+            Ok(rule) if &rule == served => {}
+            Ok(_) => {
+                return Err(format!(
+                    "part {part} ({kinds:?}) is not served as the prune rule writes it: {}",
+                    difference(original, served)
+                ))
+            }
+            Err(refused) => return Err(format!("part {part} ({kinds:?}): {refused:?}")),
         }
         // Put the held part back where the pruned one is served: if the
         // result is the held message, nothing else changed.
@@ -329,10 +310,13 @@ pub(super) fn accepts(
         match candidate.pointer_mut(pointer) {
             Some(slot) if whole => *slot = original,
             Some(Value::Array(parts)) if index < parts.len() => parts[index] = original,
-            _ => return false,
+            _ => return Err(format!("part {part} is missing")),
         }
     }
-    candidate == held.message
+    if candidate != held.message {
+        return Err("a part the page does not list changed".into());
+    }
+    Ok(())
 }
 
 impl AsyncRecord {
@@ -421,7 +405,8 @@ impl AsyncRecord {
         fresh: &ReadMessage,
         listed: &[PrunedReasoning],
     ) -> Result<bool, HandlerOutcome> {
-        if !accepts(self.serializer_profile()?, held, fresh, listed) {
+        if let Err(why) = acceptance(self.serializer_profile()?, held, fresh, listed) {
+            tracing::info!(session_ref=%self.reference(), ordinal=fresh.ordinal, %why, "async re-read is not the runner's prune; treated as a changed transcript");
             return Ok(false);
         }
         let entry = HeldEntry::from_read(fresh)?;

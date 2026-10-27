@@ -38,7 +38,13 @@ fn reasoning_fixture(rig: &Rig) -> (Value, Value, Value) {
         tags::PartTag::tagged("1", format!("§{}§", 100 + PRUNED_ORDINAL * 3)),
     ];
     let mut pruned = entry.message.clone();
-    pruned["parts"][0] = json!({"id":"p39r","type":"reasoning","text":""});
+    // As llm-runner's rule writes the pruned part.
+    pruned["parts"][0] = cortexkit_role_llm_runner::archive_prunes_reasoning::prune_part_in(
+        "opencode-aisdk",
+        kinds::REASONING,
+        &reasoning,
+    )
+    .unwrap();
     (reasoning, text, pruned)
 }
 
