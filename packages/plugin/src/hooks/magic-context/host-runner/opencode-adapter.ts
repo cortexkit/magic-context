@@ -32,8 +32,8 @@ function toolTextField(state: Part): "error" | "output" {
 }
 const publishedSources = new WeakMap<MessageLike, MessageLike>();
 const hostReplay = new WeakMap<MessageLike, () => unknown>();
-/** Defer copying v2 tool-result and host metadata until rust_pipeline's provider
- * mode records a new message; the legacy full-request path never reads it. */
+/** Defer copying v2 tool-result and host metadata until `providerIncoming` reads
+ * the message; nothing else reads it. */
 export function rememberOpenCodeHostReplay(message: MessageLike, read: () => unknown): void {
     hostReplay.set(message, read);
 }

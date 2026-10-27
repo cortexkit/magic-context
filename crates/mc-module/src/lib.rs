@@ -1853,8 +1853,9 @@ pub struct McHandler {
     retrieval_reranker: Option<Arc<dyn retrieval::hybrid::RerankClient>>,
     config: Arc<Mutex<ConfigCache>>,
     historian_runner_refusals: Arc<HistorianRunnerRefusalCache>,
-    /// Runs queued for a claimant that a firing task in this process is still
-    /// waiting on. Empty under the in-module runner.
+    /// Runs queued for a host claimant that a firing task in this process is still
+    /// waiting on. The `historian.*` claim routes are retired, so a run queued here
+    /// can only reach its deadline; runner-lane conversations never queue one.
     host_runs: Arc<HostRunLedger>,
     /// Live Broca dream children, keyed by the Broca session each one runs in.
     /// A memory tool the runner dispatches on such a session reaches the task's
@@ -2361,8 +2362,8 @@ enum WrapupFiringError {
 
 const TERMINAL_WRAPUP_FAILURE_PREFIX: &str = "mc-terminal-wrapup-failure:";
 
-/// Wrapup refusal when the session's transform snapshot carries no historian model
-/// chain. The host sends one with every transform, so this names a host defect.
+/// Wrapup refusal when the session's request carries no historian model chain: a
+/// defect in whatever built the request, since every caller is expected to send one.
 const WRAPUP_MODEL_CHAIN_MISSING: &str = "the session's transform carried no historian model chain";
 
 fn terminal_wrapup_failure_fields(summary: &str) -> Option<(String, String, String)> {
@@ -2451,7 +2452,7 @@ struct HistorianFiringTask {
     /// the moment the firing was prepared so a config edit mid-run cannot move a
     /// firing already in flight to a different lane.
     runner: HistorianRunnerKind,
-    /// Waiters for runs queued for a claimant. Unused by the in-module runner.
+    /// Waiters for runs queued for a host claimant (see `McHandler::host_runs`).
     host_runs: Arc<HostRunLedger>,
     /// Set for a runner-lane conversation: the completion runs on the
     /// conversation's own runner over llm-runner, never on the claim queue and
@@ -10703,15 +10704,16 @@ impl RequestMethodProbe {
             // Non-final transform pages carry the page envelope but not `kind`,
             // which travels with the scalar fields on the final page.
             || self.transform_page_id.is_some()
-            // A single state-sync row can exceed the facade cap, so this live module
-            // path uses the transform-class ceiling as well.
+            // The retired `state_sync` route sent multi-MiB rows too. The wider cap
+            // lets such a request reach its `transform_route_retired` answer by name.
             || named(&self.method, "state_sync")
     }
 }
 
-/// The facade byte budget exists for agent tool calls; transform-class requests
-/// legitimately carry a session's full message array (multi-MiB on large
-/// sessions), so they get the wider cap. Method sniffing on raw bytes avoids
+/// The facade byte budget exists for agent tool calls. Transform-class requests
+/// carried a session's full message array (multi-MiB on large sessions); their
+/// routes are retired, but they keep the wider cap so a stale host still gets the
+/// named retirement answer rather than a size refusal. Method sniffing on raw bytes avoids
 /// parsing multi-MiB JSON just to reject it.
 fn enforce_request_byte_cap(body: &[u8]) -> Result<(), HandlerOutcome> {
     if body.len() <= MAX_FACADE_FRAME_BYTES {
@@ -11299,9 +11301,9 @@ fn ctx_reduce_ack_details(unknown: &[u64]) -> String {
     details.join("; ")
 }
 
-/// Recover one raw CK message in the same bounded-snapshot window used by verbose
-/// ctx_expand. The durable transcript fallback above remains available when the snapshot
-/// is gone, but it intentionally cannot recover raw tool input or output bytes.
+/// Render one CK message reconstructed from a durable chunk transcript's raw-message
+/// payload. When that payload is missing or undecodable, `ctx_expand` falls back to the
+/// compacted transcript text instead.
 fn render_cached_message_expand(message: &ck_wire::CkIngressMessage) -> String {
     let role = match message.ck.role.as_str() {
         "assistant" => "A (assistant)",
