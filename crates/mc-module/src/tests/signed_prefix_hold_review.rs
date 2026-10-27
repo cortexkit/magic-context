@@ -658,9 +658,11 @@ const REVIEW_UNHELD_CASES: [(&str, bool, bool); 6] = [
 /// Pin the intended unheld-session output with distance-based age reclaim.
 /// These snapshots retain current-task tool bodies; signed-prefix hold checks
 /// remain independent of this unheld policy golden. Re-pinned for the TypeScript pass
-/// decision rules: a primary execute pass with no summary to wait for rebuilds for
-/// queued drops (2% or the third held pass), and the age sweep and supersession wait
-/// below the force band.
+/// decision rules. Cases 2, 3 and 5 first diverge from the earlier pins at steps 54, 58
+/// and 10: each is the third consecutive primary execute pass (71%, 70% and 79%, below
+/// the 85% force band) holding queued drops with no summary to wait for, which now
+/// rebuilds and applies them (invariant 3's bounded execute exception). Every later step
+/// follows from that rebuild. The subagent and unchanged primary cases never meet it.
 const REVIEW_UNHELD_GOLDEN: [&str; 6] = [
     "379e07c15ef75bc0e0809bb4c4c9021b767fa988a0cf10d367635cb562e9c6d0",
     "a06635735bfd78bd1ed09d54c39a0c0e32c645ec6d4e1e6269c828b8358c7bdb",
