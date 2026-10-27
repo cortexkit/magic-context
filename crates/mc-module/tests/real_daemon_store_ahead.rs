@@ -4,7 +4,7 @@
 //! A real ck-subc runs, a real ck-mc registers with it, and the store it opens records one
 //! migration version more than the binary carries: the shape a binary-only rollback leaves
 //! behind. The test asserts what an operator and an adapter each see: `ck health magic-context`
-//! names the refusal with both versions, and a transform request gets the typed
+//! names the refusal with both versions, and a session request gets the typed
 //! `store_ahead_of_binary` error frame instead of an answer. It also checks that nothing the
 //! module did while refusing changed the store file.
 //!
@@ -150,7 +150,7 @@ fn assert_dev_process_name(pid: u32) {
 fn assert_dev_process_name(_: u32) {}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_module_on_a_store_ahead_of_it_refuses_on_health_and_on_transform() {
+async fn a_module_on_a_store_ahead_of_it_refuses_on_health_and_on_a_session_request() {
     std::env::remove_var(subc_protocol::SUBC_MODULE_ID_ENV);
     std::env::remove_var(subc_protocol::SUBC_LAUNCH_NONCE_ENV);
     std::env::remove_var(subc_os::LAUNCH_NONCE_FD_ENV);
@@ -267,31 +267,28 @@ async fn a_module_on_a_store_ahead_of_it_refuses_on_health_and_on_transform() {
         LATEST_MIGRATION_VERSION
     );
 
-    // A transform request gets the typed refusal, with both versions as detail.
-    let transform = consumer
+    // A session request gets the typed refusal, with both versions as detail.
+    let refused = consumer
         .call(
             RouteTarget::ToolProvider {
                 module_id: MODULE_ID.to_string(),
             },
             identity(&isolation, "ahead"),
             serde_json::to_vec(&json!({
-                "kind": "transform",
-                "v": 2,
-                "serializer_profile": "owned-llmrunner",
+                "method": "session.status",
+                "v": 1,
                 "session_id": "ahead",
-                "render_config": "cfg0",
-                "messages": [],
             }))
             .unwrap(),
             call_options(),
         )
         .await;
-    let Err(CallError::Module(body)) = transform else {
+    let Err(CallError::Module(body)) = refused else {
         panic!(
-            "a transform on a refused store must fail with a module error frame, got {transform:?}"
+            "a session request on a refused store must fail with a module error frame, got {refused:?}"
         );
     };
-    eprintln!("transform error frame: {body:?}");
+    eprintln!("session.status error frame: {body:?}");
     assert_eq!(body.code, STORE_AHEAD_OF_BINARY_REFUSAL_REASON, "{body:?}");
     assert_eq!(
         body.detail,

@@ -525,7 +525,7 @@ async fn review_partial_activate_abort_restores_rows_and_does_not_fork() {
         assert_eq!(project_rows(&b), vec!["B project data"; 3]);
         assert_eq!(
             refusal(
-                a.dispatch_value(1, json!({"method":"transform","session_id":SESSION}))
+                a.dispatch_value(1, json!({"method":"session.status","v":1,"session_id":SESSION}))
                     .await
             ),
             "session_moved"
@@ -680,28 +680,6 @@ async fn review_staging_corruption_is_refused_without_replacing_rows() {
     std::fs::write(path, original).unwrap();
     reply(call(&d, role::ops::ACTIVATE, params(&refs)).await);
     assert_eq!(note(&d), "portable note");
-}
-
-#[cfg(not(feature = "agent-data"))]
-fn row_counts(h: &McHandler, context: bool) -> BTreeMap<String, i64> {
-    let conn = if context {
-        context_conn(h)
-    } else {
-        rusqlite::Connection::open(h.store.get().unwrap().move_storage_path().unwrap()).unwrap()
-    };
-    let tables = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
-        .unwrap().query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-    tables
-        .into_iter()
-        .map(|table| {
-            let count = conn
-                .query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |r| {
-                    r.get(0)
-                })
-                .unwrap();
-            (table, count)
-        })
-        .collect()
 }
 
 #[cfg(not(feature = "agent-data"))]

@@ -16,37 +16,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-#[cfg(test)]
-thread_local! {
-    static UNCOMPACTED_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static PROJECTION_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
-}
-
-/// Take and reset actual message/block visits on this thread, not elapsed time.
-#[cfg(test)]
-pub(crate) fn take_projection_work() -> (usize, usize) {
-    PROJECTION_WORK.with(|work| work.replace((0, 0)))
-}
-
-/// Test-only reference to the former ownership model. Scope the flag to the current-thread
-/// replay so its wire clones cannot affect unrelated tests, including after a panic.
-#[cfg(test)]
-pub(crate) struct UncompactedProjectionGuard(bool);
-
-#[cfg(test)]
-impl UncompactedProjectionGuard {
-    pub(crate) fn enter() -> Self {
-        Self(UNCOMPACTED_REFERENCE.with(|flag| flag.replace(true)))
-    }
-}
-
-#[cfg(test)]
-impl Drop for UncompactedProjectionGuard {
-    fn drop(&mut self) {
-        UNCOMPACTED_REFERENCE.with(|flag| flag.set(self.0));
-    }
-}
-
 // The re-exported CK message/block serializers retain the original serde_json::Value
 // for pass-through. That must remain a Value-level replay path, not a typed-struct
 // round-trip, so harmless future CK fields are not silently dropped.
@@ -206,13 +175,6 @@ impl ProjectedWireBlock {
     }
 
     fn new(block: &CkWireBlock, bytes: &Arc<str>) -> Self {
-        #[cfg(test)]
-        if UNCOMPACTED_REFERENCE.with(|flag| flag.get()) {
-            return Self {
-                shell: block.clone(),
-                payload: None,
-            };
-        }
         let Some((text, path)) = scalar_text(&block.kind) else {
             return Self {
                 shell: block.clone(),
@@ -619,11 +581,6 @@ fn project_messages_from_state(
     mut builder: FlatProjectionBuilder,
 ) -> Result<FlatProjection, CkWireError> {
     for msg in messages {
-        #[cfg(test)]
-        PROJECTION_WORK.with(|work| {
-            let (messages, blocks) = work.get();
-            work.set((messages + 1, blocks));
-        });
         if msg.mid.contains('#') {
             return Err(CkWireError::MidContainsReservedHash(msg.mid.clone()));
         }
@@ -659,11 +616,6 @@ fn project_messages_from_state(
 
         let mut identities = Vec::new();
         for (index, block) in msg.ck.content.iter().enumerate() {
-            #[cfg(test)]
-            PROJECTION_WORK.with(|work| {
-                let (messages, blocks) = work.get();
-                work.set((messages, blocks + 1));
-            });
             let id = block_id(&msg.mid, index);
             let arc_id = arc_for_block(
                 &msg.mid,

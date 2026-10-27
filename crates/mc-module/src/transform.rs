@@ -18718,39 +18718,6 @@ fn build_output_with_tags(
     )
 }
 
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-fn build_output_with_tags_unindexed(
-    core: &CoreState,
-    meta: &ModuleMeta,
-    projection: &FlatProjection,
-    req: &TransformRequest,
-    tag_overlay: Option<&TagOverlayState>,
-    synthetic_todo_enabled: bool,
-    mutation_exempt_mid: Option<&str>,
-    tag_numbers: &BTreeMap<String, u64>,
-    reasoning_watermark: u64,
-    renderer_transition_active: bool,
-    cache_snapshot: Option<&SerializedOutputCacheSnapshot>,
-    prefix_dirty: bool,
-) -> Result<BuiltOutput, TransformError> {
-    build_output_with_tags_inner(
-        core,
-        meta,
-        projection,
-        req,
-        tag_overlay,
-        synthetic_todo_enabled,
-        mutation_exempt_mid,
-        tag_numbers,
-        reasoning_watermark,
-        renderer_transition_active,
-        cache_snapshot,
-        prefix_dirty,
-        false,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn build_output_with_tags_inner(
     core: &CoreState,
@@ -19631,11 +19598,6 @@ fn active_anthropic_thinking_turn(req: &TransformRequest) -> bool {
     req.messages
         .iter()
         .any(|m| protected.contains(m.mid.as_str()) && m.ck.content.iter().any(is_reasoning_block))
-}
-
-#[cfg(test)]
-pub(crate) fn active_signed_head_for_test(req: &TransformRequest) -> bool {
-    active_anthropic_thinking_turn(req) && is_prefix_bound_thinking_model(req.model_key.as_deref())
 }
 
 /// Reproduce persisted reasoning decisions before protecting a new prefix edit.

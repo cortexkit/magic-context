@@ -10,73 +10,12 @@
 
 use super::*;
 
-/// Poll `historian.pending` through the wire until the pass's run shows up.
-async fn queued_run(handler: &McHandler) -> Value {
-    let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
-    loop {
-        let listed =
-            call_dispatch_request(handler, json!({ "method": "historian.pending", "v": 1 })).await;
-        if let Some(run) = listed["runs"].as_array().and_then(|runs| runs.first()) {
-            return run.clone();
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the pass must queue its run for a claimant"
-        );
-        tokio::time::sleep(TEST_WAIT_POLL).await;
-    }
-}
-
-/// Claim the queued run and answer it the way a host's pull loop would.
-async fn answer_as_the_host(handler: &McHandler) {
-    let queued = queued_run(handler).await;
-    let run_id = queued["run_id"].as_str().unwrap().to_string();
-    let claimed = call_dispatch_request(
-        handler,
-        json!({
-            "method": "historian.claim", "v": 1,
-            "run_id": run_id, "claimant_instance_id": "install-default-runner",
-        }),
-    )
-    .await;
-    assert_eq!(claimed["ok"], json!(true), "{claimed}");
-    let output = historian_output_for_prompt(claimed["prompt"]["user"].as_str().unwrap());
-    let completed = call_dispatch_request(
-        handler,
-        json!({
-            "method": "historian.complete", "v": 1,
-            "run_id": run_id, "token": claimed["token"],
-            "output": { "text": output, "length_capped": false },
-        }),
-    )
-    .await;
-    assert_eq!(completed["ok"], json!(true), "{completed}");
-}
-
 async fn session_status(handler: &McHandler) -> Value {
     call_dispatch_request(
         handler,
         json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
     )
     .await
-}
-
-async fn wait_for_historian_failure(store: &McStore) {
-    let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
-    while std::time::Instant::now() < deadline {
-        if store
-            .load("ses")
-            .unwrap()
-            .meta
-            .historian
-            .last_failure
-            .is_some()
-        {
-            return;
-        }
-        tokio::time::sleep(TEST_WAIT_POLL).await;
-    }
-    panic!("the historian recorded no failure");
 }
 
 fn runner_status(runner: &str, source: &str, harness: &str, observed: &str) -> Value {

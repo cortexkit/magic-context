@@ -1452,10 +1452,6 @@ const STORAGE_NAMESPACE: &str = "mc_cache";
 const DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED: bool = true;
 /// Mirrors packages/plugin/src/config/schema/magic-context.ts commit_cluster_trigger.min_clusters default.
 const DEFAULT_MIN_COMMIT_CLUSTERS: usize = 3;
-/// Legacy test fixture budget. Production assembly derives this from the configured
-/// historian context limit; the config fallback is intentionally explicit in config.rs.
-#[cfg(test)]
-const DEFAULT_HISTORIAN_CHUNK_TOKENS: usize = 32_000;
 /// TypeScript evaluates every nonempty eligible chunk after trigger checks. Rust keeps
 /// this minimum at zero so it does not impose an additional minimum-token requirement.
 const DEFAULT_HISTORIAN_MIN_CHUNK_TOKENS: usize = 0;
@@ -1933,11 +1929,6 @@ pub struct McHandler {
     guidance_now_ms: Mutex<Option<i64>>,
     #[cfg(test)]
     reduction_injection: Mutex<HashMap<String, Vec<ReductionDecision>>>,
-    /// Test-only interleave seam: runs once between the request's transform and the
-    /// Emergency95 prepare, where a concurrent publish is otherwise impossible to place
-    /// deterministically.
-    #[cfg(test)]
-    between_transform_and_prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     wrapup_operation_budget: Mutex<Option<Duration>>,
     #[cfg(test)]
@@ -1947,8 +1938,6 @@ pub struct McHandler {
     #[cfg(test)]
     classification_before_apply_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     connect_failure_commit_hook: ConnectFailureCommitHook,
-    #[cfg(test)]
-    publication_fence_write_hook: ConnectFailureCommitHook,
     /// Route channel → its session binding. Populated at `on_bind`, removed at
     /// `on_route_gone`. The SDK validates the route handle's epoch before dispatching a
     /// request, so a channel key cannot resolve a stale route. A `Mutex<HashMap>` (not a
@@ -1962,8 +1951,6 @@ pub struct McHandler {
     /// Roots previously observed on a validated transform for each session. This survives route
     /// teardown so durable cache state remains usable only along an authenticated route lineage.
     transform_session_roots: Mutex<HashMap<String, HashSet<PathBuf>>>,
-    #[cfg(test)]
-    todo_verdict_diagnostic_logs: Mutex<Vec<String>>,
     /// Module-minted zero-tool dreamer sessions. Prefixes are diagnostics only;
     /// only registered ids may bypass transform after route validation.
     active_dreamer_runs: Arc<Mutex<HashSet<String>>>,
@@ -2754,8 +2741,6 @@ impl McHandler {
             #[cfg(test)]
             reduction_injection: Mutex::new(HashMap::new()),
             #[cfg(test)]
-            between_transform_and_prepare: Mutex::new(None),
-            #[cfg(test)]
             wrapup_operation_budget: Mutex::new(None),
             #[cfg(test)]
             unknown_module_retry_delay: Mutex::new(None),
@@ -2764,14 +2749,10 @@ impl McHandler {
             #[cfg(test)]
             classification_before_apply_hook: Mutex::new(None),
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
-            #[cfg(test)]
-            publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Mutex::new(HashMap::new()),
             threshold_logged_routes: Mutex::new(HashSet::new()),
             transform_route_channels: Mutex::new(HashMap::new()),
             transform_session_roots: Mutex::new(HashMap::new()),
-            #[cfg(test)]
-            todo_verdict_diagnostic_logs: Mutex::new(Vec::new()),
             active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
             runtime_store_errors: Mutex::new(HashMap::new()),
@@ -3187,20 +3168,15 @@ impl McHandler {
             provider_historian_scan_rows: Arc::new(AtomicU64::new(0)),
             guidance_now_ms: Mutex::new(None),
             reduction_injection: Mutex::new(HashMap::new()),
-            between_transform_and_prepare: Mutex::new(None),
             wrapup_operation_budget: Mutex::new(None),
             unknown_module_retry_delay: Mutex::new(None),
             status_snapshot_hook: Mutex::new(None),
             classification_before_apply_hook: Mutex::new(None),
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
-            #[cfg(test)]
-            publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Mutex::new(HashMap::new()),
             threshold_logged_routes: Mutex::new(HashSet::new()),
             transform_route_channels: Mutex::new(HashMap::new()),
             transform_session_roots: Mutex::new(HashMap::new()),
-            #[cfg(test)]
-            todo_verdict_diagnostic_logs: Mutex::new(Vec::new()),
             active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
             runtime_store_errors: Mutex::new(HashMap::new()),
@@ -10268,25 +10244,6 @@ fn unknown_serializer_profile_error() -> HandlerOutcome {
     }
 }
 
-#[cfg(test)]
-fn message_tag_numbers(rows: Vec<TagNumberRow>) -> std::collections::BTreeMap<String, u64> {
-    let mut by_message = std::collections::BTreeMap::new();
-    for row in rows {
-        let message_id = row
-            .block_id
-            .split_once('#')
-            .map(|(message_id, _)| message_id)
-            .unwrap_or(row.block_id.as_str())
-            .to_string();
-        let tag_number = row.tag_number as u64;
-        by_message
-            .entry(message_id)
-            .and_modify(|number: &mut u64| *number = (*number).max(tag_number))
-            .or_insert(tag_number);
-    }
-    by_message
-}
-
 #[allow(clippy::too_many_arguments)]
 fn attach_native_messages_with_tags(
     response: &mut transform::TransformResponse,
@@ -10409,75 +10366,6 @@ fn replay_native_reasoning_keeps(
             }
         }
     }
-}
-
-/// Stand in for the host in unit tests: make `compartments` the session's whole set in
-/// `context.db`, as the host that sends a state sync already has.
-#[cfg(test)]
-fn test_host_replaces_compartments(
-    store: &McStore,
-    session_id: &str,
-    compartments: &[StoredCompartment],
-) {
-    store
-        .with_context_conn_for_test(|tx| {
-            tx.execute(
-                "DELETE FROM compartments WHERE session_id = ?1",
-                [session_id],
-            )?;
-            Ok(())
-        })
-        .expect("test host clears the session's compartments");
-    test_host_writes_imported_compartments(store, session_id, compartments);
-}
-
-/// Stand in for the host in unit tests: write an imported bundle's compartments into
-/// `context.db`, unless the session already has some there.
-#[cfg(test)]
-fn test_host_writes_imported_compartments(
-    store: &McStore,
-    session_id: &str,
-    compartments: &[StoredCompartment],
-) {
-    store
-        .with_context_conn_for_test(|tx| {
-            let existing: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM compartments WHERE session_id = ?1",
-                [session_id],
-                |row| row.get(0),
-            )?;
-            if existing > 0 || mc_store::validate_state_import_compartments(compartments).is_err() {
-                return Ok(());
-            }
-            for compartment in compartments {
-                tx.execute(
-                    "INSERT INTO compartments (session_id, sequence, start_message, end_message,
-                         start_message_id, end_message_id, title, content, p1, p2, p3, p4,
-                         importance, episode_type, legacy, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                    rusqlite::params![
-                        session_id,
-                        compartment.sequence,
-                        compartment.start_message,
-                        compartment.end_message,
-                        compartment.start_message_id,
-                        compartment.end_message_id,
-                        compartment.title,
-                        compartment.content,
-                        compartment.p1,
-                        compartment.p2,
-                        compartment.p3,
-                        compartment.p4,
-                        compartment.importance,
-                        compartment.episode_type,
-                        compartment.legacy,
-                        compartment.created_at,
-                    ],
-                )?;
-            }
-            Ok(())
-        })
-        .expect("test host writes the imported compartments");
 }
 
 fn replay_dream_task_response(response_json: &str) -> HandlerOutcome {
@@ -13228,8 +13116,6 @@ mod tests {
     // read as one argument instead of being scattered through this module.
     mod broca_0_7_samples;
     mod broca_contract;
-    mod gate_a1_b0;
-    mod gate_a2;
     mod guidance_get_golden;
     mod per_pass_cost;
     mod perf_audit_wire;
@@ -14935,16 +14821,6 @@ mod tests {
         .expect("store open phase should advance");
     }
 
-    async fn wait_for_store_open(handler: &McHandler) {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while handler.store.get().is_none() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("store should open after the predecessor releases its lease");
-    }
-
     /// The handle is a bare `Option`, so its emptiness cannot say WHICH state holds. These two
     /// states need opposite operator actions (wait for the other process to exit vs. find out why
     /// no ack arrived), so one shared code would be useless in both.
@@ -15027,18 +14903,6 @@ mod tests {
         );
     }
 
-    /// The code, message and detail of an error frame that carries machine-readable detail.
-    fn detailed_error_frame(outcome: HandlerOutcome) -> (String, String, Value) {
-        match outcome {
-            HandlerOutcome::ErrorWithDetail {
-                code,
-                message,
-                detail,
-            } => (code, message, detail),
-            other => panic!("expected an error frame with detail, got {other:?}"),
-        }
-    }
-
     #[tokio::test]
     async fn double_store_open_during_lease_wait_has_one_waiter() {
         let dir = tempfile::tempdir().unwrap();
@@ -15116,17 +14980,6 @@ mod tests {
             StoreOpenPolicy::default().wait_window,
             Duration::from_secs(60)
         );
-    }
-
-    /// Stand in for an open that has begun and not yet landed, so a test can drive the request
-    /// lane's in-flight arm without racing a real open to it.
-    fn mark_store_open_in_flight(handler: &McHandler, descriptor: &StorageDescriptor) {
-        handler.store_open.begin_attempt(
-            descriptor,
-            DescriptorOrigin::DaemonAck,
-            now_ms().max(0) as u64,
-        );
-        handler.store_open.set_phase(STORE_OPENING);
     }
 
     #[test]
@@ -16744,46 +16597,6 @@ mod tests {
         (handler, store, dir, project)
     }
 
-    fn cached_tool_result(mid: &str, tool_name: &str) -> CkIngressMessage {
-        CkIngressMessage {
-            mid: mid.to_string(),
-            ordinal: 1,
-            ck: CkWireMessage::from_parts(
-                "tool",
-                vec![CkWireBlock::bare(CkKind::ToolResult {
-                    id: format!("call-{mid}"),
-                    tool_name: tool_name.to_string(),
-                    output: CkToolOutput::bare(CkOutputKind::Text {
-                        text: "tool output".to_string(),
-                    }),
-                    provider_executed: false,
-                })],
-                None,
-                ProviderExtras::new(),
-                HarnessMeta::default(),
-            ),
-        }
-    }
-
-    fn cached_tool_call(mid: &str, tool_name: &str) -> CkIngressMessage {
-        CkIngressMessage {
-            mid: mid.to_string(),
-            ordinal: 1,
-            ck: CkWireMessage::from_parts(
-                "assistant",
-                vec![CkWireBlock::bare(CkKind::ToolCall {
-                    id: format!("call-{mid}"),
-                    name: tool_name.to_string(),
-                    input: json!({}),
-                    provider_executed: false,
-                })],
-                None,
-                ProviderExtras::new(),
-                HarnessMeta::default(),
-            ),
-        }
-    }
-
     /// The project key the claim lane resolves for a channel bound to this project
     /// root.
     ///
@@ -16908,52 +16721,6 @@ mod tests {
         ck_with_role(mid, ordinal, "user", text)
     }
 
-    fn ck_reasoning(mid: &str, ordinal: u64, text: &str) -> CkIngressMessage {
-        CkIngressMessage {
-            mid: mid.to_string(),
-            ordinal,
-            ck: CkWireMessage::from_parts(
-                "assistant",
-                vec![CkWireBlock::bare(CkKind::Reasoning {
-                    text: text.to_string(),
-                    signature: Some(format!("signature-{mid}")),
-                })],
-                None,
-                ProviderExtras::new(),
-                HarnessMeta {
-                    harness_id: Some(mid.to_string()),
-                    ..Default::default()
-                },
-            ),
-        }
-    }
-
-    fn assistant_tool_call(mid: &str, ordinal: u64) -> CkIngressMessage {
-        CkIngressMessage {
-            mid: mid.to_string(),
-            ordinal,
-            ck: CkWireMessage::from_parts(
-                "assistant",
-                vec![CkWireBlock::bare(CkKind::ToolCall {
-                    id: if mid.starts_with("call-") {
-                        mid.to_string()
-                    } else {
-                        format!("call-{mid}")
-                    },
-                    name: "bash".to_string(),
-                    input: json!({ "command": "printf output" }),
-                    provider_executed: false,
-                })],
-                None,
-                ProviderExtras::new(),
-                HarnessMeta {
-                    harness_id: Some(mid.to_string()),
-                    ..Default::default()
-                },
-            ),
-        }
-    }
-
     fn tool_result(mid: &str, ordinal: u64, text: &str) -> CkIngressMessage {
         CkIngressMessage {
             mid: mid.to_string(),
@@ -17012,23 +16779,6 @@ mod tests {
         })
     }
 
-    fn state_import_request(
-        import_id: &str,
-        batch_seq: usize,
-        batch_count: usize,
-        compartments: Vec<Value>,
-    ) -> Value {
-        json!({
-            "kind": "state_import",
-            "v": 1,
-            "session_id": "ses",
-            "import_id": import_id,
-            "batch_seq": batch_seq,
-            "batch_count": batch_count,
-            "compartments": compartments,
-        })
-    }
-
     fn big_messages_from(start_ordinal: u64) -> Vec<CkIngressMessage> {
         (0..80)
             .map(|idx| {
@@ -17044,18 +16794,6 @@ mod tests {
 
     pub(super) fn big_messages() -> Vec<CkIngressMessage> {
         big_messages_from(1)
-    }
-
-    fn zero_based_messages_with_system_lead() -> Vec<CkIngressMessage> {
-        let mut messages = vec![ck_with_role("m0", 0, "system", "identity lead")];
-        messages.extend((1..=80).map(|ordinal| {
-            ck(
-                &format!("m{ordinal}"),
-                ordinal,
-                &format!("message {ordinal} {}", "word ".repeat(800)),
-            )
-        }));
-        messages
     }
 
     fn request_with_usage(
@@ -17201,18 +16939,6 @@ mod tests {
         store
             .seed_workspace_member("ws", foreign, "[\"CONSTRAINTS\"]")
             .unwrap();
-    }
-
-    fn synthetic_text(response: &Value, index: usize) -> String {
-        response["ck_messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|message| message["meta"]["synthetic"] == json!(true))
-            .nth(index)
-            .and_then(|message| message["content"][0]["kind"]["text"].as_str())
-            .unwrap_or_default()
-            .to_string()
     }
 
     #[test]
@@ -17489,166 +17215,6 @@ mod tests {
         );
     }
 
-    fn native_cache_request(
-        session_id: &str,
-        messages: Vec<CkIngressMessage>,
-        native_messages: Vec<Value>,
-        fingerprint: &str,
-    ) -> TransformRequest {
-        serde_json::from_value(json!({
-            "kind": "transform",
-            "v": 2,
-            "serializer_profile": "opencode-aisdk",
-            "session_id": session_id,
-            "render_config": "cfg0",
-            "provider_id": "anthropic",
-            "serve_native": true,
-            "messages": messages,
-            "native_messages": native_messages,
-            "full_array_fingerprint": fingerprint,
-        }))
-        .unwrap()
-    }
-
-    fn native_text_message(mid: &str, role: &str, text: &str) -> Value {
-        json!({
-            "info": { "id": mid, "role": role },
-            "parts": [{ "type": "text", "text": text }],
-        })
-    }
-
-    fn native_cache_fixture(
-        session_id: &str,
-        message_count: usize,
-        block_count: usize,
-        target_native_wire_bytes: usize,
-    ) -> (TransformRequest, Vec<CkWireMessage>) {
-        assert!(block_count >= message_count);
-        let blocks_per_message = block_count / message_count;
-        let extra_blocks = block_count % message_count;
-        let payload = "x".repeat(target_native_wire_bytes / block_count);
-        let mut ingress = Vec::with_capacity(message_count);
-        let mut served = Vec::with_capacity(message_count);
-        let mut native = Vec::with_capacity(message_count);
-
-        for index in 0..message_count {
-            let mid = format!("{session_id}-{index}");
-            let part_count = blocks_per_message + usize::from(index < extra_blocks);
-            let texts = (0..part_count)
-                .map(|part| format!("{mid}-{part}:{payload}"))
-                .collect::<Vec<_>>();
-            let ck = CkWireMessage::from_parts(
-                "user",
-                texts
-                    .iter()
-                    .map(|text| CkWireBlock::bare(CkKind::Text { text: text.clone() }))
-                    .collect(),
-                None,
-                ProviderExtras::new(),
-                HarnessMeta {
-                    harness_id: Some(mid.clone()),
-                    ..Default::default()
-                },
-            );
-            served.push(ck.clone());
-            ingress.push(CkIngressMessage {
-                mid: mid.clone(),
-                ordinal: u64::try_from(index + 1).expect("fixture ordinal fits u64"),
-                ck,
-            });
-            native.push(json!({
-                "info": { "id": mid, "role": "user" },
-                "parts": texts
-                    .iter()
-                    .map(|text| json!({ "type": "text", "text": text }))
-                    .collect::<Vec<_>>(),
-            }));
-        }
-
-        (
-            native_cache_request(
-                session_id,
-                ingress,
-                native,
-                &format!("{session_id}-fixture-fingerprint"),
-            ),
-            served,
-        )
-    }
-
-    // These encoder fixtures supply reasoning-clear units as if a cache-busting
-    // transform had already committed them. The encoder only replays those decisions.
-    fn test_reasoning_clear_units(
-        request: &TransformRequest,
-        tags: &BTreeMap<String, u64>,
-        cutoff: u64,
-    ) -> Vec<mc_core::FrozenUnit> {
-        let newest = transform::latest_assistant_reasoning_mutation_exempt_mid(&request.messages);
-        request
-            .messages
-            .iter()
-            .filter(|message| {
-                message.ck.role == "assistant"
-                    && Some(message.mid.as_str()) != newest
-                    && tags.get(&message.mid).copied().unwrap_or(message.ordinal) <= cutoff
-            })
-            .map(|message| mc_core::FrozenUnit {
-                key: format!("strip:reasoning_clear:{}", message.mid),
-                kind: "strip_reasoning_clear".to_string(),
-                frozen_payload: String::new(),
-                durability_class: mc_core::DurabilityClass::Lineage,
-                reset_rule: String::new(),
-            })
-            .collect()
-    }
-
-    /// An assistant turn as OpenCode stores it: the tool part carries provider metadata the
-    /// codec does not model (Anthropic's `caller` on a served `tool_use`). Only the retained raw
-    /// sidecar tree can replay it, so it is the field that disappears when that tree is missing.
-    fn native_assistant_tool_turn_with_provider_metadata(mid: &str, call_id: &str) -> Value {
-        json!({
-            "info": {
-                "id": mid,
-                "role": "assistant",
-                "providerID": "anthropic",
-                "modelID": "claude-opus",
-            },
-            "parts": [
-                { "type": "step-start" },
-                {
-                    "type": "tool",
-                    "callID": call_id,
-                    "tool": "read",
-                    "state": {
-                        "status": "completed",
-                        "input": { "path": "src/lib.rs" },
-                        "output": "file body",
-                        "title": "src/lib.rs",
-                        "metadata": {},
-                        "time": { "start": 10, "end": 20 },
-                    },
-                    "metadata": { "anthropic": { "caller": { "type": "direct" } } },
-                },
-                { "type": "step-finish", "reason": "tool-calls" },
-            ],
-        })
-    }
-
-    fn rewrite_first_tool_result(messages: &mut [CkWireMessage], text: &str) {
-        let block = messages
-            .iter_mut()
-            .flat_map(|message| message.content.iter_mut())
-            .find(|block| matches!(block.kind, CkKind::ToolResult { .. }))
-            .expect("tool result block");
-        let CkKind::ToolResult { output, .. } = &mut block.kind else {
-            unreachable!()
-        };
-        *output = CkToolOutput::bare(CkOutputKind::Text {
-            text: text.to_string(),
-        });
-        block.mark_modified();
-    }
-
     #[test]
     #[ignore = "manual 2k-message hot-path timing fixture"]
     fn historian_tag_and_state_snapshot_hot_path_benchmark() {
@@ -17921,24 +17487,6 @@ mod tests {
     async fn mixed_known_and_unknown_descriptions_apply_known_and_only_warn_for_unknown() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let transform = call_dispatch_request(
-            &handler,
-            json!({
-                "kind": "transform",
-                "v": 2,
-                "serializer_profile": "opencode-aisdk",
-                "session_id": "ses",
-                "render_config": "cfg",
-                "prompt_surface_config_identity": "mixed-descriptions",
-                "prompt_surface_tool_descriptions": {
-                    "ctx_search": "Known search override.",
-                    "ctx_typo": "Unknown override."
-                },
-                "messages": []
-            }),
-        )
-        .await;
-        assert_eq!(transform["status"], json!("ok"));
 
         let manifest = call_dispatch_request(
             &handler,
@@ -17946,7 +17494,10 @@ mod tests {
                 "kind": "manifest.get",
                 "session_id": "ses",
                 "config_identity": "mixed-descriptions",
-                "tool_descriptions": {}
+                "tool_descriptions": {
+                    "ctx_search": "Known search override.",
+                    "ctx_typo": "Unknown override."
+                }
             }),
         )
         .await;
@@ -21027,21 +20578,6 @@ mod tests {
         }
     }
 
-    fn mint_drop_tag(store: &McStore, target_id: &str) {
-        store
-            .seed_tags_for_test(
-                "ses",
-                &[TagMintInput {
-                    block_id: target_id.to_string(),
-                    kind: "message".to_string(),
-                    token_count: 1,
-                    source_bytes: b"source".to_vec(),
-                }],
-                1,
-            )
-            .unwrap();
-    }
-
     fn wrapup_messages(count: u64, words_per_message: usize) -> Vec<CkIngressMessage> {
         (1..=count)
             .map(|ordinal| {
@@ -21057,47 +20593,6 @@ mod tests {
                 )
             })
             .collect()
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    struct HistorianAdditiveRows {
-        compartment_count: usize,
-        max_compartment_seq: i64,
-        transcript_count: usize,
-        max_transcript_seq: i64,
-        fact_count: usize,
-        max_fact_id: i64,
-        publication_floor_ordinal: Option<u64>,
-    }
-
-    fn historian_additive_rows(
-        store: &McStore,
-        session_id: &str,
-        project_path: &Path,
-    ) -> HistorianAdditiveRows {
-        let compartments = store.load_compartments(session_id).unwrap();
-        let transcripts = store
-            .load_chunk_transcripts_for_range(session_id, 0, i64::MAX)
-            .unwrap();
-        let project_path = project_path.to_string_lossy().to_string();
-        let facts = store.load_active_memories(&project_path, 0).unwrap();
-        HistorianAdditiveRows {
-            compartment_count: compartments.len(),
-            max_compartment_seq: store.max_compartment_seq(session_id).unwrap(),
-            transcript_count: transcripts.len(),
-            max_transcript_seq: transcripts
-                .iter()
-                .map(|transcript| transcript.compartment_seq)
-                .max()
-                .unwrap_or(0),
-            fact_count: facts.len(),
-            max_fact_id: store.max_memory_id(&[project_path]).unwrap(),
-            publication_floor_ordinal: store
-                .load(session_id)
-                .unwrap()
-                .meta
-                .publication_floor_ordinal,
-        }
     }
 
     pub(super) fn historian_output_for_prompt(prompt: &str) -> String {
@@ -21178,151 +20673,6 @@ mod tests {
             tokio::time::sleep(TEST_WAIT_POLL).await;
         }
         panic!("counter did not reach {expected}");
-    }
-
-    async fn wait_for_historian_state<F>(store: &McStore, predicate: F)
-    where
-        F: Fn(&HistorianDurableState) -> bool,
-    {
-        let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
-        while std::time::Instant::now() < deadline {
-            let state = store.load("ses").unwrap().meta.historian;
-            if predicate(&state) {
-                return;
-            }
-            tokio::time::sleep(TEST_WAIT_POLL).await;
-        }
-        panic!("historian state predicate did not become true");
-    }
-
-    fn m0_text(response: &Value) -> String {
-        response["ck_messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|message| message["meta"]["synthetic"] == json!(true))
-            .and_then(|message| message["content"][0]["kind"]["text"].as_str())
-            .unwrap_or_default()
-            .to_string()
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_refuses_nonempty_session_without_writes() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let bootstrap = store.load("ses").unwrap();
-        store
-            .commit("ses", None, &bootstrap.core, &bootstrap.meta)
-            .unwrap();
-        let before = store.load("ses").unwrap().row_version;
-
-        let outcome = handler
-            .dispatch_value(
-                7,
-                state_import_request(
-                    "bundle-a",
-                    0,
-                    1,
-                    vec![imported_compartment(1, 1, 1, "m1#0", "summary")],
-                ),
-            )
-            .await;
-        assert_eq!(error_code(outcome), "session_not_empty");
-        assert_eq!(store.load("ses").unwrap().row_version, before);
-        assert!(store.load_compartments("ses").unwrap().is_empty());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_id_is_durable_and_wins_before_nonempty_check() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let request = state_import_request(
-            "bundle-a",
-            0,
-            1,
-            vec![imported_compartment(1, 1, 1, "m1#0", "summary")],
-        );
-        let first = call_dispatch_request(&handler, request.clone()).await;
-        assert_eq!(
-            first,
-            json!({ "ok": true, "imported": 1, "duplicate": false })
-        );
-
-        let bootstrap = store.load("ses").unwrap();
-        let row_version = store
-            .commit("ses", None, &bootstrap.core, &bootstrap.meta)
-            .unwrap();
-        let duplicate = call_dispatch_request(&handler, request).await;
-        assert_eq!(
-            duplicate,
-            json!({ "ok": true, "imported": 1, "duplicate": true })
-        );
-        assert_eq!(store.load("ses").unwrap().row_version, Some(row_version));
-
-        let different = handler
-            .dispatch_value(
-                7,
-                state_import_request(
-                    "bundle-b",
-                    0,
-                    1,
-                    vec![imported_compartment(1, 1, 1, "m1#0", "other")],
-                ),
-            )
-            .await;
-        assert_eq!(error_code(different), "session_not_empty");
-        assert_eq!(store.load("ses").unwrap().row_version, Some(row_version));
-        assert_eq!(
-            store.load_compartments("ses").unwrap()[0].content,
-            "summary"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn state_import_structural_rejections_name_rules_and_leave_session_empty() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let cases = vec![
-            (
-                "overlap",
-                vec![
-                    imported_compartment(1, 1, 5, "m5#0", "first"),
-                    imported_compartment(2, 5, 8, "m8#0", "second"),
-                ],
-                "ranges_overlap",
-            ),
-            (
-                "seq",
-                vec![
-                    imported_compartment(2, 1, 2, "m2#0", "first"),
-                    imported_compartment(1, 3, 4, "m4#0", "second"),
-                ],
-                "seq_not_increasing",
-            ),
-            (
-                "empty-p1",
-                vec![imported_compartment(1, 1, 1, "m1#0", "   ")],
-                "p1_empty",
-            ),
-            (
-                "bad-id",
-                vec![imported_compartment(1, 1, 1, "m1", "summary")],
-                "end_message_id_invalid",
-            ),
-            (
-                "bad-range",
-                vec![imported_compartment(1, 2, 1, "m1#0", "summary")],
-                "range_invalid",
-            ),
-        ];
-        for (import_id, compartments, expected_code) in cases {
-            let outcome = handler
-                .dispatch_value(7, state_import_request(import_id, 0, 1, compartments))
-                .await;
-            assert_eq!(error_code(outcome), expected_code, "{import_id}");
-            assert!(store.load_compartments("ses").unwrap().is_empty());
-            assert!(store.load("ses").unwrap().row_version.is_none());
-        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -21748,18 +21098,6 @@ mod tests {
         assert!(summary.chars().count() <= 500);
     }
 
-    /// What one served response cost: how many tail items the pass dropped to fit,
-    /// how many messages it served, and how many bytes that was.
-    ///
-    /// A dropped tool output serializes as `{"dropped": …}`, which is what makes
-    /// the drop count readable straight off the wire.
-    fn served_census(response: &Value) -> (usize, usize, usize) {
-        let served = serde_json::to_string(&response["ck_messages"]).unwrap();
-        let dropped = served.matches("\"dropped\"").count();
-        let messages = response["ck_messages"].as_array().map_or(0, Vec::len);
-        (dropped, messages, served.len())
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn live_historian_session_installs_the_completion_notify_before_busy_is_visible() {
         let handler = McHandler::new();
@@ -21837,58 +21175,6 @@ mod tests {
         }]
     }
 
-    fn seed_awaiting(store: &McStore, messages: &[CkIngressMessage]) {
-        let canonical_messages = transform_request(messages.to_vec(), 1, 200_000).messages;
-        let projection = crate::ck_wire::project_messages(&canonical_messages).unwrap();
-        let chunk = historian_chunk::build_historian_chunk(
-            &canonical_messages,
-            &projection.blocks,
-            1,
-            DEFAULT_HISTORIAN_CHUNK_TOKENS,
-            4,
-        );
-        let fingerprint_items: Vec<_> = chunk.snapshot.iter().map(|item| item.as_item()).collect();
-        let fingerprint = historian::compute_chunk_fingerprint(&fingerprint_items);
-        let selected_range_identities = canonical_messages
-            .iter()
-            .filter(|message| !message.ck.meta.synthetic && (1..=3).contains(&message.ordinal))
-            .map(|message| mc_store::HistorianSelectedMessageIdentity {
-                mid: message.mid.clone(),
-                block_identities: projection.identity_by_mid[&message.mid].clone(),
-            })
-            .collect();
-        let loaded = store.load("ses").unwrap();
-        let mut meta = loaded.meta;
-        meta.block_identity_by_mid
-            .extend(projection.identity_by_mid);
-        meta.historian = HistorianDurableState {
-            state: HistorianPhase::AwaitingProducer,
-            firing_seq: 1,
-            chunk_range: Some(HistorianChunkRange {
-                from_ordinal: 1,
-                to_ordinal: 3,
-            }),
-            chunk_fingerprint: fingerprint,
-            selected_range_identities,
-            producer_session_id: Some("producer-session".to_string()),
-            producer_run_id: Some("run-reattach".to_string()),
-            producer_attempt: 0,
-            coordinator_token: None,
-            claim_deadline_ms: None,
-            fired_at_ms: Some(1),
-            expected_revert_epoch: 0,
-            compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
-            failure_backoff_at_ms: None,
-            last_failure: None,
-            last_no_fire: None,
-            recent_decisions: Vec::new(),
-            consecutive_publish_failures: 0,
-        };
-        store
-            .commit("ses", loaded.row_version, &loaded.core, &meta)
-            .unwrap();
-    }
-
     fn seed_historian_phase(store: &McStore, phase: HistorianPhase) {
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
@@ -21923,56 +21209,6 @@ mod tests {
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
             .unwrap();
-    }
-
-    fn seed_idle(store: &McStore) {
-        let loaded = store.load("ses").unwrap();
-        let mut meta = loaded.meta;
-        meta.historian = HistorianDurableState::default();
-        store
-            .commit("ses", loaded.row_version, &loaded.core, &meta)
-            .unwrap();
-    }
-
-    fn seed_abandoned_idle(store: &McStore, backoff_at_ms: i64, detail: &str) {
-        let loaded = store.load("ses").unwrap();
-        let fired = match historian::fire(
-            &HistorianDurableState::default(),
-            1,
-            3,
-            "seeded-fingerprint".to_string(),
-            Vec::new(),
-            0,
-            mc_store::CompartmentSetGeneration::default(),
-            1,
-            None,
-        )
-        .unwrap()
-        {
-            historian::FireOutcome::Fired(state) => state,
-            historian::FireOutcome::Busy(_) => unreachable!(),
-        };
-        let mut meta = loaded.meta;
-        meta.historian =
-            historian::abandon_with_detail(&fired, backoff_at_ms, Some(detail.to_string()));
-        store
-            .commit("ses", loaded.row_version, &loaded.core, &meta)
-            .unwrap();
-    }
-
-    fn expire_historian_backoff(store: &McStore) {
-        let loaded = store.load("ses").unwrap();
-        let mut meta = loaded.meta;
-        meta.historian.failure_backoff_at_ms = Some(now_ms() - 1);
-        store
-            .commit("ses", loaded.row_version, &loaded.core, &meta)
-            .unwrap();
-    }
-
-    #[derive(Clone, Copy)]
-    enum ReattachGenerationCase {
-        SupersededBeforeReattachSpawn,
-        FinishedReadyWithSameGeneration,
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -22063,87 +21299,6 @@ mod tests {
             "content": content,
             "p1": format!("{content}-p1"),
         })
-    }
-
-    fn paged_seed_batch(
-        session: &str,
-        seed_id: &str,
-        generation: u64,
-        expected_seq: u64,
-        index: usize,
-        total: usize,
-        compartments: Vec<Value>,
-    ) -> Value {
-        let complete = index + 1 == total;
-        let mut batch = json!({
-            "kind": "state_sync",
-            "session_id": session,
-            "shadow_generation": generation,
-            "expected_shadow_seq": expected_seq,
-            "seed_id": seed_id,
-            "seed_generation": generation,
-            "seed_batch_index": index,
-            "seed_batch_total": total,
-            "seed_complete": complete,
-            "compartments": compartments,
-            "memories": [],
-            "memory_mutations": [],
-            "user_profile": [],
-        });
-        if complete {
-            let object = batch.as_object_mut().unwrap();
-            object.insert("seed_boundary_id".to_string(), Value::Null);
-            object.insert("workspace".to_string(), Value::Null);
-            object.insert("last_todo_state".to_string(), json!("[]"));
-            object.insert("acked_watermarks".to_string(), json!({ "complete": true }));
-        }
-        batch
-    }
-
-    #[tokio::test]
-    async fn interleaved_authority_senders_keep_the_seq_fence() {
-        let state = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(state, default_test_config());
-        let request = || {
-            json!({
-                "kind": "state_sync",
-                "session_id": "ses",
-                "shadow_generation": 0,
-                "expected_shadow_seq": 0,
-                "compartments": [state_sync_compartment(0, "first sender")],
-                "user_profile": [],
-            })
-        };
-
-        let (first, second) = tokio::join!(
-            handler.dispatch_value(7, request()),
-            handler.dispatch_value(7, request()),
-        );
-        let outcomes = [first, second];
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|outcome| matches!(outcome, HandlerOutcome::Response(_)))
-                .count(),
-            1
-        );
-        let errors = outcomes
-            .into_iter()
-            .filter_map(|outcome| match outcome {
-                HandlerOutcome::Error { code, .. }
-                | HandlerOutcome::ErrorWithDetail { code, .. } => Some(code),
-                HandlerOutcome::Response(_) | HandlerOutcome::Streamed => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(errors, vec!["authority_seq_mismatch"]);
-        assert_eq!(store.load("ses").unwrap().meta.shadow_seq, 1);
-    }
-
-    fn lineage_cache_sizes(handler: &McHandler) -> (usize, usize) {
-        (
-            handler.transform_session_roots.lock().unwrap().len(),
-            handler.guidance_dates.lock().unwrap().len(),
-        )
     }
 
     fn publish_ctx_expand_fixture(
@@ -22910,93 +22065,6 @@ mod tests {
     /// can lapse while the run itself is still worth finishing.
     const CLAIM_AWAIT_BUDGET_MS: i64 = 660_000;
 
-    #[derive(Debug, serde::Deserialize)]
-    struct ClaimWireGolden {
-        schema: u32,
-        cases: Vec<ClaimWireCase>,
-    }
-
-    #[derive(Debug, serde::Deserialize)]
-    struct ClaimWireCase {
-        name: String,
-        request: Value,
-        volatile: Vec<String>,
-        response: Value,
-    }
-
-    fn claim_wire_golden() -> ClaimWireGolden {
-        let golden: ClaimWireGolden =
-            serde_json::from_str(include_str!("../testdata/historian-claim-wire-golden.json"))
-                .expect("parse historian claim wire golden");
-        assert_eq!(golden.schema, 1);
-        golden
-    }
-
-    fn claim_wire_case<'a>(golden: &'a ClaimWireGolden, name: &str) -> &'a ClaimWireCase {
-        golden
-            .cases
-            .iter()
-            .find(|case| case.name == name)
-            .unwrap_or_else(|| panic!("the claim wire golden has no case named {name}"))
-    }
-
-    /// Replace one dotted path (`runs.0.deadline_ms`) with the volatile marker.
-    fn mask_volatile_path(value: &mut Value, path: &str) {
-        let mut cursor = value;
-        let mut segments = path.split('.').peekable();
-        while let Some(segment) = segments.next() {
-            let last = segments.peek().is_none();
-            let next = match cursor {
-                Value::Array(items) => {
-                    let index: usize = segment
-                        .parse()
-                        .unwrap_or_else(|_| panic!("{segment} is not an array index in {path}"));
-                    items.get_mut(index)
-                }
-                Value::Object(map) => map.get_mut(segment),
-                _ => None,
-            };
-            let Some(next) = next else {
-                panic!("the response has no value at {path}");
-            };
-            if last {
-                *next = Value::String("<volatile>".to_string());
-                return;
-            }
-            cursor = next;
-        }
-    }
-
-    fn mask_volatile(mut value: Value, paths: &[String]) -> Value {
-        for path in paths {
-            mask_volatile_path(&mut value, path);
-        }
-        value
-    }
-
-    /// Drive one golden case and return the raw (unmasked) response so the test
-    /// can check the volatile values it just masked out of the comparison.
-    async fn drive_claim_wire_case(
-        handler: &McHandler,
-        case: &ClaimWireCase,
-        token: Option<&str>,
-    ) -> Value {
-        let mut request = case.request.clone();
-        if let Some(token) = token {
-            if request.get("token").and_then(Value::as_str) == Some("<current-token>") {
-                request["token"] = json!(token);
-            }
-        }
-        let observed = call_dispatch_request(handler, request).await;
-        assert_eq!(
-            mask_volatile(observed.clone(), &case.volatile),
-            case.response,
-            "wire drift in {}",
-            case.name
-        );
-        observed
-    }
-
     /// Put `ses` in the phase a firing reaches just before its completion runs,
     /// then queue that run for a claimant.
     fn queue_a_run_for_a_claimant(store: &McStore, project_path: &str, now_ms: i64) {
@@ -23043,170 +22111,6 @@ mod tests {
                 now_ms,
             })
             .unwrap();
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn claim_lane_requests_that_name_nothing_fail_loudly() {
-        let (handler, _store, _dir, _project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        for (request, expected_fragment) in [
-            (
-                json!({ "method": "historian.claim", "v": 1, "claimant_instance_id": "i" }),
-                "historian.claim requires run_id",
-            ),
-            (
-                json!({ "method": "historian.claim", "v": 1, "run_id": "r" }),
-                "historian.claim requires claimant_instance_id",
-            ),
-            (
-                json!({ "method": "historian.claim", "v": 1, "run_id": "  ", "claimant_instance_id": "i" }),
-                "run_id must contain",
-            ),
-            (
-                json!({ "method": "historian.heartbeat", "v": 1, "run_id": "r" }),
-                "historian.heartbeat requires token",
-            ),
-            (
-                json!({ "method": "historian.complete", "v": 1, "token": "t" }),
-                "historian.complete requires run_id",
-            ),
-            (
-                json!({ "method": "historian.pending", "v": 1, "session_id": "" }),
-                "session_id must be omitted",
-            ),
-        ] {
-            let outcome = handler.dispatch_value(7, request.clone()).await;
-            let (code, message) = error_frame(outcome);
-            assert_eq!(code, "invalid_params", "{request}");
-            assert!(
-                message.contains(expected_fragment),
-                "expected {expected_fragment:?} in {message:?}"
-            );
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_report_body_that_does_not_say_what_happened_is_refused() {
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let project_path = project.to_string_lossy().to_string();
-        queue_a_run_for_a_claimant(&store, &project_path, now_ms());
-        let claimed = call_dispatch_request(
-            &handler,
-            json!({
-                "method": "historian.claim",
-                "v": 1,
-                "run_id": CLAIM_RUN_ID,
-                "claimant_instance_id": "install-uuid-one",
-            }),
-        )
-        .await;
-        let token = claimed["token"].as_str().unwrap().to_string();
-        for (body, expected_fragment) in [
-            (
-                json!({
-                    "output": { "text": "<compartments/>" },
-                    "error": { "code": "chain_exhausted", "message": "both" },
-                }),
-                "both output and error",
-            ),
-            (json!({}), "requires either output or error"),
-            (
-                json!({ "output": { "length_capped": true } }),
-                "output requires a text string",
-            ),
-        ] {
-            let mut request = json!({
-                "method": "historian.complete",
-                "v": 1,
-                "run_id": CLAIM_RUN_ID,
-                "token": token,
-            });
-            for (key, value) in body.as_object().unwrap() {
-                request[key] = value.clone();
-            }
-            let (code, message) = error_frame(handler.dispatch_value(7, request.clone()).await);
-            assert_eq!(code, "invalid_params", "{request}");
-            assert!(
-                message.contains(expected_fragment),
-                "expected {expected_fragment:?} in {message:?}"
-            );
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn an_expired_lease_hands_the_same_run_to_the_next_claimant() {
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
-        let project_path = project.to_string_lossy().to_string();
-        // Queue far enough in the past that the lease has already lapsed but the
-        // run's own deadline has not. Those are different clocks on purpose: the
-        // await budget outlives the lease ceiling, which is what makes a re-claim
-        // worth offering at all.
-        let queued_at_ms = now_ms() - mc_store::HISTORIAN_LEASE_CEILING_MS - 1;
-        const {
-            assert!(
-                CLAIM_AWAIT_BUDGET_MS > mc_store::HISTORIAN_LEASE_CEILING_MS,
-                "a lease that outlives its run leaves nothing to re-claim"
-            )
-        };
-        queue_a_run_for_a_claimant(&store, &project_path, queued_at_ms);
-
-        let first = store
-            .claim_historian_run(
-                &project_path,
-                CLAIM_RUN_ID,
-                "install-uuid-one",
-                queued_at_ms,
-            )
-            .unwrap();
-        let mc_store::HistorianClaimOutcome::Claimed(first) = first else {
-            panic!("the first claimant must win: {first:?}");
-        };
-        assert_eq!(first.attempt, 1);
-
-        let second = call_dispatch_request(
-            &handler,
-            json!({
-                "method": "historian.claim",
-                "v": 1,
-                "run_id": CLAIM_RUN_ID,
-                "claimant_instance_id": "install-uuid-two",
-            }),
-        )
-        .await;
-        assert_eq!(second["ok"], json!(true), "{second}");
-        assert_eq!(
-            second["attempt"],
-            json!(2),
-            "the replacement continues the same run under the next attempt"
-        );
-        assert_ne!(second["token"].as_str().unwrap(), first.token);
-
-        let state = store.historian_state("ses").unwrap();
-        assert_eq!(state.producer_run_id.as_deref(), Some(CLAIM_RUN_ID));
-        assert_eq!(state.chunk_fingerprint, "fp-a1");
-        assert_eq!(state.firing_seq, 1);
-        assert_eq!(state.producer_attempt, 2);
-
-        // The replaced claimant's token no longer names a live claim, so nothing it
-        // reports can reach validation.
-        let late = call_dispatch_request(
-            &handler,
-            json!({
-                "method": "historian.complete",
-                "v": 1,
-                "run_id": CLAIM_RUN_ID,
-                "token": first.token,
-                "output": { "text": "<compartments/>" },
-            }),
-        )
-        .await;
-        assert_eq!(
-            late,
-            json!({ "ok": false, "refusal": "superseded_token" }),
-            "a superseded report is refused before its output is read"
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]

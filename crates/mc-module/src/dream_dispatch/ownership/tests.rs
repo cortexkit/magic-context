@@ -22,10 +22,6 @@ fn host_config() -> McModuleConfig {
     }
 }
 
-fn names(tasks: &[TaskName]) -> Vec<&'static str> {
-    tasks.iter().map(|t| t.as_str()).collect()
-}
-
 /// The production wiring names exactly the tasks with an end-to-end Rust path
 /// (`dispatcher::OPERATIONAL_TASKS`); a runner lane able to carry every role
 /// still gets nothing else, and every other hosted task stays `host_unwired`.
