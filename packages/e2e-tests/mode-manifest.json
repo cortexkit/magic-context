@@ -259,6 +259,14 @@
             "behavior": true
         },
         {
+            "path": "tests/issue-797-restart-tool-rows.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "opt-in real-host check (MC_REPRO_797=1): after a restart with stored tool-definition rows of 74 tools the route no longer offers and an expired provider cache, the first pass sizes the session from the request's own tools (no emergency drop) and the retired rows are deleted, with PID lsof throwaway-store containment; runs by hand on OpenCode 1 and OpenCode 2, outside the mode lanes",
+            "contract_refs": ["S2-MIGRATION"],
+            "hosts": ["opencode", "opencode2"]
+        },
+        {
             "path": "tests/system-prompt-change-order.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },

@@ -112,7 +112,7 @@ test("OpenCode 2 shapes all six dream routes and keeps timer work in its owning 
             } else if (system.includes(CURATE_SYSTEM_PROMPT)) {
                 if (!hasResult) {
                     memoryCalls++;
-                    return { openaiOutput: [{ type: "function_call", id: `fc_update_${memoryCalls}`, call_id: `call_update_${memoryCalls}`, name: "ctx_memory", arguments: JSON.stringify({ action: "update", ids: [ids[0]], content: `Fixture claim is recorded in fact.txt. Clarification ${memoryCalls} preserves the fixture fact.` }) }], usage: { input_tokens: 100, output_tokens: 10 } };
+                    return { openaiOutput: [{ type: "function_call", id: `fc_update_${memoryCalls}`, call_id: `call_update_${memoryCalls}`, name: "ctx_memory", arguments: JSON.stringify({ action: "update", ids: [ids[0]], category: "ARCHITECTURE", content: `Fixture claim is recorded in fact.txt. Clarification ${memoryCalls} preserves the fixture fact.` }) }], usage: { input_tokens: 100, output_tokens: 10 } };
                 }
                 text = "Kept the fixture fact and clarified its wording.";
             } else if (system.includes("You are a memory mapper")) text = `<mappings>${ids.map(id => `<memory id="${id}" files="fact.txt"/>`).join("")}</mappings>`;

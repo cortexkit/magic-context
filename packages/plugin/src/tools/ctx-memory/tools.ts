@@ -357,21 +357,17 @@ const ctxMemoryArgsShape = {
     // callers compatible without publishing that action here.
     action: tool.schema
         .enum([...CTX_MEMORY_ACTIONS])
-        .optional()
         .describe("write | update | archive | merge | get"),
     content: tool.schema
         .string()
-        .optional()
         .describe("The memory text — one standalone fact (write, update, merge)."),
     category: tool.schema
         .enum([...V2_MEMORY_CATEGORIES])
-        .optional()
         .describe(
-            "Kind of fact (required for write; on update/merge optional, omitted keeps the current category).",
+            "Kind of fact (required for write; on update/merge, pass the memory's current category to keep it).",
         ),
     ids: tool.schema
         .array(tool.schema.number())
-        .optional()
         .describe(
             "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get.",
         ),

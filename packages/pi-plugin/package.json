@@ -1,6 +1,6 @@
 {
 	"name": "@cortexkit/pi-magic-context",
-	"version": "0.49.23",
+	"version": "0.49.25",
 	"type": "module",
 	"description": "Pi and OMP coding agent extension for Magic Context — cross-session memory and context management",
 	"main": "dist/index.js",
@@ -71,6 +71,7 @@
 		"omp-pi-ai-1811": "npm:@oh-my-pi/pi-ai@18.11.3",
 		"omp-pi-ai-1812": "npm:@oh-my-pi/pi-ai@18.12.3",
 		"omp-pi-ai-18126": "npm:@oh-my-pi/pi-ai@18.12.6",
+		"omp-pi-ai-1813": "npm:@oh-my-pi/pi-ai@18.13.0",
 		"pi-agent-core-087": "npm:@earendil-works/pi-agent-core@0.87.1",
 		"pi-ai-086": "npm:@earendil-works/pi-ai@0.86.0",
 		"pi-ai-087": "npm:@earendil-works/pi-ai@0.87.1",

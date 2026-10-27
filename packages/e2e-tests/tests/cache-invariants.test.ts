@@ -868,7 +868,7 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                     // execute pass runs (turn 4 records high usage, turn 5 busts).
                     await runMemoryTool(
                         sessionId,
-                        { action: "write", category: "PROJECT_RULES", content: ownRule },
+                        { action: "write", category: "PROJECT_RULES", content: ownRule, ids: [] },
                         "B10 own turn: save the release-notes rule.",
                     );
                     h.mock.setDefault({ text: "B10 own pressure", usage: EXECUTE_USAGE });

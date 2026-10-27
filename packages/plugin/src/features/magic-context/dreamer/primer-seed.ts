@@ -20,6 +20,7 @@
  * back to a closed-book seed (origin compartment P1) rather than silently
  * proceeding with an empty orientation.
  */
+import { askAnswerLines } from "../../../hooks/magic-context/ask-answer-notice";
 import {
     cleanUserText,
     visitRawSessionMessages,
@@ -94,11 +95,15 @@ function orientationRenderer(capTokens: number) {
             sawMessage = true;
             const out: string[] = [];
             if (msg.role === "user" && hasMeaningfulUserText(msg.parts)) {
-                const text = extractTexts(msg.parts)
+                const rawTexts = extractTexts(msg.parts);
+                const parts = rawTexts
                     .map((t) => cleanUserText(t))
                     .map(normalizeText)
-                    .filter((t) => t.length > 0)
-                    .join(" / ");
+                    .filter((t) => t.length > 0);
+                // The user's answer to a parked ask is the one thing cleaning
+                // would drop, so its line follows the user's own words.
+                parts.push(...rawTexts.flatMap((t) => askAnswerLines(t)).map(normalizeText));
+                const text = parts.filter((t) => t.length > 0).join(" / ");
                 if (text) out.push(`U: ${text}`);
             }
             // Tool-call inputs (no outputs) — what the agent looked at. Applies to

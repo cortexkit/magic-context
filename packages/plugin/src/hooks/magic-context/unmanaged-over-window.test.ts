@@ -107,20 +107,34 @@ function historyTokens(messages: Message[]): number {
 }
 
 /** The request's local count as the estimate gives it, tool-definition figure included. */
-function requestTokens(messages: Message[]): number {
+function requestTokens(messages: Message[], sessionId?: string): number {
     const estimate = estimateFinalWireInputTokens({
         messages: messages as never,
         systemPromptTokens: 0,
         providerID: PROVIDER,
         modelID: MODEL,
         agentName: undefined,
+        sessionId,
     });
     return estimate.rawTokens ?? estimate.tokens;
 }
 
 /** Record a measured tool set of roughly `tokens` tokens for a route. */
-function measureToolSet(providerID: string, modelID: string, tokens: number): void {
-    recordToolDefinition(providerID, modelID, undefined, "big-tool", "word ".repeat(tokens), {});
+function measureToolSet(
+    providerID: string,
+    modelID: string,
+    tokens: number,
+    sessionId?: string,
+): void {
+    recordToolDefinition(
+        providerID,
+        modelID,
+        undefined,
+        "big-tool",
+        "word ".repeat(tokens),
+        {},
+        sessionId,
+    );
 }
 
 async function knownWindowTransform(sessionId: string) {
@@ -214,15 +228,15 @@ describe("a first pass with no Magic Context state and a history over the window
         await expect(serve(history(sessionId, 20, 430))).rejects.toBeInstanceOf(
             UnmanagedOverWindowError,
         );
-        // Another route's tool set is the only measurement there is, so this
-        // route's tool-definition figure is an upper envelope built from it.
-        // That envelope alone takes the estimate over the window, while the
-        // history the next pass sends is well inside it.
+        // The session's last measured request flew another route, so this
+        // route's tool-definition figure is an upper envelope built from that
+        // request's tool set. That envelope alone takes the estimate over the
+        // window, while the history the next pass sends is well inside it.
         const limit = resolveTrustedContextLimit(PROVIDER, MODEL) ?? 0;
-        measureToolSet("another-provider", "another-model", limit);
+        measureToolSet("another-provider", "another-model", limit, sessionId);
         const reduced = history(sessionId, 4, 40);
         expect(historyTokens(reduced)).toBeLessThan(limit / 2);
-        expect(requestTokens(reduced)).toBeGreaterThan(limit);
+        expect(requestTokens(reduced, sessionId)).toBeGreaterThan(limit);
         const served = await serve(reduced);
         expect(JSON.stringify(served)).toContain("the newest question");
     }, 30_000);

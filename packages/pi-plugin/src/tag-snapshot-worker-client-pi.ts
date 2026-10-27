@@ -76,7 +76,12 @@ export type PiHydrationOperation =
 export class PiTagHydrationError extends Error {
 	constructor(
 		message: string,
-		readonly code: "failed" | "stale" | "schema" | "deadline" = "failed",
+		readonly code:
+			| "failed"
+			| "stale"
+			| "cancelled"
+			| "schema"
+			| "deadline" = "failed",
 	) {
 		super(`Pi tag hydration: ${message}`);
 		this.name = "PiTagHydrationError";
@@ -399,7 +404,9 @@ export function startPiTagSnapshotWorker(
 			});
 		},
 	);
-	function abort(error: Error = new PiTagHydrationError("cancelled")) {
+	function abort(
+		error: Error = new PiTagHydrationError("cancelled", "cancelled"),
+	) {
 		if (settled) return;
 		settled = true;
 		clearTimeout(timer);

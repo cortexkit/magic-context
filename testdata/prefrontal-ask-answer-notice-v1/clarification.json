@@ -1,0 +1,1 @@
+"<system-reminder>\nInbox wake notice from user via user_clarification (user_clarification)\nThe user requested clarification for ask ask_notice_v1_clarification.\nUser request: \"What does \\\"project route\\\" mean?\\nPlease explain the risk.\"\nRespond by calling exactly:\nask(action=\"append\", id=\"ask_notice_v1_clarification\", text=\"...\")\n</system-reminder>"

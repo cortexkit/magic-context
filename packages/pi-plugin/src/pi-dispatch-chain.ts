@@ -75,19 +75,63 @@ export function piChainCapableApi(api: unknown): boolean {
 	);
 }
 
+function injectedHeadIndex(messages: readonly unknown[]): number {
+	let index = 0;
+	while (object(messages[index])?.role === "system") index++;
+	const m0 = object(messages[index]);
+	const m1 = object(messages[index + 1]);
+	const syntheticUser = (message: Record<string, unknown> | undefined) =>
+		message?.role === "user" &&
+		Object.keys(message).every((key) =>
+			["role", "content", "timestamp"].includes(key),
+		);
+	if (!syntheticUser(m0) || !syntheticUser(m1)) return -1;
+	const m0Content = m0?.content;
+	const m1Content = m1?.content;
+	if (!Array.isArray(m0Content) || !Array.isArray(m1Content)) return -1;
+	const m0Text = object(m0Content[0]);
+	const m1Text = object(m1Content[0]);
+	return m0Content.length >= 1 &&
+		m0Content.length <= 2 &&
+		(m0Content.length === 1 || object(m0Content[1])?.type === "image") &&
+		m1Content.length === 1 &&
+		m0Text?.type === "text" &&
+		typeof m0Text.text === "string" &&
+		/^(<project-docs>|<user-profile>|<covered-system-messages>|<session-history>)/.test(
+			m0Text.text,
+		) &&
+		m0Text.text.includes("</session-history>") &&
+		m1Text?.type === "text" &&
+		typeof m1Text.text === "string" &&
+		/^(<session-history-since>|<knowledge-updates>)/.test(m1Text.text)
+		? index
+		: -1;
+}
+
 export function piPreparedHistory(
 	messages: readonly unknown[],
 	model?: PiChatHistoryModel,
 ): PiPreparedHistory | undefined {
 	const snapshots: LkgInputSnapshot[] = [];
 	const responseIds: (string | undefined)[] = [];
-	for (const message of messages) {
-		const fields = lkgContentFields(message);
+	const head = injectedHeadIndex(messages);
+	for (const [index, message] of messages.entries()) {
+		const source = object(message);
+		// Only the injector's two leading synthetic users derive timestamps from
+		// the visible head, which a drain can remove. Exclude those placement
+		// timestamps only from chain identity, never from the served messages or
+		// LKG snapshots; every other field (including m0/m1 text) stays exact.
+		const identity =
+			head >= 0 && (index === head || index === head + 1)
+				? Object.fromEntries(
+						Object.entries(source ?? {}).filter(([key]) => key !== "timestamp"),
+					)
+				: message;
+		const fields = lkgContentFields(identity);
 		if (!fields) return undefined;
 		// Position is the identity here: both arrays are prepared output of the
 		// same session, and a shifted message must not match its neighbour.
 		snapshots.push({ id: "", fields });
-		const source = object(message);
 		responseIds.push(
 			source?.role === "assistant" &&
 				typeof source.responseId === "string" &&

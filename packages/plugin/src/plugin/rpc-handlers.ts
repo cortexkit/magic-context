@@ -445,7 +445,12 @@ export function buildSidebarSnapshot(
                 activeProviderID = model.providerID;
                 activeModelID = model.modelID;
                 measuredToolDefTokens =
-                    getMeasuredToolDefinitionTokens(model.providerID, model.modelID, agent) ?? 0;
+                    getMeasuredToolDefinitionTokens(
+                        model.providerID,
+                        model.modelID,
+                        agent,
+                        sessionId,
+                    ) ?? 0;
             }
         }
 

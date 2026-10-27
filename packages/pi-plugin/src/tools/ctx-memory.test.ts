@@ -99,11 +99,15 @@ describe("createCtxMemoryTool", () => {
 			expect(list.parameters.properties).toHaveProperty("limit");
 			// A replayed older primary call that still carries `limit` must stay
 			// valid: the schema tolerates unknown fields rather than rejecting them.
+			// The replayed call carries the now-required action-irrelevant filler
+			// a provider would send (issue 793); `get` still ignores it.
 			expect(primary.parameters.additionalProperties).toBe(true);
 			expect(
 				Value.Check(primary.parameters, {
 					action: "get",
 					ids: [1],
+					content: "",
+					category: "PROJECT_RULES",
 					limit: 5,
 				}),
 			).toBe(true);
@@ -1793,6 +1797,357 @@ describe("createCtxMemoryTool", () => {
 				expect(primaryFiller.isError).toBe(true);
 				expect(textOf(primaryFiller)).toBe(
 					"Error: Action 'list' is not allowed in this context.",
+				);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+	});
+	describe("issue 793 required provider schema", () => {
+		const textOf793 = (result: { content: Array<{ text?: string }> }) =>
+			result.content[0]?.text ?? "";
+
+		const requiredOf = (allowDreamerActions: boolean): string[] => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({
+					db,
+					memoryEnabled: true,
+					embeddingEnabled: false,
+					allowDreamerActions,
+				});
+				const schema = tool.parameters as unknown as { required?: string[] };
+				return [...(schema.required ?? [])].sort();
+			} finally {
+				closeQuietly(db);
+			}
+		};
+
+		it("advertises action, content, category and ids as required", () => {
+			// Argument-dropping providers (InferenceNet via OpenRouter) only
+			// emit required properties, so the key arguments must be required
+			// for the calls to arrive complete. `reason` stays optional.
+			expect(requiredOf(false)).toEqual([
+				"action",
+				"category",
+				"content",
+				"ids",
+			]);
+			expect(requiredOf(true)).toEqual([
+				"action",
+				"category",
+				"content",
+				"ids",
+			]);
+		});
+
+		it("accepts an empty ids list at the provider-schema level", () => {
+			// ctx_memory ids carries no minimum: a model that correctly sends
+			// ids: [] on write must pass host schema validation.
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({
+					db,
+					memoryEnabled: true,
+					embeddingEnabled: false,
+					allowDreamerActions: false,
+				});
+				expect(
+					Value.Check(tool.parameters, {
+						action: "write",
+						content: "x",
+						category: "PROJECT_RULES",
+						ids: [],
+					}),
+				).toBe(true);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("archive with empty content and any category validates and archives", async () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({
+					db,
+					memoryEnabled: true,
+					embeddingEnabled: false,
+					allowDreamerActions: false,
+				});
+				const ctx = fakeContext("ses-memory") as never;
+				const signal = new AbortController().signal;
+				await tool.execute(
+					"call-seed",
+					{
+						action: "write",
+						category: "PROJECT_RULES",
+						content: "Archivable filler fact.",
+					},
+					signal,
+					undefined,
+					ctx,
+				);
+				const params = {
+					action: "archive",
+					ids: [1],
+					content: "",
+					category: "CONSTRAINTS",
+				};
+				expect(Value.Check(tool.parameters, params)).toBe(true);
+				const archived = textOf793(
+					await tool.execute(
+						"call-archive-filler",
+						params,
+						signal,
+						undefined,
+						ctx,
+					),
+				);
+				expect(archived).toContain("Archived memory [ID: 1]");
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("write succeeds with an empty ids list and still rejects empty content", async () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({
+					db,
+					memoryEnabled: true,
+					embeddingEnabled: false,
+					allowDreamerActions: false,
+				});
+				const ctx = fakeContext("ses-memory") as never;
+				const signal = new AbortController().signal;
+				const written = textOf793(
+					await tool.execute(
+						"call-write-filler",
+						{
+							action: "write",
+							category: "PROJECT_RULES",
+							content: "Filler ids fact.",
+							ids: [],
+						},
+						signal,
+						undefined,
+						ctx,
+					),
+				);
+				expect(written).toContain("Saved memory [ID:");
+				const empty = textOf793(
+					await tool.execute(
+						"call-write-empty",
+						{
+							action: "write",
+							category: "PROJECT_RULES",
+							content: "",
+							ids: [],
+						},
+						signal,
+						undefined,
+						ctx,
+					),
+				);
+				expect(empty).toBe(
+					"Error: 'content' is required when action is 'write'.",
+				);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("get succeeds with content/category filler and still rejects empty ids", async () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({
+					db,
+					memoryEnabled: true,
+					embeddingEnabled: false,
+					allowDreamerActions: false,
+				});
+				const ctx = fakeContext("ses-memory") as never;
+				const signal = new AbortController().signal;
+				await tool.execute(
+					"call-seed",
+					{ action: "write", category: "PROJECT_RULES", content: "Seed fact." },
+					signal,
+					undefined,
+					ctx,
+				);
+				const filler = textOf793(
+					await tool.execute(
+						"call-get-filler",
+						{ action: "get", ids: [1], content: "", category: "PROJECT_RULES" },
+						signal,
+						undefined,
+						ctx,
+					),
+				);
+				expect(filler).toContain("Seed fact.");
+				const empty = textOf793(
+					await tool.execute(
+						"call-get-empty",
+						{ action: "get", ids: [], content: "", category: "PROJECT_RULES" },
+						signal,
+						undefined,
+						ctx,
+					),
+				);
+				expect(empty).toBe(
+					"Error: 'ids' must contain at least one integer memory ID when action is 'get'.",
+				);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("archive succeeds with content/category filler", async () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({
+					db,
+					memoryEnabled: true,
+					embeddingEnabled: false,
+					allowDreamerActions: false,
+				});
+				const ctx = fakeContext("ses-memory") as never;
+				const signal = new AbortController().signal;
+				await tool.execute(
+					"call-seed",
+					{ action: "write", category: "PROJECT_RULES", content: "Seed fact." },
+					signal,
+					undefined,
+					ctx,
+				);
+				const filler = textOf793(
+					await tool.execute(
+						"call-archive-filler",
+						{
+							action: "archive",
+							ids: [1],
+							content: "",
+							category: "PROJECT_RULES",
+						},
+						signal,
+						undefined,
+						ctx,
+					),
+				);
+				expect(filler).toContain("Archived memory [ID: 1]");
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("update keeps the category callers send back and changes it when they send another", async () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({
+					db,
+					memoryEnabled: true,
+					embeddingEnabled: false,
+					allowDreamerActions: false,
+				});
+				const ctx = fakeContext("ses-memory") as never;
+				const signal = new AbortController().signal;
+				await tool.execute(
+					"call-seed",
+					{
+						action: "write",
+						category: "PROJECT_RULES",
+						content: "Recategorizable fact.",
+					},
+					signal,
+					undefined,
+					ctx,
+				);
+				const call = async (args: Parameters<typeof tool.execute>[1]) =>
+					textOf793(
+						await tool.execute("call-793-update", args, signal, undefined, ctx),
+					);
+				expect(
+					await call({
+						action: "update",
+						ids: [1],
+						category: "PROJECT_RULES",
+						content: "Same category fact.",
+					}),
+				).toContain("in PROJECT_RULES");
+				expect(getMemoryById(db, 1)?.category).toBe("PROJECT_RULES");
+				expect(
+					await call({
+						action: "update",
+						ids: [1],
+						category: "CONSTRAINTS",
+						content: "Moved category fact.",
+					}),
+				).toContain("in CONSTRAINTS");
+				expect(getMemoryById(db, 1)?.category).toBe("CONSTRAINTS");
+				expect(
+					await call({
+						action: "update",
+						ids: [1],
+						category: "CONSTRAINTS",
+						content: "",
+					}),
+				).toBe("Error: 'content' is required when action is 'update'.");
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("merge keeps the sent source category and still rejects empty content", async () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({
+					db,
+					memoryEnabled: true,
+					embeddingEnabled: false,
+					allowDreamerActions: false,
+				});
+				const ctx = fakeContext("ses-memory") as never;
+				const signal = new AbortController().signal;
+				for (const content of ["First merge fact.", "Second merge fact."]) {
+					await tool.execute(
+						"call-seed",
+						{ action: "write", category: "PROJECT_RULES", content },
+						signal,
+						undefined,
+						ctx,
+					);
+				}
+				const merged = textOf793(
+					await tool.execute(
+						"call-merge-filler",
+						{
+							action: "merge",
+							ids: [1, 2],
+							category: "PROJECT_RULES",
+							content: "Merged filler fact.",
+						},
+						signal,
+						undefined,
+						ctx,
+					),
+				);
+				expect(merged).toContain("in PROJECT_RULES");
+				const empty = textOf793(
+					await tool.execute(
+						"call-merge-empty",
+						{
+							action: "merge",
+							ids: [1, 2],
+							category: "PROJECT_RULES",
+							content: "",
+						},
+						signal,
+						undefined,
+						ctx,
+					),
+				);
+				expect(empty).toBe(
+					"Error: 'content' is required when action is 'merge'.",
 				);
 			} finally {
 				closeQuietly(db);

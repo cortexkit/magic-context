@@ -75,10 +75,9 @@ describe("Pi ctx_note smart notes", () => {
 				minimum: 1,
 				maximum: Number.MAX_SAFE_INTEGER,
 			},
-			minItems: 1,
 			maxItems: 50,
 			description:
-				"Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write.",
+				"Note ids: one for update, 1–50 for dismiss, or 1–50 to read those notes in full. Write and a plain read take an empty list.",
 		});
 	});
 

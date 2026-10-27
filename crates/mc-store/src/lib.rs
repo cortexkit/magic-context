@@ -3372,6 +3372,7 @@ const MIGRATIONS: &[Migration] = &[
         version: 74,
         statements: include_str!("migrations/store_074_async_compaction.sql"),
     },
+    Migration { version: 75, statements: include_str!("migrations/store_075_app_read_indexes.sql") },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -5522,6 +5523,11 @@ pub struct McTagRow {
     /// appends new rows to a retained baseline) never copies the stored source payload.
     pub source_bytes: std::sync::Arc<[u8]>,
 }
+
+/// The newest compartment's stored end ordinal: one probe of the
+/// `(session_id, sequence)` unique index, read backwards.
+const NEWEST_COMPARTMENT_END_SQL: &str =
+    "SELECT end_message FROM compartments WHERE session_id = ?1 ORDER BY sequence DESC LIMIT 1";
 
 const NEWEST_TOOL_TAGS_SQL: &str = "SELECT tag_number, block_id, kind, token_count, created_at_ms
      FROM mc_tags WHERE session_id=?1 AND tag_number<=?2
@@ -8238,6 +8244,18 @@ impl McStore {
             conn.pragma_update(None, "query_only", true)?;
             read(conn)
         })
+    }
+
+    /// Run `read` against `store.db` in one read-only transaction.
+    ///
+    /// Callers see a consistent snapshot and cannot change rows: the connection
+    /// is the store's reader pool, which rejects writes. This is the store.db
+    /// counterpart of [`Self::with_context_read`].
+    pub fn with_store_read<T>(
+        &self,
+        read: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, McStoreError> {
+        self.inner.with_read(read).map_err(Into::into)
     }
 
     /// The directory holding this store's `store.db`, which is the module's data
@@ -13105,6 +13123,22 @@ impl McStore {
             )
         })?;
         Ok(exists != 0)
+    }
+
+    /// The stored end ordinal of the session's newest compartment (its highest
+    /// `sequence`), or `None` when it has none. Compartments are stored in
+    /// sequence order over consecutive message ranges, so the newest one ends
+    /// furthest. This is one probe of the `(session_id, sequence)` unique
+    /// index, whatever the number of compartments, for callers on a per-notice
+    /// budget. It reads stored coordinates only: resolved context boundaries
+    /// (`load_compartment_boundaries`) are not applied.
+    pub fn newest_compartment_end(&self, session_id: &str) -> Result<Option<i64>, McStoreError> {
+        self.context_read(|conn| {
+            conn.query_row(NEWEST_COMPARTMENT_END_SQL, params![session_id], |r| {
+                r.get(0)
+            })
+            .optional()
+        })
     }
 
     /// Resolve and persist one fake-compaction lineage edge under the store's writer fence.
@@ -19202,6 +19236,24 @@ mod tests {
     }
 
     #[test]
+    fn store_read_rejects_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        store
+            .with_store_read(|conn| {
+                let refused = conn
+                    .execute("CREATE TABLE store_read_probe(id INTEGER)", [])
+                    .expect_err("a store read must reject writes");
+                assert_eq!(
+                    refused.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::ReadOnly)
+                );
+                Ok(())
+            })
+            .expect("the refusal stays inside the read callback");
+    }
+
+    #[test]
     fn context_read_guard_restores_query_only_after_success_error_and_panic() {
         let dir = tempfile::tempdir().unwrap();
         let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
@@ -19463,6 +19515,62 @@ mod tests {
             plan.iter().any(|detail| detail
                 .contains("SEARCH mc_tags USING INDEX sqlite_autoindex_mc_tags_1")
                 && detail.contains("session_id=? AND tag_number<?")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|detail| detail.contains("SCAN") || detail.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
+    }
+
+    /// `newest_compartment_end` names the highest sequence's end, `None` for a
+    /// session without compartments, and reads it through the session's unique
+    /// index without scanning its compartments or sorting them.
+    #[test]
+    fn newest_compartment_end_is_one_index_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        let compartment = |sequence: i64, start: i64, end: i64| StoredCompartment {
+            sequence,
+            start_message: start,
+            end_message: end,
+            end_message_id: format!("m{end}#0"),
+            title: "history".into(),
+            content: format!("summary {sequence}"),
+            importance: 50,
+            ..Default::default()
+        };
+        assert_eq!(store.newest_compartment_end("s").unwrap(), None);
+        store
+            .replace_compartments(
+                "s",
+                &[
+                    compartment(1, 0, 10),
+                    compartment(2, 11, 20),
+                    compartment(3, 21, 30),
+                ],
+            )
+            .unwrap();
+        store
+            .replace_compartments("other", &[compartment(1, 0, 99)])
+            .unwrap();
+        assert_eq!(store.newest_compartment_end("s").unwrap(), Some(30));
+        assert_eq!(store.newest_compartment_end("other").unwrap(), Some(99));
+        assert_eq!(store.newest_compartment_end("none").unwrap(), None);
+        let plan = store
+            .context_read(|conn| {
+                conn.prepare(&format!("EXPLAIN QUERY PLAN {NEWEST_COMPARTMENT_END_SQL}"))?
+                    .query_map(params!["s"], |row| row.get::<_, String>(3))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        eprintln!("newest-compartment-end query plan: {plan:?}");
+        assert!(
+            plan.iter().any(|detail| detail
+                .contains("SEARCH compartments USING INDEX sqlite_autoindex_compartments_1")
+                && detail.contains("session_id=?")),
             "{plan:?}"
         );
         assert!(

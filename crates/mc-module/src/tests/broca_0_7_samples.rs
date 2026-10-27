@@ -336,9 +336,11 @@ fn broca_0_7_approved_read_keeps_the_recorded_call_key() {
 /// `session.head` decoding: the completed head and both failed-last-run
 /// heads decode through the lenient `HeadMeta` type used when a ceiling ride
 /// or the lineage window reads the head, with lineage fields intact. The two error heads
-/// carry the new `last_run_error` member, which the pinned 0.5.2 type has no
-/// field for, so the typed decode drops it while the raw answer keeps it:
-/// nothing ck-mc reads changes.
+/// carry the `last_run_error` member, which llm-runner 0.7.5 added to
+/// `HeadMeta`: the typed decode now keeps it, and re-encodes it exactly as
+/// the runner sent it. ck-mc reads no decision from it, so nothing ck-mc
+/// does changes; what this pins is that the member never makes a head
+/// refused or lossy.
 #[test]
 fn broca_0_7_heads_decode_with_lineage_intact() {
     for name in [
@@ -352,10 +354,16 @@ fn broca_0_7_heads_decode_with_lineage_intact() {
         assert!(head.lineage_consistent(), "{name}");
         assert!(head.lineage_id.is_some(), "{name}");
         assert_eq!(head.first_ordinal, Some(0), "{name}");
+        assert_eq!(
+            head.last_run_error().is_some(),
+            answer.get("last_run_error").is_some(),
+            "{name}: the typed head keeps last_run_error exactly when it is sent"
+        );
         let roundtrip = serde_json::to_value(&head).expect("HeadMeta serializes");
-        assert!(
-            roundtrip.get("last_run_error").is_none(),
-            "{name}: the pinned type carries no last_run_error field"
+        assert_eq!(
+            roundtrip.get("last_run_error"),
+            answer.get("last_run_error"),
+            "{name}: last_run_error re-encodes as the runner sent it"
         );
     }
     let completed = fixture_answer("session.head.completed.json");

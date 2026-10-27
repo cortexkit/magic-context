@@ -22,9 +22,13 @@ for (const host of ["opencode", "opencode2"] as const) {
             expect(h.lastTrigger?.shouldFire).toBe(true);
             expect(readExecuteReclaimState(h.db, h.id).floorOrdinal).toBeNull();
             expect(h.lastTrigger?.boundarySnapshot?.eligibleEndOrdinal).toBeGreaterThan(3);
+            // The fired snapshot carries the one-pass lift to its own run only.
+            expect(h.lastTrigger?.boundarySnapshot?.liftLivePromptFloor).toBe(true);
             expect(h.rebuilds).toBe(initialBusts);
             h.publish();
             const published = await h.pass(82);
+            // The mark was spent, so the next evaluation resolves without the lift.
+            expect(h.lastTrigger?.boundarySnapshot?.liftLivePromptFloor).toBeUndefined();
             expect(published).not.toEqual(warm);
             expect(getPendingOps(h.db, h.id)).toHaveLength(0);
             expect(h.rebuilds - initialBusts).toBe(1);

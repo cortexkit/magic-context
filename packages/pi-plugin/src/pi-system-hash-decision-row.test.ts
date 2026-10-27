@@ -248,7 +248,14 @@ it("Pi: the held pass that carries a system prompt change records system_hash", 
 		const after = await f.serve("genuine changed instruction");
 		// The row staged by the pass before this one is written when this pass starts.
 		await f.serve("genuine changed instruction");
-		await new Promise((resolve) => setTimeout(resolve, 50));
+		// The write is asynchronous, so wait for the changed pass's row rather than
+		// for a fixed delay that a slow runner can outlast.
+		const deadline = Date.now() + 5_000;
+		while (
+			!f.rows().some((row) => row.message_id === changed.id) &&
+			Date.now() < deadline
+		)
+			await new Promise((resolve) => setTimeout(resolve, 10));
 
 		const rows = f.rows();
 		expect(rows.filter((row) => row.message_id === changed.id)).toEqual([

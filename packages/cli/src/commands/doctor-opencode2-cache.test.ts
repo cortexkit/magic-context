@@ -9,9 +9,14 @@ import {
 } from "@magic-context/core/shared/rpc-utils";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
+import { checkLocalEmbeddingRuntime } from "../lib/embedding-runtime";
 import {
+    getOpenCodeLoadedPluginInstallRoots,
+    getOpenCodePluginCacheRoots,
+    getOpenCodePluginInstallRoots,
     getOpenCodeV2PluginCacheSlot,
     OPENCODE_PLUGIN_NAME,
+    openCodeV2SlotSpec,
     readOpenCodeV2CachedPluginVersion,
     readReferencedOpenCodePluginSpecs,
 } from "../lib/opencode-plugin-cache";
@@ -464,4 +469,149 @@ it("Windows host probe never spawns lsof and uses process and exclusive lock evi
         __resetRpcIdentityTestHooks();
         db.close();
     }
+});
+
+describe("doctor local embedding runtime on OpenCode 2", () => {
+    /** An XDG cache root with OpenCode 2 slots `@latest` (two generations) and `@beta`. */
+    function withCache(run: (cache: string, npm: string) => void): void {
+        const cache = tempDir();
+        const npm = join(cache, "opencode", "npm");
+        const latest = getOpenCodeV2PluginCacheSlot(npm);
+        writeGeneration(latest, "1790000000000", OPENCODE_PLUGIN_NAME, "0.48.0");
+        writeGeneration(latest, "1790000000001", OPENCODE_PLUGIN_NAME, "0.49.24");
+        writeGeneration(
+            getOpenCodeV2PluginCacheSlot(npm, "beta"),
+            "1790000000002",
+            OPENCODE_PLUGIN_NAME,
+            "0.50.0-beta.1",
+        );
+        const previous = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = cache;
+        try {
+            run(cache, npm);
+        } finally {
+            if (previous === undefined) delete process.env.XDG_CACHE_HOME;
+            else process.env.XDG_CACHE_HOME = previous;
+        }
+    }
+
+    it("inspects the newest generation of the configured slot first, then the other copies", () => {
+        withCache((cache, npm) => {
+            const latest = join(getOpenCodeV2PluginCacheSlot(npm), "1790000000001");
+            const beta = join(getOpenCodeV2PluginCacheSlot(npm, "beta"), "1790000000002");
+            const v1 = [
+                join(cache, "opencode", "packages", `${OPENCODE_PLUGIN_NAME}@latest`),
+                join(cache, "opencode", "packages", OPENCODE_PLUGIN_NAME),
+            ];
+            expect(getOpenCodePluginInstallRoots("v2", { plugin: [OPENCODE_PLUGIN_NAME] })).toEqual(
+                [latest, beta, ...v1],
+            );
+            expect(
+                getOpenCodePluginInstallRoots("v2", {
+                    plugins: [{ package: `${OPENCODE_PLUGIN_NAME}@beta` }],
+                }),
+            ).toEqual([beta, latest, ...v1]);
+            // OpenCode 1 keeps its own `packages/` roots first.
+            expect(getOpenCodePluginInstallRoots("v1", null)).toEqual([...v1, latest, beta]);
+        });
+    });
+
+    it("finds the installed OpenCode 2 copy that OpenCode 1's cache roots never see", () => {
+        withCache((_cache, npm) => {
+            const newest = join(getOpenCodeV2PluginCacheSlot(npm), "1790000000001");
+            // Before, doctor looked only in OpenCode 1's `packages/` roots, found
+            // nothing and reported the runtime as unverified.
+            expect(checkLocalEmbeddingRuntime(getOpenCodePluginCacheRoots()).state).toBe("unknown");
+            const status = checkLocalEmbeddingRuntime(
+                getOpenCodePluginInstallRoots("v2", null),
+                "linux",
+                "x64",
+                "native",
+            );
+            expect(status.state).not.toBe("unknown");
+            expect(JSON.stringify(status)).toContain(
+                JSON.stringify(join(newest, "node_modules", "onnxruntime-node")).slice(1, -1),
+            );
+        });
+    });
+
+    it("names a range spec's slot the way OpenCode 2 does on Windows", () => {
+        expect(openCodeV2SlotSpec(">=0.49 <1", "win32")).toBe("_=0.49 _1");
+        expect(openCodeV2SlotSpec(">=0.49 <1", "linux")).toBe(">=0.49 <1");
+        expect(openCodeV2SlotSpec("latest", "win32")).toBe("latest");
+        const npm = join(tempDir(), "opencode", "npm");
+        const ranged = join(npm, "@cortexkit", "opencode-magic-context@_=0.49");
+        writeGeneration(ranged, "1790000000003", OPENCODE_PLUGIN_NAME, "0.49.24");
+        writeGeneration(getOpenCodeV2PluginCacheSlot(npm), "1", OPENCODE_PLUGIN_NAME, "0.49.24");
+        const roots = getOpenCodePluginInstallRoots(
+            "v2",
+            { plugin: [`${OPENCODE_PLUGIN_NAME}@>=0.49`] },
+            npm,
+            "win32",
+        );
+        expect(roots[0]).toBe(join(ranged, "1790000000003"));
+    });
+
+    it("checks only the copy the host loads, so a healthy unused copy cannot hide a broken one", () => {
+        withCache((cache, npm) => {
+            const latest = join(getOpenCodeV2PluginCacheSlot(npm), "1790000000001");
+            const beta = join(getOpenCodeV2PluginCacheSlot(npm, "beta"), "1790000000002");
+            const v1 = join(cache, "opencode", "packages", OPENCODE_PLUGIN_NAME);
+            // The unused `@beta` slot and an OpenCode 1 copy have a working
+            // native runtime; the loaded `@latest` copy has none.
+            for (const root of [beta, v1]) {
+                const binDir = join(
+                    root,
+                    "node_modules",
+                    "onnxruntime-node",
+                    "bin",
+                    "napi-v6",
+                    "win32",
+                    "x64",
+                );
+                mkdirSync(binDir, { recursive: true });
+                writeFileSync(
+                    join(root, "node_modules", "onnxruntime-node", "package.json"),
+                    JSON.stringify({
+                        name: "onnxruntime-node",
+                        version: "1.23.0",
+                        main: "index.js",
+                    }),
+                );
+                writeFileSync(
+                    join(root, "node_modules", "onnxruntime-node", "index.js"),
+                    "module.exports = {};\n",
+                );
+                writeFileSync(join(binDir, "onnxruntime_binding.node"), "stub");
+            }
+            const check = (roots: string[]) =>
+                checkLocalEmbeddingRuntime(roots, "win32", "x64", "native").state;
+            // Every copy at once: the first healthy one wins (the false green).
+            expect(check(getOpenCodePluginInstallRoots("v2", null))).toBe("ok");
+            const installs = getOpenCodeLoadedPluginInstallRoots("v2", {
+                plugin: [OPENCODE_PLUGIN_NAME],
+            });
+            expect(installs.loaded).toEqual([latest]);
+            expect(installs.others).toContain(beta);
+            expect(installs.others).toContain(v1);
+            expect(check(installs.loaded)).not.toBe("ok");
+            // With `@beta` configured, the host loads that slot instead.
+            const onBeta = getOpenCodeLoadedPluginInstallRoots("v2", {
+                plugin: [`${OPENCODE_PLUGIN_NAME}@beta`],
+            });
+            expect(onBeta.loaded).toEqual([beta]);
+            expect(check(onBeta.loaded)).toBe("ok");
+            // A configured slot that is not installed is unverified, not ok.
+            const missing = getOpenCodeLoadedPluginInstallRoots("v2", {
+                plugin: [`${OPENCODE_PLUGIN_NAME}@0.1.0`],
+            });
+            expect(missing.loaded).toEqual([]);
+            expect(check(missing.loaded)).toBe("unknown");
+            // On OpenCode 1 the `packages/` tree is what loads.
+            const onV1 = getOpenCodeLoadedPluginInstallRoots("v1", null);
+            expect(onV1.loaded).toEqual(getOpenCodePluginCacheRoots());
+            expect(onV1.others).toEqual([latest, beta]);
+            expect(check(onV1.loaded)).toBe("ok");
+        });
+    });
 });

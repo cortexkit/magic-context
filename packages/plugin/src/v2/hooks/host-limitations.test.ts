@@ -146,9 +146,12 @@ describe("v2 tool-definition measurement", () => {
         expect(getMeasuredToolDefinitionTokens("openai", "gpt-mock", "plan")).toBe(first);
     });
 
-    it("reports no measurement for a draft the host sent no tools with", () => {
+    it("measures zero tool-definition tokens for a draft the host sent no tools with", () => {
+        // The draft is the exact tool set of the request, so a request with no
+        // tools has none to count, and no other set may stand in for it.
+        recordV2ToolDefinitions(draft());
         recordV2ToolDefinitions(draft({ tools: {} }));
-        expect(getMeasuredToolDefinitionTokens("openai", "gpt-mock", "build")).toBeUndefined();
+        expect(getMeasuredToolDefinitionTokens("openai", "gpt-mock", "build")).toBe(0);
         expect(getCurrentToolSetHash("openai", "gpt-mock", "build")).toBe("");
     });
 });

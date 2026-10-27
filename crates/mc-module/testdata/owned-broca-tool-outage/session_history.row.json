@@ -1,0 +1,34 @@
+{
+  "message": {
+    "content": [
+      {
+        "is_error": true,
+        "output": {
+          "code": "target_unavailable",
+          "detail": "supervised_not_registered",
+          "kind": "error",
+          "message": "tool plane unavailable",
+          "module": "aft",
+          "nothing_sent": true,
+          "retry": "the module is restarting or unavailable; retry the call in a minute"
+        },
+        "tool_call_id": "call-1",
+        "type": "tool_result"
+      }
+    ],
+    "role": "tool"
+  },
+  "mid": "m2",
+  "ordinal": 2,
+  "run": {
+    "episode": "run-sid-wH6ToWNDqs4IDUaN33VaN4",
+    "final": false,
+    "run_id": "run-sid-wH6ToWNDqs4IDUaN33VaN4"
+  },
+  "tags": [
+    {
+      "part": "m2#0"
+    }
+  ],
+  "written_at": 1793075554194
+}

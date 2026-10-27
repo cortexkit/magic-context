@@ -37,6 +37,9 @@ mod private_permissions_source_test;
 
 pub mod agent_data;
 mod agent_fragments;
+mod app_read;
+#[cfg(test)]
+mod app_read_test_store;
 pub mod boundary;
 pub mod caveman;
 mod child_retention;
@@ -1843,6 +1846,7 @@ struct RuntimeStoreError {
 /// and the per-route session bindings (route channel → {project, session}).
 pub struct McHandler {
     agent_data: Option<agent_data::AgentDataService>,
+    app_channels: Mutex<HashMap<u16, app_read::admission::AppCaller>>,
     move_visibility: Arc<agent_data::MoveVisibility>,
     registered_module_id: String,
     store: Arc<OnceLock<Arc<McStore>>>,
@@ -2681,6 +2685,7 @@ impl McHandler {
             .expect("bus connection file") = bus_connection_file;
         McHandler {
             agent_data,
+            app_channels: Mutex::default(),
             move_visibility,
             registered_module_id: module_id,
             store,
@@ -3113,6 +3118,7 @@ impl McHandler {
             agent_data,
             move_visibility,
             registered_module_id: DEFAULT_MODULE_ID.into(),
+            app_channels: Mutex::default(),
             store,
             log_directory: None,
             store_open: Arc::new(StoreOpenCoordinator::new()),
@@ -5557,482 +5563,32 @@ impl McHandler {
             request.intent = RetrievalIntent::Auto;
         }
         request.query = trim_query(&request.query).to_owned();
-        let limit = request.limit.clamp(1, 25) as usize;
-        let tier_limit = (limit * 3).max(10);
-        let dates = DateBounds {
-            from_ms: request.start_at_ms,
-            to_ms: request.end_at_ms_inclusive,
-        };
-        let cutoff = request
-            .ordinal_cutoff
-            .map(|o| o.value as i64)
-            .unwrap_or(i64::MAX);
         let adapter = retrieval_store::RetrievalStore {
             store,
             now_ms: chrono::Utc::now().timestamp_millis(),
         };
-        let mut availability = std::collections::BTreeMap::new();
-        let mut lanes = SearchLanes::default();
-        let mut bodies = HashMap::<String, String>::new();
-        let mut memory_hits = Vec::new();
-        let mut raw_hits = Vec::new();
-        let mut compartment_hits = Vec::new();
-        let mut other_hits = Vec::new();
         let vector = serde_json::from_value::<Vec<f32>>(envelope["query_vector"].clone()).ok();
-        let query_vector = request
-            .embedding
-            .as_ref()
-            .zip(vector.as_deref())
-            .filter(|(id, v)| {
-                !matches!(id.provider.as_str(), "local" | "transformers")
-                    && id.model != "off"
-                    && id.dimensions > 0
-                    && v.len() == id.dimensions as usize
-                    && v.iter().all(|v| v.is_finite())
-            });
-        let probes = literal_probes(request.intent, &request.query);
-        let has = |source| sources.contains(&source);
-        if has(RetrievalSource::Memory) {
-            let memories = retrieval_values(
-                adapter.read_search_memories(&scope, dates),
-                "memory",
-                &mut availability,
-            );
-            let fts = retrieval_values(
-                adapter.search_memory_fts(&scope, &request.query, dates, FTS_CANDIDATE_LIMIT),
-                "memory",
-                &mut availability,
-            );
-            let visible = retrieval_values(
-                adapter.read_visible_memory_ids(&scope),
-                "memory",
-                &mut availability,
-            )
-            .into_iter()
-            .chain(request.visible_memory_ids.iter().map(|v| *v as i64))
-            .collect();
-            let vectors = query_vector
-                .map(|(id, _)| {
-                    retrieval_values(
-                        adapter.read_memory_vectors(
-                            &scope,
-                            &memories.iter().map(|m| m.id).collect::<Vec<_>>(),
-                            id,
-                        ),
-                        "memory",
-                        &mut availability,
-                    )
-                })
-                .unwrap_or_default();
-            let (ranked, _) = rank_memories(
-                &memories,
-                &fts,
-                &vectors,
-                query_vector,
-                &visible,
-                dates,
-                tier_limit.max(25),
-            );
-            for hit in ranked {
-                let memory = memories
-                    .iter()
-                    .find(|m| m.id == hit.memory_id)
-                    .expect("ranked memory belongs to snapshot");
-                let candidate = retrieval_candidate(
-                    RetrievalSource::Memory,
-                    hit.memory_id.to_string(),
-                    None,
-                    hit.content,
-                    hit.score,
-                    &scope,
-                );
-                bodies.insert(
-                    retrieval_key(&candidate),
-                    candidate_text(
-                        &format!("memory {} {}", hit.memory_id, scope.project.0),
-                        memory.content.lines().next().unwrap_or_default(),
-                        &memory.content,
-                    ),
-                );
-                memory_hits.push(candidate);
-            }
-            let convert = |hit: MemoryHit| {
-                retrieval_candidate(
-                    RetrievalSource::Memory,
-                    hit.memory_id.to_string(),
-                    None,
-                    hit.content,
-                    hit.score,
-                    &scope,
-                )
-            };
-            lanes.memory_fts = rank_memories(&memories, &fts, &[], None, &visible, dates, 25)
-                .0
-                .into_iter()
-                .map(convert)
-                .collect();
-            lanes.memory_vector =
-                rank_memories(&memories, &[], &vectors, query_vector, &visible, dates, 25)
-                    .0
-                    .into_iter()
-                    .map(convert)
-                    .collect();
-            for candidate in lanes.memory_fts.iter().chain(&lanes.memory_vector) {
-                if let Some(memory) = memories
-                    .iter()
-                    .find(|m| m.id.to_string() == candidate.hit.source_id)
-                {
-                    bodies.insert(
-                        retrieval_key(candidate),
-                        candidate_text(
-                            &format!("memory {} {}", memory.id, scope.project.0),
-                            memory.content.lines().next().unwrap_or_default(),
-                            &memory.content,
-                        ),
-                    );
-                }
-            }
-            memory_hits.truncate(tier_limit);
-        }
-        if has(RetrievalSource::RawMessage) {
-            let rows = retrieval_values(
-                adapter.raw_messages(
-                    &scope,
-                    &request.query,
-                    dates,
-                    cutoff,
-                    75,
-                    request.intent == RetrievalIntent::Explicit,
-                ),
-                "raw_message",
-                &mut availability,
-            );
-            for (rank, row) in rows.iter().enumerate() {
-                let candidate = retrieval_candidate(
-                    RetrievalSource::RawMessage,
-                    row.id.clone(),
-                    Some(row.ordinal as u64),
-                    row.content.clone(),
-                    1.0 - rank as f64 / rows.len() as f64,
-                    &scope,
-                );
-                bodies.insert(
-                    retrieval_key(&candidate),
-                    candidate_text(
-                        &format!("message {} {} @{}", row.id, scope.session.0, row.ordinal),
-                        &format!(
-                            "{}: {}",
-                            row.role,
-                            row.content.lines().next().unwrap_or_default()
-                        ),
-                        &row.content,
-                    ),
-                );
-                raw_hits.push(candidate);
-            }
-            if !probes.is_empty() {
-                let corpus = retrieval_values(
-                    adapter.corpus_size(&scope, cutoff),
-                    "raw_message",
-                    &mut availability,
-                );
-                let matches = probes
-                    .iter()
-                    .map(|probe| {
-                        let rows = retrieval_values(
-                            adapter.raw_messages(&scope, probe, dates, cutoff, 75, true),
-                            "raw_message",
-                            &mut availability,
-                        );
-                        let hits = rows
-                            .iter()
-                            .map(|row| {
-                                let c = retrieval_candidate(
-                                    RetrievalSource::RawMessage,
-                                    row.id.clone(),
-                                    Some(row.ordinal as u64),
-                                    row.content.clone(),
-                                    0.0,
-                                    &scope,
-                                );
-                                bodies.insert(
-                                    retrieval_key(&c),
-                                    candidate_text(
-                                        &format!(
-                                            "message {} {} @{}",
-                                            row.id, scope.session.0, row.ordinal
-                                        ),
-                                        &format!(
-                                            "{}: {}",
-                                            row.role,
-                                            row.content.lines().next().unwrap_or_default()
-                                        ),
-                                        &row.content,
-                                    ),
-                                );
-                                c.hit
-                            })
-                            .collect();
-                        ProbeMatches {
-                            probe: probe.clone(),
-                            document_frequency: retrieval_values(
-                                adapter.probe_frequency(&scope, probe, dates, cutoff),
-                                "raw_message",
-                                &mut availability,
-                            ),
-                            hits,
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                raw_hits = rank_message_probes(
-                    &raw_hits.iter().map(|c| c.hit.clone()).collect::<Vec<_>>(),
-                    &matches,
-                    corpus,
-                    75,
-                    tier_limit.max(25),
-                )
-                .into_iter()
-                .map(|hit| SearchCandidate {
-                    hit,
-                    compartment_range: None,
-                })
-                .collect();
-            }
-            lanes.message_fts = raw_hits
-                .iter()
-                .take(25)
-                .cloned()
-                .map(|mut c| {
-                    c.hit.text = preview(&c.hit.text);
-                    c
-                })
-                .collect();
-            raw_hits.truncate(tier_limit);
-            let count = raw_hits.len();
-            for (rank, candidate) in raw_hits.iter_mut().enumerate() {
-                candidate.hit.text = preview(&candidate.hit.text);
-                candidate.hit.score = 1.0 - rank as f64 / count as f64;
-            }
-        }
-        if has(RetrievalSource::Compartment) {
-            if let Some((identity, vector)) = query_vector {
-                let chunks = retrieval_values(
-                    adapter.read_compartment_chunks(&scope, dates, identity),
-                    "compartment",
-                    &mut availability,
-                );
-                for hit in retrieval::compartments::rank_compartments(
-                    &chunks,
-                    &scope,
-                    identity,
-                    vector,
-                    dates,
-                    Some(cutoff),
-                    tier_limit.max(25),
-                ) {
-                    let mut candidate = retrieval_candidate(
-                        RetrievalSource::Compartment,
-                        hit.compartment_id.to_string(),
-                        Some(hit.start_ordinal as u64),
-                        hit.content,
-                        hit.score,
-                        &scope,
-                    );
-                    candidate.compartment_range =
-                        Some((hit.start_ordinal as u64, hit.end_ordinal as u64));
-                    let body = adapter.compartment_text(&scope, hit.start_ordinal, hit.end_ordinal);
-                    if let CapabilityResult::Available { value: body }
-                    | CapabilityResult::Degraded { value: body, .. } = body
-                    {
-                        bodies.insert(
-                            retrieval_key(&candidate),
-                            candidate_text(
-                                &format!(
-                                    "compartment {} {} @{}-{}",
-                                    hit.compartment_id,
-                                    scope.session.0,
-                                    hit.start_ordinal,
-                                    hit.end_ordinal
-                                ),
-                                &hit.title,
-                                &body,
-                            ),
-                        );
-                    }
-                    compartment_hits.push(candidate);
-                }
-                lanes.chunk_vector = compartment_hits.iter().take(25).cloned().collect();
-                compartment_hits.truncate(tier_limit);
-            } else {
-                availability.insert(
-                    "compartment".into(),
-                    mc_store::parity_schema_manifest::unavailable("retrieval_lane"),
-                );
-            }
-        }
-        if has(RetrievalSource::GitCommit) {
-            let result = retrieval_values(
-                adapter.git_commits(&scope, &request, query_vector, tier_limit),
-                "git_commit",
-                &mut availability,
-            );
-            let convert = |hit: &mc_store::git_archive::GitCommitSearchHit| {
-                retrieval_candidate(
-                    RetrievalSource::GitCommit,
-                    hit.commit.sha.clone(),
-                    None,
-                    preview(&hit.commit.message),
-                    hit.score,
-                    &scope,
-                )
-            };
-            for hit in result.hits.iter().chain(&result.fts).chain(&result.vector) {
-                let candidate = convert(hit);
-                bodies.insert(
-                    retrieval_key(&candidate),
-                    candidate_text(
-                        &format!("git_commit {} {}", hit.commit.sha, scope.project.0),
-                        &format!(
-                            "{} {}",
-                            hit.commit.short_sha,
-                            hit.commit.message.lines().next().unwrap_or_default()
-                        ),
-                        &hit.commit.message,
-                    ),
-                );
-            }
-            lanes.git_fts = result.fts.iter().map(convert).collect();
-            lanes.git_vector = result.vector.iter().map(convert).collect();
-            other_hits.extend(result.hits.iter().map(convert));
-        }
-        if has(RetrievalSource::Note) {
-            let (hits, rows) = retrieval_values(
-                adapter.notes(&scope, &request, &probes, tier_limit.max(25)),
-                "note",
-                &mut availability,
-            );
-            for hit in hits {
-                let candidate = retrieval_candidate(
-                    RetrievalSource::Note,
-                    hit.note_id.to_string(),
-                    hit.anchor_ordinal.and_then(|o| u64::try_from(o).ok()),
-                    hit.content,
-                    hit.score,
-                    &scope,
-                );
-                if let Some(row) = rows.iter().find(|r| r.id == hit.note_id) {
-                    let body = format!(
-                        "{}{}",
-                        row.content,
-                        row.ready_reason
-                            .as_deref()
-                            .filter(|s| !s.is_empty())
-                            .map(|s| format!("\nReason: {s}"))
-                            .unwrap_or_default()
-                    );
-                    bodies.insert(
-                        retrieval_key(&candidate),
-                        candidate_text(
-                            &format!("note {} {}", hit.note_id, scope.project.0),
-                            body.lines().next().unwrap_or_default(),
-                            &body,
-                        ),
-                    );
-                }
-                lanes.notes.push(candidate.clone());
-                other_hits.push(candidate);
-            }
-            lanes.notes.truncate(25);
-        }
-        if has(RetrievalSource::Primer) {
-            availability.insert(
-                "primer".into(),
-                mc_store::parity_schema_manifest::unavailable("retrieval_lane"),
-            );
-        }
-        let mut baseline = memory_hits;
-        baseline.extend(retrieval_merge_messages(
-            raw_hits,
-            compartment_hits,
-            tier_limit,
-        ));
-        baseline.extend(other_hits);
-        baseline.sort_by(|a, b| {
-            let boost = |c: &SearchCandidate| match c.hit.source {
-                RetrievalSource::Memory => 1.3,
-                RetrievalSource::RawMessage | RetrievalSource::Compartment => 1.275,
-                RetrievalSource::GitCommit => 1.2,
-                RetrievalSource::Primer => 1.25,
-                RetrievalSource::Note => 1.0,
-            };
-            (b.hit.score * boost(b))
-                .total_cmp(&(a.hit.score * boost(a)))
-                .then_with(|| {
-                    if a.hit.source != b.hit.source {
-                        return std::cmp::Ordering::Equal;
-                    }
-                    match a.hit.source {
-                        RetrievalSource::Memory => a
-                            .hit
-                            .source_id
-                            .parse::<i64>()
-                            .unwrap_or_default()
-                            .cmp(&b.hit.source_id.parse::<i64>().unwrap_or_default()),
-                        RetrievalSource::RawMessage | RetrievalSource::Compartment => a
-                            .hit
-                            .ordinal
-                            .map(|o| o.value)
-                            .cmp(&b.hit.ordinal.map(|o| o.value)),
-                        _ => std::cmp::Ordering::Equal,
-                    }
-                })
-        });
-        baseline.truncate(limit);
-        if request.query.is_empty() {
-            baseline.clear();
-        }
+        let prepared = retrieval_store::search::collect(
+            &adapter,
+            &scope,
+            &request,
+            &sources,
+            vector.as_deref(),
+        );
         let identity = RerankIdentity::new(
             binding.project_root.to_string_lossy().into_owned(),
             binding.session.clone(),
         );
-        let pinned = prepare_reranker(
-            request.intent,
-            &request.query,
-            self.retrieval_reranker.as_deref(),
-            &identity,
-        )
-        .await;
-        let session = pinned
-            .zip(self.retrieval_reranker.as_deref())
-            .map(|(lane, client)| RerankSession {
-                client,
-                lane,
+        respond(
+            retrieval_store::search::finish(
+                prepared,
+                &request,
                 identity,
-            });
-        let pool = fuse_search_lanes(&lanes);
-        let texts = pool
-            .iter()
-            .map(|c| bodies.get(&retrieval_key(c)).cloned())
-            .collect::<Option<Vec<_>>>();
-        let hits = if let Some(texts) = texts {
-            rerank_search_results(
-                request.intent,
-                session.as_ref(),
-                &request.query,
-                &baseline,
-                &pool,
-                &texts,
-                limit,
+                self.retrieval_reranker.as_deref(),
+                envelope["capture_lanes"] == true,
             )
-            .await
-        } else {
-            baseline
-        };
-        let mut body = json!({"v":1,"hits":hits.into_iter().map(|c| c.hit).collect::<Vec<_>>(),"source_availability":availability,"literal_probes":probes});
-        if envelope["capture_lanes"] == true {
-            body["lanes"] = json!({"git_fts":lanes.git_fts.iter().map(|c|&c.hit).collect::<Vec<_>>(),"git_vector":lanes.git_vector.iter().map(|c|&c.hit).collect::<Vec<_>>()});
-        }
-        respond(body)
+            .await,
+        )
     }
 
     fn handle_non_served_method(
@@ -9352,11 +8908,17 @@ impl McHandler {
             .or_else(|| non_empty_string_arg(args, "content").map(|_| "write"))
             .unwrap_or("read");
         // `note_ids` is the only id field on both the model-facing schema and
-        // the TS adapter's wire. `write` ignores required-surface filler;
-        // targeted `read` and `dismiss` accept one to fifty IDs, while `update`
-        // addresses exactly one note.
+        // the TS adapter's wire. The schema marks it required, so providers that
+        // send only required arguments always carry it: `write` ignores it, and
+        // an empty list on `read` is the plain listing read, the same as leaving
+        // it out. A non-empty list on `read` and `dismiss` takes one to fifty
+        // IDs, while `update` addresses exactly one note.
+        let plain_read = action == "read"
+            && args
+                .get("note_ids")
+                .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty));
         let note_ids = match action {
-            "update" | "dismiss" | "read" if action != "read" || args.get("note_ids").is_some() => {
+            "update" | "dismiss" | "read" if !plain_read => {
                 let max = if action == "update" { 1 } else { 50 };
                 let error = if action == "update" {
                     "Error: 'note_ids' must contain exactly one positive integer id when action is 'update'."
@@ -9738,14 +9300,34 @@ impl ModuleHandler for McHandler {
 
     /// Record the route's {project_root, session} so the transform path can resolve the
     /// project from the daemon-controlled channel (never a per-pass request field). Accept
-    /// every route — project resolution, not authorization, is the concern here.
+    /// session routes. The independent app service authorizes its caller first.
     async fn on_bind(&self, req: &RouteBindRequest) -> subc_client_rs::BindDecision {
+        self.app_channels
+            .lock()
+            .expect("app channels")
+            .remove(&req.handle.channel);
         if let Some(service) = &self.agent_data {
             service
                 .channels
                 .lock()
                 .expect("agent data channels")
                 .remove(&req.handle.channel);
+        }
+        if matches!(&req.target, subc_protocol::RouteTarget::InternalService { service_id, .. } if service_id == app_read::SERVICE_ID)
+        {
+            let allow_direct = !matches!(req.principal, Some(subc_protocol::Principal::Direct))
+                || config::user_app_read_allow_direct();
+            return match app_read::admission::admit(req, &self.registered_module_id, allow_direct) {
+                Ok(caller) => {
+                    self.unbind_route(req.handle.channel);
+                    self.app_channels
+                        .lock()
+                        .expect("app channels")
+                        .insert(req.handle.channel, caller);
+                    subc_client_rs::BindDecision::accept()
+                }
+                Err(refusal) => refusal,
+            };
         }
         if let subc_protocol::RouteTarget::InternalService {
             module_id,
@@ -9850,6 +9432,10 @@ impl ModuleHandler for McHandler {
     /// Drop the route's binding on teardown so a reused channel can't resolve a stale
     /// project and the map doesn't leak.
     async fn on_route_gone(&self, handle: &RouteHandle) {
+        self.app_channels
+            .lock()
+            .expect("app channels")
+            .remove(&handle.channel);
         if let Some(service) = &self.agent_data {
             service
                 .channels
@@ -9861,7 +9447,37 @@ impl ModuleHandler for McHandler {
     }
 
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
-        let channel = ctx.route_handle().channel;
+        self.handle_channel(ctx.route_handle().channel, body).await
+    }
+}
+
+impl McHandler {
+    async fn handle_channel(&self, channel: u16, body: Vec<u8>) -> HandlerOutcome {
+        let app_caller = self
+            .app_channels
+            .lock()
+            .expect("app channels")
+            .get(&channel)
+            .cloned();
+        if let Some(caller) = app_caller {
+            let allow_direct = !caller.is_direct() || config::user_app_read_allow_direct();
+            let context = app_read::AppReadContext::from_parts(
+                self.store.get().cloned(),
+                Arc::clone(&self.config),
+                {
+                    let roots = self
+                        .active_project_roots
+                        .lock()
+                        .expect("active project roots");
+                    let mut paths: Vec<_> = roots.values().cloned().collect();
+                    paths.sort();
+                    paths.dedup();
+                    paths
+                },
+                now_ms(),
+            );
+            return app_read::handle(&caller, allow_direct, &body, &context);
+        }
         // A flow-scoped route never takes the agent-data lane: it falls through to
         // the dispatcher, whose flow fence admits only the flow ops.
         if !self.flow_scoped(channel)
@@ -9912,8 +9528,27 @@ impl ModuleHandler for McHandler {
             return outcome;
         }
         let request = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
-        self.dispatch_request(ctx.route_handle().channel, request)
-            .await
+        if request
+            .get("method")
+            .and_then(Value::as_str)
+            .is_some_and(|method| app_read::APP_READ_METHODS.contains(&method))
+        {
+            return HandlerOutcome::Error {
+                code: if self
+                    .bindings
+                    .lock()
+                    .expect("route bindings")
+                    .contains_key(&channel)
+                {
+                    "app_caller_forbidden"
+                } else {
+                    "route_unbound"
+                }
+                .into(),
+                message: "App read methods require a bound mc-app-read channel.".into(),
+            };
+        }
+        self.dispatch_request(channel, request).await
     }
 }
 
@@ -13009,6 +12644,15 @@ pub fn manifest_with_route_targets_and_smart_notes(
             sub_supervises: false,
         },
         subagent_invocations_read::management_role(),
+        ProviderRole::InternalService {
+            service_id: app_read::SERVICE_ID.into(),
+            transport: subc_protocol::manifest::InternalTransport::Bulk,
+            agent_facing: false,
+            operations: app_read::APP_READ_METHODS
+                .iter()
+                .map(|method| method.to_string())
+                .collect(),
+        },
     ];
     if agent_data::ENABLED {
         capabilities.push(cortexkit_role_agent_data::PROVIDES.to_string());
@@ -17701,10 +17345,9 @@ mod tests {
             properties["note_ids"],
             json!({
                 "type": "array",
-                "minItems": 1,
                 "maxItems": 50,
                 "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 },
-                "description": "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write."
+                "description": "Note ids: one for update, 1–50 for dismiss, or 1–50 to read those notes in full. Write and a plain read take an empty list."
             })
         );
     }
@@ -21957,7 +21600,230 @@ mod tests {
         );
     }
 
-    // ---- historian claim lane: the wire A2 codes against -------------------
+    // The ctx_note and ctx_memory schemas mark their key arguments required, so
+    // providers that send only required arguments always carry `note_ids`, `ids`,
+    // `content` and `category`, filled with an empty or unrelated value where the
+    // action has no use for them. These calls go through the real facade argument
+    // decoding and handlers.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ctx_note_required_note_ids_accept_empty_lists_where_unused() {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, _store, _dir, _project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
+        );
+
+        let written = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "write", "content": "remember the lattice", "note_ids": []}),
+            )
+            .await,
+        );
+        assert!(written.starts_with("Saved session note #1."), "{written}");
+
+        let plain = tool_text(call_facade(&handler, "ctx_note", json!({"action": "read"})).await);
+        assert!(plain.contains("remember the lattice"), "{plain}");
+        let empty_list = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "read", "content": "", "note_ids": []}),
+            )
+            .await,
+        );
+        assert_eq!(empty_list, plain);
+
+        let targeted = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "read", "content": "", "note_ids": [1]}),
+            )
+            .await,
+        );
+        assert!(targeted.starts_with("## Notes by ID"), "{targeted}");
+        assert!(targeted.contains("remember the lattice"), "{targeted}");
+
+        let dismiss = call_facade(
+            &handler,
+            "ctx_note",
+            json!({"action": "dismiss", "content": "", "note_ids": []}),
+        )
+        .await;
+        assert_eq!(
+            tool_text(dismiss),
+            "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'."
+        );
+        let update = call_facade(
+            &handler,
+            "ctx_note",
+            json!({"action": "update", "content": "changed", "note_ids": []}),
+        )
+        .await;
+        assert_eq!(
+            tool_text(update),
+            "Error: 'note_ids' must contain exactly one positive integer id when action is 'update'."
+        );
+        let still_active =
+            tool_text(call_facade(&handler, "ctx_note", json!({"action": "read"})).await);
+        assert_eq!(still_active, plain);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ctx_memory_required_arguments_accept_values_the_action_does_not_use() {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
+        );
+        let project = project.to_str().unwrap();
+
+        // write: an empty ids list is ignored; empty content is still refused.
+        let written = tool_text(
+            call_facade(
+                &handler,
+                "ctx_memory",
+                json!({
+                    "action": "write",
+                    "content": "Written with an empty id list.",
+                    "category": "PROJECT_RULES",
+                    "ids": []
+                }),
+            )
+            .await,
+        );
+        assert!(written.starts_with("Saved memory [ID: "), "{written}");
+        let empty_content = tool_text(
+            call_facade(
+                &handler,
+                "ctx_memory",
+                json!({"action": "write", "content": "", "category": "PROJECT_RULES", "ids": []}),
+            )
+            .await,
+        );
+        assert_eq!(
+            empty_content,
+            "Error: 'content' is required when action is 'write'."
+        );
+
+        // get: content and an unrelated category are ignored; empty ids are refused.
+        let get_id = insert_memory(&store, project, "PROJECT_RULES", "Get this fact.", 20);
+        let got = tool_text(
+            call_facade(
+                &handler,
+                "ctx_memory",
+                json!({"action": "get", "ids": [get_id], "content": "", "category": "CONSTRAINTS"}),
+            )
+            .await,
+        );
+        assert!(
+            got.contains(&format!("Memory [ID: {get_id}] in PROJECT_RULES")),
+            "{got}"
+        );
+        assert!(got.contains("Get this fact."), "{got}");
+        let get_empty = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({"action": "get", "ids": [], "content": "", "category": "CONSTRAINTS"}),
+        )
+        .await;
+        assert!(tool_is_error(get_empty));
+
+        // archive: content and an unrelated category are ignored.
+        let archive_id = insert_memory(&store, project, "PROJECT_RULES", "Archive this fact.", 30);
+        let archived = tool_text(
+            call_facade(
+                &handler,
+                "ctx_memory",
+                json!({
+                    "action": "archive",
+                    "ids": [archive_id],
+                    "content": "",
+                    "category": "CONSTRAINTS"
+                }),
+            )
+            .await,
+        );
+        assert_eq!(archived, format!("Archived memory IDs [{archive_id}]."));
+
+        // update: the category sent is the one the memory ends up in. Sending its
+        // current category keeps it; sending another moves it; an empty value
+        // keeps it as well.
+        let update_id = insert_memory(&store, project, "ARCHITECTURE", "Original fact.", 40);
+        let kept = tool_text(
+            call_facade(
+                &handler,
+                "ctx_memory",
+                json!({
+                    "action": "update",
+                    "ids": [update_id],
+                    "content": "Updated fact.",
+                    "category": "ARCHITECTURE"
+                }),
+            )
+            .await,
+        );
+        assert_eq!(
+            kept,
+            format!("Updated memory [ID: {update_id}] in ARCHITECTURE.")
+        );
+        let moved = tool_text(
+            call_facade(
+                &handler,
+                "ctx_memory",
+                json!({
+                    "action": "update",
+                    "ids": [update_id],
+                    "content": "Updated fact, renamed.",
+                    "category": "NAMING"
+                }),
+            )
+            .await,
+        );
+        assert_eq!(
+            moved,
+            format!("Updated memory [ID: {update_id}] in NAMING.")
+        );
+        let empty_category = tool_text(
+            call_facade(
+                &handler,
+                "ctx_memory",
+                json!({
+                    "action": "update",
+                    "ids": [update_id],
+                    "content": "Updated fact, once more.",
+                    "category": ""
+                }),
+            )
+            .await,
+        );
+        assert_eq!(
+            empty_category,
+            format!("Updated memory [ID: {update_id}] in NAMING.")
+        );
+
+        // merge: the category sent is the merged memory's category.
+        let first = insert_memory(&store, project, "CONSTRAINTS", "Merge source one.", 50);
+        let second = insert_memory(&store, project, "CONSTRAINTS", "Merge source two.", 60);
+        let merged = tool_text(
+            call_facade(
+                &handler,
+                "ctx_memory",
+                json!({
+                    "action": "merge",
+                    "ids": [first, second],
+                    "content": "Merged fact.",
+                    "category": "CONFIG_VALUES"
+                }),
+            )
+            .await,
+        );
+        assert!(merged.contains("in CONFIG_VALUES"), "{merged}");
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn note_facade_glance_lists_one_row_per_note_with_age_and_stale_markers() {

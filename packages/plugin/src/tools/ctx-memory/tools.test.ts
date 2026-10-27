@@ -2505,13 +2505,27 @@ describe("createCtxMemoryTools", () => {
             });
 
             // OpenCode wraps plugin args in a non-strict object schema, so an
-            // unknown `limit` from a replayed call must not fail validation.
+            // unknown `limit` from a replayed call must not fail validation. The
+            // replayed call carries the now-required action-irrelevant filler a
+            // provider would send (issue 793); `get` still ignores it.
             const hostSchema = tool.schema.object(tools.ctx_memory.args);
-            expect(hostSchema.safeParse({ action: "get", ids: [first.id], limit: 5 }).success).toBe(
-                true,
-            );
+            expect(
+                hostSchema.safeParse({
+                    action: "get",
+                    ids: [first.id],
+                    content: "",
+                    category: "CONSTRAINTS",
+                    limit: 5,
+                }).success,
+            ).toBe(true);
             const replayed = await tools.ctx_memory.execute(
-                { action: "get", ids: [first.id], limit: 5 },
+                {
+                    action: "get",
+                    ids: [first.id],
+                    content: "",
+                    category: "CONSTRAINTS",
+                    limit: 5,
+                },
                 toolContext(),
             );
             expect(replayed).toContain("First durable constraint.");
@@ -3041,6 +3055,192 @@ describe("createCtxMemoryTools", () => {
             expect(primaryFiller).toBe(
                 "Error: ctx_memory_list is only available to the dreamer agent.",
             );
+        });
+    });
+
+    describe("issue 793 required provider schema", () => {
+        it("advertises action, content, category and ids as required", () => {
+            // Argument-dropping providers (InferenceNet via OpenRouter) only
+            // emit required properties, so the key arguments must be required
+            // for the calls to arrive complete. `reason` stays optional.
+            const jsonSchema = tool.schema.toJSONSchema(
+                tool.schema.object(tools.ctx_memory.args ?? {}),
+            ) as { required?: string[] };
+            expect(jsonSchema.required?.sort()).toEqual(["action", "category", "content", "ids"]);
+        });
+
+        it("accepts an empty ids list at the provider-schema level", () => {
+            // ctx_memory ids carries no minimum: a model that correctly sends
+            // ids: [] on write must pass host schema validation.
+            const hostSchema = tool.schema.object(tools.ctx_memory.args ?? {});
+            expect(
+                hostSchema.safeParse({
+                    action: "write",
+                    content: "x",
+                    category: "PROJECT_RULES",
+                    ids: [],
+                }).success,
+            ).toBe(true);
+        });
+
+        it("archive with empty content and any category validates and archives", async () => {
+            await tools.ctx_memory.execute(
+                {
+                    action: "write",
+                    category: "PROJECT_RULES",
+                    content: "Archivable filler fact.",
+                },
+                toolContext(),
+            );
+            const params: {
+                action: "archive";
+                ids: number[];
+                content: string;
+                category: string;
+            } = { action: "archive", ids: [1], content: "", category: "CONSTRAINTS" };
+            const hostSchema = tool.schema.object(tools.ctx_memory.args ?? {});
+            expect(hostSchema.safeParse(params).success).toBe(true);
+            const result = await tools.ctx_memory.execute(params, toolContext());
+            expect(result).toContain("Archived memory [ID: 1]");
+        });
+
+        it("write succeeds with an empty ids list and still rejects an empty content", async () => {
+            const written = await tools.ctx_memory.execute(
+                {
+                    action: "write",
+                    category: "PROJECT_RULES",
+                    content: "Filler ids fact.",
+                    ids: [],
+                },
+                toolContext(),
+            );
+            expect(written).toContain("Saved memory [ID: 1]");
+            const emptyContent = await tools.ctx_memory.execute(
+                {
+                    action: "write",
+                    category: "PROJECT_RULES",
+                    content: "",
+                    ids: [],
+                },
+                toolContext(),
+            );
+            expect(emptyContent).toBe("Error: 'content' is required when action is 'write'.");
+        });
+
+        it("get succeeds with content/category filler and still rejects empty ids", async () => {
+            await tools.ctx_memory.execute(
+                {
+                    action: "write",
+                    category: "PROJECT_RULES",
+                    content: "Gettable fact.",
+                },
+                toolContext(),
+            );
+            const filler = await tools.ctx_memory.execute(
+                { action: "get", ids: [1], content: "", category: "PROJECT_RULES" },
+                toolContext(),
+            );
+            expect(filler).toContain("Gettable fact.");
+            const emptyIds = await tools.ctx_memory.execute(
+                { action: "get", ids: [], content: "", category: "PROJECT_RULES" },
+                toolContext(),
+            );
+            expect(emptyIds).toBe(
+                "Error: 'ids' must contain at least one integer memory ID when action is 'get'.",
+            );
+        });
+
+        it("archive succeeds with content/category filler and still rejects empty ids", async () => {
+            await tools.ctx_memory.execute(
+                {
+                    action: "write",
+                    category: "PROJECT_RULES",
+                    content: "Archivable fact.",
+                },
+                toolContext(),
+            );
+            const filler = await tools.ctx_memory.execute(
+                { action: "archive", ids: [1], content: "", category: "PROJECT_RULES" },
+                toolContext(),
+            );
+            expect(filler).toContain("Archived memory [ID: 1]");
+        });
+
+        it("update keeps the category callers send back and changes it when they send another", async () => {
+            await tools.ctx_memory.execute(
+                {
+                    action: "write",
+                    category: "PROJECT_RULES",
+                    content: "Recategorizable fact.",
+                },
+                toolContext(),
+            );
+            const kept = await tools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [1],
+                    category: "PROJECT_RULES",
+                    content: "Same category fact.",
+                },
+                toolContext(),
+            );
+            expect(kept).toContain("in PROJECT_RULES");
+            expect(getMemoryById(db, 1)?.category).toBe("PROJECT_RULES");
+            const changed = await tools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [1],
+                    category: "CONSTRAINTS",
+                    content: "Moved category fact.",
+                },
+                toolContext(),
+            );
+            expect(changed).toContain("in CONSTRAINTS");
+            expect(getMemoryById(db, 1)?.category).toBe("CONSTRAINTS");
+            const emptyContent = await tools.ctx_memory.execute(
+                { action: "update", ids: [1], category: "CONSTRAINTS", content: "" },
+                toolContext(),
+            );
+            expect(emptyContent).toBe("Error: 'content' is required when action is 'update'.");
+        });
+
+        it("merge keeps the sent source category and still rejects empty filler", async () => {
+            await tools.ctx_memory.execute(
+                {
+                    action: "write",
+                    category: "PROJECT_RULES",
+                    content: "First merge fact.",
+                },
+                toolContext(),
+            );
+            await tools.ctx_memory.execute(
+                {
+                    action: "write",
+                    category: "PROJECT_RULES",
+                    content: "Second merge fact.",
+                },
+                toolContext(),
+            );
+            const merged = await tools.ctx_memory.execute(
+                {
+                    action: "merge",
+                    ids: [1, 2],
+                    category: "PROJECT_RULES",
+                    content: "Merged filler fact.",
+                },
+                toolContext(),
+            );
+            expect(merged).toContain("in PROJECT_RULES");
+            const emptyContent = await tools.ctx_memory.execute(
+                {
+                    action: "merge",
+                    ids: [1, 2],
+                    category: "PROJECT_RULES",
+                    content: "",
+                },
+                toolContext(),
+            );
+            expect(emptyContent).toBe("Error: 'content' is required when action is 'merge'.");
         });
     });
 });

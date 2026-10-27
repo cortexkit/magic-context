@@ -249,3 +249,117 @@ async fn broca_0_7_offline_import_serves_bare_export_lines() {
         Some("8fc1fdb7-1e03-4f62-a690-6bcfe91075b6:5")
     );
 }
+
+/// The approved page with the members runners send since llm-runner 0.7.0 on
+/// every row, with the values Broca's display captures show: `model` on an
+/// assistant row (0.7.4: it carries its recorded model) and the `sender`
+/// module of the message.
+fn page_with_row_members(mut page: Value) -> Value {
+    for row in page["messages"].as_array_mut().expect("messages") {
+        if row["message"]["role"] == "assistant" {
+            row["model"] = json!("p/m");
+        }
+        row["sender"] = json!("sample-owner");
+    }
+    page
+}
+
+/// Members runners send after llm-runner 0.7.0 never make ck-mc refuse:
+/// per-row `model` and `sender` on `session.read` entries, through the
+/// resumable read, the re-read stability check and notice ingest (whose
+/// owned-broca decode is ck-mc's own strict codec); the same members on
+/// `session.history` rows through the history page decode ctx_expand uses;
+/// and `last_run_error` (0.7.5), `sender` and `model` on `session.head`
+/// through the head read that opens the lineage window.
+#[tokio::test]
+async fn members_newer_than_the_card_contract_never_refuse() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = owned_broca_rig(dir.path()).await;
+    let plain = approved_described_page();
+    let page = page_with_row_members(plain.clone());
+    *rig.runner.page_override.lock().unwrap() = Some(page.clone());
+    let mut state = rig.state();
+    state.lineage = Some(page["lineage_id"].as_str().expect("lineage").into());
+    let read = rig
+        .h
+        .read_async_resumable(&mut state, 0, Duration::from_secs(5))
+        .await;
+    assert!(
+        matches!(read, Ok(ReadProgress::Complete)),
+        "rows with model and sender complete the read"
+    );
+    assert_eq!(state.entries.len(), 4);
+    // Held without the members, re-read with them, or the other way round:
+    // neither is a changed transcript.
+    let with: Vec<ReadMessage> = serde_json::from_value(page["messages"].clone()).unwrap();
+    let without: Vec<ReadMessage> = serde_json::from_value(plain["messages"].clone()).unwrap();
+    for (with, without) in with.iter().zip(&without) {
+        let held = state.entries.get(&with.ordinal).unwrap().read().unwrap();
+        assert!(stable_entry(&held, with), "ordinal {}", with.ordinal);
+        assert!(stable_entry(&held, without), "ordinal {}", with.ordinal);
+    }
+    let codec = codec::Codec::from_params(&Value::Object(state.setup.params.clone())).unwrap();
+    state
+        .ingest_read(rig.h.store.get().unwrap(), codec)
+        .unwrap_or_else(|error| panic!("ingest: {error:?}"));
+    // Raw `session.history` rows (the form ctx_expand reads) carry the same
+    // members. Broca's display captures show their real values: `model` on
+    // assistant rows and the `sender` module.
+    let display: Value = serde_json::from_slice(include_bytes!(
+        "../../../../testdata/broca-0.7/approved.session.history.json"
+    ))
+    .unwrap();
+    let model = display["result"]["messages"][1]["row"]["model"].clone();
+    let sender = display["result"]["messages"][0]["row"]["sender"].clone();
+    assert!(model.is_string() && sender.is_string());
+    let rows = approved_page()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            let mut row = json!({"mid":entry["mid"],"ordinal":entry["ordinal"],"written_at":entry["written_at"],"message":entry["message"],"tags":entry["tags"],"sender":sender});
+            if entry["message"]["role"] == "assistant" {
+                row["model"] = model.clone();
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    let history = json!({"lineage_id":page["lineage_id"],"history_version":0,"messages":rows});
+    let decoded: cortexkit_role_llm_runner::history::HistoryPage =
+        crate::providers::decode(&history).unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(
+        decoded.messages.len(),
+        history["messages"].as_array().unwrap().len()
+    );
+    for row in &decoded.messages {
+        codec
+            .decode_message(&InboundMessage {
+                ordinal: row.ordinal.unwrap_or(0),
+                mid: row.mid.clone(),
+                message: row.message.clone(),
+            })
+            .unwrap_or_else(|error| panic!("{}: {error:?}", row.mid));
+    }
+    // `session.head` with `last_run_error`, `sender` and `model`, from
+    // llm-runner 0.7.9's published head vectors.
+    let vector = |name: &str| -> Value {
+        serde_json::from_str(cortexkit_role_llm_runner::vectors::file(name).unwrap()).unwrap()
+    };
+    let mut head = vector("head-last-run-error.json")["answers"][0]["answer"].clone();
+    assert!(head.get("last_run_error").is_some());
+    head["sender"] = vector("head-sender.json")["answers"][0]["answer"]["sender"].clone();
+    head["model"] = serde_json::to_value(cortexkit_role_llm_runner::read::HeadModel::new(
+        "anthropic",
+        "claude-sonnet-4-5",
+    ))
+    .unwrap();
+    *rig.runner.head_override.lock().unwrap() = Some(head.clone());
+    let mut fresh = rig.state();
+    fresh.entries = Default::default();
+    fresh.cut_seed = None;
+    fresh.conditions = None;
+    rig.h
+        .ensure_lineage_window(&mut fresh, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|error| panic!("head with newer members: {error:?}"));
+}

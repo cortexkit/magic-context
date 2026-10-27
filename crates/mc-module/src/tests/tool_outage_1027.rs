@@ -19,6 +19,7 @@
 
 use cortexkit_role_llm_runner::history::HistoryEntry;
 use cortexkit_role_llm_runner::read::{ReadMessage, ReadPage};
+use cortexkit_role_llm_runner::serializer_profile::error_output::ErrorOutput;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -577,9 +578,23 @@ fn tool_outage_each_field_composes_its_own_line() {
 /// Renders a re-encoded error output the way Broca does: `message` plus one
 /// line per present sibling, in field order. This mirrors broca-protocol's
 /// `ToolOutput::error_model_text` and is the independent check that a
-/// re-encoded output renders exactly the CK text it was built from.
+/// re-encoded output renders exactly the CK text it was built from. It also
+/// checks the mirror against llm-runner's published renderer, the text every
+/// runner shows the model, so the two can never drift apart unnoticed.
 fn broca_model_text(output: &Value) -> String {
     assert_eq!(output["kind"], serde_json::json!("error"));
+    let published = ErrorOutput::decode(output)
+        .unwrap_or_else(|violation| panic!("re-encoded output breaks the profile: {violation}"))
+        .render();
+    let mirrored = broca_mirror_text(output);
+    assert_eq!(
+        mirrored, published,
+        "Broca's rendering and the published one agree"
+    );
+    mirrored
+}
+
+fn broca_mirror_text(output: &Value) -> String {
     let mut text = output["message"].as_str().expect("message").to_string();
     for (key, prefix) in [
         ("module", "\nmodule: "),
@@ -1006,4 +1021,103 @@ fn tool_outage_model_visible_text_stays_the_plain_message() {
     assert_eq!(projection.blocks[1].tool_call_id.as_deref(), Some("call-1"));
     assert!(projection.blocks[1].arc_id.is_some());
     assert_eq!(projection.blocks[1].arc_id, projection.blocks[0].arc_id);
+}
+
+/// llm-runner 0.7.9's published owned-broca error-output vectors, copied byte
+/// for byte into `testdata/owned-broca-tool-outage/` with their `SHA256SUMS`.
+fn published_vector(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("testdata/owned-broca-tool-outage")
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|error| panic!("read {path:?}: {error}"))
+}
+
+fn outage_entry(output: &Value) -> crate::providers::codec::InboundMessage {
+    crate::providers::codec::InboundMessage {
+        ordinal: 9,
+        mid: "m9".into(),
+        message: serde_json::json!({"role":"tool","content":[{"type":"tool_result","tool_call_id":"c","output":output,"is_error":true}]}),
+    }
+}
+
+/// The published vector files are the ones llm-runner 0.7.9 ships: every
+/// file listed in `SHA256SUMS` matches its digest.
+#[test]
+fn tool_outage_published_vectors_match_their_checksums() {
+    let sums = String::from_utf8(published_vector("SHA256SUMS")).unwrap();
+    let mut checked = 0;
+    for line in sums.lines() {
+        let (digest, name) = line.split_once("  ").expect("sha256sum line");
+        assert_eq!(
+            hex(&Sha256::digest(published_vector(name))),
+            digest,
+            "{name} drifted from the published vectors"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 10);
+}
+
+/// Every published valid output decodes through the owned-broca codec, its
+/// CK text is exactly the published rendering (what the runner shows the
+/// model), and re-encoding the unchanged message gives back the runner's own
+/// bytes.
+#[test]
+fn tool_outage_published_valid_outputs_decode_render_and_round_trip() {
+    let file: Value =
+        serde_json::from_slice(&published_vector("valid-error-outputs.json")).unwrap();
+    let cases = file["valid"].as_array().unwrap();
+    assert!(!cases.is_empty());
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let entry = outage_entry(&case["output"]);
+        let decoded = crate::providers::codec::Codec::OwnedBroca
+            .decode_message(&entry)
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let crate::ck_wire::CkKind::ToolResult { output, .. } = &decoded.ck.content[0].kind else {
+            panic!("{name}: must decode to a tool result");
+        };
+        assert_eq!(
+            Value::from(crate::tail_hygiene::tool_output_content(&output.kind)),
+            case["rendered"],
+            "{name}: the CK text is the published rendering"
+        );
+        let encoded = crate::providers::codec::encode_message(&decoded.ck).unwrap();
+        assert_eq!(
+            crate::providers::bytes(&encoded).unwrap(),
+            crate::providers::bytes(&entry.message).unwrap(),
+            "{name}: an unchanged output goes back as the runner's bytes"
+        );
+    }
+}
+
+/// Every published invalid output is refused as `history_unreadable`. Where
+/// the output is an error output, the refusal names the member and the rule
+/// the published reader names; an output of another kind is refused by the
+/// codec's own closed shape for that kind.
+#[test]
+fn tool_outage_published_invalid_outputs_are_refused_by_member_and_rule() {
+    let file: Value =
+        serde_json::from_slice(&published_vector("invalid-error-outputs.json")).unwrap();
+    let cases = file["invalid"].as_array().unwrap();
+    assert!(cases.len() >= 20);
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let error = crate::providers::codec::Codec::OwnedBroca
+            .decode_message(&outage_entry(&case["output"]))
+            .expect_err(name);
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("history_unreadable"),
+            "{name}: {rendered}"
+        );
+        if case["output"]["kind"] == "error" {
+            let member = case["expect"]["member"].as_str().unwrap();
+            let rule = case["expect"]["rule"].as_str().unwrap();
+            assert!(
+                rendered.contains(&format!("member {member}: {rule}")),
+                "{name}: the refusal names {member} and {rule}: {rendered}"
+            );
+        }
+    }
 }

@@ -106,20 +106,20 @@
         "tokens": 187
       },
       "ctx_note": {
-        "chars": 1314,
-        "tokens": 303
+        "chars": 1276,
+        "tokens": 296
       },
       "ctx_memory": {
-        "chars": 717,
-        "tokens": 172
+        "chars": 719,
+        "tokens": 175
       },
       "ctx_search": {
         "chars": 566,
         "tokens": 134
       },
-      "totalTokens": 834
+      "totalTokens": 830
     },
-    "builtInProviderVisibleTotal": 3929
+    "builtInProviderVisibleTotal": 3925
   },
   "mutableProseBaseline": 3095,
   "integerLightCeiling": 1917,

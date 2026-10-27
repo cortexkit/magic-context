@@ -76,42 +76,34 @@ type CtxNoteReadFilter = (typeof FILTER_VALUES)[number];
 
 const ParamsSchema = Type.Object(
 	{
-		action: Type.Optional(
-			Type.Union(
-				[
-					Type.Literal("write"),
-					Type.Literal("read"),
-					Type.Literal("dismiss"),
-					Type.Literal("update"),
-				],
-				{
-					description:
-						"write | read | update | dismiss. Defaults to write when content is given, else read.",
-				},
-			),
+		action: Type.Union(
+			[
+				Type.Literal("write"),
+				Type.Literal("read"),
+				Type.Literal("dismiss"),
+				Type.Literal("update"),
+			],
+			{
+				description: "write | read | update | dismiss.",
+			},
 		),
-		content: Type.Optional(
-			Type.String({
-				description:
-					"Note text for write/update: first line is the title (under 80 chars), then the detail.",
-			}),
-		),
+		content: Type.String({
+			description:
+				"Note text for write/update: first line is the title (under 80 chars), then the detail.",
+		}),
 		surface_condition: Type.Optional(
 			Type.String({
 				description:
 					"Makes this a smart note: a condition an outside checker can verify on its own, periodically — repository state, releases, web pages, anything it can look up — never something only this conversation knows. The note is parked until the condition holds.",
 			}),
 		),
-		note_ids: Type.Optional(
-			Type.Array(
-				Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
-				{
-					minItems: 1,
-					maxItems: 50,
-					description:
-						"Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write.",
-				},
-			),
+		note_ids: Type.Array(
+			Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+			{
+				maxItems: 50,
+				description:
+					"Note ids: one for update, 1–50 for dismiss, or 1–50 to read those notes in full. Write and a plain read take an empty list.",
+			},
 		),
 		filter: Type.Optional(
 			Type.Union(
@@ -200,8 +192,10 @@ function formatNotesById(
 
 /**
  * Read `note_ids` for targeted reads and mutations. `write` ignores the field
- * because required-all tool surfaces send filler there. `read` and `dismiss`
- * accept one to fifty IDs; `update` addresses exactly one note.
+ * and a plain `read` treats an empty list the same as omitting it, because
+ * required-field tool surfaces send `[]` where there is nothing to select.
+ * A non-empty list on `read` returns those notes in full; `dismiss` accepts
+ * one to fifty IDs; `update` addresses exactly one note.
  */
 function parseNoteIds(action: string, value: unknown): number[] | string {
 	const max = action === "update" ? 1 : 50;
@@ -316,11 +310,21 @@ export function createCtxNoteTool(
 			// check would mis-infer `write` and then reject the empty content.
 			const action =
 				params.action ?? (params.content?.trim() ? "write" : "read");
+			// An empty list on read is the plain listing read, not a targeted
+			// one: required-field providers always send the field, so `[]`
+			// must behave like omitting it. Only a non-empty list selects the
+			// full-body read; dismiss and update genuinely need ids.
+			const targetedReadIds =
+				action === "read" &&
+				Array.isArray(params.note_ids) &&
+				params.note_ids.length === 0
+					? undefined
+					: params.note_ids;
 			const noteIds =
 				action === "dismiss" ||
 				action === "update" ||
-				(action === "read" && params.note_ids !== undefined)
-					? parseNoteIds(action, params.note_ids)
+				(action === "read" && targetedReadIds !== undefined)
+					? parseNoteIds(action, targetedReadIds)
 					: undefined;
 			if (typeof noteIds === "string") return err(noteIds);
 

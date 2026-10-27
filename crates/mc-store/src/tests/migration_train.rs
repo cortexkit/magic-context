@@ -491,7 +491,7 @@ fn assert_metadata_and_inventory(store: &McStore, version: u32) {
             }
         }
     }
-    if version == 74 {
+    if version == LATEST_MIGRATION_VERSION {
         store
             .inner
             .with_conn(|conn| {
@@ -501,7 +501,10 @@ fn assert_metadata_and_inventory(store: &McStore, version: u32) {
             })
             .unwrap();
         assert_eq!(crate::move_inventory::INVENTORY_VERSION, 9);
-        assert_eq!(crate::move_inventory::STORE_SCHEMA_VERSION, 74);
+        assert_eq!(
+            crate::move_inventory::STORE_SCHEMA_VERSION,
+            LATEST_MIGRATION_VERSION
+        );
     }
 }
 
@@ -867,6 +870,8 @@ fn assert_intent(store: &McStore, target: u32) {
                     0
                 );
             }
+        }
+        v if v == LATEST_MIGRATION_VERSION => {
             let key = "[\"project\",\"async-owner\",\"opencode\"]";
             let mut save =
                 store.async_compaction_save("async-ref", key, "async-owner", "{\"cursor\":7}");
@@ -1594,14 +1599,13 @@ fn populated_increment(previous: u32) {
 }
 
 #[test]
-fn released_63_to_74_preserves_data_and_fences_the_old_binary() {
+fn released_63_to_head_preserves_data_and_fences_the_old_binary() {
     let dir = tempfile::tempdir().unwrap();
     let descriptor = descriptor(dir.path());
     // Build the released schema from its DDL, without creating any later tables.
     let before = seed(&descriptor, 63);
     assert!(!before.tables.contains_key("mc_async_compaction"));
     let upgraded = McStore::open(&descriptor).unwrap();
-    assert_eq!(LATEST_MIGRATION_VERSION, 74);
     // The move inventory's context.db pin must match the context schema this binary
     // ships (the plugin's LATEST_SUPPORTED_VERSION, read at compile time), so the
     // expectation moves with each new context migration instead of being a literal.
@@ -1609,7 +1613,7 @@ fn released_63_to_74_preserves_data_and_fences_the_old_binary() {
         crate::move_inventory::CONTEXT_SCHEMA_VERSION,
         crate::context_schema::BOOTSTRAP_VERSION
     );
-    assert_metadata_and_inventory(&upgraded, 74);
+    assert_metadata_and_inventory(&upgraded, LATEST_MIGRATION_VERSION);
     let after = store_snapshot(&upgraded);
     for table in ["mc_tags", "pending_agent_drops"] {
         assert_eq!(after.tables[table], before.tables[table], "{table}");
@@ -1621,14 +1625,14 @@ fn released_63_to_74_preserves_data_and_fences_the_old_binary() {
     drop(upgraded);
     let bytes = database_bytes(dir.path());
     let Err(error) = McStore::open_with_migrations(&descriptor, false, &chain(63)) else {
-        panic!("a version 63 binary accepted version 74");
+        panic!("a version 63 binary accepted the current head");
     };
     assert!(matches!(
         error,
         McStoreError::StoreAheadOfBinary {
-            db_version: 74,
+            db_version,
             binary_max: 63
-        }
+        } if db_version == LATEST_MIGRATION_VERSION
     ));
     assert_eq!(database_bytes(dir.path()), bytes);
 }
@@ -1653,3 +1657,105 @@ increment!(populated_70_to_71, 70);
 increment!(populated_71_to_72, 71);
 increment!(populated_72_to_73, 72);
 increment!(populated_73_to_74, 73);
+
+#[test]
+fn app_read_indexes_upgrade_populated_entries_and_roll_back_on_failure() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let dir = tempfile::tempdir().unwrap();
+    let descriptor = descriptor(dir.path());
+    seed_context(&dir.path().join("context.db"));
+    seed(&descriptor, 74);
+    let old = open_at(&descriptor, 74);
+    old.inner.with_conn(|conn| {
+        conn.execute_batch(r#"
+            INSERT INTO mc_async_compaction VALUES('legacy-ref','["/p","held-session","pi"]','held-session','{}',4);
+            INSERT INTO mc_async_compaction_entries VALUES
+                ('legacy-ref','held-session',0,'{"mid":"runner-m0","content":"kept"}','[]'),
+                ('legacy-ref','held-session',1,'{"mid":"runner-m1"}','[]'),
+                ('legacy-ref','held-session',2,'{}','[]'),
+                ('legacy-ref','held-session',3,'legacy opaque entry','[]');
+        "#)
+    }).unwrap();
+    let before = store_snapshot(&old);
+    drop(old);
+    let inner = open_sqlite(&descriptor).unwrap();
+    let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hit = reached.clone();
+    inner
+        .with_conn(|conn| {
+            conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+                if matches!(ctx.action, AuthAction::CreateIndex { index_name, .. }
+                if index_name == "idx_mc_async_compaction_entries_mid")
+                {
+                    hit.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }));
+            Ok(())
+        })
+        .unwrap();
+    assert!(inner.migrate(NS, &chain(LATEST_MIGRATION_VERSION)).is_err());
+    assert!(reached.load(std::sync::atomic::Ordering::SeqCst));
+    inner
+        .with_conn(|conn| {
+            conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+            assert_eq!(
+                snapshot(conn)?,
+                before,
+                "failed backfill must roll back DDL, rows and stamps"
+            );
+            Ok(())
+        })
+        .unwrap();
+    drop(inner);
+
+    let upgraded = McStore::open(&descriptor).unwrap();
+    assert_metadata_and_inventory(&upgraded, LATEST_MIGRATION_VERSION);
+    upgraded.inner.with_conn(|conn| {
+        let rows = conn.prepare("SELECT ordinal,mid,entry_json FROM mc_async_compaction_entries WHERE session_ref='legacy-ref' ORDER BY ordinal")?
+            .query_map([], |r| Ok((r.get::<_,u64>(0)?, r.get::<_,Option<String>>(1)?, r.get::<_,String>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(rows.iter().map(|r| r.1.as_deref()).collect::<Vec<_>>(), vec![Some("runner-m0"),Some("runner-m1"),None,None]);
+        assert_eq!(rows[0].2, r#"{"mid":"runner-m0","content":"kept"}"#);
+        assert_eq!(rows[3].2, "legacy opaque entry");
+        for (sql, index) in [
+            ("SELECT state_json FROM mc_async_compaction WHERE session='held-session'", "idx_mc_async_compaction_session"),
+            ("SELECT entry_json FROM mc_async_compaction_entries WHERE session_ref='legacy-ref' AND mid='runner-m0'", "idx_mc_async_compaction_entries_mid"),
+        ] {
+            let details = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?.query_map([], |r| r.get::<_,String>(3))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            assert!(details.iter().any(|p| p.contains("SEARCH") && p.contains(index)), "{details:?}");
+            assert!(!details.iter().any(|p| p.contains("SCAN")), "{details:?}");
+        }
+        Ok(())
+    }).unwrap();
+    assert_intent(&upgraded, LATEST_MIGRATION_VERSION);
+    let after = store_snapshot(&upgraded);
+    drop(upgraded);
+    let reopened = McStore::open(&descriptor).unwrap();
+    assert_eq!(store_snapshot(&reopened), after);
+    drop(reopened);
+    assert!(
+        matches!(McStore::open_with_migrations(&descriptor, false, &chain(74)), Err(McStoreError::StoreAheadOfBinary { db_version, binary_max: 74 }) if db_version == LATEST_MIGRATION_VERSION)
+    );
+}
+
+#[test]
+fn app_read_indexes_fresh_schema_and_new_entry_mid() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = McStore::open(&descriptor(dir.path())).unwrap();
+    assert_metadata_and_inventory(&store, LATEST_MIGRATION_VERSION);
+    store
+        .async_compaction_save("mid-ref", "[\"/p\",\"s\",\"pi\"]", "s", "{}")
+        .append_entry(0, r#"{"mid":"new-mid"}"#.into(), "[]".into())
+        .commit()
+        .unwrap();
+    assert_eq!(
+        scalar::<String>(
+            &store,
+            "SELECT mid FROM mc_async_compaction_entries WHERE session_ref='mid-ref' AND ordinal=0"
+        ),
+        "new-mid"
+    );
+}

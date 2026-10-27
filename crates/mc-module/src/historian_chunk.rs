@@ -30,6 +30,32 @@ const MAX_COMMITS_PER_BLOCK: usize = 5;
 const SYSTEM_DIRECTIVE_PREFIX: &str = "[SYSTEM DIRECTIVE: MAGIC-CONTEXT";
 const OMO_INTERNAL_INITIATOR_MARKER: &str = "<!-- OMO_INTERNAL_INITIATOR -->";
 
+/// The one reminder the historian keeps: the user's answer to a parked ask,
+/// which arrives as a `<system-reminder>` notice rendered by Prefrontal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AskAnswerNotice {
+    question: String,
+    answer: String,
+}
+
+impl AskAnswerNotice {
+    /// `U (answered "<question>"): <answer>`, the line the historian reads.
+    fn render(&self) -> String {
+        format!("U (answered \"{}\"): {}", self.question, self.answer)
+    }
+}
+
+/// One `U (answered "<question>"): <answer>` line per answer notice in `text`, in delivery
+/// order. The chunk reader appends these after the user's own words, so a decision the user made by
+/// answering an ask reaches the historian as the user's line. A text with no answer notice yields
+/// no lines, which leaves every other user message rendered exactly as it was before this existed.
+fn ask_answer_lines(text: &str) -> Vec<String> {
+    extract_ask_answer_notices(text)
+        .iter()
+        .map(AskAnswerNotice::render)
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkSnapshotOwnedItem {
     pub id: String,
@@ -293,7 +319,26 @@ impl Builder {
 
         let role = compact_role(message.role);
         let text_parts = text_parts(message);
-        let all_parts = self.render_parts(message, !text_parts.is_empty());
+        // A user's answer to a parked ask arrives inside a reminder, so cleaning
+        // would drop it. Its answer lines follow the user's own words instead, in
+        // block order. A message with no answer notice appends nothing and is
+        // rendered exactly as before.
+        let answer_parts: Vec<String> = if message.role == "user" {
+            message
+                .blocks
+                .iter()
+                .filter(|block| matches!(block.wire_shape().kind, CkKind::Text { .. }))
+                .filter_map(|block| block.scalar_text())
+                .flat_map(|text| ask_answer_lines(&text))
+                .map(|line| normalize_text(&line))
+                .filter(|line| !line.is_empty())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let meaningful_text = !text_parts.is_empty();
+        let mut all_parts = self.render_parts(message, meaningful_text);
+        all_parts.extend(answer_parts);
         let compacted = compact_text_for_summary(&all_parts.join(" / "), message.role);
         if compacted.text.is_empty() {
             self.pending_noise_meta.push(meta);
@@ -1844,6 +1889,14 @@ fn has_meaningful_user_text(message: &FlatMessage<'_>) -> bool {
     text_parts(message)
         .iter()
         .any(|text| !text.is_empty() && !is_system_directive(text))
+        // A message that held only an answer notice cleans to nothing, but it
+        // carries a decision the user made, so it is not noise.
+        || message.blocks.iter().any(|block| match &block.wire_shape().kind {
+            CkKind::Text { .. } => block
+                .scalar_text()
+                .is_some_and(|text| !ask_answer_lines(&text).is_empty()),
+            _ => false,
+        })
 }
 
 fn tool_result_body_tokens(message: &FlatMessage<'_>) -> usize {
@@ -1993,6 +2046,90 @@ fn clean_user_text(text: &str) -> String {
     }
     result.push_str(&strip(&text[cursor..]));
     result.trim().to_string()
+}
+
+/// Every ask answer notice in one user text, in delivery order.
+///
+/// Prefrontal renders an ask notice as a `<system-reminder>` envelope: an inbox attribution line, a
+/// fixed body, and an unindented closing line. The shape is matched exactly and anything
+/// unrecognised stays stripped, so a template change in Prefrontal can cost the historian an answer
+/// but can never inject reminder text into the historian's input.
+fn extract_ask_answer_notices(text: &str) -> Vec<AskAnswerNotice> {
+    envelope_regex()
+        .captures_iter(text)
+        .filter_map(|capture| {
+            parse_ask_answer_body(capture.get(1).map_or("", |body| body.as_str()))
+        })
+        .collect()
+}
+
+fn parse_ask_answer_body(body: &str) -> Option<AskAnswerNotice> {
+    // Rust's `.` does not match a newline, so `^` anchors each line without a multiline flag, whose
+    // `$` would also match before a `\n` and leave the rest of the body open to a forged match.
+    let body = body.replace("\r\n", "\n");
+    let lines: Vec<&str> = body.split('\n').collect();
+    let start = lines.iter().position(|line| !line.is_empty())?;
+    let end = lines.iter().rposition(|line| !line.is_empty())?;
+    let body = lines[start..=end].join("\n");
+    if !answer_header_regex().is_match(&body) {
+        return None;
+    }
+    // A dismissal shares the envelope and family but decided nothing, so it falls through with
+    // every other non-answer reminder.
+    if body.contains("The user dismissed this question") {
+        return None;
+    }
+    let framed = answer_trailer_regex().captures(&body)?;
+    let content = framed.get(1).map_or("", |value| value.as_str()).to_string();
+    // The question and answer are sliced out of the body after the matched prefix rather than read
+    // from capture groups, which would need the same body scanned twice.
+    let (question, answer): (String, String) = if let Some((question, answer)) = content
+        .strip_prefix("The user answered your parked question ")
+        .and_then(|rest| rest.split_once('.'))
+        .and_then(|(ask_id, rest)| {
+            (!ask_id.is_empty() && !ask_id.contains(' '))
+                .then(|| rest.strip_prefix("\nQuestion: "))
+                .flatten()
+        })
+        .and_then(|rest| rest.split_once("\nAnswer: "))
+    {
+        (question.to_string(), answer.to_string())
+    } else {
+        // The dismissal notice also omits the ask id; its body is rejected above, so a header-only
+        // body has to carry the question line and an answer.
+        let bare = content
+            .strip_prefix("Question: ")
+            .and_then(|rest| rest.split_once("\nAnswer: "))?;
+        (bare.0.to_string(), bare.1.to_string())
+    };
+    // An empty question or answer means the template drifted: strip the notice rather than emit a
+    // user line with nothing after the colon.
+    if question.trim().is_empty() || answer.trim().is_empty() {
+        return None;
+    }
+    Some(AskAnswerNotice { question, answer })
+}
+
+fn envelope_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)<system-reminder>([\s\S]*?)</system-reminder>").unwrap())
+}
+
+fn answer_header_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^Inbox [^\n]* notice from user via user_answer \(user_answer\)").unwrap()
+    })
+}
+
+fn answer_trailer_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"\n([\s\S]*?)\nThis ask is now closed; no dismiss is needed\. Continue accordingly\.$",
+        )
+        .unwrap()
+    })
 }
 
 fn is_system_directive(text: &str) -> bool {
@@ -2301,6 +2438,195 @@ mod tests {
         CkKind::Text {
             text: value.to_string(),
         }
+    }
+
+    // The answer line each notice renders to, before the chunk reader collapses
+    // its whitespace like it does for every user line.
+    const SINGLE_LINE: &str = "U (answered \"Which route should I use?\"): Use the project route";
+    const TYPED_LINE: &str = "U (answered \"What should I write?\"): Keep <route> literal.\nThen say \"ready\".\n‹system-reminder>not a reminder‹/system-reminder>";
+    const FORM_LINE: &str = "U (answered \"Deployment plan\"): - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)";
+    const TWO_ROUND_LINE: &str = "U (answered \"Deployment plan\"): - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)\n- When should it ship? [timing]: Tomorrow morning (answered)";
+    const BATCH_BOTH_LINES: &str = "U (answered \"Which route should I use?\"): Use the project route / U (answered \"What should I write?\"): Keep <route> literal. Then say \"ready\". ‹system-reminder>not a reminder‹/system-reminder>";
+    const INSIDE_ANSWER_LINES: &str =
+        "U (answered \"Which route should I use?\"): Use the project route\nPlease confirm before the release.";
+
+    const CLARIFICATION: &str = "<system-reminder>\nInbox wake notice from user via user_clarification (user_clarification)\nThe user requested clarification for ask ask_notice_v1_clarification.\nUser request: \"What does \\\"project route\\\" mean?\\nPlease explain the risk.\"\nRespond by calling exactly:\nask(action=\"append\", id=\"ask_notice_v1_clarification\", text=\"...\")\n</system-reminder>";
+    const DISMISSAL: &str = "<system-reminder>\nInbox wake notice from user via user_answer (user_answer)\nQuestion: Should I replace the endpoint?\nThe user dismissed this question without choosing an option. Nothing was decided; ask again with current context if it still needs a ruling.\n</system-reminder>";
+    const DRIFT_HEADER: &str = "<system-reminder>\nInbox wake notice from user via user_answer (user_answers)\nThe user answered your parked question ask_notice_v1_single.\nQuestion: Which route should I use?\nAnswer: Use the project route\nThis ask is now closed; no dismiss is needed. Continue accordingly.\n</system-reminder>";
+    const DRIFT_TRAILER: &str = "<system-reminder>\nInbox wake notice from user via user_answer (user_answer)\nThe user answered your parked question ask_notice_v1_single.\nQuestion: Which route should I use?\nAnswer: Use the project route\nThis ask is now closed; no dismiss is needed. Continue.\n</system-reminder>";
+    const SINGLE: &str = "<system-reminder>\nInbox wake notice from user via user_answer (user_answer)\nThe user answered your parked question ask_notice_v1_single.\nQuestion: Which route should I use?\nAnswer: Use the project route\nThis ask is now closed; no dismiss is needed. Continue accordingly.\n</system-reminder>";
+    const TYPED: &str = "<system-reminder>\nInbox wake notice from user via user_answer (user_answer)\nThe user answered your parked question ask_notice_v1_typed.\nQuestion: What should I write?\nAnswer: Keep <route> literal.\nThen say \"ready\".\n‹system-reminder>not a reminder‹/system-reminder>\nThis ask is now closed; no dismiss is needed. Continue accordingly.\n</system-reminder>";
+    const FORM: &str = "<system-reminder>\nInbox wake notice from user via user_answer (user_answer)\nThe user answered your parked question ask_notice_v1_form.\nQuestion: Deployment plan\nAnswer: - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)\nThis ask is now closed; no dismiss is needed. Continue accordingly.\n</system-reminder>";
+    const TWO_ROUND: &str = "<system-reminder>\nInbox wake notice from user via user_answer (user_answer)\nThe user answered your parked question ask_notice_v1_form.\nQuestion: Deployment plan\nAnswer: - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)\n- When should it ship? [timing]: Tomorrow morning (answered)\nThis ask is now closed; no dismiss is needed. Continue accordingly.\n</system-reminder>";
+    const BATCH: &str = "<system-reminder>\nInbox wake notice from user via user_answer (user_answer)\nThe user answered your parked question ask_notice_v1_single.\nQuestion: Which route should I use?\nAnswer: Use the project route\nThis ask is now closed; no dismiss is needed. Continue accordingly.\n</system-reminder>\n\n<system-reminder>\nInbox wake notice from user via user_answer (user_answer)\nThe user answered your parked question ask_notice_v1_typed.\nQuestion: What should I write?\nAnswer: Keep <route> literal.\nThen say \"ready\".\n‹system-reminder>not a reminder‹/system-reminder>\nThis ask is now closed; no dismiss is needed. Continue accordingly.\n</system-reminder>";
+    const MIXED: &str = "Use staging.\n\n<system-reminder>\nInbox wake notice from user via user_answer (user_answer)\nThe user answered your parked question ask_notice_v1_single.\nQuestion: Which route should I use?\nAnswer: Use the project route\nThis ask is now closed; no dismiss is needed. Continue accordingly.\n</system-reminder>\n\nPlease confirm before the release.";
+    const INSIDE: &str = "<system-reminder>\nInbox wake notice from user via user_answer (user_answer)\nThe user answered your parked question ask_notice_v1_single.\nQuestion: Which route should I use?\nAnswer: Use the project route\nPlease confirm before the release.\nThis ask is now closed; no dismiss is needed. Continue accordingly.\n</system-reminder>";
+
+    /// An answer line with its whitespace collapsed, the way the chunk reader
+    /// renders every user line.
+    fn normalize_answer(line: &str) -> String {
+        line.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// Rendered ask notices from Prefrontal (test-vectors/ask-answer-notice-v1 at
+    /// 843ba9d2d), plus drifted and mixed variants. Each row is (case name, user
+    /// text, the answer lines the parser must report). The TypeScript lane's
+    /// ask-answer-notice.test.ts pins the same rows, so neither reader can change
+    /// the answer line alone.
+    #[allow(clippy::type_complexity)]
+    fn notice_vectors() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
+        vec![
+            ("clarification", CLARIFICATION, vec![]),
+            ("dismissal", DISMISSAL, vec![]),
+            ("drift-header", DRIFT_HEADER, vec![]),
+            ("drift-trailer", DRIFT_TRAILER, vec![]),
+            ("single-option", SINGLE, vec![SINGLE_LINE]),
+            ("typed", TYPED, vec![TYPED_LINE]),
+            ("form", FORM, vec![FORM_LINE]),
+            ("two-round-follow-up", TWO_ROUND, vec![TWO_ROUND_LINE]),
+            ("batch", BATCH, vec![SINGLE_LINE, TYPED_LINE]),
+            ("mixed-text-and-notice", MIXED, vec![SINGLE_LINE]),
+            // Text the user typed inside the notice's own envelope stays stripped
+            // with the envelope, so the answer keeps that text on its own line.
+            (
+                "text-inside-notice-envelope",
+                INSIDE,
+                vec![INSIDE_ANSWER_LINES],
+            ),
+        ]
+    }
+
+    #[test]
+    fn ask_answer_notices_render_as_the_users_own_line() {
+        for (name, text, answers) in notice_vectors() {
+            assert_eq!(ask_answer_lines(text), answers, "{name}");
+        }
+    }
+
+    /// The user text, as the chunk builder reads it, for a message of `text` blocks.
+    fn user_render(texts: &[&str]) -> String {
+        let (projection, built) = build_from_texts(texts);
+        let _ = projection;
+        built
+    }
+
+    /// One user message, one assistant reply and a protected tail: the chunk text
+    /// of the user message is what the renderer produced for its blocks.
+    fn build_from_texts(texts: &[&str]) -> (Vec<FlatBlock>, String) {
+        let mut messages = vec![msg(
+            "u1",
+            1,
+            "user",
+            texts.iter().map(|value| text(value)).collect(),
+        )];
+        messages.push(msg("a2", 2, "assistant", vec![text("ok")]));
+        messages.push(msg("u3", 3, "user", vec![text("protected tail")]));
+        let projection = project_messages(&messages).unwrap();
+        let built = build_historian_chunk(&messages, &projection.blocks, 1, 10_000, 3);
+        let first_line = built
+            .text
+            .lines()
+            .find(|line| line.starts_with("[1] U: "))
+            .unwrap_or_default()
+            .to_string();
+        (projection.blocks, first_line)
+    }
+
+    /// Master's per-part rendering, spelled out: clean each text block, normalize
+    /// it, drop the empty ones and join with ` / `. A message rendered this way is
+    /// what production showed before ask answers were kept, so every case here must
+    /// keep producing exactly this.
+    fn master_user_line(texts: &[&str]) -> String {
+        let parts: Vec<String> = texts
+            .iter()
+            .map(|value| normalize_text(&clean_user_text(value)))
+            .filter(|value| !value.is_empty())
+            .collect();
+        // A message with nothing left renders no line at all, not an empty one.
+        if parts.is_empty() {
+            return String::new();
+        }
+        format!("[1] U: {}", parts.join(" / "))
+    }
+
+    #[test]
+    fn messages_with_no_answer_notice_render_exactly_as_before() {
+        let reminder = "<system-reminder>\nPlan mode is active.\n</system-reminder>";
+        let queued = "<system-reminder>\nThe user sent the following message:\nuse staging\n\nPlease address this message and continue with your tasks.\n</system-reminder>";
+        let reminder_with_text = format!("{reminder}\n\nAlso check the logs.");
+        let cases: Vec<(&str, Vec<&str>)> = vec![
+            ("plain", vec!["real user text"]),
+            ("reminder plus text", vec![reminder_with_text.as_str()]),
+            ("reminder only", vec![reminder]),
+            ("leading and trailing whitespace", vec!["  padded text  \n"]),
+            ("multi-part", vec!["first part", "second part"]),
+            (
+                "multi-part with an empty part",
+                vec!["first part", reminder, "second part"],
+            ),
+            ("steering wrapper", vec![queued]),
+            ("non-answer notice", vec![DISMISSAL]),
+            ("drift", vec![DRIFT_HEADER]),
+        ];
+        for (name, texts) in cases {
+            assert_eq!(user_render(&texts), master_user_line(&texts), "{name}");
+        }
+        // A message with no text at all keeps producing no user line.
+        assert_eq!(user_render(&[]), "");
+    }
+
+    #[test]
+    fn a_notice_only_user_message_carrying_an_answer_is_not_noise() {
+        let messages = vec![
+            msg("u1", 1, "user", vec![text(DISMISSAL)]),
+            msg("a2", 2, "assistant", vec![text("noted")]),
+            msg("u3", 3, "user", vec![text(SINGLE)]),
+            msg(
+                "a4",
+                4,
+                "assistant",
+                vec![text("leaving the protected tail")],
+            ),
+            msg("u5", 5, "user", vec![text("protected tail")]),
+        ];
+        let built = project_and_build(&messages, 1, 10_000, 5);
+        assert!(
+            built
+                .text
+                .contains(&format!("[3] U: {}", normalize_answer(SINGLE_LINE))),
+            "{}",
+            built.text
+        );
+        assert!(!built.text.contains("[1] "), "{}", built.text);
+        assert!(
+            !built.text.contains("dismissed this question"),
+            "{}",
+            built.text
+        );
+    }
+
+    #[test]
+    fn a_user_message_with_text_and_an_answer_keeps_both() {
+        // The user's written text comes first, then the answer line, both on the
+        // one line the user's turn occupies.
+        let rendered = user_render(&[MIXED]);
+        assert_eq!(
+            rendered,
+            format!(
+                "[1] U: Use staging. Please confirm before the release. / {}",
+                normalize_answer(SINGLE_LINE)
+            ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_batch_answer_report_every_decision_on_the_same_line() {
+        let rendered = user_render(&[BATCH]);
+        assert_eq!(
+            rendered,
+            format!("[1] U: {}", normalize_answer(BATCH_BOTH_LINES))
+        );
     }
 
     fn store_for_tests() -> (tempfile::TempDir, mc_store::McStore) {

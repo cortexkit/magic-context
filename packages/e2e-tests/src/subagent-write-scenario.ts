@@ -25,13 +25,14 @@ export async function subagentWriteScenario(f: {
                 action: "write",
                 category: "PROJECT_RULES",
                 content: `${prefix} memory sentinel`,
+                ids: [],
             },
         },
         {
             type: "tool_use" as const,
             id: `${prefix}_note`,
             name: "ctx_note",
-            input: { action: "write", content: `${prefix} note sentinel` },
+            input: { action: "write", content: `${prefix} note sentinel`, note_ids: [] },
         },
     ];
     f.mock.setDefault({ text: "finished", usage });

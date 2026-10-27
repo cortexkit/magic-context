@@ -61,6 +61,12 @@ if name == "gh":
         if scenario.get("graphql_errors"):
             response["errors"] = [{"message": "fixture GraphQL failure"}]
         print(json.dumps(response))
+    elif args == ["api", "repos/cortexkit/magic-context/pulls/123"]:
+        prior = sum(item["name"] == "gh" and item["args"] == args for item in previous)
+        body = scenario.get("body", "A plain description.")
+        if prior and "body" in scenario.get("recheck", {}):
+            body = scenario["recheck"]["body"]
+        print(json.dumps({"number": 123, "body": body}))
     elif args[:1] == ["api"] and any("/check-runs?per_page=100" in arg for arg in args):
         if "--paginate" not in args or "--slurp" not in args or not any(scenario["head"] in arg for arg in args):
             sys.exit("Check-runs query must paginate the exact head")

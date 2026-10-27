@@ -1,6 +1,6 @@
 import {
-    getLargestMeasuredToolDefinitionTokens,
     getMeasuredToolDefinitionTokens,
+    getSessionToolDefinitionTokens,
     getToolDefinitionMeasurementSignature,
 } from "../../features/magic-context/tool-definition-tokens";
 import {
@@ -93,6 +93,13 @@ export interface FinalWireTokenEstimateInput {
     providerID: string | undefined;
     modelID: string | undefined;
     agentName: string | undefined;
+    /**
+     * The session the request belongs to. On OpenCode 2 it selects the exact
+     * tool set this session's request carries. For a route with no measurement
+     * it names the session whose last known tool figure may stand in: its
+     * exact set on OpenCode 2, or its last route's activity total on OpenCode 1.
+     */
+    sessionId?: string;
     systemPromptHash?: string;
     /** Bound tokenizer work for refusal checks; ordinary admission uses its
      * separate fit estimator. */
@@ -139,6 +146,7 @@ export function createFinalWireUsageTracker() {
             input.providerID,
             input.modelID,
             input.agentName,
+            input.sessionId,
         );
         if (!tools) return;
         return JSON.stringify([
@@ -153,9 +161,10 @@ export function createFinalWireUsageTracker() {
     return {
         estimate(
             sessionId: string,
-            input: FinalWireTokenEstimateInput,
+            request: FinalWireTokenEstimateInput,
             limit?: number,
         ): FinalWireTokenEstimate {
+            const input = { ...request, sessionId: request.sessionId ?? sessionId };
             let measuredPrefix: FinalWireTokenEstimateInput["measuredPrefix"];
             try {
                 const previous = served.get(sessionId);
@@ -214,7 +223,8 @@ export function createFinalWireUsageTracker() {
             }
             return estimateOutgoingWireForRefusal({ ...input, measuredPrefix }, limit);
         },
-        capture(sessionId: string, input: FinalWireTokenEstimateInput): void {
+        capture(sessionId: string, request: FinalWireTokenEstimateInput): void {
+            const input = { ...request, sessionId: request.sessionId ?? sessionId };
             const previous = served.get(sessionId);
             served.delete(sessionId);
             try {
@@ -349,7 +359,8 @@ export interface FinalWireTokenEstimate {
     /**
      * True when the tool-definition figure is this route's own measurement. When
      * false, `toolDefinitionTokens` is either unknown or an upper envelope taken
-     * from the largest tool set measured on any route.
+     * from this session's last known tool figure (its exact set on OpenCode 2,
+     * its last route's activity total on OpenCode 1).
      */
     toolDefinitionsMeasured?: boolean;
     /** Unscaled transform-array/system/tool measurement; provider framing is unmeasured. */
@@ -359,7 +370,7 @@ export interface FinalWireTokenEstimate {
      * Calibrated provider mass for reading context pressure, not for fit. A
      * seeded model gets its measured ratios, an unseeded model counts at the
      * neutral 1:1 ratio, and tool definitions this route has not measured count
-     * at the largest tool set measured on any route, without the fit envelope.
+     * at the session's last known tool figure, without the fit envelope.
      * `tokens` keeps the fit envelope for admission and must not be read as a
      * pressure reading: for an unseeded model it doubles the whole request.
      */
@@ -394,6 +405,7 @@ export function estimateOutgoingWireForRefusal(
                           input.providerID,
                           input.modelID,
                           input.agentName,
+                          input.sessionId,
                       )
                     : undefined;
             const envelope = measured
@@ -449,22 +461,32 @@ export function estimateFinalWireInputTokens(
     const measuredToolDefinitions =
         input.toolDefinitionTokens ??
         (input.providerID && input.modelID
-            ? getMeasuredToolDefinitionTokens(input.providerID, input.modelID, input.agentName)
+            ? getMeasuredToolDefinitionTokens(
+                  input.providerID,
+                  input.modelID,
+                  input.agentName,
+                  input.sessionId,
+              )
             : undefined);
     const calibration = resolveDecisionCalibration(input.providerID, input.modelID);
-    const largestToolDefinitions =
+    // A route with no measurement of its own borrows this session's last known
+    // tool figure (typically the same tools under the model it just switched
+    // from), never the largest figure in the store. On OpenCode 1 that is the
+    // last route's activity total, which can include tools other sessions on
+    // that route were offered.
+    const borrowedToolDefinitions =
         measuredToolDefinitions === undefined
-            ? getLargestMeasuredToolDefinitionTokens()
+            ? getSessionToolDefinitionTokens(input.sessionId)
             : undefined;
-    // An unknown route inherits an upper envelope from observed tool sets, not zero.
+    // An unknown route inherits an upper envelope from the borrowed set, not zero.
     // Account for calibration below one on known models; unknown models already apply
     // UNKNOWN_FIT_RATIO to the whole request in providerMass.
     const toolDefinitions =
         measuredToolDefinitions ??
-        (largestToolDefinitions === undefined
+        (borrowedToolDefinitions === undefined
             ? undefined
             : Math.ceil(
-                  (largestToolDefinitions * UNKNOWN_FIT_RATIO) /
+                  (borrowedToolDefinitions * UNKNOWN_FIT_RATIO) /
                       (calibration.seeded ? calibration.toolsRatio : UNKNOWN_FIT_RATIO),
               ));
     const rawComponents = {
@@ -473,7 +495,7 @@ export function estimateFinalWireInputTokens(
         prose: messageTokens.conversation,
     };
     const tokens = providerMass(rawComponents, calibration, true);
-    const pressureToolDefinitions = measuredToolDefinitions ?? largestToolDefinitions ?? 0;
+    const pressureToolDefinitions = measuredToolDefinitions ?? borrowedToolDefinitions ?? 0;
     const pressureTokens = providerMass(
         {
             system: rawComponents.system,

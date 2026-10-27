@@ -108,7 +108,7 @@ test("OC2 commits complete 80-character, incremental and replacement mapping rep
         host.mock.addMatcher(body => {
             if (!String(body.instructions).includes(CURATE_SYSTEM_PROMPT)) return null;
             if (!JSON.stringify(body.input).includes("function_call_output")) return {
-                openaiOutput: [{ type: "function_call", id: "fc_curate", call_id: "call_curate", name: "ctx_memory", arguments: JSON.stringify({ action: "update", ids: [lastMemory], content: "The replacement fixture claim is implemented by its backing file. The fixture remains local to this project." }) }],
+                openaiOutput: [{ type: "function_call", id: "fc_curate", call_id: "call_curate", name: "ctx_memory", arguments: JSON.stringify({ action: "update", ids: [lastMemory], category: "ARCHITECTURE", content: "The replacement fixture claim is implemented by its backing file. The fixture remains local to this project." }) }],
                 usage: { input_tokens: 100, output_tokens: 10 },
             };
             return { text: "Clarified the fixture memory.", usage: { input_tokens: 100, output_tokens: 10 } };

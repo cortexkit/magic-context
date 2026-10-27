@@ -94,6 +94,7 @@ export function measureLkgReplayRequest(args: {
                       providerID: args.model?.providerID,
                       modelID: args.model?.modelID,
                       agentName: args.agentName,
+                      sessionId: args.sessionId,
                   }),
     });
 }

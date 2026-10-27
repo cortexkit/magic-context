@@ -127,11 +127,37 @@ check_runs() {
 $pending"
 }
 
+# GitHub closes an issue when a closing keyword ("Fixes #N") appears in a PR
+# description at merge or in a commit message pushed to master. This script also
+# puts the PR title in its merge commit message. Issues must stay open until the
+# fix is released, so a keyword in the title, the description or any merged
+# commit message is refused.
+CLOSING_KEYWORD='(^|[^[:alnum:]_])(fix(es|ed)?|close[sd]?|resolve[sd]?):?[[:space:]]+([[:alnum:]_.-]+/[[:alnum:]_.-]+)?#[0-9]+'
+
 check_title() {
-  local closing
-  closing=$(run jq -nr --arg title "$title" '$title | test("(^|[^[:alnum:]_])(fix(es|ed)?|close[sd]?|resolve[sd]?)[[:space:]]+#[0-9]+"; "i")')
+  local closing pull body
+  closing=$(run jq -nr --arg title "$title" --arg re "$CLOSING_KEYWORD" '$title | test($re; "i")')
   if [ "$closing" = true ]; then
     die 'PR title contains a GitHub closing keyword with a number. Edit the title/message before merging; no automatic issue closing is allowed.'
+  fi
+  pull=$(run gh api "repos/$REPOSITORY/pulls/$number")
+  body=$(run jq -r '.body // ""' <<< "$pull")
+  closing=$(run jq -nr --arg body "$body" --arg re "$CLOSING_KEYWORD" '$body | test($re; "i")')
+  if [ "$closing" = true ]; then
+    die 'PR description contains a GitHub closing keyword with a number. Remove it from the description before merging; no automatic issue closing is allowed.'
+  fi
+}
+
+# Run after the PR head is fetched: the merge keeps the contributor's commits,
+# so their messages reach master unchanged.
+check_commit_messages() {
+  local messages closing
+  messages=$(run git log --format='%h %s%n%b' "master..$head")
+  closing=$(printf '%s\n' "$messages" | grep -iE "$CLOSING_KEYWORD" || true)
+  if [ -n "$closing" ]; then
+    die "A commit message in PR #$number contains a GitHub closing keyword, which would close the issue as soon as master is pushed:
+$closing
+Ask the contributor to reword the commit, or squash the PR into one commit with a clean message, before merging."
   fi
 }
 
@@ -157,6 +183,7 @@ master_sha=$(run git rev-parse master)
 run git fetch origin "pull/$number/head"
 fetched_head=$(run git rev-parse FETCH_HEAD)
 [ "$fetched_head" = "$head" ] || die 'PR head changed between the GitHub query and fetch; retry with the new head.'
+check_commit_messages
 
 worktree="${TMPDIR:-/tmp}/magic-context/merge-pr-$number"
 [ ! -e "$worktree" ] && [ ! -L "$worktree" ] || die "Temporary worktree already exists: $worktree (not removed)."

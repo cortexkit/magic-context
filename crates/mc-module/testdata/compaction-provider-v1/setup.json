@@ -54,6 +54,40 @@
         },
         "now": 1790000000000
       }
+    },
+    {
+      "name": "a runner that honours provider-set ride waits up to 240,000 ms, the value the Claude Code gateway sends because Claude Code times a request out 360 s before its first byte",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000003",
+        "preset": "head",
+        "params": {},
+        "composition": {
+          "providers": [
+            {
+              "provider": "aft",
+              "tools": [
+                {
+                  "name": "read",
+                  "capabilities": [
+                    "code.read/v1"
+                  ]
+                }
+              ]
+            },
+            {
+              "provider": "magic-context",
+              "tools": []
+            }
+          ]
+        },
+        "model": "anthropic/claude-opus-4-5",
+        "context_window": 200000,
+        "output_limit": 64000,
+        "now": 1790000000000,
+        "ride_wait_max_ms": 240000
+      }
     }
   ],
   "answers": [
@@ -93,6 +127,42 @@
       }
     },
     {
+      "name": "a provider-set ride wait of 30,000 ms, within the request's ride_wait_max_ms",
+      "answer": {
+        "answer": "ready",
+        "request_id": "cr-000003",
+        "initial": {
+          "compaction_id": "mc:ses_01J9Z:head-1",
+          "version": 1,
+          "range": {
+            "from": 0,
+            "to": 0
+          },
+          "replacement": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<m0: project docs and memories>"
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<m1: session history>"
+                }
+              ]
+            }
+          ]
+        },
+        "ride_wait_ms": 30000
+      }
+    },
+    {
       "name": "no head: an empty initial view",
       "answer": {
         "answer": "ready",
@@ -105,6 +175,45 @@
             "to": 0
           },
           "replacement": []
+        }
+      }
+    },
+    {
+      "name": "a session moved from standalone Magic Context carries its tag checkpoint",
+      "answer": {
+        "answer": "ready",
+        "request_id": "cr-000001",
+        "initial": {
+          "compaction_id": "mc:ses_01J9Z:head-1",
+          "version": 1,
+          "range": {
+            "from": 0,
+            "to": 0
+          },
+          "replacement": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<m0: project docs and memories>"
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<m1: session history>"
+                }
+              ]
+            }
+          ]
+        },
+        "checkpoint": {
+          "tag_checkpoint": 340,
+          "cut": "msg_boundary"
         }
       }
     },
@@ -136,6 +245,36 @@
         "request_id": "cr-000001",
         "code": "acme_own_code",
         "reason": "x"
+      },
+      "retryable": false
+    },
+    {
+      "name": "setup identity mismatch on a session-bound route",
+      "answer": {
+        "answer": "refuse",
+        "request_id": "cr-000001",
+        "code": "setup_identity_mismatch",
+        "reason": "the route is bound to another session"
+      },
+      "retryable": false
+    },
+    {
+      "name": "a session with standalone state and no completed move",
+      "answer": {
+        "answer": "refuse",
+        "request_id": "cr-000001",
+        "code": "standalone_session_not_migrated",
+        "reason": "see the doctor command"
+      },
+      "retryable": false
+    },
+    {
+      "name": "a moved session on a runner without tag_checkpoint",
+      "answer": {
+        "answer": "refuse",
+        "request_id": "cr-000001",
+        "code": "tag_checkpoint_unsupported",
+        "reason": "see the doctor command"
       },
       "retryable": false
     }
@@ -302,6 +441,146 @@
         "replacement": []
       },
       "problem": "range_inverted"
+    }
+  ],
+  "ride_wait": [
+    {
+      "name": "a wait at the cap is accepted",
+      "request": {
+        "session": "ses_rw",
+        "harness": "claude-code",
+        "request_id": "cr-rw",
+        "params": {},
+        "composition": {},
+        "model": "anthropic/claude-opus-4-5",
+        "now": 1790000000000,
+        "ride_wait_max_ms": 240000
+      },
+      "answer": {
+        "answer": "ready",
+        "request_id": "cr-rw",
+        "initial": {
+          "compaction_id": "cmp-rw",
+          "version": 1,
+          "range": {
+            "from": 0,
+            "to": 0
+          },
+          "replacement": []
+        },
+        "ride_wait_ms": 240000
+      },
+      "failed_setup": null
+    },
+    {
+      "name": "no wait: the runner keeps its own short ride deadline",
+      "request": {
+        "session": "ses_rw",
+        "harness": "claude-code",
+        "request_id": "cr-rw",
+        "params": {},
+        "composition": {},
+        "model": "anthropic/claude-opus-4-5",
+        "now": 1790000000000,
+        "ride_wait_max_ms": 240000
+      },
+      "answer": {
+        "answer": "ready",
+        "request_id": "cr-rw",
+        "initial": {
+          "compaction_id": "cmp-rw",
+          "version": 1,
+          "range": {
+            "from": 0,
+            "to": 0
+          },
+          "replacement": []
+        }
+      },
+      "failed_setup": null
+    },
+    {
+      "name": "a wait above the cap fails Setup, never clamped",
+      "request": {
+        "session": "ses_rw",
+        "harness": "claude-code",
+        "request_id": "cr-rw",
+        "params": {},
+        "composition": {},
+        "model": "anthropic/claude-opus-4-5",
+        "now": 1790000000000,
+        "ride_wait_max_ms": 240000
+      },
+      "answer": {
+        "answer": "ready",
+        "request_id": "cr-rw",
+        "initial": {
+          "compaction_id": "cmp-rw",
+          "version": 1,
+          "range": {
+            "from": 0,
+            "to": 0
+          },
+          "replacement": []
+        },
+        "ride_wait_ms": 240001
+      },
+      "failed_setup": "ride_wait_ms"
+    },
+    {
+      "name": "a wait of 0 fails Setup",
+      "request": {
+        "session": "ses_rw",
+        "harness": "claude-code",
+        "request_id": "cr-rw",
+        "params": {},
+        "composition": {},
+        "model": "anthropic/claude-opus-4-5",
+        "now": 1790000000000,
+        "ride_wait_max_ms": 240000
+      },
+      "answer": {
+        "answer": "ready",
+        "request_id": "cr-rw",
+        "initial": {
+          "compaction_id": "cmp-rw",
+          "version": 1,
+          "range": {
+            "from": 0,
+            "to": 0
+          },
+          "replacement": []
+        },
+        "ride_wait_ms": 0
+      },
+      "failed_setup": "ride_wait_ms"
+    },
+    {
+      "name": "a wait the runner never asked for fails Setup",
+      "request": {
+        "session": "ses_rw",
+        "harness": "claude-code",
+        "request_id": "cr-rw",
+        "params": {},
+        "composition": {},
+        "model": "anthropic/claude-opus-4-5",
+        "now": 1790000000000
+      },
+      "answer": {
+        "answer": "ready",
+        "request_id": "cr-rw",
+        "initial": {
+          "compaction_id": "cmp-rw",
+          "version": 1,
+          "range": {
+            "from": 0,
+            "to": 0
+          },
+          "replacement": []
+        },
+        "ride_wait_ms": 5000
+      },
+      "failed_setup": "ride_wait_ms"
     }
   ]
 }

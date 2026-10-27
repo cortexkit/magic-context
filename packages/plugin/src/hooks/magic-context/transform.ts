@@ -72,7 +72,6 @@ import type { ModelInput } from "../../shared/model-resolution";
 import { getSdkContextLimit } from "../../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
-import { isRecord } from "../../shared/record-type-guard";
 import { withoutSqliteTransformPass } from "../../shared/sqlite";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import type { CavemanWordRules } from "./caveman";
@@ -121,10 +120,7 @@ import {
 } from "./final-wire-token-estimate";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import type { LiveModelBySession } from "./hook-handlers";
-import {
-    cloneKeepingCoveredInstructionMarks,
-    takeCoveredInstructionRows,
-} from "./host-served-rows";
+import { takeCoveredInstructionRows } from "./host-served-rows";
 import {
     capturePrefixTrimSourceOrder,
     findHostCompactionWindow,
@@ -203,6 +199,7 @@ import {
 import { createM0RenderOptions } from "./render-options";
 import { sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute, modelAcceptsEmptyContent } from "./sentinel";
+import { takeSignedThinkingFitSnapshot } from "./signed-thinking-fit-snapshot";
 import {
     decideSignedThinkingHold,
     resolveSignedThinkingHoldPolicy,
@@ -813,15 +810,11 @@ export function createTransform(deps: TransformDeps) {
         const startTime = performance.now();
         const historianRun = deps.resolveHistorianRun?.();
         const messages = output.messages as MessageLike[];
-        const originalForThinkingFit = messages.some((message) =>
-            message.parts.some(
-                (part) =>
-                    isRecord(part) &&
-                    ["reasoning", "thinking", "redacted_thinking"].includes(String(part.type)),
-            ),
-        )
-            ? cloneKeepingCoveredInstructionMarks(messages)
-            : null;
+        // The entry order, for the signed-thinking fit snapshot taken once the
+        // hold is decided (see takeSignedThinkingFitSnapshot). No message or
+        // part is edited before that point; only covered instruction rows are
+        // taken out of the array just below.
+        const entryOrderForThinkingFit = messages.slice();
         // Covered instruction rows restored by the OpenCode 2 hook stay out of
         // every stage until postprocess decides whether this session serves them.
         const coveredHostInstructions = takeCoveredInstructionRows(messages);
@@ -1683,6 +1676,7 @@ export function createTransform(deps: TransformDeps) {
                     providerID: modelForBudget?.providerID,
                     modelID: modelForBudget?.modelID,
                     agentName: runNotificationParams(sessionId)?.agent,
+                    sessionId,
                 });
                 // The history alone, unscaled: system prompt and tool
                 // definitions are not something this pass can reduce, and the
@@ -1792,6 +1786,13 @@ export function createTransform(deps: TransformDeps) {
             signedThinkingHold?.held === true,
         );
         freezeM0M1 ||= activeThinkingPrefixHold;
+        const originalForThinkingFit = takeSignedThinkingFitSnapshot({
+            sessionId,
+            entryOrder: entryOrderForThinkingFit,
+            held: activeThinkingPrefixHold,
+            activeAnthropicThinkingTurn: activeThinkingTurn,
+            compactionOff,
+        });
         const prefixHoldLogKey = signedThinkingHold
             ? `${currentTurnId}:${signedThinkingHold.reason}:${signedThinkingHold.heavyStepsBack ?? "none"}`
             : freezeM0M1
@@ -2953,6 +2954,7 @@ export function createTransform(deps: TransformDeps) {
                     providerID: modelForBudget?.providerID,
                     modelID: modelForBudget?.modelID,
                     agentName: notificationParams.agent,
+                    sessionId,
                 });
             } catch (error) {
                 sessionLog(
@@ -3228,6 +3230,7 @@ export function createTransform(deps: TransformDeps) {
                         providerID: modelForBudget?.providerID,
                         modelID: modelForBudget?.modelID,
                         agentName: notificationParams.agent,
+                        sessionId,
                         systemPromptHash: sessionMeta.systemPromptHash,
                     },
                     boundaryContextLimit,
@@ -3260,6 +3263,7 @@ export function createTransform(deps: TransformDeps) {
                               providerID: modelForBudget?.providerID,
                               modelID: modelForBudget?.modelID,
                               agentName: notificationParams.agent,
+                              sessionId,
                               systemPromptHash: sessionMeta.systemPromptHash,
                           },
                           boundaryContextLimit,
@@ -3278,16 +3282,15 @@ export function createTransform(deps: TransformDeps) {
                 boundaryContextLimit > 0 &&
                 (finalWireEstimate.refusalTokens ?? finalWireEstimate.tokens) > boundaryContextLimit
             ) {
-                if (
+                const signedFitRetryWanted =
                     !thinkingFitRetries.has(sessionId) &&
                     activeThinkingPrefixHold &&
-                    originalForThinkingFit &&
                     hasActiveAnthropicThinkingTurn(
                         messages,
                         resolvedProviderID,
                         modelForBudget?.modelID,
-                    )
-                ) {
+                    );
+                if (signedFitRetryWanted && originalForThinkingFit) {
                     thinkingFitRetries.add(sessionId);
                     requestPendingMaterialization(
                         deps.pendingMaterializationSessions,
@@ -3302,12 +3305,22 @@ export function createTransform(deps: TransformDeps) {
                     }
                     return;
                 }
+                // A held pass that needs the retry but has no copy of its input
+                // (the copy failed) is refused like a retry that still did not
+                // fit, never sent over the window.
+                if (signedFitRetryWanted) {
+                    sessionLog(
+                        sessionId,
+                        "signed thinking fit: the held request is over the window and no copy of the pass input exists to retry from; refusing it",
+                    );
+                }
                 // Only a held turn refuses on an estimated overflow: it cannot
                 // reclaim anything, so sending would loop on provider rejections.
                 // An unheld pass has already stripped and drained like any other
                 // model's bust; if it is still over, the ordinary overflow path
                 // (provider error, learned limit, emergency reclaim) takes over.
                 if (
+                    signedFitRetryWanted ||
                     thinkingFitRetries.has(sessionId) ||
                     postTransformResult.thinkingReleasedForFit ||
                     signedFitPreviouslyRefused
@@ -3337,6 +3350,7 @@ export function createTransform(deps: TransformDeps) {
                         providerID: modelForBudget?.providerID,
                         modelID: modelForBudget?.modelID,
                         agentName: notificationParams.agent,
+                        sessionId,
                     });
                 if (untrimmed.tokens > boundaryContextLimit) {
                     sessionLog(
@@ -3361,12 +3375,13 @@ export function createTransform(deps: TransformDeps) {
                     providerID: modelForBudget?.providerID,
                     modelID: modelForBudget?.modelID,
                     agentName: notificationParams.agent,
+                    sessionId,
                 });
                 // Count the request the way it will really go out: system
                 // prompt, history and this route's measured tool definitions,
                 // unscaled. When the route's tool definitions are not measured
-                // yet, the estimate's figure is an upper envelope (the largest
-                // tool set seen on any route, scaled up), which would refuse
+                // yet, the estimate's figure is an upper envelope (the tool set
+                // this session last sent, scaled up), which would refuse
                 // a request that fits and keep the session flagged; leave it
                 // out then, as the entry check does. The system prompt and
                 // history stay in, so a carried session whose host-cut history
@@ -3526,6 +3541,7 @@ export function createTransform(deps: TransformDeps) {
                         providerID: modelForBudget?.providerID,
                         modelID: modelForBudget?.modelID,
                         agentName: notificationParams.agent,
+                        sessionId,
                     });
                 } catch (error) {
                     sessionLog(sessionId, "degraded pass size guard could not estimate:", error);
@@ -3971,6 +3987,7 @@ export function createTransform(deps: TransformDeps) {
                 providerID: modelForBudget?.providerID,
                 modelID: modelForBudget?.modelID,
                 agentName: notificationParams.agent,
+                sessionId,
                 systemPromptHash: sessionMeta.systemPromptHash,
             });
         deps.onPostprocess?.({ bustedThisPass: postTransformResult.bustedThisPass });

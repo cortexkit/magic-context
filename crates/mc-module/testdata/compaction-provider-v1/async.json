@@ -392,6 +392,42 @@
   ],
   "notices_accepted": [
     {
+      "name": "a known account switch is attributed in the next notice",
+      "headers": {
+        "session_ref": "0b9679cc5a4044d51710921d5233db02",
+        "seq": "1",
+        "lineage_id": "lin_a",
+        "through_ordinal": "1",
+        "through_digest": "efc959960e9c3392a28c897f298ca6651073d4d263c7f241eb7956ed87267fc1",
+        "est_tokens": "1200",
+        "model": "anthropic/claude-sonnet-4-5",
+        "window": "200000",
+        "events": "account_change:Route_1.a-b"
+      },
+      "digest": "eba1fe9be45f0e57ee61a94ac033ef7e498e7886b466463f0b630554ac903c3b",
+      "events": [
+        "account_change:Route_1.a-b"
+      ]
+    },
+    {
+      "name": "a 64-byte account label is accepted",
+      "headers": {
+        "session_ref": "0b9679cc5a4044d51710921d5233db02",
+        "seq": "1",
+        "lineage_id": "lin_a",
+        "through_ordinal": "1",
+        "through_digest": "efc959960e9c3392a28c897f298ca6651073d4d263c7f241eb7956ed87267fc1",
+        "est_tokens": "1200",
+        "model": "anthropic/claude-sonnet-4-5",
+        "window": "200000",
+        "events": "account_change:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "digest": "7712522dcbf4ff4fef605bccf0997ab236d183e77ac21887da84a8ed0ea6bfc6",
+      "events": [
+        "account_change:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    },
+    {
       "name": "a header this contract does not define is ignored and not digested",
       "headers": {
         "session_ref": "0b9679cc5a4044d51710921d5233db02",
@@ -638,6 +674,81 @@
         "model": "anthropic/claude-sonnet-4-5",
         "window": "200000",
         "events": "model_change:x"
+      },
+      "problem": "malformed:events"
+    },
+    {
+      "name": "account change without an account",
+      "headers": {
+        "session_ref": "0b9679cc5a4044d51710921d5233db02",
+        "seq": "1",
+        "lineage_id": "lin_a",
+        "through_ordinal": "1",
+        "through_digest": "efc959960e9c3392a28c897f298ca6651073d4d263c7f241eb7956ed87267fc1",
+        "est_tokens": "1200",
+        "model": "anthropic/claude-sonnet-4-5",
+        "window": "200000",
+        "events": "account_change"
+      },
+      "problem": "malformed:events"
+    },
+    {
+      "name": "account change with an empty account",
+      "headers": {
+        "session_ref": "0b9679cc5a4044d51710921d5233db02",
+        "seq": "1",
+        "lineage_id": "lin_a",
+        "through_ordinal": "1",
+        "through_digest": "efc959960e9c3392a28c897f298ca6651073d4d263c7f241eb7956ed87267fc1",
+        "est_tokens": "1200",
+        "model": "anthropic/claude-sonnet-4-5",
+        "window": "200000",
+        "events": "account_change:"
+      },
+      "problem": "malformed:events"
+    },
+    {
+      "name": "account change with a 65-byte account",
+      "headers": {
+        "session_ref": "0b9679cc5a4044d51710921d5233db02",
+        "seq": "1",
+        "lineage_id": "lin_a",
+        "through_ordinal": "1",
+        "through_digest": "efc959960e9c3392a28c897f298ca6651073d4d263c7f241eb7956ed87267fc1",
+        "est_tokens": "1200",
+        "model": "anthropic/claude-sonnet-4-5",
+        "window": "200000",
+        "events": "account_change:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "problem": "malformed:events"
+    },
+    {
+      "name": "account change with a disallowed account character",
+      "headers": {
+        "session_ref": "0b9679cc5a4044d51710921d5233db02",
+        "seq": "1",
+        "lineage_id": "lin_a",
+        "through_ordinal": "1",
+        "through_digest": "efc959960e9c3392a28c897f298ca6651073d4d263c7f241eb7956ed87267fc1",
+        "est_tokens": "1200",
+        "model": "anthropic/claude-sonnet-4-5",
+        "window": "200000",
+        "events": "account_change:route/account"
+      },
+      "problem": "malformed:events"
+    },
+    {
+      "name": "account change with an extra argument",
+      "headers": {
+        "session_ref": "0b9679cc5a4044d51710921d5233db02",
+        "seq": "1",
+        "lineage_id": "lin_a",
+        "through_ordinal": "1",
+        "through_digest": "efc959960e9c3392a28c897f298ca6651073d4d263c7f241eb7956ed87267fc1",
+        "est_tokens": "1200",
+        "model": "anthropic/claude-sonnet-4-5",
+        "window": "200000",
+        "events": "account_change:route:extra"
       },
       "problem": "malformed:events"
     },
@@ -5421,6 +5532,18 @@
         }
       },
       {
+        "name": "account changed before sending",
+        "request": {
+          "method": "compaction.ride",
+          "params": {
+            "session_ref": "0b9679cc5a4044d51710921d5233db02",
+            "cause": "account_change",
+            "account": "Route_1.a-b",
+            "deadline_ms": 1500
+          }
+        }
+      },
+      {
         "name": "surface changed",
         "request": {
           "method": "compaction.ride",
@@ -5452,6 +5575,57 @@
             "deadline_ms": 1500
           }
         }
+      }
+    ],
+    "account_requests": [
+      {
+        "name": "a one-byte account label",
+        "params": {
+          "session_ref": "0b9679cc5a4044d51710921d5233db02",
+          "cause": "account_change",
+          "account": "a",
+          "deadline_ms": 1500
+        },
+        "account": "a"
+      },
+      {
+        "name": "a 64-byte account label",
+        "params": {
+          "session_ref": "0b9679cc5a4044d51710921d5233db02",
+          "cause": "account_change",
+          "account": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "deadline_ms": 1500
+        },
+        "account": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "name": "no account on another rewrite cause",
+        "params": {
+          "session_ref": "0b9679cc5a4044d51710921d5233db02",
+          "cause": "model_change",
+          "deadline_ms": 1500
+        },
+        "account": null
+      },
+      {
+        "name": "a valid account on another cause is ignored",
+        "params": {
+          "session_ref": "0b9679cc5a4044d51710921d5233db02",
+          "cause": "model_change",
+          "account": "Route_1.a-b",
+          "deadline_ms": 1500
+        },
+        "account": null
+      },
+      {
+        "name": "a malformed account on another cause is ignored",
+        "params": {
+          "session_ref": "0b9679cc5a4044d51710921d5233db02",
+          "cause": "model_change",
+          "account": "",
+          "deadline_ms": 1500
+        },
+        "account": null
       }
     ],
     "overflow_requests": [
@@ -5519,6 +5693,15 @@
         }
       },
       {
+        "name": "an account-change ride waiting the most a ride may: 300,000 ms",
+        "params": {
+          "session_ref": "0b9679cc5a4044d51710921d5233db02",
+          "cause": "account_change",
+          "account": "Route_1.a-b",
+          "deadline_ms": 300000
+        }
+      },
+      {
         "name": "a surface-change ride just past the runner's own 10,000 ms default",
         "params": {
           "session_ref": "0b9679cc5a4044d51710921d5233db02",
@@ -5528,6 +5711,45 @@
       }
     ],
     "requests_refused": [
+      {
+        "name": "account change without an account",
+        "params": {
+          "session_ref": "0b9679cc5a4044d51710921d5233db02",
+          "cause": "account_change",
+          "deadline_ms": 1500
+        },
+        "problem": "account"
+      },
+      {
+        "name": "account change with an empty account",
+        "params": {
+          "session_ref": "0b9679cc5a4044d51710921d5233db02",
+          "cause": "account_change",
+          "account": "",
+          "deadline_ms": 1500
+        },
+        "problem": "account"
+      },
+      {
+        "name": "account change with a 65-byte account",
+        "params": {
+          "session_ref": "0b9679cc5a4044d51710921d5233db02",
+          "cause": "account_change",
+          "account": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "deadline_ms": 1500
+        },
+        "problem": "account"
+      },
+      {
+        "name": "account change with a disallowed account character",
+        "params": {
+          "session_ref": "0b9679cc5a4044d51710921d5233db02",
+          "cause": "account_change",
+          "account": "route/account",
+          "deadline_ms": 1500
+        },
+        "problem": "account"
+      },
       {
         "name": "zero deadline",
         "params": {

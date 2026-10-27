@@ -107,6 +107,14 @@ export interface ProtectedTailBoundarySnapshot {
     priorBoundaryOrdinal: number;
     migrationFloorActive: boolean;
     emergencyTailScale?: 0.5 | 0.25;
+    /**
+     * True when the trigger resolved this boundary with the one-pass live-prompt
+     * floor lift. A historian run that re-resolves a stale copy of this snapshot
+     * must lift the floor again, or a session with a single prompt has no head
+     * to summarize below the force band. Only the run started from this
+     * snapshot may use it; nothing else should copy it.
+     */
+    liftLivePromptFloor?: boolean;
     providerShapeVersion: "opencode-v1" | "pi-folded-v1";
     cacheNamespace: string;
     createdAt: number;
@@ -809,6 +817,8 @@ export function resolveProtectedTailBoundary(
         priorBoundaryOrdinal: ctx.priorBoundaryOrdinal,
         migrationFloorActive: ctx.migrationFloorActive,
         emergencyTailScale: ctx.emergencyTailScale,
+        // Left undefined when not lifted so unlifted snapshots keep their old shape.
+        liftLivePromptFloor: ctx.liftLivePromptFloor === true ? true : undefined,
         providerShapeVersion: ctx.providerShapeVersion,
         cacheNamespace: ctx.cacheNamespace,
         createdAt,

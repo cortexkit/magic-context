@@ -673,6 +673,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 model.providerID,
                 model.modelID,
                 agentBySession.get(sessionId),
+                sessionId,
             );
         },
         getFallbackModelId: (sessionId) => {

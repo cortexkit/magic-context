@@ -49,7 +49,7 @@ import { rebaseSessionCoordinatesAsync } from "../../features/magic-context/stor
 import { createTagger } from "../../features/magic-context/tagger";
 import {
     getCurrentToolSetHash,
-    recordToolDefinition,
+    recordToolDefinitionSet,
 } from "../../features/magic-context/tool-definition-tokens";
 import { stageOpenCodeV2TransformDecision } from "../../features/magic-context/transform-decision-log";
 import {
@@ -567,25 +567,34 @@ export function applyV2PromptSurfaceTools(
  * the wire, and it is keyed by the same {provider, model, agent} triple the status and sidebar
  * handlers look the measurement up by.
  *
+ * The draft is the request's exact tool set, so it replaces the route's measured set and becomes
+ * this session's figure: a tool an earlier request carried, or another session's request carried,
+ * does not count toward this request's size.
+ *
  * Measuring changes no served byte: the resulting tool-set hash is an attribution marker that the
  * m[0] materialization decision records but never folds on.
  */
 export function recordV2ToolDefinitions(draft: SessionContext): void {
     if (!draft.tools) return;
+    const tools: Array<{ id: string; description: string; parameters: unknown }> = [];
     for (const [id, tool] of Object.entries(draft.tools)) {
         if (!tool) continue;
         // The execute hook sees only the tool name, so keep the parameter names
         // for the dropped-input refusal to list.
         recordToolParameters(id, tool.input);
-        recordToolDefinition(
-            draft.model.providerID,
-            draft.model.id,
-            draft.agent,
+        tools.push({
             id,
-            typeof tool.description === "string" ? tool.description : "",
-            tool.input,
-        );
+            description: typeof tool.description === "string" ? tool.description : "",
+            parameters: tool.input,
+        });
     }
+    recordToolDefinitionSet(
+        draft.model.providerID,
+        draft.model.id,
+        draft.agent,
+        tools,
+        draft.sessionID,
+    );
 }
 
 /**
@@ -1551,6 +1560,7 @@ export async function registerContext(context: V2Context) {
                     draft.model.providerID,
                     draft.model.id,
                     draft.agent,
+                    draft.sessionID,
                 ),
                 modelKey: `${draft.model.providerID}/${draft.model.id}`,
                 // materializeM0 does not read cacheExpired. mustMaterialize owns
@@ -2180,6 +2190,7 @@ export async function registerContext(context: V2Context) {
                         model.providerID,
                         model.modelID,
                         agents.get(sessionId),
+                        sessionId,
                     );
                 },
                 channel1StateBySession: channel1,

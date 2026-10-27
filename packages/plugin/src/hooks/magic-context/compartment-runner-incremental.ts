@@ -561,6 +561,9 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                       },
                       usageSource: boundarySnapshot.usageSource,
                       emergencyTailScale: boundarySnapshot.emergencyTailScale,
+                      // Honour exactly the trigger's one-pass floor lift for this run;
+                      // the protected tail is still recomputed from live messages.
+                      liftLivePromptFloor: boundarySnapshot.liftLivePromptFloor === true,
                   });
             if (refreshed && hasRunnableCompartmentWindow(refreshed)) {
                 sessionLog(

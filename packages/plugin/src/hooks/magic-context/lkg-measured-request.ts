@@ -91,7 +91,12 @@ function identity(slot: LkgSlot): string {
         .digest("hex");
 }
 
-function envelope(modelKey: string, systemPromptTokens: number, agentName?: string): string {
+function envelope(
+    modelKey: string,
+    systemPromptTokens: number,
+    agentName: string | undefined,
+    sessionId: string,
+): string {
     const slash = modelKey.indexOf("/");
     return JSON.stringify([
         modelKey,
@@ -101,6 +106,7 @@ function envelope(modelKey: string, systemPromptTokens: number, agentName?: stri
             modelKey.slice(0, slash),
             modelKey.slice(slash + 1),
             agentName,
+            sessionId,
         ),
     ]);
 }
@@ -177,7 +183,12 @@ export function noteCapturedLkgRequest(args: {
         slot: identity(args.slot),
         prefixCount:
             args.prefixMessageCount ?? (JSON.parse(args.slot.jsonPrefix) as unknown[]).length,
-        envelope: envelope(request.modelKey, args.systemPromptTokens, args.agentName),
+        envelope: envelope(
+            request.modelKey,
+            args.systemPromptTokens,
+            args.agentName,
+            args.sessionId,
+        ),
         ...(args.marker ? { marker: args.marker, jsonPrefix: args.slot.jsonPrefix } : {}),
     });
 }
@@ -294,7 +305,8 @@ export function measuredLkgPrefix(args: {
         !args.slot ||
         capture.slot !== identity(args.slot) ||
         capture.request.modelKey !== args.modelKey ||
-        capture.envelope !== envelope(args.modelKey, args.systemPromptTokens, args.agentName)
+        capture.envelope !==
+            envelope(args.modelKey, args.systemPromptTokens, args.agentName, args.sessionId)
     )
         return;
     const appendedMessages = args.messages.slice(capture.prefixCount);

@@ -112,35 +112,27 @@ const DREAMER_ONLY_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set(["list"]);
 const GET_MAX_IDS = 20;
 
 const ParamsShape = {
-	action: Type.Optional(
-		Type.Union(
-			PRIMARY_ACTIONS.map((a) => Type.Literal(a)),
-			{
-				description: "write | update | archive | merge | get",
-			},
-		),
+	action: Type.Union(
+		PRIMARY_ACTIONS.map((a) => Type.Literal(a)),
+		{
+			description: "write | update | archive | merge | get",
+		},
 	),
-	content: Type.Optional(
-		Type.String({
+	content: Type.String({
+		description:
+			"The memory text — one standalone fact (write, update, merge).",
+	}),
+	category: Type.Union(
+		V2_MEMORY_CATEGORIES.map((c) => Type.Literal(c)),
+		{
 			description:
-				"The memory text — one standalone fact (write, update, merge).",
-		}),
+				"Kind of fact (required for write; on update/merge, pass the memory's current category to keep it).",
+		},
 	),
-	category: Type.Optional(
-		Type.Union(
-			V2_MEMORY_CATEGORIES.map((c) => Type.Literal(c)),
-			{
-				description:
-					"Kind of fact (required for write; on update/merge optional, omitted keeps the current category).",
-			},
-		),
-	),
-	ids: Type.Optional(
-		Type.Array(Type.Number(), {
-			description:
-				"Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get.",
-		}),
-	),
+	ids: Type.Array(Type.Number(), {
+		description:
+			"Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get.",
+	}),
 	reason: Type.Optional(
 		Type.String({
 			description: "Why it is being archived (optional).",

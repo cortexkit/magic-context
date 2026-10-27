@@ -501,6 +501,9 @@ export function checkLocalEmbeddingRuntimeAt(
  * `@pkg@latest/...` or `@pkg/...`). Returns the first `ok`; otherwise the first
  * informative failure; `unknown` only when no candidate root even exists (we
  * can't introspect the install, so we stay silent rather than false-alarm).
+ * Pass only the locations of the copy the host loads
+ * (`getOpenCodeLoadedPluginInstallRoots`): any `ok` root wins, so a healthy
+ * copy the host never reads would hide a broken loaded one.
  */
 export function checkLocalEmbeddingRuntime(
     installRoots: string[],

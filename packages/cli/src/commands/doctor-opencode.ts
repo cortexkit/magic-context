@@ -89,7 +89,7 @@ import {
 } from "../lib/opencode-helpers";
 import {
     describeUnusedOpenCodePluginCache,
-    getOpenCodePluginCacheRoots,
+    getOpenCodeLoadedPluginInstallRoots,
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY_WITH_VERSION,
     OPENCODE_PLUGIN_NAME as PLUGIN_NAME,
 } from "../lib/opencode-plugin-cache";
@@ -753,13 +753,18 @@ export async function runIssueFlow(
 // bundle when the native addon is absent. Verify both lanes so a loadable
 // onnxruntime-web package cannot hide a missing persistence-capable bundle.
 // Shared by the explicit-`local` branch and the no-config/default-provider path.
-function checkLocalEmbeddingRuntimeForDoctor(runtimePreference: LocalEmbeddingRuntime = "auto"): {
+// `installRoots` are the alternative locations of the one plugin copy the host
+// loads (`getOpenCodeLoadedPluginInstallRoots`).
+function checkLocalEmbeddingRuntimeForDoctor(
+    installRoots: string[],
+    runtimePreference: LocalEmbeddingRuntime = "auto",
+): {
     issues: number;
     localRuntimeBroken?: boolean;
     unverified?: boolean;
 } {
     const runtime = checkLocalEmbeddingRuntime(
-        getOpenCodePluginCacheRoots(),
+        installRoots,
         process.platform,
         process.arch,
         runtimePreference,
@@ -788,18 +793,19 @@ function checkLocalEmbeddingRuntimeForDoctor(runtimePreference: LocalEmbeddingRu
 
 async function checkEmbeddingConfig(
     magicContextConfigPath: string,
+    installRoots: string[],
 ): Promise<{ issues: number; localRuntimeBroken?: boolean; unverified?: boolean }> {
     if (!existsSync(magicContextConfigPath)) {
         // No config → local provider defaults apply. Still verify the local
         // runtime: local is the DEFAULT, so "no config" means local embeddings,
         // and a broken onnxruntime-node would silently fail (#128/#6).
-        return checkLocalEmbeddingRuntimeForDoctor();
+        return checkLocalEmbeddingRuntimeForDoctor(installRoots);
     }
 
     let rawText: string;
     try {
         const raw = loadRawConfigFile({ configPath: magicContextConfigPath, tier: "user" });
-        if (!raw) return checkLocalEmbeddingRuntimeForDoctor();
+        if (!raw) return checkLocalEmbeddingRuntimeForDoctor(installRoots);
         rawText = raw.text;
     } catch {
         log.warn("Could not read magic-context.jsonc for embedding check");
@@ -837,7 +843,7 @@ async function checkEmbeddingConfig(
             embedding?.local_runtime === "native" || embedding?.local_runtime === "wasm"
                 ? embedding.local_runtime
                 : "auto";
-        return checkLocalEmbeddingRuntimeForDoctor(runtimePreference);
+        return checkLocalEmbeddingRuntimeForDoctor(installRoots, runtimePreference);
     }
 
     if (provider === "synapse") {
@@ -1922,8 +1928,34 @@ export async function runDoctor(
 
     // 7b. Validate embedding configuration — runs a real probe against the
     // configured endpoint so users catch misconfigured URL / missing env var /
-    // wrong provider issues before relying on semantic memory search.
-    const embeddingCheck = await checkEmbeddingConfig(paths.magicContextConfig);
+    // wrong provider issues before relying on semantic memory search. The local
+    // runtime is looked for where the active host installs plugins: OpenCode 2
+    // installs into its own `npm/` cache, not OpenCode 1's `packages/`.
+    let embeddingHostConfig: Record<string, unknown> | null = null;
+    try {
+        if (paths.opencodeConfigFormat !== "none")
+            embeddingHostConfig = parse(readFileSync(paths.opencodeConfig, "utf-8")) as Record<
+                string,
+                unknown
+            >;
+    } catch {
+        // Unreadable config: the host loads the `latest` slot.
+    }
+    // Only the copy the host loads can break local embeddings, so only that
+    // copy is checked; a healthy copy elsewhere must not hide a broken one.
+    const embeddingInstalls = getOpenCodeLoadedPluginInstallRoots(
+        hostGeneration,
+        embeddingHostConfig,
+    );
+    const unusedInstalls = embeddingInstalls.others.filter((root) => existsSync(root));
+    if (unusedInstalls.length > 0)
+        log.info(
+            `Local embedding runtime: checked only the copy ${hostGeneration === "v2" ? "OpenCode 2" : "OpenCode 1"} loads; other installed copies (not loaded, not checked): ${unusedInstalls.join(", ")}`,
+        );
+    const embeddingCheck = await checkEmbeddingConfig(
+        paths.magicContextConfig,
+        embeddingInstalls.loaded,
+    );
     issues += embeddingCheck.issues;
     if (embeddingCheck.issues > 0) failCount += embeddingCheck.issues;
     else if (embeddingCheck.unverified) warnCount++;

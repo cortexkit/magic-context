@@ -1,6 +1,8 @@
 /// <reference types="bun-types" />
 
 import { afterAll, beforeAll, expect, it } from "bun:test";
+import { inspectHostOpenFiles } from "../src/host-open-files";
+import { PiTestHarness } from "../src/pi-harness";
 import {
     createFreshSession,
     createScenarioHarness,
@@ -43,7 +45,7 @@ function emitMemoryWriteOnce(content: string): void {
                     type: "tool_use",
                     id: `toolu_memory_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`,
                     name: memoryTool.name,
-                    input: { action: "write", category: "PROJECT_RULES", content },
+                    input: { action: "write", category: "PROJECT_RULES", content, ids: [] },
                 },
             ],
             stop_reason: "tool_use",
@@ -63,7 +65,16 @@ forEachHost(import.meta.url, "memory injection", (host) => {
     });
 
     afterAll(async () => {
-        await h.dispose();
+        try {
+            if (h instanceof PiTestHarness) {
+                const pid = h.hostPid;
+                if (pid === undefined) throw new Error("Host PID unavailable for isolation audit");
+                const proof = inspectHostOpenFiles(pid, h.env.baseDir, h.contextDbPath());
+                console.log("[host isolation]", JSON.stringify({ host, pid, databases: proof.databases }));
+            }
+        } finally {
+            await h.dispose();
+        }
     });
 
     it("injects <project-memory> on first turn even with no compartments", async () => {
@@ -84,6 +95,7 @@ forEachHost(import.meta.url, "memory injection", (host) => {
         const writerSessionId = await h.createSession();
         emitMemoryWriteOnce(directive);
         await h.sendPrompt(writerSessionId, "remember the project package-manager rule");
+        expect(JSON.stringify(h.mock.lastRequest()?.body)).toContain("Saved memory [ID:");
 
         const memorySessionId = await createFreshSession(h);
 

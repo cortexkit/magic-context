@@ -3,6 +3,7 @@ import {
 	piIsDeveloperHistory,
 } from "./pi-dispatch-agent-history";
 import type { PiChatHistoryModel } from "./pi-dispatch-chat-history";
+import { piOmpUserHistory } from "./pi-dispatch-omp-user";
 import { piToolCallWireId } from "./pi-dispatch-tool-ids";
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -65,6 +66,7 @@ export function piEncodeChainTail(
 	for (const value of messages) {
 		let message = object(value);
 		if (!message || message.providerPayload !== undefined) return undefined;
+		message = piOmpUserHistory(message);
 		if (message.role === "custom" || message.role === "hookMessage") {
 			// The context hook sees the persisted custom message, before OMP turns
 			// its text into a developer row. Do not guess rows for user-attributed

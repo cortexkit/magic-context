@@ -673,6 +673,16 @@ function observePipelineResultForTests(
 
 let variantChangeLogObserverForTests: ((message: string) => void) | undefined;
 let beforePipelineForTests: (() => Promise<void>) | undefined;
+/** Tests only: each pass's fit-input copies, seen after its first pipeline run. */
+let thinkingFitInputObserverForTests:
+	| ((observation: {
+			sessionId: string;
+			held: boolean;
+			strictThinkingKept: boolean;
+			thinkingCopy: readonly unknown[] | null;
+			fitReclaimCopy: readonly unknown[] | undefined;
+	  }) => void)
+	| undefined;
 
 function logPiLkgRecovery(sessionId: string, message: string): void {
 	lkgRecoveryLogObserverForTests?.(message);
@@ -803,6 +813,15 @@ export const __test = {
 		pipelineResultObserverForTests = fn;
 		return () => {
 			pipelineResultObserverForTests = previous;
+		};
+	},
+	setThinkingFitInputObserverForTests(
+		fn: typeof thinkingFitInputObserverForTests,
+	): () => void {
+		const previous = thinkingFitInputObserverForTests;
+		thinkingFitInputObserverForTests = fn;
+		return () => {
+			thinkingFitInputObserverForTests = previous;
 		};
 	},
 };
@@ -5635,24 +5654,13 @@ export function registerPiContextHandler(
 					contextLimit: rawFallbackLimit,
 					forcePercentage: forceMaterializationPercentage,
 				});
-			let inputForThinkingFit: unknown[] | null =
-				(getHarness() !== "pi" || nativeFitPossible) &&
-				isPrefixBoundThinkingModel(ctx.model?.provider, ctx.model?.id)
-					? structuredClone(event.messages)
-					: null;
-			// Renderers can mutate parts, and JSONL lacks context added by extensions.
-			// Preserve the original only for recovery, missing usage, near-capacity
-			// input, a large new tail, or an invalidated cache; not steady low-pressure turns.
-			let inputForFitReclaim: unknown[] | undefined = nativeFitPossible
-				? (inputForThinkingFit ?? structuredClone(event.messages))
-				: undefined;
-			if (fitInputStart !== undefined)
-				recordPiTransformTiming({
-					sessionId,
-					stage: "fitInputPreparation",
-					elapsedMs: performance.now() - fitInputStart,
-					extra: inputForFitReclaim ? "snapshot" : "no-snapshot",
-				});
+			// The fit inputs are copied just before the pipeline runs (below), once
+			// the signed-thinking hold is known. Nothing edits event.messages, its
+			// messages or their parts before then.
+			const fitPredictionMs =
+				fitInputStart === undefined
+					? undefined
+					: performance.now() - fitInputStart;
 			if (!options.compactionOff && !sessionMeta.isSubagent) {
 				let promptId: string | null = null;
 				for (let i = event.messages.length - 1; i >= 0; i--) {
@@ -5921,8 +5929,39 @@ export function registerPiContextHandler(
 				);
 			};
 			pipelineArgs.evaluateHistorianBeforeReclaim = scheduleHistorian;
+			const fitCopyStart =
+				fitPredictionMs === undefined ? undefined : performance.now();
+			// The signed-thinking fit retry below runs only when the pipeline kept a
+			// held signed turn (strictThinkingKept), which requires this pass's hold.
+			// An unheld pass therefore never needs this copy and does not take it.
+			let inputForThinkingFit: unknown[] | null =
+				(getHarness() !== "pi" || nativeFitPossible) &&
+				isPrefixBoundThinkingModel(ctx.model?.provider, ctx.model?.id) &&
+				pipelineArgs.signedThinkingHold === true
+					? structuredClone(event.messages)
+					: null;
+			// Renderers can mutate parts, and JSONL lacks context added by extensions.
+			// Preserve the original only for recovery, missing usage, near-capacity
+			// input, a large new tail, or an invalidated cache; not steady low-pressure turns.
+			let inputForFitReclaim: unknown[] | undefined = nativeFitPossible
+				? (inputForThinkingFit ?? structuredClone(event.messages))
+				: undefined;
+			if (fitPredictionMs !== undefined && fitCopyStart !== undefined)
+				recordPiTransformTiming({
+					sessionId,
+					stage: "fitInputPreparation",
+					elapsedMs: fitPredictionMs + (performance.now() - fitCopyStart),
+					extra: inputForFitReclaim ? "snapshot" : "no-snapshot",
+				});
 			let result = await budget.waitMandatory(runPipeline(pipelineArgs));
 			const historyRefreshThisPass = result.historyRefreshPermitted;
+			thinkingFitInputObserverForTests?.({
+				sessionId,
+				held: pipelineArgs.signedThinkingHold === true,
+				strictThinkingKept: result.strictThinkingKept,
+				thinkingCopy: inputForThinkingFit,
+				fitReclaimCopy: inputForFitReclaim,
+			});
 			observePipelineResultForTests(sessionId, result);
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
 			if (result.identityRebuilt || result.lkgFrozenReleaseReason)
@@ -7649,7 +7688,9 @@ function spawnPiHistorianRun(args: {
 	boundarySnapshot:
 		| ProtectedTailBoundarySnapshot
 		| (() => ProtectedTailBoundarySnapshot | undefined);
-	refreshBoundarySnapshot?: () => ProtectedTailBoundarySnapshot;
+	refreshBoundarySnapshot?: (
+		stale: ProtectedTailBoundarySnapshot,
+	) => ProtectedTailBoundarySnapshot;
 	currentContextLimit: number;
 	fallbackModelId?: string;
 }): void {
@@ -8135,6 +8176,7 @@ function maybeFireHistorian(args: {
 	const unregister = setRawMessageProvider(sessionId, provider);
 	const resolvePiBoundarySnapshot = (
 		emergencyTailScale?: 0.5 | 0.25,
+		liftLivePromptFloor = false,
 	): ProtectedTailBoundarySnapshot =>
 		resolveProtectedTailBoundary(
 			resolveBoundaryContext({
@@ -8148,26 +8190,36 @@ function maybeFireHistorian(args: {
 				providerShapeVersion: "pi-folded-v1",
 				cacheNamespace: `pi:${sessionId}`,
 				emergencyTailScale,
+				liftLivePromptFloor,
 			}),
 		);
-	const resolveRunnablePiBoundarySnapshot =
-		(): ProtectedTailBoundarySnapshot => {
-			let snapshot = ensureRunnablePiBoundaryForTests(
-				resolvePiBoundarySnapshot(),
+	// `stale` is the snapshot a historian run is refreshing. Only a snapshot the
+	// trigger resolved with the one-pass live-prompt floor lift passes that lift
+	// on; every other caller (and the recovery paths, which pass nothing) keeps
+	// the floor.
+	const resolveRunnablePiBoundarySnapshot = (
+		stale?: ProtectedTailBoundarySnapshot,
+	): ProtectedTailBoundarySnapshot => {
+		const liftLivePromptFloor = stale?.liftLivePromptFloor === true;
+		let snapshot = ensureRunnablePiBoundaryForTests(
+			resolvePiBoundarySnapshot(undefined, liftLivePromptFloor),
+		);
+		// Derived band, not literal 80: under a raised execute threshold the
+		// emergency-scaled retry must not relax the boundary below the force
+		// band (same escalation class as the OpenCode trigger's force gate).
+		if (
+			!hasRunnableCompartmentWindow(snapshot) &&
+			usage.percentage >= historianForceMaterializationPercentage
+		) {
+			snapshot = ensureRunnablePiBoundaryForTests(
+				resolvePiBoundarySnapshot(
+					usage.percentage >= 95 ? 0.25 : 0.5,
+					liftLivePromptFloor,
+				),
 			);
-			// Derived band, not literal 80: under a raised execute threshold the
-			// emergency-scaled retry must not relax the boundary below the force
-			// band (same escalation class as the OpenCode trigger's force gate).
-			if (
-				!hasRunnableCompartmentWindow(snapshot) &&
-				usage.percentage >= historianForceMaterializationPercentage
-			) {
-				snapshot = ensureRunnablePiBoundaryForTests(
-					resolvePiBoundarySnapshot(usage.percentage >= 95 ? 0.25 : 0.5),
-				);
-			}
-			return snapshot;
-		};
+		}
+		return snapshot;
+	};
 	let boundarySnapshot: ProtectedTailBoundarySnapshot | undefined;
 
 	let triggered = false;

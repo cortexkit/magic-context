@@ -1,3 +1,5 @@
+import { piOmpUserHistory } from "./pi-dispatch-omp-user";
+
 function object(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value)
 		? (value as Record<string, unknown>)
@@ -24,6 +26,7 @@ export function piAgentHistory(
 	return messages.flatMap((value): unknown[] => {
 		const message = object(value);
 		if (!message) return [value];
+		if (message.role === "user") return [piOmpUserHistory(message)];
 		if (message.role === "compactionSummary") {
 			// With blocks, OMP sends the summary literally; without blocks it renders a
 			// nonempty context envelope even for an empty summary. Only row shape is

@@ -276,6 +276,48 @@ describe("hidden-agent registration drift guard", () => {
         expect(permissionDisabled("task", taskRules(merged.task))).toBe(true);
     });
 
+    test("named task allows survive an ambient wildcard deny (#777)", () => {
+        const internalAgentIds = [DREAMER_REVIEWER_AGENT, HISTORIAN_AGENT];
+        const merged = denyTaskRoutingToAgents(
+            { task: { "*": "deny", "my-scout": "allow" } },
+            internalAgentIds,
+        ) as { task: Record<string, string> };
+
+        // The agent's own ordering is kept: the wildcard stays where the user
+        // put it, so the named allow after it still wins under OpenCode's
+        // last-matching-rule evaluation instead of being overridden by a
+        // re-appended wildcard.
+        expect(merged.task).toEqual({
+            "*": "deny",
+            "my-scout": "allow",
+            [DREAMER_REVIEWER_AGENT]: "deny",
+            [HISTORIAN_AGENT]: "deny",
+        });
+
+        const rules = taskRules(merged.task);
+        const lastMatching = (target: string) =>
+            [...rules].reverse().find((rule) => rule.pattern === target || rule.pattern === "*");
+        expect(lastMatching("my-scout")?.action).toBe("allow");
+        expect(lastMatching("other-agent")?.action).toBe("deny");
+
+        // A mixed map must not hide the whole Task tool: the last rule is a
+        // named deny, not the wildcard.
+        expect(permissionDisabled("task", rules)).toBe(false);
+    });
+
+    test("mixed wildcard-deny task maps re-merge idempotently (#777)", () => {
+        const internalAgentIds = [DREAMER_REVIEWER_AGENT, HISTORIAN_AGENT];
+        const first = denyTaskRoutingToAgents(
+            { task: { "*": "deny", "my-scout": "allow" } },
+            internalAgentIds,
+        );
+        const second = denyTaskRoutingToAgents(first, internalAgentIds);
+
+        expect(second).toEqual(first);
+        const task = (second as { task: Record<string, string> }).task;
+        expect(Object.keys(task).filter((pattern) => pattern === "*")).toHaveLength(1);
+    });
+
     test("Task wildcard re-emission is idempotent across repeated registration", () => {
         const internalAgentIds = [DREAMER_REVIEWER_AGENT, HISTORIAN_AGENT];
         const first = denyTaskRoutingToAgents({ task: { "*": "deny" } }, internalAgentIds);

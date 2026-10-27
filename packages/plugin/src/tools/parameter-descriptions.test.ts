@@ -118,8 +118,9 @@ describe("parameter descriptions match runtime behavior", () => {
             const text = descriptions.ctx_note.note_ids;
             expect({ preset, text }).toEqual({
                 preset,
-                text: expect.stringContaining("1–50 for dismiss or read"),
+                text: expect.stringContaining("1–50 for dismiss, or 1–50 to read"),
             });
+            expect(text).toContain("Write and a plain read take an empty list.");
             expect(text).not.toMatch(/\bany\b/);
         }
         const hostArgs = createCtxNoteTools({

@@ -345,6 +345,81 @@ test("issue 686 WebSocket continuation guard: a history mutation breaks the chai
 	);
 });
 
+const m1Text =
+	"<session-history-since>(no new content since last materialization)</session-history-since>";
+const injectedUser = (text: string, timestamp: number) => ({
+	role: "user",
+	content: [{ type: "text", text }],
+	timestamp,
+});
+const injectedPair = (headTimestamp: number) => [
+	injectedUser(HEAD, headTimestamp - 2),
+	injectedUser(m1Text, headTimestamp - 1),
+];
+
+test("issue 791: a drain changing only the injected pair's timestamps admits a chained pass", async () => {
+	const h = harness();
+	const beforeDrain = [...injectedPair(100), u1];
+	const wire = [
+		userItem(HEAD),
+		userItem(m1Text),
+		userItem("§1§ read the file"),
+	];
+	await h.pass(beforeDrain);
+	h.send(full(wire));
+	h.respond(a1.host);
+	// The covered head has disappeared from the host branch. Injection still
+	// serves the same cached text and visible tail, but derives new timestamps.
+	const afterDrain = [...injectedPair(533), u1, a1.prepared, r1];
+	const untouched = JSON.stringify(afterDrain);
+	await h.pass(afterDrain);
+	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
+	expect(h.refusals).toEqual([]);
+	expect(h.aborts).toBe(0);
+	expect(JSON.stringify(afterDrain)).toBe(untouched);
+	expect(afterDrain.slice(0, 2).map((m) => m.content)).toEqual(
+		beforeDrain.slice(0, 2).map((m) => m.content),
+	);
+});
+
+for (const changed of [
+	"m0 text",
+	"m1 text",
+	"user timestamp",
+	"m0 image",
+] as const) {
+	test(`issue 791: a real ${changed} change still refuses a chained pass`, async () => {
+		const h = harness();
+		const initial = [...injectedPair(100), u1];
+		await h.pass(initial);
+		h.send(
+			full([userItem(HEAD), userItem(m1Text), userItem("§1§ read the file")]),
+		);
+		h.respond(a1.host);
+		const next = [...injectedPair(533), structuredClone(u1), a1.prepared, r1];
+		if (changed === "m0 text" || changed === "m1 text") {
+			const index = changed === "m0 text" ? 0 : 1;
+			next[index] = injectedUser(
+				(index === 0 ? HEAD : m1Text).replace("</", "changed</"),
+				533 + index,
+			);
+		} else if (changed === "user timestamp")
+			next[2] = { ...u1, timestamp: 999 };
+		else
+			(next[0].content as unknown[]).push({
+				type: "image",
+				data: "changed",
+				mimeType: "image/png",
+			});
+		await h.pass(next);
+		h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
+		expect(h.aborts).toBe(1);
+		expect(h.refusals[0]).toContain(
+			"prepared history does not extend the previous managed request",
+		);
+	});
+}
+
 test("issue 686 WebSocket continuation guard: a stale previous_response_id refuses", async () => {
 	const h = await toolTurn();
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));

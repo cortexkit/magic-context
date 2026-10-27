@@ -333,9 +333,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-agent-data"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c974c2d1a3840050a7fb8e0e1eef98454bdee06b43dff176659a6e18735d3f6"
+checksum = "67120d0281f07d005086abfc348d88ae455f2abe03d10cbe5700d36be57d3072"
 dependencies = [
  "serde",
  "serde_json",
@@ -343,9 +343,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-compaction-provider"
-version = "0.7.0"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33b4707d7f373a7c0f52ac3b2b159a83d501e6ffd0815e5612076b6b473d8d7a"
+checksum = "e04392a969618d952af817b3f019e4cb88b96761cae754d26823c35333c18c94"
 dependencies = [
  "cortexkit-role-llm-runner",
  "serde",
@@ -365,9 +365,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-llm-runner"
-version = "0.7.0"
+version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffc531f67e5a9f5cd838b07c1f1949bcce04ed0a14608929d695b7bba4cbfaed"
+checksum = "07f320d82ce7e3fce65132e4429c8c1e24fee5af0ad02abf9db9a7a761151d6f"
 dependencies = [
  "cortexkit-rich-ui-syntax",
  "serde",
@@ -378,9 +378,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-llm-runner-conformance"
-version = "0.14.0"
+version = "0.15.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af71ac93183aadeec4a281c953933f95adeab508a7c3e82aa1c4ad16236bdfcd"
+checksum = "7250728856b61a0fe67433b042f69dce310e6d4852f70afad01b4ed9f419c519"
 dependencies = [
  "async-trait",
  "base64",
@@ -390,6 +390,7 @@ dependencies = [
  "cortexkit-role-llm-runner",
  "futures-util",
  "serde",
+ "serde_jcs",
  "serde_json",
  "subc-protocol 0.33.1",
  "tokio",
@@ -1012,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "mc-core"
-version = "0.49.23"
+version = "0.49.25"
 dependencies = [
  "cortexkit-cache-core",
  "serde",
@@ -1021,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "mc-module"
-version = "0.49.23"
+version = "0.49.25"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -1073,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "mc-store"
-version = "0.49.23"
+version = "0.49.25"
 dependencies = [
  "cortexkit-cache-core",
  "cortexkit-store",
@@ -1090,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "mc-tokenizer"
-version = "0.49.23"
+version = "0.49.25"
 dependencies = [
  "base64",
  "rustc-hash",

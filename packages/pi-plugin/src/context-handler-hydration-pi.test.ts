@@ -459,6 +459,94 @@ it("a stale hydration retries with a fresh worker and serves the turn", async ()
 	expect(h.dispatches).toBe(1);
 });
 
+it("a clone prewarm queues behind the active session and its first turn is served", async () => {
+	const h = harness();
+	h.slowWorker(100);
+	prewarmPiTagSnapshot(h.db, h.sessionId);
+	prewarmPiTagSnapshot(h.db, "startup-clone");
+	await h.call();
+	expect(h.refusals).toEqual([]);
+	expect(h.dispatches).toBe(1);
+	expect(getPiTagSnapshotView(h.db, h.sessionId)).toEqual(
+		getTagsBySession(h.db, h.sessionId),
+	);
+	await ensurePiTagSnapshotReady(h.db, "startup-clone", new PiContextBudget());
+	await drainPiTagSnapshotSession("startup-clone");
+	expect(h.starts).toBe(2);
+});
+
+it("an independently cancelled prewarm retries and serves the first turn", async () => {
+	const h = harness();
+	let starts = 0;
+	__setPiTagSnapshotWorkerForTests(h.db, (request, cached) => {
+		const job = h.track(
+			startPiTagSnapshotWorker(
+				{ ...request, test: { openDelayMs: 100 } },
+				{ cached },
+			),
+		);
+		if (++starts === 1) setImmediate(() => job.cancel());
+		return job;
+	});
+	prewarmPiTagSnapshot(h.db, h.sessionId);
+	await h.call();
+	expect(h.refusals).toEqual([]);
+	expect(h.dispatches).toBe(1);
+	expect(starts).toBe(2);
+});
+
+for (const kind of ["cancel", "abort"] as const) {
+	it(`a pass's own ${kind} still stops hydration without retrying`, async () => {
+		const h = harness();
+		const budget = new PiContextBudget();
+		const controller = new AbortController();
+		budget.signal = controller.signal;
+		__setPiTagSnapshotWorkerForTests(h.db, (request, cached) => {
+			const job = h.track(
+				startPiTagSnapshotWorker(
+					{ ...request, test: { openDelayMs: 100 } },
+					{ cached },
+				),
+			);
+			setImmediate(() => {
+				if (kind === "cancel") budget.cancel();
+				else controller.abort(new Error("user abort"));
+				job.cancel();
+			});
+			return job;
+		});
+		await expect(
+			ensurePiTagSnapshotReady(h.db, h.sessionId, budget),
+		).rejects.toThrow();
+		expect(h.starts).toBe(1);
+		expect(h.dispatches).toBe(0);
+	});
+}
+
+it("closing the connection stops a cancelled hydration wait without restarting", async () => {
+	const db = createTestDb();
+	let reject!: (error: Error) => void;
+	let starts = 0;
+	__setPiTagSnapshotWorkerForTests(db, () => {
+		starts++;
+		return {
+			result: new Promise<never>((_resolve, fail) => {
+				reject = fail;
+			}),
+			released: Promise.resolve(),
+			cancel: () => reject(new PiTagHydrationError("cancelled", "cancelled")),
+		};
+	});
+	const pending = ensurePiTagSnapshotReady(
+		db,
+		"closing-session",
+		new PiContextBudget(),
+	);
+	db.close();
+	await expect(pending).rejects.toThrow("connection closed");
+	expect(starts).toBe(1);
+});
+
 for (const evidence of ["allocator observer", "insert journal"] as const) {
 	it(`own first allocation refuses without ${evidence} evidence`, async () => {
 		const h = harness();

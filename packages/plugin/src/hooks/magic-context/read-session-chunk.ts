@@ -8,6 +8,7 @@ import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-m
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { isSystemDirective, removeSystemReminders } from "../../shared/system-directive";
+import { askAnswerLines } from "./ask-answer-notice";
 import { isHostUnservedRow, markHostUnservedRow } from "./host-served-rows";
 import { prewarmRawSessionOrdinalsForDb } from "./raw-ordinal-warmup";
 import {
@@ -312,6 +313,16 @@ export function cleanUserText(text: string): string {
 }
 
 /**
+ * The answer lines the chunk reader appends to a user message, one per answer
+ * notice in its raw text, normalized like every other user text.
+ */
+function answerLineParts(rawText: string): string[] {
+    return askAnswerLines(rawText)
+        .map(normalizeText)
+        .filter((value) => value.length > 0);
+}
+
+/**
  * The chunk reader's noise gate. It matches hasMeaningfulUserText but cleans
  * text with cleanUserText, so a steering-wrapped user message counts as the
  * user's words. The shared predicate is left as is because it also decides
@@ -328,7 +339,17 @@ function hasMeaningfulChunkUserText(parts: unknown[]): boolean {
         if (isSystemDirective(cleaned)) continue;
         return true;
     }
-    return false;
+    // A message that held only an answer notice cleans to nothing, but it carries
+    // a decision the user made, so it is not noise.
+    return parts.some(
+        (part) =>
+            part !== null &&
+            typeof part === "object" &&
+            (part as Record<string, unknown>).type === "text" &&
+            typeof (part as Record<string, unknown>).text === "string" &&
+            (part as Record<string, unknown>).ignored !== true &&
+            askAnswerLines((part as Record<string, unknown>).text as string).length > 0,
+    );
 }
 
 export interface SessionChunk {
@@ -1480,12 +1501,22 @@ export function readSessionChunk(
             .map(normalizeText)
             .filter((value) => value.length > 0);
 
+        // A user's answer to a parked ask arrives inside a reminder, so cleaning
+        // would drop it. Its answer lines follow the user's own words instead,
+        // in part order. A message with no answer notice appends nothing and is
+        // rendered exactly as before.
+        const answerParts =
+            msg.role === "user"
+                ? extractTexts(msg.parts).flatMap((text) => answerLineParts(text))
+                : [];
+        const userParts = answerParts.length > 0 ? [...textParts, ...answerParts] : textParts;
+
         // For messages with no text content, extract tool-call descriptions as
         // lightweight summaries so historian sees what actions were taken.
         const allParts =
             options.expand === false
                 ? [
-                      ...textParts,
+                      ...userParts,
                       ...(textParts.length === 0 ? extractToolCallSummaries(msg.parts) : []),
                   ]
                 : msg.parts.flatMap((part) => {
@@ -1496,6 +1527,13 @@ export function readSessionChunk(
                           .map((t) => (msg.role === "user" ? cleanUserText(t) : t))
                           .map(normalizeText)
                           .filter(Boolean);
+                      // The answer lines follow the text part that carried them,
+                      // so a message keeps its own order.
+                      if (msg.role === "user") {
+                          texts.push(
+                              ...extractTexts([part]).flatMap((text) => answerLineParts(text)),
+                          );
+                      }
                       return texts.length
                           ? texts
                           : textParts.length === 0
@@ -1514,7 +1552,7 @@ export function readSessionChunk(
         // Narrative is present iff this message contributed at least one real text part.
         // Tool summaries alone count as tool-only. User-role messages here always carry
         // meaningful text (the no-text user branch returned above).
-        const msgHasNarrative = textParts.length > 0;
+        const msgHasNarrative = userParts.length > 0;
 
         if (currentBlock && currentBlock.role === role) {
             currentBlock.endOrdinal = msg.ordinal;

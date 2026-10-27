@@ -112,9 +112,14 @@ function isPermissionMap(value: unknown): value is Record<string, unknown> {
  * OpenCode accepts either a whole-permission action or a pattern map for
  * `permission.task`; its visibility evaluator uses the last matching rule.
  * Normalize the whole-permission form, retain unrelated user rules, then append
- * our exact agent-id denies. When the ambient task policy has a wildcard deny,
- * re-emit that wildcard after the named denies so the Task tool is hidden rather
- * than shown as a callable-but-refused tool.
+ * our exact agent-id denies. When the ambient task policy is a wildcard deny
+ * whose only companions are our own appended agent-id denies, re-emit that
+ * wildcard after the named denies so the Task tool is hidden rather than shown
+ * as a callable-but-refused tool. When the wildcard deny sits next to any of
+ * the agent's own rules (the deny-by-default-with-exceptions shape), keep the
+ * agent's own ordering untouched: OpenCode resolves with the last matching
+ * rule, so moving the wildcard to the end there would override every named
+ * allow and empty the Task tool (#777).
  */
 export function denyTaskRoutingToAgents(
     permission: unknown,
@@ -133,10 +138,19 @@ export function denyTaskRoutingToAgents(
           : {};
     const internalAgentIdSet = new Set(internalAgentIds);
     const hasAmbientWildcardDeny = configuredTask["*"] === "deny";
+    // Only our own appended agent-id denies may accompany the wildcard for the
+    // move to stay correct — a user's named allow next to it must keep winning.
+    // Excluding internal ids here also keeps re-merging our own output
+    // idempotent: that output is exactly internal denies plus the wildcard.
+    const movesAmbientWildcardDeny =
+        hasAmbientWildcardDeny &&
+        Object.keys(configuredTask).every(
+            (agentId) => agentId === "*" || internalAgentIdSet.has(agentId),
+        );
     const retainedTask = Object.fromEntries(
         Object.entries(configuredTask).filter(
             ([agentId]) =>
-                !internalAgentIdSet.has(agentId) && (agentId !== "*" || !hasAmbientWildcardDeny),
+                !internalAgentIdSet.has(agentId) && (agentId !== "*" || !movesAmbientWildcardDeny),
         ),
     );
 
@@ -147,8 +161,10 @@ export function denyTaskRoutingToAgents(
             ...Object.fromEntries(internalAgentIds.map((agentId) => [agentId, "deny"])),
             // OpenCode's Permission.disabled uses findLast. Re-inserting the
             // ambient wildcard after our named routing denies keeps its whole-tool
-            // deny as the final match and makes the Task tool invisible.
-            ...(hasAmbientWildcardDeny ? { "*": "deny" } : {}),
+            // deny as the final match and makes the Task tool invisible — but
+            // only when it stood alone; with named rules the agent's own
+            // ordering must win (#777).
+            ...(movesAmbientWildcardDeny ? { "*": "deny" } : {}),
         },
     };
 }

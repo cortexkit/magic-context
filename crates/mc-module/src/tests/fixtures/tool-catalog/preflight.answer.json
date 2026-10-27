@@ -1,10 +1,10 @@
 {
-  "generation": "018e4c540e0579a4c97d56662762251d3ab326b87a8aa0549c06099c7cfa796e",
-  "catalog_digest": "018e4c540e0579a4c97d56662762251d3ab326b87a8aa0549c06099c7cfa796e",
+  "generation": "5239624f429fd26fe12f12920820cb52c0bf104d3f9eadd5d007838360b9d664",
+  "catalog_digest": "5239624f429fd26fe12f12920820cb52c0bf104d3f9eadd5d007838360b9d664",
   "tools": [
     {
       "name": "ctx_note",
-      "schema_digest": "7f22f89fc404f26312d12622f7d7c1f5face16b39f4d91214ba6c63017a4dc66",
+      "schema_digest": "cf84d0fffd0c46b40b50c6297d8d02f73ef5e0527f66cd14e24718ce1e3ef4f4",
       "semantics": 1,
       "result_ops": [
         "prepend",
@@ -25,7 +25,7 @@
               "dismiss",
               "update"
             ],
-            "description": "write | read | update | dismiss. Defaults to write when content is given, else read."
+            "description": "write | read | update | dismiss."
           },
           "content": {
             "type": "string",
@@ -55,7 +55,6 @@
             "description": "Skip this many newest rows (default 0)."
           },
           "note_ids": {
-            "minItems": 1,
             "maxItems": 50,
             "type": "array",
             "items": {
@@ -63,15 +62,20 @@
               "minimum": 1,
               "maximum": 9007199254740991
             },
-            "description": "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write."
+            "description": "Note ids: one for update, 1–50 for dismiss, or 1–50 to read those notes in full. Write and a plain read take an empty list."
           }
         },
+        "required": [
+          "action",
+          "content",
+          "note_ids"
+        ],
         "additionalProperties": false
       }
     },
     {
       "name": "ctx_memory",
-      "schema_digest": "14aa400d0f9f21ad2d15072d93831ab52d406b16a3b680b4bafd44797bedda48",
+      "schema_digest": "de59b47f087c33bb84d20fe9eec0f5cdd5692089aa43e4bf19b72dcb53292cbc",
       "semantics": 1,
       "result_ops": [
         "prepend",
@@ -108,7 +112,7 @@
               "CONFIG_VALUES",
               "NAMING"
             ],
-            "description": "Kind of fact (required for write; on update/merge optional, omitted keeps the current category)."
+            "description": "Kind of fact (required for write; on update/merge, pass the memory's current category to keep it)."
           },
           "ids": {
             "type": "array",
@@ -122,6 +126,12 @@
             "description": "Why it is being archived (optional)."
           }
         },
+        "required": [
+          "action",
+          "content",
+          "category",
+          "ids"
+        ],
         "additionalProperties": false
       }
     },

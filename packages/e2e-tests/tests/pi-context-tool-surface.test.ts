@@ -24,12 +24,13 @@ function hash(value: string): string {
 }
 
 /**
- * Tool-list hashes captured from Pi 0.87.1 and OMP 18.12.3 before enabling
- * the context tools listed below.
+ * Pi 0.87.1's exact tool list with required memory/note arguments, and OMP
+ * 18.12.3's historical list before enabling the context tools listed below.
+ * The OMP historical pin remains an inequality check, not a current snapshot.
  */
-const PRE_CHANGE_TOOL_BYTES_SHA256 = {
+const TOOL_BYTES_SHA256 = {
 	omp: "76a6eb5bf46e2fc43a9ab84640ed7257bc5d1c63b2242f3f464cf3cec8a8280b",
-	pi: "d328ca0086de3c301d0e1901d0ea20cf242251dfdf8f8953e0efeb53ea05d0b1",
+	pi: "d421ab31332486cb3e6448c2e46ed267d24d00d59a589caeb0fda7237e4264c2",
 } as const;
 
 const CONTEXT_TOOL_NAMES = [
@@ -212,6 +213,30 @@ forEachHost(import.meta.url, null, (host) => {
 					),
 				};
 			};
+			const opened = execFileSync("lsof", ["-Fn", "-p", String(harness.hostPid)], {
+				encoding: "utf8",
+			});
+			writeFileSync(join(base, `${host}-lsof.txt`), opened);
+			const stores = opened
+				.split("\n")
+				.filter(
+					(line) =>
+						line.startsWith("n/") &&
+						(/\.db(?:-wal|-shm)?$/.test(line) || /\/(?:\.config|\.pi|\.omp)\//.test(line)),
+				)
+				.map((line) => line.slice(1));
+			expect(stores.length).toBeGreaterThan(0);
+			expect(stores.every((path) => path.startsWith(`${base}/`))).toBe(true);
+			for (const path of [
+				harness.env.baseDir,
+				harness.env.configDir,
+				harness.env.dataDir,
+				harness.env.cacheDir,
+				harness.env.agentDir,
+			]) {
+				expect(path.startsWith(`${base}/`)).toBe(true);
+			}
+
 			const toolHashes = toolBytes.map((bytes) => hash(bytes));
 			const firstTools = Array.isArray(captured[0]?.body.tools)
 				? captured[0].body.tools.filter(isRecord)
@@ -219,7 +244,7 @@ forEachHost(import.meta.url, null, (host) => {
 			expect(toolHashes[1]).toBe(toolHashes[0]);
 			expect(toolBytes[1]).toBe(toolBytes[0]);
 			if (host === "pi") {
-				expect(toolHashes[0]).toBe(PRE_CHANGE_TOOL_BYTES_SHA256.pi);
+				expect(toolHashes[0]).toBe(TOOL_BYTES_SHA256.pi);
 				for (const request of captured) {
 					const tools = Array.isArray(request.body.tools) ? request.body.tools : [];
 					for (const tool of tools.filter(isRecord)) {
@@ -227,7 +252,7 @@ forEachHost(import.meta.url, null, (host) => {
 					}
 				}
 			} else {
-				expect(toolHashes[0]).not.toBe(PRE_CHANGE_TOOL_BYTES_SHA256.omp);
+				expect(toolHashes[0]).not.toBe(TOOL_BYTES_SHA256.omp);
 				const toolNames = firstTools.map((tool) =>
 					typeof tool.name === "string" ? tool.name.replace(/^_/, "") : tool.name,
 				);
@@ -282,30 +307,6 @@ forEachHost(import.meta.url, null, (host) => {
 					wire_dir: wireDir,
 				})}`,
 			);
-
-			const opened = execFileSync("lsof", ["-Fn", "-p", String(harness.hostPid)], {
-				encoding: "utf8",
-			});
-			writeFileSync(join(base, `${host}-lsof.txt`), opened);
-			const stores = opened
-				.split("\n")
-				.filter(
-					(line) =>
-						line.startsWith("n/") &&
-						(/\.db(?:-wal|-shm)?$/.test(line) || /\/(?:\.config|\.pi|\.omp)\//.test(line)),
-				)
-				.map((line) => line.slice(1));
-			expect(stores.length).toBeGreaterThan(0);
-			expect(stores.every((path) => path.startsWith(`${base}/`))).toBe(true);
-			for (const path of [
-				harness.env.baseDir,
-				harness.env.configDir,
-				harness.env.dataDir,
-				harness.env.cacheDir,
-				harness.env.agentDir,
-			]) {
-				expect(path.startsWith(`${base}/`)).toBe(true);
-			}
 		} finally {
 			await harness?.dispose();
 			if (previousTmp === undefined) delete process.env.TMPDIR;

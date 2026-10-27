@@ -448,8 +448,12 @@ export interface PiHistorianDeps {
 	/**
 	 * Optional live boundary resolver used only to recover a stale trigger snapshot.
 	 * It must recompute against the currently registered Pi raw-message provider.
+	 * It receives the stale snapshot so it can carry that snapshot's one-pass
+	 * live-prompt floor lift into the re-resolved boundary.
 	 */
-	refreshBoundarySnapshot?: () => ProtectedTailBoundarySnapshot;
+	refreshBoundarySnapshot?: (
+		stale: ProtectedTailBoundarySnapshot,
+	) => ProtectedTailBoundarySnapshot;
 	/** Current resolved context limit used to reject stale snapshots after model switches. */
 	currentContextLimit?: number;
 	/** Optional per-call timeout (default 600s). */
@@ -729,7 +733,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				refreshBoundarySnapshot
 			) {
 				try {
-					const refreshed = refreshBoundarySnapshot();
+					const refreshed = refreshBoundarySnapshot(boundarySnapshot);
 					if (hasRunnableCompartmentWindow(refreshed)) {
 						sessionLog(
 							sessionId,

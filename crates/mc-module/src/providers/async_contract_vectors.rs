@@ -1,5 +1,6 @@
-//! Public-API async contract vectors from published compaction-provider 0.5.1.
-//! Their expected digests come from the contract's independent implementation.
+//! Public-API async contract vectors from published compaction-provider
+//! 0.7.2 (`async.json`, `setup.json`, copied byte for byte). Their expected
+//! digests come from the contract's independent implementation.
 use crate::sha256_hex;
 mod vectors {
     use serde::{de::DeserializeOwned, Serialize};
@@ -459,11 +460,26 @@ fn ride_vectors() {
         [
             RideCause::TtlExpired,
             RideCause::ModelChange,
+            RideCause::AccountChange,
             RideCause::SurfaceChange,
             RideCause::Ceiling,
             RideCause::Unknown("provider_switch".into()),
         ]
     );
+    // compaction-provider 0.7.2: every valid account label round-trips and is
+    // the validated label the request reports for that cause.
+    let accounts = vectors::cases(ride, "account_requests");
+    assert!(!accounts.is_empty());
+    for case in accounts {
+        let request: RideRequest = vectors::round_trip(name(case), &case["params"]);
+        assert_eq!(request.check(), Ok(()), "{}", name(case));
+        assert_eq!(
+            request.account(),
+            case["account"].as_str(),
+            "{}",
+            name(case)
+        );
+    }
     for case in vectors::cases(ride, "requests_refused") {
         let request: RideRequest = serde_json::from_value(case["params"].clone()).unwrap();
         assert_eq!(

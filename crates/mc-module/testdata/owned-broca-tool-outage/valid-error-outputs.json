@@ -1,0 +1,92 @@
+{
+  "profile": "owned-broca",
+  "valid": [
+    {
+      "name": "plain_error",
+      "output": {
+        "kind": "error",
+        "message": "plain failure"
+      },
+      "plain": true,
+      "rendered": "plain failure"
+    },
+    {
+      "name": "every_member_at_its_limit_in_another_member_order",
+      "output": {
+        "retry": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "nothing_sent": true,
+        "detail": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "code": "ab_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1",
+        "module": "fed:peer-1:mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "message": "tool plane unavailable",
+        "kind": "error"
+      },
+      "plain": false,
+      "rendered": "tool plane unavailable\nmodule: fed:peer-1:mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm\ncode: ab_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1b_1\ndetail: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\nnothing was sent\nretry: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+    },
+    {
+      "name": "lost_reply_without_nothing_sent_and_object_detail",
+      "output": {
+        "kind": "error",
+        "message": "tool call timed out",
+        "module": "fed:peer-1:aft",
+        "code": "timeout",
+        "detail": "{\"after_ms\":30000}"
+      },
+      "plain": false,
+      "rendered": "tool call timed out\nmodule: fed:peer-1:aft\ncode: timeout\ndetail: {\"after_ms\":30000}"
+    },
+    {
+      "name": "module_with_space",
+      "output": {
+        "kind": "error",
+        "message": "tool plane unavailable",
+        "module": "aft module",
+        "code": "target_unavailable",
+        "detail": "supervised_not_registered",
+        "nothing_sent": true,
+        "retry": "the module is restarting or unavailable; retry the call in a minute"
+      },
+      "plain": false,
+      "rendered": "tool plane unavailable\nmodule: aft module\ncode: target_unavailable\ndetail: supervised_not_registered\nnothing was sent\nretry: the module is restarting or unavailable; retry the call in a minute"
+    },
+    {
+      "name": "module_non_ascii",
+      "output": {
+        "kind": "error",
+        "message": "tool plane unavailable",
+        "module": "aft-é",
+        "code": "target_unavailable",
+        "detail": "supervised_not_registered",
+        "nothing_sent": true,
+        "retry": "the module is restarting or unavailable; retry the call in a minute"
+      },
+      "plain": false,
+      "rendered": "tool plane unavailable\nmodule: aft-é\ncode: target_unavailable\ndetail: supervised_not_registered\nnothing was sent\nretry: the module is restarting or unavailable; retry the call in a minute"
+    },
+    {
+      "name": "module_at_129_bytes",
+      "output": {
+        "kind": "error",
+        "message": "tool plane unavailable",
+        "module": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "code": "target_unavailable",
+        "detail": "supervised_not_registered",
+        "nothing_sent": true,
+        "retry": "the module is restarting or unavailable; retry the call in a minute"
+      },
+      "plain": false,
+      "rendered": "tool plane unavailable\nmodule: mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm\ncode: target_unavailable\ndetail: supervised_not_registered\nnothing was sent\nretry: the module is restarting or unavailable; retry the call in a minute"
+    },
+    {
+      "name": "module_at_255_bytes_with_multibyte",
+      "output": {
+        "kind": "error",
+        "message": "tool plane unavailable",
+        "module": "éxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéx"
+      },
+      "plain": false,
+      "rendered": "tool plane unavailable\nmodule: éxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéxéx"
+    }
+  ]
+}
