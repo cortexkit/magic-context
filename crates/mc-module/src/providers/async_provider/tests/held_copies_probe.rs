@@ -1,4 +1,4 @@
-//! compaction-provider 0.7.4's `held_copies_follow_reasoning_pruned` probe,
+//! compaction-provider 0.7.5's `held_copies_follow_reasoning_pruned` probe,
 //! run end to end against the async provider for every serializer profile
 //! ck-mc declares. The probe plays the runner: its scripted transcript, in
 //! the profile's native stored format, answers ck-mc's reverse
@@ -427,31 +427,33 @@ async fn probe_passes(profile: &'static str) {
     }
 }
 
-// compaction-provider 0.7.4's profile transcripts stop the probe in ck-mc
-// before any prune is checked, for reasons outside archive pruning. Each run
-// is kept so it can be run on demand (`--ignored`) once the fixture named on
-// it is fixed.
+// With compaction-provider 0.7.5 every profile run passes the probe's
+// reconcile and view checks and stops at its last one: after a notice that
+// repeats the reconciled generation and adds nothing, ck-mc's ordinary read
+// of its newest held entry (the overlap every notice reads to check the
+// transcript continues unchanged; `State::read_from`) is counted as a second
+// reconcile. Run them with `--ignored`.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "kit fixture serves shapes Broca never serves (compaction-provider 0.7.5 fixes): `text_with_state` parts, which Broca's serializer writes as plain `text`, and array `tool_result` outputs, which Broca always serves as `{kind: ...}`"]
+#[ignore = "the probe counts ck-mc's standing one-entry overlap read at its newest held ordinal as a reconcile re-read (compaction-provider 0.7.5)"]
 async fn held_copies_follow_reasoning_pruned_owned_broca() {
     probe_passes("owned-broca").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "kit transcript defect (compaction-provider 0.7.5 fixes): the probe's pages name message `probe-m<o>` while the OpenCode body's `info.id` is `msg_probe_<o>`; ck-mc requires the runner's own id (history_unreadable: invalid OpenCode {info, parts} message)"]
+#[ignore = "the probe counts ck-mc's standing one-entry overlap read at its newest held ordinal as a reconcile re-read (compaction-provider 0.7.5)"]
 async fn held_copies_follow_reasoning_pruned_opencode_aisdk() {
     probe_passes("opencode-aisdk").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "kit transcript defect (compaction-provider 0.7.5 fixes): the probe's pages name message `probe-m<o>` while the pi entry's `id` is `probe-entry-<o>`; ck-mc requires the journal id (history_unreadable: Pi provider requires stable message entries)"]
+#[ignore = "the probe counts ck-mc's standing one-entry overlap read at its newest held ordinal as a reconcile re-read (compaction-provider 0.7.5)"]
 async fn held_copies_follow_reasoning_pruned_pi() {
     probe_passes("pi").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "kit transcript defect (compaction-provider 0.7.5 fixes): the probe's transcript ends at an assistant tool_use whose result is never written, so its notices complete but no view can compact through the open arc, and the probe needs a view after the prune"]
+#[ignore = "the probe counts ck-mc's standing one-entry overlap read at its newest held ordinal as a reconcile re-read (compaction-provider 0.7.5)"]
 async fn held_copies_follow_reasoning_pruned_anthropic_messages() {
     probe_passes("anthropic-messages").await;
 }
