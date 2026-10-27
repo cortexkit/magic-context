@@ -1,5 +1,4 @@
 //! Expand one summary without reading unrelated summary bodies.
-#![cfg_attr(not(test), expect(dead_code, reason = "consumed by app read dispatch"))]
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};

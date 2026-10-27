@@ -1,9 +1,5 @@
 //! Indexed session routing. Connections belong to the caller's read snapshot;
 //! a target must be resolved again on every request, not cached across moves.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the session read operations")
-)]
 
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};

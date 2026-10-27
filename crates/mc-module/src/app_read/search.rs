@@ -535,7 +535,6 @@ fn literal_highlight(text: &str, query: &str) -> String {
 }
 
 /// Connections may already belong to a wider caller-owned snapshot.
-#[cfg_attr(test, expect(dead_code, reason = "dispatcher integration is separate"))]
 pub(crate) fn search(
     context: &Connection,
     store: &Connection,

@@ -1,5 +1,4 @@
 //! Transcript addresses refer to stored parts, not the subset a UI displays.
-#![cfg_attr(not(test), expect(dead_code, reason = "consumed by app read dispatch"))]
 
 use serde_json::{json, Value};
 

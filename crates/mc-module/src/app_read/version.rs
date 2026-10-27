@@ -1,8 +1,4 @@
 //! Opaque versions over indexed counters, never transcript contents or wall time.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the session read operations")
-)]
 
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
