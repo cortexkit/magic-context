@@ -5,10 +5,7 @@ import {
     toolLoopDreamTasks,
 } from "../../features/magic-context/dreamer/task-registry";
 import type { DreamTaskRuntimeConfig } from "../../features/magic-context/dreamer/task-scheduler";
-import {
-    resolveManualDreamTask,
-    selectRunnableDreamTasks,
-} from "./dream-manual";
+import { resolveManualDreamTask, selectRunnableDreamTasks } from "./dream-manual";
 
 test("no argument runs every enabled task", () => {
     expect(resolveManualDreamTask(undefined)).toEqual({});

@@ -34,10 +34,7 @@ import {
     SubcError,
 } from "@cortexkit/subc-client";
 
-import {
-    __moduleTransportTest,
-    SubcModuleTransport,
-} from "./module-transport";
+import { __moduleTransportTest, SubcModuleTransport } from "./module-transport";
 import { StoreAheadOfBinaryError } from "./store-ahead-refusal";
 
 function decodedBody(body: unknown): unknown {
