@@ -415,7 +415,8 @@ const CASES: Array<{ name: string; note: string; inputs: VectorInputs }> = [
         note: "At 95% the force ride and the emergency latch both yield.",
         inputs: base({ usagePercent: 96, emergencyEpisodeSpent: true, pendingWork: ALL_WORK }),
     },
-    // Inputs the first round pinned to constants, and the review's extra cases.
+    // Signed-thinking holds, parked force triggers, prefix rewrites and repairs, routine
+    // cleanup latches, subagent cache loss, a non-default force band and running historians.
     {
         name: "primary-signed-hold-execute-queued-worth-it",
         note: "A pass held for recent signed thinking may not change its prefix: the execute pass is admitted and counted, but nothing applies.",
