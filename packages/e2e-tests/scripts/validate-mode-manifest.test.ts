@@ -22,7 +22,7 @@ describe("mode manifest validator", () => {
         // Bump this with the manifest whenever a tests/**/*.test.ts file is added or
         // removed. Moving a file between excluded and ts-only changes the invocation
         // counts and excluded list below, but not the total number of files.
-        expect(validation.files.length).toBe(169);
+        expect(validation.files.length).toBe(156);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -33,7 +33,7 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(84);
+        expect(ts).toHaveLength(83);
         // The Rust lane is retired with transform_mode: no entry has a rust
         // invocation. Former both-modes files stay in the TypeScript list.
         expect(validation.manifest.rust_lane).toBe("retired");
@@ -41,7 +41,7 @@ describe("mode manifest validator", () => {
         expect(ts).toContain("tests/idle-ttl-restart.test.ts");
         expect(ts).toContain("tests/subagent-behavior.test.ts");
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(8);
-        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(47);
+        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(46);
         expect(filesForMode(validation, "ts", "opencode")).toContain("tests/processed-images.test.ts");
         expect(rust).not.toContain("tests/processed-images.test.ts");
         for (const host of ["opencode2", "pi", "omp"] as const) {
@@ -150,11 +150,6 @@ describe("mode manifest validator", () => {
             "tests/opencode2/restart-system-prompt-change.test.ts",
             "tests/opencode2/rpc-s2-listener.test.ts",
             "tests/opencode2/runner.test.ts",
-            "tests/opencode2/rust-mode-boundary-restart-gate.test.ts",
-            "tests/opencode2/rust-mode-fold-cadence.test.ts",
-            "tests/opencode2/rust-mode-host-runner-default.test.ts",
-            "tests/opencode2/rust-mode-limitation.test.ts",
-            "tests/opencode2/rust-mode-module-served.test.ts",
             "tests/opencode2/session-api-cutover.test.ts",
             "tests/opencode2/session-project-binding.test.ts",
             "tests/opencode2/sidebar-component.test.ts",
@@ -168,13 +163,6 @@ describe("mode manifest validator", () => {
             "tests/opencode2/tool-result-image.test.ts",
             "tests/opencode2/ts-mode-on-migrated-real-store.test.ts",
             "tests/opencode2/v1-v2-reconversion.test.ts",
-            "tests/pi-rust-degradation-arc-1.test.ts",
-            "tests/pi-rust-degradation-arc-4.test.ts",
-            "tests/rust-provider-pipeline-opencode1.test.ts",
-            "tests/rust-provider-pipeline-opencode2.test.ts",
-            "tests/rust-smoke.test.ts",
-            "tests/rust-tool-attachment-upgrade.test.ts",
-            "tests/rust-tool-attachments.test.ts",
             "tests/system-prompt-change-order.test.ts",
             "tests/zen-primary-surface.test.ts",
         ]);
