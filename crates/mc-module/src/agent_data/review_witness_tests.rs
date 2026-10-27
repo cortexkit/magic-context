@@ -154,6 +154,16 @@ fn manifest_before_participant(
         // Added after the participant and independent of it: the read-only
         // management query basal flows call. The agent-data feature changes nothing here.
         crate::subagent_invocations_read::management_role(),
+        // App-read design §3.1: this independent read service remains present with agent-data off.
+        ProviderRole::InternalService {
+            service_id: crate::app_read::SERVICE_ID.into(),
+            transport: subc_protocol::manifest::InternalTransport::Bulk,
+            agent_facing: false,
+            operations: crate::app_read::APP_READ_METHODS
+                .iter()
+                .map(|method| method.to_string())
+                .collect(),
+        },
     ])
     .consumes(vec![ConsumerRole::ServiceClient { of: targets }])
     .build()

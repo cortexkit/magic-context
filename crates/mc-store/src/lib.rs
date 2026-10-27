@@ -3372,6 +3372,7 @@ const MIGRATIONS: &[Migration] = &[
         version: 74,
         statements: include_str!("migrations/store_074_async_compaction.sql"),
     },
+    Migration { version: 75, statements: include_str!("migrations/store_075_app_read_indexes.sql") },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -8243,6 +8244,18 @@ impl McStore {
             conn.pragma_update(None, "query_only", true)?;
             read(conn)
         })
+    }
+
+    /// Run `read` against `store.db` in one read-only transaction.
+    ///
+    /// Callers see a consistent snapshot and cannot change rows: the connection
+    /// is the store's reader pool, which rejects writes. This is the store.db
+    /// counterpart of [`Self::with_context_read`].
+    pub fn with_store_read<T>(
+        &self,
+        read: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, McStoreError> {
+        self.inner.with_read(read).map_err(Into::into)
     }
 
     /// The directory holding this store's `store.db`, which is the module's data
@@ -19220,6 +19233,24 @@ mod tests {
             })
             .unwrap();
         assert_eq!((rows, tables), (0, 0));
+    }
+
+    #[test]
+    fn store_read_rejects_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        store
+            .with_store_read(|conn| {
+                let refused = conn
+                    .execute("CREATE TABLE store_read_probe(id INTEGER)", [])
+                    .expect_err("a store read must reject writes");
+                assert_eq!(
+                    refused.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::ReadOnly)
+                );
+                Ok(())
+            })
+            .expect("the refusal stays inside the read callback");
     }
 
     #[test]
