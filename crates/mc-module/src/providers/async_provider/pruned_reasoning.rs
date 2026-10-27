@@ -36,13 +36,21 @@ use cortexkit_role_llm_runner::archive_prunes_reasoning::{self, PrunedPartAt, Pr
 /// The runner's prune state, as `session.head` reports it.
 pub(super) type PruneState = cortexkit_role_llm_runner::archive_prunes_reasoning::ReasoningPruned;
 
+/// Where a re-read for a prune generation stopped when it ran out of time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct ReconcileCursor {
+    pub(super) generation: u64,
+    pub(super) next_ordinal: u64,
+}
+
 /// How far a reconciliation got.
 pub(super) enum Reconciled {
     /// Every held message the prune can have changed was read again.
     Complete,
     /// The read budget ran out first. Messages already replaced stay
-    /// replaced; the generation is not recorded, so the next notice or
-    /// Setup carrying it reconciles again (and finds those stable).
+    /// replaced and the record keeps where the re-read stopped
+    /// (`pruned_reconcile_cursor`); the generation is not recorded, so the
+    /// next notice or Setup carrying it continues from there.
     Incomplete,
 }
 
@@ -601,16 +609,30 @@ impl McHandler {
         let floor = state.reconcile_floor();
         let first_held = state.entries.range(floor..).next().map(|(n, _)| *n);
         let last_held = state.entries.last_key_value().map(|(n, _)| *n);
+        // A re-read for this generation that ran out of time continues where
+        // it stopped: the copies before that are already reconciled.
+        let resume_at = state
+            .pruned_reconcile_cursor
+            .filter(|cursor| cursor.generation == seen.generation)
+            .map(|cursor| cursor.next_ordinal);
         let mut replaced = 0usize;
         let mut read = 0usize;
         if let (Some(first), Some(last)) = (first_held, last_held) {
             let through = last.min(seen.through_ordinal);
-            let mut from = first;
+            let mut from = first.max(resume_at.unwrap_or(first));
+            // Stop before a page the remaining budget could cut short: a page
+            // call cut by its timeout is a failed read, not a resumable one.
+            let mut slowest_page = Duration::ZERO;
             while from <= through {
-                if Instant::now() >= deadline {
-                    tracing::info!(session_ref=%state.reference(), generation=seen.generation, next=from, "async prune reconcile incomplete; the next notice continues it");
+                if deadline.saturating_duration_since(Instant::now()) <= slowest_page {
+                    tracing::info!(session_ref=%state.reference(), generation=seen.generation, next=from, "async prune reconcile incomplete; the next Setup or notice continues it");
+                    state.pruned_reconcile_cursor = Some(ReconcileCursor {
+                        generation: seen.generation,
+                        next_ordinal: from,
+                    });
                     return Ok(Reconciled::Incomplete);
                 }
+                let page_started = Instant::now();
                 let mut params = json!({
                     "from_ordinal": from,
                     "limit": through - from + 1,
@@ -668,6 +690,7 @@ impl McHandler {
                 if from <= through && page["next_from_ordinal"].as_u64() != Some(from) {
                     return Err(transient("async paging did not advance"));
                 }
+                slowest_page = slowest_page.max(page_started.elapsed());
             }
         }
         tracing::info!(
@@ -680,6 +703,7 @@ impl McHandler {
             "async held copies reconciled with the runner's prune"
         );
         state.reasoning_pruned = Some(seen);
+        state.pruned_reconcile_cursor = None;
         Ok(Reconciled::Complete)
     }
 
@@ -687,7 +711,12 @@ impl McHandler {
     /// return the stored Setup answer, which now names the pruning
     /// permission. A held copy that differs other than as a prune resets the
     /// conversation; it is read again from scratch at the next notice, and
-    /// what it reads then is the runner's pruned bytes.
+    /// what it reads then is the runner's pruned bytes. A re-read that does
+    /// not finish within the read budget fails the Setup with a transient
+    /// error: the runner makes no other call for the run and calls Setup
+    /// again with the same `reasoning_pruned`, which continues the re-read
+    /// where it stopped. So no view is ever built before the generation is
+    /// reconciled.
     pub(super) async fn reconcile_at_setup(
         &self,
         store: &McStore,
@@ -701,7 +730,16 @@ impl McHandler {
             .reconcile_pruned_reasoning(&mut state, seen, self.notice_read_budget())
             .await
         {
-            Ok(_) => {}
+            Ok(Reconciled::Complete) => {}
+            Ok(Reconciled::Incomplete) => {
+                // Keep the copies already replaced and where the re-read
+                // stopped.
+                state.save(store, &[])?;
+                self.checkin(state);
+                return Err(transient(
+                    "async prune reconcile incomplete; call Setup again to continue it",
+                ));
+            }
             Err(error) => {
                 tracing::warn!(session_ref=%reference, ?error, "async prune reconcile refused; reading the conversation again");
                 state.reset(store)?;

@@ -269,6 +269,11 @@ pub(crate) struct AsyncRecord {
     /// against it (`pruned_reasoning`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pruned_parts: BTreeMap<u64, BTreeMap<String, String>>,
+    /// Where a re-read for a new prune generation stopped when it ran out of
+    /// time, so the next Setup or notice carrying that generation continues
+    /// from there instead of reading the reconciled copies again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pruned_reconcile_cursor: Option<pruned_reasoning::ReconcileCursor>,
     /// Held copies changed by a prune: the runner's next request no longer
     /// matches its prompt cache from the first pruned message on, so the next
     /// engine pass runs once as a rebuild, as a ride does, and lands pending
@@ -2142,6 +2147,7 @@ impl State {
         // transcript is read again with its prune record.
         self.pruned_readopt.clear();
         self.pruned_parts.clear();
+        self.pruned_reconcile_cursor = None;
         for (version, view) in &self.published_engine {
             if let Some(edits) = &view.frozen_edits {
                 self.retired_frozen
@@ -2845,6 +2851,7 @@ impl McHandler {
             reasoning_pruned: request.reasoning_pruned.filter(|state| state.valid()),
             pruned_readopt: BTreeSet::new(),
             pruned_parts: BTreeMap::new(),
+            pruned_reconcile_cursor: None,
             pruned_rebuild_pending: false,
             rode_since_notice: false,
             page_reasoning_pruned: None,

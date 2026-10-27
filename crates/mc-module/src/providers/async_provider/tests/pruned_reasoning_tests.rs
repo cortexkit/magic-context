@@ -213,6 +213,79 @@ async fn a_new_prune_generation_rereads_held_copies_through_the_prune_once() {
     );
 }
 
+/// A post-prune Setup whose re-read runs out of time fails with a transient
+/// error, so the runner makes no other call for the run and calls Setup
+/// again; no view can be built from copies the prune changed. The retried
+/// Setup continues the re-read where the first stopped, without reading the
+/// copies already reconciled for the same generation, and answers `ready`
+/// once the generation is reconciled.
+#[tokio::test]
+async fn an_incomplete_setup_reconcile_fails_and_the_retry_continues_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(dir.path()).await;
+    rig.fill(40);
+    let (reasoning, pruned) = with_reasoning(&rig, 29);
+    rig.notice(1, 1_000, None).await;
+    prune_reasoning(&rig, 29, &reasoning, pruned.clone());
+    // A slow runner: six messages a page, 50 ms a page, 100 ms to read.
+    rig.runner
+        .page_size
+        .store(6, std::sync::atomic::Ordering::Relaxed);
+    rig.runner
+        .read_delay_ms
+        .store(50, std::sync::atomic::Ordering::Relaxed);
+    *rig.h
+        .provider_store
+        .async_runtime
+        .notice_read_budget
+        .lock()
+        .unwrap() = Some(Duration::from_millis(100));
+    let mut request = serde_json::to_value(&rig.state().setup).unwrap();
+    request["request_id"] = json!("setup-after-prune");
+    request["reasoning_pruned"] = serde_json::to_value(rig.runner.prune_state().unwrap()).unwrap();
+    let first = rig
+        .h
+        .dispatch_value(7, json!({"method":"compaction.setup","params":request}))
+        .await;
+    assert!(
+        matches!(&first, HandlerOutcome::Error { code, .. } if code == "transient"),
+        "an unfinished re-read fails the Setup: {first:?}"
+    );
+    let state = rig.state();
+    assert_eq!(state.reasoning_pruned_generation(), None);
+    let stopped = state
+        .pruned_reconcile_cursor
+        .expect("where the re-read stopped");
+    assert_eq!(stopped.generation, 1);
+    assert!(
+        stopped.next_ordinal > 0 && stopped.next_ordinal <= 29,
+        "{stopped:?}"
+    );
+    // The runner calls Setup again, faster this time.
+    rig.runner
+        .read_delay_ms
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    *rig.h
+        .provider_store
+        .async_runtime
+        .notice_read_budget
+        .lock()
+        .unwrap() = None;
+    rig.runner.reads.lock().unwrap().clear();
+    let answer = rig.op("compaction.setup", request).await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    let starts = rig.runner.read_starts();
+    assert_eq!(starts.first(), Some(&stopped.next_ordinal), "{starts:?}");
+    assert!(
+        starts.iter().all(|start| *start >= stopped.next_ordinal),
+        "the copies already reconciled are not read again: {starts:?}"
+    );
+    let state = rig.state();
+    assert_eq!(state.reasoning_pruned_generation(), Some(1));
+    assert_eq!(state.pruned_reconcile_cursor, None);
+    assert_eq!(held(&rig, 29), pruned);
+}
+
 /// A reconciliation never reads below the cut. Copies held from
 /// below it stay as they are; the ones above it are reconciled.
 #[tokio::test]
