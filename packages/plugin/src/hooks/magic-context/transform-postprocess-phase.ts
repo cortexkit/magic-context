@@ -101,7 +101,7 @@ import {
     renderConvertedToolSkeletons,
 } from "./apply-operations";
 import { runAutoSearchHint } from "./auto-search-runner";
-import { reclaimRideLabel, reclaimRidePermitted } from "./cache-busting-signals";
+import { reclaimRideLabel } from "./cache-busting-signals";
 import type { CavemanWordRules } from "./caveman";
 import {
     rearmChannel2AfterCoverageAdvancingHardFold,
@@ -180,6 +180,13 @@ import {
     snapshotSessionValue,
     todoCompanionRequired,
 } from "./paired-thinking-edit";
+import {
+    decidePassMutation,
+    emergencyEpisodeRearms,
+    emergencyRewriteAlreadyPriced,
+    pressureBands,
+    routineCleanupAdmitted,
+} from "./pass-mutation-decision";
 import type { PassDegradationKind, PassDegradationSite, PassOutcome } from "./pass-outcome";
 import {
     postprocessOldestTags,
@@ -2978,107 +2985,74 @@ export async function runPostTransformPhase(
     // retain their separately protected opportunity to edit the suffix.
     const idleExpiryRebuild =
         (!freezeM0M1 || activeThinkingPrefixHold) && args.m0M1?.hardSignals?.cacheExpired === true;
-    const rideSignals = {
-        servedShapeRepair: servedShapeRepair.needsRebuild,
-        executeReclaim: false,
-        subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
-        hardFold:
-            rewritingSignedPrefix ||
-            foldBustsServedPrefixThisPass ||
-            firstRenderBust ||
-            idleExpiryRebuild,
-        // A reading that only a local count put in the force band is not
-        // evidence the session is there: the count can overstate the provider.
-        // Below 95% it waits for the provider's next measurement instead of
-        // rewriting the cache on its own. At 95% or more it still rides, since
-        // waiting there risks the next request not fitting.
-        force:
-            emergencyDropEligible &&
-            (args.contextUsage.percentage >= 95 ||
-                (triggerPermissions.force &&
-                    args.contextUsageFromEstimate !== true &&
-                    getEmergencyInputSample(args.db, args.sessionId) === 0)),
-        explicitFlush:
-            isExplicitFlush &&
-            hasPendingMaterializationOrigin(
-                args.pendingMaterializationSessions,
-                args.sessionId,
-                "user_flush",
-            ),
-        publishedHistory:
-            !prefixPreflightFailed &&
-            (publishedM1RefreshedThisPass ||
-                (!m0M1EnabledForFold &&
-                    (args.pendingCompartmentInjection?.compartmentCount ?? 0) > 0 &&
-                    legacyPublishedHeadChanged(args))),
-    };
     const protectedToolTags = protectedToolTagNumbers(args.tags, args.protectedTools);
-    rideSignals.executeReclaim =
-        !compactionOff &&
-        originateExecuteReclaim({
-            db: args.db,
-            sessionId: args.sessionId,
-            primaryExecute:
-                args.fullFeatureMode &&
-                args.schedulerDecision === "execute" &&
-                args.contextUsage.percentage < args.forceMaterializationPercentage,
-            alreadyBusting: Object.values(rideSignals).some(Boolean) || args.historyRebuiltThisPass,
-            summaryCanCome:
-                compartmentRunning ||
-                args.sessionMeta.compartmentInProgress ||
-                ((prefixPreflightFailed || freezeM0M1 || activeThinkingPrefixHold) &&
-                    (args.deferredHistoryRefreshSessions.has(args.sessionId) ||
-                        args.deferredMaterializationSessions.has(args.sessionId) ||
-                        args.historyRefreshSessions?.has(args.sessionId) === true)) ||
-                readExecuteReclaimState(args.db, args.sessionId).floorOrdinal !== null,
-            reclaimableTokens: estimateExecuteReclaimTokens({
+    // The ride signals, the per-pass mutation permission and the lane gates come
+    // from `decidePassMutation`; the shared decision vectors
+    // (`pass-decision-vectors.json`) exercise that same function.
+    const passDecision = decidePassMutation(
+        {
+            fullFeatureMode: args.fullFeatureMode,
+            compactionOff,
+            schedulerDecision: args.schedulerDecision,
+            contextPercentage: args.contextUsage.percentage,
+            forceMaterializationPercentage: args.forceMaterializationPercentage,
+            contextUsageFromEstimate: args.contextUsageFromEstimate === true,
+            emergencyInputSample: () => getEmergencyInputSample(args.db, args.sessionId),
+            forceTriggerPermitted: triggerPermissions.force,
+            servedShapeRepair: servedShapeRepair.needsRebuild,
+            rewritingSignedPrefix,
+            foldBustsServedPrefix: foldBustsServedPrefixThisPass,
+            firstRenderBust,
+            idleExpiryRebuild,
+            heldIdleExpiryRebuild,
+            explicitFlush:
+                isExplicitFlush &&
+                hasPendingMaterializationOrigin(
+                    args.pendingMaterializationSessions,
+                    args.sessionId,
+                    "user_flush",
+                ),
+            publishedHistory:
+                !prefixPreflightFailed &&
+                (publishedM1RefreshedThisPass ||
+                    (!m0M1EnabledForFold &&
+                        (args.pendingCompartmentInjection?.compartmentCount ?? 0) > 0 &&
+                        legacyPublishedHeadChanged(args))),
+            historyRebuiltThisPass: args.historyRebuiltThisPass === true,
+            materializationRequested,
+            alreadyRanThisTurn,
+            signedThinkingHold: activeThinkingPrefixHold,
+        },
+        ({ primaryExecute, alreadyBusting }) =>
+            originateExecuteReclaim({
                 db: args.db,
                 sessionId: args.sessionId,
-                pendingOps,
-                tags: args.tags,
-                targets: newTargets,
-                protectedTagIds: new Set([...args.protectedTagIds, ...protectedToolTags]),
+                primaryExecute,
+                alreadyBusting,
+                summaryCanCome:
+                    compartmentRunning ||
+                    args.sessionMeta.compartmentInProgress ||
+                    ((prefixPreflightFailed || freezeM0M1 || activeThinkingPrefixHold) &&
+                        (args.deferredHistoryRefreshSessions.has(args.sessionId) ||
+                            args.deferredMaterializationSessions.has(args.sessionId) ||
+                            args.historyRefreshSessions?.has(args.sessionId) === true)) ||
+                    readExecuteReclaimState(args.db, args.sessionId).floorOrdinal !== null,
+                reclaimableTokens: estimateExecuteReclaimTokens({
+                    db: args.db,
+                    sessionId: args.sessionId,
+                    pendingOps,
+                    tags: args.tags,
+                    targets: newTargets,
+                    protectedTagIds: new Set([...args.protectedTagIds, ...protectedToolTags]),
+                }),
+                usableWindow: args.usableWindow,
             }),
-            usableWindow: args.usableWindow,
-        });
-    // Warm-cache thinking holds defer every new prefix edit. First render, idle
-    // expiry and pressure relief can admit work, but the target guards still
-    // forbid changes before any retained signature. A genuine prefix rewrite
-    // first omits every signed block. The directory veto freezes injection only.
-    // The historian's redundancy skip applies the same predicate.
-    const publishedWorkDrainAllowed =
-        (!compactionOff || servedShapeRepair.needsRebuild) &&
-        reclaimRidePermitted(rideSignals, {
-            signedThinkingHold: activeThinkingPrefixHold,
-            firstRender: firstRenderBust,
-            idleExpiry: idleExpiryRebuild,
-            emergency: emergencyDropEligible,
-        });
-    const shouldApplyPendingOps = !compactionOff && publishedWorkDrainAllowed;
-    const shouldRunHeuristics =
-        !compactionOff &&
-        publishedWorkDrainAllowed &&
-        (rideSignals.publishedHistory ||
-            rideSignals.executeReclaim ||
-            rideSignals.servedShapeRepair ||
-            materializationRequested ||
-            forceMaterialization ||
-            // The off-wire fold changed the served prefix, so the prefix already
-            // busted. Heuristics may ride it and bypass the once-per-turn guard
-            // without creating an independent prefix rewrite.
-            foldBustsServedPrefixThisPass ||
-            firstRenderBust ||
-            heldIdleExpiryRebuild ||
-            // the derived force band emergency floor for BOTH primary and subagent. For a primary
-            // this coincides with forceMaterialization (fullFeatureMode && the derived force band);
-            // for a subagent (no forceMaterialization) it's the only path that
-            // fires the tiered drop even when the ordinary scheduler defers.
-            emergencyDropEligible ||
-            (args.schedulerDecision === "execute" &&
-                (!alreadyRanThisTurn || !args.fullFeatureMode)));
+    );
+    const { rideSignals, publishedWorkDrainAllowed, shouldApplyPendingOps, shouldRunHeuristics } =
+        passDecision;
     // Every first-application lane and m[1] refresh uses this same permission.
     // It authorizes mutation; individual lanes may still find no eligible work.
-    const isCacheBustingPass = publishedWorkDrainAllowed;
+    const isCacheBustingPass = passDecision.isCacheBustingPass;
     if (servedShapeRepair.needsRebuild && !isCacheBustingPass)
         throw new Error("Served-shape repair requires a rebuilding pass");
     servedShapeRepair.apply(isCacheBustingPass);
@@ -3659,34 +3633,39 @@ export async function runPostTransformPhase(
                 // statuses restores bytes already served on every pass, so it never
                 // counts (otherwise any session holding a drop would rearm the
                 // episode and lift the minimum on every pass).
-                const emergencyRewriteAlreadyPriced =
-                    pendingOpsDidMutate ||
-                    foldBustsServedPrefixThisPass ||
-                    firstRenderBust ||
-                    heldIdleExpiryRebuild ||
-                    args.historyRebuiltThisPass ||
-                    args.compartmentInjectionRebuiltFromDb ||
-                    args.rebuiltHistoryFromInitialPrepare;
+                const rewriteAlreadyPriced = emergencyRewriteAlreadyPriced({
+                    pendingOpsDidMutate,
+                    foldBustsServedPrefix: foldBustsServedPrefixThisPass,
+                    firstRenderBust,
+                    heldIdleExpiryRebuild,
+                    historyRebuiltThisPass: args.historyRebuiltThisPass === true,
+                    compartmentInjectionRebuiltFromDb: args.compartmentInjectionRebuiltFromDb === true,
+                    rebuiltHistoryFromInitialPrepare: args.rebuiltHistoryFromInitialPrepare === true,
+                });
                 // An independent mutation is already pricing this pass. Rearm the
                 // emergency batch so all candidates accumulated during sustained
                 // force pressure can ride it instead of waiting for another episode.
                 if (
-                    emergencyDropEligible &&
-                    emergencyRewriteAlreadyPriced &&
-                    getEmergencyInputSample(args.db, args.sessionId) > 0
+                    emergencyEpisodeRearms({
+                        emergencyDropEligible,
+                        rewriteAlreadyPriced,
+                        emergencyInputSample: () => getEmergencyInputSample(args.db, args.sessionId),
+                    })
                 ) {
                     clearEmergencyDropSample(args.db, args.sessionId);
                 }
                 // Force-originated tool and text rewrites share the durable episode.
                 // A small pressure dip or a process restart cannot rearm just the text lane.
                 // Independent work and the absolute emergency arm still admit all lanes.
-                let routineCleanupApplied =
-                    (emergencyDropEligible
-                        ? args.contextUsage.percentage >= 95 ||
-                          getEmergencyInputSample(args.db, args.sessionId) === 0
-                        : !args.fullFeatureMode || !routinePressureAlreadyApplied) ||
-                    materializationRequested ||
-                    emergencyRewriteAlreadyPriced;
+                let routineCleanupApplied = routineCleanupAdmitted({
+                    emergencyDropEligible,
+                    contextPercentage: args.contextUsage.percentage,
+                    emergencyInputSample: () => getEmergencyInputSample(args.db, args.sessionId),
+                    fullFeatureMode: args.fullFeatureMode,
+                    routinePressureAlreadyApplied,
+                    materializationRequested,
+                    rewriteAlreadyPriced,
+                });
                 // Pending ops run just before heuristics and can drop active tags.
                 // Emergency floor math must see that post-op active set; otherwise
                 // already-reclaimed tags stay in floorTags and the planner over-evicts.
@@ -3712,7 +3691,7 @@ export async function runPostTransformPhase(
                                       currentTotalInputTokens: args.contextUsage.inputTokens,
                                       ceilingTokens: args.emergencyCeilingTokens,
                                       usagePercentage: args.contextUsage.percentage,
-                                      passAlreadyPriced: emergencyRewriteAlreadyPriced,
+                                      passAlreadyPriced: rewriteAlreadyPriced,
                                   }
                                 : undefined,
                         routine: routineCleanupApplied,
@@ -4007,7 +3986,7 @@ export async function runPostTransformPhase(
             const toolReclaimApplicationOpportunity = isCacheBustingPass;
             let autoReclaimTargetCount = 0;
             let autoReclaimDidMutate = false;
-            if (toolReclaimApplicationOpportunity && !emergencyDropEligible) {
+            if (passDecision.toolReclaimAdmitted) {
                 const tReclaimSelect = performance.now();
                 const syntheticPendingOps = buildSyntheticToolReclaimOps({
                     db: args.db,

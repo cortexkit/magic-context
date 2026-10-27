@@ -1,0 +1,1490 @@
+{
+  "description": "Per-pass rebuild decisions generated from the TypeScript plugin's gates by packages/plugin/scripts/generate-pass-decision-vectors.ts. Do not edit by hand; regenerate with `bun scripts/generate-pass-decision-vectors.ts` from packages/plugin.",
+  "lanes": [
+    "queuedDrops",
+    "emergencyDrop",
+    "dedup",
+    "ageSweep",
+    "supersession"
+  ],
+  "origins": [
+    "cacheLoss",
+    "executedFold",
+    "publishedHistory",
+    "flush",
+    "force",
+    "primaryExecuteNoSummary",
+    "subagentExecute"
+  ],
+  "vectors": [
+    {
+      "name": "subagent-defer-holds-queued-drop",
+      "note": "A subagent defer pass replays its bytes; the queued drop waits.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "broca-pass13-subagent-first-execute-applies-released-drop",
+      "note": "Broca run 1115b pass 13: the first execute after `ctx_reduce drop=2,5`; tag 2 is outside the protection window and applies.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "subagentExecute",
+        "lanes": [
+          "queuedDrops"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "broca-pass14-subagent-execute-protected-drop-only",
+      "note": "Broca pass 14: tag 5 is still inside the protection window, so no queued work is eligible and nothing else waits.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "broca-pass15-subagent-execute-drop-leaves-window",
+      "note": "Broca pass 15: newer output pushed tag 5 out of the window; the execute pass applies it on its own.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "subagentExecute",
+        "lanes": [
+          "queuedDrops"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "broca-pass17-subagent-execute-age-sweep-alone",
+      "note": "Broca pass 17: no queued drop; an aged output passed the distance bookmark and the execute pass applies the age sweep on its own.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": true,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "subagentExecute",
+        "lanes": [
+          "ageSweep"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "subagent-execute-with-nothing-eligible",
+      "note": "Permission alone rewrites no bytes.",
+      "inputs": {
+        "preset": "reviewer",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "subagent-execute-routine-cleanup",
+      "note": "Subagents run every cleanup lane on every execute pass.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "subagentExecute",
+        "lanes": [
+          "dedup",
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "subagent-defer-routine-cleanup-waits",
+      "note": "Automatic lanes never originate a rebuild on a defer pass.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "subagent-execute-small-queued-drop",
+      "note": "The 2% bound is primary-only: a subagent execute pass applies any eligible queued drop.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "subagentExecute",
+        "lanes": [
+          "queuedDrops"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "subagent-force-band-armed",
+      "note": "At the force band the emergency selector owns tool reclaim; age sweep and supersession wait.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "force",
+        "lanes": [
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "subagent-force-band-spent-episode",
+      "note": "A spent force episode keeps emergency and routine cleanup latched; the subagent execute permission alone does not re-arm it.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": true,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "subagent-force-band-spent-episode-queued-drop",
+      "note": "Applied queued drops price the pass, which re-arms the spent episode for every lane.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": true,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "subagentExecute",
+        "lanes": [
+          "queuedDrops",
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "subagent-absolute-emergency-spent-episode",
+      "note": "At 95% the latch yields.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 96,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": true,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "force",
+        "lanes": [
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "subagent-force-band-estimate-only",
+      "note": "An estimate-only force reading takes no force ride, but the subagent execute pass still admits its lanes.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": true,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "subagentExecute",
+        "lanes": [
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-defer-holds-queued-drop",
+      "note": "A defer pass replays its bytes; the held count resets.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 1
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-execute-no-summary-queued-worth-it",
+      "note": "No summary can come and the queued work is 2.7% of the window: the execute pass rebuilds now.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "primaryExecuteNoSummary",
+        "lanes": [
+          "queuedDrops"
+        ],
+        "heldPassesAfter": 1
+      }
+    },
+    {
+      "name": "primary-execute-no-summary-small-queue-first-hold",
+      "note": "Below 2% the execute pass holds and counts.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 1
+      }
+    },
+    {
+      "name": "primary-execute-no-summary-small-queue-second-hold",
+      "note": "Second consecutive held execute pass.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 1
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 2
+      }
+    },
+    {
+      "name": "primary-execute-no-summary-small-queue-third-pass",
+      "note": "The third consecutive held execute pass rebuilds.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 2
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "primaryExecuteNoSummary",
+        "lanes": [
+          "queuedDrops"
+        ],
+        "heldPassesAfter": 3
+      }
+    },
+    {
+      "name": "primary-execute-historian-in-flight-holds",
+      "note": "A summary can come, so queued drops wait for its rebuild.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": true,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 1
+      }
+    },
+    {
+      "name": "primary-execute-summary-pending-holds",
+      "note": "A published summary waits to render (or a floor mark is set), so queued drops wait for it.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": true,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 1
+      }
+    },
+    {
+      "name": "primary-execute-published-history-carries-drops",
+      "note": "Freshly published history rebuilds the head; queued drops and cleanup ride it.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": true,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "publishedHistory",
+        "lanes": [
+          "queuedDrops",
+          "dedup",
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-execute-age-sweep-alone",
+      "note": "Automatic lanes never originate a primary rebuild.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-execute-no-summary-carries-cleanup",
+      "note": "The execute pass that rebuilds for queued work applies the usual cleanup with it.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "primaryExecuteNoSummary",
+        "lanes": [
+          "queuedDrops",
+          "dedup",
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 1
+      }
+    },
+    {
+      "name": "primary-defer-executed-fold",
+      "note": "An executed fold rebuilds the prefix; everything eligible drains into it.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": true,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "executedFold",
+        "lanes": [
+          "queuedDrops",
+          "dedup",
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-executed-fold-with-historian-in-flight",
+      "note": "The historian veto yields to an executed fold.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": true,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": true,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "executedFold",
+        "lanes": [
+          "queuedDrops"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-flush-with-nothing-queued",
+      "note": "A flush is permission; with nothing eligible it rewrites no bytes.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": true,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-flush-applies-queued-drop",
+      "note": "A user flush applies queued drops and cleanup in one rebuild.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": true,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "flush",
+        "lanes": [
+          "queuedDrops",
+          "dedup",
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-idle-expiry",
+      "note": "The provider cache expired: the pass rebuilds anyway and eligible work rides it.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "idleExpiry",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "cacheLoss",
+        "lanes": [
+          "dedup",
+          "ageSweep",
+          "supersession"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-first-render",
+      "note": "No cached m[0]/m[1] pair exists, so the head renders for the first time.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "firstRender",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "cacheLoss",
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-force-band-armed",
+      "note": "The force band's first batch drops by need; age sweep and supersession wait.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "force",
+        "lanes": [
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-force-band-armed-queued-drop",
+      "note": "At the force band the execute pass does not count queued work; the force ride applies it.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "force",
+        "lanes": [
+          "queuedDrops",
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-force-band-spent-episode",
+      "note": "One emergency batch per force episode; nothing else rebuilds.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": true,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-force-band-estimate-only",
+      "note": "A local count alone never puts a primary pass in the force band below 95%.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": true,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "primary-absolute-emergency-spent-episode",
+      "note": "At 95% the force ride and the emergency latch both yield.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 96,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": true,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "force",
+        "lanes": [
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "compaction-off-execute-never-reduces",
+      "note": "Compaction off leaves context management to the host.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": true,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "compaction-off-subagent-execute-never-reduces",
+      "note": "The subagent execute permission does not apply with compaction off.",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": true,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 3505,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "compaction-off-force-band-never-reduces",
+      "note": "Compaction off has no force band.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": true,
+        "scheduler": "execute",
+        "usagePercent": 96,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "compaction-off-additive-fold",
+      "note": "An additive m[0]/m[1] fold rebuilds the head; no lane may ride it.",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": true,
+        "scheduler": "defer",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": true,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "executedFold",
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    }
+  ]
+}
