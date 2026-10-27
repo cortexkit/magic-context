@@ -1,5 +1,11 @@
-import type { ModuleSessionClient } from "./module-session-kernel";
 import { getDefaultSubcConnectionFile, SubcModuleTransport } from "./module-transport";
+
+/** The calls a host lane makes on `ck-mc` through its subc route. */
+export interface ModuleSessionClient {
+    call(args: Parameters<SubcModuleTransport["call"]>[0]): Promise<unknown>;
+    deleteSession?(sessionId: string, projectRoot: string): Promise<void>;
+    closeSession?(sessionId: string): void;
+}
 
 /**
  * Build the subc-backed module client every host lane uses to reach `ck-mc`.
@@ -25,7 +31,6 @@ export function createSubcModuleClient(options: {
     );
     return {
         call: (args) => transport.call(args),
-        stateSyncCapabilities: (args) => transport.stateSyncCapabilities(args),
         deleteSession: (sessionId, projectRoot) => transport.deleteSession(sessionId, projectRoot),
         closeSession: (sessionId) => transport.closeSession(sessionId),
     };

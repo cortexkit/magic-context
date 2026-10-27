@@ -373,6 +373,5 @@ mod tests {
             .native_messages
             .iter()
             .all(|message| message["meta"]["synthetic"] == true));
-        assert_eq!(fixture.state_import()["kind"], "state_import");
     }
 }

@@ -265,7 +265,7 @@ async fn review_session_diagnostics_refuse_released_data() {
     let mut p = params(&refs);
     p["holder"] = json!("other-Mac");
     reply(call(&h, role::ops::RELEASE, p).await);
-    for method in ["transform", "status", "health", "diagnostics"] {
+    for method in ["session.status", "status", "health", "diagnostics"] {
         assert_eq!(
             refusal(
                 h.dispatch_value(1, json!({"method":method,"session_id":SESSION}))
@@ -535,8 +535,11 @@ async fn review_partial_activate_abort_restores_rows_and_does_not_fork() {
         assert_eq!(project_rows(&b), vec!["B project data"; 3]);
         assert_eq!(
             refusal(
-                a.dispatch_value(1, json!({"method":"transform","session_id":SESSION}))
-                    .await
+                a.dispatch_value(
+                    1,
+                    json!({"method":"session.status","v":1,"session_id":SESSION})
+                )
+                .await
             ),
             "session_moved"
         );
@@ -693,142 +696,6 @@ async fn review_staging_corruption_is_refused_without_replacing_rows() {
 }
 
 #[cfg(not(feature = "agent-data"))]
-fn row_counts(h: &McHandler, context: bool) -> BTreeMap<String, i64> {
-    let conn = if context {
-        context_conn(h)
-    } else {
-        rusqlite::Connection::open(h.store.get().unwrap().move_storage_path().unwrap()).unwrap()
-    };
-    let tables = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
-        .unwrap().query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-    tables
-        .into_iter()
-        .map(|table| {
-            let count = conn
-                .query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |r| {
-                    r.get(0)
-                })
-                .unwrap();
-            (table, count)
-        })
-        .collect()
-}
-
-#[cfg(not(feature = "agent-data"))]
-#[tokio::test]
-async fn review_feature_off_normal_dispatch_preserves_business_write_footprints() {
-    let old_dir = tempfile::tempdir().unwrap();
-    let new_dir = tempfile::tempdir().unwrap();
-    let door = Arc::new(FakeDoor::default());
-    let mut old = make(old_dir.path(), door.clone()).await;
-    let mut new = make(new_dir.path(), door.clone()).await;
-    for h in [&mut old, &mut new] {
-        h.fixed_config.as_mut().unwrap().memory_enabled = true;
-        observe(h, SESSION).await;
-    }
-    let mut fixture = FixtureBuilder::frozen_reductions();
-    fixture.session_id = SESSION.into();
-    let request = fixture.call_transform();
-    let bytes = serde_json::to_vec(&request).unwrap().len();
-    // Direct transform, historian-claim and facade calls are a reference for
-    // the dispatcher: they bypass AgentDataService's pass admission but execute
-    // the same persistence handlers. This compares the wrapper's SQL footprint,
-    // not a separately compiled older binary.
-    let direct = reply(
-        old.handle_transform_dispatch(1, request.clone(), Some(bytes))
-            .await,
-    );
-    let dispatched = reply(new.dispatch_value(1, request).await);
-    assert_eq!(dispatched["ck_messages"], direct["ck_messages"]);
-    assert!(dispatched["ck_messages"].is_array());
-    for context in [false, true] {
-        assert_eq!(row_counts(&old, context), row_counts(&new, context));
-    }
-    let mut before_historian = BTreeMap::new();
-    for h in [&old, &new] {
-        let store = h.store.get().unwrap();
-        let loaded = store.load(SESSION).unwrap();
-        let mut meta = loaded.meta;
-        meta.historian = mc_store::HistorianDurableState {
-            state: mc_store::HistorianPhase::Firing,
-            firing_seq: 1,
-            chunk_range: Some(mc_store::HistorianChunkRange {
-                from_ordinal: 1,
-                to_ordinal: 3,
-            }),
-            chunk_fingerprint: "review-fingerprint".into(),
-            fired_at_ms: Some(crate::now_ms()),
-            ..mc_store::HistorianDurableState::default()
-        };
-        store
-            .commit(SESSION, loaded.row_version, &loaded.core, &meta)
-            .unwrap();
-        let binding = h.facade_binding(1).unwrap();
-        let project = h.historian_lane_project(1, &binding, store).unwrap();
-        store
-            .publish_pending_historian_run(&mc_store::NewHistorianPendingRun {
-                run_id: "review-run".into(),
-                session_id: SESSION.into(),
-                project_path: project,
-                firing_seq: 1,
-                chunk_fingerprint: "review-fingerprint".into(),
-                system_prompt: "review-system".into(),
-                user_prompt: "review-user".into(),
-                model_chain: vec!["test/first".into()],
-                await_budget_ms: 30_000,
-                historian_timeout_ms: None,
-                now_ms: crate::now_ms(),
-            })
-            .unwrap();
-        before_historian = row_counts(h, false);
-    }
-    let claim = json!({"method":"historian.claim","v":1,"run_id":"review-run","claimant_instance_id":"review-host"});
-    let direct = reply(old.handle_historian_claim_value(1, &claim));
-    let dispatched = reply(new.dispatch_value(1, claim).await);
-    assert_eq!(direct["ok"], true, "{direct}");
-    assert_eq!(dispatched["ok"], true, "{dispatched}");
-    assert!(direct["token"]
-        .as_str()
-        .is_some_and(|token| !token.is_empty()));
-    assert!(dispatched["token"]
-        .as_str()
-        .is_some_and(|token| !token.is_empty()));
-    assert_eq!(row_counts(&old, false), row_counts(&new, false));
-    assert_eq!(
-        old.store
-            .get()
-            .unwrap()
-            .load(SESSION)
-            .unwrap()
-            .meta
-            .historian
-            .state,
-        new.store
-            .get()
-            .unwrap()
-            .load(SESSION)
-            .unwrap()
-            .meta
-            .historian
-            .state
-    );
-    assert!(!before_historian.is_empty());
-    let tool = json!({"name":"ctx_memory","arguments":{"action":"write","category":"PROJECT_RULES","content":"A deterministic review fact.","command_id":"review-write"}});
-    let before = row_counts(&old, true);
-    let direct = reply(old.handle_facade_value(1, tool.clone()).await);
-    let dispatched = reply(new.dispatch_value(1, tool).await);
-    assert_eq!(dispatched, direct);
-    assert_eq!(row_counts(&old, true), row_counts(&new, true));
-    assert_ne!(
-        row_counts(&old, true),
-        before,
-        "the tool probe must really write context.db"
-    );
-    assert_eq!(row_counts(&old, false), row_counts(&new, false));
-    eprintln!("direct unchanged business handlers vs feature-off dispatch: identical transform ck_messages and SQL row footprints after transform, historian claim and ctx_memory write");
-}
-
-#[cfg(not(feature = "agent-data"))]
 async fn production_make(dir: &Path) -> McHandler {
     let store = Arc::new(
         McHandler::open_store_once(&descriptor(dir), false)
@@ -850,52 +717,6 @@ async fn production_make(dir: &Path) -> McHandler {
     h
 }
 
-#[tokio::test]
-async fn review_abort_restore_rebaselines_but_a_real_turn_still_advances() {
-    let sdir = tempfile::tempdir().unwrap();
-    let ddir = tempfile::tempdir().unwrap();
-    let door = Arc::new(FakeDoor::default());
-    let s = make(sdir.path(), door.clone()).await;
-    let d = make(ddir.path(), door.clone()).await;
-    seed(&s, SESSION);
-    seed(&d, SESSION);
-    observe(&s, SESSION).await;
-    observe(&d, SESSION).await;
-    let refs = vec![reference(SESSION)];
-    let local = json!({"refs":refs,"cutId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"});
-    reply(call(&d, role::ops::PREPARE, local.clone()).await);
-    reply(call(&d, role::ops::ABORT, local).await);
-    context_conn(&s)
-        .execute(
-            "UPDATE notes SET content='incoming note' WHERE session_id=?1",
-            [SESSION],
-        )
-        .unwrap();
-    prepared(&s, &door, &refs).await;
-    assert_eq!(
-        reply(call(&d, role::ops::DIVERGED, params(&refs)).await)["refs"][0]["state"],
-        "at_cut"
-    );
-    reply(call(&d, role::ops::IMPORT, params(&refs)).await);
-    *d.agent_data.as_ref().unwrap().crash_after.lock().unwrap() = Some(1);
-    assert_eq!(
-        refusal(call(&d, role::ops::ACTIVATE, params(&refs)).await),
-        "unavailable"
-    );
-    reply(call(&d, role::ops::ABORT, params(&refs)).await);
-    assert_eq!(note(&d), "portable note");
-    assert_eq!(
-        reply(call(&d, role::ops::DIVERGED, params(&refs)).await)["refs"][0]["state"],
-        "at_cut"
-    );
-    let mut turn = FixtureBuilder::frozen_reductions();
-    turn.session_id = SESSION.into();
-    assert!(reply(d.dispatch_value(1, turn.call_transform()).await)["ck_messages"].is_array());
-    assert_eq!(
-        reply(call(&d, role::ops::DIVERGED, params(&refs)).await)["refs"][0]["state"],
-        "advanced"
-    );
-}
 #[tokio::test]
 async fn review_undo_corruption_refuses_activation_and_abort_without_new_writes() {
     let sdir = tempfile::tempdir().unwrap();

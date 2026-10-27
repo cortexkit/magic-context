@@ -5,7 +5,7 @@ import type { MarkerEnvelope } from "../marker-envelope";
 import type { MessageLike } from "../transform-operations";
 import type { BridgeReceipt } from "./bridge-receipt";
 import type { FallbackInputs } from "./fallback-admissibility";
-import type { OpenCodeProviderOptions } from "./opencode-adapter";
+import type { ExitReason, HookOutcome, Subject } from "./record";
 
 /** Opaque Magic Context payload relay: one whole subc frame payload per call, with an absolute Unix-ms deadline.
  * The bridge owns JSON encoding and reply-page assembly; failures reject with BridgeTransportError. */
@@ -131,7 +131,10 @@ export type BridgeMarkerInputs = Omit<
 };
 
 export type BridgeRefusalReason =
-    | NonNullable<Parameters<NonNullable<OpenCodeProviderOptions["fullRequest"]>>[5]>
+    | ExitReason
+    | "bootstrap_declined"
+    | "provider_disabled"
+    | "rollback"
     | "raw_history_provider_missing"
     | "covered_range_changed"
     | "served_bytes_changed";
@@ -159,4 +162,9 @@ export class BridgeRefusalError extends EmergencyFailClosedError {
     }
 }
 
-export type BridgeOutcomeListener = NonNullable<OpenCodeProviderOptions["onOutcome"]>;
+/** Awaited for newly saved hook ops or unavailability before messages are served. */
+export type BridgeOutcomeListener = (
+    messageId: string,
+    subject: Subject,
+    outcome: HookOutcome,
+) => Promise<void>;

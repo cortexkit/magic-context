@@ -441,54 +441,6 @@ fn attachment_repair_ts_omitted_defaults_preserve_old_identity_on_defer() {
 }
 
 #[test]
-fn attachment_repair_projection_cache_retains_ingress_during_legacy_replay() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = store(dir.path());
-    let (native, fixed) = attachment_review_fixture();
-    let session = "attachment-repair-delta";
-    let old = attachment_review_request(
-        &native,
-        attachment_review_old_ingress(fixed.clone()),
-        session,
-    );
-    run(&store, &old, &[]);
-    run(&store, &old, &[]);
-    let mut upgraded = attachment_review_request(&native, fixed, session);
-    let deferred =
-        transform_with_projection(&store, &upgraded, &pctx("git:proj", "/nonexistent-docs", 0))
-            .unwrap();
-    assert!(!deferred.response.prefix_bust_permitted);
-    // This is the exact prefix reconstruction the facade uses for tail deltas.
-    let prefix = deferred
-        .projection
-        .reattach_messages_prefix(upgraded.messages.len())
-        .unwrap();
-    assert_eq!(
-        prefix, upgraded.messages,
-        "the ingress cache must not replace pending media with served Text"
-    );
-    upgraded.messages = prefix;
-    upgraded.messages.push(item("append-delta", 5, "continue"));
-    upgraded.native_messages.as_mut().unwrap().push(json!({"info": {"id": "append-delta", "role": "user"}, "parts": [{"type": "text", "text": "continue"}]}));
-    let mut loaded = store.load(session).unwrap();
-    loaded.meta.soft_refresh_pending = true;
-    store
-        .commit(session, loaded.row_version, &loaded.core, &loaded.meta)
-        .unwrap();
-    let restored = run(&store, &upgraded, &[]);
-    assert!(restored.prefix_bust_permitted);
-    let encoded = attachment_review_native(&restored, upgraded.native_messages.as_ref().unwrap());
-    let screenshot = encoded
-        .iter()
-        .find(|m| m["info"]["id"] == "screenshot")
-        .unwrap();
-    assert_eq!(
-        screenshot["parts"][0]["state"]["attachments"],
-        native[1]["parts"][0]["state"]["attachments"]
-    );
-}
-
-#[test]
 fn attachment_rereview_provisional_result_upgrade_waits_for_permission_after_restart() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());

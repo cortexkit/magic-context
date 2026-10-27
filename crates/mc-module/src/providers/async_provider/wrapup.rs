@@ -333,7 +333,7 @@ impl McHandler {
                             continue;
                         }
                         Err(
-                            WrapupFiringError::Retryable(_, detail)
+                            WrapupFiringError::Retryable(detail)
                             | WrapupFiringError::Terminal { detail, .. }
                             | WrapupFiringError::UnknownModule(detail),
                         ) => return Err(transient(detail)),

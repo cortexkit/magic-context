@@ -1,6 +1,4 @@
 import type { DreamerConfig } from "../../config/schema/magic-context";
-import type { DreamModuleClient } from "../../features/magic-context/dreamer/rust-ownership";
-import { readRustOwnedDreamTasks } from "../../features/magic-context/dreamer/rust-ownership";
 import { buildDreamTaskRuntimeConfigs } from "../../features/magic-context/dreamer/task-config";
 import { createDreamTaskExecutor } from "../../features/magic-context/dreamer/task-executor";
 import { runDueTasksForProject } from "../../features/magic-context/dreamer/task-scheduler";
@@ -59,7 +57,6 @@ export function startDreamTrigger(
         sample?: () => {
             config: DreamerConfig;
             mural?: { enabled: boolean };
-            rustBackgroundEnabled?: boolean;
         };
         executor: HiddenCompletionExecutor;
         projectIdentity: () => string;
@@ -69,11 +66,6 @@ export function startDreamTrigger(
         mural?: { enabled: boolean };
         memoryInjectionBudgetTokens?: number;
         retinaHandoff?: boolean;
-        /**
-         * Present only when this host is attached to ck-mc. Then, with the live
-         * `rust_background_enabled` on, the tasks ck-mc publishes are skipped.
-         */
-        moduleClient?: DreamModuleClient;
         /** Native source boundary; injectable for scheduler-only tests. */
         openReader?: () => Pick<V2StoreReader, "rootSessionActivity" | "close">;
     },
@@ -124,17 +116,10 @@ export function startDreamTrigger(
                         toolsSupported: args.executor.capabilities.tools === true,
                     });
                     const projectIdentity = args.projectIdentity();
-                    const rustOwnedTasks = await readRustOwnedDreamTasks({
-                        rustBackgroundEnabled: sampled?.rustBackgroundEnabled,
-                        moduleClient: args.moduleClient,
-                        projectIdentity,
-                        projectRoot: context.location.directory,
-                    });
                     await runDueTasksForProject({
                         db,
                         projectIdentity,
                         projectMemoryEnabled: args.projectMemoryEnabled,
-                        rustOwnedTasks,
                         smartNotesEnabled: args.smartNotesEnabled,
                         tasks: runnable,
                         executor: createDreamTaskExecutor({

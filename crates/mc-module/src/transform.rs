@@ -165,13 +165,11 @@ pub(crate) const SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024
 const TAG_BASELINE_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const TAG_MINT_FRONTIER_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
-/// One served CK message plus the canonical bytes used by the module response writer.
+/// One served CK message plus the identity of its canonical bytes.
 /// The typed value stays behind an `Arc`, so a cache hit does not clone large tool output trees.
 #[derive(Debug, Clone)]
 pub struct ServedMessage {
     message: Arc<CkWireMessage>,
-    canonical_bytes: Arc<[u8]>,
-    canonical_hash: [u8; 32],
     output_identity: Arc<str>,
     block_fingerprints: Arc<[(String, usize)]>,
     retained_bytes: usize,
@@ -232,7 +230,6 @@ impl ServedMessage {
             .collect::<Vec<_>>();
         let canonical_digest = Sha256::digest(&canonical_bytes);
         let output_identity = format!("{canonical_digest:x}");
-        let canonical_hash: [u8; 32] = canonical_digest.into();
         let message = Arc::new(message);
         let canonical_bytes: Arc<[u8]> = Arc::from(canonical_bytes);
         let output_identity: Arc<str> = Arc::from(output_identity);
@@ -245,8 +242,6 @@ impl ServedMessage {
         );
         Self {
             message,
-            canonical_bytes,
-            canonical_hash,
             output_identity,
             block_fingerprints,
             retained_bytes,
@@ -262,20 +257,19 @@ impl ServedMessage {
         self
     }
 
-    pub(crate) fn native_identity_basis(&self) -> (&str, &[u8; 32]) {
-        (&self.output_identity, &self.canonical_hash)
-    }
-
     pub fn into_message(self) -> CkWireMessage {
         Arc::try_unwrap(self.message).unwrap_or_else(|message| (*message).clone())
     }
 
-    pub(crate) fn canonical_bytes(&self) -> &[u8] {
-        &self.canonical_bytes
-    }
-
     fn retained_bytes(&self) -> usize {
         self.retained_bytes
+    }
+
+    /// The canonical bytes this message's output identity hashes. Production keeps
+    /// only the identity; tests re-encode to compare served bytes.
+    #[cfg(test)]
+    pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
+        canonical_message_bytes(&self.message)
     }
 }
 
@@ -2046,23 +2040,14 @@ pub(crate) struct ProjectionCacheInput {
     pub projection: Arc<FlatProjection>,
     pub replace_from: usize,
     pub prior_fingerprint: String,
-    pub message_retained_bytes: Arc<Vec<usize>>,
 }
 
 pub struct TransformWithProjection {
     pub response: TransformResponse,
     pub projection: FlatProjection,
-    /// Historian preflight consumes the exact tag snapshot validated by this transform. The
-    /// snapshot is absent only on paths that return before normal tag hydration.
-    pub(crate) historian_tags: Option<Arc<Vec<McTagRow>>>,
     /// Native attachment uses the same validated tag baseline as the transform, avoiding a
     /// second numbers-only table scan after the response has been built.
     pub tag_numbers: BTreeMap<String, u64>,
-    /// Publication floor from the state accepted by this transform. Emergency follow-up uses it
-    /// as the pre-wait comparison point, then performs one fresh read after asynchronous work.
-    pub(crate) publication_floor_ordinal: Option<u64>,
-    /// Whether this transform pass already has a cache-busting event that can apply pending drops.
-    pub(crate) reclaim_ride_available: bool,
     pub scheduler_pass: scheduler::PassDecision,
     pub scheduler_defer_reason: Option<scheduler::SchedulerDeferReason>,
     pub scheduler_drain_latch_active: bool,
@@ -3846,10 +3831,7 @@ fn lineage_protocol_passthrough(
     projection: FlatProjection,
 ) -> TransformWithProjection {
     TransformWithProjection {
-        historian_tags: None,
         tag_numbers: BTreeMap::new(),
-        publication_floor_ordinal: None,
-        reclaim_ride_available: false,
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
         scheduler_defer_reason: Some(scheduler::SchedulerDeferReason::SchedulerDefer),
@@ -4626,10 +4608,7 @@ fn apply_additive_only(
         PassPlan::Defer | PassPlan::Reject(_) => None,
     };
     Ok(TransformWithProjection {
-        historian_tags: None,
         tag_numbers: BTreeMap::new(),
-        publication_floor_ordinal: meta.publication_floor_ordinal,
-        reclaim_ride_available: false,
         projection,
         scheduler_pass: scheduler_outcome.pass,
         scheduler_defer_reason: scheduler_outcome.defer_reason,
@@ -5283,7 +5262,6 @@ fn apply_once(
                 );
             }
             return Ok(pending_passthrough_result(PendingPassthroughArgs {
-                historian_tags: Arc::clone(&tag_rows),
                 projection,
                 tag_numbers,
                 req,
@@ -5294,7 +5272,6 @@ fn apply_once(
                 reasoning_watermark: next_meta
                     .reasoning_cleared_through_tag
                     .max(next_meta.reasoning_cleared_through_ordinal),
-                publication_floor_ordinal: next_meta.publication_floor_ordinal,
                 transition_consumed: transition_consumed(&loaded.core),
                 committed: fingerprint_changed,
                 trim_mismatch,
@@ -5405,7 +5382,6 @@ fn apply_once(
             ambiguous
         );
         return Ok(pending_passthrough_result(PendingPassthroughArgs {
-            historian_tags: Arc::clone(&tag_rows),
             projection,
             tag_numbers,
             req,
@@ -5416,7 +5392,6 @@ fn apply_once(
             reasoning_watermark: meta
                 .reasoning_cleared_through_tag
                 .max(meta.reasoning_cleared_through_ordinal),
-            publication_floor_ordinal: meta.publication_floor_ordinal,
             transition_consumed: transition_consumed(&loaded.core),
             committed: true,
             trim_mismatch,
@@ -9034,10 +9009,7 @@ fn apply_once(
     timings.total = elapsed_ms(total_started_at);
     profile_start!(_perf_result, "apply_result_build");
     Ok(TransformWithProjection {
-        historian_tags: Some(tag_rows),
         tag_numbers,
-        publication_floor_ordinal: meta.publication_floor_ordinal,
-        reclaim_ride_available: pass_already_busting,
         projection,
         scheduler_pass: scheduler_outcome.pass,
         scheduler_defer_reason: scheduler_outcome.defer_reason,
@@ -12051,7 +12023,6 @@ fn pending_rewrite_detail(session_id: &str, fingerprint: &str, ambiguous: bool) 
 }
 
 struct PendingPassthroughArgs<'a> {
-    historian_tags: Arc<Vec<McTagRow>>,
     projection: FlatProjection,
     tag_numbers: BTreeMap<String, u64>,
     req: &'a TransformRequest,
@@ -12060,7 +12031,6 @@ struct PendingPassthroughArgs<'a> {
     rendered_memory_ids: Vec<i64>,
     revert_epoch: u64,
     reasoning_watermark: u64,
-    publication_floor_ordinal: Option<u64>,
     transition_consumed: bool,
     committed: bool,
     trim_mismatch: Option<TrimMismatch>,
@@ -12108,7 +12078,6 @@ fn pending_passthrough_messages(
 
 fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWithProjection {
     let PendingPassthroughArgs {
-        historian_tags,
         projection,
         tag_numbers,
         req,
@@ -12117,7 +12086,6 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         rendered_memory_ids,
         revert_epoch,
         reasoning_watermark,
-        publication_floor_ordinal,
         transition_consumed,
         committed,
         trim_mismatch,
@@ -12140,10 +12108,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
     timings.total = elapsed_ms(total_started_at);
     response.timings = Some(timings);
     TransformWithProjection {
-        historian_tags: Some(historian_tags),
         tag_numbers,
-        publication_floor_ordinal,
-        reclaim_ride_available: false,
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
         scheduler_defer_reason: Some(scheduler::SchedulerDeferReason::SchedulerDefer),
@@ -14579,39 +14544,6 @@ pub(crate) fn js_utf16_units_from_internal(text: &str) -> Vec<u16> {
     }
     units.extend(rest.encode_utf16());
     units
-}
-
-pub(crate) fn encode_js_surrogate_markers(encoded: Vec<u8>) -> Vec<u8> {
-    profile_start!(_perf_surrogates, "rt17_surrogates");
-    let Ok(text) = String::from_utf8(encoded) else {
-        unreachable!("serde_json always emits UTF-8")
-    };
-    if !text.contains(JS_SURROGATE_MARKER_OPEN) {
-        return text.into_bytes();
-    }
-
-    let mut output = String::with_capacity(text.len());
-    let mut rest = text.as_str();
-    while let Some(marker_start) = rest.find(JS_SURROGATE_MARKER_OPEN) {
-        output.push_str(&rest[..marker_start]);
-        let marker = &rest[marker_start + JS_SURROGATE_MARKER_OPEN.len_utf8()..];
-        let bytes = marker.as_bytes();
-        let encoded_marker = bytes.len() >= 4
-            && bytes[..4].iter().all(u8::is_ascii_hexdigit)
-            && marker[4..].starts_with(JS_SURROGATE_MARKER_CLOSE)
-            && u16::from_str_radix(&marker[..4], 16)
-                .is_ok_and(|unit| (0xD800..=0xDBFF).contains(&unit));
-        if encoded_marker {
-            output.push_str("\\u");
-            output.push_str(&marker[..4]);
-            rest = &marker[4 + JS_SURROGATE_MARKER_CLOSE.len_utf8()..];
-        } else {
-            output.push(JS_SURROGATE_MARKER_OPEN);
-            rest = marker;
-        }
-    }
-    output.push_str(rest);
-    output.into_bytes()
 }
 
 /// Keep whole Unicode scalars while measuring the prefix in UTF-16 code units, matching the
@@ -18786,39 +18718,6 @@ fn build_output_with_tags(
     )
 }
 
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-fn build_output_with_tags_unindexed(
-    core: &CoreState,
-    meta: &ModuleMeta,
-    projection: &FlatProjection,
-    req: &TransformRequest,
-    tag_overlay: Option<&TagOverlayState>,
-    synthetic_todo_enabled: bool,
-    mutation_exempt_mid: Option<&str>,
-    tag_numbers: &BTreeMap<String, u64>,
-    reasoning_watermark: u64,
-    renderer_transition_active: bool,
-    cache_snapshot: Option<&SerializedOutputCacheSnapshot>,
-    prefix_dirty: bool,
-) -> Result<BuiltOutput, TransformError> {
-    build_output_with_tags_inner(
-        core,
-        meta,
-        projection,
-        req,
-        tag_overlay,
-        synthetic_todo_enabled,
-        mutation_exempt_mid,
-        tag_numbers,
-        reasoning_watermark,
-        renderer_transition_active,
-        cache_snapshot,
-        prefix_dirty,
-        false,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn build_output_with_tags_inner(
     core: &CoreState,
@@ -19701,11 +19600,6 @@ fn active_anthropic_thinking_turn(req: &TransformRequest) -> bool {
         .any(|m| protected.contains(m.mid.as_str()) && m.ck.content.iter().any(is_reasoning_block))
 }
 
-#[cfg(test)]
-pub(crate) fn active_signed_head_for_test(req: &TransformRequest) -> bool {
-    active_anthropic_thinking_turn(req) && is_prefix_bound_thinking_model(req.model_key.as_deref())
-}
-
 /// Reproduce persisted reasoning decisions before protecting a new prefix edit.
 /// Already-frozen legacy omissions are not new mutations and remain authoritative.
 fn active_thinking_prefix_edit_ids(core: &CoreState, req: &TransformRequest) -> HashSet<String> {
@@ -19969,29 +19863,6 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
         provider_accepts_empty_content,
         native_messages,
         served_messages.iter(),
-        ingress_messages,
-        reasoning_clear_units,
-        mid_turn,
-        tag_numbers,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn clear_served_native_reasoning_from_served(
-    profile: SerializerProfile,
-    provider_accepts_empty_content: bool,
-    native_messages: &mut [Value],
-    served_messages: &[ServedMessage],
-    ingress_messages: &[CkIngressMessage],
-    reasoning_clear_units: &[FrozenUnit],
-    mid_turn: bool,
-    tag_numbers: &BTreeMap<String, u64>,
-) -> usize {
-    clear_served_native_reasoning_from_iter(
-        profile,
-        provider_accepts_empty_content,
-        native_messages,
-        served_messages.iter().map(Deref::deref),
         ingress_messages,
         reasoning_clear_units,
         mid_turn,
@@ -24471,8 +24342,8 @@ pub(crate) mod tests {
             "projection hash reuse must yield the same divergence fingerprints"
         );
         assert_eq!(
-            reused.canonical_bytes.as_ref(),
-            baseline.canonical_bytes.as_ref(),
+            reused.canonical_bytes(),
+            baseline.canonical_bytes(),
             "canonical served bytes must stay identical under hash reuse"
         );
         // First block must actually hit the reuse path (same digest as FlatBlock).
@@ -34029,7 +33900,6 @@ pub(crate) mod tests {
     }
 
     include!("transform/reasoning_clear_tests.rs");
-    include!("transform/reasoning_clear_gate_tests.rs");
     include!("transform/stale_reduce_tests.rs");
     include!("transform/image_admission_tests.rs");
     include!("transform/todo_admission_tests.rs");
@@ -38341,70 +38211,6 @@ pub(crate) mod tests {
         assert_eq!(healed.len(), 2);
         assert_eq!(healed[0].meta.harness_id.as_deref(), Some("one"));
         assert_eq!(healed[1].meta.harness_id.as_deref(), Some("one-result"));
-
-        let healed_ck = healed
-            .iter()
-            .map(|message| message.deref().clone())
-            .collect::<Vec<_>>();
-        let mut request = req(
-            "belt-release-native",
-            "cfg0",
-            ingress_from_ck(healed_ck.clone()),
-        );
-        request.serializer_profile = "opencode-aisdk".to_string();
-        request.serve_native = true;
-        request.full_array_fingerprint = Some("belt-release-fp".to_string());
-        let cache = Mutex::new(crate::NativeAttachmentCache::new(1024 * 1024));
-        let mut first = TransformResponse::passthrough(
-            healed_ck.clone(),
-            request.full_array_fingerprint.clone(),
-        );
-        let first_stats = crate::attach_native_messages_incremental(
-            &mut first,
-            &request,
-            &[],
-            &BTreeMap::new(),
-            None,
-            None,
-            true,
-            None,
-            0,
-            &cache,
-            crate::NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(first_stats.encoded_messages, healed_ck.len());
-        let native = first.native_messages.as_ref().unwrap();
-        let tool_ids = native
-            .iter()
-            .flat_map(|message| message["parts"].as_array().into_iter().flatten())
-            .filter_map(|part| part["callID"].as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            tool_ids.len(),
-            tool_ids.iter().copied().collect::<HashSet<_>>().len()
-        );
-        assert_eq!(tool_ids, vec!["duplicate"]);
-
-        let mut replay = TransformResponse::passthrough(
-            healed_ck.clone(),
-            request.full_array_fingerprint.clone(),
-        );
-        let replay_stats = crate::attach_native_messages_incremental(
-            &mut replay,
-            &request,
-            &[],
-            &BTreeMap::new(),
-            None,
-            None,
-            true,
-            None,
-            0,
-            &cache,
-            crate::NativeCacheKeyMode::Normal,
-        );
-        assert_eq!(replay_stats.reused_messages, healed_ck.len());
-        assert_eq!(replay_stats.encoded_messages, 0);
-        assert_eq!(replay.native_messages, first.native_messages);
     }
 
     #[test]
@@ -38483,138 +38289,6 @@ pub(crate) mod tests {
                 .as_ref()
                 .and_then(|pair| pair.anchor_mid.as_deref()),
             Some("todo")
-        );
-    }
-
-    #[test]
-    fn synthetic_todo_keep_reanchors_when_coverage_advance_folds_anchor() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_compartments("keep-fold", &[comp(1, 1, 1, "a", "SUMMARY-1")])
-            .unwrap();
-        let todos = json!([{ "content": "Fold", "status": "pending", "priority": "high" }]);
-        let first = run(
-            &s,
-            &req(
-                "keep-fold",
-                "cfg0",
-                vec![
-                    item("a", 1, "raw"),
-                    todowrite_call("todo", 2, todos.clone()),
-                ],
-            ),
-            &spine(),
-        );
-        let first_pair = synthetic_todo_pair_bytes(&first);
-        let first_call_id = synthetic_todo_call_id(&first);
-
-        s.replace_compartments(
-            "keep-fold",
-            &[
-                comp(1, 1, 1, "a", "SUMMARY-1"),
-                comp(2, 2, 2, "todo", "SUMMARY-2"),
-            ],
-        )
-        .unwrap();
-        s.arm_soft_refresh("keep-fold").unwrap();
-        let moved = run(
-            &s,
-            &req(
-                "keep-fold",
-                "cfg0",
-                vec![
-                    item("a", 1, "raw"),
-                    todowrite_call("todo", 2, todos),
-                    assistant_form("t3", 3, &["new tail end"]),
-                ],
-            ),
-            &spine(),
-        );
-
-        assert_eq!(moved.action, "SOFT");
-        assert_eq!(synthetic_todo_call_id(&moved), first_call_id);
-        assert_eq!(synthetic_todo_pair_bytes(&moved), first_pair);
-        assert_eq!(
-            synthetic_todo_index(&moved),
-            message_index(&moved, "t3") + 1
-        );
-        assert_eq!(
-            s.load("keep-fold")
-                .unwrap()
-                .meta
-                .synthetic_todo
-                .as_ref()
-                .and_then(|pair| pair.anchor_mid.as_deref()),
-            Some("t3")
-        );
-
-        let cache = Mutex::new(crate::NativeAttachmentCache::new(1024 * 1024));
-        let mut first_request = req(
-            "keep-fold-native",
-            "cfg0",
-            vec![item("a", 1, "raw"), todowrite_call("todo", 2, json!([]))],
-        );
-        first_request.serializer_profile = "opencode-aisdk".to_string();
-        first_request.serve_native = true;
-        first_request.full_array_fingerprint = Some("todo-fold-fp-1".to_string());
-        let mut first_native = first.clone();
-        crate::attach_native_messages_incremental(
-            &mut first_native,
-            &first_request,
-            &[],
-            &BTreeMap::new(),
-            None,
-            None,
-            true,
-            None,
-            0,
-            &cache,
-            crate::NativeCacheKeyMode::Normal,
-        );
-
-        let mut moved_request = req(
-            "keep-fold-native",
-            "cfg0",
-            vec![
-                item("a", 1, "raw"),
-                todowrite_call("todo", 2, json!([])),
-                assistant_form("t3", 3, &["new tail end"]),
-            ],
-        );
-        moved_request.serializer_profile = "opencode-aisdk".to_string();
-        moved_request.serve_native = true;
-        moved_request.full_array_fingerprint = Some("todo-fold-fp-2".to_string());
-        let mut moved_native = moved.clone();
-        let stats = crate::attach_native_messages_incremental(
-            &mut moved_native,
-            &moved_request,
-            &[],
-            &BTreeMap::new(),
-            None,
-            None,
-            true,
-            None,
-            0,
-            &cache,
-            crate::NativeCacheKeyMode::Normal,
-        );
-        assert!(stats.encoded_messages > 0);
-        let native = moved_native.native_messages.unwrap();
-        let tail_index = native
-            .iter()
-            .position(|message| message["info"]["id"] == "t3")
-            .unwrap();
-        let todo_index = native
-            .iter()
-            .position(|message| {
-                message["parts"].as_array().is_some_and(|parts| {
-                    parts.iter().any(|part| part["syntheticTodoMarker"] == true)
-                })
-            })
-            .unwrap();
-        assert!(
-            todo_index > tail_index,
-            "coverage fold must move todo after t3"
         );
     }
 
@@ -41007,18 +40681,6 @@ pub(crate) mod tests {
         assert_eq!(
             empty_reasoning_sentinel(original),
             fixture["expected_sentinel"]
-        );
-    }
-
-    #[test]
-    fn response_encoder_emits_javascript_lone_surrogate_escape() {
-        let units = "a😀b".encode_utf16().collect::<Vec<_>>();
-        let internal = string_from_js_utf16_prefix(&units, 2);
-        assert_eq!(js_utf16_units_from_internal(&internal), units[..2]);
-        let encoded = serde_json::to_vec(&internal).unwrap();
-        assert_eq!(
-            encode_js_surrogate_markers(encoded),
-            br#""a\ud83d""#.to_vec()
         );
     }
 
@@ -49861,215 +49523,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "run manually to profile a production-sized module pass"]
-    fn full_module_pass_timing_fixture() {
-        const MESSAGE_COUNT: usize = 2_500;
-        const FROZEN_UNIT_COUNT: usize = 47_075;
-        const NEW_TAG_COUNT: usize = 5;
-        const PAYLOAD_BYTES: usize = 4_096;
-        let messages = (0..MESSAGE_COUNT)
-            .map(|index| {
-                item(
-                    &format!("m{index}"),
-                    index as u64 + 1,
-                    &format!("tail payload {index} {}", "x".repeat(PAYLOAD_BYTES)),
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut request = req("perf-full-module-pass", "cfg0", messages);
-        request.serializer_profile = "opencode-aisdk".to_string();
-        request.serve_native = true;
-        request.full_array_fingerprint = Some("perf-full-module-pass-0".to_string());
-        let projection_started_at = Instant::now();
-        let projection = project_messages(&request.messages).unwrap();
-        let full_projection_ms = elapsed_ms(projection_started_at);
-        let mut changed_messages = request.messages.clone();
-        let changed = changed_messages
-            .last_mut()
-            .expect("large timing fixture has a tail message");
-        let ck_wire::CkKind::Text { text } = &mut changed.ck.content[0].kind else {
-            panic!("large timing fixture tail must be text");
-        };
-        text.push_str(" changed");
-        let cached_projection_started_at = Instant::now();
-        let cached_projection =
-            project_messages_incremental(&changed_messages, &projection, MESSAGE_COUNT - 1)
-                .unwrap();
-        let cached_projection_ms = elapsed_ms(cached_projection_started_at);
-        let full_changed_projection = project_messages(&changed_messages).unwrap();
-        assert_eq!(cached_projection, full_changed_projection);
-        assert!(
-            cached_projection_ms * 10.0 < full_projection_ms,
-            "cached projection must be at least 10x faster: first={full_projection_ms:.3}ms cached={cached_projection_ms:.3}ms"
-        );
-        let mut frozen_units = vec![
-            synth_region("m0", "m0 fixture".to_string()),
-            synth_region("m1", "m1 fixture".to_string()),
-        ];
-        for index in 0..MESSAGE_COUNT {
-            let target = format!("m{index}#0");
-            let unit = match index % 3 {
-                0 => red_unit(&target, "drop", "[dropped]"),
-                1 => FrozenUnit {
-                    key: format!("{CAV_KEY_PREFIX}{target}"),
-                    kind: "caveman".to_string(),
-                    frozen_payload: "condensed tail payload".to_string(),
-                    durability_class: mc_core::DurabilityClass::Lineage,
-                    reset_rule: String::new(),
-                },
-                _ => FrozenUnit {
-                    key: format!("strip:thinking:m{index}"),
-                    kind: "strip".to_string(),
-                    frozen_payload: String::new(),
-                    durability_class: mc_core::DurabilityClass::Lineage,
-                    reset_rule: String::new(),
-                },
-            };
-            frozen_units.push(unit);
-        }
-        for index in frozen_units.len()..FROZEN_UNIT_COUNT {
-            frozen_units.push(red_unit(&format!("retired-{index}#0"), "drop", "[dropped]"));
-        }
-        assert_eq!(frozen_units.len(), FROZEN_UNIT_COUNT);
-        let core = CoreState {
-            frozen_units,
-            ..Default::default()
-        };
-        let meta = ModuleMeta::default();
-
-        let all_tag_work = tag_mint_inputs(&projection, &core, None, &HashSet::new());
-        let existing_tag_count = all_tag_work.inputs.len() - NEW_TAG_COUNT;
-        let mut mature_tag_rows = Vec::new();
-        append_tag_mint_rows(
-            &mut mature_tag_rows,
-            all_tag_work.inputs[..existing_tag_count].to_vec(),
-            100,
-        );
-        let existing_tag_ids = mature_tag_rows
-            .iter()
-            .map(|row| row.block_id.as_str())
-            .collect::<HashSet<_>>();
-        let legacy_tag_started_at = Instant::now();
-        let legacy_tag_work = legacy_tag_mint_inputs(&projection, &core, None, &existing_tag_ids);
-        let legacy_tag_ms = elapsed_ms(legacy_tag_started_at);
-        let optimized_tag_started_at = Instant::now();
-        let optimized_tag_work = tag_mint_inputs(&projection, &core, None, &existing_tag_ids);
-        let optimized_tag_ms = elapsed_ms(optimized_tag_started_at);
-        assert_eq!(optimized_tag_work.inputs, legacy_tag_work.inputs);
-        assert_eq!(optimized_tag_work.inputs.len(), NEW_TAG_COUNT);
-        let mut legacy_tag_rows = mature_tag_rows.clone();
-        append_tag_mint_rows(&mut legacy_tag_rows, legacy_tag_work.inputs, 200);
-        let mut optimized_tag_rows = mature_tag_rows;
-        append_tag_mint_rows(
-            &mut optimized_tag_rows,
-            optimized_tag_work.inputs.clone(),
-            200,
-        );
-        assert_eq!(optimized_tag_rows, legacy_tag_rows);
-        eprintln!(
-            "tag-mint-work before_ms={legacy_tag_ms:.1} after_ms={optimized_tag_ms:.1} \
-             candidates={} new={} before_tokenized_bytes={} after_tokenized_bytes={}",
-            optimized_tag_work.candidate_count,
-            optimized_tag_work.inputs.len(),
-            legacy_tag_work.tokenized_bytes,
-            optimized_tag_work.tokenized_bytes,
-        );
-
-        let first = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
-        let unindexed = build_output_with_tags_unindexed(
-            &core,
-            &meta,
-            &projection,
-            &request,
-            None,
-            false,
-            None,
-            &BTreeMap::new(),
-            0,
-            transition_consumed(&core),
-            None,
-            true,
-        )
-        .unwrap();
-        assert_eq!(
-            canonical_output(&first.messages),
-            canonical_output(&unindexed.messages),
-            "indexed output must remain byte-identical to the unfixed scan path"
-        );
-        let snapshot = SerializedOutputCacheSnapshot {
-            entries: first.cache_entries.clone(),
-        };
-        let replay = build_cached_fixture(
-            &core,
-            &meta,
-            &request,
-            &projection,
-            None,
-            Some(&snapshot),
-            false,
-        );
-        let fresh = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
-        assert_eq!(
-            canonical_output(&replay.messages),
-            canonical_output(&fresh.messages)
-        );
-        assert_eq!(replay.timings.identity_messages, MESSAGE_COUNT);
-        assert_eq!(replay.timings.cache_misses, 0);
-        assert_eq!(replay.timings.cache_hits, MESSAGE_COUNT + 2);
-
-        let timings = TransformTimings {
-            total: replay.timings.total,
-            build_output: replay.timings.total,
-            blocks_by_mid: replay.timings.blocks_by_mid,
-            build_frozen_unit_index: replay.timings.frozen_unit_index,
-            full_drop_tool_ids: replay.timings.full_drop_tool_ids,
-            build_identity: replay.timings.identity,
-            build_identity_max: replay.timings.identity_max,
-            build_frozen_unit_scan: replay.timings.frozen_unit_scan,
-            build_cache_lookup: replay.timings.cache_lookup,
-            build_serialize_misses: replay.timings.serialize_misses,
-            build_tail_loop: replay.timings.tail_loop,
-            frozen_units: core.frozen_units.len(),
-            tail_units_matched: frozen_units_matched_to_tail(&core, &request, None),
-            projection_blocks: projection.blocks.len(),
-            tail_messages_emitted: replay
-                .messages
-                .iter()
-                .filter(|message| !message.meta.synthetic)
-                .count(),
-            build_identity_messages: replay.timings.identity_messages,
-            tag_mint_candidates: optimized_tag_work.candidate_count,
-            tag_mint_new: optimized_tag_work.inputs.len(),
-            tag_mint_tokenized_bytes: optimized_tag_work.tokenized_bytes,
-            cache_hits: replay.timings.cache_hits,
-            cache_misses: replay.timings.cache_misses,
-            cache_dirty_skips: replay.timings.cache_dirty_skips,
-            ..Default::default()
-        };
-        let served = replay
-            .messages
-            .iter()
-            .map(|message| message.deref().clone())
-            .collect::<Vec<_>>();
-        let mut response =
-            TransformResponse::passthrough(served, request.full_array_fingerprint.clone());
-        let attach_started_at = Instant::now();
-        crate::attach_native_messages(&mut response, &request, &[], None);
-        let attach_ms = elapsed_ms(attach_started_at);
-        let encode_started_at = Instant::now();
-        let _encoded = serde_json::to_vec(&response).unwrap();
-        let encode_ms = elapsed_ms(encode_started_at);
-        eprintln!(
-            "full-module-pass-decomposition n={MESSAGE_COUNT} projection_ms={full_projection_ms:.3} cached_projection_ms={cached_projection_ms:.3} apply_ms={:.3} attach_ms={attach_ms:.3} encode_ms={encode_ms:.3}",
-            replay.timings.total,
-        );
-        eprintln!(
-            "{}",
-            format_pass_timing_line("perf-full-module-pass", &timings, encode_ms)
-        );
-    }
-
-    #[test]
     fn serialized_output_cache_reuses_steady_state_and_matches_fresh_bytes() {
         let (core, meta, request, projection) = output_cache_fixture("m0-v1", "m1-v1");
         let first = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
@@ -50328,7 +49781,7 @@ pub(crate) mod tests {
         let served_retained = crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
             .saturating_add(message_retained)
             .saturating_add(crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES)
-            .saturating_add(served.canonical_bytes.len())
+            .saturating_add(served.canonical_bytes().len())
             .saturating_add(crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES)
             .saturating_add(served.output_identity.len())
             .saturating_add(crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES)
@@ -50380,7 +49833,7 @@ pub(crate) mod tests {
             .saturating_add(size_of::<usize>() * 3)
             .saturating_add((size_of::<String>() + "fixture-session".len()).saturating_mul(2));
         let retained = SerializedOutputCache::entries_retained_bytes("fixture-session", &entries);
-        let legacy = served.canonical_bytes.len();
+        let legacy = served.canonical_bytes().len();
 
         assert!(retained >= legacy.saturating_mul(2));
         assert!(

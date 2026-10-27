@@ -138,22 +138,6 @@
             "hosts": ["opencode"]
         },
         {
-            "path": "tests/rust-provider-pipeline-opencode1.test.ts",
-            "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
-            "rationale": "Opt-in provider-pipeline measurement probe: invoke directly with bun test tests/rust-provider-pipeline-opencode1.test.ts, a pinned OpenCode 1.18.x host and matching prebuilt module/daemon/fault binaries. Not a default hermetic-shard gate; host routing and record assertions have not passed in that environment. Missing inputs fail explicitly. P1-P4 cutover measurements remain blocked.",
-            "contract_refs": ["PROVIDER-PIPELINE-T2"],
-            "hosts": ["opencode"]
-        },
-        {
-            "path": "tests/rust-provider-pipeline-opencode2.test.ts",
-            "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
-            "rationale": "Opt-in provider-pipeline measurement probe: invoke directly with bun test tests/rust-provider-pipeline-opencode2.test.ts, a pinned OpenCode 2.0.x host and matching prebuilt module/daemon/fault binaries. Not a default hermetic-shard gate; its pinned version preflight has not passed with the shard host. Missing inputs fail explicitly. P1-P4 cutover measurements remain blocked.",
-            "contract_refs": ["PROVIDER-PIPELINE-T2"],
-            "hosts": ["opencode2"]
-        },
-        {
             "path": "tests/processed-images.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
@@ -200,22 +184,6 @@
             "rationale": "Real OpenCode 2 failing read then /compact preserves error status and provider bytes; a successful read remains byte-identical; the same arm runs on a fresh host-converted OpenCode 1 store. Host PID lsof proves throwaway-store containment.",
             "contract_refs": ["OC2-S1"],
             "hosts": ["opencode2"]
-        },
-        {
-            "path": "tests/rust-tool-attachments.test.ts",
-            "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
-            "rationale": "Retired with transform_mode: no host runs the full-array Rust transform any more, so this rust-only file no longer runs; it stays until it is deleted or ported to the bridge lanes. Before: Real OpenCode 1 Rust-mode native attach: mock screenshot plus read image/PDF reach the Anthropic wire with tagged text on first sight and replay byte-identically on later defers; host PID lsof proves throwaway-store containment",
-            "contract_refs": ["S2-MIGRATION"],
-            "hosts": ["opencode"]
-        },
-        {
-            "path": "tests/rust-tool-attachment-upgrade.test.ts",
-            "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
-            "rationale": "Retired with transform_mode: no host runs the full-array Rust transform any more, so this rust-only file no longer runs; it stays until it is deleted or ported to the bridge lanes. Before: Real OpenCode 1 old-adapter upgrade preserves previously served attachment-free bytes on three defers across restart, restores once on acknowledged independent module flush permission, then replays media byte-identically on three tail deltas; host PID lsof proves throwaway-store containment",
-            "contract_refs": ["S2-MIGRATION"],
-            "hosts": ["opencode"]
         },
         {
             "path": "tests/reasoning-token-budget.test.ts",
@@ -1658,67 +1626,6 @@
             ]
         },
         {
-            "path": "tests/opencode2/rust-mode-fold-cadence.test.ts",
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "Retired with transform_mode: no host runs the full-array Rust transform any more, so this rust-only file no longer runs; it stays until it is deleted or ported to the bridge lanes. Before: Boots the hermetic ck-subc daemon and ck-mc module behind the GA 2.0.5 host, so it only has meaning in the Rust invocation: it pins who decides when a Rust-mode session folds, by holding the usage the host measures fixed while the content the module measures changes",
-            "contract_refs": [
-                "OC2-S1"
-            ],
-            "hosts": [
-                "opencode2"
-            ]
-        },
-        {
-            "path": "tests/opencode2/rust-mode-host-runner-default.test.ts",
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "Retired with transform_mode: no host runs the full-array Rust transform any more, so this rust-only file no longer runs; it stays until it is deleted or ported to the bridge lanes. Before: the OpenCode 2 twin: with no historian.runner configured, a Rust-mode session folds through the host runner (the v2 hidden-completion carrier) with no Broca module present",
-            "contract_refs": [
-                "OC2-S1",
-                "HISTORIAN-PRODUCER"
-            ],
-            "hosts": [
-                "opencode2"
-            ]
-        },
-        {
-            "path": "tests/opencode2/rust-mode-limitation.test.ts",
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "OpenCode v2 lane: transform_mode \"rust\" is accepted on OpenCode 2 without naming a host limitation, and with no module reachable the status surfaces report canonical session state as unavailable rather than answering with host-side numbers; it needs no Rust stack, so it runs from the v2 lane's own invocation (bun test tests/opencode2) rather than the mode-selected spawn seam",
-            "contract_refs": [
-                "OC2-S1"
-            ],
-            "hosts": [
-                "opencode2"
-            ]
-        },
-        {
-            "path": "tests/opencode2/rust-mode-module-served.test.ts",
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "Retired with transform_mode: no host runs the full-array Rust transform any more, so this rust-only file no longer runs; it stays until it is deleted or ported to the bridge lanes. Before: Boots the hermetic ck-subc daemon and ck-mc module behind the GA 2.0.5 host, so it only has meaning in the Rust invocation: it pins that the OpenCode 2 lane's transforms are module-served, byte-identical across defers, and that the status surfaces read module state",
-            "contract_refs": [
-                "OC2-S1"
-            ],
-            "hosts": [
-                "opencode2"
-            ]
-        },
-        {
             "path": "tests/opencode2/sidebar-component.test.ts",
             "tier": "excluded",
             "invocation": {
@@ -1914,21 +1821,6 @@
             ]
         },
         {
-            "path": "tests/paired-session-replay.test.ts",
-            "tier": "ts-only",
-            "invocation": {
-                "ts": true,
-                "rust": false
-            },
-            "rationale": "CI-fast unit guard for paired replay byte/value-space classification vocabulary",
-            "contract_refs": [
-                "PARITY-REPLAY"
-            ],
-            "hosts": [
-                "opencode"
-            ]
-        },
-        {
             "path": "tests/pi-home-directory-identity.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
@@ -2006,89 +1898,6 @@
                     "reason": "the scenario pins the Pi release that reported the stuck bucket",
                     "contract_ref": "PI-HARNESS"
                 }
-            ]
-        },
-        {
-            "path": "tests/pi-rust-degradation-arc-1.test.ts",
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "Retired with transform_mode: no host runs the full-array Rust transform any more, so this rust-only file no longer runs; it stays until it is deleted or ported to the bridge lanes. Before: FM-PI-1 covers Pi-owned JSONL/branch-entry continuation and explicit refusal seams after a mid-session external-module fault",
-            "contract_refs": [
-                "FM-PI-1",
-                "pi-rust-degradation-trace.json"
-            ],
-            "hosts": [
-                "pi"
-            ],
-            "behavior": true,
-            "divergences": [
-                {
-                    "host": "opencode",
-                    "reason": "the drill asserts Pi-owned JSONL and external subprocess fault seams",
-                    "contract_ref": "FM-PI-1"
-                },
-                {
-                    "host": "opencode2",
-                    "reason": "the drill asserts Pi-owned JSONL and external subprocess fault seams",
-                    "contract_ref": "FM-PI-1"
-                },
-                {
-                    "host": "omp",
-                    "reason": "the recorded fault trace and fake executable target the pinned Pi runtime",
-                    "contract_ref": "pi-rust-degradation-trace.json"
-                }
-            ]
-        },
-        {
-            "path": "tests/pi-rust-degradation-arc-4.test.ts",
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "Retired with transform_mode: no host runs the full-array Rust transform any more, so this rust-only file no longer runs; it stays until it is deleted or ported to the bridge lanes. Before: FM-PI-4 covers Pi-owned provider-proof emergency continuation and fail-closed refusal at the 95 percent boundary",
-            "contract_refs": [
-                "FM-PI-4",
-                "pi-rust-degradation-trace.json"
-            ],
-            "hosts": [
-                "pi"
-            ],
-            "behavior": true,
-            "divergences": [
-                {
-                    "host": "opencode",
-                    "reason": "the drill asserts Pi-owned JSONL and external subprocess fault seams",
-                    "contract_ref": "FM-PI-1"
-                },
-                {
-                    "host": "opencode2",
-                    "reason": "the drill asserts Pi-owned JSONL and external subprocess fault seams",
-                    "contract_ref": "FM-PI-1"
-                },
-                {
-                    "host": "omp",
-                    "reason": "the recorded fault trace and fake executable target the pinned Pi runtime",
-                    "contract_ref": "pi-rust-degradation-trace.json"
-                }
-            ]
-        },
-        {
-            "path": "tests/rust-smoke.test.ts",
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "Retired with transform_mode: no host runs the full-array Rust transform any more, so this rust-only file no longer runs; it stays until it is deleted or ported to the bridge lanes. Before: existing rust-* file; hermetic Rust harness leg",
-            "contract_refs": [
-                "RUST-E2E"
-            ],
-            "hosts": [
-                "opencode"
             ]
         },
         {
@@ -2308,22 +2117,6 @@
                     "reason": "GA 2.0.5 exposes no native todowrite tool or todo state; verify the real tool inventory instead of inventing a host todo snapshot",
                     "contract_ref": "packages/plugin/PARITY.md#native-todos"
                 }
-            ]
-        },
-        {
-            "path": "tests/opencode2/rust-mode-boundary-restart-gate.test.ts",
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "Adversarial gate reproduction, run on demand: a Rust-mode fold on the GA host across a host restart, over a 10,000-row session by default (GATE_SEEDED_ROWS=0 runs the unseeded fold/restart/fold; GATE_SEED_SHAPE=arcs seeds cloned user/tool/assistant turns instead of one-line user rows), with the v2 reader's decode counters and lsof on the module",
-            "contract_refs": [
-                "OC2-S1",
-                "RUST-E2E"
-            ],
-            "hosts": [
-                "opencode2"
             ]
         },
         {

@@ -674,7 +674,6 @@ export function createMagicContextCommandHandler(deps: {
                             windowGeometry,
                             tailHygiene,
                             undefined,
-                            false,
                             {
                                 cacheTtlConfig: deps.cacheTtlConfig ?? "5m",
                                 cacheTtlConfigured: deps.cacheTtlConfigured === true,
