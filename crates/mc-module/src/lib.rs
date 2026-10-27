@@ -22541,6 +22541,147 @@ mod tests {
             "{malformed:?}"
         );
     }
+
+    /// The code, message and detail of an error frame that carries machine-readable detail.
+    fn detailed_error_frame(outcome: HandlerOutcome) -> (String, String, Value) {
+        match outcome {
+            HandlerOutcome::ErrorWithDetail {
+                code,
+                message,
+                detail,
+            } => (code, message, detail),
+            other => panic!("expected an error frame with detail, got {other:?}"),
+        }
+    }
+
+    /// Stand in for an open that has begun and not yet landed, so a test can drive the request
+    /// lane's in-flight arm without racing a real open to it.
+    fn mark_store_open_in_flight(handler: &McHandler, descriptor: &StorageDescriptor) {
+        handler.store_open.begin_attempt(
+            descriptor,
+            DescriptorOrigin::DaemonAck,
+            now_ms().max(0) as u64,
+        );
+        handler.store_open.set_phase(STORE_OPENING);
+    }
+
+    /// A store that a newer ck-mc migrated one version past this binary is refused, and every
+    /// surface names that refusal with both versions: the health lane, the shared refusal seam,
+    /// the runner lane, a session op and a facade tool. A lane that answered with a
+    /// generic "no store" error, or answered at all, would be the half-working state the refusal
+    /// exists to prevent.
+    #[tokio::test]
+    async fn a_store_ahead_of_this_binary_is_refused_by_name_on_health_and_every_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let ahead = LATEST_MIGRATION_VERSION + 1;
+        let newer = McStore::open_for_test(&descriptor).unwrap();
+        newer.stamp_schema_version_for_test(ahead).unwrap();
+        drop(newer);
+
+        let handler = McHandler::new();
+        handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while handler.store_open.failure_snapshot().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("an open that cannot succeed must record its reason");
+        assert!(handler.store.get().is_none(), "no store handle may exist");
+
+        let report = <McHandler as ModuleHandler>::health(&handler).await;
+        assert_eq!(report.status, HealthStatus::Failing);
+        let metrics = report
+            .metrics
+            .expect("a refused open must carry health metrics");
+        assert_eq!(metrics["storage_state"], "open_refused_store_ahead");
+        assert_eq!(
+            metrics["storage_open_failure_reason_code"],
+            STORE_AHEAD_OF_BINARY_REFUSAL_REASON
+        );
+        assert_eq!(metrics["store_db_version"], ahead);
+        assert_eq!(
+            metrics["binary_max_store_version"],
+            LATEST_MIGRATION_VERSION
+        );
+        let detail = report
+            .detail
+            .expect("a refused open must carry a health detail");
+        assert!(
+            detail.contains(&format!(
+                "{STORE_AHEAD_OF_BINARY_REFUSAL_REASON}: db_version={ahead} binary_max={LATEST_MIGRATION_VERSION}"
+            )),
+            "health must name the refusal and both versions: {detail}"
+        );
+        assert!(
+            detail.contains("context.db and store.db from the same backup"),
+            "health must carry the remediation: {detail}"
+        );
+
+        let expected_detail = json!({
+            "reason_code": STORE_AHEAD_OF_BINARY_REFUSAL_REASON,
+            "db_version": ahead,
+            "binary_max": LATEST_MIGRATION_VERSION,
+        });
+        let (code, message, frame_detail) = detailed_error_frame(handler.store_refusal());
+        assert_eq!(code, STORE_AHEAD_OF_BINARY_REFUSAL_REASON);
+        assert_eq!(frame_detail, expected_detail);
+        assert!(message.contains("(terminal)"), "{message}");
+
+        // The runner lane's async compaction op and a session op, through request dispatch.
+        for request in [
+            json!({ "method": "compaction.setup", "params": {} }),
+            json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+        ] {
+            let (code, _, detail) =
+                detailed_error_frame(handler.dispatch_value(7, request.clone()).await);
+            assert_eq!(code, STORE_AHEAD_OF_BINARY_REFUSAL_REASON, "{request}");
+            assert_eq!(detail, expected_detail, "{request}");
+        }
+
+        // A facade tool, whose message is what the user reads.
+        let (tool_code, tool_message, tool_detail) = detailed_error_frame(
+            call_facade(&handler, "ctx_memory", json!({ "action": "list" })).await,
+        );
+        assert_eq!(tool_code, STORE_AHEAD_OF_BINARY_REFUSAL_REASON);
+        assert_eq!(tool_detail, expected_detail);
+        assert_eq!(
+            tool_message,
+            format!(
+                "Magic Context refused to start: its store (store.db) is at schema v{ahead} but this ck-mc build only knows up to v{LATEST_MIGRATION_VERSION}. Update ck-mc, or roll back by restoring ck-mc together with context.db and store.db from the same backup. (MC-C13)"
+            )
+        );
+    }
+
+    /// A first request that arrives during the open must be served by that open, not refused a few
+    /// dozen milliseconds before it lands.
+    #[tokio::test]
+    async fn a_request_waits_out_an_in_flight_store_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        let opened = McStore::open_for_test(&descriptor).unwrap();
+        let handler = McHandler::new();
+        mark_store_open_in_flight(&handler, &descriptor);
+
+        let slot = Arc::clone(&handler.store);
+        let coordinator = Arc::clone(&handler.store_open);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            let _ = slot.set(Arc::new(opened));
+            coordinator.set_phase(STORE_OPENED);
+        });
+        // The request lane's store seam, which every facade tool goes through, waits out
+        // the open instead of refusing a request a few milliseconds before it lands.
+        assert!(
+            handler.store_for_request().await.is_ok(),
+            "the request must reach the far side of the store seam once the open lands"
+        );
+    }
 }
 
 #[cfg(test)]
