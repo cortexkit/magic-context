@@ -212,6 +212,7 @@ fn difference(held: &Value, served: &Value) -> String {
 /// Whether `fresh`, a re-read of the held message `held` in serializer
 /// profile `profile`, differs from it only as the contract's re-read rule
 /// allows (`acceptance`).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn accepts(
     profile: &str,
     held: &ReadMessage,

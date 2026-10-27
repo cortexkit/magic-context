@@ -28,7 +28,7 @@ fn row(ordinal: u64, part: &str, kind: &str, original: &Value) -> Value {
 
 /// Message `n` in the shape `Rig::fill` writes it.
 fn fill_entry(n: u64) -> ReadMessage {
-    let part = if n % 5 > 0 && n % 5 < 4 {
+    let part = if !n.is_multiple_of(5) && n % 5 < 4 {
         json!({"id":format!("p{n}"),"type":"tool","tool":"read","callID":format!("call{n}"),"state":{"status":"completed","input":{"path":format!("file{n}")},"output":"exact spent output ".repeat(500)}})
     } else {
         json!({"id":format!("p{n}"),"type":"text","text":format!("message {n} ")+&"durable words ".repeat(16)})
@@ -36,7 +36,7 @@ fn fill_entry(n: u64) -> ReadMessage {
     ReadMessage::new(
         n,
         format!("m{n}"),
-        json!({"info":{"id":format!("m{n}"),"role":if n%5==0{"user"}else{"assistant"},"time":{"created":1}},"parts":[part]}),
+        json!({"info":{"id":format!("m{n}"),"role":if n.is_multiple_of(5){"user"}else{"assistant"},"time":{"created":1}},"parts":[part]}),
     )
     .with_tags(vec![tags::PartTag::tagged("0", format!("§{}§", 100 + n * 3))])
 }
