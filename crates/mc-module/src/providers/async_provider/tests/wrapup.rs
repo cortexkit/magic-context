@@ -901,7 +901,6 @@ async fn autonomous_historian_publishes_a_refit_expanded_range_with_missing_iden
         HistorianPrepareContext {
             rust_background_enabled: Some(true),
             now: now_ms(),
-            snapshot_generation: None,
             publication_fence: Some(fence),
             tag_snapshot: None,
             async_coverage: Some(None),

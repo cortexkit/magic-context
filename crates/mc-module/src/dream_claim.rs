@@ -1,15 +1,12 @@
-//! Versioned, session-confined Host dream claimant management routes, and the
-//! `dream.ownership` route that publishes which dream tasks Rust runs.
+//! The `dream.ownership` route that publishes which dream tasks Rust runs, and
+//! the `dream.run` manual entry. The Host claimant routes (`dream.child.*`) are
+//! retired; a `claimant` declaration on `dream.ownership` is refused by name.
 
-use crate::dream_dispatch::host_carrier::DreamQueue;
-use crate::dream_dispatch::ownership::{
-    self, ClaimantDeclaration, Ownership, OwnershipInput, Wiring,
-};
+use crate::dream_dispatch::ownership::{self, Ownership, OwnershipInput, Wiring};
 use crate::dream_dispatch::tick::{DreamHandles, DreamTarget, ManualRun};
 use crate::{invalid_params_error, now_ms, ops_facade, respond, McHandler, SessionBinding};
 use mc_store::dream_scheduler::schedules::TaskName;
 use serde_json::{json, Value};
-use std::sync::Arc;
 use subc_client_rs::HandlerOutcome;
 
 /// Harness names whose plugin opens a principal-less route and runs the
@@ -24,12 +21,6 @@ pub(crate) fn plugin_lane(binding: &SessionBinding) -> bool {
 }
 
 impl McHandler {
-    /// Off-thread executors share this queue with the management routes. Merely
-    /// registering a claimant never starts a task or selects a different runner.
-    pub fn dream_queue(&self) -> Arc<DreamQueue> {
-        self.dream_children.clone()
-    }
-
     /// Resolve the bound project after checking the v1 envelope and admitting
     /// either a principal-less plugin route or a daemon-attested harness route.
     fn dream_lane(
@@ -65,25 +56,6 @@ impl McHandler {
         Ok((binding, project))
     }
 
-    pub(crate) fn handle_dream_child(
-        &self,
-        channel: u16,
-        method: &str,
-        request: &Value,
-    ) -> HandlerOutcome {
-        let (binding, project) = match self.dream_lane(channel, request, method) {
-            Ok(lane) => lane,
-            Err(refusal) => return refusal,
-        };
-        match self
-            .dream_children
-            .route(&project, &binding.session, method, request)
-        {
-            Ok(body) => respond(body),
-            Err(refusal) => respond(json!({"ok": false, "refusal": refusal})),
-        }
-    }
-
     fn dream_wiring(&self) -> Wiring {
         #[cfg(test)]
         if let Some(wiring) = &self.dream_wiring {
@@ -99,8 +71,6 @@ impl McHandler {
     pub(crate) fn dream_handles(&self) -> DreamHandles {
         DreamHandles {
             store: self.store.clone(),
-            claimants: self.dream_claimants.clone(),
-            queue: self.dream_children.clone(),
             broca_routes: self.broca_dream_tools.clone(),
             runs: self.dream_runs.clone(),
             wiring: self.dream_wiring(),
@@ -167,7 +137,7 @@ impl McHandler {
             return invalid_params_error("dream.run command_id must be 1-256 bytes");
         };
         self.record_dream_target(&binding, &project);
-        if !self.dream_ownership(&binding, &project).owns(task) {
+        if !self.dream_ownership(&binding).owns(task) {
             return respond(json!({"ok": false, "refusal": "not_published"}));
         }
         let started = self
@@ -184,10 +154,9 @@ impl McHandler {
     }
 
     /// The tasks Rust runs for this project right now, from the route's current
-    /// config, this build's wiring and the freshest claimant declared on any of
-    /// the project's attested harness routes. A declared claimant's own harness
-    /// selects the runner and models, because its children run there.
-    pub(crate) fn dream_ownership(&self, binding: &SessionBinding, project: &str) -> Ownership {
+    /// config and this build's wiring. The route's harness selects the runner and
+    /// models.
+    pub(crate) fn dream_ownership(&self, binding: &SessionBinding) -> Ownership {
         let config = self.effective_config(&binding.project_root);
         // Settings are only read when activation could publish anything; a
         // resolution failure publishes nothing rather than guessing.
@@ -195,24 +164,18 @@ impl McHandler {
             .rust_background_enabled()
             .then(|| self.dream_task_settings(&binding.project_root).ok())
             .flatten();
-        let claimant = self.dream_claimants.current(project, now_ms());
-        let harness = claimant
-            .as_ref()
-            .map_or(binding.harness.as_str(), |c| c.harness.as_str());
         let wiring = self.dream_wiring();
         ownership::publish(&OwnershipInput {
             config: &config,
             settings: settings.as_ref(),
-            harness,
+            harness: binding.harness.as_str(),
             wiring: &wiring,
-            claimant: claimant.as_ref(),
         })
     }
 
     /// Remember a runner-lane conversation as its project's dream target: the tick
     /// then sends that project's dream children to `route` (the conversation's own
-    /// runner, as hidden children of `route.parent_session()`) instead of queueing
-    /// them for a host claimant. `project` is the project key the store files the
+    /// runner, as hidden children of `route.parent_session()`). `project` is the project key the store files the
     /// project's dream schedule under; `directory` is where children work.
     ///
     /// Nothing here reads a pass barrier, a provider plan or a route channel, so
@@ -244,44 +207,26 @@ impl McHandler {
         true
     }
 
-    /// `dream.ownership {v:1, claimant?}` answers with the published list for the
-    /// route's project; it is the only list a plugin's scheduler consults.
+    /// `dream.ownership {v:1}` answers with the published list for the route's
+    /// project. Reading is open to plugin and attested harness routes.
     ///
-    /// Reading is open to plugin and attested harness routes. Only an attested
-    /// harness route (the plugin-free THALAMUS harness, admitted by `dream_lane`)
-    /// may declare a claimant (`claimant: {capabilities, agents}`) or withdraw its
-    /// own (`claimant: null`): a plugin cannot make Rust take its own tasks away.
+    /// A `claimant` field declared a Host claimant that then pulled children over
+    /// the `dream.child.*` routes. Those routes are retired, so a declaration (or a
+    /// withdrawal) is refused by name: accepting it would publish tasks whose
+    /// children nobody can claim.
     pub(crate) fn handle_dream_ownership(&self, channel: u16, request: &Value) -> HandlerOutcome {
         let (binding, project) = match self.dream_lane(channel, request, "dream.ownership") {
             Ok(lane) => lane,
             Err(refusal) => return refusal,
         };
         self.record_dream_target(&binding, &project);
-        if let Some(claimant) = request.get("claimant") {
-            // dream_lane let a route through only as a plugin route (no principal)
-            // or as the admitted harness module (principal present); refuse the former.
-            if binding.principal.is_none() {
-                return HandlerOutcome::Error {
-                    code: "claimant_requires_attested_harness".into(),
-                    message: "only an attested harness route can declare a dream claimant".into(),
-                };
-            }
-            if claimant.is_null() {
-                self.dream_claimants.withdraw(&project, &binding.session);
-            } else {
-                match ClaimantDeclaration::parse(claimant, now_ms()) {
-                    Ok(declaration) => self.dream_claimants.declare(
-                        &project,
-                        &binding.session,
-                        declaration
-                            .on_route(&binding.session, &binding.harness)
-                            .in_directory(&binding.project_root),
-                    ),
-                    Err(reason) => return invalid_params_error(reason),
-                }
-            }
+        if request.get("claimant").is_some() {
+            return HandlerOutcome::Error {
+                code: crate::RETIRED_ROUTE_CODE.into(),
+                message: "dream.ownership claimant".into(),
+            };
         }
-        respond(self.dream_ownership(&binding, &project).to_json())
+        respond(self.dream_ownership(&binding).to_json())
     }
 
     /// Whether Rust publishes `task` for this route; used by `dreamer.run_task`.
@@ -294,10 +239,14 @@ impl McHandler {
         let Some(store) = self.store.get() else {
             return false;
         };
-        let Ok(project) = self.historian_lane_project(channel, binding, store) else {
+        // The route must still resolve to a project for Rust to run its tasks.
+        if self
+            .historian_lane_project(channel, binding, store)
+            .is_err()
+        {
             return false;
-        };
-        self.dream_ownership(binding, &project).owns(task)
+        }
+        self.dream_ownership(binding).owns(task)
     }
 }
 

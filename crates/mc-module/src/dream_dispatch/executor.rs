@@ -1,10 +1,8 @@
 //! The production task executor: the hosts that run each dream task in Rust, and
 //! the carrier their children go through.
 //!
-//! Which carrier a run uses is fixed before the run, from the trusted runner
-//! choice for the claimant's harness (`McModuleConfig::dreamer_runner_for`): the
-//! Host carrier queues children on the declaring claimant's session, the Broca
-//! carrier sends them to the user-configured Broca runner. A task reaches this
+//! Children go through the llm-runner carrier: to the user-configured Broca
+//! runner, or to a runner-lane conversation's own runner. A task reaches this
 //! executor only when `ownership::publish` named it, so a run never starts for a
 //! task whose children nothing can carry.
 
@@ -15,7 +13,6 @@ use super::context::{
 };
 use super::curate_host::{CurateError, CurateHost};
 use super::dispatcher::TaskExecutor;
-use super::host_carrier::{DreamQueue, HostCarrier};
 use super::primer_host::{PrimerCarrier, PrimerHost};
 use super::retrospective_host::{HostError, RetrospectiveHost};
 use super::session_reader;
@@ -30,7 +27,6 @@ use mc_store::parity_schema_manifest::StoreScope;
 use mc_store::McStore;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// Makes one Broca port per task run. A port carries the llm-runner ops of the
@@ -75,12 +71,6 @@ impl BrocaPorts for NoBroca {
 
 /// Where this run's children go.
 pub enum Transport<B: BrocaPorts> {
-    /// Queue children for the claimant polling `dream.child.pending` on the run's
-    /// session. `fence_root` keeps the restart markers (see `HostCarrier`).
-    Host {
-        queue: Arc<DreamQueue>,
-        fence_root: PathBuf,
-    },
     /// Send children to the configured Broca runner.
     Broca {
         ports: B,
@@ -89,16 +79,14 @@ pub enum Transport<B: BrocaPorts> {
     },
 }
 
-/// The carrier of one task run, over either transport.
+/// The carrier of one task run.
 pub enum TaskCarrier<P: BrocaPort> {
-    Host(HostCarrier),
     Broca(Box<BrocaCarrier<P>>),
 }
 
 impl<P: BrocaPort> DreamCarrier for TaskCarrier<P> {
     async fn open(&mut self, request: &ChildRequest) -> Result<String, CarrierError> {
         match self {
-            Self::Host(c) => c.open(request).await,
             Self::Broca(c) => c.open(request).await,
         }
     }
@@ -108,13 +96,11 @@ impl<P: BrocaPort> DreamCarrier for TaskCarrier<P> {
         request: &ChildRequest,
     ) -> Result<Completion, CarrierError> {
         match self {
-            Self::Host(c) => c.complete(child, request).await,
             Self::Broca(c) => c.complete(child, request).await,
         }
     }
     async fn close(&mut self, child: &str, settled: bool) -> Result<(), CarrierError> {
         match self {
-            Self::Host(c) => c.close(child, settled).await,
             Self::Broca(c) => c.close(child, settled).await,
         }
     }
@@ -266,15 +252,6 @@ impl<B: BrocaPorts> DreamExecutor<B> {
         router: Arc<dyn TaskToolRouter>,
     ) -> TaskCarrier<B::Port> {
         match &self.transport {
-            Transport::Host { queue, fence_root } => TaskCarrier::Host(HostCarrier::new(
-                queue.clone(),
-                context.clone(),
-                router,
-                Arc::new(Discard),
-                self.store.clone(),
-                self.scheduler.clone(),
-                fence_root,
-            )),
             Transport::Broca {
                 ports,
                 routes,

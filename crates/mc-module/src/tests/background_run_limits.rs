@@ -47,7 +47,6 @@ fn prepare(
         HistorianPrepareContext {
             rust_background_enabled: Some(true),
             now: now_ms(),
-            snapshot_generation: None,
             publication_fence: None,
             tag_snapshot: None,
             async_coverage: None,

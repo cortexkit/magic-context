@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use serde_json::{json, Map, Value};
 
@@ -264,43 +263,6 @@ pub fn decode_opencode_with_sidecar_and_base(
     }
 }
 
-pub(crate) fn decode_opencode_sidecar_incremental(
-    messages: &[MessageV2Json],
-    prior: &DecodeSidecar,
-    replace_from: usize,
-) -> DecodeSidecar {
-    debug_assert!(replace_from <= messages.len());
-    debug_assert!(replace_from <= prior.order.len());
-    if replace_from == messages.len() && replace_from == prior.order.len() {
-        return prior.clone();
-    }
-
-    let suffix = decode_opencode_with_sidecar_and_base(
-        &messages[replace_from..],
-        Some(prior),
-        replace_from as u64,
-    )
-    .sidecar;
-    let mut sidecar = DecodeSidecar::new(HARNESS);
-    sidecar.mid_pins = suffix.mid_pins;
-    for mid in prior.order.iter().take(replace_from) {
-        sidecar.order.push(mid.clone());
-        if let Some(meta) = prior.messages.get(mid) {
-            sidecar.messages.insert(mid.clone(), Arc::clone(meta));
-        }
-    }
-    for mid in suffix.order {
-        let Some(meta) = suffix.messages.get(&mid) else {
-            continue;
-        };
-        if !sidecar.order.contains(&mid) {
-            sidecar.order.push(mid.clone());
-        }
-        sidecar.messages.insert(mid, Arc::clone(meta));
-    }
-    sidecar
-}
-
 pub fn encode_opencode(
     messages: &[CkWireMessage],
     sidecar: &DecodeSidecar,
@@ -401,8 +363,6 @@ pub(crate) fn encode_opencode_with_transition_state_and_reasoning_exemption(
 
 #[derive(Debug, Clone)]
 pub(crate) struct EncodedOpencodeChunk {
-    pub(crate) start_index: usize,
-    pub(crate) end_index: usize,
     pub(crate) value: MessageV2Json,
 }
 
@@ -451,8 +411,6 @@ pub(crate) fn encode_opencode_chunks_with_transition_state(
             if let Some(part) = render_synthetic_todo_pair(&messages[index], next) {
                 let info = synthetic_message_info(&messages[index], session_id);
                 encoded.push(EncodedOpencodeChunk {
-                    start_index: absolute_index,
-                    end_index: absolute_index.saturating_add(2),
                     value: json!({
                         "info": info,
                         "parts": [part],
@@ -468,11 +426,7 @@ pub(crate) fn encode_opencode_chunks_with_transition_state(
                 if let Some(part) = render_adjacent_tool_pair(&messages[index], next) {
                     let mut message = encode_new_message(&messages[index], session_id);
                     set_value(&mut message, "parts", Value::Array(vec![part]));
-                    encoded.push(EncodedOpencodeChunk {
-                        start_index: absolute_index,
-                        end_index: absolute_index.saturating_add(2),
-                        value: message,
-                    });
+                    encoded.push(EncodedOpencodeChunk { value: message });
                     index += 2;
                     continue;
                 }
@@ -502,11 +456,7 @@ pub(crate) fn encode_opencode_chunks_with_transition_state(
                 enforce_latest_assistant_native_reasoning(&mut value, &meta.raw);
             }
         }
-        encoded.push(EncodedOpencodeChunk {
-            start_index: absolute_index,
-            end_index: absolute_index.saturating_add(1),
-            value,
-        });
+        encoded.push(EncodedOpencodeChunk { value });
         index += 1;
     }
     encoded

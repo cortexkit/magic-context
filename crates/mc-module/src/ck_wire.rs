@@ -371,50 +371,6 @@ impl FlatProjection {
         self.message_block_ends.get(prefix_messages - 1).copied()
     }
 
-    pub(crate) fn reattach_messages_prefix(
-        &self,
-        prefix_messages: usize,
-    ) -> Option<Vec<CkIngressMessage>> {
-        profile_start!(_perf_reattach, "rt02_reattach_prefix");
-        if prefix_messages > self.message_count() || self.message_meta.len() != self.message_count()
-        {
-            return None;
-        }
-
-        let mut block_start = 0;
-        let mut messages = Vec::with_capacity(prefix_messages);
-        for (message_index, message) in self.message_meta.iter().take(prefix_messages).enumerate() {
-            let block_end = *self.message_block_ends.get(message_index)?;
-            if block_end < block_start || block_end > self.blocks.len() {
-                return None;
-            }
-            let content = self.blocks[block_start..block_end]
-                .iter()
-                .enumerate()
-                .map(|(block_index, block)| {
-                    (block.mid == message.mid
-                        && block.ordinal == message.ordinal
-                        && block.role == message.role
-                        && block.block_index == block_index)
-                        .then(|| block.wire().into_owned())
-                })
-                .collect::<Option<Vec<_>>>()?;
-            messages.push(CkIngressMessage {
-                mid: message.mid.clone(),
-                ordinal: message.ordinal,
-                ck: CkWireMessage::from_parts(
-                    message.role.clone(),
-                    content,
-                    message.origin.clone(),
-                    message.provider_extras.clone(),
-                    message.meta.clone(),
-                ),
-            });
-            block_start = block_end;
-        }
-        Some(messages)
-    }
-
     pub(crate) fn retained_bytes(&self) -> usize {
         use crate::retained_size::{
             btree_map_allocation_bytes, harness_meta_heap_bytes, origin_heap_bytes,

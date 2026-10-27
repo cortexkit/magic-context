@@ -5871,7 +5871,6 @@ impl McHandler {
                     HistorianPrepareContext {
                         rust_background_enabled: None,
                         now: now_ms(),
-                        snapshot_generation: None,
                         publication_fence: Some(fence),
                         tag_snapshot: None,
                         async_coverage: Some(coverage),

@@ -165,13 +165,11 @@ pub(crate) const SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024
 const TAG_BASELINE_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const TAG_MINT_FRONTIER_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
-/// One served CK message plus the canonical bytes used by the module response writer.
+/// One served CK message plus the identity of its canonical bytes.
 /// The typed value stays behind an `Arc`, so a cache hit does not clone large tool output trees.
 #[derive(Debug, Clone)]
 pub struct ServedMessage {
     message: Arc<CkWireMessage>,
-    canonical_bytes: Arc<[u8]>,
-    canonical_hash: [u8; 32],
     output_identity: Arc<str>,
     block_fingerprints: Arc<[(String, usize)]>,
     retained_bytes: usize,
@@ -232,7 +230,6 @@ impl ServedMessage {
             .collect::<Vec<_>>();
         let canonical_digest = Sha256::digest(&canonical_bytes);
         let output_identity = format!("{canonical_digest:x}");
-        let canonical_hash: [u8; 32] = canonical_digest.into();
         let message = Arc::new(message);
         let canonical_bytes: Arc<[u8]> = Arc::from(canonical_bytes);
         let output_identity: Arc<str> = Arc::from(output_identity);
@@ -245,8 +242,6 @@ impl ServedMessage {
         );
         Self {
             message,
-            canonical_bytes,
-            canonical_hash,
             output_identity,
             block_fingerprints,
             retained_bytes,
@@ -262,20 +257,19 @@ impl ServedMessage {
         self
     }
 
-    pub(crate) fn native_identity_basis(&self) -> (&str, &[u8; 32]) {
-        (&self.output_identity, &self.canonical_hash)
-    }
-
     pub fn into_message(self) -> CkWireMessage {
         Arc::try_unwrap(self.message).unwrap_or_else(|message| (*message).clone())
     }
 
-    pub(crate) fn canonical_bytes(&self) -> &[u8] {
-        &self.canonical_bytes
-    }
-
     fn retained_bytes(&self) -> usize {
         self.retained_bytes
+    }
+
+    /// The canonical bytes this message's output identity hashes. Production keeps
+    /// only the identity; tests re-encode to compare served bytes.
+    #[cfg(test)]
+    pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
+        canonical_message_bytes(&self.message)
     }
 }
 
@@ -2046,23 +2040,14 @@ pub(crate) struct ProjectionCacheInput {
     pub projection: Arc<FlatProjection>,
     pub replace_from: usize,
     pub prior_fingerprint: String,
-    pub message_retained_bytes: Arc<Vec<usize>>,
 }
 
 pub struct TransformWithProjection {
     pub response: TransformResponse,
     pub projection: FlatProjection,
-    /// Historian preflight consumes the exact tag snapshot validated by this transform. The
-    /// snapshot is absent only on paths that return before normal tag hydration.
-    pub(crate) historian_tags: Option<Arc<Vec<McTagRow>>>,
     /// Native attachment uses the same validated tag baseline as the transform, avoiding a
     /// second numbers-only table scan after the response has been built.
     pub tag_numbers: BTreeMap<String, u64>,
-    /// Publication floor from the state accepted by this transform. Emergency follow-up uses it
-    /// as the pre-wait comparison point, then performs one fresh read after asynchronous work.
-    pub(crate) publication_floor_ordinal: Option<u64>,
-    /// Whether this transform pass already has a cache-busting event that can apply pending drops.
-    pub(crate) reclaim_ride_available: bool,
     pub scheduler_pass: scheduler::PassDecision,
     pub scheduler_defer_reason: Option<scheduler::SchedulerDeferReason>,
     pub scheduler_drain_latch_active: bool,
@@ -3846,10 +3831,7 @@ fn lineage_protocol_passthrough(
     projection: FlatProjection,
 ) -> TransformWithProjection {
     TransformWithProjection {
-        historian_tags: None,
         tag_numbers: BTreeMap::new(),
-        publication_floor_ordinal: None,
-        reclaim_ride_available: false,
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
         scheduler_defer_reason: Some(scheduler::SchedulerDeferReason::SchedulerDefer),
@@ -4626,10 +4608,7 @@ fn apply_additive_only(
         PassPlan::Defer | PassPlan::Reject(_) => None,
     };
     Ok(TransformWithProjection {
-        historian_tags: None,
         tag_numbers: BTreeMap::new(),
-        publication_floor_ordinal: meta.publication_floor_ordinal,
-        reclaim_ride_available: false,
         projection,
         scheduler_pass: scheduler_outcome.pass,
         scheduler_defer_reason: scheduler_outcome.defer_reason,
@@ -5283,7 +5262,6 @@ fn apply_once(
                 );
             }
             return Ok(pending_passthrough_result(PendingPassthroughArgs {
-                historian_tags: Arc::clone(&tag_rows),
                 projection,
                 tag_numbers,
                 req,
@@ -5294,7 +5272,6 @@ fn apply_once(
                 reasoning_watermark: next_meta
                     .reasoning_cleared_through_tag
                     .max(next_meta.reasoning_cleared_through_ordinal),
-                publication_floor_ordinal: next_meta.publication_floor_ordinal,
                 transition_consumed: transition_consumed(&loaded.core),
                 committed: fingerprint_changed,
                 trim_mismatch,
@@ -5405,7 +5382,6 @@ fn apply_once(
             ambiguous
         );
         return Ok(pending_passthrough_result(PendingPassthroughArgs {
-            historian_tags: Arc::clone(&tag_rows),
             projection,
             tag_numbers,
             req,
@@ -5416,7 +5392,6 @@ fn apply_once(
             reasoning_watermark: meta
                 .reasoning_cleared_through_tag
                 .max(meta.reasoning_cleared_through_ordinal),
-            publication_floor_ordinal: meta.publication_floor_ordinal,
             transition_consumed: transition_consumed(&loaded.core),
             committed: true,
             trim_mismatch,
@@ -9034,10 +9009,7 @@ fn apply_once(
     timings.total = elapsed_ms(total_started_at);
     profile_start!(_perf_result, "apply_result_build");
     Ok(TransformWithProjection {
-        historian_tags: Some(tag_rows),
         tag_numbers,
-        publication_floor_ordinal: meta.publication_floor_ordinal,
-        reclaim_ride_available: pass_already_busting,
         projection,
         scheduler_pass: scheduler_outcome.pass,
         scheduler_defer_reason: scheduler_outcome.defer_reason,
@@ -12051,7 +12023,6 @@ fn pending_rewrite_detail(session_id: &str, fingerprint: &str, ambiguous: bool) 
 }
 
 struct PendingPassthroughArgs<'a> {
-    historian_tags: Arc<Vec<McTagRow>>,
     projection: FlatProjection,
     tag_numbers: BTreeMap<String, u64>,
     req: &'a TransformRequest,
@@ -12060,7 +12031,6 @@ struct PendingPassthroughArgs<'a> {
     rendered_memory_ids: Vec<i64>,
     revert_epoch: u64,
     reasoning_watermark: u64,
-    publication_floor_ordinal: Option<u64>,
     transition_consumed: bool,
     committed: bool,
     trim_mismatch: Option<TrimMismatch>,
@@ -12108,7 +12078,6 @@ fn pending_passthrough_messages(
 
 fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWithProjection {
     let PendingPassthroughArgs {
-        historian_tags,
         projection,
         tag_numbers,
         req,
@@ -12117,7 +12086,6 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         rendered_memory_ids,
         revert_epoch,
         reasoning_watermark,
-        publication_floor_ordinal,
         transition_consumed,
         committed,
         trim_mismatch,
@@ -12140,10 +12108,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
     timings.total = elapsed_ms(total_started_at);
     response.timings = Some(timings);
     TransformWithProjection {
-        historian_tags: Some(historian_tags),
         tag_numbers,
-        publication_floor_ordinal,
-        reclaim_ride_available: false,
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
         scheduler_defer_reason: Some(scheduler::SchedulerDeferReason::SchedulerDefer),
@@ -14579,39 +14544,6 @@ pub(crate) fn js_utf16_units_from_internal(text: &str) -> Vec<u16> {
     }
     units.extend(rest.encode_utf16());
     units
-}
-
-pub(crate) fn encode_js_surrogate_markers(encoded: Vec<u8>) -> Vec<u8> {
-    profile_start!(_perf_surrogates, "rt17_surrogates");
-    let Ok(text) = String::from_utf8(encoded) else {
-        unreachable!("serde_json always emits UTF-8")
-    };
-    if !text.contains(JS_SURROGATE_MARKER_OPEN) {
-        return text.into_bytes();
-    }
-
-    let mut output = String::with_capacity(text.len());
-    let mut rest = text.as_str();
-    while let Some(marker_start) = rest.find(JS_SURROGATE_MARKER_OPEN) {
-        output.push_str(&rest[..marker_start]);
-        let marker = &rest[marker_start + JS_SURROGATE_MARKER_OPEN.len_utf8()..];
-        let bytes = marker.as_bytes();
-        let encoded_marker = bytes.len() >= 4
-            && bytes[..4].iter().all(u8::is_ascii_hexdigit)
-            && marker[4..].starts_with(JS_SURROGATE_MARKER_CLOSE)
-            && u16::from_str_radix(&marker[..4], 16)
-                .is_ok_and(|unit| (0xD800..=0xDBFF).contains(&unit));
-        if encoded_marker {
-            output.push_str("\\u");
-            output.push_str(&marker[..4]);
-            rest = &marker[4 + JS_SURROGATE_MARKER_CLOSE.len_utf8()..];
-        } else {
-            output.push(JS_SURROGATE_MARKER_OPEN);
-            rest = marker;
-        }
-    }
-    output.push_str(rest);
-    output.into_bytes()
 }
 
 /// Keep whole Unicode scalars while measuring the prefix in UTF-16 code units, matching the
@@ -19977,29 +19909,6 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn clear_served_native_reasoning_from_served(
-    profile: SerializerProfile,
-    provider_accepts_empty_content: bool,
-    native_messages: &mut [Value],
-    served_messages: &[ServedMessage],
-    ingress_messages: &[CkIngressMessage],
-    reasoning_clear_units: &[FrozenUnit],
-    mid_turn: bool,
-    tag_numbers: &BTreeMap<String, u64>,
-) -> usize {
-    clear_served_native_reasoning_from_iter(
-        profile,
-        provider_accepts_empty_content,
-        native_messages,
-        served_messages.iter().map(Deref::deref),
-        ingress_messages,
-        reasoning_clear_units,
-        mid_turn,
-        tag_numbers,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn clear_served_native_reasoning_from_iter<'a>(
     profile: SerializerProfile,
     provider_accepts_empty_content: bool,
@@ -24471,8 +24380,8 @@ pub(crate) mod tests {
             "projection hash reuse must yield the same divergence fingerprints"
         );
         assert_eq!(
-            reused.canonical_bytes.as_ref(),
-            baseline.canonical_bytes.as_ref(),
+            reused.canonical_bytes(),
+            baseline.canonical_bytes(),
             "canonical served bytes must stay identical under hash reuse"
         );
         // First block must actually hit the reuse path (same digest as FlatBlock).
