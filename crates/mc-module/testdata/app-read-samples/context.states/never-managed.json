@@ -1,0 +1,42 @@
+{
+  "name": "never-managed",
+  "request": {
+    "method": "context.states",
+    "params": {
+      "message_ids": [
+        "m"
+      ],
+      "session": {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "unknown"
+      }
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "compartments": [],
+    "messages": [
+      {
+        "compartment_id": null,
+        "dropped_parts": [],
+        "message_id": "m",
+        "outside_reason": "never_managed",
+        "parts": {
+          "dropped": 0,
+          "stamped": 0,
+          "tagged": 0
+        },
+        "split": null,
+        "stamped_parts": [],
+        "state": "outside"
+      }
+    ],
+    "moved_from_standalone": false,
+    "op": "context.states",
+    "schema": 1,
+    "session_kind": "standalone",
+    "state": "ready",
+    "version": "cs1:f8e0aed718193a11f299e8f7e967c85ca3387e675e4e3e12c2b7d6acd7fd3fb0"
+  }
+}

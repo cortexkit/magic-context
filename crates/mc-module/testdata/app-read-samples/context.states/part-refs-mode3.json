@@ -1,0 +1,74 @@
+{
+  "name": "part-refs-mode3",
+  "request": {
+    "method": "context.states",
+    "params": {
+      "message_ids": [
+        "m3"
+      ],
+      "session": {
+        "harness": "pi",
+        "runner": "runner",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "compartments": [],
+    "messages": [
+      {
+        "compartment_id": null,
+        "dropped_parts": [
+          {
+            "drop_mode": null,
+            "dropped_at_ms": null,
+            "dropped_at_source": "not_recorded",
+            "kind": "tool",
+            "part_ref": {
+              "part_key": "prt_3b"
+            },
+            "size": {
+              "bytes": null,
+              "input_bytes": null,
+              "input_tokens": null,
+              "tokens": 20
+            }
+          }
+        ],
+        "message_id": "m3",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 1,
+          "stamped": 1,
+          "tagged": 2
+        },
+        "split": null,
+        "stamped_parts": [
+          {
+            "kind": "text",
+            "part_ref": {
+              "part_key": "prt_3a"
+            },
+            "size": {
+              "bytes": 3,
+              "input_bytes": null,
+              "input_tokens": null,
+              "tokens": 10
+            },
+            "stage": "queued",
+            "stamped_at_ms": 123,
+            "stamped_at_source": "recorded"
+          }
+        ],
+        "state": "raw"
+      }
+    ],
+    "moved_from_standalone": false,
+    "op": "context.states",
+    "schema": 1,
+    "session_kind": "mode3",
+    "state": "ready",
+    "version": "cs1:27b759bd5c6f5b13ba32c76a3c2b46e79718bf7a286a0a2ec76418b3d8d14d2b"
+  }
+}

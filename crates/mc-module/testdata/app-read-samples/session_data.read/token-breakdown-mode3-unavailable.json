@@ -1,0 +1,22 @@
+{
+  "name": "token-breakdown-mode3-unavailable",
+  "refusal": {
+    "code": "app_op_unavailable",
+    "detail": {
+      "index": "idx_mc_async_compaction_session",
+      "section": "token_breakdown"
+    },
+    "message": "Section token_breakdown needs index idx_mc_async_compaction_session, which is not installed."
+  },
+  "request": {
+    "method": "session_data.read",
+    "params": {
+      "section": "token_breakdown",
+      "session": {
+        "harness": "opencode",
+        "runner": "runner",
+        "session": "s"
+      }
+    }
+  }
+}

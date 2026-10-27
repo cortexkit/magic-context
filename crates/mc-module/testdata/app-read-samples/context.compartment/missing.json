@@ -1,0 +1,19 @@
+{
+  "name": "missing",
+  "refusal": {
+    "code": "compartment_not_found",
+    "detail": null,
+    "message": "The summary no longer exists in this session."
+  },
+  "request": {
+    "method": "context.compartment",
+    "params": {
+      "compartment_id": "999",
+      "session": {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "s"
+      }
+    }
+  }
+}

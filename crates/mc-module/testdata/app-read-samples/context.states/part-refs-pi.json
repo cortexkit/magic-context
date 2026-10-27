@@ -1,0 +1,88 @@
+{
+  "name": "part-refs-pi",
+  "request": {
+    "method": "context.states",
+    "params": {
+      "message_ids": [
+        "m"
+      ],
+      "session": {
+        "harness": "pi",
+        "runner": "pi",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "compartments": [],
+    "messages": [
+      {
+        "compartment_id": null,
+        "dropped_parts": [
+          {
+            "drop_mode": "full",
+            "dropped_at_ms": null,
+            "dropped_at_source": "not_recorded",
+            "kind": "file",
+            "part_ref": {
+              "part_index": 4
+            },
+            "size": {
+              "bytes": 30,
+              "input_bytes": null,
+              "input_tokens": null,
+              "tokens": 9
+            }
+          },
+          {
+            "drop_mode": "skeleton_real",
+            "dropped_at_ms": null,
+            "dropped_at_source": "not_recorded",
+            "kind": "text",
+            "part_ref": {
+              "content_key": "mc-text-v1:vector:content:o1"
+            },
+            "size": {
+              "bytes": 20,
+              "input_bytes": null,
+              "input_tokens": null,
+              "tokens": 6
+            }
+          },
+          {
+            "drop_mode": "full",
+            "dropped_at_ms": null,
+            "dropped_at_source": "not_recorded",
+            "kind": "text",
+            "part_ref": {
+              "text_ordinal": 2
+            },
+            "size": {
+              "bytes": 10,
+              "input_bytes": null,
+              "input_tokens": null,
+              "tokens": 3
+            }
+          }
+        ],
+        "message_id": "m",
+        "outside_reason": null,
+        "parts": {
+          "dropped": 3,
+          "stamped": 0,
+          "tagged": 3
+        },
+        "split": null,
+        "stamped_parts": [],
+        "state": "dropped"
+      }
+    ],
+    "moved_from_standalone": false,
+    "op": "context.states",
+    "schema": 1,
+    "session_kind": "standalone",
+    "state": "ready",
+    "version": "cs1:663781068ceb87d4836713ae981fb90363ca15a1b7e45e81322c1dfa2e0e7006"
+  }
+}

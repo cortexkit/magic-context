@@ -1,0 +1,12 @@
+{
+  "name": "disabled",
+  "refusal": {
+    "code": "embedding_disabled",
+    "detail": null,
+    "message": "Embeddings are off or local, so there is no remote endpoint to probe."
+  },
+  "request": {
+    "method": "config.embedding_probe",
+    "params": {}
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "refusal-bad-if-version",
+  "refusal": {
+    "code": "invalid_params",
+    "detail": {
+      "field": "params.if_version",
+      "reason": "type"
+    },
+    "message": "Parameter params.if_version is invalid (type)."
+  },
+  "request": {
+    "method": "context.states",
+    "params": {
+      "if_version": 42,
+      "message_ids": [
+        "raw"
+      ],
+      "session": {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "s"
+      }
+    }
+  }
+}
