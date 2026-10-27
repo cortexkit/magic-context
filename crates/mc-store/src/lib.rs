@@ -5368,6 +5368,12 @@ pub struct ModuleMeta {
     /// Whether the emergency idempotence sample is valid.
     #[serde(default)]
     pub has_prior_emergency_drop: bool,
+    /// Consecutive primary execute passes that held queued agent drops because the queued
+    /// work was below 2% of the usable window and no other rebuild was happening. The third
+    /// such pass rebuilds when no summary can come. Omitted while zero so stored records
+    /// that never held keep their bytes.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub execute_reclaim_held_passes: u64,
     /// Last evaluated emergency target and candidate exhaustion, retained through sub-margin dips.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emergency_drop_assessment: Option<EmergencyDropAssessment>,

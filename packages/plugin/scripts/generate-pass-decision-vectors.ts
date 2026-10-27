@@ -65,7 +65,7 @@ type Origin = (typeof ORIGINS)[number];
 
 interface VectorInputs {
     /** ck-mc preset. `head` is a primary session; every other preset is a subagent. */
-    preset: "head" | "worker" | "reviewer";
+    preset: "head" | "worker" | "reader";
     /** `compaction.enabled: false`: memories and docs only, no context management. */
     compactionOff: boolean;
     scheduler: "execute" | "defer";
@@ -177,7 +177,7 @@ const CASES: Array<{ name: string; note: string; inputs: VectorInputs }> = [
     {
         name: "subagent-execute-with-nothing-eligible",
         note: "Permission alone rewrites no bytes.",
-        inputs: base({ preset: "reviewer" }),
+        inputs: base({ preset: "reader" }),
     },
     {
         name: "subagent-execute-routine-cleanup",
@@ -360,7 +360,7 @@ const CASES: Array<{ name: string; note: string; inputs: VectorInputs }> = [
     },
     {
         name: "primary-force-band-spent-episode-flush",
-        note: "A flush admits routine cleanup but does not price the pass, so the spent emergency latch holds.",
+        note: "A flush rebuilds the history injection, which prices the pass and re-arms the spent episode.",
         inputs: base({
             scheduler: "defer",
             usagePercent: 88,
@@ -452,7 +452,9 @@ export function decideVector(inputs: VectorInputs): VectorExpected {
             heldIdleExpiryRebuild: false,
             explicitFlush: inputs.flush,
             publishedHistory: inputs.publishedHistory,
-            historyRebuiltThisPass: inputs.publishedHistory,
+            // `/ctx-flush` also requests a history rebuild (`onFlush` in hook.ts), so a
+            // flush pass rebuilds the history injection.
+            historyRebuiltThisPass: inputs.publishedHistory || inputs.flush,
             materializationRequested: inputs.flush,
             alreadyRanThisTurn: false,
             signedThinkingHold: false,
@@ -479,7 +481,7 @@ export function decideVector(inputs: VectorInputs): VectorExpected {
             foldBustsServedPrefix: inputs.executedFold,
             firstRenderBust,
             heldIdleExpiryRebuild: false,
-            historyRebuiltThisPass: inputs.publishedHistory,
+            historyRebuiltThisPass: inputs.publishedHistory || inputs.flush,
             compartmentInjectionRebuiltFromDb: false,
             rebuiltHistoryFromInitialPrepare: false,
         });

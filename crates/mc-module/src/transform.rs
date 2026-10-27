@@ -6097,47 +6097,54 @@ fn apply_once(
             req.session_id
         );
     }
-    let force_episode_available = force_band_active
-        && (!loaded.meta.has_prior_emergency_drop
-            || (trigger_holds_enabled
-                && !protected_signed_prefix
-                && held_release.has("force_episode")))
-        && !(trigger_holds_enabled && protected_signed_prefix && held_release.has("force_episode"));
+    let force_episode_available = force_episode_available(
+        force_band_active,
+        loaded.meta.has_prior_emergency_drop,
+        trigger_holds_enabled,
+        protected_signed_prefix,
+        held_release.has("force_episode"),
+    );
+    let ride_inputs = PassRideInputs {
+        is_subagent: req.is_subagent,
+        pass: scheduler_outcome.pass,
+        raw_rebuild,
+        prefix_materialization_enabled,
+        initialized: loaded.meta.initialized,
+        render_config_changed,
+        cached_m1_missing: cached_m1_missing(&loaded.core),
+        hard_fold_prices_mutations,
+        reconcile_hard_due,
+        lineage_force_hard: lineage_state.force_hard,
+        m1_changed: current_m1_digest != applied_m1_revision,
+        flush_armed,
+        signed_prefix_hold,
+        idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
+        open_signed_turn,
+        head_rebuild_forced,
+        force_episode_available,
+    };
+    let rides = pass_rides(&ride_inputs);
+    let subagent_execute_permitted = rides.subagent_execute_permitted;
+    let supersession_ride_available = rides.supersession_ride_available;
     // A rebuild that is not the emergency itself. It is the only thing that waives the
-    // emergency minimum: the force-band edge and the 95% backstop below permit a rewrite
-    // but do not pay for one. Both flags derive from this one expression so they cannot
-    // drift apart.
-    let independent_rebuild = raw_rebuild || (prefix_materialization_enabled
-        && (!loaded.meta.initialized
-            || render_config_changed
-            || cached_m1_missing(&loaded.core)
-            || hard_fold_prices_mutations
-            || reconcile_hard_due
-            || lineage_state.force_hard
-            || (scheduler_outcome.pass != scheduler::PassDecision::Defer
-                && current_m1_digest != applied_m1_revision)))
-        || (flush_armed && !signed_prefix_hold)
-        || (prefix_materialization_enabled && scheduler_outcome.idle_ttl_fired)
-        // An active signed turn keeps the optional m0/m1 rebuilds above disabled, but a pass
-        // whose head cannot be replayed, or whose provider cache already expired, is a full
-        // cache write like any other: queued work is applied on it, to blocks after the kept
-        // signed thinking only (`active_thinking_prefix_edit_ids`). On the expired pass the
-        // head itself still replays (`signed_head_frozen`).
-        || (open_signed_turn
-            && (head_rebuild_forced
-                || (!req.is_subagent && scheduler_outcome.idle_ttl_fired)));
-    // A subagent's only permission to apply queued drops and cleanup is a non-Defer scheduler
-    // decision. A signed-prefix hold withholds it exactly as a scheduler Defer would, so a
-    // held subagent pass also replays its previous bytes.
-    let subagent_execute_permitted =
-        !signed_prefix_hold && scheduler_outcome.pass != scheduler::PassDecision::Defer;
-    let supersession_ride_available = independent_rebuild
-        // Subagents cannot fold history. Execute is their one shared permission
-        // for queued drops and automatic cleanup, not a request to change bytes.
-        || (req.is_subagent && subagent_execute_permitted)
-        || force_episode_available
-            || scheduler_outcome.pass == scheduler::PassDecision::Emergency95;
-    let emergency_minimum_waived = independent_rebuild;
+    // emergency minimum: the force-band edge and the 95% backstop permit a rewrite but do
+    // not pay for one.
+    let emergency_minimum_waived = rides.independent_rebuild;
+    // Invariant 3's bounded execute exception applies to a primary execute pass that no
+    // other ride rebuilds. A summary that can still come (a historian or wrap-up run in
+    // flight, or a publication waiting behind a frozen signed head) holds the queued work
+    // for that summary's rebuild instead.
+    let execute_reclaim_candidate = !req.is_subagent
+        && scheduler_outcome.pass == scheduler::PassDecision::Execute
+        && !supersession_ride_available
+        && !pending_agent_drops.is_empty();
+    let summary_can_come = ctx.historian_active
+        || ctx.wrapup_active
+        || (signed_head_frozen
+            && (compartment_seq_changed_since_meta || current_m1_digest != applied_m1_revision));
+    let mut execute_reclaim_admitted = false;
+    // The count persisted at the end of this pass when it does not rebuild.
+    let mut execute_reclaim_held_passes = 0u64;
     let tag_tokens_by_block: HashMap<&str, usize> = tag_rows
         .iter()
         .filter_map(|row| {
@@ -6175,7 +6182,8 @@ fn apply_once(
         reclaim_pending_now,
         mut plan,
     ) = loop {
-        let pass_already_busting = supersession_ride_available && !all_held;
+        let pass_already_busting =
+            (supersession_ride_available || execute_reclaim_admitted) && !all_held;
         let supersession_ride_available = pass_already_busting;
         let emergency_minimum_waived = emergency_minimum_waived && !all_held;
         let calibration_candidate =
@@ -6205,18 +6213,7 @@ fn apply_once(
         let tail_reclaim_enabled = serializer_profile.is_none_or(healing::tail_reclaim);
         let cached_m1_missing_due = cached_m1_missing(&loaded.core);
         let producer_gate = tail_reclaim_enabled
-            && producer_gate(
-                scheduler_outcome.pass,
-                !loaded.meta.initialized
-                    || render_config_changed
-                    || reconcile_hard_due
-                    || hard_fold_prices_mutations
-                    || cached_m1_missing_due
-                    // A lineage descent or discarded cache sections force a HARD even when the
-                    // scheduler defers. Queued work is selected now so it is applied in that
-                    // same cache rewrite instead of costing a second one later.
-                    || lineage_state.force_hard,
-            );
+            && producer_gate(scheduler_outcome.pass, producer_hard_advisory(&ride_inputs));
         // A closed producer gate or an all-held plan selects Defer, which emits no
         // reductions. Execute selection still needs pass_already_busting or
         // supersession_ride_available to permit shortening or dropping content.
@@ -6324,7 +6321,7 @@ fn apply_once(
         // Even when rewrites are deferred, selection must report which tool blocks cannot
         // be changed. PassClass::Defer returns that protection information without proposing
         // reductions or granting permission to rewrite the cached prefix.
-        let mut selection_outcome = {
+        let selection_outcome = {
             let frozen = frozen_red_targets(&loaded.core);
             // No per-request gate here: producer_gate already requires
             // tail_reclaim_enabled, which is the profile default. Gating again on the
@@ -6347,46 +6344,89 @@ fn apply_once(
                 .filter(|drop| drop.command_first_applied_at_ms.is_some())
                 .map(|drop| drop.target_id.clone())
                 .collect::<HashSet<_>>();
-            select_reductions_with_outcome(
+            let selection_ctx = SelectionContext {
+                calibration: Some(active_calibration),
+                pass_class: selection_class,
+                current_total_input_tokens: usage_input_tokens,
+                ceiling_tokens: context_limit_tokens
+                    * ctx.execute_threshold_percentage.clamp(1.0, 100.0)
+                    / 100.0,
+                last_execute_ordinal: if loaded.core.reconcile_pending {
+                    0
+                } else {
+                    loaded.meta.last_execute_ordinal
+                },
+                scheduler_pressure_execute: scheduler_outcome.pressure_execute,
+                prior_input_sample: loaded.meta.last_emergency_input_sample,
+                // The spent-episode latch as stored. Selection decides whether this pass
+                // re-arms it (`selection::lane_gates`).
+                has_prior_drop: loaded.meta.has_prior_emergency_drop
+                    || (trigger_holds_enabled
+                        && protected_signed_prefix
+                        && held_release.has("force_episode")),
+                agent_drop_ids,
+                agent_drop_command_ids,
+                first_applied_agent_drop_ids,
+                pass_already_busting,
+                supersession_ride_available,
+                emergency_minimum_waived,
+                emergency_window_yields: scheduler_outcome.pass
+                    == scheduler::PassDecision::Emergency95,
+                tag_window_protected_block_ids: tag_window_protected_block_ids.clone(),
+                exempt_message_protected_block_ids,
+            };
+            let selection_config = SelectionConfig {
+                smart_drops: ctx.smart_drops,
+                protected_tools: ctx.protected_tools.clone(),
+            };
+            let outcome = select_reductions_with_outcome(
                 &tail_for_selection,
                 &frozen,
-                &SelectionContext {
-                    calibration: Some(active_calibration),
-                    pass_class: selection_class,
-                    current_total_input_tokens: usage_input_tokens,
-                    ceiling_tokens: context_limit_tokens
-                        * ctx.execute_threshold_percentage.clamp(1.0, 100.0)
-                        / 100.0,
-                    last_execute_ordinal: if loaded.core.reconcile_pending {
-                        0
-                    } else {
-                        loaded.meta.last_execute_ordinal
-                    },
-                    scheduler_pressure_execute: scheduler_outcome.pressure_execute,
-                    prior_input_sample: loaded.meta.last_emergency_input_sample,
-                    has_prior_drop: (loaded.meta.has_prior_emergency_drop
-                        || (trigger_holds_enabled
-                            && protected_signed_prefix
-                            && held_release.has("force_episode")))
-                        && !pass_already_busting,
-                    agent_drop_ids,
-                    agent_drop_command_ids,
-                    first_applied_agent_drop_ids,
-                    pass_already_busting,
-                    supersession_ride_available,
-                    emergency_minimum_waived,
-                    emergency_window_yields: scheduler_outcome.pass
-                        == scheduler::PassDecision::Emergency95,
-                    tag_window_protected_block_ids: tag_window_protected_block_ids.clone(),
-                    exempt_message_protected_block_ids,
-                },
-                &SelectionConfig {
-                    smart_drops: ctx.smart_drops,
-                    protected_tools: ctx.protected_tools.clone(),
-                },
-            )
+                &selection_ctx,
+                &selection_config,
+            );
+            (outcome, frozen, selection_ctx, selection_config)
         };
+        let (mut selection_outcome, selection_frozen, selection_ctx, selection_config) =
+            selection_outcome;
         timings.selection = elapsed_ms(selection_started_at);
+        if execute_reclaim_candidate && !execute_reclaim_admitted && !all_held {
+            // Count what the drain could actually remove now: run the same selection as if
+            // the pass were rebuilding, and keep only the queued targets it would reduce.
+            let probe = select_reductions_with_outcome(
+                &tail_for_selection,
+                &selection_frozen,
+                &SelectionContext {
+                    pass_already_busting: true,
+                    supersession_ride_available: true,
+                    ..selection_ctx.clone()
+                },
+                &selection_config,
+            );
+            let decision = decide_execute_reclaim(&ExecuteReclaimInputs {
+                held_passes: loaded.meta.execute_reclaim_held_passes,
+                primary_execute: true,
+                summary_can_come,
+                already_busting: pass_already_busting,
+                reclaimable_tokens: queued_drop_reclaim_tokens(
+                    &tail_for_selection,
+                    &probe.decisions,
+                    &pending_drop_target_ids,
+                    active_calibration,
+                ),
+                usable_window: context_limit_tokens,
+            });
+            execute_reclaim_held_passes = decision.held_passes;
+            if decision.admitted && !signed_prefix_hold {
+                tracing::info!(
+                    "mc-module: [{}] execute pass rebuilds for queued work: no summary can come (held passes {})",
+                    req.session_id,
+                    decision.held_passes
+                );
+                execute_reclaim_admitted = true;
+                continue;
+            }
+        }
         let nudge_base_protected_block_ids = protected_block_ids.clone();
         protected_block_ids.extend(selection_outcome.protected_tool_block_ids.iter().cloned());
         let count_to_u64 =
@@ -6544,7 +6584,11 @@ fn apply_once(
         if (attachment_upgrade.is_some()
             || todo_injection_pending
             || (scheduler_outcome.idle_ttl_fired && reclaim_pending_now)
-            || boundaryless_explicit_flush)
+            || boundaryless_explicit_flush
+            // Before the first summary there is no boundary to locate either. An execute pass
+            // that rebuilds for queued work (invariant 3's bounded exception) applies it
+            // the same way a boundaryless flush does.
+            || (execute_reclaim_admitted && reclaim_pending_now))
             && bust_opportunity
             && !loaded.core.reconcile_pending
             && matches!(plan, PassPlan::Defer)
@@ -6762,6 +6806,13 @@ fn apply_once(
         meta.has_prior_emergency_drop = false;
         meta.emergency_drop_assessment = None;
     }
+    // A rewrite that is already paid for re-arms a spent force episode, so every candidate
+    // accumulated during sustained pressure rides it. A batch applied on this pass latches
+    // the episode again below.
+    if selection_outcome.emergency_episode_rearmed {
+        meta.last_emergency_input_sample = 0.0;
+        meta.has_prior_emergency_drop = false;
+    }
     if let Some(assessment) = selection_outcome.emergency_drop_assessment {
         meta.emergency_drop_assessment = Some(assessment);
     }
@@ -6837,6 +6888,13 @@ fn apply_once(
         marker_hard_keeps_provider_cache && !supersession_ride_available && !reductions_pending_now;
     let is_provider_prefix_mutation_pass =
         pass_plan_permits_prefix_mutation(&plan, marker_hard_serves_frozen_prefix);
+    // A rebuilding pass resets the held execute-pass count, as the TypeScript plugin's
+    // `clearExecuteReclaimState` does on every pass that changed bytes.
+    meta.execute_reclaim_held_passes = if is_provider_prefix_mutation_pass {
+        0
+    } else {
+        execute_reclaim_held_passes
+    };
     // The reductions-only child branch preserves inherited history and accepts
     // reduction units only. Image/system/age-reasoning strip units stay primary-only;
     // an execute ride must not silently widen that separate replay contract.
@@ -10155,6 +10213,211 @@ fn scheduler_config(execute_threshold_percentage: f64) -> SchedulerConfig {
 
 fn producer_gate(pass: scheduler::PassDecision, hard_advisory: bool) -> bool {
     !matches!(pass, scheduler::PassDecision::Defer) || hard_advisory
+}
+
+/// Work that lets a scheduler Defer pass select reductions: a rebuild of the head that
+/// happens anyway (a lineage descent or discarded cache sections force a HARD even when
+/// the scheduler defers), or a user `/ctx-flush`, which the TypeScript plugin drains on
+/// any pass. Queued work is selected now so it lands in that same rewrite instead of
+/// costing a second one later.
+fn producer_hard_advisory(inputs: &PassRideInputs) -> bool {
+    !inputs.initialized
+        || inputs.render_config_changed
+        || inputs.reconcile_hard_due
+        || inputs.hard_fold_prices_mutations
+        || inputs.cached_m1_missing
+        || inputs.lineage_force_hard
+        || (inputs.flush_armed && !inputs.signed_prefix_hold)
+}
+
+/// The force band's one emergency batch is still available in this pressure episode.
+/// Under trigger holds, a force episode parked behind kept signed thinking is released on
+/// the first pass that keeps none, and stays parked while the prefix is still protected.
+fn force_episode_available(
+    force_band_active: bool,
+    has_prior_emergency_drop: bool,
+    trigger_holds_enabled: bool,
+    protected_signed_prefix: bool,
+    force_episode_held: bool,
+) -> bool {
+    force_band_active
+        && (!has_prior_emergency_drop
+            || (trigger_holds_enabled && !protected_signed_prefix && force_episode_held))
+        && !(trigger_holds_enabled && protected_signed_prefix && force_episode_held)
+}
+
+/// The per-pass facts [`pass_rides`] decides from.
+#[derive(Debug, Clone, Copy)]
+struct PassRideInputs {
+    is_subagent: bool,
+    pass: scheduler::PassDecision,
+    /// A raw rebuild: the head cannot be replayed from stored state.
+    raw_rebuild: bool,
+    /// Primary session whose prefix is not held for kept signed thinking.
+    prefix_materialization_enabled: bool,
+    initialized: bool,
+    render_config_changed: bool,
+    cached_m1_missing: bool,
+    hard_fold_prices_mutations: bool,
+    reconcile_hard_due: bool,
+    lineage_force_hard: bool,
+    /// Published history or memory changed the m1 this pass would render.
+    m1_changed: bool,
+    /// A user `/ctx-flush` is pending.
+    flush_armed: bool,
+    signed_prefix_hold: bool,
+    idle_ttl_fired: bool,
+    open_signed_turn: bool,
+    head_rebuild_forced: bool,
+    force_episode_available: bool,
+}
+
+/// What lets queued drops and automatic cleanup first-apply on a pass, before the primary
+/// execute pass is asked whether it rebuilds for queued work ([`decide_execute_reclaim`]).
+/// Mirrors the ride signals of the TypeScript `decidePassMutation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PassRides {
+    /// A rebuild that is not the emergency itself: a fold, an m1 or render-config change,
+    /// a cold or unreplayable head, an expired cache, or a pending flush.
+    independent_rebuild: bool,
+    /// A subagent's execute pass, its one shared permission for queued drops and cleanup.
+    subagent_execute_permitted: bool,
+    /// Any ride at all: the shared permission every reduction lane consults.
+    supersession_ride_available: bool,
+}
+
+fn pass_rides(inputs: &PassRideInputs) -> PassRides {
+    let PassRideInputs {
+        is_subagent,
+        pass,
+        raw_rebuild,
+        prefix_materialization_enabled,
+        initialized,
+        render_config_changed,
+        cached_m1_missing,
+        hard_fold_prices_mutations,
+        reconcile_hard_due,
+        lineage_force_hard,
+        m1_changed,
+        flush_armed,
+        signed_prefix_hold,
+        idle_ttl_fired,
+        open_signed_turn,
+        head_rebuild_forced,
+        force_episode_available,
+    } = *inputs;
+    let independent_rebuild = raw_rebuild
+        || (prefix_materialization_enabled
+            && (!initialized
+                || render_config_changed
+                || cached_m1_missing
+                || hard_fold_prices_mutations
+                || reconcile_hard_due
+                || lineage_force_hard
+                || (pass != scheduler::PassDecision::Defer && m1_changed)))
+        || (flush_armed && !signed_prefix_hold)
+        || (prefix_materialization_enabled && idle_ttl_fired)
+        // An active signed turn keeps the optional m0/m1 rebuilds above disabled, but a pass
+        // whose head cannot be replayed, or whose provider cache already expired, is a full
+        // cache write like any other: queued work is applied on it, to blocks after the kept
+        // signed thinking only (`active_thinking_prefix_edit_ids`). On the expired pass the
+        // head itself still replays (`signed_head_frozen`).
+        || (open_signed_turn && (head_rebuild_forced || (!is_subagent && idle_ttl_fired)));
+    // A subagent's only permission to apply queued drops and cleanup is a non-Defer scheduler
+    // decision. A signed-prefix hold withholds it exactly as a scheduler Defer would, so a
+    // held subagent pass also replays its previous bytes.
+    let subagent_execute_permitted = !signed_prefix_hold && pass != scheduler::PassDecision::Defer;
+    PassRides {
+        independent_rebuild,
+        subagent_execute_permitted,
+        supersession_ride_available: independent_rebuild
+            // Subagents cannot fold history. Execute is their one shared permission
+            // for queued drops and automatic cleanup, not a request to change bytes.
+            || (is_subagent && subagent_execute_permitted)
+            || force_episode_available
+            || pass == scheduler::PassDecision::Emergency95,
+    }
+}
+
+/// Invariant 3's bounded execute exception, as the TypeScript `decideExecuteReclaim`
+/// decides it. A primary execute pass that nothing else rebuilds, and on which no
+/// summary can come, rebuilds itself and applies the queued drops and the usual
+/// cleanup in that one rebuild, once the queued work it can actually remove is worth
+/// it: at least 2% of the usable window, or the third consecutive such pass. The
+/// queued `ctx_reduce` drops land on that pass; they do not cause it.
+#[derive(Debug, Clone, Copy)]
+struct ExecuteReclaimInputs {
+    /// Persisted consecutive held passes before this pass.
+    held_passes: u64,
+    /// Primary session, scheduler Execute below the force band.
+    primary_execute: bool,
+    /// A historian or wrap-up run is in flight, or a published summary waits to render.
+    summary_can_come: bool,
+    /// Another ride already rebuilds this pass.
+    already_busting: bool,
+    /// Calibrated tokens the queued drops would remove on this pass.
+    reclaimable_tokens: f64,
+    usable_window: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExecuteReclaimDecision {
+    /// The count to persist unless the pass rebuilds (a rebuilding pass resets it to zero).
+    held_passes: u64,
+    admitted: bool,
+}
+
+/// Calibrated tokens the queued drops would remove on this pass: the queued targets that
+/// `decisions` reduces, weighted as the TypeScript `estimateExecuteReclaimTokens` weighs
+/// them (tool blocks by the tools ratio, everything else by the prose ratio, a quarter
+/// of the byte length when a block has no token count).
+fn queued_drop_reclaim_tokens(
+    items: &[SelItem],
+    decisions: &[ReductionDecision],
+    queued: &HashSet<String>,
+    calibration: crate::decision_calibration::DecisionCalibration,
+) -> f64 {
+    let reduced = decisions
+        .iter()
+        .map(|decision| decision.target_id.as_str())
+        .filter(|id| queued.contains(*id))
+        .collect::<HashSet<_>>();
+    items
+        .iter()
+        .filter(|item| reduced.contains(item.id.as_str()))
+        .map(|item| {
+            let tokens = item
+                .token_count
+                .unwrap_or_else(|| item.byte_size.div_ceil(4)) as f64;
+            let ratio = if matches!(
+                item.kind,
+                SelKind::ToolCall { .. } | SelKind::ToolResult { .. }
+            ) {
+                calibration.tools_ratio
+            } else {
+                calibration.prose_ratio
+            };
+            tokens * ratio
+        })
+        .sum()
+}
+
+fn decide_execute_reclaim(inputs: &ExecuteReclaimInputs) -> ExecuteReclaimDecision {
+    let worth_counting = inputs.primary_execute && inputs.reclaimable_tokens > 0.0;
+    let held_passes = if worth_counting && !inputs.already_busting {
+        inputs.held_passes.saturating_add(1)
+    } else {
+        0
+    };
+    ExecuteReclaimDecision {
+        held_passes,
+        admitted: worth_counting
+            && !inputs.already_busting
+            && !inputs.summary_can_come
+            && ((inputs.usable_window > 0.0
+                && inputs.reclaimable_tokens >= inputs.usable_window * 0.02)
+                || held_passes >= 3),
+    }
 }
 
 fn selection_pass_class(pass: scheduler::PassDecision) -> PassClass {
@@ -26556,7 +26819,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn execute_only_queued_drops_are_held_without_historian() {
+    fn execute_only_queued_drops_apply_when_no_summary_can_come() {
         check_execute_only_queued_drops(false);
     }
 
@@ -26587,7 +26850,11 @@ pub(crate) mod tests {
             s.append_pending_agent_drops("ses", &["old#0".into()], 1)
                 .unwrap();
         }
-        if is_subagent && execute && queued {
+        // A subagent execute pass, and a primary execute pass on which no summary can come
+        // with queued work worth at least 2% of the window, rebuild once and carry the
+        // eligible age cleanup with the queued drops.
+        let applies = execute && queued;
+        if applies {
             request.messages = vec![
                 item("old", 1, "spent content"),
                 assistant_tool_call("aged-call", 2, "aged-tool"),
@@ -26599,11 +26866,26 @@ pub(crate) mod tests {
             s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
                 .unwrap();
         }
+        if applies && !is_subagent {
+            // The queued text is far below 2% of the 100k-token window, so a primary
+            // execute pass holds it twice and rebuilds on the third held pass.
+            for held in 1..=2 {
+                transform(&s, &request, &ctx).unwrap();
+                assert_eq!(s.load_pending_agent_drops("ses").unwrap().len(), 1);
+                assert_eq!(
+                    s.load("ses").unwrap().meta.execute_reclaim_held_passes,
+                    held
+                );
+            }
+        }
         let result = transform(&s, &request, &ctx).unwrap();
-        let applies = is_subagent && execute && queued;
         assert_eq!(
             s.load_pending_agent_drops("ses").unwrap().len(),
-            usize::from(queued && !applies)
+            usize::from(queued && !applies),
+            "action={} scheduler={:?} held={}",
+            result.action,
+            result.scheduler_decision,
+            s.load("ses").unwrap().meta.execute_reclaim_held_passes
         );
         assert_eq!(result.ck_messages == baseline.ck_messages, !applies);
         if applies {
@@ -26801,7 +27083,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn issue_619_primary_execute_holds_queued_drops() {
+    fn issue_619_primary_execute_without_summary_applies_queued_drops() {
         check_issue_619_subagent_ride(false, true, true);
     }
 
@@ -26833,9 +27115,28 @@ pub(crate) mod tests {
         ctx.historian_active = historian_active;
         s.append_pending_agent_drops("ses", &["tail#0".to_string()], 1)
             .unwrap();
-        let held = transform(&s, &request, &ctx).unwrap();
+        let first = transform(&s, &request, &ctx).unwrap();
+        if !historian_active {
+            // No summary can come. The queued drop is far below 2% of the 100k-token
+            // window, so the execute pass holds it twice and rebuilds on the third pass.
+            assert_eq!(
+                serde_json::to_vec(&first.ck_messages).unwrap(),
+                serde_json::to_vec(&baseline.ck_messages).unwrap()
+            );
+            transform(&s, &request, &ctx).unwrap();
+            assert_eq!(s.load("ses").unwrap().meta.execute_reclaim_held_passes, 2);
+            let third = transform(&s, &request, &ctx).unwrap();
+            assert_ne!(
+                serde_json::to_vec(&third.ck_messages).unwrap(),
+                serde_json::to_vec(&baseline.ck_messages).unwrap()
+            );
+            assert!(s.load_pending_agent_drops("ses").unwrap().is_empty());
+            assert_eq!(s.load("ses").unwrap().meta.execute_reclaim_held_passes, 0);
+            return;
+        }
+        // A running historian's summary will rebuild the head; the drop waits for it.
         assert_eq!(
-            serde_json::to_vec(&held.ck_messages).unwrap(),
+            serde_json::to_vec(&first.ck_messages).unwrap(),
             serde_json::to_vec(&baseline.ck_messages).unwrap()
         );
         assert_eq!(s.load_pending_agent_drops("ses").unwrap().len(), 1);
@@ -26846,8 +27147,67 @@ pub(crate) mod tests {
         let applied = transform(&s, &request, &ctx).unwrap();
         assert_ne!(
             serde_json::to_vec(&applied.ck_messages).unwrap(),
-            serde_json::to_vec(&held.ck_messages).unwrap()
+            serde_json::to_vec(&first.ck_messages).unwrap()
         );
+        assert!(s.load_pending_agent_drops("ses").unwrap().is_empty());
+    }
+
+    /// Invariant 3's bounded execute exception, counted: queued work below 2% of the usable
+    /// window holds on two consecutive primary execute passes and rebuilds on the third.
+    #[test]
+    fn primary_execute_rebuilds_for_small_queued_drops_on_the_third_held_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let messages = vec![item("a", 1, "raw"), item("tail", 2, "small pending drop")];
+        s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let request = with_usage(req("ses", "cfg0", messages), 70_000, 100_000);
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        transform(&s, &request, &ctx).unwrap();
+        let baseline = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(baseline.scheduler_decision.as_deref(), Some("execute"));
+        s.append_pending_agent_drops("ses", &["tail#0".to_string()], 1)
+            .unwrap();
+        for held in 1..=2 {
+            let pass = transform(&s, &request, &ctx).unwrap();
+            assert_eq!(pass.ck_messages, baseline.ck_messages, "held pass {held}");
+            assert_eq!(s.load_pending_agent_drops("ses").unwrap().len(), 1);
+            assert_eq!(
+                s.load("ses").unwrap().meta.execute_reclaim_held_passes,
+                held
+            );
+        }
+        let third = transform(&s, &request, &ctx).unwrap();
+        assert_ne!(third.ck_messages, baseline.ck_messages);
+        assert!(s.load_pending_agent_drops("ses").unwrap().is_empty());
+        assert_eq!(s.load("ses").unwrap().meta.execute_reclaim_held_passes, 0);
+        assert_eq!(
+            transform(&s, &request, &ctx).unwrap().ck_messages,
+            third.ck_messages
+        );
+    }
+
+    /// A user flush drains queued drops on any pass, including one the scheduler defers.
+    #[test]
+    fn flush_on_a_deferred_pass_applies_queued_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let messages = vec![item("a", 1, "raw"), item("tail", 2, "pending drop")];
+        s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let request = with_usage(req("ses", "cfg0", messages), 20, 100);
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        transform(&s, &request, &ctx).unwrap();
+        let baseline = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(baseline.scheduler_decision.as_deref(), Some("defer"));
+        s.append_pending_agent_drops("ses", &["tail#0".to_string()], 1)
+            .unwrap();
+        let mut loaded = s.load("ses").unwrap();
+        loaded.meta.soft_refresh_pending = true;
+        s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let flushed = transform(&s, &request, &ctx).unwrap();
+        assert_ne!(flushed.ck_messages, baseline.ck_messages);
         assert!(s.load_pending_agent_drops("ses").unwrap().is_empty());
     }
 
@@ -27975,12 +28335,19 @@ pub(crate) mod tests {
         let loaded = s.load("ses").unwrap();
         assert!(loaded.meta.has_prior_emergency_drop);
         assert!(loaded.meta.emergency_drain_active);
-        for key in ["red:m8#0", "red:m111#0", "cav:m3#0"] {
+        for key in ["red:m8#0", "cav:m3#0"] {
             assert!(
                 loaded.core.frozen_units.iter().any(|u| u.key == key),
                 "missing {key}"
             );
         }
+        // The aged `write` arc waits: in the force band only the emergency selector reclaims
+        // tools, and the age sweep first-applies on a rebuilding pass below the band.
+        assert!(!loaded
+            .core
+            .frozen_units
+            .iter()
+            .any(|u| u.key == "red:m111#0"));
         let bytes = serde_json::to_vec(&first.ck_messages).unwrap();
         s.append_pending_agent_drops("ses", &["queued#0".to_string()], 1)
             .unwrap();
@@ -28014,6 +28381,10 @@ pub(crate) mod tests {
         loaded.meta.last_execute_ordinal = 142;
         s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
+        // The age sweep that reclaims the late arc never first-applies in the force band,
+        // where only the emergency selector reclaims tools; the flush below the band
+        // carries it together with the queued drop.
+        request = with_usage(request, 70_000, 100_000);
         transform(&s, &request, &context).unwrap();
         assert!(s
             .load("ses")
@@ -28264,6 +28635,9 @@ pub(crate) mod tests {
             .iter()
             .any(|unit| unit.key == "red:aged#0"));
 
+        // The age sweep never first-applies in the force band (the emergency selector owns
+        // tool reclaim there), so the independent fold that carries it lands below the band.
+        request = with_usage(request, 70_000, 100_000);
         s.append_compartments("ses", &[comp(2, 2, 3, "old#0", "published fold")])
             .unwrap();
         transform(&s, &request, &context).unwrap();
@@ -28355,6 +28729,16 @@ pub(crate) mod tests {
                 _ => {}
             }
             transform(&s, &request, &context).unwrap();
+            // The escape re-arms the force episode, but the aged arc is age-sweep work, which
+            // never first-applies in the force band (the emergency selector, which finds no
+            // candidate in this fixture, owns tool reclaim there). The first rebuilding pass
+            // below the band applies it.
+            let mut loaded = s.load("ses").unwrap();
+            loaded.meta.soft_refresh_pending = true;
+            s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+                .unwrap();
+            request = with_usage(request, 70_000, 100_000);
+            transform(&s, &request, &context).unwrap();
             assert!(
                 s.load("ses")
                     .unwrap()
@@ -28362,7 +28746,7 @@ pub(crate) mod tests {
                     .frozen_units
                     .iter()
                     .any(|u| u.key == "red:late#0"),
-                "escape {escape} must reclaim"
+                "escape {escape}: the age sweep must apply below the band"
             );
         }
     }
@@ -30688,14 +31072,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn force_band_admits_age_batch_and_advances_watermark_under_historian_veto() {
+    fn force_band_advances_watermark_but_holds_age_batch_under_historian_veto() {
         // An active historian vetoes the ordinary execute-band arm (queued work waits for
         // the next materializing pass), but the veto must not reach the force band: a
-        // Force85/Emergency95 pass engages the emergency arm, which exempts the veto, so
-        // the waiting age batch is admitted and the watermark advances on that same pass.
-        // The aged arc is a T1 `read` and the fresh arc a T2 `edit`, each the only arc in
-        // its tier: the emergency tier selector reserves both (newest-20% per tier), so
-        // any freeze of the aged arc is uniquely the force-band age arm's work.
+        // Force85/Emergency95 pass takes the force ride, which exempts the veto, so the
+        // watermark advances on that pass. The age batch itself still waits: in the force
+        // band only the emergency selector reclaims tools. The aged arc is a T1 `read` and
+        // the fresh arc a T2 `edit`, each the only arc in its tier: the emergency tier
+        // selector reserves both (newest-20% per tier), so no tool is reduced.
         const SESSION: &str = "force-band-veto";
 
         let dir = tempfile::tempdir().unwrap();
@@ -30760,30 +31144,28 @@ pub(crate) mod tests {
         assert!(frozen_red_payload(&loaded.core, "aged-call#0").is_none());
         assert!(frozen_red_payload(&loaded.core, "aged-result#0").is_none());
 
-        // Force85 under the same active historian: the emergency arm bypasses the veto.
+        // Force85 under the same active historian: the force band's ride bypasses the veto
+        // and advances the watermark, but in the band the emergency selector owns tool
+        // reclaim (TypeScript `toolReclaimAdmitted`), so the waiting age batch is not
+        // applied there. The emergency tier reserve keeps both arcs, so the pass changes no
+        // bytes.
         let force = transform(
             &s,
             &with_usage(req(SESSION, "cfg0", messages.clone()), 90, 100),
             &veto_ctx,
         )
         .unwrap();
-        assert_eq!(force.action, "SOFT");
+        assert_eq!(force.action, "SOFT+");
         let loaded = s.load(SESSION).unwrap();
         assert!(
-            frozen_red_payload(&loaded.core, "aged-call#0").is_some(),
-            "the force-band edge must admit the waiting age batch despite the historian veto"
+            frozen_red_payload(&loaded.core, "aged-call#0").is_none(),
+            "the age sweep does not first-apply in the force band"
         );
-        assert!(
-            frozen_red_payload(&loaded.core, "aged-result#0").is_some(),
-            "the admitted age batch drops the paired result"
-        );
-        assert!(
-            frozen_red_payload(&loaded.core, "fresh-call#0").is_none(),
-            "the fresh arc stays above the pre-pass watermark"
-        );
+        assert!(frozen_red_payload(&loaded.core, "aged-result#0").is_none());
+        assert!(frozen_red_payload(&loaded.core, "fresh-call#0").is_none());
         assert_eq!(
             loaded.meta.last_execute_ordinal, 7,
-            "the force pass must advance the watermark on that same pass"
+            "the force band's ride is still an application opportunity for the watermark"
         );
     }
 
@@ -34035,6 +34417,7 @@ pub(crate) mod tests {
     include!("transform/todo_admission_tests.rs");
     include!("transform/temporal_admission_tests.rs");
     include!("transform/tool_arc_admission_tests.rs");
+    include!("transform/pass_decision_vector_tests.rs");
     include!("tests/signed_prefix_hold.rs");
     include!("tests/signed_prefix_hold_review.rs");
     include!("tests/image_stripping_review_witness.rs");

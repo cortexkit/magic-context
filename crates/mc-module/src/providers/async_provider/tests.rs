@@ -1208,7 +1208,7 @@ async fn fork_descent_preserves_only_verified_prefix_state() {
 }
 
 #[tokio::test]
-async fn ordinary_execute_with_only_drops_defers_but_m1_refresh_publishes() {
+async fn ordinary_execute_without_summary_rebuilds_for_drops_and_m1_refresh_publishes() {
     let dir = tempfile::tempdir().unwrap();
     let rig = Rig::new(dir.path()).await;
     rig.fill(40);
@@ -1218,14 +1218,20 @@ async fn ordinary_execute_with_only_drops_defers_but_m1_refresh_publishes() {
     let baseline = rig.newest().unwrap();
     rig.queue(&[163, 166, 169]).await;
     rig.notice(3, 75_000, Some(baseline)).await;
-    assert_eq!(
-        rig.newest(),
-        Some(baseline),
-        "ordinary Execute does not originate a bust for drops alone"
+    // Invariant 3's bounded execute exception, as in the TypeScript plugin: no summary
+    // can come and the queued work is worth at least 2% of the window, so the execute
+    // pass rebuilds instead of waiting, and the queued drops land on it.
+    let drained = rig.newest().unwrap();
+    assert!(
+        drained > baseline,
+        "an execute pass with no summary to wait for rebuilds and carries the queued drops"
     );
     let namespace = rig.state().namespace();
     let store = rig.h.store.get().unwrap();
-    assert_eq!(store.load_pending_agent_drops(&namespace).unwrap().len(), 3);
+    assert!(store
+        .load_pending_agent_drops(&namespace)
+        .unwrap()
+        .is_empty());
     let mut rows = store.load_compartments(&namespace).unwrap();
     rows.push(mc_store::StoredCompartment {
         sequence: 2,
@@ -1239,22 +1245,18 @@ async fn ordinary_execute_with_only_drops_defers_but_m1_refresh_publishes() {
         ..Default::default()
     });
     store.replace_compartments(&namespace, &rows).unwrap();
-    rig.notice(4, 1_000, Some(baseline)).await;
+    rig.notice(4, 1_000, Some(drained)).await;
     assert_eq!(
         rig.newest(),
-        Some(baseline),
+        Some(drained),
         "M1 delta remains queued below Execute"
     );
-    rig.notice(5, 75_000, Some(baseline)).await;
+    rig.notice(5, 75_000, Some(drained)).await;
     let version = rig.newest().unwrap();
     assert!(
-        version > baseline,
-        "ordinary Execute publishes an M1 refresh, carrying queued drops"
+        version > drained,
+        "ordinary Execute publishes an M1 refresh"
     );
-    assert!(store
-        .load_pending_agent_drops(&namespace)
-        .unwrap()
-        .is_empty());
     let _ = rig.render(&rig.get(version).await);
 }
 

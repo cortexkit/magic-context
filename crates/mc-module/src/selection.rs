@@ -1131,13 +1131,69 @@ fn select_tool_dedup(arcs: &[&ToolArc], ctx: &SelectionContext) -> HashSet<Strin
 }
 
 fn reclaim_ride_available(ctx: &SelectionContext) -> bool {
+    // The force band's own ride: an armed episode, or the absolute 95% arm whatever the
+    // episode (TypeScript `rideSignals.force`).
     ctx.pass_already_busting
         || ctx.supersession_ride_available
-        || (ctx.pass_class == PassClass::EmergencyForce && !ctx.has_prior_drop)
+        || (ctx.pass_class == PassClass::EmergencyForce
+            && (!ctx.has_prior_drop || ctx.emergency_window_yields))
 }
 
 fn two_pass_batch_can_apply(ctx: &SelectionContext) -> bool {
     reclaim_ride_available(ctx)
+}
+
+/// A rebuild other than the emergency itself already rewrites the prefix on this pass:
+/// an independent rebuild known before selection, or queued agent drops applying now.
+/// Mirrors the TypeScript `emergencyRewriteAlreadyPriced`.
+fn emergency_rewrite_already_priced(ctx: &SelectionContext, agent_drops_applied: bool) -> bool {
+    ctx.emergency_minimum_waived || agent_drops_applied
+}
+
+/// The force episode already spent its one emergency batch, and nothing on this pass
+/// re-arms it: not the absolute 95% arm, not a rewrite that is already paid for. A ride
+/// that only permits mutation (a subagent execute pass) does not re-arm it. Mirrors the
+/// TypeScript `emergencyEpisodeRearms` followed by `emergencyEpisodeLatched`.
+fn emergency_episode_latched(ctx: &SelectionContext, agent_drops_applied: bool) -> bool {
+    ctx.pass_class == PassClass::EmergencyForce
+        && ctx.has_prior_drop
+        && !ctx.emergency_window_yields
+        && !emergency_rewrite_already_priced(ctx, agent_drops_applied)
+}
+
+/// Which automatic lanes may first-apply on this pass. Whether a lane then changes bytes
+/// depends on it finding candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LaneGates {
+    /// Queued `ctx_reduce` drops.
+    pub agent_drops: bool,
+    /// The force band's tiered emergency drop.
+    pub emergency: bool,
+    /// Duplicate-tool cleanup, the routine heuristic lane.
+    pub dedup: bool,
+    /// The two-pass age sweep.
+    pub age_sweep: bool,
+    /// Spent control-plane supersession and superseded-edit markers.
+    pub supersession: bool,
+}
+
+/// The lane gates of the TypeScript postprocess phase, applied to this selection pass.
+/// `agent_drops_applied` says whether queued drops first-apply on it.
+/// - Queued drops need a pass that already rebuilds.
+/// - At the force band the emergency selector owns tool reclaim: the age sweep and
+///   supersession wait (`toolReclaimAdmitted`), and a spent episode keeps the emergency
+///   drop and routine cleanup latched until a priced rewrite or the 95% arm re-arms it.
+pub(crate) fn lane_gates(ctx: &SelectionContext, agent_drops_applied: bool) -> LaneGates {
+    let ride = reclaim_ride_available(ctx);
+    let force_band = ctx.pass_class == PassClass::EmergencyForce;
+    let latched = emergency_episode_latched(ctx, agent_drops_applied);
+    LaneGates {
+        agent_drops: ctx.pass_already_busting,
+        emergency: ride && force_band && !latched,
+        dedup: ride && !latched,
+        age_sweep: ride && !force_band,
+        supersession: ride && !force_band,
+    }
 }
 
 /// 1.4 Age-based two-pass: tool arcs whose age (ToolCall ordinal) is at/under the
@@ -1146,8 +1202,9 @@ fn select_two_pass(
     arcs: &[&ToolArc],
     ctx: &SelectionContext,
     protected: &HashSet<String>,
+    admitted: bool,
 ) -> HashSet<String> {
-    if !two_pass_batch_can_apply(ctx) || ctx.last_execute_ordinal == 0 {
+    if !admitted || ctx.last_execute_ordinal == 0 {
         return HashSet::new();
     }
     arcs.iter()
@@ -1284,9 +1341,7 @@ fn select_emergency(
     if !ctx.current_total_input_tokens.is_finite() || ctx.current_total_input_tokens <= 0.0 {
         return HashSet::new();
     }
-    if ctx.has_prior_drop && !ctx.pass_already_busting && !ctx.emergency_window_yields {
-        return HashSet::new();
-    }
+    // The spent-episode latch is decided by `lane_gates` before this selector runs.
 
     let fixed_floor = (ctx.current_total_input_tokens - all_active_floor_tokens).max(0.0);
     let working_span = (ctx.ceiling_tokens - fixed_floor).max(0.0);
@@ -1448,6 +1503,10 @@ pub(crate) struct SelectionOutcome {
     pub protected_tool_block_ids: HashSet<String>,
     pub decisions: Vec<ReductionDecision>,
     pub emergency_drop_assessment: Option<mc_store::EmergencyDropAssessment>,
+    /// The force episode had spent its emergency batch, and a rewrite that is already paid
+    /// for re-armed it on this pass. The caller clears the persisted latch, as the
+    /// TypeScript plugin clears its emergency sample, before recording any new batch.
+    pub emergency_episode_rearmed: bool,
     /// The pressure pass was already busting, or was in the force band, so the age
     /// batch had an application opportunity. Empty opportunities still advance the
     /// watermark so future arcs can age into a later batch.
@@ -1626,7 +1685,9 @@ pub(crate) fn select_reductions_with_outcome(
             !incomplete_arc_ids.contains(*arc_id) && !reasoning_ineligible_arcs.contains(*arc_id)
         })
     };
-    // Apply the same arc guards to queued drops as to automatic reductions.
+    // Apply the same arc guards to queued drops as to automatic reductions, including the
+    // whole-arc protection applied to the final decision list below, so this set is exactly
+    // the queued drops that first-apply on this pass.
     let mut agent_decisions = Vec::new();
     select_agent_drops(
         ctx,
@@ -1636,6 +1697,21 @@ pub(crate) fn select_reductions_with_outcome(
         &mut agent_decisions,
     );
     agent_decisions.retain(|decision| arc_allows_reduction(&decision.target_id));
+    let protected_arcs: HashSet<&str> = items
+        .iter()
+        .filter(|item| ctx.block_is_protected(&item.id))
+        .filter_map(|item| item.arc_id.as_deref())
+        .collect();
+    agent_decisions.retain(|decision| {
+        !arc_by_block_id
+            .get(decision.target_id.as_str())
+            .is_some_and(|arc_id| protected_arcs.contains(arc_id))
+    });
+    let gates = lane_gates(ctx, !agent_decisions.is_empty());
+    let emergency_episode_rearmed = ctx.pass_class == PassClass::EmergencyForce
+        && ctx.has_prior_drop
+        && reclaim_ride_available(ctx)
+        && emergency_rewrite_already_priced(ctx, !agent_decisions.is_empty());
     let two_pass_batch_can_apply = two_pass_batch_can_apply(ctx);
     let reasoning_adjacency_collapse_arcs = reasoning_adjacency_collapse_arc_ids(items);
     // A running call has no completed/errored result and is never reclaimable. This
@@ -1660,7 +1736,7 @@ pub(crate) fn select_reductions_with_outcome(
     let mut arc_shapes: HashMap<String, ArcShape> = HashMap::new();
     // Dedup precedes age selection, as in the TS heuristic pass. An older duplicate
     // removed here must not also enter the two-pass age batch.
-    let dedup_arc_ids = if reclaim_ride_available(ctx) {
+    let dedup_arc_ids = if gates.dedup {
         select_tool_dedup(&active_arcs, ctx)
             .into_iter()
             .filter(|id| !protected_tools.contains(id))
@@ -1673,77 +1749,47 @@ pub(crate) fn select_reductions_with_outcome(
         .copied()
         .filter(|arc| !dedup_arc_ids.contains(&arc.arc_id))
         .collect();
-    let two_pass_arc_ids = select_two_pass(&arcs_after_dedup, ctx, &protected_tools);
+    let two_pass_arc_ids =
+        select_two_pass(&arcs_after_dedup, ctx, &protected_tools, gates.age_sweep);
     let mut eligible_supersession_arc_ids = None;
     let mut emergency_drop_assessment = None;
 
     match ctx.pass_class {
         PassClass::EmergencyForce => {
-            // Compute emergency first to learn whether this pass has concrete reclaim work;
-            // dedup intent still enters before the age intent below.
             // Floor accounting and eviction candidates have different populations. Every
             // unfrozen tagged-content class contributes to the fixed-floor derivation, including
             // text, media, reasoning, and non-droppable tools; system-prefix and opaque metadata
             // remain outside that population. Only active client tool arcs can be selected below.
-            let all_active_floor_tokens = active_floor_tokens(items, frozen_keys, ctx.calibration);
-            let reclaim_by_arc = emergency_reclaim_by_arc(
-                items,
-                &active_arcs,
-                ctx,
-                &reasoning_adjacency_collapse_arcs,
-            );
-            let emergency_arc_ids = select_emergency(
-                &active_arcs,
-                &protected_tools,
-                ctx,
-                all_active_floor_tokens,
-                &reclaim_by_arc,
-                &mut emergency_drop_assessment,
-            );
-            if ctx.pass_already_busting
-                || !emergency_arc_ids.is_empty()
-                || !two_pass_arc_ids.is_empty()
-            {
-                for arc_id in &dedup_arc_ids {
-                    arc_shapes.insert(arc_id.clone(), ArcShape::DedupFullDrop);
-                }
-            }
-            // The force-band edge admits a waiting age batch without changing emergency's
-            // own candidate accounting or tiered selection.
-            for arc_id in &two_pass_arc_ids {
-                arc_shapes
-                    .entry(arc_id.clone())
-                    .or_insert(ArcShape::FullDrop);
+            let emergency_arc_ids = if gates.emergency {
+                let all_active_floor_tokens =
+                    active_floor_tokens(items, frozen_keys, ctx.calibration);
+                let reclaim_by_arc = emergency_reclaim_by_arc(
+                    items,
+                    &active_arcs,
+                    ctx,
+                    &reasoning_adjacency_collapse_arcs,
+                );
+                select_emergency(
+                    &active_arcs,
+                    &protected_tools,
+                    ctx,
+                    all_active_floor_tokens,
+                    &reclaim_by_arc,
+                    &mut emergency_drop_assessment,
+                )
+            } else {
+                HashSet::new()
+            };
+            // Routine cleanup shares the episode's one pressure rewrite. The age sweep and
+            // supersession wait below the band (`lane_gates`), as in the TypeScript plugin,
+            // where the emergency selector owns tool reclaim in the force band.
+            for arc_id in &dedup_arc_ids {
+                arc_shapes.insert(arc_id.clone(), ArcShape::DedupFullDrop);
             }
             for arc_id in &emergency_arc_ids {
                 arc_shapes
                     .entry(arc_id.clone())
                     .or_insert(ArcShape::FullDrop);
-            }
-            // Supersession joins a priced batch, including the shared force-episode
-            // opportunity. A held latch without independent work grants no new ride.
-            if ctx.pass_already_busting
-                || !emergency_arc_ids.is_empty()
-                || !two_pass_arc_ids.is_empty()
-            {
-                // A superseded arc remains eligible while the ride gate is shut, so the count
-                // observed when it next opens summarizes everything accumulated between rides.
-                let mut intents =
-                    select_supersession(&active_arcs, &supersession_recent_message_ids);
-                intents.retain(|id, intent| {
-                    !protected_tools.contains(id)
-                        && (!intent.edit_marker
-                            || arc_by_id[id.as_str()].ordinal <= ctx.last_execute_ordinal)
-                });
-                eligible_supersession_arc_ids =
-                    Some(intents.keys().cloned().collect::<HashSet<_>>());
-                for (arc_id, intent) in intents {
-                    arc_shapes.entry(arc_id).or_insert(if intent.edit_marker {
-                        ArcShape::EditMarker
-                    } else {
-                        ArcShape::FullDrop
-                    });
-                }
             }
         }
         PassClass::Execute => {
@@ -1762,7 +1808,7 @@ pub(crate) fn select_reductions_with_outcome(
             // Supersession is deferred work: ordinary execute-band pressure and a held
             // emergency latch cannot authorize a rewrite. Concrete scheduled work or an
             // admitted two-pass batch lets the whole pending set ride the same bust.
-            if reclaim_ride_available(ctx) {
+            if gates.supersession {
                 // Count the exact selector output before overlap precedence removes members.
                 let mut intents =
                     select_supersession(&active_arcs, &supersession_recent_message_ids);
@@ -1904,11 +1950,6 @@ pub(crate) fn select_reductions_with_outcome(
 
     // Withhold the whole arc when either half is protected. Freezing only its call
     // would leave a live result paired with a reduced invocation on later passes.
-    let protected_arcs: HashSet<&str> = items
-        .iter()
-        .filter(|item| ctx.block_is_protected(&item.id))
-        .filter_map(|item| item.arc_id.as_deref())
-        .collect();
     out.retain(|decision| {
         !ctx.block_is_protected(&decision.target_id)
             && !arc_by_block_id
@@ -1937,6 +1978,7 @@ pub(crate) fn select_reductions_with_outcome(
         protected_tool_block_ids,
         decisions,
         emergency_drop_assessment,
+        emergency_episode_rearmed,
         two_pass_batch_can_apply,
         eligible_supersession_count: eligible_supersession_arc_ids.as_ref().map(HashSet::len),
         supersession_withheld_by_tag_window_count: withheld_count(
@@ -3261,8 +3303,11 @@ mod tests {
         assert_eq!(applied.applied_supersession_count, Some(2));
     }
 
+    /// Rewritten from `force_band_applies_waiting_two_pass_batch_without_a_ride`: the age sweep
+    /// never first-applies in the force band (TypeScript `toolReclaimAdmitted`), though the
+    /// pass still counts as an application opportunity that advances the distance bookmark.
     #[test]
-    fn force_band_applies_waiting_two_pass_batch_without_a_ride() {
+    fn force_band_leaves_the_waiting_age_batch_alone() {
         let mut result = tool_result("c1", 1, "read", 2_000);
         result.token_count = Some(300);
         let items = vec![
@@ -3274,18 +3319,30 @@ mod tests {
         ctx.scheduler_pressure_execute = true;
         assert!(!ctx.pass_already_busting);
 
-        let admitted = select_reductions_with_outcome(
+        let outcome = select_reductions_with_outcome(
             &items,
             &HashSet::new(),
             &ctx,
             &SelectionConfig::default(),
         );
-        assert_eq!(admitted.decisions.len(), 2);
-        assert!(admitted.two_pass_batch_can_apply);
+        assert!(outcome.decisions.is_empty());
+        assert!(outcome.two_pass_batch_can_apply);
+
+        ctx.pass_class = PassClass::Execute;
+        ctx.pass_already_busting = true;
+        let below_band = select_reductions_with_outcome(
+            &items,
+            &HashSet::new(),
+            &ctx,
+            &SelectionConfig::default(),
+        );
+        assert_eq!(below_band.decisions.len(), 2);
     }
 
+    /// Rewritten from `force_band_two_pass_batch_carries_pending_supersession`: below the
+    /// force band the age batch carries pending supersession; in the band both wait.
     #[test]
-    fn force_band_two_pass_batch_carries_pending_supersession() {
+    fn age_batch_carries_pending_supersession_only_below_the_force_band() {
         let mut aged_result = tool_result("aged", 1, "read", 2_000);
         aged_result.token_count = Some(300);
         let mut items = vec![
@@ -3318,16 +3375,17 @@ mod tests {
         ctx.current_total_input_tokens = 90_000.0;
         ctx.ceiling_tokens = 100_000.0;
         ctx.pass_already_busting = true;
-        let out = select_reductions(
-            &items,
-            &HashSet::new(),
-            &ctx,
-            &SelectionConfig {
-                smart_drops: true,
-                ..SelectionConfig::default()
-            },
-        );
+        let config = SelectionConfig {
+            smart_drops: true,
+            ..SelectionConfig::default()
+        };
+        let in_band = select_reductions(&items, &HashSet::new(), &ctx, &config);
+        assert!(in_band
+            .iter()
+            .all(|decision| decision.kind != "edit_marker"));
 
+        ctx.pass_class = PassClass::Execute;
+        let out = select_reductions(&items, &HashSet::new(), &ctx, &config);
         assert_eq!(out.len(), 4);
         assert!(out.iter().any(|decision| decision.target_id == "aged#0"));
         assert!(out
@@ -3431,8 +3489,11 @@ mod tests {
         );
     }
 
+    /// Rewritten from `emergency_eviction_carries_pending_supersession`: in the force band the
+    /// emergency selector owns tool reclaim, so supersession waits for a pass below the band,
+    /// as the TypeScript `toolReclaimAdmitted` gate decides.
     #[test]
-    fn emergency_eviction_carries_pending_supersession() {
+    fn emergency_eviction_leaves_pending_supersession_for_a_pass_below_the_band() {
         let mut items = vec![
             tool_call("emergency", 1, "bash", serde_json::json!({}), 160_000),
             tool_result("emergency", 1, "bash", 40_000),
@@ -3462,24 +3523,23 @@ mod tests {
         ctx.current_total_input_tokens = 90_000.0;
         ctx.ceiling_tokens = 100_000.0;
         ctx.pass_already_busting = true;
-        let out = select_reductions(
-            &items,
-            &HashSet::new(),
-            &ctx,
-            &SelectionConfig {
-                smart_drops: true,
-                ..SelectionConfig::default()
-            },
-        );
+        let config = SelectionConfig {
+            smart_drops: true,
+            ..SelectionConfig::default()
+        };
+        let out = select_reductions(&items, &HashSet::new(), &ctx, &config);
 
-        assert_eq!(out.len(), 4);
+        assert_eq!(out.len(), 2);
         assert!(out
             .iter()
-            .any(|decision| decision.target_id == "emergency#0"));
-        assert!(out
+            .all(|decision| decision.target_id.starts_with("emergency#")));
+
+        ctx.pass_class = PassClass::Execute;
+        let below_band = select_reductions(&items, &HashSet::new(), &ctx, &config);
+        assert!(below_band
             .iter()
             .any(|decision| { decision.target_id == "c1#0" && decision.kind == "edit_marker" }));
-        assert!(out
+        assert!(below_band
             .iter()
             .all(|decision| !decision.target_id.starts_with("c2#")));
     }
@@ -3637,7 +3697,7 @@ mod tests {
     }
 
     #[test]
-    fn sustained_idle_force_band_batches_supersession_until_a_real_bust() {
+    fn sustained_idle_force_band_holds_supersession_for_a_pass_below_the_band() {
         const IDLE_PASSES: u64 = 3;
 
         let mut items = vec![
@@ -3707,7 +3767,16 @@ mod tests {
         bust_ctx.ceiling_tokens = 100_000.0;
         bust_ctx.pass_already_busting = true;
         let bust = select_reductions(&items, &HashSet::new(), &bust_ctx, &cfg);
-        let markers: HashSet<&str> = bust
+        assert!(bust
+            .iter()
+            .any(|decision| decision.target_id == "emergency#0"));
+        // In the force band the emergency selector owns tool reclaim (TypeScript
+        // `toolReclaimAdmitted`); the pending supersession batch waits for a rebuilding
+        // pass below the band and then lands whole.
+        assert!(bust.iter().all(|decision| decision.kind != "edit_marker"));
+        bust_ctx.pass_class = PassClass::Execute;
+        let below_band = select_reductions(&items, &HashSet::new(), &bust_ctx, &cfg);
+        let markers: HashSet<&str> = below_band
             .iter()
             .filter(|decision| decision.kind == "edit_marker")
             .map(|decision| decision.target_id.as_str())
@@ -3716,12 +3785,9 @@ mod tests {
         assert_eq!(
             markers,
             HashSet::from(["c1#0", "c2#0", "c3#0"]),
-            "the first real emergency eviction must carry the whole pending batch"
+            "the first rebuilding pass below the band carries the whole pending batch"
         );
-        assert!(bust
-            .iter()
-            .any(|decision| decision.target_id == "emergency#0"));
-        assert!(bust
+        assert!(below_band
             .iter()
             .all(|decision| !decision.target_id.starts_with("c4#")));
     }

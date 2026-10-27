@@ -657,14 +657,17 @@ const REVIEW_UNHELD_CASES: [(&str, bool, bool); 6] = [
 
 /// Pin the intended unheld-session output with distance-based age reclaim.
 /// These snapshots retain current-task tool bodies; signed-prefix hold checks
-/// remain independent of this unheld policy golden.
+/// remain independent of this unheld policy golden. Re-pinned for the TypeScript pass
+/// decision rules: a primary execute pass with no summary to wait for rebuilds for
+/// queued drops (2% or the third held pass), and the age sweep and supersession wait
+/// below the force band.
 const REVIEW_UNHELD_GOLDEN: [&str; 6] = [
     "379e07c15ef75bc0e0809bb4c4c9021b767fa988a0cf10d367635cb562e9c6d0",
     "a06635735bfd78bd1ed09d54c39a0c0e32c645ec6d4e1e6269c828b8358c7bdb",
-    "4baf5c57ddcf064b7f9cd87ca213ae14bd7bf31ed52b6dd00f29bf3a5c80bfa9",
-    "ac945ae6c10a2a023795b58cb3d82e867c9afa864d6d688345fb87d1caa71a69",
+    "0bc73213591876a39c00b3551741923697ff3eaa24fda6bb40a2e963ed690a53",
+    "b60dbc9cc8e1034196ae139173033ea5e5d28c2bf289a80112b2874ee1ee354f",
     "e252f0b3697f7fc44ac5429fee0789a5f3f56b7462bec0cb6ad49468b2e22762",
-    "25ef18164f09a5f9e6d5a4a6a89a49f3e4372828a6c60965b4f72de6d4a2c8de",
+    "cdbcf904ff6d9304115ad9ed2593a1d7ee09e5633205c83cfe3f203600319d5c",
 ];
 
 #[test]

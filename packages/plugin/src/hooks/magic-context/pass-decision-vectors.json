@@ -207,7 +207,7 @@
       "name": "subagent-execute-with-nothing-eligible",
       "note": "Permission alone rewrites no bytes.",
       "inputs": {
-        "preset": "reviewer",
+        "preset": "reader",
         "compactionOff": false,
         "scheduler": "execute",
         "usagePercent": 70,
@@ -1269,7 +1269,7 @@
     },
     {
       "name": "primary-force-band-spent-episode-flush",
-      "note": "A flush admits routine cleanup but does not price the pass, so the spent emergency latch holds.",
+      "note": "A flush rebuilds the history injection, which prices the pass and re-arms the spent episode.",
       "inputs": {
         "preset": "head",
         "compactionOff": false,
@@ -1300,6 +1300,7 @@
         "busts": true,
         "origin": "flush",
         "lanes": [
+          "emergencyDrop",
           "dedup"
         ],
         "heldPassesAfter": 0
