@@ -3138,6 +3138,8 @@ impl McHandler {
             .unwrap_or_else(|| state.setup.model.clone());
         let mut context =
             compaction::producer_context(&work, &engine_model, status.context_window, false);
+        (context.historian_active, context.wrapup_active) =
+            self.async_summary_in_flight(store, &state.namespace());
         context.cache_ttl = "never".into();
         // On this lane the runner owns the model provider's companion edit:
         // views never remove the signed reasoning they invalidate.
@@ -5853,6 +5855,28 @@ impl crate::historian::HistorianPublicationFence for AsyncHistoryFence {
 }
 
 impl McHandler {
+    /// Whether a summary can still come for this async conversation: a historian run this
+    /// process is firing, a stored run in any phase but idle, or a wrap-up in flight. The
+    /// engine pass then holds queued drops for that summary's own rebuild instead of
+    /// rebuilding for them now (invariant 3's bounded execute exception), as the
+    /// TypeScript plugin does with `compartmentRunning` and `compartmentInProgress`.
+    fn async_summary_in_flight(&self, store: &McStore, namespace: &str) -> (bool, bool) {
+        let historian = self
+            .live_historian_sessions
+            .lock()
+            .expect("live historian mutex")
+            .contains_key(namespace)
+            || store.load_meta(namespace).is_ok_and(|snapshot| {
+                snapshot.meta.historian.state != mc_store::HistorianPhase::Idle
+            });
+        let wrapup = self
+            .wrapup_sessions
+            .lock()
+            .expect("wrapup sessions mutex")
+            .contains_key(namespace);
+        (historian, wrapup)
+    }
+
     fn schedule_async_historian(&self, state: &State) -> Result<(), HandlerOutcome> {
         if state.engine.preset != transform::compaction::Preset::Head {
             return Ok(());
@@ -6413,6 +6437,8 @@ impl McHandler {
         // engine pass, so the preflight sees the inputs the pass would.
         let work = self.provider_work(0, store, binding.clone(), state.key.clone())?;
         let mut context = compaction::producer_context(&work, model, window, false);
+        (context.historian_active, context.wrapup_active) =
+            self.async_summary_in_flight(store, &namespace);
         context.cache_ttl = "never".into();
         let facts = transform::compaction::skip_facts_with(
             store, &namespace, &context, model, window, true,
