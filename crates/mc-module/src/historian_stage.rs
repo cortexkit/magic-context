@@ -290,7 +290,7 @@ mod tests {
                 10,
             )
             .unwrap();
-        let action = crate::historian::handle_restart_load(&store, "source", 20, 30).unwrap();
+        let action = crate::historian::handle_restart_load(&store, "source", 30).unwrap();
         let crate::historian::RestartAction::ReattachProducer {
             producer_session_id,
             producer_run_id,

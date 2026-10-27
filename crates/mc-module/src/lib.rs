@@ -304,7 +304,6 @@ mod descriptors;
 pub mod healing;
 pub mod historian;
 pub mod historian_chunk;
-pub mod historian_host;
 mod historian_numerical_drain;
 pub mod historian_producer;
 pub mod historian_prompt;
@@ -382,7 +381,7 @@ use mc_store::InsertMemoryInput;
 use mc_store::{
     canonical_root, FacadeMemoryMutationError, FacadeMutationOutcome, HistorianChunkRange,
     HistorianDecision, HistorianPhase, HistorianRecentDecision, MappingUpdate, McStore,
-    McStoreError, McTagRow, NoteCasOutcome, NoteDismissOutcome, NoteInput, PendingAgentDrop,
+    McStoreError, NoteCasOutcome, NoteDismissOutcome, NoteInput, PendingAgentDrop,
     StoredChunkTranscript, StoredCompartment, StoredNote, TodoStateSetOutcome,
     LATEST_MIGRATION_VERSION, STORE_AHEAD_OF_BINARY_REFUSAL_REASON,
 };
@@ -413,7 +412,6 @@ use historian_chunk::{
     assemble_historian_firing, AssembleHistorianFiringOutcome, AssembledHistorianFiring,
     HistorianAssemblerConfig,
 };
-use historian_host::HostRunLedger;
 use historian_producer::{HistorianProducer, HistorianProducerConfig, HistorianProducerError};
 use historian_runner::HistorianRunnerKind;
 use prompt_surface::{PromptSurfacePreset, PromptSurfaceSelection};
@@ -1857,10 +1855,6 @@ pub struct McHandler {
     retrieval_reranker: Option<Arc<dyn retrieval::hybrid::RerankClient>>,
     config: Arc<Mutex<ConfigCache>>,
     historian_runner_refusals: Arc<HistorianRunnerRefusalCache>,
-    /// Runs queued for a host claimant that a firing task in this process is still
-    /// waiting on. The `historian.*` claim routes are retired, so a run queued here
-    /// can only reach its deadline; runner-lane conversations never queue one.
-    host_runs: Arc<HostRunLedger>,
     /// Live Broca dream children, keyed by the Broca session each one runs in.
     /// A memory tool the runner dispatches on such a session reaches the task's
     /// router only through this record, never the foreground facade.
@@ -2278,9 +2272,6 @@ struct HistorianPrepareContext<'a> {
     rust_background_enabled: Option<bool>,
     now: i64,
     publication_fence: Option<Arc<dyn historian::HistorianPublicationFence>>,
-    /// Final immutable tag rows validated by the transform's generation/count/max identity.
-    /// Early pass-through paths leave this absent and retain the legacy store fallback.
-    tag_snapshot: Option<Arc<Vec<McTagRow>>>,
     /// An async evaluation's captured applied coverage, including an empty prefix.
     /// Other lanes continue resolving their coverage from the stored compartments.
     async_coverage: Option<Option<u64>>,
@@ -2456,8 +2447,6 @@ struct HistorianFiringTask {
     /// the moment the firing was prepared so a config edit mid-run cannot move a
     /// firing already in flight to a different lane.
     runner: HistorianRunnerKind,
-    /// Waiters for runs queued for a host claimant (see `McHandler::host_runs`).
-    host_runs: Arc<HostRunLedger>,
     /// Set for a runner-lane conversation: the completion runs on the
     /// conversation's own runner over llm-runner, never on the claim queue and
     /// never on the configured runner, whatever `runner` says.
@@ -2696,7 +2685,6 @@ impl McHandler {
             retrieval_reranker,
             config: Arc::new(Mutex::new(ConfigCache::default())),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
-            host_runs: Arc::new(HostRunLedger::new()),
             broca_dream_tools: Arc::new(dream_dispatch::broca_carrier::BrocaToolRoute::default()),
             dream_runs,
             runner_choices: Arc::new(Mutex::new(runner_choices::RunnerChoiceLog::default())),
@@ -3127,7 +3115,6 @@ impl McHandler {
             retrieval_reranker: None,
             config: Arc::new(Mutex::new(ConfigCache::default())),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
-            host_runs: Arc::new(HostRunLedger::new()),
             broca_dream_tools: Arc::new(dream_dispatch::broca_carrier::BrocaToolRoute::default()),
             dream_runs: Arc::new(dream_dispatch::tick::DreamRuns::new(
                 None,
@@ -3824,166 +3811,6 @@ impl McHandler {
             session_id: session_id.clone(),
         };
 
-        // Restart recovery is where the claim queue's sweep belongs, and it is the
-        // only place that calls it: a row is parked by a restart, and a restart is
-        // what this function is handling. Without a caller a parked row past its own
-        // deadline would sit in the queue forever, because nothing else deletes it
-        // and nothing offers it either.
-        //
-        // The sweep covers the whole queue rather than this session, so a row left
-        // behind by a session that has since gone idle is reached by the next
-        // recovery on this module rather than waiting for its own session to fire
-        // again. It runs before the lookup below so a row that is already past its
-        // deadline is dropped here rather than adopted and then released.
-        match store.expire_historian_claims(now) {
-            Ok(sweep) => {
-                for run_id in &sweep.reclaimed {
-                    eprintln!(
-                        "mc-module: historian run {run_id} put back on offer: its claimant stopped reporting"
-                    );
-                }
-                for run_id in &sweep.dropped {
-                    eprintln!(
-                        "mc-module: historian run {run_id} dropped from the queue: parked with no report past its deadline"
-                    );
-                }
-            }
-            Err(error) => {
-                eprintln!("mc-module: historian claim sweep failed: {error}");
-            }
-        }
-
-        // Only the host lane parks a run in the durable claim queue, so this lookup
-        // is skipped on the phases that lane never reaches. A run found here
-        // outlived this process: its claimant is either still working or has already
-        // left its answer on the row, and releasing the run would throw that away.
-        let parked_host_run = match phase {
-            HistorianPhase::AwaitingProducer | HistorianPhase::Reclaiming => store
-                .load_parked_historian_run(&parsed.session_id)
-                .ok()
-                .flatten(),
-            _ => None,
-        };
-        if let Some(parked) = parked_host_run {
-            // Still out with a claimant and still inside its deadline: the session
-            // keeps its single-flight slot, which is exactly what it would be doing
-            // if this process had never restarted, and there is no report to
-            // validate, so none of the chunk work below is needed.
-            //
-            // Putting the run back on offer IS needed, and is the whole of what this
-            // branch does. A restart can take a row out of the queue while leaving
-            // the run itself alive; without this call the shortcut would skip the
-            // re-publication and the run would sit parked until its deadline.
-            if parked.report.is_none() && parked.deadline_ms > now {
-                historian::reoffer_parked_historian_run(&store, &parked.run_id, now);
-                drop(guard);
-                return Some("reattaching");
-            }
-            let publication_fence = log_publication_fence.clone();
-            let live: Vec<_> = projection
-                .blocks
-                .iter()
-                .filter(|b| !b.synthetic)
-                .cloned()
-                .collect();
-            let Some(range) = loaded.meta.historian.chunk_range.clone() else {
-                drop(guard);
-                return Some("recovering");
-            };
-            let chunk = historian_chunk::build_historian_chunk_with_expansions(
-                parsed.messages.as_slice(),
-                &live,
-                range.from_ordinal,
-                derive_historian_chunk_tokens(config.historian_context_limit_tokens),
-                range.to_ordinal.saturating_add(1),
-                &config.historian_expand_tools,
-            );
-            let prior_compartments = match if log_publication_fence.is_some() {
-                store
-                    .load_historian_assembly_index(&session_id)
-                    .map(|index| index.snapshot.compartments)
-            } else {
-                store.load_compartments(&session_id)
-            } {
-                Ok(cs) => cs
-                    .iter()
-                    .map(historian_chunk::stored_range)
-                    .collect::<Vec<_>>(),
-                Err(_) => Vec::new(),
-            };
-            let raw_chunk_messages = serde_json::to_string(
-                &parsed
-                    .messages
-                    .iter()
-                    .filter(|message| {
-                        !message.ck.meta.synthetic
-                            && message.ordinal >= chunk.chunk.start_index
-                            && message.ordinal <= chunk.chunk.end_index
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap_or_else(|_| "[]".to_string());
-            let boundary_dates = historian_chunk::native_boundary_dates(&parsed.messages);
-            let fingerprint_items: Vec<_> =
-                chunk.snapshot.iter().map(|item| item.as_item()).collect();
-            let observed = historian::compute_chunk_fingerprint(&fingerprint_items);
-            let adopt_await_timeout =
-                historian::historian_await_timeout(parsed.historian_timeout_ms);
-            tokio::spawn(async move {
-                let _guard = guard;
-                let outcome =
-                    historian::adopt_historian_run_on_host(historian::HistorianReattachRequest {
-                        rust_background_enabled,
-                        store: &store,
-                        session_id: &session_id,
-                        project_path: &project_path,
-                        harness: &harness,
-                        observed_chunk_fingerprint: &observed,
-                        validation_chunk: &chunk.chunk,
-                        chunk_transcript: &chunk.text,
-                        raw_chunk_messages: &raw_chunk_messages,
-                        boundary_dates: &boundary_dates,
-                        prior_compartments: &prior_compartments,
-                        validate_options: historian_validate::ValidateOptions {
-                            sequence_offset: prior_compartments.len() as u64 + 1,
-                            in_emergency: false,
-                            memory_enabled: config.memory_enabled,
-                            auto_promote: config.auto_promote,
-                            user_memory_collection_enabled: config.user_memory_collection_enabled,
-                            force_keep_last_compartment: false,
-                        },
-                        publication_floor_ordinal: range.to_ordinal,
-                        await_timeout: adopt_await_timeout,
-                        now_ms: now,
-                        failure_backoff_at_ms: now + HISTORIAN_FAILURE_BACKOFF_MS,
-                        completion_now_ms: now_ms,
-                        publication_fence: publication_fence
-                            .as_deref()
-                            .map(|f| f as &dyn historian::HistorianPublicationFence),
-                    });
-                match outcome {
-                    Ok(historian::HostRunAdoption::Published(success)) => eprintln!(
-                        "mc-module: historian run {} published from a report a claimant left across a restart",
-                        success.producer_run_id
-                    ),
-                    Ok(historian::HostRunAdoption::Failed { run_id, code }) => eprintln!(
-                        "mc-module: historian run {run_id} released for {session_id}: claimant reported {code}"
-                    ),
-                    Ok(historian::HostRunAdoption::Released { run_id }) => eprintln!(
-                        "mc-module: historian run {run_id} released for {session_id}: no report before its deadline"
-                    ),
-                    Ok(
-                        historian::HostRunAdoption::NotParked
-                        | historian::HostRunAdoption::StillOut { .. },
-                    ) => {}
-                    Err(e) => eprintln!(
-                        "mc-module: historian host-run adoption failed for {session_id}: {e}"
-                    ),
-                }
-            });
-            return Some("reattaching");
-        }
-
         match phase {
             HistorianPhase::AwaitingProducer => {
                 let publication_fence = log_publication_fence.clone();
@@ -4046,7 +3873,6 @@ impl McHandler {
                         let action = historian::handle_restart_load(
                             &store,
                             &session_id,
-                            now,
                             now + HISTORIAN_FAILURE_BACKOFF_MS,
                         )?;
                         match action {
@@ -4114,11 +3940,10 @@ impl McHandler {
                 });
                 Some("reattaching")
             }
-            // Reached only when the queue row is gone: a run parked for a claimant
-            // that still has its row was handled above. Without a row nothing can
-            // ever claim or report the run, so keeping it would hold the session's
-            // single-flight slot forever. Releasing it costs one re-assembled chunk
-            // on the next trigger and never loses durable output.
+            // An interrupted producer run holds the session's single-flight slot
+            // with no task left to drive it. Releasing it here costs one
+            // re-assembled chunk on the next trigger and never loses durable
+            // output; the publish path re-reads the stored compartments.
             HistorianPhase::Firing
             | HistorianPhase::Reclaiming
             | HistorianPhase::Validating
@@ -4129,7 +3954,6 @@ impl McHandler {
                     if let Err(e) = historian::handle_restart_load(
                         &store,
                         &session_id,
-                        now,
                         now + HISTORIAN_FAILURE_BACKOFF_MS,
                     ) {
                         tracing::error!(
@@ -4157,7 +3981,6 @@ impl McHandler {
             rust_background_enabled,
             now,
             publication_fence,
-            tag_snapshot,
             async_coverage,
             reclaim_ride_available,
             runner_lane,
@@ -4274,31 +4097,24 @@ impl McHandler {
         }
         let boundary_build_started_at = Instant::now();
         profile_start!(perf_boundary, "trigger_boundary_build");
-        if let Some(tags) = tag_snapshot {
+        profile_start!(_perf_fallback, "rt19_fallback_tag_load");
+        let tags = if async_coverage.is_some() {
+            let blocks = projection
+                .blocks
+                .iter()
+                .map(|block| block.id.as_str())
+                .collect::<Vec<_>>();
+            store.load_tags_for_blocks(&parsed.session_id, &blocks)
+        } else {
+            store.load_tags_for_session(&parsed.session_id)
+        };
+        if let Ok(tags) = tags {
+            // Malformed-lineage and compaction-off paths return before normal tag hydration.
+            // Preserve their fail-open tokenization behavior rather than treating absence as empty.
             self.boundary_tokens
                 .lock()
                 .expect("boundary token cache mutex")
-                .prime_from_persisted_tags(&parsed.session_id, tags.as_slice());
-        } else {
-            profile_start!(_perf_fallback, "rt19_fallback_tag_load");
-            let tags = if async_coverage.is_some() {
-                let blocks = projection
-                    .blocks
-                    .iter()
-                    .map(|block| block.id.as_str())
-                    .collect::<Vec<_>>();
-                store.load_tags_for_blocks(&parsed.session_id, &blocks)
-            } else {
-                store.load_tags_for_session(&parsed.session_id)
-            };
-            if let Ok(tags) = tags {
-                // Malformed-lineage and compaction-off paths return before normal tag hydration.
-                // Preserve their fail-open tokenization behavior rather than treating absence as empty.
-                self.boundary_tokens
-                    .lock()
-                    .expect("boundary token cache mutex")
-                    .prime_from_persisted_tags(&parsed.session_id, &tags);
-            }
+                .prime_from_persisted_tags(&parsed.session_id, &tags);
         }
         let CachedBoundaryMessages {
             messages: boundary_messages,
@@ -4823,7 +4639,6 @@ impl McHandler {
                 firing,
                 runner_refit,
                 runner: self.record_historian_runner(&parsed.session_id, &cfg, &binding.harness),
-                host_runs: Arc::clone(&self.host_runs),
                 session_runner,
                 runner_identity: runner_bind_identity(binding),
                 model_chain_generation,
@@ -5018,7 +4833,6 @@ impl McHandler {
                 &binding.config,
                 &binding.harness,
             ),
-            host_runs: Arc::clone(&self.host_runs),
             // Keep the conversation's runner route; use its Setup-derived project root,
             // harness, and session when binding child routes.
             session_runner,
@@ -5113,7 +4927,6 @@ impl McHandler {
             mut firing,
             runner_refit,
             runner,
-            host_runs,
             session_runner,
             runner_identity,
             model_chain_generation,
@@ -5137,38 +4950,15 @@ impl McHandler {
         let failure_started_at_ms = firing.now_ms;
         let configured_failure_backoff_at_ms = firing.failure_backoff_at_ms;
         if runner == HistorianRunnerKind::Host && session_runner.is_none() {
-            // The host lane never opens a Broca route, so there is no connect step
-            // to fail: the run is queued and this task waits for a claimant.
-            let mut request = firing.as_fire_request(
-                &store,
-                &session_id,
-                &project_path,
-                &harness,
-                &project_slug,
-                language.as_deref(),
-            );
-            request.temperature = historian_temperature;
-            request.rust_background_enabled = rust_background_enabled;
-            request.publication_fence = publication_fence.as_deref();
-            // The claimant walks the same model chain a Broca firing would, each
-            // attempt under the host's own per-attempt timeout, so this waits for the
-            // whole chain exactly as a Broca firing's joiners do.
-            let firing_budget = historian::firing_completion_wait_budget(
-                historian_await_timeout,
-                firing.model_chain.len(),
-            );
-            let result =
-                historian::run_historian_firing_on_host(&host_runs, request, firing_budget).await;
-            if let Some(completion) = provider_completion {
-                completion.record(&store, &session_id, &result);
-            }
-            if let Ok(loaded) = store.load(&session_id) {
-                DISPATCH_HEALTH.record_historian_outcome(
-                    historian_status_summary(&loaded.meta.historian),
-                    loaded.meta.historian.recent_decisions.len(),
-                );
-            }
-            return result;
+            // A firing for the host runner with no session runner has nowhere to go:
+            // the `historian.pending|claim|heartbeat|complete` routes are retired, so
+            // no claimant can pick up a queued run and it would wait until its
+            // deadline. Return the `historian_host_claim_retired` refusal instead of
+            // queuing work nobody can claim.
+            return Err(runner_limits::refusal(
+                "historian_host_claim_retired: the host runner has no claimant in mode 3; run on the session runner instead".to_string(),
+            )
+            .into());
         }
         let connected = match &session_runner {
             Some(route) => {

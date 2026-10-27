@@ -304,7 +304,6 @@ impl McHandler {
             worker.config = Arc::clone(&self.config);
             worker.boundary_tokens = Arc::clone(&self.boundary_tokens);
             worker.historian_runner_refusals = Arc::clone(&self.historian_runner_refusals);
-            worker.host_runs = Arc::clone(&self.host_runs);
             worker.runner_choices = Arc::clone(&self.runner_choices);
             worker.project_identities = Arc::clone(&self.project_identities);
             worker.memory_paused_routes = Arc::clone(&self.memory_paused_routes);
@@ -760,7 +759,6 @@ impl McHandler {
                             lineage: prepare_lineage,
                             serial: Arc::clone(&worker.provider_serial),
                         })),
-                        tag_snapshot: None,
                         async_coverage: None,
                         reclaim_ride_available,
                         runner_lane: true,

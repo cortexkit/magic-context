@@ -5961,7 +5961,6 @@ impl McHandler {
                         rust_background_enabled: None,
                         now: now_ms(),
                         publication_fence: Some(fence),
-                        tag_snapshot: None,
                         async_coverage: Some(coverage),
                         reclaim_ride_available: false,
                         runner_lane: true,

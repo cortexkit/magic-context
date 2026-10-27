@@ -902,7 +902,6 @@ async fn autonomous_historian_publishes_a_refit_expanded_range_with_missing_iden
             rust_background_enabled: Some(true),
             now: now_ms(),
             publication_fence: Some(fence),
-            tag_snapshot: None,
             async_coverage: Some(None),
             reclaim_ride_available: false,
             runner_lane: true,

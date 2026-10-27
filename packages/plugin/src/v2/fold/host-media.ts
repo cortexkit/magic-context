@@ -20,8 +20,6 @@
  *    internals, so every step is checked and any mismatch counts as unavailable.
  */
 
-import { getOpenCodeProviderProjection } from "../../hooks/magic-context/host-runner/opencode-adapter";
-
 type Part = Record<string, unknown>;
 type AssetConstructor = new (input: Part & { source: Part }) => object;
 
@@ -45,17 +43,10 @@ export function resetHostMediaForTests(): void {
 }
 
 /** Learn the host's message class and, when present, its `Media.Asset` class from a draft. */
-export function rememberHostMedia(messages: ReadonlyArray<unknown>, sessionId?: string): void {
-    const provider = sessionId ? getOpenCodeProviderProjection(sessionId) : undefined;
+export function rememberHostMedia(messages: ReadonlyArray<unknown>): void {
     for (const message of messages) {
         if (!isClassInstance(message)) continue;
         rememberedMessageClass ??= Object.getPrototypeOf(message).constructor as object;
-        if (
-            provider &&
-            typeof (message as Part).id === "string" &&
-            provider.ids.has((message as Part).id as string)
-        )
-            continue;
         if (rememberedAssetClass) return;
         const content = (message as Part).content;
         if (!Array.isArray(content)) continue;
