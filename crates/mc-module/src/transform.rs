@@ -6860,8 +6860,9 @@ fn apply_once(
         decision.origin(execute_reclaim_admitted, is_provider_prefix_mutation_pass)
     {
         tracing::debug!(
-            "mc-module: [{}] prefix rebuild permitted by ride={origin}",
-            req.session_id
+            "mc-module: [{}] prefix rebuild permitted by ride={origin} head_rewritten_anyway={}",
+            req.session_id,
+            decision.rewrites_head()
         );
     }
     // The reductions-only child branch preserves inherited history and accepts
