@@ -1,0 +1,42 @@
+{
+  "name": "meta",
+  "request": {
+    "method": "session_data.read",
+    "params": {
+      "section": "meta",
+      "session": {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "s"
+      }
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "op": "session_data.read",
+    "row": {
+      "cache_ttl": null,
+      "compartment_count": 1,
+      "compartment_in_progress": false,
+      "counter": 0,
+      "historian_failure_count": 0,
+      "historian_last_error": null,
+      "is_subagent": false,
+      "last_context_percentage": 0.0,
+      "last_input_tokens": 0,
+      "last_nudge_band": null,
+      "last_nudge_tokens": 0,
+      "last_response_time_ms": null,
+      "memory_block_count": 0,
+      "new_work_tokens": 0,
+      "newest_compartment_at_ms": 20,
+      "queued_stamp_count": 1,
+      "session_id": "s",
+      "system_prompt_hash": null,
+      "total_input_tokens": 0
+    },
+    "schema": 1,
+    "section": "meta",
+    "version": null
+  }
+}

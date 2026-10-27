@@ -448,36 +448,69 @@ fn meta(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutcome {
         );
     }
     let session_id = session.session.clone();
+    // The stamp counter works on the located-session shape the transcript
+    // pages use; `locate` above has already proven this session standalone.
+    let target = super::locator::LocatedSession {
+        session: super::locator::SessionRef {
+            runner: session.runner.clone(),
+            harness: session.harness.clone(),
+            session: session.session.clone(),
+        },
+        source: super::locator::SessionSource::Standalone,
+    };
     let outcome = ctx.context(|conn| {
         ctx.note_sql(META_SQL);
-        conn.query_row(META_SQL, [&session_id], |row| {
-            Ok(json!({
-                "session_id": row.get::<_, String>(0)?,
-                "last_response_time_ms": row.get::<_, Option<i64>>(1)?,
-                "cache_ttl": empty_as_null(row.get(2)?),
-                "counter": row.get::<_, Option<i64>>(3)?,
-                "last_nudge_tokens": row.get::<_, Option<i64>>(4)?,
-                "last_nudge_band": empty_as_null(row.get(5)?),
-                "is_subagent": row.get::<_, Option<i64>>(6)?.unwrap_or(0) != 0,
-                "last_context_percentage": row.get::<_, Option<f64>>(7)?,
-                "last_input_tokens": row.get::<_, Option<i64>>(8)?,
-                "compartment_in_progress": row.get::<_, Option<i64>>(9)?.unwrap_or(0) != 0,
-                "system_prompt_hash": empty_as_null(row.get(10)?),
-                "memory_block_count": row.get::<_, Option<i64>>(11)?,
-                "new_work_tokens": row.get::<_, i64>(12)?,
-                "total_input_tokens": row.get::<_, i64>(13)?,
-                "historian_failure_count": row.get::<_, Option<i64>>(14)?,
-                "historian_last_error": row.get::<_, Option<String>>(15)?,
-            }))
-        })
-        .optional()
+        let row = conn
+            .query_row(META_SQL, [&session_id], |row| {
+                Ok(json!({
+                    "session_id": row.get::<_, String>(0)?,
+                    "last_response_time_ms": row.get::<_, Option<i64>>(1)?,
+                    "cache_ttl": empty_as_null(row.get(2)?),
+                    "counter": row.get::<_, Option<i64>>(3)?,
+                    "last_nudge_tokens": row.get::<_, Option<i64>>(4)?,
+                    "last_nudge_band": empty_as_null(row.get(5)?),
+                    "is_subagent": row.get::<_, Option<i64>>(6)?.unwrap_or(0) != 0,
+                    "last_context_percentage": row.get::<_, Option<f64>>(7)?,
+                    "last_input_tokens": row.get::<_, Option<i64>>(8)?,
+                    "compartment_in_progress": row.get::<_, Option<i64>>(9)?.unwrap_or(0) != 0,
+                    "system_prompt_hash": empty_as_null(row.get(10)?),
+                    "memory_block_count": row.get::<_, Option<i64>>(11)?,
+                    "new_work_tokens": row.get::<_, i64>(12)?,
+                    "total_input_tokens": row.get::<_, i64>(13)?,
+                    "historian_failure_count": row.get::<_, Option<i64>>(14)?,
+                    "historian_last_error": row.get::<_, Option<String>>(15)?,
+                }))
+            })
+            .optional()?;
+        let Some(mut row) = row else {
+            return Ok(Ok(None));
+        };
+        ctx.note_sql(META_COMPARTMENTS_SQL);
+        let (count, newest) = conn.query_row(META_COMPARTMENTS_SQL, [&session_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+        })?;
+        row["compartment_count"] = json!(count);
+        row["newest_compartment_at_ms"] = json!(newest);
+        ctx.note_sql(super::context_states::STAMPED_MESSAGES);
+        let expired = || ctx.expired(started);
+        match super::context_states::standalone_queued_stamps(conn, &target, &expired) {
+            Ok(stamps) => row["queued_stamp_count"] = json!(stamps),
+            Err(refusal) => return Ok(Err(refusal)),
+        }
+        Ok(Ok(Some(row)))
     });
     match outcome {
-        Ok(Some(row)) => row_reply(OP, Some("meta"), ctx.now_ms(), None, row),
-        Ok(None) => index_unavailable("meta", "idx_mc_async_compaction_session"),
-        Err(refusal) => refusal,
+        Ok(Ok(Some(row))) => row_reply(OP, Some("meta"), ctx.now_ms(), None, row),
+        Ok(Ok(None)) => index_unavailable("meta", "idx_mc_async_compaction_session"),
+        Ok(Err(refusal)) | Err(refusal) => refusal,
     }
 }
+
+// One indexed visit to the session's compartment rows through the
+// (session_id, sequence) unique index: how many summaries exist and the latest
+// creation time among them. A session without any answers 0 and NULL.
+const META_COMPARTMENTS_SQL: &str =
+    "SELECT COUNT(*), MAX(created_at) FROM compartments WHERE session_id = ?1";
 
 const META_SQL: &str =
     "SELECT session_id, last_response_time, cache_ttl, counter, last_nudge_tokens, \
@@ -1292,5 +1325,175 @@ mod tests {
         assert!(reply["version"].is_null());
         assert!(reply.get("state").is_none());
         assert_eq!(reply["rows"].as_array().unwrap().len(), 4);
+    }
+
+    fn states_session() -> Value {
+        json!({"runner": "opencode", "harness": "opencode", "session": "s"})
+    }
+
+    fn meta_row(ctx: &AppReadContext, session: Value) -> Value {
+        let reply = response(&read(
+            &caller(),
+            ctx,
+            json!({"session": session, "section": "meta"})
+                .as_object()
+                .unwrap(),
+        ));
+        reply["row"].clone()
+    }
+
+    /// The states fixture has one compartment and two queued drops, one of
+    /// them inside the summarized message, which a page never lists.
+    #[test]
+    fn meta_counts_compartments_and_queued_stamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, db) = ctx(dir.path());
+        apply_sql(&db, include_str!("../../testdata/app-read-d/states.sql"));
+        let row = meta_row(&ctx, states_session());
+        assert_eq!(row["compartment_count"], 1);
+        assert_eq!(row["newest_compartment_at_ms"], 20);
+        assert_eq!(row["queued_stamp_count"], 1);
+        // The newest compartment is the latest created, and applying the
+        // queued drop takes it out of the count.
+        apply_sql(
+            &db,
+            "INSERT INTO compartments(session_id,sequence,start_message,end_message,title,content,created_at) \
+             VALUES('s',2,20,21,'later','summary',50); \
+             UPDATE tags SET status='dropped' WHERE id=10; DELETE FROM pending_ops WHERE tag_id=10;",
+        );
+        let row = meta_row(&ctx, states_session());
+        assert_eq!(row["compartment_count"], 2);
+        assert_eq!(row["newest_compartment_at_ms"], 50);
+        assert_eq!(row["queued_stamp_count"], 0);
+    }
+
+    #[test]
+    fn meta_answers_zero_and_null_for_a_session_without_compartments_or_stamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, db) = ctx(dir.path());
+        apply_sql(
+            &db,
+            "INSERT INTO session_meta(session_id, harness) VALUES ('ses', 'opencode');
+             INSERT INTO compartments(session_id,sequence,start_message,end_message,title,content,created_at)
+             VALUES ('other',1,1,2,'t','c',10);
+             INSERT INTO tags(session_id,message_id,type,status,tag_number) VALUES ('other','m:p0','message','active',1);
+             INSERT INTO pending_ops(session_id,tag_id,operation,queued_at) VALUES ('other',1,'drop',5);",
+        );
+        let row = meta_row(&ctx, session());
+        let fields = row.as_object().unwrap();
+        assert_eq!(fields.get("compartment_count"), Some(&json!(0)));
+        assert_eq!(fields.get("newest_compartment_at_ms"), Some(&Value::Null));
+        assert_eq!(fields.get("queued_stamp_count"), Some(&json!(0)));
+    }
+
+    #[test]
+    fn mode3_meta_is_still_refused_before_any_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path());
+        let outcome = read(
+            &caller(),
+            &ctx,
+            json!({
+                "session": {"runner": "opencode", "harness": "opencode", "session": "mc-provider:abc:async:1"},
+                "section": "meta"
+            })
+            .as_object()
+            .unwrap(),
+        );
+        match outcome {
+            HandlerOutcome::ErrorWithDetail { code, detail, .. } => {
+                assert_eq!(code, "app_op_unavailable");
+                assert_eq!(detail["index"], "idx_mc_async_compaction_session");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Stamps in every page state: raw text and tool parts, an unplaced
+    /// message, a part inside a summary, a message before the first summary,
+    /// and a part queued twice. The meta count equals the sum of the pages'
+    /// `stamped_parts` over every message.
+    #[test]
+    fn queued_stamp_count_equals_the_states_pages_stamped_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, db) = ctx(dir.path());
+        apply_sql(&db, include_str!("../../testdata/app-read-d/states.sql"));
+        apply_sql(
+            &db,
+            "INSERT INTO tags(id,session_id,message_id,type,status,tag_number,tool_name,tool_owner_message_id) VALUES
+             (12,'s','ghost:p1','message','active',12,NULL,NULL),
+             (13,'s','before:p0','message','active',13,NULL,NULL),
+             (14,'s','call_9','tool','active',14,'read','raw'),
+             (15,'s','call_orphan','tool','active',15,'read',NULL),
+             (16,'s','raw:p5','message','active',16,NULL,NULL);
+             INSERT INTO pending_ops(session_id,tag_id,operation,queued_at) VALUES
+             ('s',1,'drop',130),('s',12,'drop',131),('s',13,'drop',132),('s',14,'drop',133),
+             ('s',15,'drop',134),('s',10,'drop',135),('s',16,'other',136);",
+        );
+        let ids = [
+            "before",
+            "old-first",
+            "summarized",
+            "raw",
+            "partial",
+            "all",
+            "owner",
+            "file",
+            "compacted",
+            "zero",
+            "stamp",
+            "ghost",
+        ];
+        let page = ctx
+            .with_reads(|context, store| {
+                Ok(super::super::context_states::context_states(
+                    context,
+                    store,
+                    &caller(),
+                    &json!({"session": states_session(), "message_ids": ids}),
+                ))
+            })
+            .unwrap();
+        let page = response(&page);
+        let stamped: usize = page["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["stamped_parts"].as_array().unwrap().len())
+            .sum();
+        // raw:p2, the tool part owned by raw, stamp:p2 and ghost:p1.
+        assert_eq!(stamped, 4);
+        let row = meta_row(&ctx, states_session());
+        assert_eq!(row["queued_stamp_count"], json!(stamped));
+    }
+
+    #[test]
+    fn meta_count_queries_use_session_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_ctx, db) = ctx(dir.path());
+        let plan = explain(&db, META_COMPARTMENTS_SQL);
+        assert!(
+            plan.contains("SEARCH compartments USING")
+                && plan.contains("INDEX sqlite_autoindex_compartments_1 (session_id=?)"),
+            "{plan}"
+        );
+        assert!(!plan.contains("SCAN"), "{plan}");
+        let plan = explain(&db, super::super::context_states::STAMPED_MESSAGES);
+        assert!(
+            plan.contains("SEARCH pending_ops USING")
+                && plan.contains("idx_pending_ops_session_tag_id (session_id=?)"),
+            "{plan}"
+        );
+        // Either the full unique index or the active-only partial index on
+        // (session_id, tag_number) serves the per-stamp lookup.
+        assert!(
+            plan.contains("SEARCH tags USING INDEX")
+                && plan.contains("(session_id=? AND tag_number=?)"),
+            "{plan}"
+        );
+        assert!(
+            !plan.contains("SCAN tags") && !plan.contains("SCAN pending_ops"),
+            "{plan}"
+        );
     }
 }

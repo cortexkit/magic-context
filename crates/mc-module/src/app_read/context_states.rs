@@ -25,6 +25,13 @@ pub(crate) const FIRST: &str =
 pub(crate) const TEXT_TAGS: &str = "SELECT tag_number,message_id,type,status,byte_size,token_count,input_byte_size,input_token_count,drop_mode,tool_name FROM tags WHERE session_id=?1 AND message_id>=?2 AND message_id<?3 AND type IN ('message','file')";
 const TOOL_TAGS: &str = "SELECT tag_number,message_id,type,status,byte_size,token_count,input_byte_size,input_token_count,drop_mode,tool_name,tool_owner_message_id FROM tags WHERE session_id=?1 AND type='tool' AND tool_owner_message_id";
 pub(crate) const STAMP: &str = "SELECT queued_at FROM pending_ops WHERE session_id=?1 AND tag_id=?2 AND operation='drop' ORDER BY id LIMIT 1";
+// The messages a standalone session's queued `ctx_reduce` drops point into:
+// the same active tags STAMP finds a queued drop for, named by the message a
+// page lists them under. Text and file tags are keyed "<message id>:<part>",
+// the prefix TEXT_TAGS matches; tool tags name their owning message, as
+// TOOL_TAGS does. The read starts from the session's few pending_ops rows and
+// looks each tag up through the tags (session_id, tag_number) unique index.
+pub(crate) const STAMPED_MESSAGES: &str = "SELECT DISTINCT CASE WHEN type='tool' THEN tool_owner_message_id ELSE substr(message_id,1,instr(message_id,':')-1) END FROM tags WHERE session_id=?1 AND status='active' AND type IN ('message','file','tool') AND tag_number IN (SELECT tag_id FROM pending_ops WHERE session_id=?1 AND operation='drop')";
 // Force the mid index: MIN(ordinal) otherwise filters a session-sized primary-key prefix by mid.
 pub(crate) const ASYNC_PLACEMENT: &str =
     "SELECT ordinal,index_json FROM mc_async_compaction_entries WHERE session_ref=?1 AND mid=?2 AND ordinal=(SELECT MIN(ordinal) FROM mc_async_compaction_entries INDEXED BY idx_mc_async_compaction_entries_mid WHERE session_ref=?1 AND mid=?2)";
@@ -276,6 +283,106 @@ fn standalone_parts(
     Ok((parts, compacted))
 }
 
+fn summary_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Summary> {
+    Ok(Summary {
+        id: r.get(0)?,
+        sequence: r.get(1)?,
+        first: r.get(2)?,
+        last: r.get(3)?,
+        first_id: r.get(4)?,
+        last_id: r.get(5)?,
+        start_block: r.get(6)?,
+        end_block: r.get(7)?,
+    })
+}
+
+/// Count the parts a `context.states` page would list under `stamped_parts`,
+/// summed over every message of one standalone session, without the caller
+/// naming the messages. Only messages that hold a queued drop are visited, and
+/// each is judged by the same placement, coverage and part rules the page uses,
+/// so a stamp inside a summarized span or before the first compartment is not
+/// counted here either. `expired` is checked between messages so a session
+/// with many stamped messages stops at the read budget.
+pub(crate) fn standalone_queued_stamps(
+    context: &Connection,
+    target: &LocatedSession,
+    expired: &dyn Fn() -> bool,
+) -> Result<usize, HandlerOutcome> {
+    let key = target.context_session_id();
+    let messages = context
+        .prepare(STAMPED_MESSAGES)
+        .map_err(query_error)?
+        .query_map([key], |r| r.get::<_, Option<String>>(0))
+        .map_err(query_error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(query_error)?;
+    // A page can only be asked for ids that pass its request validation; any
+    // other owner (a tool without one, a text key without a message prefix)
+    // never appears on a page, so it is not counted.
+    let messages: Vec<String> = messages
+        .into_iter()
+        .flatten()
+        .filter(|mid| !mid.is_empty() && mid.len() <= 512 && !mid.contains('\0'))
+        .collect();
+    if messages.is_empty() {
+        return Ok(0);
+    }
+    let first: Option<i64> = context
+        .query_row(FIRST, [key], |r| r.get(0))
+        .optional()
+        .map_err(query_error)?;
+    let mut total = 0;
+    for mid in &messages {
+        if expired() {
+            return Err(budget_error());
+        }
+        total += stamped_in_message(context, target, mid, first)?;
+    }
+    Ok(total)
+}
+
+/// The length of one message's `stamped_parts`, decided exactly as `read` does.
+fn stamped_in_message(
+    context: &Connection,
+    target: &LocatedSession,
+    mid: &str,
+    first: Option<i64>,
+) -> Result<usize, HandlerOutcome> {
+    let key = target.context_session_id();
+    let ordinal: Option<i64> = context
+        .query_row(PLACEMENT, params![key, mid], |r| r.get(0))
+        .optional()
+        .map_err(query_error)?;
+    let summaries = match ordinal {
+        Some(ordinal) => context
+            .prepare(OVERLAP)
+            .map_err(query_error)?
+            .query_map(params![key, ordinal, ordinal], summary_row)
+            .map_err(query_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(query_error)?,
+        None => Vec::new(),
+    };
+    let covered: Vec<_> = summaries
+        .iter()
+        .filter(|s| ordinal.is_some_and(|o| o >= s.first && o <= s.last))
+        .collect();
+    let tools = page_tools(context, key, &[mid.to_owned()])?
+        .remove(mid)
+        .unwrap_or_default();
+    let (mut parts, _) = standalone_parts(context, target, mid, tools)?;
+    let (fully_covered, _) = coverage(target, ordinal, &covered, &mut parts)?;
+    // A summarized message and one before the first compartment list no
+    // parts; every other state lists the remaining undropped stamped parts.
+    if fully_covered || ordinal.zip(first).is_some_and(|(o, f)| o < f) {
+        return Ok(0);
+    }
+    Ok(parts
+        .iter()
+        .filter(|p| !p.dropped && p.stamp.is_some())
+        .count())
+}
+
 pub(crate) fn context_states(
     context: &Connection,
     store: &Connection,
@@ -405,18 +512,7 @@ fn read(context: &Connection, store: &Connection, input: &Value) -> Result<Value
         summaries = context
             .prepare(OVERLAP)
             .map_err(query_error)?
-            .query_map(params![key, lo, hi], |r| {
-                Ok(Summary {
-                    id: r.get(0)?,
-                    sequence: r.get(1)?,
-                    first: r.get(2)?,
-                    last: r.get(3)?,
-                    first_id: r.get(4)?,
-                    last_id: r.get(5)?,
-                    start_block: r.get(6)?,
-                    end_block: r.get(7)?,
-                })
-            })
+            .query_map(params![key, lo, hi], summary_row)
             .map_err(query_error)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(query_error)?;

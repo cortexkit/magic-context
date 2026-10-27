@@ -86,6 +86,10 @@ differ, so the samples cannot drift from the handlers. `SHA256SUMS` is
 
 ## `session_data.read`
 
+- `session_data.read/meta.json`: the session row plus
+  `compartment_count`, `newest_compartment_at_ms` and `queued_stamp_count`
+  (one compartment, one listed queued stamp; a queued drop inside the
+  summarized message is not a listed stamp, as on `context.states` pages).
 - `session_data.read/token-breakdown-provider.json`: a pass with a
   provider-reported input total (`total.source: "provider"`).
 - `session_data.read/token-breakdown-estimate.json`: no provider total, so
