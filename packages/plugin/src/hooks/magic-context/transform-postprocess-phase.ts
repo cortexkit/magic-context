@@ -2280,10 +2280,6 @@ export async function runPostTransformPhase(
     const alreadyRanThisTurn =
         args.currentTurnId !== null &&
         args.lastHeuristicsTurnId.get(args.sessionId) === args.currentTurnId;
-    const forceMaterialization =
-        args.fullFeatureMode &&
-        !compactionOff &&
-        args.contextUsage.percentage >= args.forceMaterializationPercentage;
     // Tiered emergency drop eligibility (Phase 2). Unlike `forceMaterialization`
     // (primary-only — it also forces m[0] materialization), the emergency tool
     // floor fires at the derived force band for BOTH primary AND subagent: it's the only tool
@@ -2291,8 +2287,12 @@ export async function runPostTransformPhase(
     // cache-busting-pass operation (selection persisted, defer passes replay),
     // so it only runs when heuristics run (see shouldRunHeuristics) AND usage is
     // ≥ the force-materialize threshold.
-    const emergencyDropEligible =
-        !compactionOff && args.contextUsage.percentage >= args.forceMaterializationPercentage;
+    const { forceMaterialization, emergencyDropEligible } = pressureBands({
+        fullFeatureMode: args.fullFeatureMode,
+        compactionOff,
+        contextPercentage: args.contextUsage.percentage,
+        forceMaterializationPercentage: args.forceMaterializationPercentage,
+    });
     const executePressureEligible = args.schedulerDecision === "execute" || emergencyDropEligible;
     if (!executePressureEligible) {
         routinePressureAppliedBySession.delete(args.sessionId);
