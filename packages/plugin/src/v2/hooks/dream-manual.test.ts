@@ -1,17 +1,12 @@
 import { expect, test } from "bun:test";
-import { DreamerConfigSchema } from "../../config/schema/magic-context";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
 import {
     formatUnsupportedDreamTasks,
     toolLoopDreamTasks,
 } from "../../features/magic-context/dreamer/task-registry";
 import type { DreamTaskRuntimeConfig } from "../../features/magic-context/dreamer/task-scheduler";
-import { runMigrations } from "../../features/magic-context/migrations";
-import { initializeDatabase } from "../../features/magic-context/storage-db";
-import { Database } from "../../shared/sqlite";
 import {
     resolveManualDreamTask,
-    runManualDreamNow,
     selectRunnableDreamTasks,
 } from "./dream-manual";
 

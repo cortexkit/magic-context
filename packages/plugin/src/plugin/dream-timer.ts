@@ -120,10 +120,7 @@ interface ProjectRegistration {
     sampleDreamRun?: () => Partial<
         Pick<
             ProjectRegistration,
-            | "dreamerConfig"
-            | "mural"
-            | "historianChildSweep"
-            | "gitCommitIndexing"
+            "dreamerConfig" | "mural" | "historianChildSweep" | "gitCommitIndexing"
         >
     >;
     language?: string;

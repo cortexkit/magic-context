@@ -39,7 +39,6 @@ const CONNECT_BACKOFF_WAIT_BUDGET_MS = 12_000;
 const CONNECT_BACKOFF_WAIT_JITTER_MS = 100;
 const HANDSHAKE_TIMEOUT_MS = 2_000;
 const MODULE_SEND_TIMEOUT_MS = 15_000;
-export const TRANSFORM_PAGE_UPLOAD_TIMEOUT_MS = 5_000;
 export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS = 15_000;
 export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_PER_MESSAGE_MS = 2;
 export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MAX_MS = 90_000;
@@ -470,9 +469,7 @@ export class SubcModuleTransport {
                 ? MAX_WRAPUP_REQUEST_BUDGET_MS
                 : args.attemptClass === "transform_series_execute"
                   ? TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS
-                  : args.method === "transform"
-                    ? Math.min(this.requestTimeoutMs, TRANSFORM_PAGE_UPLOAD_TIMEOUT_MS)
-                    : this.requestTimeoutMs);
+                  : this.requestTimeoutMs);
         const tracksWrapup = args.method === "session.wrapup";
         if (tracksWrapup) {
             this.wrapupSessions.set(
@@ -658,15 +655,6 @@ export class SubcModuleTransport {
                             !args.generationSensitive
                         ) {
                             continue;
-                        }
-                        // A disconnected transform may already have committed. Never resend
-                        // its history automatically, including after a partial reply download.
-                        if (args.method === "transform") {
-                            if (!ensuredRoute) throw error;
-                            throw Object.assign(
-                                new Error("Transform transport interrupted; abandon this pass"),
-                                { code: "transform_transport_interrupted", cause: error },
-                            );
                         }
                         if (args.generationSensitive && !args.signal?.aborted) {
                             return {
