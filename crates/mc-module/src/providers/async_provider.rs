@@ -574,6 +574,39 @@ fn waiting_for_tool_result(failure: &HandlerOutcome) -> bool {
             && message == "lineage protocol error: compaction range ends inside a tool arc")
 }
 
+/// Whether the newest assistant turn holds a tool call with no result yet:
+/// the one open arc a later write of the transcript can still close. A
+/// result in the same message (an OpenCode tool part holds both) or in a
+/// later one answers the call.
+fn newest_turn_awaits_a_result(state: &State, codec: codec::Codec) -> Result<bool, HandlerOutcome> {
+    let mut answered = BTreeSet::new();
+    for entry in state.entries.values().rev() {
+        let decoded = decoded_entry(codec, &entry.inbound()?)?;
+        let mut calls = Vec::new();
+        for block in &decoded.ck.content {
+            match &block.kind {
+                ck_wire::CkKind::ToolResult {
+                    id,
+                    provider_executed: false,
+                    ..
+                } => {
+                    answered.insert(id.clone());
+                }
+                ck_wire::CkKind::ToolCall {
+                    id,
+                    provider_executed: false,
+                    ..
+                } => calls.push(id.clone()),
+                _ => {}
+            }
+        }
+        if decoded.ck.role == "assistant" {
+            return Ok(calls.iter().any(|id| !answered.contains(id)));
+        }
+    }
+    Ok(false)
+}
+
 /// Where an engine baseline (`last_produced` / `last_applied`) is stored.
 /// A baseline that is one of the retained published views is only named by
 /// version, so acknowledging a view never copies the whole transcript again.
@@ -4695,14 +4728,19 @@ impl McHandler {
         if run_engine {
             match self.publish_async(0, &mut state, codec, resynced) {
                 Ok(_) => state.engine_failed = false,
-                // The transcript ends in a tool call whose result is not
-                // written yet. The runner sends a notice after every durable
-                // write, that call included (compaction-provider §5), so this
-                // notice is accepted like any other: nothing compacts through
-                // the open arc, and the notice completes. The engine pass is
-                // kept marked as failed so the result's own notice runs the
-                // pass rather than skipping it.
-                Err(error) if waiting_for_tool_result(&error) => {
+                // The newest assistant turn ends in a tool call whose result
+                // is not written yet. The runner sends a notice after every
+                // durable write, that call included (compaction-provider
+                // §5), so this notice is accepted like any other: nothing
+                // compacts through the open arc, and the notice completes.
+                // The engine pass is kept marked as failed so the result's own
+                // notice runs the pass rather than skipping it. A call left
+                // unanswered earlier in the transcript is not waiting for
+                // anything, so it keeps the failure path.
+                Err(error)
+                    if waiting_for_tool_result(&error)
+                        && newest_turn_awaits_a_result(&state, codec).unwrap_or(false) =>
+                {
                     state.engine_failed = true;
                     state.last_pass = None;
                     waiting_for_result = true;
