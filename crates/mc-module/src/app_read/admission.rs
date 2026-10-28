@@ -12,6 +12,32 @@ pub struct AppCaller {
     harness: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct AppRefusal {
+    code: &'static str,
+    message: String,
+}
+
+impl AppRefusal {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn bind_decision(self) -> BindDecision {
+        BindDecision::reject(self.code, self.message)
+    }
+
+    pub fn outcome(self) -> HandlerOutcome {
+        HandlerOutcome::Error {
+            code: self.code.into(),
+            message: self.message,
+        }
+    }
+}
+
 fn caller_allowed(principal: Option<&Principal>, allow_direct: bool) -> bool {
     match principal {
         Some(Principal::Direct) => allow_direct,
@@ -24,17 +50,23 @@ pub fn admit(
     req: &RouteBindRequest,
     registered_id: &str,
     allow_direct: bool,
-) -> Result<AppCaller, BindDecision> {
-    if !matches!(&req.target, subc_protocol::RouteTarget::InternalService {module_id, service_id}
-        if module_id == registered_id && service_id == super::SERVICE_ID)
-    {
-        return Err(BindDecision::reject(
+) -> Result<AppCaller, AppRefusal> {
+    let target_matches = match &req.target {
+        subc_protocol::RouteTarget::InternalService {
+            module_id,
+            service_id,
+        } => module_id == registered_id && service_id == super::SERVICE_ID,
+        subc_protocol::RouteTarget::ManagementSurface { module_id } => module_id == registered_id,
+        _ => false,
+    };
+    if !target_matches {
+        return Err(AppRefusal::new(
             "app_target_mismatch",
             "App read target differs from the registered module.",
         ));
     }
     if !caller_allowed(req.principal.as_ref(), allow_direct) {
-        return Err(BindDecision::reject(
+        return Err(AppRefusal::new(
             "app_caller_forbidden",
             "App read requires Callosum or Direct with app_read.allow_direct enabled.",
         ));
@@ -59,7 +91,7 @@ pub fn admit(
             None
         };
         if let Some(attribute) = attribute {
-            return Err(BindDecision::reject(
+            return Err(AppRefusal::new(
                 "app_route_agent_scope",
                 format!("App read does not admit scope attribute {attribute}."),
             ));
@@ -68,7 +100,7 @@ pub fn admit(
     if matches!(&req.principal, Some(Principal::Reserved { .. }))
         && !req.identity.harness.starts_with("fed-phone:")
     {
-        return Err(BindDecision::reject(
+        return Err(AppRefusal::new(
             "app_route_not_operator",
             "Callosum must stamp the fed-phone: device class.",
         ));
@@ -79,7 +111,7 @@ pub fn admit(
         .and_then(|versions| versions.get(super::SERVICE_ID))
     {
         if version != "v1" {
-            return Err(BindDecision::reject(
+            return Err(AppRefusal::new(
                 "app_role_version_unsupported",
                 format!("App read role version {version:?} is unsupported; expected v1."),
             ));
@@ -191,16 +223,24 @@ pub(super) mod tests {
     }
 
     fn assert_admission(req: &RouteBindRequest, allow_direct: bool, expected: Option<&str>) {
-        let result = admit(req, crate::DEFAULT_MODULE_ID, allow_direct);
-        match expected {
-            None => assert!(result.is_ok(), "{result:?}"),
-            Some(code) => match result {
-                Err(refusal) => assert!(
-                    format!("{refusal:?}").contains(code),
-                    "expected {code}, got {refusal:?}"
-                ),
-                Ok(_) => panic!("expected {code} for {req:?}"),
-            },
+        let mut management = req.clone();
+        if let subc_protocol::RouteTarget::InternalService { module_id, .. } = &req.target {
+            management.target = subc_protocol::RouteTarget::ManagementSurface {
+                module_id: module_id.clone(),
+            };
+        }
+        for req in [req, &management] {
+            let result = admit(req, crate::DEFAULT_MODULE_ID, allow_direct);
+            match expected {
+                None => assert!(result.is_ok(), "{result:?}"),
+                Some(code) => match result {
+                    Err(refusal) => assert!(
+                        format!("{refusal:?}").contains(code),
+                        "expected {code}, got {refusal:?}"
+                    ),
+                    Ok(_) => panic!("expected {code} for {req:?}"),
+                },
+            }
         }
     }
 
