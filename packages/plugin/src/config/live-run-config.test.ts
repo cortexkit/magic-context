@@ -9,9 +9,52 @@ import {
 import { producerInputTokenLimit } from "../hooks/magic-context/producer-window-guard";
 import { resolveDreamerTaskModel, resolveHistorianModel } from "../shared/model-resolution";
 import { createTestTempDirFromPath } from "../shared/test-temp-dir";
+import { isCommitRetentionPaused } from "./commit-retention-recovery";
 import { loadPluginConfigDetailed } from "./index";
-import { dreamerRunConfig, historianRunConfig } from "./live-run-config";
+import { changedLiveKeys, dreamerRunConfig, historianRunConfig } from "./live-run-config";
 import { LiveConfigReader } from "./live-snapshot";
+
+test("dreamer retains the recovered-cap pause through live copies and clears it when the same cap is fixed", () => {
+    const root = createTestTempDirFromPath(join(tmpdir(), "mc-live-retention-"));
+    const previous = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = root;
+    const directory = join(root, "project");
+    const file = join(root, "cortexkit", "magic-context.jsonc");
+    mkdirSync(join(root, "cortexkit"), { recursive: true });
+    mkdirSync(directory, { recursive: true });
+    const writeCap = (max_commits: number) =>
+        writeFileSync(
+            file,
+            JSON.stringify({ memory: { git_commit_indexing: { enabled: true, max_commits } } }),
+        );
+    try {
+        writeCap(0);
+        const boot = loadPluginConfigDetailed(directory, false).config;
+        const reader = new LiveConfigReader(
+            directory,
+            boot,
+            () => {
+                const loaded = loadPluginConfigDetailed(directory, false);
+                if (loaded.loadOutcome === "schema-recovery") throw new Error("invalid config");
+                return loaded.config;
+            },
+            () => {},
+            changedLiveKeys,
+        );
+        const initial = dreamerRunConfig(boot, reader.poll().effective);
+        expect(initial.memory.git_commit_indexing.max_commits).toBe(2000);
+        expect(isCommitRetentionPaused(initial.memory.git_commit_indexing)).toBe(true);
+        writeCap(2000);
+        const fixed = dreamerRunConfig(boot, reader.poll().effective);
+        expect(fixed.memory.git_commit_indexing.max_commits).toBe(2000);
+        expect(isCommitRetentionPaused(fixed.memory.git_commit_indexing)).toBe(false);
+        expect(isCommitRetentionPaused(initial.memory.git_commit_indexing)).toBe(true);
+    } finally {
+        if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = previous;
+        rmSync(root, { recursive: true, force: true });
+    }
+});
 
 for (const host of ["OC1", "OC2", "Pi", "OMP"] as const) {
     test(`${host} historian samples the next generation while an existing run keeps its model and fallback`, () => {

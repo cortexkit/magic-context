@@ -101,13 +101,7 @@ export function registerV2DreamScheduleTimer(args: {
         embeddingConfig: config.embedding,
         transformMode: config.transform_mode,
         moduleClient: createDreamTimerModuleClient(args.rustModeModuleClient),
-        gitCommitIndexing: gitCommitIndexing?.enabled
-            ? {
-                  enabled: true,
-                  since_days: gitCommitIndexing.since_days,
-                  max_commits: gitCommitIndexing.max_commits,
-              }
-            : undefined,
+        gitCommitIndexing: gitCommitIndexing?.enabled ? gitCommitIndexing : undefined,
         ensureRegistered: args.ensureRegistered ?? ensureProjectRegisteredFromOpenCodeDirectory,
     }).catch((error: unknown) => {
         log(`[magic-context] v2 dream timer registration failed (continuing without it): ${error}`);

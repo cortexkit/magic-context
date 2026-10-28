@@ -32,6 +32,7 @@ import type {
 } from "../../features/magic-context/memory/embedding-provider";
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import { getMemoriesForList } from "../../features/magic-context/memory/storage-memory";
+import { handleUntrustedLoad } from "../../plugin/embedding-bootstrap-helpers";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
@@ -379,6 +380,21 @@ describe("createCtxMemoryTools", () => {
         closeQuietly(db);
         _setTestProviderFactoryForProject(null);
         _resetProjectEmbeddingRegistryForTests();
+    });
+
+    it("names the invalid embedding field when an untrusted first load disables memory", async () => {
+        handleUntrustedLoad(db, "/repo/project", "/repo/project", {
+            config: { embedding: { provider: "off" } },
+            loadOutcome: "schema-recovery",
+            sources: { userConfig: "ok", projectConfig: "ok" },
+            substitutionFailures: [],
+            recoveredTopLevelKeys: ["embedding"],
+            recoveredFieldPaths: ["embedding.model", "embedding.endpoint"],
+        });
+        const result = await tools.ctx_memory.execute({ action: "get", ids: [1] }, toolContext());
+        expect(result).toBe(
+            "Cross-session memory is off for this project because magic-context.jsonc has invalid embedding or project identity settings: embedding.endpoint, embedding.model.",
+        );
     });
 
     it("writes and reads a memory through an opted-in home session identity", async () => {

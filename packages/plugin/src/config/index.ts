@@ -15,6 +15,7 @@ import { log } from "../shared/logger";
 import { setOutputReserveConfig } from "../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
 import { isCompactionEnabled, migrateLegacyAgentEnabledInMemory } from "./agent-disable";
+import { applyCommitRetentionRecovery } from "./commit-retention-recovery";
 import { warnDeprecatedMuralModel, warnDeprecatedWindowOverlayPath } from "./deprecated-config";
 import {
     cortexKitProjectConfigBasePath,
@@ -121,6 +122,7 @@ export interface LoadResultDetailed {
     };
     substitutionFailures: Array<{ keyPath: string; source: "user" | "project"; message: string }>;
     recoveredTopLevelKeys: string[];
+    recoveredFieldPaths: string[];
     configParseFailures: ConfigParseFailure[];
     warningDetails: ConfigWarningDetail[];
     cacheTtlConfigured: boolean;
@@ -410,6 +412,7 @@ export function warnProtectedTagsDeprecationOnce(): void {
 export function parsePluginConfig(
     rawConfig: Record<string, unknown>,
     recoveredTopLevelKeys: string[] = [],
+    recoveredFieldPaths: string[] = [],
 ): MagicContextPluginConfig & { configWarnings?: string[] } {
     // Pre-Zod shim: reshape legacy experimental.* graduated keys so the user's
     // opt-in/out state survives upgrades even when they never run `doctor`.
@@ -543,6 +546,7 @@ export function parsePluginConfig(
             }
             if (prunedLeaves.length === issuePaths.length) {
                 patched[key] = prunedBlock;
+                recoveredFieldPaths.push(...prunedLeaves.map((leaf) => `${key}.${leaf}`));
                 const reason = customMessagesByKey.get(key);
                 warnings.push(
                     `"${key}": invalid nested field(s) ${prunedLeaves.map((leaf) => `"${key}.${leaf}"`).join(", ")}, using defaults for those.${reason ? ` ${reason}` : ""}`,
@@ -553,6 +557,7 @@ export function parsePluginConfig(
 
         // Root-level or unreachable agent errors cannot be repaired safely because
         // guessing a model configuration could select an expensive unintended model.
+        recoveredFieldPaths.push(key);
         if (isAgentConfig) {
             delete patched[key];
             warnings.push(
@@ -609,6 +614,13 @@ export function parsePluginConfig(
     // If even the patched version fails (shouldn't happen), fall back to full defaults
     // but keep enabled:true — the user intended to use the plugin.
     warnings.push("Config recovery failed, using all defaults.");
+    recoveredFieldPaths.push(
+        "embedding",
+        "memory",
+        "subc",
+        "shadow_embedding",
+        "allow_home_project",
+    );
     return {
         ...defaults,
         disabled_hooks: disabledHooks,
@@ -819,6 +831,7 @@ export function loadPluginConfigDetailed(
     // way that forces extra historian work on the user's account.
     const trustedBaseConfig = parsePluginConfig(trustedProfiledRaw);
     let projectRestoredTopLevelKeys: string[] = [];
+    let projectRestoredFieldPaths: string[] = [];
 
     if (projectLoaded) {
         mergedRaw = deepMergeRawConfig(mergedRaw, profileResolution.projectBase);
@@ -846,6 +859,7 @@ export function loadPluginConfigDetailed(
             allWarnings.push(`[project config] ${warning}`);
         }
         projectRestoredTopLevelKeys = restoredOverProject.restoredTopLevelKeys;
+        projectRestoredFieldPaths = restoredOverProject.restoredFieldPaths;
         for (const warning of constrainProjectCommands({
             mergedRaw,
             trustedRaw: trustedProfiledRaw,
@@ -857,8 +871,10 @@ export function loadPluginConfigDetailed(
     }
 
     const recoveredTopLevelKeys: string[] = [];
+    const recoveredFieldPaths: string[] = [];
     const cacheTtlConfigured = Object.hasOwn(mergedRaw, "cache_ttl");
-    const config = parsePluginConfig(mergedRaw, recoveredTopLevelKeys);
+    const config = parsePluginConfig(mergedRaw, recoveredTopLevelKeys, recoveredFieldPaths);
+    recoveredFieldPaths.push(...projectRestoredFieldPaths);
     // An ignored invalid project value is still a config the user must fix, so
     // keep reporting it as schema recovery (live reload keeps the last good
     // config on that outcome, as it did before the user's value was restored).
@@ -873,7 +889,10 @@ export function loadPluginConfigDetailed(
     if (applyRuntimeGlobals) {
         setOutputReserveConfig(config.output_reserve);
     }
-    const leafValidationWarnings = [...(config.configWarnings ?? [])];
+    const recoveryWarnings = config.configWarnings ?? [];
+    applyCommitRetentionRecovery(config, recoveredFieldPaths, recoveryWarnings);
+    if (recoveryWarnings.length > 0) config.configWarnings = recoveryWarnings;
+    const leafValidationWarnings = [...recoveryWarnings];
     if (config.configWarnings?.length) {
         allWarnings.push(
             ...config.configWarnings.map((w) => {
@@ -933,6 +952,7 @@ export function loadPluginConfigDetailed(
         sources,
         substitutionFailures,
         recoveredTopLevelKeys,
+        recoveredFieldPaths,
         configParseFailures,
         warningDetails,
         cacheTtlConfigured,
