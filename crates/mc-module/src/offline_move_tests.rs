@@ -148,14 +148,6 @@ fn all_store_bytes(paths: &StorePaths) -> Vec<(PathBuf, Option<Vec<u8>>)> {
         .collect()
 }
 
-fn marker_data(paths: &StorePaths) -> Value {
-    let part = fixture()["expected"]["marker_part"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    relocated_marker_data(paths, &part)
-}
-
 fn relocated_marker_data(paths: &StorePaths, part: &str) -> Value {
     let conn = Connection::open(&paths.opencode_db).unwrap();
     let data: String = conn
@@ -349,6 +341,20 @@ fn move_carries_summaries_cut_checkpoint_and_drops_after_the_cut() {
         plan.old_summary_part.clone(),
     );
     let conn = Connection::open(&paths.opencode_db).unwrap();
+    // The old carrier keeps its own parts but no longer holds a compaction part.
+    let old_carrier_compactions: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM part WHERE message_id=?1 AND json_extract(data,'$.type')='compaction'",
+            [&old_cut],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if old_cut != record.cut {
+        assert_eq!(
+            old_carrier_compactions, 0,
+            "{old_cut} still carries a compaction part"
+        );
+    }
     assert!(
         conn.query_row("SELECT 1 FROM message WHERE id=?1", [&old_summary], |_| Ok(
             ()
