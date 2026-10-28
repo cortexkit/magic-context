@@ -960,25 +960,31 @@ impl McHandler {
                         let retained_last: Option<u64> = parent_applied
                             .as_ref()
                             .and_then(|view| retained_through(view, first));
-                        let retained_rows: Vec<Value> = match (&parent_applied, retained_last) {
-                            (Some(view), Some(last)) => {
-                                let mut missing = false;
-                                for ordinal in first..=last {
-                                    if !retained_entries.contains_key(&ordinal) {
-                                        missing = true;
-                                        break;
-                                    }
-                                }
-                                if missing {
-                                    return unknown();
-                                }
-                                render_retained_rows(&retained_entries, view, first, last)?
-                            }
-                            _ => Vec::new(),
+                        // The parent setup is still stored (the crash happened
+                        // before the final save rewrote it), so the same
+                        // first-generation gate as the first attempt applies.
+                        // Missing rows fall back to head-only, never unknown.
+                        let full_window = state.setup.descends_from.is_none()
+                            && match (&parent_applied, retained_last) {
+                                (Some(_), Some(last)) => (first..=last)
+                                    .all(|ordinal| retained_entries.contains_key(&ordinal)),
+                                _ => false,
+                            };
+                        let retained_rows: Vec<Value> = if full_window {
+                            let (Some(view), Some(last)) = (&parent_applied, retained_last) else {
+                                unreachable!("gated by full_window");
+                            };
+                            render_retained_rows(&retained_entries, view, first, last)?
+                        } else {
+                            Vec::new()
                         };
-                        let retained_to = retained_last
-                            .and_then(|last| last.checked_add(1))
-                            .unwrap_or(first);
+                        let retained_to = if full_window {
+                            retained_last
+                                .and_then(|last| last.checked_add(1))
+                                .unwrap_or(first)
+                        } else {
+                            first
+                        };
                         let mut engine = state.engine_with_baselines()?;
                         for view in [&mut engine.last_produced, &mut engine.last_applied]
                             .into_iter()
@@ -1020,6 +1026,19 @@ impl McHandler {
                         answer = answer.with_accepts(old.accepts().to_vec());
                         state.initial = serde_json::to_value(answer).map_err(transient)?;
                         state.initial["serializer_profile"] = json!(codec.wire_id());
+                        // Same tail state as the first attempt would have
+                        // committed: the parent history forwards on the next
+                        // notice, and pending undo edits replay on the next
+                        // read. The parent lineage is the cut's lineage: the
+                        // request descends from it, and the seed was selected
+                        // for it above.
+                        state.pending_parent_history = (is_latest
+                            && !cut.parent_namespace.is_empty())
+                        .then_some(ParentHistory {
+                            namespace: cut.parent_namespace.clone(),
+                            revision: cut.parent_revision.clone(),
+                        });
+                        state.pending_undo_edits = true;
                         // The retried Setup only writes the small record: the
                         // new lineage's rows were already persisted by the
                         // crashed `begin_at_cut`. Allow the save without a
@@ -1071,12 +1090,17 @@ impl McHandler {
                 .into_iter()
                 .collect();
         }
-        // One Setup rule: the new lineage's `initial` covers the retained rows
-        // the last applied view rendered, with that view's bytes. Setup does
-        // not call `session.read`: it renders retained rows from held rows
-        // and the cut seed's frozen edits. Cached or held entries after the
-        // last retained ordinal never extend it: they render raw outside the
-        // replacement.
+        // One Setup rule: a first-generation parent's new lineage `initial`
+        // covers the retained rows the last applied view rendered, with that
+        // view's bytes. Setup does not call `session.read`: it renders
+        // retained rows from the seed window's held rows. Cached or held
+        // entries after the last retained ordinal never extend it: they render
+        // raw outside the replacement. A lineage that itself began at a cut
+        // continues returning only the cut head: its carried seed views already
+        // hold the retained rows with their edits. When the held rows do not cover
+        // the retained range (a revert removed them, or the endpoint was never
+        // read), the answer stays head-only instead of failing: the rows arrive
+        // raw on the next notice.
         // `existing` came from `load_head` without transcript rows; the held
         // rows for the retained range come from the seed's window (reloaded
         // from the store for the current cut to include rows read since
@@ -1096,20 +1120,28 @@ impl McHandler {
         let retained_last: Option<u64> = parent_applied
             .as_ref()
             .and_then(|view| retained_through(view, first));
-        let retained_rows: Vec<Value> = match (&parent_applied, retained_last) {
-            (Some(view), Some(last)) => {
-                for ordinal in first..=last {
-                    if !retained_entries.contains_key(&ordinal) {
-                        return unknown();
-                    }
+        let full_window = state.setup.descends_from.is_none()
+            && match (&parent_applied, retained_last) {
+                (Some(_), Some(last)) => {
+                    (first..=last).all(|ordinal| retained_entries.contains_key(&ordinal))
                 }
-                render_retained_rows(&retained_entries, view, first, last)?
-            }
-            _ => Vec::new(),
+                _ => false,
+            };
+        let retained_rows: Vec<Value> = if full_window {
+            let (Some(view), Some(last)) = (&parent_applied, retained_last) else {
+                unreachable!("gated by full_window");
+            };
+            render_retained_rows(&retained_entries, view, first, last)?
+        } else {
+            Vec::new()
         };
-        let retained_to = retained_last
-            .and_then(|last| last.checked_add(1))
-            .unwrap_or(first);
+        let retained_to = if full_window {
+            retained_last
+                .and_then(|last| last.checked_add(1))
+                .unwrap_or(first)
+        } else {
+            first
+        };
         // A saved stage is immutable. A descendant gets its own namespace and
         // reads the live window on its next notice, so an undo cannot inherit
         // the parent's removed window rows or tag identities.
