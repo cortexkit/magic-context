@@ -1914,19 +1914,89 @@ fn interrupted(step: &str) -> impl Fn(rusqlite::Error) -> MoveError + '_ {
     move |error| MoveError::Interrupted(format!("{step}: {error}"))
 }
 
+/// The relocated compaction part's checkpoint key, in the plugin's member
+/// order (`tag_checkpoint`, `session`, `message_count`).
+#[derive(Serialize)]
+struct RelocatedCheckpointKey<'a> {
+    tag_checkpoint: u64,
+    session: &'a str,
+    message_count: usize,
+}
+
+/// The relocated compaction part's `data`: the plugin's
+/// `{"type":"compaction","auto":true}` with `cortexkit` appended last.
+/// A struct (field order is declaration order), never `json!`, so the bytes
+/// match the plugin's `JSON.stringify` insertion order.
+#[derive(Serialize)]
+struct RelocatedCompactionData<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    auto: bool,
+    cortexkit: RelocatedCheckpointKey<'a>,
+}
+
+#[derive(Serialize)]
+struct RelocatedPath<'a> {
+    cwd: &'a str,
+    root: &'a str,
+}
+
+#[derive(Serialize)]
+struct RelocatedCache {
+    read: u8,
+    write: u8,
+}
+
+#[derive(Serialize)]
+struct RelocatedTokens {
+    input: u8,
+    output: u8,
+    reasoning: u8,
+    cache: RelocatedCache,
+}
+
+#[derive(Serialize)]
+struct RelocatedTime {
+    created: i64,
+    completed: i64,
+}
+
+/// The relocated summary message's `data`: the plugin writer's output for
+/// `resolvedBoundary = U` and `endMessageId = P`, with the old summary's path
+/// carried over. Field order is declaration order, matching the plugin's
+/// `JSON.stringify` member order exactly.
+#[derive(Serialize)]
+struct RelocatedSummaryData<'a> {
+    role: &'a str,
+    #[serde(rename = "parentID")]
+    parent_id: &'a str,
+    summary: bool,
+    finish: &'a str,
+    mode: &'a str,
+    agent: &'a str,
+    path: RelocatedPath<'a>,
+    cost: u8,
+    tokens: RelocatedTokens,
+    #[serde(rename = "modelID")]
+    model_id: &'a str,
+    #[serde(rename = "providerID")]
+    provider_id: &'a str,
+    time: RelocatedTime,
+}
+
 /// The relocated compaction part's `data`: the plugin's
 /// `{"type":"compaction","auto":true}` plus exactly the `cortexkit` key.
 fn relocation_compaction_data(tag_checkpoint: u64, session: &str, message_count: usize) -> String {
-    json!({
-        "type": "compaction",
-        "auto": true,
-        "cortexkit": {
-            "tag_checkpoint": tag_checkpoint,
-            "session": session,
-            "message_count": message_count,
+    serde_json::to_string(&RelocatedCompactionData {
+        kind: "compaction",
+        auto: true,
+        cortexkit: RelocatedCheckpointKey {
+            tag_checkpoint,
+            session,
+            message_count,
         },
     })
-    .to_string()
+    .expect("compaction data serializes")
 }
 
 /// The relocated summary message's `data`: the plugin writer's output for
@@ -1934,21 +2004,29 @@ fn relocation_compaction_data(tag_checkpoint: u64, session: &str, message_count:
 /// carried over. Key order matches the plugin's `JSON.stringify` exactly.
 fn relocation_summary_data(boundary_id: &str, boundary_time: i64, cwd: &str, root: &str) -> String {
     let time = boundary_time.saturating_add(1);
-    json!({
-        "role": "assistant",
-        "parentID": boundary_id,
-        "summary": true,
-        "finish": "stop",
-        "mode": "compaction",
-        "agent": "compaction",
-        "path": {"cwd": cwd, "root": root},
-        "cost": 0,
-        "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
-        "modelID": "magic-context",
-        "providerID": "magic-context",
-        "time": {"created": time, "completed": time},
+    serde_json::to_string(&RelocatedSummaryData {
+        role: "assistant",
+        parent_id: boundary_id,
+        summary: true,
+        finish: "stop",
+        mode: "compaction",
+        agent: "compaction",
+        path: RelocatedPath { cwd, root },
+        cost: 0,
+        tokens: RelocatedTokens {
+            input: 0,
+            output: 0,
+            reasoning: 0,
+            cache: RelocatedCache { read: 0, write: 0 },
+        },
+        model_id: "magic-context",
+        provider_id: "magic-context",
+        time: RelocatedTime {
+            created: time,
+            completed: time,
+        },
     })
-    .to_string()
+    .expect("summary data serializes")
 }
 
 /// Write the plan: the three-row relocation and the checkpoint key in one host
@@ -1966,7 +2044,9 @@ pub fn apply(paths: &StorePaths, plan: &Plan, stop: Option<StopAfter>) -> Result
         &plan.summary_cwd,
         &plan.summary_root,
     );
-    let new_summary_part_data = json!({"type": "text", "text": plan.summary_text}).to_string();
+    // The summary text is unchanged by the move: copy the old summary part's
+    // `data` string verbatim, keeping `JSON.stringify`'s exact escaping.
+    let new_summary_part_data = plan.old_summary_part_data.clone();
     let summary_time = plan.u_time.saturating_add(1);
     if !plan.marker_already_keyed {
         let mut opencode = open_writer(&paths.opencode_db)?;
