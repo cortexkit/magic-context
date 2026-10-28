@@ -2576,7 +2576,7 @@ impl McHandler {
             &request.request_id,
         )? {
             moved_session::Fence::Fresh => None,
-            moved_session::Fence::Moved(record) => Some(record),
+            moved_session::Fence::Moved(record) => Some(*record),
             moved_session::Fence::Refuse(answer) => return bytes(&answer),
         };
         let reference = key.reference();

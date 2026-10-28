@@ -2734,10 +2734,12 @@ pub fn apply_with_certificate(
     Ok(())
 }
 
-/// Write the plan without a certificate (test and provider-setup helper).
-/// Production uses `apply_with_certificate` via `--apply --head-cut`. The
-/// placeholder head cut names `P`; the digest is empty and the time is zero.
-/// The write order, the host checks and the resume are otherwise identical.
+/// Write the plan without a certificate, for tests only. Production uses
+/// `apply_with_certificate` via `--apply --head-cut`. The placeholder head cut
+/// names `P` with an empty digest and time zero, which a live Setup's head
+/// check would never accept, so this must stay out of non-test builds. The
+/// write order, the host checks and the resume are otherwise identical.
+#[cfg(test)]
 pub fn apply(paths: &StorePaths, plan: &Plan, stop: Option<StopAfter>) -> Result<(), MoveError> {
     if let Some(record) = existing_intent(paths, &plan.record.session)? {
         return resume_from_record(paths, &record, stop);
@@ -2798,7 +2800,8 @@ pub enum Outcome {
 /// test/provider path without a certificate resumes a `relocating` intent when
 /// one exists and otherwise plans and applies with a placeholder head cut.
 /// Production uses `--apply --head-cut` (`run_with_head_cut`), which checks the
-/// export certificate before committing the intent.
+/// export certificate before committing the intent. Test-only, like `apply`.
+#[cfg(test)]
 pub fn run(
     paths: &StorePaths,
     session: &str,
@@ -2820,6 +2823,16 @@ pub fn run(
     }
     apply(paths, &plan, stop)?;
     Ok(Outcome::Moved(plan))
+}
+
+/// `--plan`: check that no host holds the stores, then plan read-only.
+fn plan_only(
+    paths: &StorePaths,
+    session: &str,
+    holders: &dyn HolderCheck,
+) -> Result<Outcome, MoveError> {
+    check_holders(paths, holders)?;
+    Ok(Outcome::Planned(plan(paths, session)?))
 }
 
 /// Rebuild a `Plan` view for an already-persisted record, for `run`'s return
@@ -2981,7 +2994,7 @@ pub fn cli_main(args: &[String]) -> i32 {
         }
     };
     let outcome = match mode {
-        CliMode::Plan => run(&paths, &session, true, &Lsof, None),
+        CliMode::Plan => plan_only(&paths, &session, &Lsof),
         CliMode::Apply { head_cut } => run_with_head_cut(&paths, &session, &head_cut, &Lsof, None),
     };
     match outcome {

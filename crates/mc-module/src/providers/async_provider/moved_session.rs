@@ -30,7 +30,7 @@ pub(super) enum Fence {
     /// No standalone state and no move: an ordinary new conversation.
     Fresh,
     /// The offline move completed; set up from its record.
-    Moved(MoveRecord),
+    Moved(Box<MoveRecord>),
     /// Refuse setup with this answer.
     Refuse(Value),
 }
@@ -56,7 +56,7 @@ pub(super) fn setup_fence(
         })
         .map_err(transient)?;
     Ok(match record {
-        Some(Ok(record)) => Fence::Moved(record),
+        Some(Ok(record)) => Fence::Moved(Box::new(record)),
         Some(Err(reason)) => Fence::Refuse(
             serde_json::to_value(contract::setup::SetupAnswer::refuse(
                 request_id,

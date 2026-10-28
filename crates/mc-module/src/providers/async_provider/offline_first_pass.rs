@@ -592,7 +592,7 @@ impl McHandler {
             &state.setup.session,
             &state.setup.request_id,
         )? {
-            moved_session::Fence::Moved(record) => Some(record),
+            moved_session::Fence::Moved(record) => Some(*record),
             moved_session::Fence::Fresh => None,
             moved_session::Fence::Refuse(answer) => {
                 return Err(error(
