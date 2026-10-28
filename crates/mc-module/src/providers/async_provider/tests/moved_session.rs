@@ -454,6 +454,40 @@ async fn moved_session_sets_up_from_the_import_and_carries_drops_onto_the_same_p
 }
 
 #[tokio::test]
+async fn moved_setup_initial_contains_imported_history_head() {
+    // The one Setup rule owns every lineage-start `initial`: the bootstrap
+    // runs before the Setup engine pass, so the rendered head already
+    // includes the imported history. A moved session's Setup `initial` is an
+    // empty `[message_count, message_count)` insertion whose replacement is
+    // the imported history head, not an empty head.
+    let dir = tempfile::tempdir().unwrap();
+    let (_rig, answer) = moved_rig(dir.path(), true).await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    assert_eq!(
+        answer["initial"]["range"],
+        json!({"from": 6, "to": 6}),
+        "moved Setup initial is the head insertion at the cut: {answer}"
+    );
+    let replacement = answer["initial"]["replacement"]
+        .as_array()
+        .expect("Setup initial carries the history head");
+    assert!(
+        !replacement.is_empty(),
+        "history head is not empty: {answer}"
+    );
+    let source = fixture::fixture();
+    let compartments = source["context"]["compartments"].as_array().unwrap();
+    let bytes = serde_json::to_string(replacement).unwrap();
+    for compartment in compartments {
+        let content = compartment["content"].as_str().unwrap();
+        assert!(
+            bytes.contains(content),
+            "Setup initial must contain the imported history head: missing {content:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn setup_refuses_an_unmoved_standalone_session() {
     let dir = tempfile::tempdir().unwrap();
     let (rig, answer) = moved_rig(dir.path(), false).await;

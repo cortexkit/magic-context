@@ -347,6 +347,11 @@ impl AsyncRecord {
     /// `lineage_first_ordinal`, `cut_digest` and `time_basis` from the certified
     /// `head_cut`, and `pre_cut_tags`/`max_tag` from the tag checkpoint, so an
     /// old `ctx_reduce` tag answers as already in the history summary.
+    ///
+    /// The caller arms the soft refresh after its Setup engine pass. The Setup
+    /// pass renders the head from these imported rows; arming the refresh
+    /// before that pass would leave the rendered head without its frames. Armed
+    /// after the pass, the first notice refreshes the imported history once.
     pub(super) fn finish_standalone_import(
         &mut self,
         store: &McStore,
@@ -355,13 +360,6 @@ impl AsyncRecord {
         let seed = Self::standalone_seed(record)?;
         self.lineage_first_ordinal = record.message_count;
         self.begin_at_cut(store, seed, cut_seed::CutStart::Fresh)?;
-        // The imported history needs one refresh before it renders in views.
-        // Armed here, after the Setup engine pass already rendered the head
-        // insertion, so the first notice refreshes once and only once.
-        let namespace = self.namespace();
-        if !record.compartments.is_empty() {
-            store.arm_soft_refresh(&namespace).map_err(transient)?;
-        }
         Ok(())
     }
 

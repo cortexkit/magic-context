@@ -143,6 +143,35 @@ async fn published_checkpoint_vector_is_the_unchanged_setup_answer_on_repeated_s
         record["cut"] = checkpoint["cut"].clone();
         record["message_count"] = checkpoint["message_count"].clone();
         record["head_cut"] = checkpoint["head_cut"].clone();
+        // The Setup engine pass now renders the imported history head, so the
+        // manifest's compartments must cover the certified prefix. Cover the
+        // whole `[0, message_count)` prefix with one summary whose boundary
+        // is the certified head cut; the checkpoint wire test does not assert
+        // history bytes.
+        let count = checkpoint["message_count"].as_u64().expect("count");
+        let mid = checkpoint["head_cut"]["mid"]
+            .as_str()
+            .expect("mid")
+            .to_owned();
+        record["compartments"] = json!([{
+            "sequence": 1,
+            "start_position": 1,
+            "end_position": count,
+            "start_message_id": "m0",
+            "end_message_id": mid,
+            "start_block": 0,
+            "end_block": 0,
+            "title": "history",
+            "content": "vector history",
+            "p1": "vector history",
+            "p2": null,
+            "p3": null,
+            "p4": null,
+            "importance": 50,
+            "episode_type": "summary",
+            "legacy": 0,
+            "created_at": 1
+        }]);
     });
     let runner = runner(dir.path());
     *runner.head_override.lock().unwrap() =
