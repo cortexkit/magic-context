@@ -5,10 +5,7 @@ import { deleteChunkEmbedBackoffForSession } from "./compartment-chunk-embedding
 import { releaseMemoryReservations } from "./memory/lifecycle-applier";
 import { deleteUncommittedPublications } from "./memory/turn-one-publication";
 import { closeTurnTwoChildrenOfSessions } from "./memory/turn-two-children";
-import {
-    deleteUnmappedMessageFtsRows,
-    getMessageFtsRowidMapBackfillProgress,
-} from "./message-fts-rowid-map";
+import { deleteUnmappedMessageFtsRows } from "./message-fts-rowid-map";
 import { deleteSessionActivity } from "./session-activity";
 import {
     tagIdentityRevisionKey,
@@ -24,8 +21,8 @@ export interface SessionScopedTableDefinition {
 }
 
 /**
- * Tables whose rows are owned by a session. Keep this list in dependency-safe
- * deletion order so event cleanup and orphan cleanup cannot drift apart.
+ * Tables whose rows are owned by a session, in dependency-safe deletion order.
+ * Every explicit session deletion must cover the complete list.
  */
 export const SESSION_SCOPED_TABLES: readonly SessionScopedTableDefinition[] = [
     { table: "pending_ops", harnessScoped: true },
@@ -147,12 +144,11 @@ function cleanupStatement(db: Database, sql: string): Statement {
 
 /**
  * Delete one bounded session-id batch. A supplied harness scopes every table
- * that stores harness provenance; tables without that column rely on the
- * caller's harness-scoped candidate source.
+ * that stores harness provenance; tables without that column are session-wide.
  *
  * A Rust cleanup marker protects the entire host-side session until module
- * acknowledgement. Otherwise an orphan sweep could retain the marker while
- * deleting its session→project coordinate, making the durable retry unreachable.
+ * acknowledgement. Deleting the session's project mapping in session_projects
+ * sooner would make the durable retry unreachable.
  */
 export function deleteSessionScopedRows(
     db: Database,
@@ -187,9 +183,8 @@ export function deleteSessionScopedRows(
     deleteUncommittedPublications(db, deletableSessionIds, harness);
     const harnessTables = SESSION_SCOPED_TABLES.filter((definition) => definition.harnessScoped);
     if (options.preserveTagRevisionTombstones) {
-        // With the context rows gone, retain each producing harness next to the
-        // tag-change counters. OpenCode's orphan sweep cannot infer Pi/OMP
-        // session liveness from OpenCode's own database.
+        // Context resets retain the producing harness next to the tag-change
+        // counters so a later explicit deletion can retire only its own markers.
         const owners = cleanupStatement(
             db,
             harnessTables
@@ -284,97 +279,4 @@ export function deleteSessionScopedRows(
     if (!options.deferRecoveryFenceCleanup)
         for (const sessionId of deletableSessionIds) clearLkgRecoveryFence(sessionId);
     return deletableSessionIds.length;
-}
-
-export const SESSION_CLEANUP_SLICE_ROWS = 64;
-
-/** Delete at most one row slice; the owner marker makes an interrupted purge discoverable. */
-export function deleteSessionScopedRowsSlice(
-    db: Database,
-    sessionId: string,
-    harness: string,
-): { complete: boolean; deleted: number } {
-    if (
-        cleanupStatement(
-            db,
-            "SELECT 1 FROM pending_session_cleanup WHERE session_id = ? AND harness = ?",
-        ).get(sessionId, `${harness}:rust`)
-    )
-        return { complete: true, deleted: 0 };
-    releaseMemoryReservations(db, [sessionId], harness);
-    closeTurnTwoChildrenOfSessions([sessionId]);
-    deleteUncommittedPublications(db, [sessionId], harness);
-    cleanupStatement(
-        db,
-        "INSERT OR IGNORE INTO schema_migrations_meta(key,value) VALUES (?,?)",
-    ).run(tagTombstoneOwnerKey(sessionId, harness), harness);
-    let remaining = SESSION_CLEANUP_SLICE_ROWS;
-    const started = performance.now();
-    // Backoff keys refer to compartment IDs, so retire them before deleting the
-    // compartments themselves. Joining the KV table skips already absent keys.
-    remaining -= deleteChunkEmbedBackoffForSession(db, sessionId, remaining);
-    if (remaining <= 0) return { complete: false, deleted: 0 };
-    for (const definition of SESSION_SCOPED_TABLES) {
-        if (definition.table === "message_history_fts") {
-            const rows = cleanupStatement(
-                db,
-                "SELECT fts_rowid AS id FROM message_fts_rowid_map WHERE session_id = ? LIMIT ?",
-            ).all(sessionId, remaining) as { id: number }[];
-            const removeFts = cleanupStatement(
-                db,
-                "DELETE FROM message_history_fts WHERE rowid = ?",
-            );
-            const removeMap = cleanupStatement(
-                db,
-                "DELETE FROM message_fts_rowid_map WHERE session_id = ? AND fts_rowid = ?",
-            );
-            for (const row of rows) {
-                removeFts.run(row.id);
-                removeMap.run(sessionId, row.id);
-            }
-            remaining -= rows.length;
-            if (remaining > 0 && !getMessageFtsRowidMapBackfillProgress(db).completed)
-                remaining -= cleanupStatement(
-                    db,
-                    `DELETE FROM message_history_fts WHERE rowid IN (
-                    SELECT rowid FROM message_history_fts WHERE session_id = ? LIMIT ?
-                )`,
-                ).run(sessionId, remaining).changes;
-        } else {
-            const predicates = ["session_id = ?"];
-            if (definition.extraPredicate) predicates.push(definition.extraPredicate);
-            if (definition.harnessScoped) predicates.push("harness = ?");
-            const args = [sessionId, ...(definition.harnessScoped ? [harness] : []), remaining];
-            // Payload chunks and replay ledgers have no SQLite rowid. Slice by
-            // their complete session-local key so one collection cannot erase another.
-            const key =
-                definition.table === "session_meta_chunks"
-                    ? "(column_name, chunk)"
-                    : definition.table === "session_render_cache"
-                      ? "cache_key"
-                      : definition.table === "temporal_decisions" ||
-                          definition.table === "session_replay_decisions"
-                        ? "message_id"
-                        : "rowid";
-            const withoutRowid = key !== "rowid";
-            const selectedKey = key === "(column_name, chunk)" ? "column_name, chunk" : key;
-            remaining -= cleanupStatement(
-                db,
-                `DELETE FROM ${definition.table}
-                WHERE ${withoutRowid ? "session_id = ? AND " : ""}${key} IN (
-                    SELECT ${selectedKey} FROM ${definition.table} WHERE ${predicates.join(" AND ")} LIMIT ?
-                )`,
-            ).run(...(withoutRowid ? [sessionId] : []), ...args).changes;
-        }
-        if (remaining <= 0 || performance.now() - started >= 10)
-            return { complete: false, deleted: 0 };
-    }
-    // All table rows are gone (or belong to another harness). The final cleanup
-    // retires KV counters and the owner marker; filesystem work stays deferred.
-    return {
-        complete: true,
-        deleted: deleteSessionScopedRows(db, [sessionId], harness, {
-            deferRecoveryFenceCleanup: true,
-        }),
-    };
 }

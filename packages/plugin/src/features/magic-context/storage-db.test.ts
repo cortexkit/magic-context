@@ -505,9 +505,8 @@ describe("storage-db", () => {
                 schemaTables,
             );
 
-            // The orphan sweep derives candidates from this harness-provenanced
-            // subset. Tables without harness remain cleanup-only because their
-            // rows cannot safely be attributed to OpenCode instead of Pi.
+            // Harness-scoped deletion must filter every table with provenance;
+            // tables without a harness column hold session-wide state.
             const harnessScopedSchemaTables = schemaTables.filter((table) => {
                 const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
                     name: string;

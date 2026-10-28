@@ -660,13 +660,6 @@ export class V2StoreReader {
         return typeof row.parent_id === "string" && row.parent_id.length > 0;
     }
 
-    /** Authoritative liveness snapshot for background orphan cleanup. */
-    sessionIds(): string[] {
-        return (this.prepare("SELECT id FROM session_v2").all() as { id: string }[]).map(
-            (row) => row.id,
-        );
-    }
-
     /**
      * The most recently updated top-level user session the host created in
      * `directory`, or undefined when there is none. Children, Magic Context's

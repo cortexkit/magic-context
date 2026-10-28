@@ -6,6 +6,7 @@ import { sessionDecisionCalibration } from "../../features/magic-context/session
 import {
     deriveTagLoadFloor,
     getActiveTagsBySession,
+    getOverflowState,
     getPendingOps,
     getTriggerTagTokenUpperBound,
     loadProtectedTailMeta,
@@ -25,6 +26,7 @@ import {
 } from "./cache-busting-signals";
 import { readExecuteReclaimState, writeExecuteReclaimState } from "./execute-reclaim";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
+import { shouldWaitForNewHistorianHistory } from "./historian-history-wait";
 import {
     createDefaultBoundarySnapshotForTests,
     getRawHistoryEligibility,
@@ -708,6 +710,20 @@ export function checkCompartmentTrigger(
                 `compartment trigger: skipped — no new raw history (usage=${usage.percentage.toFixed(1)}% nextStartOrdinal=${tailInfo.nextStartOrdinal} diagnostic-collection-failed: ${error instanceof Error ? error.message : String(error)})`,
             );
         }
+        return { shouldFire: false };
+    }
+
+    if (
+        tailInfo.boundarySnapshot &&
+        shouldWaitForNewHistorianHistory(tailInfo.boundarySnapshot, {
+            usagePercentage: usage.percentage,
+            emergency: getOverflowState(db, sessionId).needsEmergencyRecovery,
+        })
+    ) {
+        sessionLog(
+            sessionId,
+            "compartment trigger: waiting for new history after no forward progress",
+        );
         return { shouldFire: false };
     }
 

@@ -16,6 +16,10 @@ import {
 import { createScheduler } from "../../features/magic-context/scheduler";
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
+    seedRetainedSession,
+    snapshotSessionRows,
+} from "../../features/magic-context/session-retention.fixture";
+import {
     applyStrippedPlaceholderDelta,
     closeDatabase,
     getHiddenSeamPlaceholderIds,
@@ -1493,6 +1497,28 @@ describe("createEventHandler", () => {
         expect(getTagsBySession(openDatabase(), "ses-clean")).toHaveLength(0);
         expect(getMaxCompressionDepth(openDatabase(), "ses-clean")).toBe(0);
         expect(getOrCreateSessionMeta(openDatabase(), "ses-clean").isSubagent).toBe(false);
+    });
+
+    it("session.deleted still removes summaries, raw history and every seeded session row", async () => {
+        useTempDataHome("context-event-explicit-delete-");
+        const deps = createDeps(new Map());
+        const sessionId = "ses-explicit-delete";
+        seedRetainedSession(deps.db, sessionId, Date.now() - 25 * 60 * 60 * 1000);
+        const before = snapshotSessionRows(deps.db, sessionId);
+        expect(before.compartments).toHaveLength(40);
+        expect(before.source_contents).toHaveLength(1);
+        expect(before.message_history_fts).toHaveLength(1);
+        expect(before.session_render_cache).toHaveLength(1);
+        expect(before.session_meta_chunks.length).toBeGreaterThan(0);
+        expect(before.session_meta_collection_revisions.length).toBeGreaterThan(0);
+
+        await createEventHandler(deps)({
+            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+        });
+
+        for (const [table, rows] of Object.entries(snapshotSessionRows(deps.db, sessionId))) {
+            expect(rows, `${table} retained deleted session data`).toEqual([]);
+        }
     });
 
     it("retries a failed deleted-session cleanup from its durable marker", async () => {

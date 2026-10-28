@@ -537,6 +537,17 @@ export async function awaitInFlightDreamers(
 	await Promise.allSettled(runs);
 }
 
+/**
+ * Minutes the Pi subprocess may run past its task's own timeout. The executor's
+ * abort signal ends a task at its configured timeout; the subprocess ceiling
+ * sits this far above it, so the signal always fires first and the run is
+ * reported as the task's timeout rather than a killed runner.
+ */
+const RUNNER_TIMEOUT_HEADROOM_MINUTES = 5;
+
+/** Task timeout assumed when the dream session's task can't be identified. */
+const UNKNOWN_TASK_TIMEOUT_MINUTES = 30;
+
 function createPiDreamerClient(
 	opts: PiDreamerOptions,
 	onAdjunctsRefreshNeeded = opts.onAdjunctsRefreshNeeded,
@@ -628,10 +639,14 @@ function createPiDreamerClient(
 				userMessage,
 				model: perTaskModel,
 				fallbackModels: undefined,
-				// The executor enforces the per-task timeout via its abort signal;
-				// give the subprocess a generous ceiling so the signal is the
-				// authority (not a second, conflicting wall-clock here).
-				timeoutMs: 30 * 60 * 1000,
+				// The executor enforces the per-task timeout via its abort signal.
+				// The subprocess ceiling follows that timeout plus headroom, so it
+				// never ends a task the signal would still let run.
+				timeoutMs:
+					((taskConfig?.timeoutMinutes ?? UNKNOWN_TASK_TIMEOUT_MINUTES) +
+						RUNNER_TIMEOUT_HEADROOM_MINUTES) *
+					60 *
+					1000,
 				cwd: dreamSession.directory,
 				signal: args.signal
 					? AbortSignal.any([args.signal, controller.signal])
@@ -823,7 +838,10 @@ function accountingTaskFromTitle(title: string | undefined): string | null {
 	const task = title.slice("magic-context-dream-".length);
 	if (!title.startsWith("magic-context-dream-") || task.length === 0)
 		return null;
-	return task === "classify" ? "classify-memories" : task;
+	// Two child titles use a shorter name than their configured task.
+	if (task === "classify") return "classify-memories";
+	if (task === "user-memories") return "review-user-memories";
+	return task;
 }
 
 function readSessionTitle(args: { body?: unknown }): string | undefined {
@@ -955,6 +973,7 @@ function makeMessage(
 }
 
 export const __test = {
+	accountingTaskFromTitle,
 	registeredProjectCount: () => registeredProjects.size,
 	clearRegistrationGeneration: (projectIdentity: string) => {
 		const registration = registeredProjects.get(projectIdentity);

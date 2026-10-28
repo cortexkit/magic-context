@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createV1HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-historian";
 import * as shared from "../../../shared";
 import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
@@ -259,6 +260,136 @@ test("production verification paths normalize tracked files in a real git projec
 });
 
 describe("runVerify disposition", () => {
+    for (const transport of ["client", "hidden executor"] as const) {
+        describe(`short verify output through ${transport}`, () => {
+            function createArgs(db: Database, project: string, client: unknown): VerifyArgs {
+                const args = verifyArgs(db, tempProject(), project);
+                args.client = client as never;
+                args.forceBroad = true;
+                args.model = "antigravity/primary";
+                args.fallbackModels = ["antigravity/fallback"];
+                if (transport === "hidden executor") {
+                    args.hiddenCompletionExecutor = createV1HiddenCompletionExecutor(
+                        args.client,
+                        db,
+                        args.sessionDirectory,
+                    );
+                }
+                return args;
+            }
+
+            test("accepts a complete single-memory reply at 32 output tokens without fallback", async () => {
+                const db = freshDb();
+                try {
+                    const project = `git:verify-short-complete-${transport}`;
+                    addMappedMemories(db, project, 1);
+                    const scripted = scriptedVerifyClient((_call, ids) => ({
+                        kind: "text",
+                        text: `<verify><verified id="${ids[0]}" files="src/old.ts"/></verify>`,
+                        tokens: { output: 32, reasoning: 0 },
+                    }));
+                    const args = createArgs(db, project, scripted.client);
+
+                    expect(await runVerify(args)).toMatchObject({
+                        verified: 1,
+                        remaining: 0,
+                        complete: true,
+                    });
+                    expect(scripted.promptCalls()).toBe(1);
+                    expect(scripted.promptModels()).toEqual(["antigravity/primary"]);
+                } finally {
+                    closeQuietly(db);
+                }
+            });
+
+            test.each([
+                {
+                    shape: "wrong id",
+                    count: 1,
+                    manifest: (_ids: number[]) => '<verify><verified id="999999"/></verify>',
+                },
+                {
+                    shape: "only one of three ids",
+                    count: 3,
+                    manifest: (ids: number[]) => `<verify><verified id="${ids[0]}"/></verify>`,
+                },
+                {
+                    shape: "an extra id",
+                    count: 1,
+                    manifest: (ids: number[]) =>
+                        `<verify><verified id="${ids[0]}"/><skip id="999999"/></verify>`,
+                },
+                {
+                    shape: "a duplicate id",
+                    count: 1,
+                    manifest: (ids: number[]) =>
+                        `<verify><verified id="${ids[0]}"/><skip id="${ids[0]}"/></verify>`,
+                },
+                {
+                    shape: "an unclosed root",
+                    count: 1,
+                    manifest: (ids: number[]) => `<verify><verified id="${ids[0]}"/>`,
+                },
+            ])("treats a short reply with $shape as an outage and falls back", async ({
+                count,
+                manifest,
+            }) => {
+                const db = freshDb();
+                try {
+                    const project = `git:verify-short-incomplete-${transport}`;
+                    addMappedMemories(db, project, count);
+                    const scripted = scriptedVerifyClient((_call, ids) => ({
+                        kind: "text",
+                        text: manifest(ids),
+                        tokens: { output: 8, reasoning: 0 },
+                    }));
+                    const args = createArgs(db, project, scripted.client);
+
+                    await expect(runVerify(args)).rejects.toBeInstanceOf(
+                        DreamerProviderOutputFailureError,
+                    );
+                    expect(scripted.promptCalls()).toBe(2);
+                    expect(scripted.promptModels()).toEqual([
+                        "antigravity/primary",
+                        "antigravity/fallback",
+                    ]);
+                    for (const id of scripted.promptIds()[0]) {
+                        expect(getMemoryVerifications(db, [id]).get(id)?.verifiedAt).toBe(1_000);
+                    }
+                } finally {
+                    closeQuietly(db);
+                }
+            });
+
+            test("falls back after an empty reply", async () => {
+                const db = freshDb();
+                try {
+                    const project = `git:verify-empty-${transport}`;
+                    addMappedMemories(db, project, 1);
+                    const scripted = scriptedVerifyClient((call) =>
+                        call === 1
+                            ? { kind: "text", text: "", tokens: { output: 0, reasoning: 0 } }
+                            : { kind: "manifest" },
+                    );
+                    const args = createArgs(db, project, scripted.client);
+
+                    expect(await runVerify(args)).toMatchObject({
+                        verified: 1,
+                        remaining: 0,
+                        complete: true,
+                    });
+                    expect(scripted.promptCalls()).toBe(2);
+                    expect(scripted.promptModels()).toEqual([
+                        "antigravity/primary",
+                        "antigravity/fallback",
+                    ]);
+                } finally {
+                    closeQuietly(db);
+                }
+            });
+        });
+    }
+
     test("uses configured fallback after the recorded quota notice and skips the primary in later batches", async () => {
         const db = freshDb();
         const log = spyOn(logger, "log").mockImplementation(() => {});
@@ -631,7 +762,7 @@ describe("runVerify disposition", () => {
         }
     });
 
-    test("classifies outage text before manifest parsing and retries every fallback model", async () => {
+    test("classifies invalid outage text and retries every fallback model", async () => {
         const db = freshDb();
         try {
             const projectIdentity = "git:verify-provider-outage";

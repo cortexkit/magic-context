@@ -95,6 +95,11 @@ import {
 } from "./compartment-runner-validation";
 import { producerSourceLocalBudget } from "./derive-budgets";
 import {
+    clearHistorianHistoryWait,
+    recordHistorianNoProgress,
+    shouldWaitForNewHistorianHistory,
+} from "./historian-history-wait";
+import {
     describeHistorianPromptTrim,
     fitHistorianPrompt,
     resolveHistorianProducerWindow,
@@ -321,6 +326,7 @@ export function findDanglingPublicationBoundary(
 
 /** Clean up module-level session state on session deletion. */
 export function clearHistorianAlertState(sessionId: string): void {
+    clearHistorianHistoryWait(sessionId);
     lastHistorianAlertBySession.delete(sessionId);
     loggedStoredValidationFailures.delete(sessionId);
 }
@@ -803,6 +809,20 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         }
 
         const perRunCap = selectPerRunCap(boundarySnapshot);
+        if (
+            !deps.forceDrainQuota &&
+            shouldWaitForNewHistorianHistory(boundarySnapshot, {
+                emergency: getOverflowState(db, sessionId).needsEmergencyRecovery,
+            })
+        ) {
+            telemetry.status = "noop";
+            telemetry.failureReason = "waiting for new history after no forward progress";
+            sessionLog(
+                sessionId,
+                "historian no-op: waiting for new history after no forward progress",
+            );
+            return;
+        }
         const usable = Math.max(
             1,
             Math.round(
@@ -1027,6 +1047,12 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         const sequenceOffset = priorCompartments.length === 0 ? 0 : maxExistingSequence + 1;
 
         retainDrainReservationForRetryThrottle = true;
+        if (!deps.forceDrainQuota) {
+            shouldWaitForNewHistorianHistory(boundarySnapshot, {
+                emergency: getOverflowState(db, sessionId).needsEmergencyRecovery,
+                claim: true,
+            });
+        }
         const validatedPass = await runValidatedHistorianPass({
             client,
             hiddenCompletionExecutor: deps.hiddenCompletionExecutor,
@@ -1134,12 +1160,18 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 sessionId,
                 `no forward progress beyond raw message ${offset - 1}`,
             );
-            await notifyHistorianIssue(
-                buildHistorianFailureNotice(
-                    failCount,
-                    `historian made no forward progress beyond raw message ${offset - 1}`,
-                ),
-            );
+            try {
+                await notifyHistorianIssue(
+                    buildHistorianFailureNotice(
+                        failCount,
+                        `historian made no forward progress beyond raw message ${offset - 1}`,
+                    ),
+                );
+            } finally {
+                // OpenCode can append the notice itself as a no-reply user message.
+                // Include it in the wait watermark so it cannot trigger another paid retry.
+                recordHistorianNoProgress(boundarySnapshot, inEmergency);
+            }
             return;
         }
 
@@ -1460,6 +1492,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             db.exec("COMMIT");
             published = true;
             publishCommitted = true;
+            clearHistorianHistoryWait(sessionId);
             finishHistorianPublishStage(
                 sessionId,
                 "publish-txn",

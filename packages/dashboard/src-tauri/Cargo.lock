@@ -2395,7 +2395,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "mc-store"
-version = "0.49.26"
+version = "0.49.28"
 dependencies = [
  "cortexkit-cache-core",
  "cortexkit-store",
