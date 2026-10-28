@@ -125,7 +125,7 @@ fn a_message_without_the_runners_digests_is_refused_by_name() {
 fn the_checkpoint_is_the_number_below_the_lowest_tag() {
     let pages = parse(&[page(0..2, None)]).unwrap();
     let record = |checkpoint| MoveRecord {
-        version: 1,
+        version: crate::offline_move::RECORD_VERSION,
         session: "s".into(),
         harness: "opencode".into(),
         tag_checkpoint: checkpoint,
@@ -134,6 +134,7 @@ fn the_checkpoint_is_the_number_below_the_lowest_tag() {
         codec_profile: Default::default(),
         compartments: Vec::new(),
         drops: Vec::new(),
+        ..Default::default()
     };
     assert!(check_checkpoint(&record(20), &pages).is_ok());
     assert_eq!(
