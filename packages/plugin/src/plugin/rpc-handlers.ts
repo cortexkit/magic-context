@@ -107,6 +107,7 @@ import {
 import { resolveCacheTtlDisplay } from "../shared/cache-ttl-display";
 import type { ConfigParseFailure } from "../shared/config-diagnostics";
 import { getMagicContextStorageDir } from "../shared/data-path";
+import { getHarness } from "../shared/harness";
 import { listHiddenVariantWarnings } from "../shared/hidden-variant-warnings";
 import { activeHostLimitations } from "../shared/host-limitations";
 import { getLoggerDiagnostics, log } from "../shared/logger";
@@ -138,11 +139,11 @@ import {
 import { renderCapabilityRefusal } from "../shared/user-facing-codes";
 import { applyStickySnapshotCache } from "./sidebar-snapshot-cache";
 
-// Per-process incremental work-metrics state, keyed by session. The RPC server
+// Per-process incremental work-metrics state, keyed by generation and session. The RPC server
 // is long-lived, so the carry survives across polls and each poll folds only
 // assistant rows newer than its watermark (≈0 when idle). Lost on restart —
-// the next poll cold-starts from the persisted session_meta value's session by
-// re-folding once, which is the acceptable one-time cost design A accepts.
+// the next successful poll re-folds the session once and replaces the persisted
+// fallback with fresh metrics.
 const workMetricsCarryBySession = new Map<string, WorkMetricsCarry>();
 export async function executeRustRecompRpc(
     moduleClient: RustModeModuleClient | undefined,
@@ -237,15 +238,21 @@ function resolveSidebarWorkMetrics(
     persistedNewWork: number,
     persistedTotalInput: number,
 ): { newWorkTokens: number; totalInputTokens: number } {
-    if (!openCodeDbExists()) {
+    // Migrated stores retain both schemas; only the running host identifies
+    // which table receives this session's messages.
+    const generation = getHarness() === "opencode2" ? "v2" : "v1";
+    if (!openCodeDbExists(generation)) {
         return { newWorkTokens: persistedNewWork, totalInputTokens: persistedTotalInput };
     }
     try {
-        const carry = workMetricsCarryBySession.get(sessionId) ?? emptyWorkMetricsCarry();
-        const { carry: nextCarry, metrics } = withReadOnlySessionDb((openCodeDb) =>
-            computeOpenCodeWorkMetricsIncremental(openCodeDb, sessionId, carry),
+        const carryKey = `${generation}:${sessionId}`;
+        const carry = workMetricsCarryBySession.get(carryKey) ?? emptyWorkMetricsCarry();
+        const { carry: nextCarry, metrics } = withReadOnlySessionDb(
+            (openCodeDb) =>
+                computeOpenCodeWorkMetricsIncremental(openCodeDb, sessionId, carry, generation),
+            generation,
         );
-        workMetricsCarryBySession.set(sessionId, nextCarry);
+        workMetricsCarryBySession.set(carryKey, nextCarry);
         // Write-through so the value warm-starts the sidebar after a restart.
         try {
             setSessionWorkMetrics(db, sessionId, metrics.newWorkTokens, metrics.totalInputTokens);
