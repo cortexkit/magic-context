@@ -131,6 +131,7 @@ fn the_checkpoint_is_the_number_below_the_lowest_tag() {
         tag_checkpoint: checkpoint,
         cut: "m0".into(),
         marker_part: "p".into(),
+        codec_profile: Default::default(),
         compartments: Vec::new(),
         drops: Vec::new(),
     };

@@ -153,6 +153,10 @@ fn marker_data(paths: &StorePaths) -> Value {
         .as_str()
         .unwrap()
         .to_owned();
+    relocated_marker_data(paths, &part)
+}
+
+fn relocated_marker_data(paths: &StorePaths, part: &str) -> Value {
     let conn = Connection::open(&paths.opencode_db).unwrap();
     let data: String = conn
         .query_row("SELECT data FROM part WHERE id=?1", [part], |row| {
@@ -160,6 +164,35 @@ fn marker_data(paths: &StorePaths) -> Value {
         })
         .unwrap();
     serde_json::from_str(&data).unwrap()
+}
+
+fn host_message_row(paths: &StorePaths, mid: &str) -> (String, i64, i64, String) {
+    let conn = Connection::open(&paths.opencode_db).unwrap();
+    conn.query_row(
+        "SELECT id, time_created, time_updated, data FROM message WHERE id=?1",
+        [mid],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+    .unwrap()
+}
+
+fn host_part_row(paths: &StorePaths, pid: &str) -> (String, String, String, i64, i64, String) {
+    let conn = Connection::open(&paths.opencode_db).unwrap();
+    conn.query_row(
+        "SELECT id, message_id, session_id, time_created, time_updated, data FROM part WHERE id=?1",
+        [pid],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
+    )
+    .unwrap()
 }
 
 fn record(paths: &StorePaths) -> Option<String> {
@@ -244,10 +277,17 @@ fn move_carries_summaries_cut_checkpoint_and_drops_after_the_cut() {
     assert_eq!(record.cut, "msg_m007");
     assert_eq!(plan.p, "msg_m006");
     assert_eq!(plan.message_count, 6);
-    assert_eq!(
-        record.marker_part,
-        expected["marker_part"].as_str().unwrap()
-    );
+    // The relocated marker ids are the plugin generator's output for
+    // `resolvedBoundary = U` and `endMessageId = P`.
+    assert_eq!(record.marker_part, "prt_000001b580017vSwDweLmvnis8");
+    assert_eq!(plan.new_summary_id, "msg_000001b590011TLOnC0hggUweo");
+    assert_eq!(plan.new_summary_part_id, "prt_000001b590020zGA8sPgeGCoLV");
+    assert_eq!(plan.u_time, 7000);
+    assert_eq!(plan.summary_text, "[Compacted by Magic Context]");
+    // The codec profile and per-endpoint CK block ids ride the manifest for
+    // the import step. Whole-message endpoints cover the decoded range.
+    assert_eq!(record.codec_profile.serializer, "opencode-aisdk");
+    assert_eq!(record.codec_profile.native_index, "part_index");
     let source = fixture["context"]["compartments"].as_array().unwrap();
     assert_eq!(record.compartments.len(), source.len());
     for (imported, source) in record.compartments.iter().zip(source) {
@@ -272,6 +312,12 @@ fn move_carries_summaries_cut_checkpoint_and_drops_after_the_cut() {
             (None, None)
         );
     }
+    // msg_m001 holds one text part; msg_m002 holds reasoning, text and a
+    // completed tool (call plus result); msg_m006 holds text and a tool.
+    assert_eq!(record.compartments[0].start_block, Some(0));
+    assert_eq!(record.compartments[0].end_block, Some(3));
+    assert_eq!(record.compartments[1].start_block, Some(0));
+    assert_eq!(record.compartments[1].end_block, Some(2));
     assert_eq!(
         record.compartments.last().unwrap().end_message_id,
         expected["coverage_end"].as_str().unwrap()
@@ -293,22 +339,135 @@ fn move_carries_summaries_cut_checkpoint_and_drops_after_the_cut() {
         expected["behind_cut"].as_array().unwrap().len()
     );
     assert!(plan.missing.is_empty(), "{:?}", plan.missing);
-    // The checkpoint key, `"cortexkit": {"tag_checkpoint": N, "session": S}`, is the only
-    // change to opencode.db.
-    let marker = marker_data(&paths);
-    assert_eq!(
-        marker,
-        json!({"type":"compaction","auto":true,"cortexkit":{"tag_checkpoint":20,"session":fixture_session()}})
+    // The oracle: the plugin writer's rows for `resolvedBoundary = U` and
+    // `endMessageId = P`, plus exactly the 3-key. Every other SQL column and
+    // JSON byte matches; `U` and every unrelated row stay byte-identical.
+    let (old_cut, old_summary, old_compaction, old_summary_part) = (
+        plan.marker_carrier.clone(),
+        plan.old_summary.clone(),
+        plan.old_compaction_part.clone(),
+        plan.old_summary_part.clone(),
     );
+    let conn = Connection::open(&paths.opencode_db).unwrap();
+    assert!(
+        conn.query_row("SELECT 1 FROM message WHERE id=?1", [&old_summary], |_| Ok(
+            ()
+        ))
+        .optional()
+        .unwrap()
+        .is_none(),
+        "old summary was not deleted"
+    );
+    for old in [&old_compaction, &old_summary_part] {
+        if old.is_empty() {
+            continue;
+        }
+        assert!(
+            conn.query_row("SELECT 1 FROM part WHERE id=?1", [old], |_| Ok(()))
+                .optional()
+                .unwrap()
+                .is_none(),
+            "old part {old} was not deleted"
+        );
+    }
+    let (id, message_id, session_id, created, updated, data) =
+        host_part_row(&paths, &record.marker_part);
+    assert_eq!(id, "prt_000001b580017vSwDweLmvnis8");
+    assert_eq!(message_id, "msg_m007");
+    assert_eq!(session_id, fixture_session());
+    assert_eq!((created, updated), (7000, 7000));
+    assert_eq!(
+        serde_json::from_str::<Value>(&data).unwrap(),
+        json!({"type":"compaction","auto":true,"cortexkit":{"tag_checkpoint":20,"session":fixture_session(),"message_count":6}})
+    );
+    assert_eq!(
+        data,
+        json!({"type":"compaction","auto":true,"cortexkit":{"tag_checkpoint":20,"session":fixture_session(),"message_count":6}}).to_string()
+    );
+    let (id, session_id, created, updated, data) = {
+        let (id, session_id, created, updated, data) = conn
+            .query_row(
+                "SELECT id, session_id, time_created, time_updated, data FROM message WHERE id=?1",
+                [&plan.new_summary_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        (id, session_id, created, updated, data)
+    };
+    assert_eq!(id, "msg_000001b590011TLOnC0hggUweo");
+    assert_eq!(session_id, fixture_session());
+    assert_eq!((created, updated), (7001, 7001));
+    let summary_value: Value = serde_json::from_str(&data).unwrap();
+    assert_eq!(
+        summary_value,
+        json!({
+            "role": "assistant",
+            "parentID": "msg_m007",
+            "summary": true,
+            "finish": "stop",
+            "mode": "compaction",
+            "agent": "compaction",
+            "path": {"cwd": "/repo", "root": "/repo"},
+            "cost": 0,
+            "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            "modelID": "magic-context",
+            "providerID": "magic-context",
+            "time": {"created": 7001, "completed": 7001},
+        })
+    );
+    let (id, message_id, _, created, updated, data) =
+        host_part_row(&paths, &plan.new_summary_part_id);
+    assert_eq!(id, "prt_000001b590020zGA8sPgeGCoLV");
+    assert_eq!(message_id, plan.new_summary_id);
+    assert_eq!((created, updated), (7001, 7001));
+    assert_eq!(
+        serde_json::from_str::<Value>(&data).unwrap(),
+        json!({"type": "text", "text": "[Compacted by Magic Context]"})
+    );
+    // `U`'s own message row is untouched; only its new compaction part was added.
+    let (mid, created, updated, mdata) = host_message_row(&paths, "msg_m007");
+    assert_eq!((mid.as_str(), created, updated), ("msg_m007", 7000, 7000));
+    assert_eq!(
+        serde_json::from_str::<Value>(&mdata).unwrap(),
+        json!({"role": "user", "time": {"created": 7000}})
+    );
+    // Relocating the marker never changes the counted prefix length.
+    let host_after = load_host_session(
+        &open_read_only(&paths.opencode_db).unwrap(),
+        &fixture_session(),
+    )
+    .unwrap();
+    assert_eq!(host_after.position.get("msg_m006"), Some(&6));
+    assert_eq!(host_after.position.get("msg_m007"), Some(&7));
+    // Every unrelated row is byte-identical: only the three deleted ids and the
+    // three inserted ids differ between the before and after images.
     let after = snapshot(&paths);
-    let changed = before
-        .0
-        .iter()
-        .zip(&after.0)
-        .filter(|(a, b)| a != b)
-        .map(|(a, _)| a.0.clone())
-        .collect::<Vec<_>>();
-    assert_eq!(changed, vec![record.marker_part.clone()]);
+    let mut before_map: std::collections::HashMap<String, String> = before.0.into_iter().collect();
+    let mut after_map: std::collections::HashMap<String, String> = after.0.into_iter().collect();
+    for gone in [&old_summary, &old_compaction, &old_summary_part] {
+        if gone.is_empty() {
+            continue;
+        }
+        assert!(before_map.remove(gone).is_some(), "{gone} missing before");
+        assert!(!after_map.contains_key(gone), "{gone} not deleted");
+    }
+    for fresh in [
+        plan.new_summary_id.clone(),
+        record.marker_part.clone(),
+        plan.new_summary_part_id.clone(),
+    ] {
+        assert!(after_map.remove(&fresh).is_some(), "{fresh} missing after");
+        assert!(!before_map.contains_key(&fresh), "{fresh} existed before");
+    }
+    assert_eq!(before_map, after_map, "an unrelated row changed");
     // The moved record is the stored plan.
     let stored: MoveRecord = serde_json::from_str(&record_of(&paths)).unwrap();
     assert_eq!(stored, record);
@@ -376,7 +535,12 @@ fn move_rerun_after_a_crash_at_each_write_step_ends_identical() {
         record(&crashed).is_none(),
         "the moved record must be the last write"
     );
-    assert_eq!(marker_data(&crashed)["cortexkit"]["tag_checkpoint"], 20);
+    let crashed_plan = plan(&crashed, &fixture_session()).unwrap();
+    assert_eq!(
+        relocated_marker_data(&crashed, &crashed_plan.record.marker_part)["cortexkit"]
+            ["tag_checkpoint"],
+        20
+    );
     let Outcome::Moved(plan) = run(&crashed, &fixture_session(), false, &NoHolders, None).unwrap()
     else {
         panic!("rerun did not move");
@@ -1007,7 +1171,9 @@ fn plan_flag_prints_the_certification_inputs_without_writing() {
 }
 
 #[test]
-fn apply_refuses_a_cut_without_marker_relocation_even_if_already_keyed() {
+fn apply_relocates_the_marker_onto_u_in_one_host_transaction() {
+    // `write_movable_stores` still carries the old marker on `msg_m005` while
+    // the plan selects `U = msg_m007`: apply relocates instead of refusing.
     for keyed in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let paths = write_movable_stores(dir.path());
@@ -1017,8 +1183,169 @@ fn apply_refuses_a_cut_without_marker_relocation_even_if_already_keyed() {
                 [json!({"tag_checkpoint":20,"session":fixture_session()}).to_string()],
             ).unwrap();
         }
-        assert_eq!(refusal(&paths).code, "source_changed");
+        let before_plan = plan(&paths, &fixture_session()).unwrap();
+        assert_eq!(before_plan.record.cut, "msg_m007");
+        assert_eq!(before_plan.marker_carrier, "msg_m005");
+        let Outcome::Moved(plan) =
+            run(&paths, &fixture_session(), false, &NoHolders, None).unwrap()
+        else {
+            panic!("relocation did not move");
+        };
+        assert_eq!(plan.record.cut, "msg_m007");
+        let marker = relocated_marker_data(&paths, &plan.record.marker_part);
+        assert_eq!(
+            marker["cortexkit"],
+            json!({"tag_checkpoint":20,"session":fixture_session(),"message_count":6})
+        );
     }
+}
+
+#[test]
+fn marker_on_head_cut_refuses_before_any_write() {
+    // Moving the old marker onto `U` would delete `P`'s compaction part when
+    // the old carrier `W` is `P` itself. The certificate for `P` is taken
+    // before apply, so apply must never rewrite `P`'s rows. `P` must be a
+    // user message here so the old marker can sit on it: the fixture's `P`
+    // (`msg_m006`) is an assistant, so first make it a user.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_movable_stores(dir.path());
+    host_sql(
+        &paths,
+        "UPDATE message SET data=json_set(data,'$.role','user') WHERE id='msg_m006'",
+    );
+    // The fixture's `P` is `msg_m006` for `U = msg_m007`: move the old marker
+    // from `msg_m005` onto `msg_m006`, keeping its summary parented there.
+    host_sql(&paths, "UPDATE part SET message_id='msg_m006',time_created=6000,time_updated=6000 WHERE json_extract(data,'$.type')='compaction';
+        UPDATE message SET data=json_set(data,'$.parentID','msg_m006','$.time.created',6001,'$.time.completed',6001),time_created=6001,time_updated=6001 WHERE json_extract(data,'$.summary')=1;
+        UPDATE part SET time_created=6001,time_updated=6001 WHERE message_id IN (SELECT id FROM message WHERE json_extract(data,'$.summary')=1)");
+    context_sql(&paths, "UPDATE session_meta SET compaction_marker_state=json_set(compaction_marker_state,'$.boundaryMessageId','msg_m006','$.boundaryOrdinal',6)");
+    assert_eq!(refusal(&paths).code, "marker_on_head_cut");
+}
+
+#[test]
+fn positional_past_the_end_slot_is_gone_not_missing() {
+    // CKDESK's tag 5872 at `<mid>:p1`: the message exists with one text part,
+    // so index 1 names no served slot. Nothing at that slot is served.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_moved_session_stores(dir.path());
+    host_sql(
+        &paths,
+        "DELETE FROM part WHERE message_id='msg_m008' AND id != 'prt_m008_b'",
+    );
+    context_sql(&paths, "UPDATE tags SET message_id='msg_m008:p1', type='message', status='dropped' WHERE tag_number=13");
+    context_sql(
+        &paths,
+        "UPDATE tags SET status='active' WHERE tag_number=12",
+    );
+    context_sql(&paths, "DELETE FROM pending_ops WHERE tag_id=16");
+    let before = all_store_bytes(&paths);
+    let plan = plan(&paths, &fixture_session()).unwrap();
+    assert!(plan.gone.contains(&13), "{:?}", plan.gone);
+    assert!(!plan.record.drops.iter().any(|drop| drop.source_tag == 13));
+    assert_eq!(all_store_bytes(&paths), before);
+}
+
+#[test]
+fn qta_and_synapse_shaped_file_drops_refuse_untagged_without_writes() {
+    // SYNAPSE shape: the fixture's single queued file drop after `U`.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_stores(dir.path());
+    assert_eq!(refusal(&paths).code, "drop_target_untagged");
+    // QTA shape: three dropped file parts after `U`.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_movable_stores(dir.path());
+    host_sql(&paths, "INSERT INTO part SELECT 'prt_qta_f1', 'msg_m009', session_id, 9000, 9000, '{\"type\":\"file\",\"mime\":\"text/plain\",\"url\":\"data:text/plain;base64,eA==\"}' FROM part LIMIT 1");
+    host_sql(&paths, "INSERT INTO part SELECT 'prt_qta_f2', 'msg_m010', session_id, 10000, 10000, '{\"type\":\"file\",\"mime\":\"text/plain\",\"url\":\"data:text/plain;base64,eQ==\"}' FROM part LIMIT 1");
+    // `msg_m009` holds `prt_m009_a` (text, index 0), `prt_m009_b` (file,
+    // index 1) and the new file at index 2; `msg_m010` holds two tool parts
+    // and text plus the new file. Valid file slots bind to untaggable file
+    // parts and refuse, instead of going `gone` as past-the-end slots do.
+    context_sql(&paths, "INSERT INTO tags(session_id,message_id,type,status,byte_size,tag_number,harness) VALUES ('ses_mode3_move_fixture','msg_m009:file2','file','dropped',10,101,'opencode'),('ses_mode3_move_fixture','msg_m010:file3','file','dropped',10,102,'opencode')");
+    assert_eq!(refusal(&paths).code, "drop_target_untagged");
+}
+
+#[test]
+fn id_generator_matches_plugin_vectors() {
+    // Vectors taken from `packages/plugin/.../compaction-marker.ts` via bun.
+    assert_eq!(deterministic_base62("", 5), "HLxI5");
+    assert_eq!(deterministic_base62("abc", 14), "7nzH5i6WpR5bav");
+    assert_eq!(
+        deterministic_base62("msg\0ses-1\0msg_user\0summary-message", 14),
+        "zpqyymA9FjZ5Q5"
+    );
+    assert_eq!(
+        generate_message_id(101, 1, "ses-1\0msg_user\0summary-message"),
+        "msg_000000065001zpqyymA9FjZ5Q5"
+    );
+    assert_eq!(
+        generate_message_id(1000, 0, "boundary"),
+        "msg_0000003e8000Os1l5thYhzI5Sw"
+    );
+    // The fixture's own old triple pins the generator end to end.
+    assert_eq!(
+        generate_part_id(5000, 1, "ses_mode3_move_fixture\0msg_m006\0compaction-part"),
+        "prt_0000013880017vSwDweLmvnis8"
+    );
+    assert_eq!(
+        generate_message_id(5001, 1, "ses_mode3_move_fixture\0msg_m006\0summary-message"),
+        "msg_0000013890011TLOnC0hggUweo"
+    );
+    assert_eq!(
+        generate_part_id(5001, 2, "ses_mode3_move_fixture\0msg_m006\0summary-part"),
+        "prt_0000013890020zGA8sPgeGCoLV"
+    );
+    // The relocated triple for `U = msg_m007`, `P = msg_m006`.
+    assert_eq!(
+        generate_part_id(7000, 1, "ses_mode3_move_fixture\0msg_m006\0compaction-part"),
+        "prt_000001b580017vSwDweLmvnis8"
+    );
+    assert_eq!(
+        generate_message_id(7001, 1, "ses_mode3_move_fixture\0msg_m006\0summary-message"),
+        "msg_000001b590011TLOnC0hggUweo"
+    );
+}
+
+#[test]
+fn offline_block_ids_match_edge_block_vectors() {
+    // Known-answer CK block ranges for the `edge_block` codec (`opencode-aisdk`
+    // with `nativeIndex = part_index`). Whole-message endpoints cover the
+    // first through the last decoded block; skipped parts (compaction,
+    // ignored or empty text) decode to no block.
+    assert_eq!(offline_codec_profile().serializer, "opencode-aisdk");
+    assert_eq!(offline_codec_profile().native_index, "part_index");
+    for (role, parts, expected) in [
+        (
+            "user",
+            vec![json!({"type":"text","text":"hi"})],
+            Some((0, 0)),
+        ),
+        (
+            "assistant",
+            vec![
+                json!({"type":"reasoning","text":"think"}),
+                json!({"type":"text","text":"done"}),
+                json!({"type":"tool","callID":"c1","tool":"read","state":{"status":"completed","input":{},"output":"out","title":"t","metadata":{},"time":{"start":1,"end":2}}}),
+            ],
+            // Reasoning, text, tool call and tool result: four CK blocks.
+            Some((0, 3)),
+        ),
+        ("user", vec![json!({"type":"compaction","auto":true})], None),
+        (
+            "assistant",
+            vec![json!({"type":"text","text":"","ignored":true})],
+            None,
+        ),
+    ] {
+        assert_eq!(offline_ck_block_range(role, &parts), expected);
+    }
+    // The fixture's imported endpoints decode to the manifest's stored ranges.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_moved_session_stores(dir.path());
+    let plan = plan(&paths, &fixture_session()).unwrap();
+    assert_eq!(plan.record.compartments[0].start_block, Some(0));
+    assert_eq!(plan.record.compartments[0].end_block, Some(3));
+    assert_eq!(plan.record.compartments[1].start_block, Some(0));
+    assert_eq!(plan.record.compartments[1].end_block, Some(2));
 }
 
 #[test]
