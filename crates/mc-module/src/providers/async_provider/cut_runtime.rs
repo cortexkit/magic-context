@@ -150,6 +150,92 @@ fn retained_through(applied: &view::CompactionView, first: u64) -> Option<u64> {
     (through >= first).then_some(through)
 }
 
+/// Why a descent whose last applied view rendered a retained range answers
+/// head-only instead of rendering it: the seed window cannot cover that
+/// range. `current` tells whether the seed is the parent lineage's latest
+/// cut, so an older frozen snapshot is distinguishable from a window that
+/// lost rows.
+fn fallback_reason(
+    current: bool,
+    first: u64,
+    last: u64,
+    held: &BTreeMap<u64, Arc<HeldEntry>>,
+) -> &'static str {
+    if !current {
+        // The seed is an older cut's frozen snapshot while the parent lineage
+        // has since published newer cuts: its window ends before the retained
+        // range the latest applied view rendered does.
+        return "retired snapshot";
+    }
+    let missing = (first..=last).find(|ordinal| !held.contains_key(ordinal));
+    match missing {
+        // Rows above the first gap are still held: a fully read window has
+        // no holes, so the missing row was removed after it was rendered.
+        Some(gap) if held.keys().any(|ordinal| *ordinal > gap) => "revert removed rows",
+        // Nothing is held past the first gap: the retained tail was never
+        // read into this lineage's store. It renders raw once read.
+        Some(_) => "endpoint never read",
+        // No gap: the caller only calls this when some row is missing.
+        None => "covered",
+    }
+}
+
+/// The descent `initial`'s retained rows and exclusive end: the history head
+/// is separate, so this returns only the window rows. When the seed window
+/// covers everything the last applied view rendered at or after `first`,
+/// those rows render byte for byte as that view rendered them. Otherwise the
+/// answer stays head-only with a debug log naming why; the rows arrive raw on
+/// the next notice instead of failing. Setup does not call `session.read`
+/// here; the suffix is read only later, during recovery after the new
+/// lineage adopts the cut.
+fn retained_initial(
+    store: &McStore,
+    reference: &str,
+    applied_version: Option<u64>,
+    seed_entries: &[(u64, String)],
+    first: u64,
+    current: bool,
+    request_id: &str,
+) -> Result<(Vec<Value>, u64), HandlerOutcome> {
+    let mut held: BTreeMap<u64, Arc<HeldEntry>> = BTreeMap::new();
+    for (ordinal, raw) in seed_entries {
+        held.insert(*ordinal, Arc::new(HeldEntry::from_stored(raw.clone())?));
+    }
+    let applied: Option<view::CompactionView> = match applied_version {
+        Some(version) => store
+            .load_async_compaction_view(reference, version)
+            .map_err(transient)?
+            .map(|raw| serde_json::from_str(&raw).map_err(transient))
+            .transpose()?,
+        None => None,
+    };
+    let last: Option<u64> = applied
+        .as_ref()
+        .and_then(|view| retained_through(view, first));
+    let full = match (&applied, last) {
+        (Some(_), Some(end)) => (first..=end).all(|ordinal| held.contains_key(&ordinal)),
+        _ => false,
+    };
+    if !full {
+        if let Some(end) = last.filter(|_| applied.is_some()) {
+            tracing::debug!(
+                first_ordinal = first,
+                last_retained = end,
+                held_rows = held.len(),
+                reason = fallback_reason(current, first, end, &held),
+                request_id,
+                "cut descent answers head-only: held window cannot cover the retained range"
+            );
+        }
+        return Ok((Vec::new(), first));
+    }
+    let (Some(view), Some(end)) = (applied.as_ref(), last) else {
+        unreachable!("full coverage implies an applied view with a retained end");
+    };
+    let to = end.checked_add(1).unwrap_or(first);
+    Ok((render_retained_rows(&held, view, first, end)?, to))
+}
+
 /// Render the retained rows `[first, last]` byte for byte as the last applied
 /// view rendered them: the history head is separate (the cut's stored head),
 /// and these are the window rows with that view's drops and replacements in
@@ -929,11 +1015,15 @@ impl McHandler {
                         // The new lineage's entries were already persisted by the
                         // crashed `begin_at_cut`; reload the latest window when
                         // the cut is still the newest so rows read since staging
-                        // are included, exactly as the first attempt does.
+                        // are included, exactly as the first attempt does. The
+                        // stored lineage is already new, so the parent lineage
+                        // comes from the still-unreplaced stored Setup.
                         let mut seed = seed;
-                        let is_latest = state.published_cuts.values().map(|cut| cut.version).max()
-                            == Some(cut.version);
-                        if is_latest {
+                        let parent_current = state.setup.lineage_id.as_deref()
+                            == Some(cut.lineage.as_str())
+                            && state.published_cuts.values().map(|cut| cut.version).max()
+                                == Some(cut.version);
+                        if parent_current {
                             seed.window.entries = store
                                 .load_async_compaction_entries_range(
                                     &state.reference(),
@@ -944,47 +1034,21 @@ impl McHandler {
                                 .into_iter()
                                 .collect();
                         }
-                        let mut retained_entries: BTreeMap<u64, Arc<HeldEntry>> = BTreeMap::new();
-                        for (ordinal, raw) in &seed.window.entries {
-                            retained_entries
-                                .insert(*ordinal, Arc::new(HeldEntry::from_stored(raw.clone())?));
-                        }
-                        let parent_applied: Option<view::CompactionView> = match state.applied {
-                            Some(version) => store
-                                .load_async_compaction_view(&state.reference(), version)
-                                .map_err(transient)?
-                                .map(|raw| serde_json::from_str(&raw).map_err(transient))
-                                .transpose()?,
-                            None => None,
-                        };
-                        let retained_last: Option<u64> = parent_applied
-                            .as_ref()
-                            .and_then(|view| retained_through(view, first));
-                        // The parent setup is still stored (the crash happened
-                        // before the final save rewrote it), so the same
-                        // first-generation gate as the first attempt applies.
-                        // Missing rows fall back to head-only, never unknown.
-                        let full_window = state.setup.descends_from.is_none()
-                            && match (&parent_applied, retained_last) {
-                                (Some(_), Some(last)) => (first..=last)
-                                    .all(|ordinal| retained_entries.contains_key(&ordinal)),
-                                _ => false,
-                            };
-                        let retained_rows: Vec<Value> = if full_window {
-                            let (Some(view), Some(last)) = (&parent_applied, retained_last) else {
-                                unreachable!("gated by full_window");
-                            };
-                            render_retained_rows(&retained_entries, view, first, last)?
-                        } else {
-                            Vec::new()
-                        };
-                        let retained_to = if full_window {
-                            retained_last
-                                .and_then(|last| last.checked_add(1))
-                                .unwrap_or(first)
-                        } else {
-                            first
-                        };
+                        // Same rule as the first attempt: render the retained
+                        // rows when the seed window covers them, else answer
+                        // head-only with a logged reason. The parent setup is
+                        // still stored (the crash happened before the final
+                        // save rewrote it), so the stored answer check above
+                        // keeps working after this retry saves.
+                        let (retained_rows, retained_to) = retained_initial(
+                            store,
+                            &state.reference(),
+                            state.applied,
+                            &seed.window.entries,
+                            first,
+                            parent_current,
+                            request.request_id.as_str(),
+                        )?;
                         let mut engine = state.engine_with_baselines()?;
                         for view in [&mut engine.last_produced, &mut engine.last_applied]
                             .into_iter()
@@ -1032,7 +1096,7 @@ impl McHandler {
                         // read. The parent lineage is the cut's lineage: the
                         // request descends from it, and the seed was selected
                         // for it above.
-                        state.pending_parent_history = (is_latest
+                        state.pending_parent_history = (parent_current
                             && !cut.parent_namespace.is_empty())
                         .then_some(ParentHistory {
                             namespace: cut.parent_namespace.clone(),
@@ -1090,58 +1154,25 @@ impl McHandler {
                 .into_iter()
                 .collect();
         }
-        // One Setup rule: a first-generation parent's new lineage `initial`
-        // covers the retained rows the last applied view rendered, with that
-        // view's bytes. Setup does not call `session.read`: it renders
-        // retained rows from the seed window's held rows. Cached or held
+        // One Setup rule: a new lineage's `initial` covers the retained rows
+        // the last applied view rendered, with that view's bytes. Setup does
+        // not call `session.read`: it renders retained rows from the seed
+        // window's held rows (`existing` came from `load_head` without
+        // transcript rows; the current cut's window is reloaded from the
+        // store above to include rows read since staging). Cached or held
         // entries after the last retained ordinal never extend it: they render
-        // raw outside the replacement. A lineage that itself began at a cut
-        // continues returning only the cut head: its carried seed views already
-        // hold the retained rows with their edits. When the held rows do not cover
-        // the retained range (a revert removed them, or the endpoint was never
-        // read), the answer stays head-only instead of failing: the rows arrive
-        // raw on the next notice.
-        // `existing` came from `load_head` without transcript rows; the held
-        // rows for the retained range come from the seed's window (reloaded
-        // from the store for the current cut to include rows read since
-        // staging), decoded here for rendering.
-        let mut retained_entries: BTreeMap<u64, Arc<HeldEntry>> = BTreeMap::new();
-        for (ordinal, raw) in &seed.window.entries {
-            retained_entries.insert(*ordinal, Arc::new(HeldEntry::from_stored(raw.clone())?));
-        }
-        let parent_applied: Option<view::CompactionView> = match state.applied {
-            Some(version) => store
-                .load_async_compaction_view(&state.reference(), version)
-                .map_err(transient)?
-                .map(|raw| serde_json::from_str(&raw).map_err(transient))
-                .transpose()?,
-            None => None,
-        };
-        let retained_last: Option<u64> = parent_applied
-            .as_ref()
-            .and_then(|view| retained_through(view, first));
-        let full_window = state.setup.descends_from.is_none()
-            && match (&parent_applied, retained_last) {
-                (Some(_), Some(last)) => {
-                    (first..=last).all(|ordinal| retained_entries.contains_key(&ordinal))
-                }
-                _ => false,
-            };
-        let retained_rows: Vec<Value> = if full_window {
-            let (Some(view), Some(last)) = (&parent_applied, retained_last) else {
-                unreachable!("gated by full_window");
-            };
-            render_retained_rows(&retained_entries, view, first, last)?
-        } else {
-            Vec::new()
-        };
-        let retained_to = if full_window {
-            retained_last
-                .and_then(|last| last.checked_add(1))
-                .unwrap_or(first)
-        } else {
-            first
-        };
+        // raw outside the replacement. When the held rows do not cover the
+        // retained range, the answer stays head-only instead of failing: the
+        // rows arrive raw on the next notice.
+        let (retained_rows, retained_to) = retained_initial(
+            store,
+            &state.reference(),
+            state.applied,
+            &seed.window.entries,
+            first,
+            current_parent_cut,
+            request.request_id.as_str(),
+        )?;
         // A saved stage is immutable. A descendant gets its own namespace and
         // reads the live window on its next notice, so an undo cannot inherit
         // the parent's removed window rows or tag identities.
