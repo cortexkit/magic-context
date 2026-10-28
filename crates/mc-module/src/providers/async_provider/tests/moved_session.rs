@@ -39,22 +39,20 @@ pub(super) fn newest_marker_checkpoint(
          ORDER BY message.time_created DESC, message.id DESC, part.id DESC",
         )
         .unwrap();
-    let rows = query
+    let rows: Vec<String> = query
         .query_map([session], |row| row.get::<_, String>(0))
-        .unwrap();
-    // The binding ends the iterator's borrows of `query` and `conn` before they
-    // drop; returning the chain directly would not compile.
-    #[allow(clippy::let_and_return)]
-    let checkpoint = rows
+        .unwrap()
+        .filter_map(|raw| raw.ok())
+        .collect();
+    rows.into_iter()
         .filter_map(|raw| {
-            let data: Value = serde_json::from_str(&raw.unwrap()).ok()?;
+            let data: Value = serde_json::from_str(&raw).ok()?;
             let key: tags::MarkerCheckpoint =
                 serde_json::from_value(data["cortexkit"].clone()).ok()?;
             (key.session == session && key.message_count.is_some() && key.head_cut.is_some())
                 .then_some(key)
         })
-        .next();
-    checkpoint
+        .next()
 }
 
 /// The session as the runner reads it from `opencode.db`.
@@ -218,11 +216,20 @@ async fn moved_session_sets_up_from_the_import_and_carries_drops_onto_the_same_p
     let namespace = state.namespace();
     let store = rig.h.store.get().unwrap();
 
-    // The same summaries, re-anchored by message id onto the runner's ordinals.
+    // The same summaries, imported at ordinals 0..message_count-1 with the
+    // offline-computed CK block ids. The runner never serves anything below the
+    // cut, so pre-cut message ids are not in the held index.
     let imported = store.load_compartments(&namespace).unwrap();
     let standalone = source["context"]["compartments"].as_array().unwrap();
     assert_eq!(imported.len(), standalone.len());
-    for (row, source) in imported.iter().zip(standalone) {
+    let record = crate::offline_move::read_move_record(
+        &rusqlite::Connection::open(dir.path().join("context.db")).unwrap(),
+        &fixture::fixture_session(),
+    )
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    for ((row, source), manifest) in imported.iter().zip(standalone).zip(&record.compartments) {
         assert_eq!(row.content, source["content"].as_str().unwrap());
         assert_eq!(row.p1.as_deref(), source["p1"].as_str());
         assert_eq!(row.p2.as_deref(), source["p2"].as_str());
@@ -230,13 +237,44 @@ async fn moved_session_sets_up_from_the_import_and_carries_drops_onto_the_same_p
             row.importance as i64,
             source["importance"].as_i64().unwrap()
         );
-        let start = state.mid_index[source["start_message_id"].as_str().unwrap()];
-        let end = state.mid_index[source["end_message_id"].as_str().unwrap()];
+        // Positions are 1-based in the manifest; ordinals are 0-based.
         assert_eq!(
             (row.start_message, row.end_message),
-            (start as i64, end as i64)
+            (
+                source["start_message"].as_i64().unwrap() - 1,
+                source["end_message"].as_i64().unwrap() - 1
+            )
         );
+        let start_block = manifest.start_block.unwrap();
+        let end_block = manifest.end_block.unwrap();
+        assert_eq!(
+            row.start_message_id,
+            format!("{}#{start_block}", manifest.start_message_id)
+        );
+        assert_eq!(
+            row.end_message_id,
+            format!("{}#{end_block}", manifest.end_message_id)
+        );
+        assert_eq!(row.sequence, manifest.sequence);
     }
+    // The seed keeps the last sequence and the boundary of the last imported
+    // row, the certified digest and time basis, and the pre-cut tag range.
+    let seed = state.cut_seed.as_ref().expect("adoption seed");
+    assert_eq!(seed.first_ordinal, 6);
+    assert_eq!(state.lineage_first_ordinal, 6);
+    assert_eq!(seed.cut_mid, "msg_m006");
+    assert_eq!(
+        seed.cut_digest,
+        "189f89a46681c05dac35fe71f4e46c1a8cb5a0c0882b1d5f4cc80ce3f4582ca9"
+    );
+    assert!(seed.time_basis.is_some());
+    assert_eq!(seed.pre_cut_tags, vec![(1, 20)]);
+    assert_eq!(seed.max_tag, 20);
+    assert_eq!(seed.compartment_seq, 2);
+    assert_eq!(seed.boundary_id, imported.last().unwrap().end_message_id);
+    // No held row lives below the cut.
+    assert!(state.entries.keys().all(|ordinal| *ordinal >= 6));
+    assert!(state.mid_index.keys().all(|mid| mid.as_str() >= "msg_m007"));
     // m001..m006 are ordinals 0..=5: the marker's summary message is not served.
     assert_eq!(imported.last().unwrap().end_message, 5);
     // msg_m007 is the seventh served message, hence ordinal 6.
@@ -335,13 +373,18 @@ async fn moved_session_sets_up_from_the_import_and_carries_drops_onto_the_same_p
         "{queued:?} vs {expected_queued:?}"
     );
 
-    // New numbers start above the checkpoint; old standalone numbers are unknown.
+    // New numbers start above the checkpoint; old standalone numbers are below
+    // the cut, so they answer as already summarized rather than unknown.
     assert!(state
         .tag_index
         .keys()
         .all(|tag| tags::parse_tag(tag).unwrap() > 20));
     let old = rig.tool(7, "ctx_reduce", json!({"drop":"13"})).await;
-    assert_eq!(old["isError"], true, "{old}");
+    assert_eq!(old["isError"], false, "{old}");
+    assert!(
+        old.to_string().contains("already in the history summary"),
+        "old tag 13 must answer below the cut: {old}"
+    );
     let new = rig.tool(7, "ctx_reduce", json!({"drop":"21"})).await;
     assert_ne!(new["isError"], true, "{new}");
 
@@ -401,10 +444,12 @@ async fn moved_session_sets_up_from_the_import_and_carries_drops_onto_the_same_p
         })
         .await;
     assert_eq!(again["answer"], "ready", "{again}");
-    // The second Setup returns the same cut (msg_m007) as the first Setup.
+    // The second Setup returns the same cut (msg_m007) as the first Setup, with
+    // the same certified checkpoint.
     assert_eq!(
         again["checkpoint"],
-        json!({"tag_checkpoint": 20, "cut": "msg_m007"})
+        json!({"tag_checkpoint": 20, "cut": "msg_m007", "message_count": 6,
+            "head_cut":{"mid":"msg_m006","digest":"189f89a46681c05dac35fe71f4e46c1a8cb5a0c0882b1d5f4cc80ce3f4582ca9","written_at":1793145600123u64}})
     );
 }
 
@@ -426,18 +471,151 @@ async fn setup_refuses_an_unmoved_standalone_session() {
 }
 
 #[tokio::test]
-async fn moved_session_import_refuses_a_read_that_starts_after_the_history() {
+async fn moved_session_first_read_binds_without_pre_cut_rows() {
+    // The adoption bootstrap imports the prefix at Setup, so the first read is
+    // drops-only and never serves anything below the cut. A read starting at
+    // the cut (without pre-cut rows) must succeed and bind drops.
     let dir = tempfile::tempdir().unwrap();
     let (rig, _) = moved_rig(dir.path(), true).await;
     {
         let mut entries = rig.runner.entries.lock().unwrap();
-        entries.retain(|entry| entry.mid != "msg_m001");
+        entries.retain(|entry| entry.ordinal >= 6);
     }
     let state = rig.state();
     let mut state = state;
     let store = rig.h.store.get().unwrap();
-    // Feed the shortened transcript through the same ingest a notice uses.
+    // Feed only the post-cut transcript through the same ingest a notice uses.
     for entry in rig.runner.entries.lock().unwrap().iter() {
+        state.entries.insert(
+            entry.ordinal,
+            Arc::new(HeldEntry::from_read(entry).unwrap()),
+        );
+    }
+    state.journal.complete = true;
+    state
+        .ingest_read(store, codec::Codec::OpencodeAiSdk)
+        .expect("drops-only first read binds");
+    assert!(state
+        .standalone_move
+        .as_ref()
+        .is_some_and(|moved| moved.pending.is_none()));
+    assert!(!state
+        .standalone_move
+        .as_ref()
+        .map(|moved| moved.bound_drops.is_empty())
+        .unwrap_or(true));
+}
+
+#[tokio::test]
+async fn importing_stage_restarts_from_the_move_record() {
+    // A crash between the `importing` save (cut set, initial still null) and the
+    // final Setup save must restart from the move record and never answer the
+    // partial record as complete.
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, answer) = moved_rig(dir.path(), true).await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    let store = rig.h.store.get().unwrap();
+    // Simulate the crash: keep the cut stage, drop the complete initial.
+    let mut state = rig.state();
+    assert!(state.cut_first_ordinal.is_some());
+    state.initial = Value::Null;
+    state.save(store, &[]).unwrap();
+    let stored = load_head(store, &rig.reference).unwrap().unwrap();
+    assert!(stored.is_importing_stage(), "must look importing");
+    // A repeat Setup restarts and answers ready, not the partial record.
+    let again = rig
+        .op("compaction.setup", {
+            let mut request = setup_request(&fixture::fixture_session(), "retry");
+            request["params"] = json!({"serializer_profile":"opencode-aisdk"});
+            request
+        })
+        .await;
+    assert_eq!(again["answer"], "ready", "{again}");
+    assert_eq!(
+        again["checkpoint"], answer["checkpoint"],
+        "{again} vs {answer}"
+    );
+    let restored = rig.state();
+    assert!(!restored.is_importing_stage());
+    assert_eq!(restored.lineage_first_ordinal, 6);
+    assert!(restored.cut_seed.is_some());
+}
+
+#[tokio::test]
+async fn second_bind_adds_no_duplicate_and_keeps_the_move_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, _) = moved_rig(dir.path(), true).await;
+    let store = rig.h.store.get().unwrap();
+    // First bind through the same ingest a notice uses, without running the
+    // engine in between so nothing consumes the queue.
+    let mut first = rig.state();
+    for entry in rig.runner.entries.lock().unwrap().iter() {
+        if entry.ordinal < 6 {
+            continue;
+        }
+        first.entries.insert(
+            entry.ordinal,
+            Arc::new(HeldEntry::from_read(entry).unwrap()),
+        );
+    }
+    first.journal.complete = true;
+    first
+        .ingest_read(store, codec::Codec::OpencodeAiSdk)
+        .expect("first bind");
+    first.save(store, &[]).unwrap();
+    let pending_before = store.load_pending_agent_drops(&first.namespace()).unwrap();
+    let frozen_before = first.frozen_edits.json().unwrap();
+    assert!(first
+        .standalone_move
+        .as_ref()
+        .is_some_and(|moved| moved.pending.is_none()));
+    assert!(!first
+        .standalone_move
+        .as_ref()
+        .map(|moved| moved.bound_drops.is_empty())
+        .unwrap_or(true));
+    // The authoritative move record is never cleared.
+    let raw = offline_move::read_move_record_raw(
+        &rusqlite::Connection::open(dir.path().join("context.db")).unwrap(),
+        &fixture::fixture_session(),
+    )
+    .unwrap()
+    .expect("move record survives binding");
+    let kept: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(kept["state"], "moved");
+    // A second bind in the same namespace is idempotent: no duplicate edit or
+    // queue row, and still only its own pending marker cleared.
+    let mut again = first;
+    again.journal.complete = true;
+    again
+        .ingest_read(store, codec::Codec::OpencodeAiSdk)
+        .expect("second bind");
+    let pending_after = store.load_pending_agent_drops(&again.namespace()).unwrap();
+    assert_eq!(pending_before.len(), pending_after.len());
+    assert_eq!(frozen_before, again.frozen_edits.json().unwrap());
+    assert!(again
+        .standalone_move
+        .as_ref()
+        .is_some_and(|moved| moved.pending.is_none()));
+}
+
+#[tokio::test]
+async fn unbindable_drop_target_refuses_drop_target_unbound() {
+    // A carried drop whose served part has no tag cannot be bound: fail closed.
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, _) = moved_rig(dir.path(), true).await;
+    // Drop the applied target msg_m008 entirely, so no served part matches it.
+    {
+        let mut entries = rig.runner.entries.lock().unwrap();
+        entries.retain(|entry| entry.mid != "msg_m008");
+    }
+    let mut state = rig.state();
+    let store = rig.h.store.get().unwrap();
+    for entry in rig.runner.entries.lock().unwrap().iter() {
+        // Only post-cut rows are ever served; pre-cut rows are never requested.
+        if entry.ordinal < 6 {
+            continue;
+        }
         state.entries.insert(
             entry.ordinal,
             Arc::new(HeldEntry::from_read(entry).unwrap()),
@@ -449,10 +627,134 @@ async fn moved_session_import_refuses_a_read_that_starts_after_the_history() {
         panic!("{refused:?}");
     };
     assert_eq!(code, PROTOCOL_ERROR);
-    assert!(
-        message.starts_with("moved_session_read_starts_after_history"),
-        "{message}"
-    );
+    assert!(message.contains("drop_target_unbound"), "{message}");
+}
+
+#[tokio::test]
+async fn replay_skips_removed_and_changed_digests() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, _) = moved_rig(dir.path(), true).await;
+    rig.notice(1, 1_000, None).await;
+    settle_historian(&rig).await;
+    let store = rig.h.store.get().unwrap();
+    let mut state = rig.state();
+    let bound = state
+        .standalone_move
+        .as_ref()
+        .map(|moved| moved.bound_drops.clone())
+        .unwrap();
+    assert!(!bound.is_empty());
+    // Removed target: drop its tag row so no served part matches, and drop its
+    // held entry so the replay sees it as gone rather than untagged.
+    let removed = bound
+        .iter()
+        .find(|drop| drop.kind == crate::offline_move::DropKind::Applied)
+        .unwrap()
+        .clone();
+    let tag_to_drop = state
+        .tag_index
+        .iter()
+        .find(|(_, address)| address.mid == removed.mid && address.part == removed.part)
+        .map(|(tag, _)| tag.clone());
+    if let Some(tag) = tag_to_drop {
+        state.tag_index.remove(&tag);
+    }
+    if let Some(ordinal) = state.mid_index.get(&removed.mid).copied() {
+        state.entries.remove(&ordinal);
+    }
+    state.journal.complete = true;
+    state
+        .ingest_read(store, codec::Codec::OpencodeAiSdk)
+        .expect("removed target is skipped, not refused");
+    // Changed digest: serve the same part with a different digest. The old drop
+    // must not be applied to the changed content.
+    let mut changed = rig.state();
+    let changed_target = bound
+        .iter()
+        .find(|drop| drop.kind == crate::offline_move::DropKind::Applied)
+        .unwrap();
+    for (_, address) in changed.tag_index.iter_mut() {
+        if address.mid == changed_target.mid && address.part == changed_target.part {
+            address.digest = "changed-digest".into();
+        }
+    }
+    changed.journal.complete = true;
+    changed
+        .ingest_read(store, codec::Codec::OpencodeAiSdk)
+        .expect("changed digest is skipped, not dropped");
+}
+
+#[tokio::test]
+async fn replay_same_digest_untagged_refuses_before_any_model_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, _) = moved_rig(dir.path(), true).await;
+    rig.notice(1, 1_000, None).await;
+    settle_historian(&rig).await;
+    let store = rig.h.store.get().unwrap();
+    let mut state = rig.state();
+    let bound = state
+        .standalone_move
+        .as_ref()
+        .map(|moved| moved.bound_drops.clone())
+        .unwrap();
+    let target = bound
+        .iter()
+        .find(|drop| drop.kind == crate::offline_move::DropKind::Applied)
+        .unwrap()
+        .clone();
+    // Keep the held part with its digest but drop its tag, so the same-digest
+    // part is served untagged. The replay must refuse before any model call.
+    let tag_to_drop = state
+        .tag_index
+        .iter()
+        .find(|(_, address)| address.mid == target.mid && address.part == target.part)
+        .map(|(tag, _)| tag.clone());
+    let dropped = tag_to_drop.map(|tag| state.tag_index.remove(&tag).unwrap());
+    assert!(dropped.is_some(), "expected a tagged applied target");
+    state.journal.complete = true;
+    let refused = state.ingest_read(store, codec::Codec::OpencodeAiSdk);
+    let Err(HandlerOutcome::Error { code, message }) = refused else {
+        panic!("{refused:?}");
+    };
+    assert_eq!(code, PROTOCOL_ERROR);
+    assert!(message.contains("drop_target_unbound"), "{message}");
+}
+
+#[tokio::test]
+async fn rebinding_into_a_fresh_generation_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, _) = moved_rig(dir.path(), true).await;
+    rig.notice(1, 1_000, None).await;
+    settle_historian(&rig).await;
+    let first_namespace = rig.state().namespace();
+    let first_bound = rig
+        .state()
+        .standalone_move
+        .as_ref()
+        .map(|moved| moved.bound_drops.clone())
+        .unwrap();
+    assert!(!first_bound.is_empty());
+    // Move to a fresh generation on a new lineage with the same certified cut.
+    *rig.runner.lineage.lock().unwrap() = "L2".into();
+    let mut request = setup_request(&fixture::fixture_session(), "gen2");
+    request["params"] = json!({"serializer_profile":"opencode-aisdk"});
+    request["lineage_id"] = json!("L2");
+    let answer = rig.op("compaction.setup", request).await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    rig.notice(2, 1_000, None).await;
+    settle_historian(&rig).await;
+    let state = rig.state();
+    assert_ne!(state.namespace(), first_namespace);
+    let rebased = state
+        .standalone_move
+        .as_ref()
+        .map(|moved| moved.bound_drops.clone())
+        .unwrap();
+    assert_eq!(rebased, first_bound);
+    assert!(state
+        .standalone_move
+        .as_ref()
+        .is_some_and(|moved| moved.pending.is_none()));
 }
 
 fn peak_rss_kib() -> Option<u64> {
