@@ -107,7 +107,7 @@ export interface HiddenRunHandle {
 export interface HiddenCompletion {
     text: string | null;
     reasoning?: string | null;
-    usage: TokenTotals;
+    usage: TokenTotals & { reasoning?: number };
     lengthCapped: boolean;
     tokenLog?: import("../../shared/run-token-log").RunTokenLog;
     /** Original host messages are retained only by transports that expose them. */
@@ -125,6 +125,8 @@ export interface HiddenCompletionExecutor {
     attempt(handle: HiddenRunHandle, request: PromptArgs): Promise<void>;
     /** Kept separate from prompt settlement so read failures never resend a historian prompt. */
     collect(handle: HiddenRunHandle, limit: number): Promise<HiddenCompletion>;
+    /** Read an interrupted child's output without treating it as a settled completion. */
+    collectPartial?(handle: HiddenRunHandle, limit: number): Promise<HiddenCompletion>;
     close(
         handle: HiddenRunHandle | null,
         settlement: {

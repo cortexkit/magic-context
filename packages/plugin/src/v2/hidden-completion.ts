@@ -136,6 +136,8 @@ interface RunState {
     /** Releases this run's hold on the store reader pool. */
     releaseStore: () => void;
     completion?: HiddenCompletion;
+    partialCompletion?: HiddenCompletion;
+    attempt?: { child: HiddenChildAttempt; baseline: number };
     failed: boolean;
     /** A failure other than a settled provider error row (dispatch error, refusal, timeout, abort). */
     unsettledFailure: boolean;
@@ -213,6 +215,23 @@ function toolResultText(result: unknown): string | undefined {
         .filter((part) => part.length > 0)
         .join("\n");
     return text.length > 0 ? text : undefined;
+}
+
+function sumRowUsage(rows: readonly StoreRow<"assistant">[]): HiddenCompletion["usage"] {
+    const count = (value: unknown): number =>
+        typeof value === "number" && Number.isFinite(value) ? value : 0;
+    return rows.reduce<HiddenCompletion["usage"]>(
+        (total, row) => ({
+            input: total.input + count(row.data.tokens?.input),
+            output: total.output + count(row.data.tokens?.output),
+            cacheRead: total.cacheRead + count(row.data.tokens?.cache?.read),
+            cacheWrite: total.cacheWrite + count(row.data.tokens?.cache?.write),
+            ...(total.reasoning !== undefined || row.data.tokens?.reasoning !== undefined
+                ? { reasoning: (total.reasoning ?? 0) + count(row.data.tokens?.reasoning) }
+                : {}),
+        }),
+        { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    );
 }
 
 /**
@@ -483,6 +502,10 @@ export function createLateHiddenExecutor(
         open: (run) => wired().open(run),
         attempt: (handle, request) => wired().attempt(handle, request),
         collect: (handle, limit) => wired().collect(handle, limit),
+        collectPartial: (handle, limit) => {
+            const executor = wired();
+            return executor.collectPartial?.(handle, limit) ?? executor.collect(handle, limit);
+        },
         close: (handle, settlement) => wired().close(handle, settlement),
     };
 }
@@ -609,8 +632,39 @@ export async function createV2HiddenCompletionExecutor(
         run.child = lifecycle.updateModel(run.child, requested);
     };
 
+    const partialCompletion = (run: RunState): HiddenCompletion => {
+        const attempt = run.attempt;
+        const rows = attempt
+            ? withReader(options.openReader, (reader) => {
+                  const latest = reader.latestAssistant(run.child.id);
+                  return (
+                      reader.assistantSince?.(run.child.id, attempt.baseline) ??
+                      (latest ? [latest] : [])
+                  ).filter((row) => row.seq > attempt.baseline);
+              })
+            : [];
+        const usage = sumRowUsage(rows);
+        return {
+            text: rows.map(assistantText).filter(Boolean).join("\n") || null,
+            messages: attempt ? toolLoopMessages(attempt.child, rows) : [],
+            usage,
+            tokenLog: runTokenLog(usage),
+            lengthCapped: false,
+        };
+    };
+
     const retire = (run: RunState, reason: string): void => {
         if (run.retired) return;
+        // Native retirement can delete the child's rows immediately. Preserve the
+        // interrupted transcript before cleanup so complete per-memory mapping
+        // decisions can still be committed from an unfinished manifest.
+        if (hiddenToolLoop(run.identity) && !run.completion) {
+            try {
+                run.partialCompletion = partialCompletion(run);
+            } catch (error) {
+                note(`[magic-context] could not read interrupted child output: ${String(error)}`);
+            }
+        }
         lifecycle.retire(run.child, reason);
         run.retired = true;
     };
@@ -765,6 +819,8 @@ export async function createV2HiddenCompletionExecutor(
                 shaped: false,
                 budget: run.budget,
             };
+            run.partialCompletion = undefined;
+            run.attempt = { child: attempt, baseline };
             options.hook.registerAttempt(marker, attempt);
             const deadline = Date.now() + run.identity.timeoutMs;
             const budget = run.budget;
@@ -962,17 +1018,7 @@ export async function createV2HiddenCompletionExecutor(
                         tokenNumber(step.data.tokens?.input) !== undefined ||
                         tokenNumber(step.data.tokens?.output) !== undefined,
                 );
-                const usage = steps.reduce(
-                    (total, step) => ({
-                        input: total.input + (tokenNumber(step.data.tokens?.input) ?? 0),
-                        output: total.output + (tokenNumber(step.data.tokens?.output) ?? 0),
-                        cacheRead:
-                            total.cacheRead + (tokenNumber(step.data.tokens?.cache?.read) ?? 0),
-                        cacheWrite:
-                            total.cacheWrite + (tokenNumber(step.data.tokens?.cache?.write) ?? 0),
-                    }),
-                    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                );
+                const usage = sumRowUsage(steps);
                 // A host promise may resolve at the same instant as cancellation.
                 // Never publish a completion after the child has been retired.
                 if (request.signal?.aborted || run.retired || Date.now() >= deadline) {
@@ -985,7 +1031,11 @@ export async function createV2HiddenCompletionExecutor(
                 }
                 run.completion = {
                     text,
-                    tokenLog: runTokenLog(tokens, run.identity.maxOutputTokens, row.data.finish),
+                    tokenLog: runTokenLog(
+                        reportedUsage ? usage : tokens,
+                        run.identity.maxOutputTokens,
+                        row.data.finish,
+                    ),
                     ...(hiddenToolLoop(run.identity)
                         ? { messages: toolLoopMessages(attempt, steps) }
                         : {}),
@@ -1060,6 +1110,11 @@ export async function createV2HiddenCompletionExecutor(
             const completion = runs.get(handle)?.completion;
             if (!completion) throw new Error("Hidden completion has no settled output");
             return completion;
+        },
+        async collectPartial(handle) {
+            const run = runs.get(handle);
+            if (!run) throw new Error("Hidden completion handle is closed");
+            return run.completion ?? run.partialCompletion ?? partialCompletion(run);
         },
         async close(handle, settlement) {
             if (!handle) return;
