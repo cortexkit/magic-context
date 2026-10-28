@@ -1458,6 +1458,13 @@ export function readSessionChunk(
         const meta = { ordinal: msg.ordinal, messageId: msg.id };
         if (isHostUnservedRow(msg)) markHostUnservedRow(meta);
 
+        // Host instructions are prompt material, not user decisions. Keep their
+        // ordinals for coverage, but omit their text as the Rust reader does.
+        if (msg.role === "system") {
+            recordFilteredNoise(meta);
+            continue;
+        }
+
         // Skip user messages that are pure system notifications (background task
         // completions, internal initiator markers, system directives). These carry
         // zero signal for compartment summaries — unless they contain tool results

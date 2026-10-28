@@ -13,7 +13,7 @@ import {
     ownsLkgDirtyFence,
 } from "./lkg-recovery-fence";
 import { type LkgEntryProjection, resolveLkgModelKeys } from "./lkg-replay";
-import { getSlot, type LkgEntryNote, lkgContentDigest } from "./lkg-slot";
+import { getSlot, type LkgEntryNote, lkgContentDigest, lkgInputIdentity } from "./lkg-slot";
 import type { MessageLike } from "./transform-operations";
 
 interface RecoveryPrefix {
@@ -147,6 +147,23 @@ export function noteLkgRecoveryPrefix(args: {
 
 export function readLkgRecoveryPrefix(
     sessionId: string,
+    inputs: (Pick<LkgEntryProjection, "id" | "contentDigest"> & { role?: string })[],
+    messages: MessageLike[],
+    db?: Database,
+): { prefix?: RecoveryPrefix; rebuildReason?: string } {
+    return readRecoveryIdentityPrefix(
+        sessionId,
+        inputs.map((input, index) => ({
+            id: lkgInputIdentity(input.id, input.role, index),
+            contentDigest: input.contentDigest,
+        })),
+        messages,
+        db,
+    );
+}
+
+function readRecoveryIdentityPrefix(
+    sessionId: string,
     inputs: Pick<LkgEntryProjection, "id" | "contentDigest">[],
     messages: MessageLike[],
     db?: Database,
@@ -194,8 +211,8 @@ export function noteLkgHealthyPrefix(
             prefix && !release
                 ? {
                       ...prefix,
-                      inputs: inputs.map((input) => ({
-                          id: input.id ?? "",
+                      inputs: inputs.map((input, index) => ({
+                          id: lkgInputIdentity(input.id, input.role, index) ?? "",
                           digest: input.contentDigest?.() ?? "",
                       })),
                       json: JSON.stringify(messages),
@@ -220,5 +237,5 @@ export function lkgRecoveryEntryUnproven(
         id,
         contentDigest: () => digests[index] ?? null,
     }));
-    return !!readLkgRecoveryPrefix(sessionId, inputs, messages).rebuildReason;
+    return !!readRecoveryIdentityPrefix(sessionId, inputs, messages).rebuildReason;
 }

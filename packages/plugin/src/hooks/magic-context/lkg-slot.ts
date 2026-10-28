@@ -40,6 +40,17 @@ export interface LkgEntryNote {
     anchorIndex: number;
 }
 
+const POSITIONAL_SYSTEM_KEY = "\0mc-system:";
+
+/** Replay-only identity; never assign it to a host message's info.id or to a ctx_reduce tag. */
+export function lkgInputIdentity(id: unknown, role: unknown, index: number): string | null {
+    if (typeof id === "string" && id.length > 0)
+        return id.startsWith(POSITIONAL_SYSTEM_KEY) ? null : id;
+    // Content is checked separately by the aligned pristine digest. Position
+    // distinguishes repeated announcements without inventing a host message id.
+    return role === "system" ? `${POSITIONAL_SYSTEM_KEY}${index}` : null;
+}
+
 // One slot must hold any request a provider will accept. Anthropic's limit is
 // 32 MB of request JSON, and screenshot-heavy sessions reach it long before the
 // token window. Slot size is counted as two heap bytes per JSON character, so a
@@ -788,10 +799,9 @@ export function noteEntry(sessionId: string, input: MessageLike[]): LkgEntryNote
     const messages = input.some((message) => isCoveredInstructionRow(message.info))
         ? input.filter((message) => !isCoveredInstructionRow(message.info))
         : input;
-    const entryInputIds = messages.map((message) => {
-        const id = (message.info as { id?: unknown } | undefined)?.id;
-        return typeof id === "string" ? id : "";
-    });
+    const entryInputIds = messages.map(
+        (message, index) => lkgInputIdentity(message.info?.id, message.info?.role, index) ?? "",
+    );
     const anchorIndex = entryInputIds.indexOf(slot.lastInputMessageId);
     if (anchorIndex < 0) return null;
     // Digest the whole input, not only the prefix the slot needs: the entry
