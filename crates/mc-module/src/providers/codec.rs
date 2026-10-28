@@ -354,6 +354,11 @@ enum NativeBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_format: Option<String>,
     },
+    ProviderFallback {
+        from_model: String,
+        to_model: String,
+        raw: String,
+    },
     ToolCall {
         tool_call_id: String,
         tool_name: String,
@@ -450,6 +455,12 @@ pub fn decode_message(
             NativeBlock::Text { text } => CkKind::Text { text },
             NativeBlock::Reasoning { text, signature } => CkKind::Reasoning { text, signature },
             NativeBlock::RedactedReasoning { data, .. } => CkKind::RedactedReasoning { data },
+            NativeBlock::ProviderFallback { .. } => CkKind::Opaque(ck_wire::OpaqueBlock {
+                source: json!("broca"),
+                kind: "provider_fallback".into(),
+                raw: raw.clone(),
+                arc: None,
+            }),
             NativeBlock::ToolCall {
                 tool_call_id,
                 tool_name,
@@ -672,6 +683,27 @@ pub fn encode_message(message: &ck_wire::CkWireMessage) -> Result<Value, Handler
                     candidate
                 }
             }
+            CkKind::Opaque(opaque)
+                if opaque.source == json!("broca") && opaque.kind == "provider_fallback" =>
+            {
+                let retained = raw.filter(|raw| **raw == opaque.raw).ok_or_else(|| {
+                    error(
+                        "provider_fallback_edit_unsupported",
+                        "Cannot author or change a provider fallback block",
+                    )
+                })?;
+                // Validate the retained carrier too: opaque CK values must not
+                // bypass Broca's closed native part schema on egress.
+                match serde_json::from_value::<NativeBlock>(retained.clone()) {
+                    Ok(NativeBlock::ProviderFallback { .. }) => retained.clone(),
+                    _ => {
+                        return Err(error(
+                            "history_unreadable",
+                            "Invalid provider fallback block",
+                        ))
+                    }
+                }
+            }
             _ => {
                 return Err(error(
                     "history_unreadable",
@@ -686,6 +718,7 @@ pub fn encode_message(message: &ck_wire::CkWireMessage) -> Result<Value, Handler
         .get("mc-provider")
         .and_then(|v| v.get("native_message"))
     {
+        check_provider_fallback_edit(original, &content)?;
         if original.get("role") == Some(&json!(message.role))
             && original.get("content") == Some(&json!(content))
         {
@@ -693,6 +726,35 @@ pub fn encode_message(message: &ck_wire::CkWireMessage) -> Result<Value, Handler
         }
     }
     Ok(json!({"role":message.role,"content":content}))
+}
+
+/// A retained fallback belongs to the reasoning sequence in its source message.
+/// Changing that sequence could replay a provider handoff without its context;
+/// refuse rather than infer how the provider would have rewritten it.
+fn check_provider_fallback_edit(original: &Value, content: &[Value]) -> Result<(), HandlerOutcome> {
+    let Some(source) = original.get("content").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let Some(last) = source
+        .iter()
+        .rposition(|part| part["type"] == "provider_fallback")
+    else {
+        return Ok(());
+    };
+    for (index, part) in source.iter().enumerate() {
+        let protected = index <= last
+            || matches!(
+                part["type"].as_str(),
+                Some("reasoning" | "redacted_reasoning")
+            );
+        if protected && content.get(index) != Some(part) {
+            return Err(error(
+                "provider_fallback_edit_unsupported",
+                "Cannot remove or move a provider fallback or its reasoning sequence",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn encode_view(

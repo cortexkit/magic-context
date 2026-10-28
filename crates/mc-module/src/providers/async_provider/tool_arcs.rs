@@ -48,6 +48,10 @@ pub(super) struct KeptMessage {
     /// message still names its call when every part is dropped; only removing
     /// the whole message removes the result.
     tool_result_message: bool,
+    /// Fallbacks and reasoning that must survive together in a kept message.
+    pub(super) fallback_protected: Vec<String>,
+    /// Removing an earlier part would shift a retained fallback's position.
+    pub(super) fallback_prefix: Vec<String>,
 }
 
 /// Kept transcript messages of one view by ordinal.
@@ -71,6 +75,29 @@ impl KeptMessage {
     ) -> Result<Self, HandlerOutcome> {
         let native = super::parts(message)?;
         let (sides, tool_result_message) = sides(codec, message, &native);
+        let fallback = (codec == codec::Codec::OwnedBroca)
+            .then(|| {
+                native
+                    .iter()
+                    .rposition(|part| part["type"] == "provider_fallback")
+            })
+            .flatten();
+        let fallback_protected = native
+            .iter()
+            .enumerate()
+            .filter_map(|(index, part)| {
+                (fallback.is_some()
+                    && matches!(
+                        part["type"].as_str(),
+                        Some("provider_fallback" | "reasoning" | "redacted_reasoning")
+                    ))
+                .then(|| parts.get(index).cloned())
+                .flatten()
+            })
+            .collect();
+        let fallback_prefix = fallback.map_or_else(Vec::new, |last| {
+            parts.iter().take(last + 1).cloned().collect()
+        });
         Ok(Self {
             codec,
             mid: mid.to_owned(),
@@ -79,6 +106,8 @@ impl KeptMessage {
             string_content: message.get("content").is_some_and(Value::is_string),
             sides,
             tool_result_message,
+            fallback_protected,
+            fallback_prefix,
         })
     }
 }
