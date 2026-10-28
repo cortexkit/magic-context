@@ -7,9 +7,6 @@ use crate::offline_move::{self, DropKind, MoveRecord};
 /// The harness OpenCode 1 sessions are set up under. Only these can hold
 /// standalone plugin state.
 const OPENCODE1_HARNESS: &str = "opencode";
-/// Setup refusal for a moved record that exists but cannot be read. The session
-/// was handed away from standalone, so ck-mc must not set it up as a fresh one.
-const MOVED_RECORD_UNREADABLE: &str = "moved_session_record_unreadable";
 
 /// What the offline move left for this conversation.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -20,6 +17,9 @@ pub(super) struct StandaloneMove {
     pub tag_checkpoint: u64,
     /// The boundary user message the standalone marker cuts at.
     pub cut: String,
+    /// Counted prefix length and the runner-certified last message in that prefix.
+    pub message_count: u64,
+    pub head_cut: cortexkit_role_llm_runner::read::HeadCut,
     /// The imported summaries and drops, until the first read binds them to held
     /// entries. Cleared once bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,20 +47,30 @@ pub(super) fn setup_fence(
     if harness != OPENCODE1_HARNESS || !store.has_context_domain() {
         return Ok(Fence::Fresh);
     }
-    let (record, standalone) = store
+    let (raw, record, standalone) = store
         .with_context_read(|conn| {
             Ok((
+                offline_move::read_move_record_raw(conn, session)?,
                 offline_move::read_move_record(conn, session)?,
                 offline_move::has_standalone_state(conn, session)?,
             ))
         })
         .map_err(transient)?;
     Ok(match record {
-        Some(Ok(record)) => Fence::Moved(Box::new(record)),
+        Some(Ok(record)) if record.state == offline_move::MoveState::Moved => {
+            Fence::Moved(Box::new(record))
+        }
+        Some(Ok(_)) => Fence::Refuse(setup_refusal(
+            request_id,
+            "move_in_progress",
+            "The offline move has not finished; rerun `ck-mc offline move-session` first.",
+        )),
         Some(Err(reason)) => Fence::Refuse(
             serde_json::to_value(contract::setup::SetupAnswer::refuse(
                 request_id,
-                contract::errors::RefuseCode::from_code(MOVED_RECORD_UNREADABLE),
+                contract::errors::RefuseCode::from_code(offline_move::classify_record_error(
+                    raw.as_deref().unwrap_or_default(),
+                )),
                 format!("The moved record for this session cannot be read: {reason}"),
             ))
             .map_err(transient)?,
@@ -119,14 +129,95 @@ impl StandaloneMove {
     /// The Setup checkpoint every Setup answer for this session carries.
     pub(super) fn checkpoint(&self) -> contract::setup::SetupCheckpoint {
         contract::setup::SetupCheckpoint::new(self.tag_checkpoint, &self.cut)
+            .with_message_checkpoint(self.message_count, self.head_cut.clone())
     }
 
     pub(super) fn from_record(record: MoveRecord) -> Self {
         Self {
             tag_checkpoint: record.tag_checkpoint,
             cut: record.cut.clone(),
+            message_count: record.message_count,
+            head_cut: certified_head(&record),
             pending: Some(record),
         }
+    }
+}
+
+pub(super) fn certified_head(record: &MoveRecord) -> cortexkit_role_llm_runner::read::HeadCut {
+    cortexkit_role_llm_runner::read::HeadCut::new(
+        &record.head_cut.mid,
+        &record.head_cut.digest,
+        record.head_cut.written_at,
+    )
+}
+
+pub(super) fn checkpoint(record: &MoveRecord) -> contract::setup::SetupCheckpoint {
+    contract::setup::SetupCheckpoint::new(record.tag_checkpoint, &record.cut)
+        .with_message_checkpoint(record.message_count, certified_head(record))
+}
+
+pub(super) fn setup_refusal(request_id: &str, code: &str, reason: &str) -> Value {
+    serde_json::to_value(contract::setup::SetupAnswer::refuse(
+        request_id,
+        contract::errors::RefuseCode::from_code(code),
+        reason,
+    ))
+    .expect("Setup refusal serializes")
+}
+
+impl McHandler {
+    /// Validate the manifest's codec and certified prefix before an engine pass
+    /// or import can expose a provider record. Native descents validate their
+    /// own newer cut instead of the original adoption boundary.
+    pub(super) async fn check_moved_setup(
+        &self,
+        record: &MoveRecord,
+        request: &compact::setup::SetupRequest,
+        route: &crate::route_targets::SessionRunnerRoute,
+        identity: &session_resolver::RunnerBindIdentity,
+    ) -> Result<Option<Value>, HandlerOutcome> {
+        let codec_matches = codec::Codec::from_params(&Value::Object(request.params.clone()))
+            .is_ok_and(|codec| {
+                codec.wire_id() == record.codec_profile.serializer
+                    && record.codec_profile.native_index == "part_index"
+            });
+        if !codec_matches {
+            return Ok(Some(setup_refusal(
+                &request.request_id,
+                "moved_session_codec_mismatch",
+                "Setup's codec differs from the offline move manifest.",
+            )));
+        }
+        if request.descends_from.is_some() {
+            return Ok(None);
+        }
+        let raw = self
+            .provider_runner
+            .call_for_identity(
+                route,
+                identity,
+                "session.head",
+                json!({}),
+                Duration::from_secs(10),
+            )
+            .await
+            .map_err(runner_error)?;
+        let head: cortexkit_role_llm_runner::read::HeadMeta = decode(&raw)?;
+        let code = if head.first_ordinal.unwrap_or(0) < record.message_count {
+            Some("moved_session_reverted_below_import")
+        } else if head.first_ordinal != Some(record.message_count)
+            || head.cut.as_ref() != Some(&certified_head(record))
+            || head.lineage_id != request.lineage_id
+        {
+            Some("moved_session_head_mismatch")
+        } else {
+            None
+        };
+        Ok(code.map(|code| setup_refusal(
+            &request.request_id,
+            code,
+            "The runner's head does not match the offline-certified prefix; rerun the offline preparation after restoring the moved history.",
+        )))
     }
 }
 

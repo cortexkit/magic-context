@@ -2579,6 +2579,40 @@ impl McHandler {
             moved_session::Fence::Moved(record) => Some(*record),
             moved_session::Fence::Refuse(answer) => return bytes(&answer),
         };
+        let mut live_describe = None;
+        if let Some(record) = &standalone_move {
+            let route = crate::route_targets::SessionRunnerRoute::for_principal(
+                binding.principal.as_ref(),
+                &request.session,
+            )
+            .ok_or_else(|| invalid_field("runner", "unsupported session runner principal"))?;
+            let identity = session_resolver::RunnerBindIdentity {
+                project_root: binding.project_root.clone(),
+                harness: request.harness.clone(),
+                session: request.session.clone(),
+            };
+            let describe = self.runner_describe(&route, &identity).await?;
+            if let Some(refusal) = self
+                .refuse_checkpoint_unsupported(
+                    Some(&moved_session::checkpoint(record)),
+                    CheckpointSource::StandaloneMove,
+                    &route,
+                    &identity,
+                    &request.request_id,
+                    Some(describe.clone()),
+                )
+                .await?
+            {
+                return bytes(&refusal);
+            }
+            if let Some(refusal) = self
+                .check_moved_setup(record, &request, &route, &identity)
+                .await?
+            {
+                return bytes(&refusal);
+            }
+            live_describe = Some(describe);
+        }
         let reference = key.reference();
         let existing = load_head(store, &reference)?;
         let unsafe_existing = existing
@@ -2617,8 +2651,14 @@ impl McHandler {
             let history = store
                 .load_compartments(&old.namespace())
                 .map_err(transient)?;
-            let mut state =
-                self.new_async_record(channel, binding, &request, key, None, generation)?;
+            let mut state = self.new_async_record(
+                channel,
+                binding,
+                &request,
+                key,
+                standalone_move.clone(),
+                generation,
+            )?;
             // A new lineage of an existing conversation keeps its pruning
             // permission as it was; only new conversations opt in here.
             if !old.accepts_pruning() {
@@ -2676,7 +2716,10 @@ impl McHandler {
                 .lock()
                 .expect("async resident cache")
                 .forget(&reference);
-            return bytes(&state.initial);
+            return bytes(&with_checkpoint(
+                state.initial,
+                standalone_move.as_ref().map(moved_session::checkpoint),
+            ));
         }
         // A record the offline first pass prepared is kept only for the exact
         // Setup it was prepared under; any other Setup discards it and sets the
@@ -2688,14 +2731,17 @@ impl McHandler {
         // It is also kept only for the runner `role.describe` it was prepared
         // against. The answer read here serves the moved session's checkpoint
         // check below as well, so this Setup asks the runner once.
-        let mut live_describe = None;
         if let Some(state) = existing
             .as_ref()
             .filter(|state| discarded.is_none() && state.offline_first_pass.is_some())
         {
-            let describe = self
-                .runner_describe(&state.runner()?, &state.runner_identity())
-                .await?;
+            let describe = match live_describe.take() {
+                Some(describe) => describe,
+                None => {
+                    self.runner_describe(&state.runner()?, &state.runner_identity())
+                        .await?
+                }
+            };
             discarded = offline_first_pass::describe_mismatch(state, &describe)
                 .map(|reason| (state.generation, reason));
             live_describe = Some(describe);
@@ -2733,11 +2779,7 @@ impl McHandler {
                 .standalone_move
                 .as_ref()
                 .map(moved_session::StandaloneMove::checkpoint)
-                .or_else(|| {
-                    standalone_move.as_ref().map(|record| {
-                        contract::setup::SetupCheckpoint::new(record.tag_checkpoint, &record.cut)
-                    })
-                });
+                .or_else(|| standalone_move.as_ref().map(moved_session::checkpoint));
             // A conversation set up with a full-array floor answers the floor
             // it stored; the full-array state is never read again.
             let (checkpoint, why) = match (checkpoint, &state.full_array_floor) {
@@ -2762,9 +2804,7 @@ impl McHandler {
             answer["request_id"] = json!(request.request_id);
             return bytes(&with_checkpoint(answer, checkpoint));
         }
-        let checkpoint = standalone_move.as_ref().map(|record| {
-            contract::setup::SetupCheckpoint::new(record.tag_checkpoint, &record.cut)
-        });
+        let checkpoint = standalone_move.as_ref().map(moved_session::checkpoint);
         // A Claude Code conversation ck-mc served on the full-array route
         // numbers its parts above every number that route allocated for it.
         // Read once, here, and stored with the record.
@@ -3037,8 +3077,8 @@ impl McHandler {
 
     /// For a session with a Setup checkpoint (`checkpoint` present: moved from
     /// standalone, or carrying a full-array floor, as `why` says), the terminal
-    /// `tag_checkpoint_unsupported` refusal when its runner does not declare
-    /// llm-runner's `tag_checkpoint` group, read from the runner's own
+    /// capability refusal when its runner does not declare the required
+    /// llm-runner checkpoint groups, read from the runner's own
     /// `role.describe` (`fetched` when this Setup already read it); `None`
     /// when Setup may answer.
     async fn refuse_checkpoint_unsupported(
@@ -3059,10 +3099,16 @@ impl McHandler {
         };
         let describe = cortexkit_role_llm_runner::describe::check_describe(&reply)
             .map_err(|problems| transient(format!("runner role.describe: {problems:?}")))?;
-        Ok(
-            (!describe.declares(cortexkit_role_llm_runner::capabilities::TAG_CHECKPOINT))
-                .then(|| moved_session::tag_checkpoint_refusal(request_id, why)),
-        )
+        if !describe.declares(cortexkit_role_llm_runner::capabilities::TAG_CHECKPOINT) {
+            return Ok(Some(moved_session::tag_checkpoint_refusal(request_id, why)));
+        }
+        Ok((checkpoint.is_some_and(|checkpoint| checkpoint.message_count.is_some())
+            && !describe.declares(cortexkit_role_llm_runner::capabilities::MESSAGE_CHECKPOINT))
+            .then(|| moved_session::setup_refusal(
+                request_id,
+                compact::errors::refuse_codes::MESSAGE_CHECKPOINT_UNSUPPORTED,
+                "This moved session requires a runner declaring message_checkpoint to preserve its certified message positions.",
+            )))
     }
 
     fn async_engine(

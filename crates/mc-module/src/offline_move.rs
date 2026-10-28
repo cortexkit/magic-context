@@ -748,7 +748,7 @@ struct HostSession {
     parts: HashMap<String, Vec<PartRow>>,
 }
 
-/// The plugin skips only summary=true/1 with finish="stop", regardless of role.
+/// The plugin skips finished summaries, including JSON numeric 1.0.
 fn plugin_finished_summary(data: &Value) -> bool {
     (data["summary"] == true || data["summary"].as_f64() == Some(1.0)) && data["finish"] == "stop"
 }
@@ -947,6 +947,59 @@ fn load_host_session(conn: &Connection, session: &str) -> Result<HostSession, Re
         position,
         parts,
     })
+}
+
+#[cfg(test)]
+#[test]
+fn published_message_checkpoint_rows_define_move_positions() {
+    let vector: Value = serde_json::from_str(
+        cortexkit_role_llm_runner::vectors::file("message-checkpoint.json").unwrap(),
+    )
+    .unwrap();
+    let vector = &vector["opencode1"];
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE message(id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+         CREATE TABLE part(id TEXT, session_id TEXT, message_id TEXT, data TEXT);",
+    )
+    .unwrap();
+    for row in vector["rows"].as_array().unwrap() {
+        conn.execute(
+            "INSERT INTO message VALUES(?1,'vector',?2,?3)",
+            rusqlite::params![
+                row["id"].as_str().unwrap(),
+                row["time_created"].as_i64().unwrap(),
+                row["data"].as_str().unwrap(),
+            ],
+        )
+        .unwrap();
+    }
+    for (index, row) in vector["parts"].as_array().unwrap().iter().enumerate() {
+        conn.execute(
+            "INSERT INTO part VALUES(?1,'vector',?2,?3)",
+            rusqlite::params![
+                format!("part_{index:04}"),
+                row["message_id"].as_str().unwrap(),
+                row["data"].as_str().unwrap(),
+            ],
+        )
+        .unwrap();
+    }
+    let host = load_host_session(&conn, "vector").unwrap();
+    let ids: Vec<_> = host
+        .messages
+        .iter()
+        .filter(|row| row.counted)
+        .map(|row| row.id.as_str())
+        .collect();
+    assert_eq!(serde_json::to_value(&ids).unwrap(), vector["counted_ids"]);
+    assert_eq!(
+        host.position.len() as u64,
+        vector["message_count"].as_u64().unwrap()
+    );
+    for (ordinal, id) in ids.iter().enumerate() {
+        assert_eq!(host.position[*id], ordinal + 1);
+    }
 }
 
 /// The marker OpenCode 1 would apply next: walking newest to oldest, the first user
