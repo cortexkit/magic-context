@@ -20,8 +20,11 @@ import {
     addProcessedImageStrippedIds,
     addStaleReduceStrippedIds,
     addTrailingBlankDecisions,
+    appendNoteNudgeAnchor,
+    getNoteNudgeAnchors,
     thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
+import { markTagDropped } from "../../features/magic-context/storage-tags";
 import * as coordinateRebase from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
 import { __test as decisionLogInternals } from "../../features/magic-context/transform-decision-log";
@@ -149,9 +152,17 @@ function nextTurn(sessionId: string): Message[] {
  * tagging step find the writer lock held by a second connection, released when
  * the transform resets the tagger, i.e. exactly across the tagging step.
  */
-async function sessionWithPersistedDrop(sessionId: string, generation?: "v1" | "v2") {
+async function sessionWithPersistedDrop(
+    sessionId: string,
+    generation?: "v1" | "v2",
+    noteAnchor?: { messageId: string; text: string },
+    source = history,
+) {
     useTempDataHome("mc-degraded-pass-");
     const db = openDatabase();
+    if (noteAnchor) {
+        appendNoteNudgeAnchor(db, sessionId, noteAnchor.messageId, noteAnchor.text);
+    }
     let lockDuringTagging = false;
     const baseTagger = createTagger();
     const tagger = {
@@ -175,7 +186,7 @@ async function sessionWithPersistedDrop(sessionId: string, generation?: "v1" | "
     const deps: Parameters<typeof createTransform>[0] = {
         directory: generation ? process.env.XDG_DATA_HOME : undefined,
         storeGeneration: generation,
-        hostRawMessages: generation ? async () => history(sessionId) : undefined,
+        hostRawMessages: generation ? async () => source(sessionId) : undefined,
         hostPrepareRawOrdinals: generation ? async () => true : undefined,
         tagger,
         scheduler,
@@ -191,8 +202,10 @@ async function sessionWithPersistedDrop(sessionId: string, generation?: "v1" | "
         historianRunnable: false,
     };
     const transform = createTransform(deps);
+    const onLkgReplay = mock(() => undefined);
     const handler = createMessagesTransformHandler({
         magicContext: { "experimental.chat.messages.transform": transform },
+        onLkgReplay,
     });
     const serve = async (messages: Message[]) => {
         const output = { messages } as unknown as Output;
@@ -202,13 +215,13 @@ async function sessionWithPersistedDrop(sessionId: string, generation?: "v1" | "
 
     // First pass tags the conversation; the tool output is then dropped the
     // way a flushed ctx_reduce leaves it.
-    await serve(history(sessionId));
+    await serve(source(sessionId));
     const toolTag = getTagsBySession(db, sessionId).find((tag) => tag.type === "tool");
     if (!toolTag) throw new Error("the first pass did not tag the tool output");
     updateTagStatus(db, sessionId, toolTag.tagNumber, "dropped");
 
     // A healthy defer pass replays the drop; it is the last good request.
-    const managed = JSON.stringify(await serve(history(sessionId)));
+    const managed = JSON.stringify(await serve(source(sessionId)));
     if (generation)
         updateSessionMeta(db, sessionId, {
             lastResponseTime: Date.now(),
@@ -223,6 +236,7 @@ async function sessionWithPersistedDrop(sessionId: string, generation?: "v1" | "
         deps,
         managed,
         serve,
+        onLkgReplay,
         armLockDuringTagging: () => {
             lockDuringTagging = true;
         },
@@ -241,6 +255,52 @@ function expectReplayOfManaged(served: Message[], managed: string, sessionId: st
 }
 
 describe("a degraded transform pass is never served", () => {
+    it("preserves a captured note nudge on an older dropped synthetic user message during busy LKG replay", async () => {
+        const sessionId = "ses-lkg-dropped-note-nudge";
+        const instruction =
+            '\n\n<instruction name="deferred_notes">frozen older-message note</instruction>';
+        // Healthy postprocessing excludes synthetic notice parts from its late
+        // drop sweep. The fallback must preserve their already-served note suffix too.
+        const source = () => {
+            const messages = history(sessionId);
+            messages[0].parts[0] = {
+                type: "text",
+                synthetic: true,
+                text: "[BACKGROUND BASH COMPLETED] finished earlier work",
+            };
+            return messages;
+        };
+        const session = await sessionWithPersistedDrop(
+            sessionId,
+            undefined,
+            { messageId: "u1", text: instruction },
+            source,
+        );
+        const userTag = getTagsBySession(session.db, sessionId).find(
+            (tag) => tag.messageId === "u1:p0",
+        );
+        if (!userTag) throw new Error("Expected a tagged older user message");
+        markTagDropped(session.db, sessionId, userTag.tagNumber, "full");
+        const first = await session.serve(source());
+        const firstUser = first.find((message) => message.info.id === "u1");
+        expect(firstUser?.parts[0].text).toBe(`[dropped §${userTag.tagNumber}§]${instruction}`);
+        expect(getSlot(sessionId)?.jsonPrefix).toContain("frozen older-message note");
+        expect(session.onLkgReplay).not.toHaveBeenCalled();
+
+        session.armLockDuringTagging();
+        const second = await session.serve([
+            ...source(),
+            ...nextTurn(sessionId).slice(history(sessionId).length),
+        ]);
+        const secondUser = second.find((message) => message.info.id === "u1");
+        expect(session.onLkgReplay).toHaveBeenCalledTimes(1);
+        expect(getSlot(sessionId)?.jsonPrefix).toContain("frozen older-message note");
+        expect(getNoteNudgeAnchors(session.db, sessionId)).toEqual([
+            { messageId: "u1", text: instruction },
+        ]);
+        expect(JSON.stringify(secondUser)).toBe(JSON.stringify(firstUser));
+    });
+
     for (const generation of ["v1", "v2"] as const) {
         it(`preserves the entire busy raw tail on healthy ${generation} passes`, async () => {
             const sessionId = `ses-recovery-handoff-${generation}`;
