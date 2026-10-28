@@ -64,10 +64,10 @@ import {
     CACHE_READ_EPSILON_TOKENS,
     cachedPrefixFloor,
     classifyCacheBust,
+    createCacheBustDecisionJoiner,
     DEFAULT_CACHE_TTL_MS,
     isIdleCacheExpiry,
     isMissingBreakpointAfterRead,
-    nearestCacheBustDecision,
     parseCacheTtl,
     refreshesCachedPrefix,
 } from "./cache-bust-attribution";
@@ -760,6 +760,7 @@ export function analyzeOpenCodeCacheBustSession(
     let filesExamined = 0;
     let nextCursor: string | undefined;
     let scanBounded = false;
+    const precedingRequestTimestampsMs: number[] = [];
     const snapshots = options.scanDeadlineMs === undefined
         ? discoverDumpCandidates(args)
             .filter((candidate) => candidate.session === options.sessionId)
@@ -791,6 +792,13 @@ export function analyzeOpenCodeCacheBustSession(
             if (chosen.length) nextCursor = key(chosen.at(-1)!);
             const first = indexed.indexOf(chosen[0]);
             const selected = first < 0 ? [] : [...indexed.slice(Math.max(0, first - 2), first), ...chosen];
+            // Earlier dump filenames reserve their passes without reopening old bodies.
+            // Otherwise a bounded scan could reuse a pass claimed in a previous batch.
+            precedingRequestTimestampsMs.push(
+                ...indexed
+                    .slice(0, first < 0 ? 0 : Math.max(0, first - 2))
+                    .map((entry) => entry.timestamp),
+            );
             return sources.flatMap((source) => loadCandidateSnapshots(
                 { source, session: options.sessionId, latestMtimeMs: 0, totalBytes: 0, dumpCount: 0 },
                 args, selected.filter((entry) => entry.source === source).map((entry) => entry.file),
@@ -817,16 +825,15 @@ export function analyzeOpenCodeCacheBustSession(
     const firstNewIndex = boundedSnapshots.findIndex((snapshot) =>
         inWindow(snapshot),
     );
-    const analysisSnapshots =
-        firstNewIndex < 0
-            ? []
-            : boundedSnapshots.slice(
-                  options.sinceExclusiveMs === undefined ? 0 : Math.max(0, firstNewIndex - 2),
-              );
+    const analysisStart = options.sinceExclusiveMs === undefined ? 0 : Math.max(0, firstNewIndex - 2);
+    const analysisSnapshots = firstNewIndex < 0 ? [] : boundedSnapshots.slice(analysisStart);
+    precedingRequestTimestampsMs.push(
+        ...boundedSnapshots.slice(0, analysisStart).map((snapshot) => snapshot.requestTimestampMs),
+    );
     const rows = analyzeSnapshots(
         analysisSnapshots,
         withSchedulerLogFallback(options.decisions ?? [], options.sessionId, options.mcLogPath),
-        { cacheTtlMs: options.cacheTtlMs },
+        { cacheTtlMs: options.cacheTtlMs, precedingRequestTimestampsMs },
     );
     const requests: AnalyzedCacheRequest[] = rows.flatMap((row) => {
         const timestampMs = Date.parse(row.current.createdAt);
@@ -970,7 +977,7 @@ function bustsReusablePrefix(
 export function analyzeSnapshots(
     snaps: readonly Snapshot[],
     decisionsAndMarkers: readonly CacheBustDecisionAttribution[] = [],
-    options: { cacheTtlMs?: number } = {},
+    options: { cacheTtlMs?: number; precedingRequestTimestampsMs?: readonly number[] } = {},
 ): AnalysisRow[] {
     const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
     // When the reusable prefix was last read in full or written; see
@@ -979,6 +986,8 @@ export function analyzeSnapshots(
     // Disruption markers explain a following epoch HARD but never serve a request, so
     // they stay out of every request join.
     const decisions = decisionsAndMarkers.filter((record) => record.disruption === undefined);
+    const joinDecision = createCacheBustDecisionJoiner(decisions);
+    for (const timestampMs of options.precedingRequestTimestampsMs ?? []) joinDecision(timestampMs);
     const disruptions = decisionsAndMarkers.filter(
         (record) =>
             record.disruption !== undefined ||
@@ -1006,11 +1015,14 @@ export function analyzeSnapshots(
     let previousShortRead = false;
     let previousBustDivergenceIndex: number | undefined;
     let previousMetered: Snapshot | undefined;
+    let previousMeteredDecision: CacheBustDecisionAttribution | undefined;
     // Last metered request before the current run of LATENCY rows (Gemini only).
     let latencyReference: Snapshot | undefined;
     const rows: AnalysisRow[] = [];
     for (let index = 0; index < snaps.length; index += 1) {
         const current = snaps[index];
+        // BASE, STABLE, and unmetered requests claim passes too, not just busts.
+        const decision = joinDecision(current.requestTimestampMs);
         if (isUsageMissing(current)) {
             const previous = previousMetered;
             const divergenceIndex = previous
@@ -1033,8 +1045,9 @@ export function analyzeSnapshots(
             continue;
         }
         if (!previousMetered) {
-            rows.push({ current, divergenceIndex: -1, verdict: "BASE" });
+            rows.push({ current, divergenceIndex: -1, verdict: "BASE", decision });
             previousMetered = current;
+            previousMeteredDecision = decision;
             prefixRefreshedAtMs = current.requestTimestampMs;
             continue;
         }
@@ -1128,11 +1141,9 @@ export function analyzeSnapshots(
             verdict === "BUST" || verdict === "LATENCY"
                 ? (current.usage.cacheCreation ?? Math.max(0, prevTotal - current.usage.cacheRead))
                 : undefined;
-        const decision = nearestCacheBustDecision(decisions, current.requestTimestampMs);
-        const previousDecision = nearestCacheBustDecision(decisions, previous.requestTimestampMs);
         const attributionDecision =
-            rebust && byteVerdict === "STABLE" && previousDecision?.materialized
-                ? previousDecision
+            rebust && byteVerdict === "STABLE" && previousMeteredDecision?.materialized
+                ? previousMeteredDecision
                 : decision;
         const divergentSegment =
             divergenceIndex < 0
@@ -1204,6 +1215,7 @@ export function analyzeSnapshots(
                 : undefined;
         previousBustDivergenceIndex = verdict === "BUST" ? divergenceIndex : undefined;
         previousMetered = current;
+        previousMeteredDecision = decision;
         rows.push({
             current,
             previous,
