@@ -539,6 +539,7 @@ async function verifyOneBatch(
             recordInvocation(args, startedAt, {
                 status: "completed",
                 messages: run.completion.messages ?? [],
+                tokens: run.completion.usage,
             });
             reportUsage(
                 run.completion.messages ?? [],
@@ -656,6 +657,7 @@ async function verifyOneBatch(
             status: failedInvocationStatus(error),
             error,
             messages,
+            tokens: failedCompletion?.usage,
         });
         if (error instanceof DreamerModuleFailureError || signal.aborted) throw error;
         // A timeout is a budget verdict, not a failure of this run: report it so the
@@ -1026,7 +1028,12 @@ function rewriteMemoryContent(db: Database, memory: Memory, content: string, has
 function recordInvocation(
     args: VerifyArgs,
     startedAt: number,
-    params: { status: SubagentInvocationStatus; messages?: unknown[]; error?: unknown },
+    params: {
+        status: SubagentInvocationStatus;
+        messages?: unknown[];
+        tokens?: HiddenCompletion["usage"];
+        error?: unknown;
+    },
 ): void {
     if (!args.parentSessionId) return;
     recordChildInvocation({
@@ -1038,6 +1045,10 @@ function recordInvocation(
         startedAt,
         status: params.status,
         messages: params.messages,
+        tokens:
+            args.hiddenCompletionExecutor?.capabilities.harness === "opencode2"
+                ? params.tokens
+                : undefined,
         attemptedModel: args.model,
         configuredModels: args.fallbackModels,
         error: params.error,

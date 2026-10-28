@@ -572,6 +572,7 @@ async function mapOneBatch(
             recordInvocation(args, startedAt, {
                 status: "completed",
                 messages: run.completion.messages ?? [],
+                tokens: run.completion.usage,
             });
             stage = "apply";
             const outcome = await applyParsedBatchMappings(
@@ -683,6 +684,7 @@ async function mapOneBatch(
             status: failedInvocationStatus(error),
             error,
             messages,
+            tokens: failedCompletion?.usage,
         });
         // Stop if another worker took ownership of this task or the shared memory
         // module rejected its write. Neither condition permits a local fallback write.
@@ -929,7 +931,12 @@ async function applyParsedBatchMappings(
 function recordInvocation(
     args: MapMemoriesArgs,
     startedAt: number,
-    params: { status: SubagentInvocationStatus; messages?: unknown[]; error?: unknown },
+    params: {
+        status: SubagentInvocationStatus;
+        messages?: unknown[];
+        tokens?: HiddenCompletion["usage"];
+        error?: unknown;
+    },
 ): void {
     if (!args.parentSessionId) return;
     recordChildInvocation({
@@ -941,6 +948,10 @@ function recordInvocation(
         startedAt,
         status: params.status,
         messages: params.messages,
+        tokens:
+            args.hiddenCompletionExecutor?.capabilities.harness === "opencode2"
+                ? params.tokens
+                : undefined,
         attemptedModel: args.model,
         configuredModels: args.fallbackModels,
         error: params.error,

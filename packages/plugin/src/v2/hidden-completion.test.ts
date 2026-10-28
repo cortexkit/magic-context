@@ -1,7 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { parsePluginConfig } from "../config";
-import { parseMapMemoriesCompletion } from "../features/magic-context/dreamer/map-memories";
+import { withLiveDreamerOutputCap } from "../config/live-child-output-cap";
+import { acquireLease } from "../features/magic-context/dreamer/lease";
+import {
+    mapMemories,
+    parseMapMemoriesCompletion,
+} from "../features/magic-context/dreamer/map-memories";
 import { inspectCurateMemoryOperations } from "../features/magic-context/dreamer/task-executor";
+import { getMemoryVerifications, insertMemory } from "../features/magic-context/memory";
 import { runMigrations } from "../features/magic-context/migrations";
 import { closeDatabase, openDatabase } from "../features/magic-context/storage";
 import { initializeDatabase } from "../features/magic-context/storage-db";
@@ -15,6 +21,7 @@ import {
     clearProducerModelObservations,
     observeProducerModelsForTest,
 } from "../hooks/magic-context/producer-window-test-support";
+import * as logger from "../shared/logger";
 import { resolveHistorianModel } from "../shared/model-resolution";
 import {
     getPromptFailureDetail,
@@ -842,7 +849,7 @@ describe("OpenCode 2 hidden child completion", () => {
             expect(state.requests[0]?.options).toEqual({ temperature: 0.25 });
             expect(completion).toMatchObject({
                 text: "editor completion",
-                usage: { input: 101, output: 11, cacheRead: 7, cacheWrite: 5 },
+                usage: { input: 101, output: 11, cacheRead: 7, cacheWrite: 5, reasoning: 3 },
                 tokenLog: {
                     input: 101,
                     output: 11,
@@ -1194,6 +1201,7 @@ describe("OpenCode 2 hidden child completion", () => {
                 output: 11,
                 cacheRead: 0,
                 cacheWrite: 0,
+                reasoning: 3,
             });
             await close(state.executor, handle, true);
         } finally {
@@ -1437,6 +1445,14 @@ test("OC2 mapper retains the persisted incremental transcript and final reply wi
         await state.executor.attempt(handle, request());
         const completion = await state.executor.collect(handle, 50);
         expect(completion.text).toBe(final);
+        expect(completion.usage).toEqual({
+            input: 202,
+            output: 22,
+            cacheRead: 14,
+            cacheWrite: 10,
+            reasoning: 6,
+        });
+        expect(completion.tokenLog?.reasoning).toBe(6);
         expect(completion.messages).toEqual([
             { info: { role: "assistant" }, parts: [{ type: "text", text: prefix }] },
             { info: { role: "assistant" }, parts: [{ type: "text", text: final }] },
@@ -1450,6 +1466,80 @@ test("OC2 mapper retains the persisted incremental transcript and final reply wi
         state.db.close();
     }
 });
+
+for (const failure of ["prompt timed out after 30000ms", "provider unavailable"]) {
+    test(`OpenCode 2 map-memories keeps partial mappings after ${failure}`, async () => {
+        const state = await setup();
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        runMigrations(db);
+        const { dir: directory, cleanup } = createTestTempDir("mc-v2-map-partial-");
+        const log = spyOn(logger, "log").mockImplementation(() => {});
+        try {
+            const memory = insertMemory(db, {
+                projectPath: directory,
+                category: "ARCHITECTURE",
+                content: "Prefer explicit error handling.",
+            });
+            expect(acquireLease(db, "holder", "mapping")).toBe(true);
+            state.host.prompt = async ({ sessionID, text }) => {
+                state.hook.apply({
+                    sessionID,
+                    agent: "dreamer-memory-mapper",
+                    model: { providerID: "mock", id: "cheap" },
+                    system: [],
+                    tools: {},
+                    options: {},
+                    messages: [{ role: "user", content: [{ type: "text", text }] }],
+                });
+                state.rows.append(
+                    sessionID,
+                    `<mappings><memory id="${memory.id}" independent="true"/>`,
+                    { omitFinish: true },
+                );
+                throw new Error(failure);
+            };
+            state.host.removeSession = async ({ sessionID }) => {
+                state.removed.push(sessionID);
+                state.rows.assistantSince = () => [];
+                state.rows.latestAssistant = () => undefined;
+            };
+            const result = await mapMemories({
+                db,
+                projectIdentity: directory,
+                sessionDirectory: directory,
+                parentSessionId: "parent",
+                holderId: "holder",
+                leaseKey: "mapping",
+                deadline: Date.now() + 600_000,
+                model: "mock/cheap",
+                hiddenCompletionExecutor: withLiveDreamerOutputCap(state.executor, {}, () => ({})),
+            });
+            expect(result.independent).toBe(1);
+            expect(result.remaining).toBe(0);
+            expect(getMemoryVerifications(db, [memory.id]).get(memory.id)?.mappingOrigin).toBe(
+                "mapper",
+            );
+            expect(getSubagentInvocations(db, "parent")[0]).toMatchObject({
+                inputTokens: 101,
+                outputTokens: 11,
+                cacheReadTokens: 7,
+                cacheWriteTokens: 5,
+            });
+            expect(state.removed).toHaveLength(1);
+            expect(
+                log.mock.calls.some(([message]) =>
+                    message.includes("map-memories batch: steps=1 committed=1"),
+                ),
+            ).toBe(true);
+        } finally {
+            log.mockRestore();
+            db.close();
+            state.db.close();
+            cleanup();
+        }
+    });
+}
 
 test("hidden tool-loop hard-stops at soft prompt budget when the host has no pre-tool hook", async () => {
     const fixture = await setup();
@@ -1884,7 +1974,13 @@ test("v2 historian sums all blocked-call steps and excludes previous attempts", 
         expect(refusal).toContain("tool use is disabled for this task");
         expect(filesystemOpens).toBe(0);
         expect(completion.text).toBe("editor completion");
-        expect(completion.usage).toEqual({ input: 114, output: 16, cacheRead: 10, cacheWrite: 7 });
+        expect(completion.usage).toEqual({
+            input: 114,
+            output: 16,
+            cacheRead: 10,
+            cacheWrite: 7,
+            reasoning: 3,
+        });
         expect(Object.keys(f.requests[0]!.tools)).toEqual(["read"]);
         expect(f.requests[0]!.system).toEqual([
             {

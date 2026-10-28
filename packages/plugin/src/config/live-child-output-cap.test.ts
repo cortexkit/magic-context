@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { HiddenCompletionExecutor } from "../hooks/magic-context/compartment-runner-types";
 
 import { producerInputTokenLimit } from "../hooks/magic-context/producer-window-guard";
 import {
@@ -51,6 +52,33 @@ test("OpenCode 2 dreamer passes a fresh output cap to each hidden child", async 
     current = MagicContextConfigSchema.parse({ dreamer: { maxTokens: 8192 } });
     await executor.open(run);
     expect(received).toEqual([4096, 8192]);
+});
+
+test("OpenCode 2 dreamer output-cap wrapper forwards partial output reads", async () => {
+    const boot = MagicContextConfigSchema.parse({});
+    const reads: Array<{ id: string; limit: number }> = [];
+    const executor: HiddenCompletionExecutor = {
+        capabilities: { tools: true, harness: "opencode2" },
+        open: async () => ({ id: "child" }),
+        attempt: async () => {},
+        collect: async () => {
+            throw new Error("no settled completion");
+        },
+        collectPartial: async (handle, limit) => {
+            reads.push({ id: handle.id, limit });
+            return {
+                text: "unfinished manifest",
+                usage: { input: 101, output: 11, cacheRead: 7, cacheWrite: 5 },
+                lengthCapped: false,
+            };
+        },
+        close: async () => {},
+    };
+    const wrapped = withLiveDreamerOutputCap(executor, boot, () => boot);
+    expect((await wrapped.collectPartial?.({ id: "child" }, 200))?.text).toBe(
+        "unfinished manifest",
+    );
+    expect(reads).toEqual([{ id: "child", limit: 200 }]);
 });
 
 test("OpenCode 1 historian keeps the sampled reserve and child output cap", () => {
