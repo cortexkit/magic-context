@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sessionLog } from "../../shared/logger";
-import { isCoveredInstructionRow } from "./host-served-rows";
 import { clearCapturedLkgMeasurement } from "./lkg-measured-request";
 import {
     clearLkgRecoveryPrefixes,
@@ -38,6 +37,17 @@ export interface LkgEntryNote {
      */
     entryLegacyContentDigests?: (string | null)[];
     anchorIndex: number;
+}
+
+const POSITIONAL_SYSTEM_KEY = "\0mc-system:";
+
+/** Replay-only identity; never assign it to a host message's info.id or to a ctx_reduce tag. */
+export function lkgInputIdentity(id: unknown, role: unknown, index: number): string | null {
+    if (typeof id === "string" && id.length > 0)
+        return id.startsWith(POSITIONAL_SYSTEM_KEY) ? null : id;
+    // Content is checked separately by the aligned pristine digest. Position
+    // distinguishes repeated announcements without inventing a host message id.
+    return role === "system" ? `${POSITIONAL_SYSTEM_KEY}${index}` : null;
 }
 
 // One slot must hold any request a provider will accept. Anthropic's limit is
@@ -781,17 +791,13 @@ export function dropSlot(sessionId: string, _reason?: string): void {
 export function noteEntry(sessionId: string, input: MessageLike[]): LkgEntryNote | null {
     const slot = getSlot(sessionId);
     if (!slot) return null;
-    // Covered OpenCode 2 instruction rows restored after a host checkpoint carry
-    // no id. The transform sets them aside before it captures the slot's input
-    // projection, so the entry is read without them too; otherwise their empty
-    // ids would fail every entry check and no replay could be offered.
-    const messages = input.some((message) => isCoveredInstructionRow(message.info))
-        ? input.filter((message) => !isCoveredInstructionRow(message.info))
-        : input;
-    const entryInputIds = messages.map((message) => {
-        const id = (message.info as { id?: unknown } | undefined)?.id;
-        return typeof id === "string" ? id : "";
-    });
+    // Covered instructions can still be served from the saved prefix. Their
+    // positions and bytes must be proved too, even while transform stages set
+    // them aside to keep them out of tagging and ordinary history trimming.
+    const messages = input;
+    const entryInputIds = messages.map(
+        (message, index) => lkgInputIdentity(message.info?.id, message.info?.role, index) ?? "",
+    );
     const anchorIndex = entryInputIds.indexOf(slot.lastInputMessageId);
     if (anchorIndex < 0) return null;
     // Digest the whole input, not only the prefix the slot needs: the entry
