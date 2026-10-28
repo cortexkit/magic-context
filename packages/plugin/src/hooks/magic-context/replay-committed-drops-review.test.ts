@@ -37,6 +37,63 @@ const tail = (): MessageLike => ({
     info: { id: "tail", role: "user" },
     parts: [{ type: "text", text: "next" }],
 });
+test("reapplying an already-rendered text drop without annotations is byte-identical", () => {
+    const db = dropped("full", null, "old:p1", "message");
+    const messages: MessageLike[] = [
+        {
+            info: { id: "old", role: "user" },
+            parts: [
+                { type: "text", text: "untouched first part" },
+                { type: "text", text: "[dropped §907§]", synthetic: true },
+            ],
+        },
+        tail(),
+    ];
+    const before = JSON.stringify(messages);
+    expect(replayCommittedDrops(db, session, messages)).toBe(true);
+    expect(JSON.stringify(messages)).toBe(before);
+});
+
+test("a new text drop keeps captured note and hint suffixes on their original part", () => {
+    const db = dropped("full", null, "old:p1", "message");
+    const note = '\n\n<instruction name="deferred_notes">captured note</instruction>';
+    const hint = "\n\n<ctx-search-hint>captured recall</ctx-search-hint>";
+    const messages: MessageLike[] = [
+        {
+            info: { id: "old", role: "user" },
+            parts: [
+                { type: "text", text: "untouched first part" },
+                { type: "text", text: `§907§ reduced body${note}${hint}` },
+                { type: "text", text: "untouched last part" },
+            ],
+        },
+        tail(),
+    ];
+    expect(replayCommittedDrops(db, session, messages)).toBe(true);
+    expect(messages[0]?.parts).toEqual([
+        { type: "text", text: "untouched first part" },
+        { type: "text", text: `[dropped §907§]${note}${hint}` },
+        { type: "text", text: "untouched last part" },
+    ]);
+    const served = JSON.stringify(messages);
+    expect(replayCommittedDrops(db, session, messages)).toBe(true);
+    expect(JSON.stringify(messages)).toBe(served);
+});
+
+test("committed raw text drops cannot overwrite an injected synthetic history head", () => {
+    const db = dropped("full", null, "old:p0", "message");
+    const messages: MessageLike[] = [
+        {
+            info: { id: "old", role: "user", syntheticHead: true },
+            parts: [{ type: "text", text: "injected history", synthetic: true }],
+        },
+        tail(),
+    ];
+    const before = JSON.stringify(messages);
+    expect(replayCommittedDrops(db, session, messages)).toBe(true);
+    expect(JSON.stringify(messages)).toBe(before);
+});
+
 for (const mode of ["full", "truncated", "skeleton_real"]) {
     test(`independent binder legacy ${mode}: split arc and exact idempotence without writes`, () => {
         const db = dropped(mode);
