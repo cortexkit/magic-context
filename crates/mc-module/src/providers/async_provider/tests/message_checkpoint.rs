@@ -234,6 +234,32 @@ async fn changed_certified_head_digest_refuses_before_import() {
 }
 
 #[tokio::test]
+async fn rich_ui_stamp_moved_session_head() {
+    let dir = tempfile::tempdir().unwrap();
+    moved_paths(dir.path());
+    let runner = runner(dir.path());
+    *runner.head_override.lock().unwrap() = Some(crate::tests::broca_rich_ui_stamp::answer(
+        "session.head.json",
+    ));
+    let (rig, answer, before) = setup(
+        dir.path(),
+        runner.clone(),
+        json!({"serializer_profile":"opencode-aisdk"}),
+    )
+    .await;
+    // The captured session has no moved prefix. Decoding must reach the
+    // certified-prefix check, not reject the added head metadata.
+    assert_no_adoption(
+        &rig,
+        &runner,
+        &answer,
+        "moved_session_reverted_below_import",
+        before,
+        dir.path(),
+    );
+}
+
+#[tokio::test]
 async fn setup_checks_the_complete_head_and_prefix_origin() {
     for (first, field, value, code) in [
         (
