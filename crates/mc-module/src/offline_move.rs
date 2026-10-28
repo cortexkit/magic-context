@@ -6,8 +6,14 @@
 //! backups". This command keeps no journal of its own. Its two writes are ordered so
 //! that running it again after a crash at any point ends in the same state:
 //!
-//! 1. the tag checkpoint goes onto the in-effect compaction marker's part in
-//!    `opencode.db`, as `"cortexkit": {"tag_checkpoint": N, "session": S}`;
+//! 1. the three marker rows are relocated onto the cut `U` in one host
+//!    transaction on `opencode.db`: the old triple is deleted and the new triple
+//!    (compaction part, summary message, summary text part) is inserted with the
+//!    plugin writer's bytes for `resolvedBoundary = U` and `endMessageId = P`,
+//!    plus exactly the `cortexkit` key
+//!    `{"tag_checkpoint": N, "session": S, "message_count": M}` on the
+//!    compaction part (the key gains `head_cut` once the runner's export
+//!    certifies it);
 //! 2. the moved record goes into `context.db`, last. It is the commit point: before
 //!    it exists the session still belongs to the standalone plugin; once it exists,
 //!    the plugin refuses the session and ck-mc's setup imports it.
@@ -43,6 +49,7 @@
 //! | Imported prefix does not end at U - 1 | `prefix_end_mismatch` |
 //! | Every eligible carrier has a neighbour at its time or time + 1 | `adjacency_conflict` |
 //! | Projected marker would not be in effect | `marker_shadowed` |
+//! | Old marker carrier is P, the certified head-cut message | `marker_on_head_cut` |
 //! | Present retained message has an unresolvable target part | `drop_target_missing` |
 //! | Drop target is not unique (formerly `target_ambiguous`) | `drop_target_ambiguous` |
 //! | Model-visible drop target cannot carry a runner tag | `drop_target_untagged` |
@@ -70,7 +77,9 @@ pub const MOVE_RECORD_PREFIX: &str = "mode3_move:opencode:";
 /// The setup refusal for a session that still has standalone state and was never
 /// moved, as compaction-provider 0.4.0 publishes it.
 pub use cortexkit_role_compaction_provider::errors::refuse_codes::STANDALONE_SESSION_NOT_MIGRATED;
-/// Version of the moved record's JSON shape.
+/// Version of the moved record's JSON shape. The per-endpoint CK block ids
+/// and the codec profile do not bump it; bump the version when adding the
+/// intent, the states and `head_cut`. No moved record exists anywhere yet.
 pub const RECORD_VERSION: u32 = 1;
 const HARNESS: &str = "opencode";
 /// The `providerID`/`modelID` standalone writes on its compaction summary message.
@@ -79,6 +88,63 @@ const STANDALONE_MARKER_PROVIDER: &str = "magic-context";
 /// The `schema_migrations_meta` key of `session`'s moved record.
 pub fn move_record_key(session: &str) -> String {
     format!("{MOVE_RECORD_PREFIX}{session}")
+}
+
+// ── Marker id generator (ported whole from the plugin) ────────────────────
+//
+// The plugin's `compaction-marker.ts` generator, `deterministicBase62`
+// included: `prefix_[12-hex-chars][14-deterministic-base62]`. The time prefix
+// keeps OpenCode's lexicographic ordering; the hash suffix makes retries for
+// the same marker identity converge on the same rows.
+
+const BASE62_CHARS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const ID_PREFIX_HEX_LENGTH: usize = 12;
+const ID_SUFFIX_LENGTH: usize = 14;
+const ID_PREFIX_MASK: u128 = (1 << (ID_PREFIX_HEX_LENGTH * 4)) - 1;
+
+/// The plugin's `deterministicBase62`: the low `length` base-62 digits of the
+/// SHA-256 of `seed`, most significant digit first, with leading zeros.
+fn deterministic_base62(seed: &str, length: usize) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(seed.as_bytes());
+    let hash = hasher.finalize();
+    let mut num = hash.to_vec();
+    let mut chars = vec![b'0'; length];
+    for index in (0..length).rev() {
+        let mut remainder: u32 = 0;
+        for byte in num.iter_mut() {
+            let current = remainder * 256 + u32::from(*byte);
+            *byte = (current / 62) as u8;
+            remainder = current % 62;
+        }
+        chars[index] = BASE62_CHARS[remainder as usize];
+    }
+    String::from_utf8(chars).expect("base62 is ASCII")
+}
+
+/// The plugin's `generateId`: `(timestampMs * 0x1000 + counter)` masked to 48
+/// bits as 12 hex chars, then the hash suffix. `timestampMs` is clamped at zero
+/// exactly as the plugin clamps it.
+fn generate_id(prefix: &str, timestamp_ms: i64, counter: u64, identity: &str) -> String {
+    let clamped = timestamp_ms.max(0) as u64 as u128;
+    let encoded = (clamped * 0x1000 + u128::from(counter)) & ID_PREFIX_MASK;
+    let hex = format!("{encoded:012x}");
+    let seed = format!("{prefix}\0{identity}");
+    format!(
+        "{prefix}_{hex}{}",
+        deterministic_base62(&seed, ID_SUFFIX_LENGTH)
+    )
+}
+
+/// The plugin's `generateMessageId`.
+fn generate_message_id(timestamp_ms: i64, counter: u64, identity: &str) -> String {
+    generate_id("msg", timestamp_ms, counter, identity)
+}
+
+/// The plugin's `generatePartId`.
+fn generate_part_id(timestamp_ms: i64, counter: u64, identity: &str) -> String {
+    generate_id("prt", timestamp_ms, counter, identity)
 }
 
 /// What the offline move hands to ck-mc's setup for one session.
@@ -94,6 +160,10 @@ pub struct MoveRecord {
     pub cut: String,
     /// The compaction part that carries the checkpoint key.
     pub marker_part: String,
+    /// The codec the offline block ids were computed with: the serializer
+    /// profile and how `nativeIndex` maps to the host part order.
+    #[serde(default)]
+    pub codec_profile: CodecProfile,
     /// The session's compartments in sequence order, bound to ck-mc ordinals by
     /// message id on the first read.
     pub compartments: Vec<ImportedCompartment>,
@@ -101,18 +171,39 @@ pub struct MoveRecord {
     pub drops: Vec<CarriedDrop>,
 }
 
+/// The offline codec profile for CK block ids: the `edge_block` serializer and
+/// the `nativeIndex` mapping it uses over the host message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CodecProfile {
+    /// The provider codec's `serializer_profile` wire id (OpenCode 1 moves
+    /// always use `"opencode-aisdk"`).
+    #[serde(default)]
+    pub serializer: String,
+    /// How `nativeIndex` maps to the host part order (`"part_index"`: the
+    /// codec stamps each CK block with its OpenCode part index).
+    #[serde(default)]
+    pub native_index: String,
+}
+
 /// One standalone compartment. Endpoints are OpenCode message ids; a partial
 /// endpoint also names the OpenCode part id where the compartment starts or ends
-/// inside that message.
+/// inside that message. `start_block`/`end_block` are the CK block indexes of the
+/// endpoint inside its host message, computed offline with the `edge_block`
+/// codec over that message (whole-message endpoints cover the first through the
+/// last CK block); the import step builds the exact `StoredCompartment` rows from them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportedCompartment {
     pub sequence: i64,
     pub start_message_id: String,
     #[serde(default)]
     pub start_part: Option<String>,
+    #[serde(default)]
+    pub start_block: Option<usize>,
     pub end_message_id: String,
     #[serde(default)]
     pub end_part: Option<String>,
+    #[serde(default)]
+    pub end_block: Option<usize>,
     pub title: String,
     pub content: String,
     pub p1: Option<String>,
@@ -434,6 +525,55 @@ fn runner_taggable_part(part: &Value) -> bool {
     })
 }
 
+/// The offline `edge_block` codec profile for CK block ids: the serializer the
+/// live binder uses, and how `nativeIndex` maps to the host part order.
+fn offline_codec_profile() -> CodecProfile {
+    CodecProfile {
+        serializer: "opencode-aisdk".to_owned(),
+        native_index: "part_index".to_owned(),
+    }
+}
+
+/// The CK block range of one host message, computed offline with the same codec
+/// `edge_block` uses: decode the message's parts in OpenCode part order and
+/// take the first through the last CK block. Parts the runner never serves
+/// (the compaction part, ignored or empty text) decode to no block, exactly as
+/// they do live, so a whole-message endpoint covers the decoded range. `None`
+/// when the message decodes to no CK block.
+fn offline_ck_block_range(role: &str, part_datas: &[Value]) -> Option<(usize, usize)> {
+    let decoded = crate::codec::opencode::decode_opencode(&[json!({
+        "info": {"id": "move-block-id", "role": role},
+        "parts": part_datas,
+    })]);
+    let len = decoded
+        .messages
+        .first()
+        .map(|message| message.ck.content.len())
+        .unwrap_or(0);
+    if len == 0 {
+        None
+    } else {
+        Some((0, len - 1))
+    }
+}
+
+/// A host message's parts as stored, in the order OpenCode loads them (by id),
+/// for the offline block-id computation.
+fn host_part_datas(conn: &Connection, session: &str, mid: &str) -> Result<Vec<Value>, Refusal> {
+    let mut statement = conn
+        .prepare("SELECT data FROM part WHERE session_id=?1 AND message_id=?2 ORDER BY id")
+        .map_err(sql)?;
+    let rows = statement
+        .query_map(params![session, mid], |row| row.get::<_, String>(0))
+        .map_err(sql)?;
+    let mut datas = Vec::new();
+    for row in rows {
+        let data = row.map_err(sql)?;
+        datas.push(serde_json::from_str::<Value>(&data).unwrap_or(Value::Null));
+    }
+    Ok(datas)
+}
+
 fn load_host_session(conn: &Connection, session: &str) -> Result<HostSession, Refusal> {
     for table in ["message", "part"] {
         if !table_exists(conn, table).map_err(sql)? {
@@ -669,6 +809,30 @@ pub struct Plan {
     pub record: MoveRecord,
     /// Message currently carrying the in-effect marker, before relocation.
     pub marker_carrier: String,
+    /// The old compaction part id on `marker_carrier`, deleted by relocation.
+    pub old_compaction_part: String,
+    /// The old summary message id being relocated away from `marker_carrier`.
+    pub old_summary: String,
+    /// The old summary's text part id being deleted with it.
+    pub old_summary_part: String,
+    /// The old summary message `data` as stored now (before-image).
+    pub old_summary_data: String,
+    /// The old summary text part `data` as stored now (before-image).
+    pub old_summary_part_data: String,
+    /// The old summary's text, carried unchanged onto the new summary part.
+    pub summary_text: String,
+    /// The old summary message's `path.cwd`, carried onto the new summary.
+    pub summary_cwd: String,
+    /// The old summary message's `path.root`, carried onto the new summary.
+    pub summary_root: String,
+    /// The new summary message id at `U` (deterministic for `U` and `P`).
+    pub new_summary_id: String,
+    /// The new compaction part id on `U` (deterministic for `U` and `P`).
+    pub new_compaction_part_id: String,
+    /// The new summary text part id (deterministic for `U` and `P`).
+    pub new_summary_part_id: String,
+    /// `U`'s `time_created`, pinning the writer's ordering times.
+    pub u_time: i64,
     /// Last counted message before U.
     pub p: String,
     /// Number of plugin-counted messages before U (P's 1-based position).
@@ -716,7 +880,7 @@ impl Plan {
             "returned_raw": self.returned_raw,
             "marker_part": self.record.marker_part,
             "marker_key": if self.marker_already_keyed { "present" } else { "to_write" },
-            "marker_key_value": {"tag_checkpoint": self.record.tag_checkpoint, "session": self.record.session},
+            "marker_key_value": {"tag_checkpoint": self.record.tag_checkpoint, "session": self.record.session, "message_count": self.message_count},
             "compartments": self.record.compartments.len(),
             "coverage_end": self.record.compartments.last().map(|c| c.end_message_id.clone()),
             "drops": {
@@ -1095,20 +1259,18 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
             )
         })?;
     if let Some(state) = &state {
-        for (field, expected) in [
-            ("boundaryMessageId", cut.as_str()),
-            ("compactionPartId", marker_part.as_str()),
-            ("summaryMessageId", summary_id.as_str()),
-        ] {
-            if let Some(stored) = state.get(field).and_then(Value::as_str) {
-                if stored != expected {
-                    return Err(Refusal::new(
-                        "marker_state_mismatch",
-                        format!(
-                            "standalone recorded {field}={stored} but opencode.db has {expected}"
-                        ),
-                    ));
-                }
+        // The boundary must name the host's current carrier. The summary and
+        // part ids are checked after `U` is known: when the host already
+        // carries the relocated triple (a rerun after the host COMMIT), the
+        // stored ids are stale by design and must not refuse.
+        if let Some(stored) = state.get("boundaryMessageId").and_then(Value::as_str) {
+            if stored != cut.as_str() {
+                return Err(Refusal::new(
+                    "marker_state_mismatch",
+                    format!(
+                        "standalone recorded boundaryMessageId={stored} but opencode.db has {cut}"
+                    ),
+                ));
             }
         }
     }
@@ -1119,28 +1281,83 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
         .map_err(sql)?;
     let marker_json: Value = serde_json::from_str(&marker_before)
         .map_err(|error| Refusal::new("marker_state_mismatch", error.to_string()))?;
-    let marker_already_keyed = match marker_json.get("cortexkit") {
-        None => false,
-        Some(existing) => {
-            let named = existing.get("session").and_then(Value::as_str);
-            if named.is_some_and(|named| named != session) {
-                return Err(Refusal::new(
-                    "fork_unsupported",
-                    format!(
-                        "the marker's checkpoint key names session {}; this session is a fork",
-                        named.unwrap_or_default()
-                    ),
-                ));
-            }
-            if existing != &json!({"tag_checkpoint": tag_checkpoint, "session": session}) {
-                return Err(Refusal::new(
-                    "checkpoint_conflict",
-                    format!("the marker already carries {existing}, expected checkpoint {tag_checkpoint}"),
-                ));
-            }
-            true
+    // A key naming another session means this host row belongs to a fork.
+    // The expected 3-key comparison happens after `U` is known, against the
+    // relocated part, not the old one being deleted. An old key with the same
+    // session but a different checkpoint still refuses, so a stale checkpoint
+    // is never silently replaced by relocation.
+    if let Some(existing) = marker_json.get("cortexkit") {
+        let named = existing.get("session").and_then(Value::as_str);
+        if named.is_some_and(|named| named != session) {
+            return Err(Refusal::new(
+                "fork_unsupported",
+                format!(
+                    "the marker's checkpoint key names session {}; this session is a fork",
+                    named.unwrap_or_default()
+                ),
+            ));
         }
-    };
+        if existing.get("tag_checkpoint").and_then(Value::as_u64) != Some(tag_checkpoint) {
+            return Err(Refusal::new(
+                "checkpoint_conflict",
+                format!(
+                    "the marker already carries {existing}, expected checkpoint {tag_checkpoint}"
+                ),
+            ));
+        }
+    }
+    // The old summary's text and path ride unchanged onto the new summary rows.
+    // The old summary always carries one text part in the fixtures.
+    let old_summary_data: String = opencode
+        .query_row(
+            "SELECT data FROM message WHERE id=?1 AND session_id=?2",
+            params![summary_id, session],
+            |row| row.get(0),
+        )
+        .map_err(sql)?;
+    let old_summary_json: Value = serde_json::from_str(&old_summary_data)
+        .map_err(|error| Refusal::new("marker_state_mismatch", error.to_string()))?;
+    let summary_cwd = old_summary_json
+        .pointer("/path/cwd")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let summary_root = old_summary_json
+        .pointer("/path/root")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let mut summary_parts: Vec<(String, String)> = Vec::new();
+    {
+        let mut statement = opencode
+            .prepare("SELECT id, data FROM part WHERE message_id=?1 AND session_id=?2 ORDER BY id")
+            .map_err(sql)?;
+        let rows = statement
+            .query_map(params![summary_id, session], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sql)?;
+        for row in rows {
+            summary_parts.push(row.map_err(sql)?);
+        }
+    }
+    let mut old_summary_part = String::new();
+    let mut old_summary_part_data = String::new();
+    let mut summary_text = String::new();
+    for (id, data) in &summary_parts {
+        let value: Value = serde_json::from_str(data)
+            .map_err(|error| Refusal::new("marker_state_mismatch", error.to_string()))?;
+        if value.get("type").and_then(Value::as_str) == Some("text") {
+            old_summary_part = id.clone();
+            old_summary_part_data = data.clone();
+            summary_text = value
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            break;
+        }
+    }
 
     // Admission uses counted positions; raw host indexes are only for marker selection.
     let mut compartments = Vec::new();
@@ -1182,8 +1399,10 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
         compartments.push(ImportedCompartment {
             sequence,
             start_part: None,
+            start_block: None,
             start_message_id: start_id,
             end_part: None,
+            end_block: None,
             end_message_id: end_id,
             title,
             content,
@@ -1253,7 +1472,135 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
         })
         .map(|message| message.id.clone())
         .collect();
+    // The certificate for `P` is taken before apply, so apply must never
+    // rewrite `P`'s rows. Relocating a marker whose carrier `W` is `P` would
+    // delete `P`'s compaction part. Refuse before any write.
+    if old_cut == p {
+        return Err(Refusal::new(
+            "marker_on_head_cut",
+            format!(
+                "the marker carrier {old_cut} is P, the certified head-cut message; relocating it would rewrite P"
+            ),
+        ));
+    }
     check_projected_marker(&host, &old_cut, &summary_id, &marker_part, carrier)?;
+    // The relocated triple, deterministic for this session, `P` and `U`'s time.
+    // The generator's time/counter pairs are `(U.time + 1, 1)` for the summary
+    // message, `(U.time, 1)` for the compaction part and `(U.time + 1, 2)` for
+    // the summary text part, exactly as the plugin's writer uses them.
+    let u_time = carrier.time;
+    let marker_identity = format!("{session}\0{p}");
+    let new_summary_id = generate_message_id(
+        u_time.saturating_add(1),
+        1,
+        &format!("{marker_identity}\0summary-message"),
+    );
+    let new_compaction_part_id =
+        generate_part_id(u_time, 1, &format!("{marker_identity}\0compaction-part"));
+    let new_summary_part_id = generate_part_id(
+        u_time.saturating_add(1),
+        2,
+        &format!("{marker_identity}\0summary-part"),
+    );
+    // When the host does not yet carry the relocated triple, the stored
+    // summary and part ids must still name it. Once the host carries the new
+    // triple (a rerun after the host COMMIT), the stored ids are stale and
+    // the check is skipped.
+    if marker_part != new_compaction_part_id || summary_id != new_summary_id {
+        if let Some(state) = &state {
+            for (field, expected) in [
+                ("compactionPartId", marker_part.as_str()),
+                ("summaryMessageId", summary_id.as_str()),
+            ] {
+                if let Some(stored) = state.get(field).and_then(Value::as_str) {
+                    if stored != expected {
+                        return Err(Refusal::new(
+                            "marker_state_mismatch",
+                            format!(
+                                "standalone recorded {field}={stored} but opencode.db has {expected}"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // Each imported endpoint's CK block id, computed offline with the same
+    // codec `edge_block` uses, over the host message. Whole-message endpoints
+    // cover the first through the last decoded CK block.
+    let codec_profile = offline_codec_profile();
+    for compartment in &mut compartments {
+        for (mid, is_start) in [
+            (compartment.start_message_id.clone(), true),
+            (compartment.end_message_id.clone(), false),
+        ] {
+            let role = host
+                .messages
+                .iter()
+                .find(|message| message.id == mid)
+                .map(|message| message.role.clone())
+                .unwrap_or_default();
+            let part_datas = host_part_datas(&opencode, session, &mid)?;
+            let range = offline_ck_block_range(&role, &part_datas);
+            match (is_start, range) {
+                (true, Some((first, _))) => compartment.start_block = Some(first),
+                (false, Some((_, last))) => compartment.end_block = Some(last),
+                _ => {}
+            }
+        }
+    }
+    // The relocated part already carries this exact 3-key when a previous
+    // apply relocated the rows but stopped before the moved record. The old
+    // part's key is irrelevant: it is deleted with the old triple. A relocated
+    // part carrying a different session is a fork; one carrying the same
+    // session but a different checkpoint refuses, so a stale key is never
+    // kept.
+    let expected_key = json!({
+        "tag_checkpoint": tag_checkpoint,
+        "session": session,
+        "message_count": u - 1,
+    });
+    if let Some(existing) = opencode
+        .query_row(
+            "SELECT data FROM part WHERE id=?1 AND session_id=?2",
+            params![new_compaction_part_id, session],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sql)?
+        .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+        .and_then(|data| data.get("cortexkit").cloned())
+    {
+        let named = existing.get("session").and_then(Value::as_str);
+        if named.is_some_and(|named| named != session) {
+            return Err(Refusal::new(
+                "fork_unsupported",
+                format!(
+                    "the relocated marker's checkpoint key names session {}; this session is a fork",
+                    named.unwrap_or_default()
+                ),
+            ));
+        }
+        if existing != expected_key {
+            return Err(Refusal::new(
+                "checkpoint_conflict",
+                format!(
+                    "the relocated marker already carries {existing}, expected checkpoint {tag_checkpoint}"
+                ),
+            ));
+        }
+    }
+    let marker_already_keyed = opencode
+        .query_row(
+            "SELECT data FROM part WHERE id=?1 AND session_id=?2",
+            params![new_compaction_part_id, session],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sql)?
+        .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+        .and_then(|data| data.get("cortexkit").cloned())
+        .is_some_and(|key| key == expected_key);
 
     // Drops: resolve every target after the cut to its OpenCode part.
     let by_number: HashMap<u64, &TagRow> = tags.iter().map(|tag| (tag.number, tag)).collect();
@@ -1334,6 +1681,21 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
                     }
                     Some(true) if !by_mid[mid].counted => {
                         not_served.push(number);
+                        continue;
+                    }
+                    // A positional slot past the message's last part is gone:
+                    // nothing at that slot is served (CKDESK's second tag at
+                    // `:p1` on a one-text-part user message was an id-less part
+                    // another plugin added in memory). Only a part that exists
+                    // at or after `U` but cannot be mapped refuses missing.
+                    Some(true)
+                        if host
+                            .parts
+                            .get(mid)
+                            .map(|parts| index >= parts.len())
+                            .unwrap_or(true) =>
+                    {
+                        gone.push(number);
                         continue;
                     }
                     Some(true) => resolved_messages
@@ -1479,14 +1841,25 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
     not_served.sort_unstable();
     not_served.dedup();
     Ok(Plan {
-        marker_carrier: old_cut,
+        marker_carrier: old_cut.clone(),
+        old_compaction_part: marker_part.clone(),
+        old_summary: summary_id.clone(),
+        old_summary_part,
+        summary_text,
+        summary_cwd,
+        summary_root,
+        new_summary_id,
+        new_compaction_part_id: new_compaction_part_id.clone(),
+        new_summary_part_id,
+        u_time,
         record: MoveRecord {
             version: RECORD_VERSION,
             session: session.to_owned(),
             harness: HARNESS.to_owned(),
             tag_checkpoint,
             cut,
-            marker_part,
+            marker_part: new_compaction_part_id,
+            codec_profile,
             compartments,
             drops,
         },
@@ -1495,6 +1868,8 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
         dropped_summaries,
         returned_raw,
         marker_before,
+        old_summary_data,
+        old_summary_part_data,
         marker_already_keyed,
         behind_cut,
         missing,
@@ -1539,46 +1914,320 @@ fn interrupted(step: &str) -> impl Fn(rusqlite::Error) -> MoveError + '_ {
     move |error| MoveError::Interrupted(format!("{step}: {error}"))
 }
 
-/// Write the plan: the marker checkpoint key first, the moved record last.
+/// The relocated compaction part's checkpoint key, in the plugin's member
+/// order (`tag_checkpoint`, `session`, `message_count`).
+#[derive(Serialize)]
+struct RelocatedCheckpointKey<'a> {
+    tag_checkpoint: u64,
+    session: &'a str,
+    message_count: usize,
+}
+
+/// The relocated compaction part's `data`: the plugin's
+/// `{"type":"compaction","auto":true}` with `cortexkit` appended last.
+/// A struct (field order is declaration order), never `json!`, so the bytes
+/// match the plugin's `JSON.stringify` insertion order.
+#[derive(Serialize)]
+struct RelocatedCompactionData<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    auto: bool,
+    cortexkit: RelocatedCheckpointKey<'a>,
+}
+
+#[derive(Serialize)]
+struct RelocatedPath<'a> {
+    cwd: &'a str,
+    root: &'a str,
+}
+
+#[derive(Serialize)]
+struct RelocatedCache {
+    read: u8,
+    write: u8,
+}
+
+#[derive(Serialize)]
+struct RelocatedTokens {
+    input: u8,
+    output: u8,
+    reasoning: u8,
+    cache: RelocatedCache,
+}
+
+#[derive(Serialize)]
+struct RelocatedTime {
+    created: i64,
+    completed: i64,
+}
+
+/// The relocated summary message's `data`: the plugin writer's output for
+/// `resolvedBoundary = U` and `endMessageId = P`, with the old summary's path
+/// carried over. Field order is declaration order, matching the plugin's
+/// `JSON.stringify` member order exactly.
+#[derive(Serialize)]
+struct RelocatedSummaryData<'a> {
+    role: &'a str,
+    #[serde(rename = "parentID")]
+    parent_id: &'a str,
+    summary: bool,
+    finish: &'a str,
+    mode: &'a str,
+    agent: &'a str,
+    path: RelocatedPath<'a>,
+    cost: u8,
+    tokens: RelocatedTokens,
+    #[serde(rename = "modelID")]
+    model_id: &'a str,
+    #[serde(rename = "providerID")]
+    provider_id: &'a str,
+    time: RelocatedTime,
+}
+
+/// The relocated compaction part's `data`: the plugin's
+/// `{"type":"compaction","auto":true}` plus exactly the `cortexkit` key.
+fn relocation_compaction_data(tag_checkpoint: u64, session: &str, message_count: usize) -> String {
+    serde_json::to_string(&RelocatedCompactionData {
+        kind: "compaction",
+        auto: true,
+        cortexkit: RelocatedCheckpointKey {
+            tag_checkpoint,
+            session,
+            message_count,
+        },
+    })
+    .expect("compaction data serializes")
+}
+
+/// The relocated summary message's `data`: the plugin writer's output for
+/// `resolvedBoundary = U` and `endMessageId = P`, with the old summary's path
+/// carried over. Key order matches the plugin's `JSON.stringify` exactly.
+fn relocation_summary_data(boundary_id: &str, boundary_time: i64, cwd: &str, root: &str) -> String {
+    let time = boundary_time.saturating_add(1);
+    serde_json::to_string(&RelocatedSummaryData {
+        role: "assistant",
+        parent_id: boundary_id,
+        summary: true,
+        finish: "stop",
+        mode: "compaction",
+        agent: "compaction",
+        path: RelocatedPath { cwd, root },
+        cost: 0,
+        tokens: RelocatedTokens {
+            input: 0,
+            output: 0,
+            reasoning: 0,
+            cache: RelocatedCache { read: 0, write: 0 },
+        },
+        model_id: "magic-context",
+        provider_id: "magic-context",
+        time: RelocatedTime {
+            created: time,
+            completed: time,
+        },
+    })
+    .expect("summary data serializes")
+}
+
+/// Write the plan: the three-row relocation and the checkpoint key in one host
+/// transaction on `opencode.db`, then the moved record last in `context.db`.
+/// The relocation deletes the old triple and inserts the new triple (with the
+/// 3-key) atomically; rerunning after the host COMMIT but before the record
+/// finds the new rows already in place and only writes the record.
 pub fn apply(paths: &StorePaths, plan: &Plan, stop: Option<StopAfter>) -> Result<(), MoveError> {
     let record = &plan.record;
-    // Until the writer can relocate the marker, applying a different cut would
-    // store a checkpoint at a cut the host marker does not carry. Refuse before
-    // opening a writer, including reruns with an already-keyed old marker.
-    if record.cut != plan.marker_carrier {
-        return Err(Refusal::new(
-            "source_changed",
-            "the planned cut requires marker relocation; no checkpoint was written",
-        )
-        .into());
-    }
+    let new_compaction_data =
+        relocation_compaction_data(record.tag_checkpoint, &record.session, plan.message_count);
+    let new_summary_data = relocation_summary_data(
+        &record.cut,
+        plan.u_time,
+        &plan.summary_cwd,
+        &plan.summary_root,
+    );
+    // The summary text is unchanged by the move: copy the old summary part's
+    // `data` string verbatim, keeping `JSON.stringify`'s exact escaping.
+    let new_summary_part_data = plan.old_summary_part_data.clone();
+    let summary_time = plan.u_time.saturating_add(1);
     if !plan.marker_already_keyed {
         let mut opencode = open_writer(&paths.opencode_db)?;
+        // A generated marker id that is already taken by an unrelated row has
+        // no refusal code yet: stop and ask rather than inventing one or
+        // overwriting the row. The check runs before the host transaction, so
+        // nothing is written when it fires.
+        for (id, expected, what) in [
+            (
+                &plan.new_summary_id,
+                new_summary_data.as_str(),
+                "summary message",
+            ),
+            (
+                &plan.new_compaction_part_id,
+                new_compaction_data.as_str(),
+                "compaction part",
+            ),
+            (
+                &plan.new_summary_part_id,
+                new_summary_part_data.as_str(),
+                "summary text part",
+            ),
+        ] {
+            let taken: Option<(String, String, i64, i64)> = opencode
+                .query_row(
+                    "SELECT message_id, session_id, time_created, time_updated FROM part WHERE id=?1 \
+                     UNION ALL SELECT id, session_id, time_created, time_updated FROM message WHERE id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()
+                .map_err(interrupted("opencode.db taken id probe"))?;
+            // A row with one of the new ids is only expected when it is the
+            // relocated row itself (a rerun after the host COMMIT) or one of
+            // the old rows being replaced (ids never collide in practice, but
+            // the old triple is deleted in the same transaction).
+            if taken.is_some() {
+                let existing_data: Option<String> = opencode
+                    .query_row(
+                        "SELECT data FROM part WHERE id=?1 UNION ALL SELECT data FROM message WHERE id=?1",
+                        [id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(interrupted("opencode.db taken id data"))?;
+                let is_old = id == &plan.old_compaction_part
+                    || id == &plan.old_summary
+                    || id == &plan.old_summary_part;
+                if existing_data.as_deref() != Some(expected) && !is_old {
+                    return Err(MoveError::Interrupted(format!(
+                        "generated marker {what} id {id} is already taken; manual resolution is required"
+                    )));
+                }
+            }
+            let _ = what;
+        }
         let tx = opencode
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(interrupted("opencode.db"))?;
-        // json_set keeps every existing member and its order, and the compare
-        // against the planned before-image refuses a part that changed since.
-        let key = json!({"tag_checkpoint": record.tag_checkpoint, "session": record.session});
-        let changed = tx
-            .execute(
-                "UPDATE part SET data=json_set(data,'$.cortexkit',json(?1))
-                  WHERE id=?2 AND session_id=?3 AND message_id=?4 AND data=?5",
+        // Rerun after the host COMMIT: the old rows are gone and the new rows
+        // already carry the expected bytes. Skip the relocation and only write
+        // the moved record below.
+        let old_gone: bool = tx
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM message WHERE id=?1) \
+                 AND NOT EXISTS(SELECT 1 FROM part WHERE id=?2 OR id=?3)",
                 params![
-                    key.to_string(),
-                    record.marker_part,
-                    record.session,
+                    plan.old_summary,
+                    plan.old_compaction_part,
+                    plan.old_summary_part
+                ],
+                |row| row.get(0),
+            )
+            .map_err(interrupted("opencode.db relocation probe"))?;
+        let new_ok = |id: &str, expected: &str| -> Result<bool, MoveError> {
+            Ok(tx
+                .query_row(
+                    "SELECT data FROM message WHERE id=?1 UNION ALL SELECT data FROM part WHERE id=?1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(interrupted("opencode.db relocation probe"))?
+                .as_deref()
+                == Some(expected))
+        };
+        let already = old_gone
+            && new_ok(&plan.new_summary_id, &new_summary_data)?
+            && new_ok(&plan.new_compaction_part_id, &new_compaction_data)?
+            && new_ok(&plan.new_summary_part_id, &new_summary_part_data)?;
+        if !already {
+            // Fail closed when the host changed since planning: the old rows
+            // must still carry their before-images, otherwise a rerun is
+            // required to plan again. The compare is by `data`; times and ids
+            // are pinned by the relocation itself.
+            let old_ok = |id: &str, expected: &str| -> Result<bool, MoveError> {
+                Ok(tx
+                    .query_row(
+                        "SELECT data FROM message WHERE id=?1 UNION ALL SELECT data FROM part WHERE id=?1",
+                        [id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(interrupted("opencode.db relocation probe"))?
+                    .as_deref()
+                    == Some(expected))
+            };
+            if !(old_ok(&plan.old_compaction_part, &plan.marker_before)?
+                && old_ok(&plan.old_summary, &plan.old_summary_data)?
+                && (plan.old_summary_part.is_empty()
+                    || old_ok(&plan.old_summary_part, &plan.old_summary_part_data)?))
+            {
+                return Err(Refusal::new(
+                    "source_changed",
+                    "the host marker changed after planning; rerun to plan again",
+                )
+                .into());
+            }
+            // One host transaction: delete the old triple, insert the new
+            // triple with the checkpoint key. The upserts make a rerun that
+            // stopped after a partial write converge on the same bytes.
+            tx.execute(
+                "DELETE FROM part WHERE id=?1 OR id=?2",
+                params![plan.old_compaction_part, plan.old_summary_part],
+            )
+            .map_err(interrupted("opencode.db delete old parts"))?;
+            tx.execute(
+                "DELETE FROM message WHERE id=?1",
+                [plan.old_summary.as_str()],
+            )
+            .map_err(interrupted("opencode.db delete old summary"))?;
+            tx.execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(id) DO UPDATE SET
+                     message_id=excluded.message_id, session_id=excluded.session_id,
+                     time_created=excluded.time_created, time_updated=excluded.time_updated,
+                     data=excluded.data",
+                params![
+                    plan.new_compaction_part_id,
                     record.cut,
-                    plan.marker_before
+                    record.session,
+                    plan.u_time,
+                    plan.u_time,
+                    new_compaction_data,
                 ],
             )
-            .map_err(interrupted("opencode.db marker key"))?;
-        if changed != 1 {
-            return Err(Refusal::new(
-                "source_changed",
-                "the compaction part changed after planning; rerun to plan again",
+            .map_err(interrupted("opencode.db insert compaction part"))?;
+            tx.execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                     session_id=excluded.session_id, time_created=excluded.time_created,
+                     time_updated=excluded.time_updated, data=excluded.data",
+                params![
+                    plan.new_summary_id,
+                    record.session,
+                    summary_time,
+                    summary_time,
+                    new_summary_data,
+                ],
             )
-            .into());
+            .map_err(interrupted("opencode.db insert summary"))?;
+            tx.execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(id) DO UPDATE SET
+                     message_id=excluded.message_id, session_id=excluded.session_id,
+                     time_created=excluded.time_created, time_updated=excluded.time_updated,
+                     data=excluded.data",
+                params![
+                    plan.new_summary_part_id,
+                    plan.new_summary_id,
+                    record.session,
+                    summary_time,
+                    summary_time,
+                    new_summary_part_data,
+                ],
+            )
+            .map_err(interrupted("opencode.db insert summary part"))?;
         }
         tx.commit().map_err(interrupted("opencode.db commit"))?;
     }
