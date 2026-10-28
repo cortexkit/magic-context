@@ -32,6 +32,7 @@ import {
 import type { HiddenCompletionExecutor } from "../hooks/magic-context/compartment-runner-types";
 import { createLiveSessionState } from "../hooks/magic-context/live-session-state";
 import { setRawMessageProvider } from "../hooks/magic-context/read-session-chunk";
+import { closeReadOnlySessionDb } from "../hooks/magic-context/read-session-db";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import type { RustModeModuleClient } from "../hooks/magic-context/rust-mode-transform";
 import { _resetHarnessForTesting, setHarness } from "../shared/harness";
@@ -950,6 +951,145 @@ describe("buildStatusDetail — storage version probe", () => {
             });
         } finally {
             closeQuietly(db);
+        }
+    });
+});
+
+describe("buildSidebarSnapshot — host work metrics", () => {
+    for (const store of ["migrated", "native"] as const) {
+        test(`OpenCode 2 ${store} store replaces persisted zero with session_message totals`, () => {
+            const root = createTestTempDirFromPath(join(tmpdir(), "sidebar-work-metrics-"));
+            const previousDbPath = process.env.OPENCODE_DB;
+            const previousDataHome = process.env.XDG_DATA_HOME;
+            const previousChannel = process.env.OPENCODE_CHANNEL;
+            mkdirSync(join(root, "opencode"));
+            const hostPath = join(root, "opencode", "opencode.db");
+            const host = new Database(hostPath);
+            const db = createTestDb();
+            const sessionId = `ses-work-metrics-${store}`;
+            try {
+                closeReadOnlySessionDb();
+                _resetHarnessForTesting();
+                process.env.OPENCODE_DB = hostPath;
+                host.exec(`CREATE TABLE session_message (
+                    id TEXT PRIMARY KEY, session_id TEXT, type TEXT,
+                    seq INTEGER, time_created INTEGER, data TEXT
+                )`);
+                if (store === "migrated") {
+                    host.exec(`
+                        CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+                        CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT);
+                        CREATE TABLE session_v2 (id TEXT PRIMARY KEY);
+                    `);
+                    // Reproduce the old reader persisting zero from the empty
+                    // v1 table before the same session is opened by OpenCode 2.
+                    expect(
+                        buildSidebarSnapshot(db, sessionId, process.cwd()).totalInputTokens,
+                    ).toBe(0);
+                } else {
+                    // The dev channel uses opencode.db on OpenCode 2, but
+                    // opencode-dev.db on OpenCode 1. Do not read the decoy v1 store.
+                    delete process.env.OPENCODE_DB;
+                    process.env.XDG_DATA_HOME = root;
+                    process.env.OPENCODE_CHANNEL = "dev";
+                    const decoy = new Database(join(root, "opencode", "opencode-dev.db"));
+                    try {
+                        decoy.exec(`
+                            CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+                            CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT);
+                        `);
+                    } finally {
+                        closeQuietly(decoy);
+                    }
+                    db.prepare(
+                        "INSERT INTO session_meta (session_id, new_work_tokens, total_input_tokens) VALUES (?, 0, 0)",
+                    ).run(sessionId);
+                }
+                _resetHarnessForTesting();
+                setHarness("opencode2");
+                const insert = host.prepare(
+                    "INSERT INTO session_message (id, session_id, type, seq, time_created, data) VALUES (?, ?, 'assistant', ?, ?, ?)",
+                );
+                for (const [index, input] of [70, 170, 50, 90].entries()) {
+                    insert.run(
+                        `m${index}`,
+                        sessionId,
+                        index + 1,
+                        index + 1,
+                        JSON.stringify({
+                            agent: "build",
+                            tokens: { input, output: index + 1, cache: { read: 20, write: 10 } },
+                        }),
+                    );
+                }
+
+                for (let poll = 0; poll < 2; poll++) {
+                    const snapshot = buildSidebarSnapshotRpcResponse(db, sessionId, process.cwd());
+                    expect(snapshot).toMatchObject({ newWorkTokens: 244, totalInputTokens: 320 });
+                    expect(
+                        db
+                            .prepare(
+                                "SELECT new_work_tokens, total_input_tokens FROM session_meta WHERE session_id = ?",
+                            )
+                            .get(sessionId),
+                    ).toEqual({ new_work_tokens: 244, total_input_tokens: 320 });
+                }
+            } finally {
+                closeReadOnlySessionDb();
+                _resetHarnessForTesting();
+                if (previousDbPath === undefined) delete process.env.OPENCODE_DB;
+                else process.env.OPENCODE_DB = previousDbPath;
+                if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME;
+                else process.env.XDG_DATA_HOME = previousDataHome;
+                if (previousChannel === undefined) delete process.env.OPENCODE_CHANNEL;
+                else process.env.OPENCODE_CHANNEL = previousChannel;
+                closeQuietly(host);
+                closeQuietly(db);
+                rmSync(root, { recursive: true, force: true });
+            }
+        });
+    }
+
+    test("OpenCode 1 keeps reading message when session_message also exists", () => {
+        const root = createTestTempDirFromPath(join(tmpdir(), "sidebar-work-metrics-v1-"));
+        const previousDbPath = process.env.OPENCODE_DB;
+        const host = new Database(join(root, "opencode.db"));
+        const db = createTestDb();
+        const sessionId = "ses-work-metrics-v1";
+        try {
+            closeReadOnlySessionDb();
+            _resetHarnessForTesting();
+            process.env.OPENCODE_DB = join(root, "opencode.db");
+            host.exec(`
+                CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+                CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT);
+                CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, data TEXT);
+            `);
+            host.prepare("INSERT INTO message VALUES ('v1', ?, 1, ?)").run(
+                sessionId,
+                JSON.stringify({
+                    role: "assistant",
+                    agent: "build",
+                    tokens: { input: 100, output: 7, cache: { read: 20, write: 10 } },
+                }),
+            );
+            host.prepare("INSERT INTO session_message VALUES ('v2', ?, 'assistant', 1, ?)").run(
+                sessionId,
+                JSON.stringify({ tokens: { input: 9999, output: 9999 } }),
+            );
+
+            expect(buildSidebarSnapshotRpcResponse(db, sessionId, process.cwd())).toMatchObject({
+                newWorkTokens: 137,
+                totalInputTokens: 130,
+            });
+        } finally {
+            closeReadOnlySessionDb();
+            _resetHarnessForTesting();
+            if (previousDbPath === undefined) delete process.env.OPENCODE_DB;
+            else process.env.OPENCODE_DB = previousDbPath;
+            closeQuietly(host);
+            closeQuietly(db);
+            rmSync(root, { recursive: true, force: true });
         }
     });
 });
