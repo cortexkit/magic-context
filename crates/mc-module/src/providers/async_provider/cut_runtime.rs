@@ -212,27 +212,25 @@ fn retained_initial(
     let last: Option<u64> = applied
         .as_ref()
         .and_then(|view| retained_through(view, first));
-    let full = match (&applied, last) {
-        (Some(_), Some(end)) => (first..=end).all(|ordinal| held.contains_key(&ordinal)),
-        _ => false,
-    };
-    if !full {
-        if let Some(end) = last.filter(|_| applied.is_some()) {
-            tracing::debug!(
-                first_ordinal = first,
-                last_retained = end,
-                held_rows = held.len(),
-                reason = fallback_reason(current, first, end, &held),
-                request_id,
-                "cut descent answers head-only: held window cannot cover the retained range"
-            );
-        }
-        return Ok((Vec::new(), first));
-    }
+    // No applied view, or one that retains nothing at or after `first`: there
+    // are no retained rows to render, so the answer is head-only.
     let (Some(view), Some(end)) = (applied.as_ref(), last) else {
-        unreachable!("full coverage implies an applied view with a retained end");
+        return Ok((Vec::new(), first));
     };
-    let to = end.checked_add(1).unwrap_or(first);
+    let covered = end
+        .checked_add(1)
+        .filter(|_| (first..=end).all(|ordinal| held.contains_key(&ordinal)));
+    let Some(to) = covered else {
+        tracing::debug!(
+            first_ordinal = first,
+            last_retained = end,
+            held_rows = held.len(),
+            reason = fallback_reason(current, first, end, &held),
+            request_id,
+            "cut descent answers head-only: held window cannot cover the retained range"
+        );
+        return Ok((Vec::new(), first));
+    };
     Ok((render_retained_rows(&held, view, first, end)?, to))
 }
 
