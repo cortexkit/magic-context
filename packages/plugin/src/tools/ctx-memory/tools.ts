@@ -522,7 +522,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     ? !embeddingSnapshot.features.memoryEnabled
                     : deps.memoryEnabled === false
             ) {
-                return getDisabledMessage();
+                return embeddingSnapshot?.memoryDisabledReason ?? getDisabledMessage();
             }
 
             if (args.action === "write") {

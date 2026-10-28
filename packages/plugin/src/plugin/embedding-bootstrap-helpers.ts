@@ -26,6 +26,8 @@ export interface EmbeddingLoadResultDetailed<TConfig extends { embedding: Embedd
     };
     substitutionFailures: Array<{ keyPath: string; source: "user" | "project"; message: string }>;
     recoveredTopLevelKeys: string[];
+    /** Exact recovered leaves, or a parent path when its entire block was replaced. */
+    recoveredFieldPaths?: string[];
 }
 
 export const EMBEDDING_AFFECTING_KEYS = new Set([
@@ -47,9 +49,16 @@ export const EMBEDDING_AFFECTING_KEYS = new Set([
     "embedding.query_instruction",
     "embedding.document_prefix",
     "embedding.fallback_provider",
-    "subc",
+    // Runtime/dtype can select a different local vector space.
+    "embedding.local_runtime",
+    "embedding.local_dtype",
     "subc.connection_file",
-    "shadow_embedding",
+    "shadow_embedding.enabled",
+    // Recovered feature flags can activate a stale-identity GC scope.
+    "memory.enabled",
+    "memory.git_commit_indexing.enabled",
+    // This permission controls which directory can become the project identity.
+    "allow_home_project",
 ]);
 
 // A `{env:VAR}` / `{file:path}` token left LITERAL in the resolved config.
@@ -59,23 +68,32 @@ export const EMBEDDING_AFFECTING_KEYS = new Set([
 // latch and let GC reap the real model's vectors. Detect and treat as untrusted.
 const LITERAL_CONFIG_TOKEN_RE = /\{(?:env|file):[^}]+\}/;
 
-function embeddingConfigHasLiteralTokens(embedding: EmbeddingConfig | undefined): boolean {
-    if (!embedding) return false;
-    for (const value of Object.values(embedding)) {
-        if (typeof value === "string" && LITERAL_CONFIG_TOKEN_RE.test(value)) {
-            return true;
-        }
-    }
-    return false;
+function affectsEmbeddingRegistration(path: string): boolean {
+    return [...EMBEDDING_AFFECTING_KEYS].some(
+        (field) => field === path || field.startsWith(`${path}.`),
+    );
 }
 
-export const EMBEDDING_AFFECTING_TOP_LEVEL_KEYS = new Set([
-    "embedding",
-    "memory",
-    "experimental",
-    "subc",
-    "shadow_embedding",
-]);
+export function untrustedConfigFieldPaths(
+    detailed: EmbeddingLoadResultDetailed<{ embedding: EmbeddingConfig }>,
+): string[] {
+    // Older callers may only supply root keys. A replaced parent must remain
+    // untrusted because recovery can reset an identity-bearing child within it.
+    const paths = (detailed.recoveredFieldPaths ?? detailed.recoveredTopLevelKeys).filter(
+        affectsEmbeddingRegistration,
+    );
+    paths.push(
+        ...detailed.substitutionFailures
+            .map((failure) => failure.keyPath)
+            .filter(affectsEmbeddingRegistration),
+    );
+    for (const [key, value] of Object.entries(detailed.config.embedding)) {
+        if (typeof value === "string" && LITERAL_CONFIG_TOKEN_RE.test(value)) {
+            paths.push(`embedding.${key}`);
+        }
+    }
+    return [...new Set(paths)].sort();
+}
 
 const EMBEDDING_WARNING_TERMS = [
     "api_key",
@@ -114,27 +132,12 @@ export function isConfigLoadUntrusted(
     }
 
     for (const failure of detailed.substitutionFailures) {
-        if (EMBEDDING_AFFECTING_KEYS.has(failure.keyPath)) {
-            return true;
-        }
         if (failure.keyPath === "<unknown>" && warningLooksEmbeddingRelated(failure.message)) {
             return true;
         }
     }
 
-    for (const recoveredKey of detailed.recoveredTopLevelKeys) {
-        if (EMBEDDING_AFFECTING_TOP_LEVEL_KEYS.has(recoveredKey)) {
-            return true;
-        }
-    }
-
-    // A literal {env:}/{file:} token survived into an embedding field — only
-    // possible from an unexpanded project-config token (user tokens expand). The
-    // string would hash into a bogus identity, so treat the load as untrusted
-    // regardless of how the substitution warning happened to be worded.
-    if (embeddingConfigHasLiteralTokens(detailed.config.embedding)) {
-        return true;
-    }
+    if (untrustedConfigFieldPaths(detailed).length > 0) return true;
 
     return false;
 }
@@ -155,8 +158,9 @@ export function describeFailure(
                 .join(",")}`,
         );
     }
-    if (detailed.recoveredTopLevelKeys.length > 0) {
-        parts.push(`recovered=${detailed.recoveredTopLevelKeys.join(",")}`);
+    const recovered = detailed.recoveredFieldPaths ?? detailed.recoveredTopLevelKeys;
+    if (recovered.length > 0) {
+        parts.push(`recovered=${recovered.join(",")}`);
     }
     return parts.length > 0 ? parts.join("; ") : detailed.loadOutcome;
 }
@@ -172,6 +176,7 @@ export function logConfigFailureOnce(
                 .map((failure) => `${failure.source}:${failure.keyPath}:${failure.message}`)
                 .sort(),
             recoveredTopLevelKeys: [...detailed.recoveredTopLevelKeys].sort(),
+            recoveredFieldPaths: detailed.recoveredFieldPaths?.slice().sort(),
         }),
     );
     const existing = loggedFailureSignatures.get(projectIdentity) ?? new Set<string>();
@@ -208,8 +213,28 @@ export function handleUntrustedLoad(
         directory,
         detailed.config.embedding,
         describeFailure(detailed),
+        untrustedConfigMemoryMessage(detailed),
     );
     return true;
+}
+
+function untrustedConfigMemoryMessage(
+    detailed: EmbeddingLoadResultDetailed<{ embedding: EmbeddingConfig }>,
+): string {
+    const fields = untrustedConfigFieldPaths(detailed);
+    const cause =
+        fields.length > 0
+            ? `has invalid embedding or project identity settings: ${fields.join(", ")}`
+            : Object.values(detailed.sources).includes("legacy-config-unmigrated")
+              ? "is awaiting config migration"
+              : Object.values(detailed.sources).some(
+                      (source) =>
+                          source === "project-file-parse-error" ||
+                          source === "project-file-io-error",
+                  )
+                ? "could not be read or parsed"
+                : "has invalid embedding settings";
+    return `Cross-session memory is off for this project because magic-context.jsonc ${cause}.`;
 }
 
 export function _resetEmbeddingConfigFailureLogsForTests(): void {

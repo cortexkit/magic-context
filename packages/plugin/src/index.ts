@@ -613,11 +613,7 @@ const server: Plugin = async (ctx) => {
                 retinaHandoff: pluginConfig.smart_notes.retina_handoff,
                 smartNotesEnabled: pluginConfig.smart_notes.enabled,
                 gitCommitIndexing: pluginConfig.memory.git_commit_indexing?.enabled
-                    ? {
-                          enabled: true,
-                          since_days: pluginConfig.memory.git_commit_indexing.since_days,
-                          max_commits: pluginConfig.memory.git_commit_indexing.max_commits,
-                      }
+                    ? pluginConfig.memory.git_commit_indexing
                     : undefined,
                 ensureRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
                 onDreamerProgress: (

@@ -58,3 +58,54 @@ describe("isConfigLoadUntrusted — literal config tokens", () => {
         expect(isConfigLoadUntrusted(detailed)).toBe(false);
     });
 });
+
+describe("isConfigLoadUntrusted — recovered fields", () => {
+    it.each([
+        "embedding.provider",
+        "embedding.model",
+        "embedding.endpoint",
+        "embedding.api_key",
+        "embedding.input_type",
+        "embedding.query_input_type",
+        "embedding.query_instruction",
+        "embedding.document_prefix",
+        "embedding.truncate",
+        "embedding.max_input_tokens",
+        "embedding.local_runtime",
+        "embedding.local_dtype",
+        "embedding.fallback_provider",
+        "subc.connection_file",
+        "shadow_embedding.enabled",
+        "memory.enabled",
+        "memory.git_commit_indexing.enabled",
+        "allow_home_project",
+        "embedding",
+        "memory",
+        "memory.git_commit_indexing",
+        "subc",
+        "shadow_embedding",
+    ])("distrusts recovery of %s", (path) => {
+        const detailed = makeDetailed({ provider: "off" });
+        detailed.recoveredTopLevelKeys = [path.split(".")[0]];
+        detailed.recoveredFieldPaths = [path];
+        expect(isConfigLoadUntrusted(detailed)).toBe(true);
+    });
+
+    it.each([
+        "memory.injection_budget_tokens",
+        "memory.auto_promote",
+        "memory.retrieval_count_promotion_threshold",
+        "memory.auto_search",
+        "memory.auto_search.enabled",
+        "memory.auto_search.score_threshold",
+        "memory.auto_search.min_prompt_chars",
+        "memory.git_commit_indexing.since_days",
+        "memory.git_commit_indexing.max_commits",
+        "experimental",
+    ])("trusts recovery of a non-identity setting: %s", (path) => {
+        const detailed = makeDetailed({ provider: "off" });
+        detailed.recoveredTopLevelKeys = [path.split(".")[0]];
+        detailed.recoveredFieldPaths = [path];
+        expect(isConfigLoadUntrusted(detailed)).toBe(false);
+    });
+});
