@@ -246,7 +246,9 @@ async fn broca_role_describe_setup_checkpoint() {
     for (name, writer, answer) in captures() {
         let dir = tempfile::tempdir().unwrap();
         let session = fixture::fixture_session();
-        let paths = fixture::write_stores(dir.path());
+        // The move's apply step needs the marker on the selected cut message
+        // before it writes.
+        let paths = fixture::write_moved_session_stores(dir.path());
         offline_move::run(&paths, &session, false, &fixture::NoHolders, None).unwrap();
         let mut served = None;
         let (rig, result) = Rig::try_setup_with_model(

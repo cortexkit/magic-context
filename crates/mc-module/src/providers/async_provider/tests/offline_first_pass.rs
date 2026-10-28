@@ -478,7 +478,12 @@ fn pin_history_generation(context_db: &Path, session: &str, generations: &[u64])
 }
 
 fn fixture_stores(dir: &Path) -> (StorePaths, String) {
-    (fixture::write_stores(dir), fixture::fixture_session())
+    // The fixture puts the marker on the selected cut message, which lets `run`
+    // apply the move.
+    (
+        fixture::write_moved_session_stores(dir),
+        fixture::fixture_session(),
+    )
 }
 
 /// The command's inputs written to `work`, as the window script hands them
@@ -1656,46 +1661,23 @@ async fn offline_first_pass_matches_the_live_first_pass_on_the_moved_fixture() {
 }
 
 #[tokio::test]
-async fn offline_first_pass_matches_the_live_first_pass_with_drops_and_an_arc_in_the_cut_band() {
-    let store = tempfile::tempdir().unwrap();
-    let (_, _, served) = moved_stores(store.path(), band_fixture_stores);
-    let record = {
-        let conn = rusqlite::Connection::open(store.path().join("context.db")).unwrap();
-        offline_move::read_move_record(&conn, &fixture::fixture_session())
-            .unwrap()
-            .unwrap()
-            .unwrap()
+async fn offline_first_pass_refuses_the_partial_endpoint_band_with_block_index() {
+    // Only whole-message summaries are admitted: the band's last summary ends
+    // at a block index inside m006, so the move refuses before any write. The
+    // band's queued drops on m006 and its tool arc outside coverage were the
+    // partial-endpoint shape; with whole-message endpoints that shape cannot
+    // exist (the call and result would sit inside C), and the moved-fixture
+    // differential already covers whole-message drops after the cut. No
+    // whole-message variant of this band is kept.
+    let dir = tempfile::tempdir().unwrap();
+    let (paths, session) = band_fixture_stores(dir.path());
+    let before = store_rows(&paths);
+    let outcome = offline_move::run(&paths, &session, false, &fixture::NoHolders, None);
+    let Err(offline_move::MoveError::Refused(refusal)) = outcome else {
+        panic!("expected a block_index refusal, got {outcome:?}");
     };
-    // The shape the differential is meant to cover.
-    let ordinal = |mid: &str| {
-        served
-            .iter()
-            .find(|entry| entry.mid == mid)
-            .unwrap()
-            .ordinal
-    };
-    let last = record.compartments.last().unwrap();
-    assert!(
-        ordinal(&record.cut) < ordinal(&last.end_message_id),
-        "the cut lies before C"
-    );
-    assert_eq!(
-        last.end_part.as_deref(),
-        Some("prt_m006_a"),
-        "C ends inside m006, before its tool part"
-    );
-    let band = record
-        .drops
-        .iter()
-        .filter(|drop| drop.kind == offline_move::DropKind::Queued && drop.mid == "msg_m006")
-        .map(|drop| drop.part.as_str())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        band,
-        BTreeSet::from(["prt_m006_a", "prt_m006_b"]),
-        "queued drops in (cut, C]"
-    );
-    differential("cut band fixture", band_fixture_stores, 11, 20).await;
+    assert_eq!(refusal.code, "block_index");
+    assert_eq!(store_rows(&paths), before, "a refusal wrote");
 }
 
 async fn seeded(seeds: std::ops::Range<u64>) {

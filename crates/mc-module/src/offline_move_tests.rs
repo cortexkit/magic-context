@@ -1311,8 +1311,13 @@ pub(crate) fn write_synthetic_stores(dir: &Path, shape: &Synthetic) -> StorePath
                 .unwrap();
             }
         }
-        // Compartments up to the first assistant turn after the cut.
-        let covered = cut + 2;
+        // The compartments tile the counted prefix and end exactly at the message
+        // before the cut, so the fold end (the last covered message, index
+        // cut - 1) plus one lands on the marker message. The cut is a user
+        // message with no neighbour at its time or time + 1 (the relocated
+        // summary is excluded), and no summary straddles it. Covering past the
+        // cut would straddle it and refuse with `cut_straddled`.
+        let covered = cut;
         let per = covered.div_ceil(shape.compartments);
         let mut compartment = ctx
             .prepare(
@@ -1340,10 +1345,22 @@ pub(crate) fn write_synthetic_stores(dir: &Path, shape: &Synthetic) -> StorePath
             sequence += 1;
         }
         ctx.execute(
-            // Tag inserts may already have created the row.
-            "INSERT INTO session_meta(session_id,harness,counter,compaction_marker_state) VALUES (?1,'opencode',?2,'')
-             ON CONFLICT(session_id) DO UPDATE SET counter=excluded.counter",
-            params![session, tag as i64],
+            // Tag inserts may already have created the row. The fold end T is the
+            // last covered message, a counted row inside the tiled prefix; U is
+            // then T + 1, the marker message itself.
+            "INSERT INTO session_meta(session_id,harness,counter,compaction_marker_state) VALUES (?1,'opencode',?2,?3)
+             ON CONFLICT(session_id) DO UPDATE SET counter=excluded.counter, compaction_marker_state=excluded.compaction_marker_state",
+            params![
+                session,
+                tag as i64,
+                json!({
+                    "boundaryMessageId": format!("msg_{cut:07}"),
+                    "summaryMessageId": "msg_summary",
+                    "compactionPartId": "prt_0_compaction",
+                    "targetEndMessageId": format!("msg_{:07}", covered - 1),
+                })
+                .to_string()
+            ],
         )
         .unwrap();
     }

@@ -85,7 +85,9 @@ pub(super) fn served_entries(opencode_db: &Path, session: &str) -> Vec<ReadMessa
 
 pub(super) async fn moved_rig(dir: &Path, run_move: bool) -> (Rig, Value) {
     let session = fixture::fixture_session();
-    let paths = fixture::write_stores(dir);
+    // The move's apply step refuses with `source_changed` unless the marker is
+    // on the selected cut, so the fixture stores put it there before each move.
+    let paths = fixture::write_moved_session_stores(dir);
     // One standalone chunk embedding, which the import copies instead of
     // computing it again.
     rusqlite::Connection::open(&paths.context_db)
@@ -137,10 +139,14 @@ async fn moved_session_sets_up_from_the_import_and_carries_drops_onto_the_same_p
     let source = fixture::fixture();
     let expected = &source["expected"];
     assert_eq!(answer["answer"], "ready", "{answer}");
-    // The setup checkpoint: the highest standalone number and the cut.
+    // The selected cut is msg_m007: the fold end (the last covered message) is
+    // msg_m006 at counted position 6, so the cut is the next message. msg_m007
+    // is a user message with a text part and no neighbour at its time or time
+    // + 1; the only older summary start at or below it is msg_m003. The message
+    // before the cut is msg_m006.
     assert_eq!(
         answer["checkpoint"],
-        json!({"tag_checkpoint": 20, "cut": expected["cut"]})
+        json!({"tag_checkpoint": 20, "cut": "msg_m007"})
     );
     rig.notice(1, 1_000, None).await;
     settle_historian(&rig).await;
@@ -169,7 +175,8 @@ async fn moved_session_sets_up_from_the_import_and_carries_drops_onto_the_same_p
     }
     // m001..m006 are ordinals 0..=5: the marker's summary message is not served.
     assert_eq!(imported.last().unwrap().end_message, 5);
-    assert_eq!(state.mid_index[expected["cut"].as_str().unwrap()], 4);
+    // msg_m007 is the seventh served message, hence ordinal 6.
+    assert_eq!(state.mid_index["msg_m007"], 6);
     assert!(state.standalone_move.as_ref().unwrap().pending.is_none());
 
     // The first view replaces the summarized messages with the imported head,
@@ -186,7 +193,7 @@ async fn moved_session_sets_up_from_the_import_and_carries_drops_onto_the_same_p
             .unwrap()
             .to(),
         6,
-        "the head covers m001..m006, split at the cut"
+        "the head covers m001..m006 (message_count 6, ending at the message before the cut)"
     );
     for compartment in standalone {
         assert!(bytes.contains(compartment["content"].as_str().unwrap()));
@@ -330,9 +337,10 @@ async fn moved_session_sets_up_from_the_import_and_carries_drops_onto_the_same_p
         })
         .await;
     assert_eq!(again["answer"], "ready", "{again}");
+    // The second Setup returns the same cut (msg_m007) as the first Setup.
     assert_eq!(
         again["checkpoint"],
-        json!({"tag_checkpoint": 20, "cut": expected["cut"]})
+        json!({"tag_checkpoint": 20, "cut": "msg_m007"})
     );
 }
 
