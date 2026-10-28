@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
 import { Database } from "../../shared/sqlite";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
-import { sweepOrphanedOpenCodeMessageIndexes } from "./message-index";
 import { runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
 import {
@@ -23,7 +22,11 @@ import {
     installHostRunnerSchema,
     loadHostRunnerRecord,
 } from "./storage-host-runner";
-import { clearSession, retryPendingRustSessionCleanupsForProject } from "./storage-meta-session";
+import {
+    clearSession,
+    markSessionCleanupPending,
+    retryPendingRustSessionCleanupsForProject,
+} from "./storage-meta-session";
 
 const key = { session_id: "runner", harness: "opencode" };
 const directories: string[] = [];
@@ -366,16 +369,9 @@ describe("durable host runner", () => {
                 key.session_id,
                 1,
             );
-            const result = sweepOrphanedOpenCodeMessageIndexes(
-                db,
-                () => {
-                    const host = new Database(":memory:");
-                    host.exec("CREATE TABLE session (id TEXT PRIMARY KEY)");
-                    return host;
-                },
-                { now: 1700000000000, safetyAgeMs: 0, cooldownMs: 0 },
-            );
-            expect(result.deleted).toBe(0);
+            // A deleted session whose module owns runner state is queued for module
+            // cleanup; its host rows stay until that cleanup succeeds.
+            expect(markSessionCleanupPending(db, key.session_id, true)).toBe(true);
             expect(loadHostRunnerRecord(db, key)).not.toBeNull();
             expect(loadHostRunnerRecord(db, other)).not.toBeNull();
             expect(
