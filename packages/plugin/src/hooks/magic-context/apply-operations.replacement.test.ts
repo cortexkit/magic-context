@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
-import { buildReplacementContent } from "./apply-operations";
+import { buildReplacementContent, renderDroppedText } from "./apply-operations";
 
 describe("buildReplacementContent — one canonical placeholder", () => {
     // The whole point: buildReplacementContent is a PURE function of tagId and
@@ -40,5 +40,40 @@ describe("buildReplacementContent — one canonical placeholder", () => {
         // skipped by stripDroppedPlaceholderMessages' role guard) and was the sole
         // source of the byte instability.
         expect(/^\[dropped §\d+§\]$/.test(buildReplacementContent(11))).toBe(true);
+    });
+});
+
+describe("renderDroppedText — captured annotation preservation", () => {
+    const note = '\n\n<instruction name="deferred_notes">captured note\nline two</instruction>';
+    const hint = "\n\n<ctx-search-hint>captured recall</ctx-search-hint>";
+
+    it("leaves the whole same-tag captured drop byte-identical", () => {
+        for (const suffix of ["", note, hint + note, " arbitrary captured suffix\n"]) {
+            const captured = `[dropped §42§]${suffix}`;
+            expect(renderDroppedText(42, captured)).toBe(captured);
+        }
+    });
+
+    it("keeps complete captured annotation suffixes in their original order on a new drop", () => {
+        for (const suffix of [note, hint, note + hint, hint + note]) {
+            expect(renderDroppedText(42, `§42§ old body${suffix}`)).toBe(`[dropped §42§]${suffix}`);
+        }
+    });
+
+    it("does not mistake a different tag's placeholder for the requested drop", () => {
+        expect(renderDroppedText(42, `[dropped §43§]${note}`)).toBe(`[dropped §42§]${note}`);
+    });
+
+    it("drops ordinary prose and incomplete or embedded annotation markup", () => {
+        for (const text of [
+            "ordinary body",
+            `body${note} more body`,
+            `body${hint} more body`,
+            'body\n\n<instruction name="deferred_notes">not closed',
+            'body\n\n<instruction name="other">not a frozen annotation</instruction>',
+        ]) {
+            expect(renderDroppedText(42, text)).toBe("[dropped §42§]");
+        }
+        expect(renderDroppedText(42)).toBe("[dropped §42§]");
     });
 });

@@ -66,6 +66,20 @@ export const RECENT_TOOL_SKELETON_WINDOW = 20;
 export function buildReplacementContent(tagId: number): string {
     return `[dropped \u00a7${tagId}\u00a7]`;
 }
+
+const FROZEN_TEXT_ANNOTATION_SUFFIX =
+    /(?:\n\n(?:<instruction name="deferred_notes">(?:(?!<\/instruction>)[\s\S])*<\/instruction>|<ctx-search-hint>(?:(?!<\/ctx-search-hint>)[\s\S])*<\/ctx-search-hint>))+$/;
+
+/** Reduce only the body; annotations already rendered on this part keep their exact bytes. */
+export function renderDroppedText(tagId: number, renderedText?: string | null): string {
+    const placeholder = buildReplacementContent(tagId);
+    // A served drop is already the complete representation, including any suffix.
+    if (renderedText?.startsWith(placeholder)) return renderedText;
+    // Only complete reserved annotation blocks at the end belong to the frozen
+    // suffix. Ordinary prose and incomplete or embedded markup are still dropped.
+    const annotations = renderedText?.match(FROZEN_TEXT_ANNOTATION_SUFFIX)?.[0] ?? "";
+    return placeholder + annotations;
+}
 export interface NewToolDropOutcome {
     result: ToolDropResult;
     /** The drop mode to persist so every later pass replays the same bytes. */
@@ -610,7 +624,10 @@ export function applyPendingOperations(
                                 });
                             }
                         } else if (target) {
-                            const replacement = buildReplacementContent(pendingOp.tagId);
+                            const replacement = renderDroppedText(
+                                pendingOp.tagId,
+                                target.getContent?.(),
+                            );
                             if (target.canSetContent?.(replacement) === false) {
                                 reject("content_unchanged");
                                 continue;
@@ -732,7 +749,9 @@ export function applyFlushedStatuses(
                     }
                 }
             } else if (target) {
-                const changed = target.setContent(buildReplacementContent(tag.tagNumber));
+                const changed = target.setContent(
+                    renderDroppedText(tag.tagNumber, target.getContent?.()),
+                );
                 if (changed) didMutateMessage = true;
             }
         }

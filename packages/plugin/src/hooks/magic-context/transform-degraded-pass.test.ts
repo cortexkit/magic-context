@@ -301,6 +301,59 @@ describe("a degraded transform pass is never served", () => {
         expect(JSON.stringify(secondUser)).toBe(JSON.stringify(firstUser));
     });
 
+    for (const synthetic of [false, true]) {
+        it(`keeps a captured reminder on ${synthetic ? "a synthetic source notice" : "ordinary user text"} when a failed attempt commits a new drop and the next pass is healthy`, async () => {
+            const sessionId = `ses-lkg-new-drop-note-nudge-${synthetic}`;
+            const instruction =
+                '\n\n<instruction name="deferred_notes">captured before the new drop</instruction>';
+            const source = () => {
+                const messages = history(sessionId);
+                messages[0].parts[0] = {
+                    type: "text",
+                    ...(synthetic ? { synthetic: true } : {}),
+                    text: "[BACKGROUND BASH COMPLETED] output before reduction",
+                };
+                return messages;
+            };
+            const session = await sessionWithPersistedDrop(
+                sessionId,
+                undefined,
+                { messageId: "u1", text: instruction },
+                source,
+            );
+            const userTag = getTagsBySession(session.db, sessionId).find(
+                (tag) => tag.messageId === "u1:p0",
+            );
+            if (!userTag) throw new Error("Expected the older text tag");
+            expect(getSlot(sessionId)?.jsonPrefix).toContain("output before reduction");
+            expect(getSlot(sessionId)?.jsonPrefix).toContain("captured before the new drop");
+
+            const onLkgReplay = mock(() => undefined);
+            const failing = createMessagesTransformHandler({
+                magicContext: {
+                    "experimental.chat.messages.transform": async () => {
+                        markTagDropped(session.db, sessionId, userTag.tagNumber, "full");
+                        throw new DegradedPassRefusalError("pending-operation-failure");
+                    },
+                },
+                onLkgReplay,
+            });
+            const raw = [...source(), ...nextTurn(sessionId).slice(history(sessionId).length)];
+            const output = { messages: structuredClone(raw) } as unknown as Output;
+            await failing({}, output);
+            expect(onLkgReplay).toHaveBeenCalledTimes(1);
+            const replayed = (output.messages as unknown as Message[]).find(
+                (message) => message.info.id === "u1",
+            );
+            expect(replayed?.parts[0].text).toBe(`[dropped §${userTag.tagNumber}§]${instruction}`);
+            const healthy = await session.serve(structuredClone(raw));
+            expect(session.onLkgReplay).not.toHaveBeenCalled();
+            expect(JSON.stringify(healthy.find((message) => message.info.id === "u1"))).toBe(
+                JSON.stringify(replayed),
+            );
+        });
+    }
+
     for (const generation of ["v1", "v2"] as const) {
         it(`preserves the entire busy raw tail on healthy ${generation} passes`, async () => {
             const sessionId = `ses-recovery-handoff-${generation}`;

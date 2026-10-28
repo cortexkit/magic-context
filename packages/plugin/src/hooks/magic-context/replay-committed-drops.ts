@@ -49,6 +49,7 @@ export function replayCommittedDrops(
     const toolThinking = new Map<string, ThinkingLikePart[]>();
     const batch = new ToolMutationBatch(messages);
     for (const message of messages) {
+        if (message.info.syntheticHead === true) continue;
         if (message.info.role === "user") precedingThinking = [];
         const thinking = message.parts.filter(isThinkingPart);
         for (let p = 0; p < message.parts.length; p++) {
@@ -84,6 +85,13 @@ export function replayCommittedDrops(
                 if (tag && tag.type !== "tool")
                     targets.set(tag.tagNumber, {
                         message,
+                        // Reduce source text even when marked synthetic, as the normal
+                        // early drop phase does. Injected syntheticHead messages are
+                        // excluded above. The normal late sweep skips synthetic parts
+                        // that history preparation may repurpose; recovery instead
+                        // reconciles a captured request with newly committed drops,
+                        // preserving each part's captured annotation suffix.
+                        getContent: () => (isTextPart(part) ? part.text : null),
                         setContent(content) {
                             if (isTextPart(part)) {
                                 if (part.text === content) return false;
