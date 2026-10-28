@@ -723,6 +723,9 @@ struct MessageRow {
     parent: Option<String>,
     provider: Option<String>,
     counted: bool,
+    /// The stored `data` string, kept only until the shared counting rule has
+    /// run over the message and its parts.
+    raw: String,
 }
 
 #[derive(Clone)]
@@ -746,11 +749,6 @@ struct HostSession {
     /// Plugin-counted, 1-based positions, not raw host row indexes.
     position: HashMap<String, usize>,
     parts: HashMap<String, Vec<PartRow>>,
-}
-
-/// The plugin skips finished summaries, including JSON numeric 1.0.
-fn plugin_finished_summary(data: &Value) -> bool {
-    (data["summary"] == true || data["summary"].as_f64() == Some(1.0)) && data["finish"] == "stop"
 }
 
 /// Use the OpenCode decoder that exposes message content so this check handles
@@ -848,9 +846,8 @@ fn load_host_session(conn: &Connection, session: &str) -> Result<HostSession, Re
         .map_err(sql)?;
     let rows = statement
         .query_map([session], |row| {
-            // The plugin counts malformed JSON as an ordinary row.
-            let data: String = row.get(2)?;
-            let data: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
+            let raw: String = row.get(2)?;
+            let data: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
             let summary = data["summary"] == true || data["summary"] == 1;
             Ok(MessageRow {
                 id: row.get(0)?,
@@ -863,7 +860,9 @@ fn load_host_session(conn: &Connection, session: &str) -> Result<HostSession, Re
                 errored: data.get("error").is_some(),
                 parent: data["parentID"].as_str().map(str::to_owned),
                 provider: data["providerID"].as_str().map(str::to_owned),
-                counted: !plugin_finished_summary(&data),
+                // Set below from the shared rule, once the parts are loaded.
+                counted: true,
+                raw,
             })
         })
         .map_err(sql)?;
@@ -929,12 +928,19 @@ fn load_host_session(conn: &Connection, session: &str) -> Result<HostSession, Re
             not_served,
         });
     }
+    // Positions come from llm-runner's shared OpenCode 1 rule (§4.8), the same
+    // function the runner and the conformance kit use: a finished summary and a
+    // message whose every part is a compaction part are not counted, and
+    // malformed JSON counts.
     for message in &mut messages {
-        if parts.get(&message.id).is_some_and(|parts| {
-            !parts.is_empty() && parts.iter().all(|part| part.kind == "compaction")
-        }) {
-            message.counted = false;
-        }
+        let raw = std::mem::take(&mut message.raw);
+        let types = parts
+            .get(&message.id)
+            .into_iter()
+            .flatten()
+            .map(|part| part.kind.as_str());
+        message.counted =
+            cortexkit_role_llm_runner::tags::opencode1_message_counts_with_parts(&raw, types);
     }
     let position = messages
         .iter()
