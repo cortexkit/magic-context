@@ -10,6 +10,9 @@ mod dreamer;
 pub mod envelope;
 mod health;
 mod locator;
+#[cfg(test)]
+#[path = "../app_read_management_tests.rs"]
+mod management_tests;
 mod part_ref;
 #[cfg(test)]
 mod part_ref_tests;
@@ -31,6 +34,8 @@ use sha2::Digest;
 use subc_client_rs::HandlerOutcome;
 
 pub const SERVICE_ID: &str = "mc-app-read";
+pub const MANAGEMENT_METHODS: &[&str] =
+    &["session_data.read", "context.cache_why", "context.search"];
 pub const APP_READ_METHODS: &[&str] = &[
     "context.states",
     "context.compartment",
@@ -797,12 +802,15 @@ pub fn handle(
                     "context.compartment" => {
                         compartment::compartment(context, store, caller, &params)
                     }
-                    "context.search" => search::search(context, store, caller, &params),
+                    "context.search" => {
+                        search::search(context, store, caller, &params, ctx.now_ms())
+                    }
                     "context.cache_why" => cache_why::cache_why(
                         context,
                         store,
                         caller,
                         params.as_object().expect("params object"),
+                        ctx.now_ms(),
                     ),
                     _ => unreachable!(),
                 })
@@ -1259,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn app_manifest_is_internal_and_not_agent_facing() {
+    fn app_manifest_keeps_internal_reads_and_offers_only_phone_management_queries() {
         let manifest = crate::manifest_with_route_targets_and_smart_notes(
             crate::DEFAULT_MODULE_ID,
             &crate::route_targets::RouteTargetConfig::default(),
@@ -1274,12 +1282,32 @@ mod tests {
         assert_eq!(app["agent_facing"], false);
         assert_eq!(app["transport"], "bulk");
         assert_eq!(app["operations"], serde_json::json!(APP_READ_METHODS));
+        let management = provides
+            .iter()
+            .find(|role| role["role"] == "management_surface")
+            .expect("management surface");
+        let operations = management["operations"].as_array().unwrap();
+        assert_eq!(
+            operations
+                .iter()
+                .map(|op| (&op["name"], &op["kind"]))
+                .collect::<Vec<_>>(),
+            vec![
+                (&json!("subagent_invocations.read"), &json!("query")),
+                (&json!("session_data.read"), &json!("query")),
+                (&json!("context.cache_why"), &json!("query")),
+                (&json!("context.search"), &json!("query"))
+            ]
+        );
         for role in provides
             .iter()
             .filter(|role| role["service_id"] != SERVICE_ID)
         {
             let encoded = serde_json::to_string(role).unwrap();
             for method in APP_READ_METHODS {
+                if role == management && MANAGEMENT_METHODS.contains(method) {
+                    continue;
+                }
                 assert!(!encoded.contains(method), "{method} leaked to another role");
             }
         }

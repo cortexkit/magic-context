@@ -313,6 +313,7 @@ pub(crate) fn cache_why(
     store: &Connection,
     _caller: &AppCaller,
     params: &Map<String, Value>,
+    as_of_ms: i64,
 ) -> HandlerOutcome {
     let result = (|| {
         let request = Request::parse(params)?;
@@ -597,11 +598,7 @@ pub(crate) fn cache_why(
         Ok(fields)
     })();
     match result {
-        Ok(fields) => envelope::reply(
-            "context.cache_why",
-            chrono::Utc::now().timestamp_millis(),
-            fields,
-        ),
+        Ok(fields) => envelope::reply("context.cache_why", as_of_ms, fields),
         Err(error) => error,
     }
 }
@@ -618,7 +615,13 @@ mod tests {
             true,
         )
         .unwrap();
-        cache_why(&db.context, &db.store, &caller, params.as_object().unwrap())
+        cache_why(
+            &db.context,
+            &db.store,
+            &caller,
+            params.as_object().unwrap(),
+            1_700_000_000_000,
+        )
     }
 
     fn value(outcome: HandlerOutcome) -> Value {

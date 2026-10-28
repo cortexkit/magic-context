@@ -67,6 +67,8 @@ differ, so the samples cannot drift from the handlers. `SHA256SUMS` is
 
 ## `context.search`
 
+- `context.search/refusal-session-not-found.json`: a session Magic Context
+  does not manage is refused by the locator with `session_not_found`.
 - `context.search/hits.json`: message hits with snippets, match ranges,
   compartment joins and per-source status.
 - `context.search/no-hits.json`: a query that matches nothing answers an
