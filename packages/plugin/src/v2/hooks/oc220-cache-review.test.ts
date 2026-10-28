@@ -40,6 +40,87 @@ test("cache review: an announcement appended after capture stays pristine across
     }
 }, 60_000);
 
+test("cache review: recovery defer preserves an instruction appended after the replay", async () => {
+    const f = await oc2ContextFixture(8823, { area: "oc220-cache-review", instructions: false });
+    const admission = installBusyAdmission();
+    const limit = spyOn(models, "getSdkContextLimit").mockReturnValue(1_000_000);
+    try {
+        f.compartment(4);
+        await f.pass();
+        f.respond();
+        f.user("The busy turn.", 1000);
+        admission.state.exhaustNext = true;
+        const replay = await f.attempt();
+        expect(replay.error).toBeUndefined();
+        expect(lkgEvents(replay.logs)).toContain("lkg_replay_served");
+        f.respond();
+        f.instruction("New instructions after recovery.");
+        f.user("Use the new instructions.", 1000);
+        const deferred = await f.pass();
+        console.log(
+            "OC220_RECOVERY_DEFER",
+            deferred.logs.find((line) => line.includes("transform scheduler:")),
+        );
+        expect(deferred.input).toContainEqual({
+            role: "system",
+            content: [{ type: "text", text: "New instructions after recovery." }],
+        });
+        expect(deferred.logs.some((line) => line.includes("decision=defer"))).toBe(true);
+        expect(deferred.draft.messages.filter((message) => message.role === "system")).toEqual([
+            {
+                role: "system",
+                content: [{ type: "text", text: "New instructions after recovery." }],
+            },
+        ]);
+    } finally {
+        limit.mockRestore();
+        admission.restore();
+        await f.cleanup();
+    }
+}, 60_000);
+
+test("cache review: busy replay refuses a changed instruction restored before the checkpoint", async () => {
+    const f = await oc2ContextFixture(8824, { area: "oc220-cache-review", instructions: true });
+    const admission = installBusyAdmission();
+    const limit = spyOn(models, "getSdkContextLimit").mockReturnValue(1_000_000);
+    try {
+        f.compartment(14);
+        const covered = f.rows.find((row) => row.type === "system")!;
+        const oldText = covered.text;
+        expect(f.rows.indexOf(covered)).toBeLessThan(f.coveredThrough);
+        await f.pass();
+        f.respond();
+        await f.pass();
+        await f.fold();
+        f.user("After the checkpoint.", 120000);
+        const saved = await f.pass();
+        expect(getSlot(f.session)).toBeDefined();
+        expect(JSON.stringify(saved.input)).not.toContain(oldText);
+        expect(saved.draft.messages).toContainEqual({
+            role: "system",
+            content: [{ type: "text", text: oldText }],
+        });
+        f.edit(covered.id, "Changed covered instruction.");
+        f.respond();
+        f.user("The busy turn after the covered edit.", 1000);
+        admission.state.exhaustNext = true;
+        const refused = await f.attempt();
+        console.log(
+            "OC220_COVERED_EDIT",
+            JSON.stringify({
+                events: lkgEvents(refused.logs),
+                system: refused.draft.messages.filter((message) => message.role === "system"),
+            }),
+        );
+        expect(refused.error).toBeDefined();
+        expect(lkgEvents(refused.logs)).not.toContain("lkg_replay_served");
+    } finally {
+        limit.mockRestore();
+        admission.restore();
+        await f.cleanup();
+    }
+}, 60_000);
+
 for (const fault of ["admission-exhausted", "transform"] as const) {
     test(`cache review: ${fault} refuses an edited instruction instead of serving the stale prefix`, async () => {
         const f = await oc2ContextFixture(8821, {

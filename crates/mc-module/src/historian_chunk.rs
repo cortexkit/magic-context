@@ -2664,6 +2664,22 @@ mod tests {
     }
 
     #[test]
+    fn instruction_between_users_merges_their_text_and_retains_coverage() {
+        let messages = vec![
+            msg("u1", 1, "user", vec![text("first")]),
+            msg("sys2", 2, "system", vec![text("instructions")]),
+            msg("u3", 3, "user", vec![text("second")]),
+        ];
+        let built = project_and_build(&messages, 1, 10_000, 4);
+        assert_eq!(built.text, "[1-3] U: first / second");
+        let ordinals: Vec<u64> = built.chunk.lines.iter().map(|line| line.ordinal).collect();
+        assert_eq!(ordinals, vec![1, 2, 3]);
+        assert_eq!(built.chunk.lines[1].message_id, "sys2#0");
+        assert_eq!(built.end_message_id, "u3#0");
+        assert!(crate::historian_validate::validate_chunk_coverage(&built.chunk).is_none());
+    }
+
+    #[test]
     fn media_in_compactable_head_uses_a_deterministic_placeholder() {
         let media = CkKind::Media(MediaBlock {
             kind: MediaKind::Image,
