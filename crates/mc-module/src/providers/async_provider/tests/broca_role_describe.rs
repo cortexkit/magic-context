@@ -273,15 +273,16 @@ async fn broca_role_describe_setup_checkpoint() {
             1,
             "{name}"
         );
-        if writer {
-            assert_eq!(result["answer"], "ready", "{name}: {result}");
+        // These captured releases predate message_checkpoint, so even a writer
+        // with tag_checkpoint cannot adopt a message-numbered moved session.
+        {
             assert_eq!(
-                result["checkpoint"]["tag_checkpoint"], 20,
-                "{name}: {result}"
-            );
-        } else {
-            assert_eq!(
-                result["code"], "tag_checkpoint_unsupported",
+                result["code"],
+                if writer {
+                    "message_checkpoint_unsupported"
+                } else {
+                    "tag_checkpoint_unsupported"
+                },
                 "{name}: {result}"
             );
             let decoded: contract::setup::SetupAnswer =

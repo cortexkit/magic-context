@@ -13,6 +13,9 @@ pub(super) mod broca_role_describe;
 
 const MODULE: &str = "thalamus-harness";
 
+#[path = "message_checkpoint.rs"]
+mod message_checkpoint;
+
 #[tokio::test]
 async fn a_moved_session_answers_setup_with_its_checkpoint_and_the_runner_anchors_at_its_cut() {
     let dir = tempfile::tempdir().unwrap();
@@ -26,7 +29,10 @@ async fn a_moved_session_answers_setup_with_its_checkpoint_and_the_runner_anchor
         .checkpoint()
         .cloned()
         .expect("a moved session's checkpoint");
-    assert_eq!(checkpoint, contract::setup::SetupCheckpoint::new(20, cut));
+    let record = rig.state().standalone_move.unwrap();
+    assert_eq!(checkpoint, record.checkpoint());
+    assert_eq!(checkpoint.message_count, Some(6));
+    assert_eq!(checkpoint.head_cut.as_ref().unwrap().mid, "msg_m006");
     assert!(answer.get("tag_checkpoint").is_none() && answer.get("cut").is_none());
     assert!(
         rig.runner

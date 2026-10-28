@@ -88,6 +88,10 @@ struct Runner {
     page_size: std::sync::atomic::AtomicUsize,
     /// Leave llm-runner's `tag_checkpoint` group out of `role.describe`.
     withholds_tag_checkpoint: std::sync::atomic::AtomicBool,
+    withholds_message_checkpoint: std::sync::atomic::AtomicBool,
+    marker_db: Option<PathBuf>,
+    setup_checkpoint: Mutex<Option<contract::setup::SetupCheckpoint>>,
+    heads: std::sync::atomic::AtomicU64,
     /// Every `role.describe` this runner answered.
     describes: std::sync::atomic::AtomicU64,
     /// A page to answer every `session.read` with, verbatim.
@@ -204,7 +208,7 @@ impl session_resolver::ProviderRunner for Runner {
     async fn call(
         &self,
         _: &Path,
-        _: &str,
+        session: &str,
         method: &str,
         params: Value,
         _: Duration,
@@ -224,16 +228,42 @@ impl session_resolver::ProviderRunner for Runner {
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
                 capabilities.push("tag_checkpoint");
+                if !self
+                    .withholds_message_checkpoint
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    capabilities.push("message_checkpoint");
+                }
             }
             return Ok(
                 json!({"majors":[{"version":"llm-runner/v1","ops":["role.describe","session.baseline","session.send","session.read","session.resolve"]}],"implementation_version":"fake","session_capabilities_from":"baseline","capabilities":capabilities}),
             );
         }
         if method == "session.head" {
+            self.heads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(head) = self.head_override.lock().unwrap().clone() {
                 return Ok(head);
             }
-            let mut head = json!({"first_ordinal":0});
+            // Setup can request `session.head` before its answer exists. Prefer the
+            // newest marker key, then the checkpoint from an earlier answer.
+            let checkpoint = self
+                .marker_db
+                .as_ref()
+                .and_then(|path| moved_session::newest_marker_checkpoint(path, session))
+                .and_then(|key| key.message_count.zip(key.head_cut))
+                .or_else(|| {
+                    self.setup_checkpoint
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .and_then(|key| key.message_count.zip(key.head_cut.clone()))
+                });
+            let mut head = match checkpoint {
+                Some((count, cut)) => json!({"first_ordinal":count,"cut":cut}),
+                None => json!({"first_ordinal":0}),
+            };
+            head["lineage_id"] = json!(*self.lineage.lock().unwrap());
             if let Some(state) = self.reasoning_pruned.lock().unwrap().clone() {
                 head["reasoning_pruned"] = state;
             }
@@ -500,6 +530,10 @@ impl Rig {
         let runner = Arc::new(Runner {
             module: module.into(),
             lineage: Mutex::new("L".into()),
+            marker_db: dir
+                .join("opencode.db")
+                .exists()
+                .then(|| dir.join("opencode.db")),
             ..Default::default()
         });
         let mut h = McHandler::new();
@@ -560,11 +594,19 @@ impl Rig {
         (rig, answer)
     }
     async fn op(&self, method: &str, params: Value) -> Value {
-        response(
+        let answer = response(
             self.h
                 .dispatch_value(7, json!({"method":method,"params":params}))
                 .await,
-        )
+        );
+        if method == "compaction.setup" && answer["answer"] == "ready" {
+            *self.runner.setup_checkpoint.lock().unwrap() =
+                serde_json::from_value::<contract::setup::SetupAnswer>(answer.clone())
+                    .unwrap()
+                    .checkpoint()
+                    .cloned();
+        }
+        answer
     }
     fn state(&self) -> State {
         load(self.h.store.get().unwrap(), &self.reference)

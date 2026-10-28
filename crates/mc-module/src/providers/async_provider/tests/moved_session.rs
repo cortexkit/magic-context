@@ -8,6 +8,52 @@ use crate::offline_move::{self, tests as fixture};
 
 const MODULE: &str = "thalamus-harness";
 
+pub(super) fn apply_certified_move(paths: &offline_move::StorePaths) {
+    let session = fixture::fixture_session();
+    let plan = offline_move::plan(paths, &session).unwrap();
+    let vector: Value = serde_json::from_str(
+        cortexkit_role_llm_runner::vectors::file("message-checkpoint.json").unwrap(),
+    )
+    .unwrap();
+    let mut head = vector["worked_head_cut"]["head_cut"].clone();
+    head["mid"] = json!(plan.p);
+    let certificate = paths.store_db.parent().unwrap().join("head-cut.json");
+    std::fs::write(
+        &certificate,
+        json!({"message_count":plan.message_count,"head_cut":head}).to_string(),
+    )
+    .unwrap();
+    offline_move::run_with_head_cut(paths, &session, &certificate, &fixture::NoHolders, None)
+        .unwrap();
+}
+
+pub(super) fn newest_marker_checkpoint(
+    path: &Path,
+    session: &str,
+) -> Option<tags::MarkerCheckpoint> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut query = conn
+        .prepare(
+            "SELECT part.data FROM part JOIN message ON message.id=part.message_id
+         WHERE message.session_id=?1
+         ORDER BY message.time_created DESC, message.id DESC, part.id DESC",
+        )
+        .unwrap();
+    let rows = query
+        .query_map([session], |row| row.get::<_, String>(0))
+        .unwrap();
+    let checkpoint = rows
+        .filter_map(|raw| {
+            let data: Value = serde_json::from_str(&raw.unwrap()).ok()?;
+            let key: tags::MarkerCheckpoint =
+                serde_json::from_value(data["cortexkit"].clone()).ok()?;
+            (key.session == session && key.message_count.is_some() && key.head_cut.is_some())
+                .then_some(key)
+        })
+        .next();
+    checkpoint
+}
+
 /// The session as the runner reads it from `opencode.db`.
 pub(super) fn served_entries(opencode_db: &Path, session: &str) -> Vec<ReadMessage> {
     let conn = rusqlite::Connection::open(opencode_db).unwrap();
@@ -46,14 +92,28 @@ pub(super) fn served_entries(opencode_db: &Path, session: &str) -> Vec<ReadMessa
     let mut after_cut = false;
     let mut served = Vec::new();
     for (mid, data) in messages {
-        let info: Value = serde_json::from_str(&data).unwrap();
-        if info["summary"] == true {
+        let stored_parts = parts_of(&mid);
+        let part_data: Vec<Value> = stored_parts
+            .iter()
+            .map(|(_, data)| serde_json::from_str(data).unwrap())
+            .collect();
+        let info: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
+        // SQLite's numeric comparison also treats a summary value of 1.0 as 1.
+        let numeric_finished = info["summary"].as_f64() == Some(1.0) && info["finish"] == "stop";
+        if numeric_finished
+            || !tags::opencode1_message_counts_with_parts(
+                &data,
+                part_data
+                    .iter()
+                    .map(|part| part["type"].as_str().unwrap_or_default()),
+            )
+        {
             continue;
         }
         after_cut |= mid == cut;
         let mut parts = Vec::new();
         let mut rows = Vec::new();
-        for (id, data) in parts_of(&mid) {
+        for (id, data) in stored_parts {
             let mut part: Value = serde_json::from_str(&data).unwrap();
             if part["type"] == "compaction" {
                 continue;
@@ -99,7 +159,7 @@ pub(super) async fn moved_rig(dir: &Path, run_move: bool) -> (Rig, Value) {
         )
         .unwrap();
     if run_move {
-        offline_move::run(&paths, &session, false, &fixture::NoHolders, None).unwrap();
+        apply_certified_move(&paths);
     }
     let (rig, answer) = Rig::try_setup_with_model(
         dir,
@@ -146,7 +206,8 @@ async fn moved_session_sets_up_from_the_import_and_carries_drops_onto_the_same_p
     // before the cut is msg_m006.
     assert_eq!(
         answer["checkpoint"],
-        json!({"tag_checkpoint": 20, "cut": "msg_m007"})
+        json!({"tag_checkpoint": 20, "cut": "msg_m007", "message_count": 6,
+            "head_cut":{"mid":"msg_m006","digest":"189f89a46681c05dac35fe71f4e46c1a8cb5a0c0882b1d5f4cc80ce3f4582ca9","written_at":1793145600123u64}})
     );
     rig.notice(1, 1_000, None).await;
     settle_historian(&rig).await;
