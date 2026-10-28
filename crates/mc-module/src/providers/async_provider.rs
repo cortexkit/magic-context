@@ -2614,7 +2614,17 @@ impl McHandler {
             live_describe = Some(describe);
         }
         let reference = key.reference();
-        let existing = load_head(store, &reference)?;
+        let mut existing = load_head(store, &reference)?;
+        // A crash inside the adoption import leaves the cut stage saved but the
+        // Setup answer incomplete. Restart from the move record in a fresh
+        // generation (a fresh namespace, so the empty head pass never sees the
+        // previous import's history) instead of answering the partial record.
+        let mut importing_restart = None;
+        if let Some(state) = existing.as_ref().filter(|state| state.is_importing_stage()) {
+            tracing::warn!(session_ref = %reference, "restarting interrupted adoption import from the move record");
+            importing_restart = Some(state.generation);
+            existing = None;
+        }
         let unsafe_existing = existing
             .as_ref()
             .map(|state| state.active_seed_is_unsafe(store))
@@ -2659,6 +2669,20 @@ impl McHandler {
                 standalone_move.clone(),
                 generation,
             )?;
+            // A moved session that already bound its drops replays the durable
+            // `(mid, part, digest)` bindings in the fresh generation instead of
+            // rebinding the move record: the pending queue lives per namespace,
+            // so the fresh namespace must re-queue from the durable bindings.
+            // A session that never bound keeps the move record's pending copy
+            // for its first bind.
+            if let (Some(old_move), Some(new_move)) =
+                (old.standalone_move.as_ref(), state.standalone_move.as_mut())
+            {
+                if old_move.pending.is_none() {
+                    new_move.pending = None;
+                    new_move.bound_drops = old_move.bound_drops.clone();
+                }
+            }
             // A new lineage of an existing conversation keeps its pruning
             // permission as it was; only new conversations opt in here.
             if !old.accepts_pruning() {
@@ -2670,9 +2694,15 @@ impl McHandler {
             state.cut_history_gc_pending =
                 old.cut_history_gc_pending || old.cut_first_ordinal.is_some();
             state.trim_published_cut_cache();
-            store
-                .replace_compartments(&state.namespace(), &history)
-                .map_err(transient)?;
+            // The adoption import already installed the manifest's exact rows in
+            // the fresh namespace; copying the old namespace over them would
+            // replace the authoritative import with whatever the old generation
+            // held. Only non-moved lineages copy history here.
+            if standalone_move.is_none() {
+                store
+                    .replace_compartments(&state.namespace(), &history)
+                    .map_err(transient)?;
+            }
             self.ensure_lineage_window(&mut state, Duration::from_secs(10))
                 .await?;
             if state.cut_seed.is_none() {
@@ -2854,14 +2884,19 @@ impl McHandler {
                 return bytes(&refusal);
             }
         }
-        let generation = match discarded {
-            Some((generation, reason)) => {
-                offline_first_pass::log_discard(&reference, reason);
-                generation
-                    .checked_add(1)
-                    .ok_or_else(|| transient("async generation exhausted"))?
+        let generation = if let Some(old) = importing_restart {
+            old.checked_add(1)
+                .ok_or_else(|| transient("async generation exhausted"))?
+        } else {
+            match discarded {
+                Some((generation, reason)) => {
+                    offline_first_pass::log_discard(&reference, reason);
+                    generation
+                        .checked_add(1)
+                        .ok_or_else(|| transient("async generation exhausted"))?
+                }
+                None => 0,
             }
-            None => 0,
         };
         let mut state =
             self.new_async_record(channel, binding, &request, key, standalone_move, generation)?;
@@ -3009,6 +3044,28 @@ impl McHandler {
             &state.key.harness,
             route,
         );
+        // The adoption import runs after this one engine pass but before any
+        // save that could expose a partial record. The empty-window head pass
+        // cannot see the imported history: with compartments present but no live
+        // rows it would try to fold and miss its anchor. Running it empty gives
+        // the head insertion, then the import places the manifest's compartments
+        // at 0..message_count-1, copies only the imported sequences' artifacts,
+        // and `begin_at_cut` saves the `importing` stage (cut set, initial still
+        // null); the final save below completes it.
+        let moved_record = state
+            .standalone_move
+            .as_ref()
+            .and_then(|moved| moved.pending.clone());
+        let moved_first = moved_record.as_ref().map(|record| record.message_count);
+        // A repeat Setup after a crash inside the stage finds the previous
+        // import still in its namespace. Clear it before the empty head pass so
+        // this pass never sees history with no live rows; the import below
+        // restores the manifest's exact rows before any save.
+        if moved_record.is_some() {
+            store
+                .replace_compartments(&state.namespace(), &[])
+                .map_err(transient)?;
+        }
         let status = transform::compaction::Status {
             lineage_id: state.lineage.clone().unwrap_or_default(),
             newest_ordinal: None,
@@ -3033,6 +3090,15 @@ impl McHandler {
             &state,
             self.async_input_oracle() || state.logical_prefix.is_none(),
         )?;
+        // Finish the adoption import after the empty head pass but before the
+        // final save, so the stored record keeps the history, the cut and the
+        // tag checkpoint. The compartments go in first, then the seed: this save
+        // is the `importing` stage (cut set, initial still null); a repeat Setup
+        // that finds it restarts from the move record.
+        if let Some(record) = moved_record {
+            state.import_standalone_compartments(store, &record)?;
+            state.finish_standalone_import(store, &record)?;
+        }
         state.adopt_engine(engine)?;
         // `serializer_profile` is a ck-mc extension member: the profile this
         // Setup accepted, so the runner can confirm ck-mc reads its schema.
@@ -3054,6 +3120,11 @@ impl McHandler {
         }
         state.initial = serde_json::to_value(answer).map_err(transient)?;
         state.initial["serializer_profile"] = json!(codec.wire_id());
+        // A moved lineage begins at its cut, not at zero: re-anchor the head
+        // insertion this pass rendered. The bytes are the imported history head.
+        if let Some(first) = moved_first.filter(|first| *first > 0) {
+            state.initial["initial"]["range"] = json!({"from": first, "to": first});
+        }
         Ok(state)
     }
 
