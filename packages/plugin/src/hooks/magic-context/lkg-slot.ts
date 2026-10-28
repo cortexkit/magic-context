@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sessionLog } from "../../shared/logger";
-import { isCoveredInstructionRow } from "./host-served-rows";
 import { clearCapturedLkgMeasurement } from "./lkg-measured-request";
 import {
     clearLkgRecoveryPrefixes,
@@ -792,13 +791,10 @@ export function dropSlot(sessionId: string, _reason?: string): void {
 export function noteEntry(sessionId: string, input: MessageLike[]): LkgEntryNote | null {
     const slot = getSlot(sessionId);
     if (!slot) return null;
-    // Covered OpenCode 2 instruction rows restored after a host checkpoint carry
-    // no id. The transform sets them aside before it captures the slot's input
-    // projection, so the entry is read without them too; otherwise their empty
-    // ids would fail every entry check and no replay could be offered.
-    const messages = input.some((message) => isCoveredInstructionRow(message.info))
-        ? input.filter((message) => !isCoveredInstructionRow(message.info))
-        : input;
+    // Covered instructions can still be served from the saved prefix. Their
+    // positions and bytes must be proved too, even while transform stages set
+    // them aside to keep them out of tagging and ordinary history trimming.
+    const messages = input;
     const entryInputIds = messages.map(
         (message, index) => lkgInputIdentity(message.info?.id, message.info?.role, index) ?? "",
     );

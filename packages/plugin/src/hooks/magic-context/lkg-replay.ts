@@ -1,5 +1,5 @@
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
-import { isCoveredInstructionRow } from "./host-served-rows";
+import { isCoveredInstructionRow, markCoveredInstructionRow } from "./host-served-rows";
 import { claimLkgRequestIdentity, noteCapturedLkgRequest } from "./lkg-measured-request";
 import {
     captureSlot,
@@ -149,6 +149,7 @@ function projectEntryWithDigests(
             value: () => contentDigest,
             enumerable: false,
         });
+        if (isCoveredInstructionRow(message.info)) markCoveredInstructionRow(projection);
         return projection;
     });
 }
@@ -341,15 +342,18 @@ export function buildLkgPrefix(
     const systemIndices = new Map<MessageLike, number>();
     if (!completeOutput) {
         const inputSystems = projected.flatMap((message, index) =>
-            message.id === null && message.role === "system" ? [{ message, index }] : [],
+            message.id === null && message.role === "system" && !isCoveredInstructionRow(message)
+                ? [{ message, index }]
+                : [],
         );
         const outputSystems = output.filter(
             (message) => messageId(message) === null && messageRole(message) === "system",
         );
-        // Require the entire ordered sequence, including rows after the anchor:
+        // Require the ordinary instruction sequence, including post-anchor rows:
         // a missing duplicate must not move another occurrence across the seam.
-        // Trimming can mark an input row as covered. Additional covered rows
-        // restored from before the input window precede that sequence instead.
+        // Covered input rows are already digest-bound; legacy sessions can omit
+        // them. If served, they precede the ordinary sequence. Trimming can also
+        // newly mark an ordinary input row as covered without changing its bytes.
         const restoredCount = outputSystems.length - inputSystems.length;
         if (
             restoredCount < 0 ||

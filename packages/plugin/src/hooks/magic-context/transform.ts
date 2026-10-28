@@ -157,7 +157,7 @@ import {
     readPersistedLkgUntaggedInputIds,
 } from "./lkg-recovery-prefix";
 import { captureLkgSlot, createLkgEntryProjector, resolveLkgModelKeys } from "./lkg-replay";
-import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
+import { beginLkgPass, dropSlot, getInMemorySlot, lkgInputIdentity } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
 import { logNudgeEvaluation } from "./nudge-evaluation-log";
 import {
@@ -862,11 +862,31 @@ export function createTransform(deps: TransformDeps) {
         const tLkgEntry = performance.now();
         // The Rust adapter captures its own last-known-good input snapshot and returns
         // before the TypeScript capture, so it does not need this entry projection.
-        const lkgInput = deps.transformMode === "rust" ? [] : projectEntry(sessionId, messages);
+        // Covered instructions still belong to the proof, even while working
+        // stages set them aside: replay can serve their saved bytes too.
+        const lkgInput =
+            deps.transformMode === "rust" ? [] : projectEntry(sessionId, entryOrderForThinkingFit);
         const recovery =
             deps.compactionOff || deps.transformMode === "rust"
                 ? {}
                 : readLkgRecoveryPrefix(sessionId, lkgInput, messages, deps.db);
+        const recoveryTailSources: { identity: string; pristineSystem?: MessageLike }[] = [];
+        if (recovery.prefix) {
+            const priorIdentities = new Set(recovery.prefix.inputs.map((input) => input.id));
+            lkgInput.forEach((input, index) => {
+                const identity = lkgInputIdentity(input.id, input.role, index);
+                if (!identity || priorIdentities.has(identity)) return;
+                recoveryTailSources.push({
+                    identity,
+                    // Anonymous instructions have no taggable host id. Freeze
+                    // their pristine bytes before stages edit the working tail.
+                    pristineSystem:
+                        input.id === null && input.role === "system"
+                            ? structuredClone(entryOrderForThinkingFit[index])
+                            : undefined,
+                });
+            });
+        }
         // Messages an earlier last-good replay served untagged that still go out
         // untagged: the in-memory recovery prefix's set and, after a restart, the
         // durable record of it. Ordinary tagging skips them until a pass allowed
@@ -3224,14 +3244,15 @@ export function createTransform(deps: TransformDeps) {
         // replay it from the persisted ledger.
         compactionModeTransitionPending.delete(sessionId);
         if (recovery.prefix && !recoveryNormalized) {
-            const priorIds = new Set(recovery.prefix.inputs.map((input) => input.id));
-            const newIds = new Set(
-                lkgInput.flatMap((input) =>
-                    input.id && !priorIds.has(input.id) ? [input.id] : [],
-                ),
-            );
-            const suffix = messages.filter(
-                (message) => message.info.id && newIds.has(message.info.id),
+            const renderedById = new Map<string, MessageLike[]>();
+            for (const message of messages) {
+                if (!message.info.id) continue;
+                const group = renderedById.get(message.info.id) ?? [];
+                group.push(message);
+                renderedById.set(message.info.id, group);
+            }
+            const suffix = recoveryTailSources.flatMap(({ identity, pristineSystem }) =>
+                pristineSystem ? [pristineSystem] : (renderedById.get(identity) ?? []),
             );
             messages.splice(0, messages.length, ...JSON.parse(recovery.prefix.json), ...suffix);
         }
