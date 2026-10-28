@@ -39,7 +39,7 @@ Automatic reclaim never touches the newest part of the conversation. `protection
 
 ## Agent drops (`ctx_reduce`)
 
-`ctx_reduce` takes tag ids and ranges (`"3-5"`, `"1,2,9"`) and only queues them: each id becomes a `drop` row in `pending_ops`. Ids already dropped or queued are skipped; content from before compaction is refused. Ids inside the protected window are accepted and counted as stamped like any other id, and apply once newer work pushes them out. Queued drops normally ride the next pass that rebuilds the prefix anyway. Two cases let them cause a rebuild themselves: on a primary session, the bounded execute exception, once the drops are worth at least 2% of the usable window or on the third held execute pass; on a subagent, any execute pass.
+`ctx_reduce` takes tag ids and ranges (`"3-5"`, `"1,2,9"`) and only queues them: each id becomes a `drop` row in `pending_ops`. Ids already dropped or queued are skipped; content from before compaction is refused. Ids inside the protected window are accepted and counted as stamped like any other id, and apply once newer work pushes them out. Queued drops never start a rebuild themselves: they land on the next pass that rebuilds the prefix anyway. Pressure is what makes an execute pass rebuild. On a primary session it does so only when no summary can come and the queued drops are worth at least 2% of the usable window, or on the third held execute pass. A subagent has no summarizer, so every execute pass rebuilds when any lane has work.
 
 `apply-operations.ts` applies them:
 

@@ -1,6 +1,6 @@
 {
 	"name": "@cortexkit/pi-magic-context",
-	"version": "0.49.25",
+	"version": "0.49.26",
 	"type": "module",
 	"description": "Pi and OMP coding agent extension for Magic Context — cross-session memory and context management",
 	"main": "dist/index.js",

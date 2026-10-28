@@ -118,6 +118,7 @@ import {
     estimateFinalWireInputTokens,
     estimateMessageTokens,
 } from "./final-wire-token-estimate";
+import type { ForeignTextParts } from "./foreign-text-parts";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import type { LiveModelBySession } from "./hook-handlers";
 import { takeCoveredInstructionRows } from "./host-served-rows";
@@ -486,6 +487,12 @@ export interface TransformDeps {
     hostRefusalNotice?: HostRefusalNotice;
     hostRefuse?: typeof abortSessionFailClosed;
     tagger: Tagger;
+    /**
+     * OpenCode 1 only: find the text parts another plugin appended to stored
+     * messages, on the array the host handed to the hook. Unset on hosts whose
+     * parts carry no ids (OpenCode 2), where an id-less part may be stored text.
+     */
+    collectForeignTextParts?: (messages: MessageLike[]) => ForeignTextParts | undefined;
     scheduler: Scheduler;
     contextUsageMap: Map<
         string,
@@ -810,6 +817,11 @@ export function createTransform(deps: TransformDeps) {
         const startTime = performance.now();
         const historianRun = deps.resolveHistorianRun?.();
         const messages = output.messages as MessageLike[];
+        // Captured before Magic Context edits anything, so only parts the host
+        // delivered can count as another plugin's. In Rust mode the module does
+        // the tagging, so this collector isn't used there.
+        const foreignTextParts =
+            deps.transformMode === "rust" ? undefined : deps.collectForeignTextParts?.(messages);
         // The entry order, for the signed-thinking fit snapshot taken once the
         // hold is decided (see takeSignedThinkingFitSnapshot). No message or
         // part is edited before that point; only covered instruction rows are
@@ -2447,6 +2459,10 @@ export function createTransform(deps: TransformDeps) {
             logTransformTiming(sessionId, "injectTemporalMarkers", tTemporal);
         }
 
+        // One gate for persisted caveman replay, shared with the tagger so a legacy
+        // foreign tag is served compressed exactly when the replay below runs.
+        const replaysCaveman =
+            !reducedMode && !compactionOff && deps.cavemanTextCompression?.enabled === true;
         let taggingSucceeded = false;
         let recoveryBatch: { finalize: () => void } | null = null;
         let recoveryNormalized = false;
@@ -2471,6 +2487,8 @@ export function createTransform(deps: TransformDeps) {
                       servedMessages: messages,
                       normalizeRestoredAssistantText: deps.normalizeRestoredAssistantText,
                       refreshSourceContents: deps.refreshSourceContents?.(sessionId),
+                      foreignTextParts,
+                      replaysCaveman,
                   });
                   for (const [number, target] of tagged.targets) targets.set(number, target);
                   for (const [message, parts] of tagged.reasoningByMessage)
@@ -2543,6 +2561,8 @@ export function createTransform(deps: TransformDeps) {
                         servedMessages: messages,
                         normalizeRestoredAssistantText: deps.normalizeRestoredAssistantText,
                         refreshSourceContents: deps.refreshSourceContents?.(sessionId),
+                        foreignTextParts,
+                        replaysCaveman,
                     },
                 );
                 targets = result.targets;
@@ -2674,7 +2694,7 @@ export function createTransform(deps: TransformDeps) {
         // caveman compression even when no new cleanup is allowed. Replay it before
         // inline-reasoning removal: compression would otherwise bring back thinking
         // that an earlier request removed. Fresh cleanup uses the same ordering.
-        if (!reducedMode && !compactionOff && deps.cavemanTextCompression?.enabled) {
+        if (replaysCaveman) {
             const tCavemanReplay = performance.now();
             const replayedCaveman = replayCavemanCompression(sessionId, db, targets, activeTags);
             if (replayedCaveman > 0) {

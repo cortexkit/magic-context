@@ -1,6 +1,6 @@
 [package]
 name = "mc-core"
-version = "0.49.25"
+version = "0.49.26"
 edition = "2021"
 publish = false
 description = "Magic Context cache-stability core: pass classifier + frozen-unit renderer over cortexkit-cache-core, origin-agnostic CK-in/CK-out."

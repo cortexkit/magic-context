@@ -1,6 +1,6 @@
 [package]
 name = "mc-tokenizer"
-version = "0.49.25"
+version = "0.49.26"
 edition = "2021"
 publish = false
 description = "Claude BPE token estimator for Magic Context: a bit-faithful Rust port of ai-tokenizer's claude encoding (tiktoken byte-BPE), used for m0 budget fitting."

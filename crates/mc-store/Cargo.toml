@@ -1,6 +1,6 @@
 [package]
 name = "mc-store"
-version = "0.49.25"
+version = "0.49.26"
 edition = "2021"
 publish = false
 description = "Magic Context durable cache-state store: per-session CoreState + module_meta with an app-level row_version CAS inside cortexkit-store's epoch-fenced transaction."

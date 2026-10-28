@@ -1,6 +1,6 @@
 [package]
 name = "mc-module"
-version = "0.49.25"
+version = "0.49.26"
 edition = "2021"
 publish = false
 description = "The Magic Context subc module: harness-agnostic cache-stability transform (CK-in/CK-out), backed by the single-writer mc-store, served over the subc wire."

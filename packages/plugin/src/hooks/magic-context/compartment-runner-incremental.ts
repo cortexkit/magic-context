@@ -122,7 +122,10 @@ import {
     resolveOpenCodeProtectedTailBoundary,
     selectPerRunCap,
 } from "./protected-tail-boundary";
-import { validateBoundarySnapshotOffThread } from "./raw-exact-ordinal-read";
+import {
+    type OffThreadBoundaryValidation,
+    validateBoundarySnapshotOffThread,
+} from "./raw-exact-ordinal-read";
 import {
     getRawSessionTagKeysThrough,
     hasRawMessageProvider,
@@ -131,11 +134,17 @@ import {
     readRawSessionMessageOrdinalById,
     readRawSessionMessageRange,
     readSessionChunk,
+    resolveHistorianChunkStart,
 } from "./read-session-chunk";
-import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
+import {
+    getMessageTimesFromOpenCodeDb,
+    openCodeDbExists,
+    withReadOnlySessionDb,
+} from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import {
     areRustHistorianSyntheticParts,
+    dropRawSessionOrdinalCheckpoints,
     isStrictGapHealingMessage,
     RawOrdinalsNotReady,
 } from "./read-session-raw";
@@ -230,6 +239,48 @@ function shouldSuppressHistorianAlert(sessionId: string): boolean {
     }
     lastHistorianAlertBySession.set(sessionId, Date.now());
     return false;
+}
+
+/**
+ * Whether a stale-snapshot detail proves the serving thread's ordinal ranks
+ * disagree with the exact read on a check that never moves by itself: one of
+ * the `offset`, `protectedTailStart` or `eligibleEnd` boundary id checks found
+ * a different message id at its ordinal, or the session shrank (deleted rows
+ * shift every later ordinal). The `last` id moves every turn as the live tail
+ * grows, so a changed last id alone never proves drift. Other stale reasons —
+ * stored compartments moved, raw content changed, the model or limit changed
+ * — say nothing about the ranks.
+ */
+export function isServingOrdinalDriftSignal(detail: string | undefined): boolean {
+    if (!detail) return false;
+    if (detail === "raw message count shrank") return true;
+    return /(?:offset|protectedTailStart|eligibleEnd) ordinal \d+ id changed$/.test(detail);
+}
+
+/**
+ * Refuse only a file-store session (OpenCode 1 reads straight from its store
+ * file; provider sessions on OpenCode 2, Pi and in-memory test stores keep
+ * no serving-thread ranks) whose stale detail is a drift signal from the
+ * check above. Anything else refreshes and adopts as before.
+ */
+function shouldRefuseStaleSnapshotForDrift(sessionId: string, detail: string | undefined): boolean {
+    if (hasRawMessageProvider(sessionId) || !openCodeDbExists()) return false;
+    return isServingOrdinalDriftSignal(detail);
+}
+
+/**
+ * Drop the serving thread's drifted ordinal ranks for a session so the next
+ * warm-up rebuilds them from a full scan. Only sessions read straight from
+ * the OpenCode 1 store file keep such ranks; provider sessions (OpenCode 2,
+ * Pi, in-memory test stores) have nothing to rebuild.
+ */
+function dropDriftedServingOrdinalRanks(sessionId: string, detail: string): void {
+    if (hasRawMessageProvider(sessionId) || !openCodeDbExists()) return;
+    withReadOnlySessionDb((reader) => dropRawSessionOrdinalCheckpoints(reader, sessionId));
+    sessionLog(
+        sessionId,
+        `historian: dropped drifted ordinal checkpoints after exact-read disagreement (${detail}); the next run rebuilds them from a full scan`,
+    );
 }
 
 export interface DanglingPublicationBoundary {
@@ -498,10 +549,25 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             return;
         }
 
-        const offset =
-            priorCompartments.length > 0
-                ? priorCompartments[priorCompartments.length - 1].endMessage + 1
-                : 1;
+        // On OpenCode 1 the next chunk continues after the last summarized
+        // message id, so a stored end_message number that drifted below its id
+        // can neither skip nor repeat a message. Provider sessions, and an id
+        // a revert removed, keep the stored number, as before. The
+        // id read can outrun a cold or just-rebuilt rank cache and defer like
+        // any other unreadable ordinal.
+        let offset: number;
+        try {
+            offset = resolveHistorianChunkStart(
+                sessionId,
+                priorCompartments[priorCompartments.length - 1] ?? null,
+            );
+        } catch (error) {
+            if (error instanceof RawOrdinalsNotReady) {
+                deferUntilOrdinalsReady("chunk start unreadable");
+                return;
+            }
+            throw error;
+        }
 
         let boundarySnapshot =
             deps.boundarySnapshot ??
@@ -522,16 +588,56 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             // The exact id reads scan the session up to each checked ordinal, so
             // they run on a worker; this run waits for them without blocking the
             // thread that serves every session.
-            const checked = await validateBoundarySnapshotOffThread({
-                db,
-                snapshot: boundarySnapshot,
-                currentContextLimit: deps.currentContextLimit ?? boundarySnapshot.contextLimit,
-            });
+            // The serving-thread count and fingerprint reads run the rank
+            // extension above; when that extension just dropped drifted ranks
+            // they defer until the rebuild lands instead of answering half.
+            let checked: OffThreadBoundaryValidation;
+            try {
+                checked = await validateBoundarySnapshotOffThread({
+                    db,
+                    snapshot: boundarySnapshot,
+                    currentContextLimit: deps.currentContextLimit ?? boundarySnapshot.contextLimit,
+                });
+            } catch (error) {
+                if (error instanceof RawOrdinalsNotReady) {
+                    deferUntilOrdinalsReady("boundary validation unreadable");
+                    return;
+                }
+                throw error;
+            }
             if (checked.kind === "not-ready") {
                 deferUntilOrdinalsReady(`boundary validation ${checked.reason}`);
                 return;
             }
             validation = checked.result;
+        }
+        // Refuse only a drifted OpenCode 1 file-store snapshot: when the exact
+        // read disagrees on a check that never moves by itself (`offset`,
+        // `protectedTailStart` or `eligibleEnd`, or a shrunk count), the
+        // serving-thread ranks are wrong, so a refreshed snapshot would carry
+        // the same wrong numbers. The chunk already continues after the stored
+        // end id in the chunk reader's own coordinates, so ending this run
+        // without publishing loses nothing: the ranks rebuild and the next
+        // trigger retries. Every other stale snapshot — a `last` id that moves
+        // every turn, stored compartments that moved, changed content —
+        // refreshes and adopts below as before.
+        if (
+            !validation.ok &&
+            validation.reason === "stale_snapshot" &&
+            shouldRefuseStaleSnapshotForDrift(sessionId, validation.detail)
+        ) {
+            dropDriftedServingOrdinalRanks(
+                sessionId,
+                validation.detail ?? validation.reason ?? "stale_snapshot",
+            );
+            sessionLog(
+                sessionId,
+                `historian: refusing to publish over a stale protected-tail snapshot (was: ${validation.detail ?? "stale"}); ending the run without publishing`,
+            );
+            telemetry.status = "noop";
+            telemetry.failureReason = "stale_snapshot";
+            rollbackDrainReservation();
+            return;
         }
         // In an active session the protected tail's newest message changes every
         // turn (a fresh user/assistant message lands), so a snapshot captured at
