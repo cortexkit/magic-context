@@ -23,8 +23,6 @@ import { DegradedPassRefusalError } from "./degraded-pass-refusal";
 import { getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import * as noteNudger from "./note-nudger";
 import { requestPendingMaterialization } from "./pending-materialization";
-import { replayCommittedDrops } from "./replay-committed-drops";
-import type { MessageLike } from "./tag-messages";
 import { createTransform } from "./transform";
 import { appendReminderToUserMessageById } from "./transform-message-helpers";
 
@@ -245,7 +243,7 @@ for (const droppedPart of [0, 1]) {
 
 for (const alreadyDropped of [false, true]) {
     for (const annotation of ["note", "hint"] as const) {
-        test(`independent: overlay equals raw healthy reconstruction after retiring ${annotation}, alreadyDropped=${alreadyDropped}`, async () => {
+        test(`independent: frozen ${annotation} survives fallback and defer until SOFT normalizes, alreadyDropped=${alreadyDropped}`, async () => {
             const f = await fixture(
                 [{ type: "text", text: "original body", synthetic: true }],
                 annotation === "note",
@@ -261,34 +259,44 @@ for (const alreadyDropped of [false, true]) {
             if (alreadyDropped) markTagDropped(f.db, f.sessionId, tag, "full");
             const captured = await f.serve();
             expect(f.old(captured)?.parts[0].text).toContain(annotation === "note" ? note : hint);
-            if (annotation === "note") pruneNoteNudgeAnchors(f.db, f.sessionId, new Set());
-            else removeAutoSearchHintDecisionByMessageId(f.db, f.sessionId, "old");
-            markTagDropped(f.db, f.sessionId, tag, "full");
-            // Apply the committed-drop edits directly to the captured messages.
-            // Do not save them for recovery: the next deferred pass would then reuse
-            // those saved bytes instead of independently rebuilding from raw input.
-            expect(replayCommittedDrops(f.db, f.sessionId, captured as MessageLike[])).toBe(true);
-            const healthy = await f.serve();
-            expect(JSON.stringify(f.old(captured))).toBe(JSON.stringify(f.old(healthy)));
+            const replayed = await f.failAfter(() => {
+                if (annotation === "note") pruneNoteNudgeAnchors(f.db, f.sessionId, new Set());
+                else removeAutoSearchHintDecisionByMessageId(f.db, f.sessionId, "old");
+                markTagDropped(f.db, f.sessionId, tag, "full");
+            });
+            // Frozen replay policy: retirement cannot rewrite served annotations on
+            // defer. A permitted SOFT rebuild may normalize the retired suffix away.
+            expect(f.old(replayed)?.parts[0].text).toBe(
+                `[dropped §${tag}§]${annotation === "note" ? note : hint}`,
+            );
+            const deferred = await f.serve();
+            expect(JSON.stringify(f.old(deferred))).toBe(JSON.stringify(f.old(replayed)));
+            f.flush();
+            const soft = await f.serve();
+            expect(f.old(soft)?.parts[0].text).toBe(`[dropped §${tag}§]`);
         });
     }
 }
 
-test("independent: pruned note fallback equals next healthy SOFT flush", async () => {
+test("independent: pruned note stays frozen on defer and normalizes on a permitted SOFT flush", async () => {
     const f = await fixture([{ type: "text", text: "original body", synthetic: true }], true);
     const tag = f.tag(0);
     const replayed = await f.failAfter(() => {
         pruneNoteNudgeAnchors(f.db, f.sessionId, new Set());
         markTagDropped(f.db, f.sessionId, tag, "full");
     });
+    // Frozen replay policy retains served annotations through defer; only the
+    // permitted SOFT rebuild below normalizes the retired note to a plain drop.
+    expect(f.old(replayed)?.parts[0].text).toBe(`[dropped §${tag}§]${note}`);
+    const deferred = await f.serve();
+    expect(JSON.stringify(f.old(deferred))).toBe(JSON.stringify(f.old(replayed)));
     f.flush();
-    const healthy = await f.serve();
-    expect(f.old(healthy)?.parts[0].text).toBe(`[dropped §${tag}§]`);
-    expect(JSON.stringify(f.old(replayed))).toBe(JSON.stringify(f.old(healthy)));
+    const soft = await f.serve();
+    expect(f.old(soft)?.parts[0].text).toBe(`[dropped §${tag}§]`);
 });
 
 for (const synthetic of [false, true]) {
-    test(`independent: no-new-commit fallback matches late healthy sweep synthetic=${synthetic}`, async () => {
+    test(`independent: late-published drop fallback matches the next healthy early replay synthetic=${synthetic}`, async () => {
         const f = await fixture([{ type: "text", text: "source notification", synthetic }], true);
         const tag = f.tag(0);
         // Model a drop published by another writer after early status replay,
@@ -297,14 +305,18 @@ for (const synthetic of [false, true]) {
             markTagDropped(f.db, f.sessionId, tag, "full");
             return null;
         });
-        let healthy: Message[];
         try {
-            healthy = await f.serve();
+            await f.serve();
             expect(publication).toHaveBeenCalled();
         } finally {
             publication.mockRestore();
         }
         const replayed = await f.failAfter(() => undefined);
-        expect(JSON.stringify(f.old(replayed))).toBe(JSON.stringify(f.old(healthy)));
+        // A late publication can leave its captured pass inconsistent. Recovery
+        // must match the next healthy early drop replay, not that older capture.
+        const nextHealthy = await f.serve();
+        expect(f.old(nextHealthy)?.parts[0].text).toContain(`[dropped §${tag}§]`);
+        expect(f.old(nextHealthy)?.parts[0].text).not.toContain("source notification");
+        expect(JSON.stringify(f.old(replayed))).toBe(JSON.stringify(f.old(nextHealthy)));
     });
 }

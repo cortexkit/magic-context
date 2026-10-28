@@ -2,7 +2,7 @@ import type { ContextDatabase } from "../../features/magic-context/storage";
 import { getTagsBySession } from "../../features/magic-context/storage";
 import { makeToolCompositeKey } from "../../features/magic-context/tagger";
 import { recoveryReasoningPrefixes } from "../../shared/recovery-reasoning-prefix";
-import { applyFlushedStatuses } from "./apply-operations";
+import { applyFlushedStatuses, renderDroppedText } from "./apply-operations";
 import { isThinkingPart } from "./tag-content-primitives";
 import type { MessageLike, TagTarget, ThinkingLikePart } from "./tag-messages";
 import { isTextPart } from "./tag-part-guards";
@@ -91,11 +91,11 @@ export function replayCommittedDrops(
                         // that history preparation may repurpose; recovery instead
                         // reconciles a captured request with newly committed drops,
                         // preserving each part's captured annotation suffix.
-                        getContent: () => (isTextPart(part) ? part.text : null),
                         setContent(content) {
                             if (isTextPart(part)) {
-                                if (part.text === content) return false;
-                                part.text = content;
+                                const rendered = renderDroppedText(tag.tagNumber, part.text);
+                                if (part.text === rendered) return false;
+                                part.text = rendered;
                             } else message.parts[p] = { type: "text", text: content };
                             return true;
                         },

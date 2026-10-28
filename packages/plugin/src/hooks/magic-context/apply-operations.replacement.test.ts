@@ -47,11 +47,18 @@ describe("renderDroppedText — captured annotation preservation", () => {
     const note = '\n\n<instruction name="deferred_notes">captured note\nline two</instruction>';
     const hint = "\n\n<ctx-search-hint>captured recall</ctx-search-hint>";
 
-    it("leaves the whole same-tag captured drop byte-identical", () => {
-        for (const suffix of ["", note, hint + note, " arbitrary captured suffix\n"]) {
+    it("leaves an already-rendered same-tag drop byte-identical", () => {
+        for (const suffix of ["", note, hint, note + hint, hint + note]) {
             const captured = `[dropped §42§]${suffix}`;
             expect(renderDroppedText(42, captured)).toBe(captured);
         }
+    });
+
+    it("reduces unrecognized prose after a same-tag placeholder", () => {
+        expect(renderDroppedText(42, "[dropped §42§] private raw payload")).toBe("[dropped §42§]");
+        expect(renderDroppedText(42, `[dropped §42§] private raw payload${note}`)).toBe(
+            `[dropped §42§]${note}`,
+        );
     });
 
     it("keeps complete captured annotation suffixes in their original order on a new drop", () => {
