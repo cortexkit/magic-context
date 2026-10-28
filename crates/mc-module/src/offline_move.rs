@@ -43,9 +43,9 @@
 //! | Imported prefix does not end at U - 1 | `prefix_end_mismatch` |
 //! | Every eligible carrier has a neighbour at its time or time + 1 | `adjacency_conflict` |
 //! | Projected marker would not be in effect | `marker_shadowed` |
-//! | Drop target cannot be found | `drop_target_missing` |
+//! | Present retained message has an unresolvable target part | `drop_target_missing` |
 //! | Drop target is not unique (formerly `target_ambiguous`) | `drop_target_ambiguous` |
-//! | Drop target cannot carry a runner tag | `drop_target_untagged` |
+//! | Model-visible drop target cannot carry a runner tag | `drop_target_untagged` |
 //! | Export certificate disagrees with the plan | `certificate_mismatch` |
 //! | Host matches neither persisted image | `move_host_state_unknown` |
 //! | Move record cannot be decoded | `move_record_unreadable` |
@@ -388,6 +388,7 @@ struct PartRow {
     blank_text: bool,
     synthetic: bool,
     taggable: bool,
+    not_served: bool,
 }
 
 /// The session as OpenCode 1 stores it: messages in canonical `(time_created,
@@ -479,12 +480,6 @@ fn load_host_session(conn: &Connection, session: &str) -> Result<HostSession, Re
             format!("opencode.db has no messages for session {session}"),
         ));
     }
-    let position = messages
-        .iter()
-        .filter(|message| message.counted)
-        .enumerate()
-        .map(|(index, message)| (message.id.clone(), index + 1))
-        .collect::<HashMap<_, _>>();
     let roles = messages
         .iter()
         .map(|message| (message.id.as_str(), message.role.as_str()))
@@ -518,15 +513,39 @@ fn load_host_session(conn: &Connection, session: &str) -> Result<HostSession, Re
         let (message, id, kind, call_id, empty_text, synthetic, data) = row.map_err(sql)?;
         let blank_text =
             kind == "text" && empty_text && roles.get(message.as_str()) == Some(&"assistant");
+        let data: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
+        let taggable = runner_taggable_part(&data);
+        let not_served = data["ignored"] == true
+            || (matches!(kind.as_str(), "text" | "reasoning") && data["text"] == "")
+            || (kind == "tool"
+                && matches!(
+                    data["state"]["status"].as_str(),
+                    Some("completed" | "error")
+                )
+                && !taggable);
         parts.entry(message).or_default().push(PartRow {
             id,
             kind,
             call_id,
             blank_text,
             synthetic,
-            taggable: runner_taggable_part(&serde_json::from_str(&data).unwrap_or(Value::Null)),
+            taggable,
+            not_served,
         });
     }
+    for message in &mut messages {
+        if parts.get(&message.id).is_some_and(|parts| {
+            !parts.is_empty() && parts.iter().all(|part| part.kind == "compaction")
+        }) {
+            message.counted = false;
+        }
+    }
+    let position = messages
+        .iter()
+        .filter(|message| message.counted)
+        .enumerate()
+        .map(|(index, message)| (message.id.clone(), index + 1))
+        .collect();
     Ok(HostSession {
         messages,
         position,
@@ -663,8 +682,12 @@ pub struct Plan {
     pub marker_already_keyed: bool,
     /// Drop targets standalone recorded before the cut; summaries cover them.
     pub behind_cut: usize,
-    /// Kept for plan-output compatibility; unresolved targets now refuse.
+    /// Kept for plan-output compatibility; unresolvable parts on present messages refuse.
     pub missing: Vec<String>,
+    /// Tags whose host message or queued tag row no longer exists.
+    pub gone: Vec<u64>,
+    /// Tags on content the host does not serve, such as ignored or empty text.
+    pub not_served: Vec<u64>,
 }
 
 impl Plan {
@@ -702,6 +725,8 @@ impl Plan {
                 "source_drop_modes": modes,
                 "behind_cut": self.behind_cut,
                 "missing": self.missing,
+                "gone": self.gone,
+                "not_served": self.not_served,
             },
             "record_key": move_record_key(&self.record.session),
             "carried": self.record.drops,
@@ -747,6 +772,7 @@ fn choose_cut<'a>(
     host: &'a HostSession,
     spans: &[(usize, usize)],
     t: usize,
+    relocated_summary: &str,
 ) -> Result<&'a MessageRow, Refusal> {
     let mut adjacency_conflict = false;
     for message in host.messages.iter().rev() {
@@ -771,6 +797,9 @@ fn choose_cut<'a>(
         }
         if host.messages.iter().any(|neighbour| {
             neighbour.id != message.id
+                // The selected marker's summary is replaced by the move. All
+                // surviving rows, including other summaries, still constrain U.
+                && neighbour.id != relocated_summary
                 && neighbour.time >= message.time
                 && neighbour.time <= message.time.saturating_add(1)
         }) {
@@ -820,6 +849,7 @@ fn check_projected_marker(
             blank_text: false,
             synthetic: false,
             taggable: false,
+            not_served: true,
         });
     let mut summary = host
         .messages
@@ -1197,7 +1227,7 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
             "T is not covered by a summary",
         ));
     }
-    let carrier = choose_cut(&host, &spans, t)?;
+    let carrier = choose_cut(&host, &spans, t, &summary_id)?;
     let cut = carrier.id.clone();
     let u = host.position[&cut];
     let imported = imported_prefix_len(&spans, u)?;
@@ -1239,7 +1269,16 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
             targets.push((*number, DropKind::Queued, *queued_at));
         }
     }
-    let after_cut = |mid: &str| host.position.get(mid).map(|index| *index >= u);
+    let by_mid: HashMap<&str, &MessageRow> = host
+        .messages
+        .iter()
+        .map(|message| (message.id.as_str(), message))
+        .collect();
+    let after_cut = |mid: &str| {
+        by_mid
+            .get(mid)
+            .map(|message| (message.time, &message.id) >= (carrier.time, &carrier.id))
+    };
     let mut positional: HashMap<&str, Vec<(PositionalKind, usize, u64)>> = HashMap::new();
     for tag in &tags {
         if tag.kind == "message" || tag.kind == "file" {
@@ -1268,26 +1307,33 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
     let mut drops = Vec::new();
     let mut behind_cut = 0;
     let missing = Vec::new();
+    let mut gone = Vec::new();
+    let mut not_served = Vec::new();
     let mut carried_parts = HashSet::new();
     for (number, kind, queued_at) in targets {
         let Some(tag) = by_number.get(&number) else {
-            return Err(Refusal::new(
-                "drop_target_missing",
-                format!("queued drop names unknown tag {number}"),
-            ));
+            gone.push(number);
+            continue;
         };
         let located = match tag.kind.as_str() {
             "message" | "file" => {
-                let Some((mid, _, _)) = parse_positional(&tag.address) else {
+                let Some((mid, _, index)) = parse_positional(&tag.address) else {
                     return Err(Refusal::new(
                         "address_malformed",
                         format!("tag {number} has address {:?}", tag.address),
                     ));
                 };
                 match after_cut(mid) {
-                    None => None,
+                    None => {
+                        gone.push(number);
+                        continue;
+                    }
                     Some(false) => {
                         behind_cut += 1;
+                        continue;
+                    }
+                    Some(true) if !by_mid[mid].counted => {
+                        not_served.push(number);
                         continue;
                     }
                     Some(true) => resolved_messages
@@ -1299,10 +1345,32 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
                             )
                         })
                         .get(&number)
-                        .map(|part| (mid.to_owned(), part.clone())),
+                        .map(|part| (mid.to_owned(), part.clone()))
+                        // An unnumbered part at the exact slot can explain a
+                        // refusal, but must not rebind a text drop to tool output.
+                        .or_else(|| {
+                            host.parts
+                                .get(mid)
+                                .and_then(|parts| parts.get(index))
+                                .filter(|part| {
+                                    !matches!(part.kind.as_str(), "text" | "file" | "compaction")
+                                        && !part.taggable
+                                })
+                                .map(|part| (mid.to_owned(), part.id.clone()))
+                        }),
                 }
             }
             "tool" => {
+                if let Some(owner) = tag.owner.as_deref() {
+                    if !by_mid.contains_key(owner) {
+                        gone.push(number);
+                        continue;
+                    }
+                    if after_cut(owner) == Some(true) && !by_mid[owner].counted {
+                        not_served.push(number);
+                        continue;
+                    }
+                }
                 if tag
                     .owner
                     .as_deref()
@@ -1337,9 +1405,17 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
                     ));
                 }
                 match candidates.first() {
+                    None if tag.owner.is_none() => {
+                        gone.push(number);
+                        continue;
+                    }
                     None => None,
                     Some((mid, _)) if after_cut(mid) == Some(false) => {
                         behind_cut += 1;
+                        continue;
+                    }
+                    Some((mid, _)) if !by_mid[*mid].counted => {
+                        not_served.push(number);
                         continue;
                     }
                     Some((mid, part)) => Some(((*mid).to_owned(), (*part).to_owned())),
@@ -1358,6 +1434,16 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
                 format!("tag {number} at {:?} cannot be resolved", tag.address),
             ));
         };
+        if host
+            .parts
+            .get(&mid)
+            .into_iter()
+            .flatten()
+            .any(|row| row.id == part && row.not_served)
+        {
+            not_served.push(number);
+            continue;
+        }
         if !carried_parts.insert((mid.clone(), part.clone())) {
             return Err(Refusal::new(
                 "drop_target_ambiguous",
@@ -1388,6 +1474,10 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
         });
     }
     drops.sort_by(|a, b| (a.source_tag, &a.mid, &a.part).cmp(&(b.source_tag, &b.mid, &b.part)));
+    gone.sort_unstable();
+    gone.dedup();
+    not_served.sort_unstable();
+    not_served.dedup();
     Ok(Plan {
         marker_carrier: old_cut,
         record: MoveRecord {
@@ -1408,6 +1498,8 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
         marker_already_keyed,
         behind_cut,
         missing,
+        gone,
+        not_served,
     })
 }
 
