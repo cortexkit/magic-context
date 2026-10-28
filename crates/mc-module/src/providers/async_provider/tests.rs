@@ -3,6 +3,7 @@ use cortexkit_bus_inmemory::{InMemoryBus, InMemoryConfig};
 mod broca_0_7;
 mod broca_account_change_samples;
 mod broca_provider_fallback;
+mod broca_rich_ui_stamp;
 mod broca_tag_rows;
 mod contract_update;
 mod contract_update_review;

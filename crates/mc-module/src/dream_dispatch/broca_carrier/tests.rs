@@ -140,6 +140,7 @@ struct State {
     /// off the pinned llm-runner reply shape would.
     bare_replies: bool,
     open_controls: bool,
+    control_override: Option<Value>,
     quiet_stream: bool,
     quiet_active_probes: usize,
     gate: Option<Arc<tokio::sync::Notify>>,
@@ -718,10 +719,14 @@ impl FakeBroca {
             {
                 let mut s = self.state();
                 let open_controls = s.open_controls;
+                let control_override = s.control_override.clone();
                 let Some(run) = s.run.as_mut() else {
                     return Ok(None);
                 };
                 if let Some(unit) = run.units.pop_front() {
+                    if let Some(control) = control_override {
+                        return Ok(Some(control));
+                    }
                     return Ok(Some(if open_controls {
                         json!({"kind":"control","event":{"vendor":"opaque","text":"not an answer","usage":"not measured here"}})
                     } else {
@@ -1531,6 +1536,34 @@ fn broca_0_7_describe_negotiates_the_dream_child_unchanged() {
     assert_eq!(negotiated(&before), negotiated(&after));
 }
 
+#[test]
+fn rich_ui_stamp_carrier_describe_and_golden() {
+    let answer = reply_answer(
+        "role.describe",
+        crate::tests::broca_rich_ui_stamp::sample("role.describe.json"),
+    )
+    .unwrap();
+    let describe = check_describe(&answer).unwrap();
+    assert!(describe.declares("rich_ui_stamp"));
+    let fixture = Fixture::new(&[]);
+    let carrier = fixture.carrier(policy());
+    let request = fixture.request(&["ctx_memory"], 3);
+    carrier.negotiate(&describe, &request, Some(100)).unwrap();
+    // Keep the vendored golden unchanged; only the decoder input gains the
+    // future capability, as it would after a runner upgrade.
+    let mut golden = child_runner_describe();
+    golden["capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("rich_ui_stamp"));
+    let original = check_describe(&child_runner_describe()).unwrap();
+    let extended = check_describe(&golden).unwrap();
+    assert_eq!(
+        carrier.negotiate(&original, &request, Some(100)).unwrap(),
+        carrier.negotiate(&extended, &request, Some(100)).unwrap()
+    );
+}
+
 #[tokio::test]
 async fn broca_child_golden_runner_stops_at_exactly_the_cap() {
     let f = Fixture::golden();
@@ -1706,6 +1739,20 @@ async fn broca_child_open_controls_follow_status_and_result_without_parsing_bodi
         completions.push((completion.text, completion.usage));
     }
     assert_eq!(completions[0], completions[1]);
+}
+
+#[tokio::test]
+async fn rich_ui_stamp_carrier_run_started() {
+    let fixture = Fixture::new(BASE);
+    fixture.broca.state().control_override = Some(crate::tests::broca_rich_ui_stamp::sample(
+        "run_started.json",
+    ));
+    fixture.script(vec![answer("fixture final")]);
+    let request = fixture.request(&[], 3);
+    let (completion, _) = run(&fixture, &mut fixture.carrier(policy()), &request).await;
+    assert_eq!(completion.unwrap().text, "fixture final");
+    assert_eq!(fixture.broca.ops("run.status").len(), 1);
+    assert_eq!(fixture.broca.ops("run.result").len(), 1);
 }
 
 #[tokio::test]

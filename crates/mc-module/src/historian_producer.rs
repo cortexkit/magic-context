@@ -4692,6 +4692,44 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn rich_ui_stamp_summarizer_describe() {
+        let describe = crate::tests::broca_rich_ui_stamp::answer("role.describe.json");
+        assert!(matches!(
+            retention_from_role_describe(&describe),
+            crate::child_retention::ChildRetention::Seconds(_)
+        ));
+        assert_eq!(
+            crate::runner_follow::FollowCapabilities::from_describe(&describe).missing(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn rich_ui_stamp_summarizer_run_started() {
+        let server = fake_server(
+            json!({"state":"active","run_id":"r1"}),
+            vec![crate::tests::broca_rich_ui_stamp::sample(
+                "run_started.json",
+            )],
+        )
+        .await;
+        {
+            let mut answers = server.answers.lock().await;
+            answers.statuses = [json!({"state":"active"}), json!({"state":"completed"})].into();
+            answers.result = Some(json!({"run_id":"r1","state":"completed",
+                "final_message":{"ordinal":1,"mid":"answer","text":"fixture final"}}));
+        }
+        let mut producer = client(&server).await;
+        producer
+            .start("rich-ui-child", "", "prompt", "prov/model-a")
+            .await
+            .unwrap();
+        let output = producer.await_output("r1").await.unwrap();
+        assert_eq!(output.text, "fixture final");
+        producer.close().await;
+    }
+
     #[tokio::test]
     async fn bare_run_status_and_result_replies_are_refused_by_name() {
         let server = fake_server(json!({"state":"active","run_id":"run-1"}), vec![]).await;

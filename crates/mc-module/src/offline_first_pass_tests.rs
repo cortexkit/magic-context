@@ -122,6 +122,38 @@ fn a_message_without_the_runners_digests_is_refused_by_name() {
 }
 
 #[test]
+fn rich_ui_stamp_offline_import_parser() {
+    for name in ["session.read.default.json", "session.read.opt-in.json"] {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("testdata/broca-rich-ui-stamp")
+                .join(name),
+        )
+        .unwrap();
+        let mut page =
+            crate::session_resolver::read_runner_reply(serde_json::from_slice(&bytes).unwrap())
+                .unwrap();
+        let codec = crate::providers::codec::Codec::OwnedBroca;
+        // The CLI requires bare descriptor pages. The captured inline page
+        // must still reach the existing missing-digest refusal, not a new one.
+        let error = parse_pages(page.to_string().as_bytes(), codec)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "served_digest_missing", "{name}");
+        eprintln!("{name}: inline offline import: {error:?}");
+        for row in page["messages"].as_array_mut().unwrap() {
+            let entry: ReadMessage = serde_json::from_value(row.clone()).unwrap();
+            let served = serde_json::to_value(serve_descriptors(&entry)).unwrap();
+            for key in ["digest", "part_digests"] {
+                row[key] = served[key].clone();
+            }
+        }
+        let pages = parse_pages(page.to_string().as_bytes(), codec).unwrap();
+        assert_eq!(pages.entries, 2, "{name}");
+    }
+}
+
+#[test]
 fn the_checkpoint_is_the_number_below_the_lowest_tag() {
     let pages = parse(&[page(0..2, None)]).unwrap();
     let record = |checkpoint| MoveRecord {
