@@ -673,7 +673,7 @@ async fn replay_skips_removed_and_changed_digests() {
         .iter()
         .find(|drop| drop.kind == crate::offline_move::DropKind::Applied)
         .unwrap();
-    for (_, address) in changed.tag_index.iter_mut() {
+    for address in changed.tag_index.values_mut() {
         if address.mid == changed_target.mid && address.part == changed_target.part {
             address.digest = "changed-digest".into();
         }
