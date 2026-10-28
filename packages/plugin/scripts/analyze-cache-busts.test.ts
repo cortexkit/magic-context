@@ -123,6 +123,104 @@ function snapshotsFor(dir: string, session: string) {
 }
 
 describe("analyze-cache-bust dump discovery", () => {
+    test("claims slow passes once across consecutive requests, including BASE and UNMETERED", () => {
+        const dir = mkdtempSync(join(tmpdir(), "cache-pass-claims-"));
+        tempDirs.push(dir);
+        const session = "ses_passClaims";
+        const start = Date.parse("2026-10-28T12:56:00Z");
+        const offsets = [0, 41_000, 81_000, 82_000, 83_000];
+        for (const [index, offset] of offsets.entries()) {
+            const at = new Date(start + offset).toISOString();
+            writeDump(
+                dir,
+                `${at.replaceAll(":", "-").replace(".", "-")}-00000${index + 1}-${session}`,
+                at,
+                session,
+                bodyWithBreakpointMessage(`prefix ${index}`),
+                index === 3
+                    ? {}
+                    : responseUsage({
+                          input_tokens: 100,
+                          cache_read_input_tokens: index === 0 ? 20_000 : 100,
+                          cache_creation_input_tokens: index === 0 ? 0 : 19_900,
+                      }),
+            );
+        }
+        const passes: CacheBustDecisionAttribution[] = [-1_000, 10_000, 50_000, 81_500].map(
+            (offset) => ({
+                timestampMs: start + offset,
+                decision: "execute",
+                materialized: true,
+                materializeReason: "pressure_refold",
+                emergency: false,
+                droppedTokens: 100,
+                droppedCount: 1,
+                inputTokens: 20_000,
+                flush: false,
+                source: "fixture",
+            }),
+        );
+
+        const rows = __test.analyzeSnapshots(snapshotsFor(dir, session), passes);
+        expect(rows.map((row) => row.decision)).toEqual([
+            passes[0], passes[1], passes[2], undefined, undefined,
+        ]);
+        expect(rows.map((row) => row.divergenceClass)).toEqual([
+            undefined,
+            "accounted_hard_pressure_refold",
+            "accounted_hard_pressure_refold",
+            "usage_missing",
+            "no_mc_pass_row",
+        ]);
+    });
+
+    test("partial and bounded scans do not reclaim a pass used before the comparison snapshots", () => {
+        const dir = mkdtempSync(join(tmpdir(), "cache-pass-watermark-"));
+        tempDirs.push(dir);
+        const session = "ses_passWatermark";
+        const start = Date.parse("2026-10-28T12:56:00Z");
+        for (let index = 0; index < 5; index += 1) {
+            const at = new Date(start + index * 1_000).toISOString();
+            writeDump(
+                dir,
+                `${at.replaceAll(":", "-").replace(".", "-")}-00000${index + 1}-${session}`,
+                at,
+                session,
+                bodyWithBreakpointMessage(index === 4 ? "changed prefix" : "cached prefix"),
+                responseUsage({
+                    input_tokens: 100,
+                    cache_read_input_tokens: index === 4 ? 100 : 20_000,
+                    cache_creation_input_tokens: index === 4 ? 19_900 : 0,
+                }),
+            );
+        }
+        const pass: CacheBustDecisionAttribution = {
+            timestampMs: start - 1_000,
+            decision: "execute",
+            materialized: true,
+            materializeReason: "pressure_refold",
+            emergency: false,
+            droppedTokens: 100,
+            droppedCount: 1,
+            inputTokens: 20_000,
+            flush: false,
+            source: "fixture",
+        };
+        for (const scanDeadlineMs of [undefined, Number.MAX_SAFE_INTEGER]) {
+            const result = analyzeOpenCodeCacheBustSession({
+                sessionId: session,
+                anthropicDir: dir,
+                openaiDir: join(dir, "missing"),
+                mcLogPath: join(dir, "missing.log"),
+                decisions: [pass],
+                sinceExclusiveMs: start + 3_000,
+                scanDeadlineMs,
+            });
+            expect(result.requests).toHaveLength(1);
+            expect(result.requests[0]?.divergenceClass).toBe("no_mc_pass_row");
+        }
+    });
+
     test("classifies an Anthropic zero read and wire-model swap as a provider full miss", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-provider-full-miss-"));
         tempDirs.push(dir);
@@ -572,12 +670,12 @@ describe("analyze-cache-bust dump discovery", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-pass-time-"));
         tempDirs.push(dir);
         const session = "ses_passtime123";
-        const firstStem = `2026-09-11T07-00-00-000Z-${session}`;
+        const firstStem = `2026-09-11T06-59-00-000Z-${session}`;
         const bustStem = `2026-09-11T07-00-10-000Z-${session}`;
         writeDump(
             dir,
             firstStem,
-            "2026-09-11T07:00:00Z",
+            "2026-09-11T06:59:00Z",
             session,
             bodyWithBreakpointMessage("old"),
             responseUsage({
