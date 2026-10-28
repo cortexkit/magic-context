@@ -2,6 +2,7 @@ use super::*;
 use cortexkit_bus_inmemory::{InMemoryBus, InMemoryConfig};
 mod broca_0_7;
 mod broca_account_change_samples;
+mod broca_provider_fallback;
 mod broca_tag_rows;
 mod contract_update;
 mod contract_update_review;
@@ -107,6 +108,8 @@ struct Runner {
     /// once something was pruned.
     reasoning_pruned: Mutex<Option<Value>>,
     history_requests: Mutex<Vec<Value>>,
+    /// A raw history page to serve without regenerating its message rows.
+    history_override: Mutex<Option<Value>>,
 }
 
 #[derive(Default)]
@@ -272,6 +275,9 @@ impl session_resolver::ProviderRunner for Runner {
         }
         if method == "session.history" {
             self.history_requests.lock().unwrap().push(params.clone());
+            if let Some(page) = self.history_override.lock().unwrap().clone() {
+                return Ok(page);
+            }
             let entries = self.entries.lock().unwrap();
             let start = if let Some(mid) = params["from_mid"].as_str() {
                 entries

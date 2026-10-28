@@ -2369,6 +2369,24 @@ fn checked_async_view(
         }
         transient(error.name())
     })?;
+    // Keep-range edits can change after native rendering. Validate their final
+    // form before publishing an edit that identifies native parts by position.
+    for range in &view.ranges {
+        if let view::ViewRange::Keep { edits, .. } = range {
+            for edit in edits {
+                if kept.get(&edit.ordinal).is_some_and(|message| {
+                    (edit.drop && message.fallback_prefix.contains(&edit.part))
+                        || ((edit.drop || edit.bytes.is_some())
+                            && message.fallback_protected.contains(&edit.part))
+                }) {
+                    return Err(error(
+                        "provider_fallback_edit_unsupported",
+                        "Cannot remove or move a provider fallback or its reasoning sequence",
+                    ));
+                }
+            }
+        }
+    }
     let splits = tool_arcs::split_pairs(codec, kept, &view.ranges);
     if !splits.is_empty() {
         return Ok(Err(splits));
