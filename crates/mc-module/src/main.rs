@@ -49,7 +49,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         std::process::exit(mc_module::single_store_repair::cli_main(&args));
     }
     // The offline move of a standalone OpenCode 1 session to mode 3 runs in a
-    // restart window with every host and ck-mc stopped.
+    // restart window with every host and ck-mc stopped. `move-session --plan`
+    // uses only read-only store connections and prints U, P and message_count.
     if std::env::args().nth(1).as_deref() == Some("offline") {
         let args: Vec<String> = std::env::args().skip(2).collect();
         std::process::exit(mc_module::offline_move::cli_main(&args));
