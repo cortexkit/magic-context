@@ -135,6 +135,35 @@ pub(crate) fn write_moved_session_stores(dir: &Path) -> StorePaths {
     paths
 }
 
+/// The worked digest vector from SUBC's `message-checkpoint.json`
+/// (`cortexkit-role-llm-runner` 0.7.17, `test-vectors/llm-runner-v1`). The
+/// digest is opaque to ck-mc: the move checks only `mid` and `message_count`
+/// and records the whole cut exactly as certified.
+const VECTOR_DIGEST: &str = "189f89a46681c05dac35fe71f4e46c1a8cb5a0c0882b1d5f4cc80ce3f4582ca9";
+const VECTOR_WRITTEN_AT: u64 = 1793145600123;
+
+/// Write `certificate` to a temp file for `--head-cut` and return its path.
+/// The dir lives as long as the returned path needs it: the caller keeps the
+/// tempdir alive across the apply call.
+fn write_cert_file(dir: &Path, certificate: &Value) -> PathBuf {
+    let path = dir.join("head-cut.json");
+    std::fs::write(&path, certificate.to_string()).unwrap();
+    path
+}
+
+fn valid_cert_value(plan: &Plan) -> Value {
+    json!({
+        "session": fixture_session(),
+        "cut": plan.record.cut,
+        "message_count": plan.message_count,
+        "head_cut": {
+            "mid": plan.p,
+            "digest": VECTOR_DIGEST,
+            "written_at": VECTOR_WRITTEN_AT,
+        },
+    })
+}
+
 /// Capture every database and WAL, not just the rows the writer currently edits.
 /// SQLite's disposable shared-memory index is not persistent store content.
 fn all_store_bytes(paths: &StorePaths) -> Vec<(PathBuf, Option<Vec<u8>>)> {
@@ -207,7 +236,13 @@ fn snapshot(paths: &StorePaths) -> (Vec<(String, String)>, Option<String>) {
 }
 
 fn moved(paths: &StorePaths) -> Plan {
-    match run(paths, &fixture_session(), false, &NoHolders, None).unwrap() {
+    // The certified path: plan read-only, then apply with the export
+    // certificate. The digest comes from SUBC's vector and is recorded as
+    // certified; only `mid` and `message_count` are checked.
+    let plan = plan(paths, &fixture_session()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let cert = write_cert_file(dir.path(), &valid_cert_value(&plan));
+    match run_with_head_cut(paths, &fixture_session(), &cert, &NoHolders, None).unwrap() {
         Outcome::Moved(plan) => plan,
         other => panic!("{other:?}"),
     }
@@ -242,6 +277,15 @@ fn pairs(value: &Value) -> BTreeSet<(String, String)> {
         .collect()
 }
 
+fn host_position(paths: &StorePaths, mid: &str) -> usize {
+    let host = load_host_session(
+        &open_read_only(&paths.opencode_db).unwrap(),
+        &fixture_session(),
+    )
+    .unwrap();
+    host.position[mid]
+}
+
 fn carried(record: &MoveRecord, kind: DropKind) -> BTreeSet<(String, String)> {
     record
         .drops
@@ -269,6 +313,24 @@ fn move_carries_summaries_cut_checkpoint_and_drops_after_the_cut() {
     assert_eq!(record.cut, "msg_m007");
     assert_eq!(plan.p, "msg_m006");
     assert_eq!(plan.message_count, 6);
+    // The move record is versioned with state `moved`: `cut` is `U`,
+    // `message_count` is the counted prefix length, and `head_cut` is exactly
+    // the certified `P` triple. The digest is opaque and recorded as given.
+    assert_eq!(record.version, RECORD_VERSION);
+    assert_eq!(record.state, MoveState::Moved);
+    assert_eq!(record.p, "msg_m006");
+    assert_eq!(record.message_count, 6);
+    assert_eq!(record.head_cut.mid, "msg_m006");
+    assert_eq!(record.head_cut.digest, VECTOR_DIGEST);
+    assert_eq!(record.head_cut.written_at, VECTOR_WRITTEN_AT);
+    // The intent holds the codec profile, the three rows before and after with
+    // their ids, the imported summaries with positions and CK block ids, the
+    // resolved drops and the tag checkpoint.
+    assert_eq!(record.old_compaction_part, plan.old_compaction_part);
+    assert_eq!(record.old_summary, plan.old_summary);
+    assert_eq!(record.new_summary_id, plan.new_summary_id);
+    assert_eq!(record.new_summary_part_id, plan.new_summary_part_id);
+    assert_eq!(record.u_time, 7000);
     // The relocated marker ids are the plugin generator's output for
     // `resolvedBoundary = U` and `endMessageId = P`.
     assert_eq!(record.marker_part, "prt_000001b580017vSwDweLmvnis8");
@@ -303,6 +365,15 @@ fn move_carries_summaries_cut_checkpoint_and_drops_after_the_cut() {
             (imported.start_part.as_ref(), imported.end_part.as_ref()),
             (None, None)
         );
+        // The intent holds the imported summaries with their counted positions.
+        assert_eq!(
+            imported.start_position,
+            host_position(&paths, &imported.start_message_id)
+        );
+        assert_eq!(
+            imported.end_position,
+            host_position(&paths, &imported.end_message_id)
+        );
     }
     // msg_m001 holds one text part; msg_m002 holds reasoning, text and a
     // completed tool (call plus result); msg_m006 holds text and a tool.
@@ -332,8 +403,9 @@ fn move_carries_summaries_cut_checkpoint_and_drops_after_the_cut() {
     );
     assert!(plan.missing.is_empty(), "{:?}", plan.missing);
     // The oracle: the plugin writer's rows for `resolvedBoundary = U` and
-    // `endMessageId = P`, plus exactly the 3-key. Every other SQL column and
-    // JSON byte matches; `U` and every unrelated row stay byte-identical.
+    // `endMessageId = P`, plus exactly the four-member `cortexkit` key. Every
+    // other SQL column and JSON byte matches; `U` and every unrelated row stay
+    // byte-identical.
     let (old_cut, old_summary, old_compaction, old_summary_part) = (
         plan.marker_carrier.clone(),
         plan.old_summary.clone(),
@@ -390,8 +462,7 @@ fn move_carries_summaries_cut_checkpoint_and_drops_after_the_cut() {
     const ORACLE_COMPACTION_BASE: &str = r#"{"type":"compaction","auto":true}"#;
     const ORACLE_TEXT_ID: &str = "prt_000001b590020zGA8sPgeGCoLV";
     const ORACLE_TEXT_DATA: &str = r#"{"type":"text","text":"[Compacted by Magic Context]"}"#;
-    const ORACLE_KEY: &str =
-        r#"{"tag_checkpoint":20,"session":"ses_mode3_move_fixture","message_count":6}"#;
+    const ORACLE_KEY: &str = r#"{"tag_checkpoint":20,"session":"ses_mode3_move_fixture","message_count":6,"head_cut":{"mid":"msg_m006","digest":"189f89a46681c05dac35fe71f4e46c1a8cb5a0c0882b1d5f4cc80ce3f4582ca9","written_at":1793145600123}}"#;
     assert_eq!(plan.new_summary_id, ORACLE_SUMMARY_ID);
     assert_eq!(record.marker_part, ORACLE_COMPACTION_ID);
     assert_eq!(plan.new_summary_part_id, ORACLE_TEXT_ID);
@@ -514,47 +585,341 @@ fn move_dry_run_prints_the_plan_and_writes_nothing() {
 
 #[test]
 fn move_rerun_after_a_crash_at_each_write_step_ends_identical() {
+    // The reference is the certified apply: intent, host and `moved` record.
     let finished = tempfile::tempdir().unwrap();
     let finished = write_moved_session_stores(finished.path());
     moved(&finished);
     let reference = snapshot(&finished);
+    let stored: MoveRecord = serde_json::from_str(&record(&finished).unwrap()).unwrap();
+    assert_eq!(stored.state, MoveState::Moved);
 
-    // A crash after the marker key: the session is not moved yet, because the
-    // moved record, the commit point, is written last.
+    // A crash after the `relocating` intent, before the host transaction: the
+    // host still matches the before-image. Resuming from the persisted intent
+    // alone finishes with byte-identical rows and a `moved` record.
     let crashed = tempfile::tempdir().unwrap();
     let crashed = write_moved_session_stores(crashed.path());
-    let stopped = run(
+    let before = snapshot(&crashed);
+    let planned_intent = plan(&crashed, &fixture_session()).unwrap();
+    let cert_dir = tempfile::tempdir().unwrap();
+    let cert = write_cert_file(cert_dir.path(), &valid_cert_value(&planned_intent));
+    let stopped = run_with_head_cut(
         &crashed,
         &fixture_session(),
-        false,
+        &cert,
         &NoHolders,
-        Some(StopAfter::MarkerKey),
+        Some(StopAfter::Intent),
     );
     assert!(
         matches!(stopped, Err(MoveError::Interrupted(_))),
         "{stopped:?}"
     );
+    let intent: MoveRecord =
+        serde_json::from_str(&record(&crashed).expect("relocating intent")).unwrap();
+    assert_eq!(intent.state, MoveState::Relocating);
+    assert_eq!(intent.head_cut.mid, planned_intent.p);
+    assert_eq!(intent.message_count, planned_intent.message_count as u64);
+    // The host is untouched: only the intent was committed.
+    assert_eq!(snapshot(&crashed).0, before.0);
+    // Resume without re-planning and without the certificate file: deleting
+    // the certificate proves the rerun never re-reads it.
+    std::fs::remove_file(&cert).unwrap();
+    resume(&crashed, &fixture_session(), &NoHolders, None).unwrap();
+    assert_eq!(snapshot(&crashed), reference);
+
+    // A crash after the host COMMIT, before `moved`: the host already carries
+    // the after-image and the record is still `relocating`. The rerun only
+    // flips the record to `moved`.
+    let crashed = tempfile::tempdir().unwrap();
+    let crashed = write_moved_session_stores(crashed.path());
+    let planned_host = plan(&crashed, &fixture_session()).unwrap();
+    let cert_dir = tempfile::tempdir().unwrap();
+    let cert = write_cert_file(cert_dir.path(), &valid_cert_value(&planned_host));
+    let stopped = run_with_head_cut(
+        &crashed,
+        &fixture_session(),
+        &cert,
+        &NoHolders,
+        Some(StopAfter::Host),
+    );
     assert!(
-        record(&crashed).is_none(),
-        "the moved record must be the last write"
+        matches!(stopped, Err(MoveError::Interrupted(_))),
+        "{stopped:?}"
     );
-    let crashed_plan = plan(&crashed, &fixture_session()).unwrap();
-    assert_eq!(
-        relocated_marker_data(&crashed, &crashed_plan.record.marker_part)["cortexkit"]
-            ["tag_checkpoint"],
-        20
-    );
-    let Outcome::Moved(plan) = run(&crashed, &fixture_session(), false, &NoHolders, None).unwrap()
-    else {
-        panic!("rerun did not move");
-    };
-    assert!(plan.marker_already_keyed);
+    let intent: MoveRecord =
+        serde_json::from_str(&record(&crashed).expect("relocating intent")).unwrap();
+    assert_eq!(intent.state, MoveState::Relocating);
+    assert_eq!(snapshot(&crashed).0, reference.0);
+    resume(&crashed, &fixture_session(), &NoHolders, None).unwrap();
     assert_eq!(snapshot(&crashed), reference);
 
     // A crash after the moved record is a finished move: rerunning refuses by
-    // name and changes nothing.
+    // name and changes nothing. The authoritative record is never cleared.
     assert_eq!(refusal(&crashed).code, "already_moved");
     assert_eq!(snapshot(&crashed), reference);
+    assert!(record(&crashed).is_some());
+}
+
+fn cert_refusal(paths: &StorePaths, certificate: &Value) -> Refusal {
+    let before = all_store_bytes(paths);
+    let dir = tempfile::tempdir().unwrap();
+    let cert = write_cert_file(dir.path(), certificate);
+    let refused = match run_with_head_cut(paths, &fixture_session(), &cert, &NoHolders, None) {
+        Err(MoveError::Refused(refusal)) => refusal,
+        other => panic!("expected a certificate refusal, got {other:?}"),
+    };
+    assert_eq!(refused.code, "certificate_mismatch");
+    assert_eq!(
+        all_store_bytes(paths),
+        before,
+        "certificate refusal wrote a store"
+    );
+    // No `relocating` intent and no other write survived the refusal.
+    assert!(
+        record(paths).is_none(),
+        "certificate refusal left an intent"
+    );
+    refused
+}
+
+#[test]
+fn apply_checks_the_certificate_before_committing_the_intent() {
+    // The SUBC vector's digest is opaque: the apply records it when `mid` and
+    // `message_count` match the plan, and no fixture expects a different
+    // well-formed digest to be detected.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_moved_session_stores(dir.path());
+    let planned = plan(&paths, &fixture_session()).unwrap();
+    let valid = valid_cert_value(&planned);
+    let cert_dir = tempfile::tempdir().unwrap();
+    let cert = write_cert_file(cert_dir.path(), &valid);
+    let loaded = load_certificate(&cert).unwrap();
+    assert_eq!(loaded.message_count, 6);
+    assert_eq!(loaded.head_cut.mid, "msg_m006");
+    check_certificate(&planned, &loaded).unwrap();
+    // A different well-formed digest with the same `mid` and count is still
+    // accepted: the digest is recorded as certified, never recomputed.
+    let mut other_digest = valid.clone();
+    other_digest["head_cut"]["digest"] = json!("other-digest");
+    let cert_dir = tempfile::tempdir().unwrap();
+    let cert = write_cert_file(cert_dir.path(), &other_digest);
+    let loaded = load_certificate(&cert).unwrap();
+    check_certificate(&planned, &loaded).unwrap();
+
+    // A different `mid` refuses before any write.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_moved_session_stores(dir.path());
+    let planned_mid = plan(&paths, &fixture_session()).unwrap();
+    let mut wrong_mid = valid_cert_value(&planned_mid);
+    wrong_mid["head_cut"]["mid"] = json!("msg_m005");
+    assert_eq!(
+        cert_refusal(&paths, &wrong_mid).code,
+        "certificate_mismatch"
+    );
+
+    // A different `message_count` refuses before any write.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_moved_session_stores(dir.path());
+    let planned_count = plan(&paths, &fixture_session()).unwrap();
+    let mut wrong_count = valid_cert_value(&planned_count);
+    wrong_count["message_count"] = json!(7);
+    assert_eq!(
+        cert_refusal(&paths, &wrong_count).code,
+        "certificate_mismatch"
+    );
+
+    // A malformed certificate (missing field, wrong type) refuses before any
+    // write. Each case snapshots all three stores and leaves no intent.
+    for malformed in [
+        json!({"message_count": 6}),
+        json!({"head_cut": {"mid": "msg_m006", "digest": VECTOR_DIGEST, "written_at": VECTOR_WRITTEN_AT}}),
+        json!({"message_count": 6, "head_cut": {"digest": VECTOR_DIGEST, "written_at": VECTOR_WRITTEN_AT}}),
+        json!({"message_count": 6, "head_cut": {"mid": "msg_m006", "written_at": VECTOR_WRITTEN_AT}}),
+        json!({"message_count": 6, "head_cut": {"mid": "msg_m006", "digest": VECTOR_DIGEST}}),
+        json!({"message_count": "6", "head_cut": {"mid": "msg_m006", "digest": VECTOR_DIGEST, "written_at": VECTOR_WRITTEN_AT}}),
+        json!({"message_count": 6, "head_cut": {"mid": 6, "digest": VECTOR_DIGEST, "written_at": VECTOR_WRITTEN_AT}}),
+        json!({"message_count": 6, "head_cut": {"mid": "msg_m006", "digest": 42, "written_at": VECTOR_WRITTEN_AT}}),
+        json!({"message_count": 6, "head_cut": {"mid": "msg_m006", "digest": VECTOR_DIGEST, "written_at": "yesterday"}}),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_moved_session_stores(dir.path());
+        assert_eq!(
+            cert_refusal(&paths, &malformed).code,
+            "certificate_mismatch"
+        );
+    }
+}
+
+#[test]
+fn move_record_and_marker_key_carry_the_certified_cut() {
+    // Known-answer: `cut` is `U`, `message_count` is the counted prefix length,
+    // and `head_cut` is exactly the certified `P` triple. The marker key is
+    // the four-member key with that head cut.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_moved_session_stores(dir.path());
+    let planned_move = moved(&paths);
+    let rec = planned_move.record.clone();
+    assert_eq!(rec.cut, "msg_m007");
+    assert_eq!(rec.cut, planned_move.record.cut);
+    assert_eq!(rec.message_count, 6);
+    assert_eq!(rec.message_count, planned_move.message_count as u64);
+    assert_eq!(
+        rec.head_cut,
+        HeadCut {
+            mid: "msg_m006".into(),
+            digest: VECTOR_DIGEST.into(),
+            written_at: VECTOR_WRITTEN_AT,
+        }
+    );
+    let marker = relocated_marker_data(&paths, &rec.marker_part);
+    assert_eq!(
+        marker["cortexkit"],
+        json!({
+            "tag_checkpoint": 20,
+            "session": fixture_session(),
+            "message_count": 6,
+            "head_cut": {"mid": "msg_m006", "digest": VECTOR_DIGEST, "written_at": VECTOR_WRITTEN_AT},
+        })
+    );
+    // The stored record round-trips through the persisted intent.
+    let stored: MoveRecord = serde_json::from_str(&record(&paths).unwrap()).unwrap();
+    assert_eq!(stored, rec);
+}
+
+#[test]
+fn host_transaction_applies_only_from_the_recorded_images() {
+    let finished = tempfile::tempdir().unwrap();
+    let finished = write_moved_session_stores(finished.path());
+    moved(&finished);
+    let reference = snapshot(&finished);
+
+    // The after-image is already in place: the rerun only flips the record to
+    // `moved` and writes nothing else to the host.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_moved_session_stores(dir.path());
+    let planned_after = plan(&paths, &fixture_session()).unwrap();
+    let cert_dir = tempfile::tempdir().unwrap();
+    let cert = write_cert_file(cert_dir.path(), &valid_cert_value(&planned_after));
+    run_with_head_cut(
+        &paths,
+        &fixture_session(),
+        &cert,
+        &NoHolders,
+        Some(StopAfter::Host),
+    )
+    .unwrap_err();
+    let intent: MoveRecord = serde_json::from_str(&record(&paths).unwrap()).unwrap();
+    assert_eq!(intent.state, MoveState::Relocating);
+    let host_before_resume = snapshot(&paths).0;
+    assert_eq!(host_before_resume, reference.0);
+    resume(&paths, &fixture_session(), &NoHolders, None).unwrap();
+    assert_eq!(snapshot(&paths), reference);
+
+    // A host matching neither image refuses `move_host_state_unknown` with no
+    // further writes: the intent stays `relocating` and the host is untouched.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_moved_session_stores(dir.path());
+    let planned_neither = plan(&paths, &fixture_session()).unwrap();
+    let cert_dir = tempfile::tempdir().unwrap();
+    let cert = write_cert_file(cert_dir.path(), &valid_cert_value(&planned_neither));
+    run_with_head_cut(
+        &paths,
+        &fixture_session(),
+        &cert,
+        &NoHolders,
+        Some(StopAfter::Intent),
+    )
+    .unwrap_err();
+    // Corrupt the host so it matches neither the before- nor the after-image.
+    host_sql(&paths, "UPDATE part SET data='corrupted' WHERE id IN (SELECT id FROM part WHERE json_extract(data,'$.type')='compaction' LIMIT 1)");
+    let before = all_store_bytes(&paths);
+    let refused = match resume(&paths, &fixture_session(), &NoHolders, None) {
+        Err(MoveError::Refused(refusal)) => refusal,
+        other => panic!("expected move_host_state_unknown, got {other:?}"),
+    };
+    assert_eq!(refused.code, "move_host_state_unknown");
+    assert_eq!(all_store_bytes(&paths), before);
+    let intent: MoveRecord = serde_json::from_str(&record(&paths).unwrap()).unwrap();
+    assert_eq!(intent.state, MoveState::Relocating);
+}
+
+#[test]
+fn resumes_finish_from_the_persisted_intent_when_planning_would_fail() {
+    let finished = tempfile::tempdir().unwrap();
+    let finished = write_moved_session_stores(finished.path());
+    moved(&finished);
+    let reference = snapshot(&finished);
+
+    for stop in [StopAfter::Intent, StopAfter::Host] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_moved_session_stores(dir.path());
+        let planned_break = plan(&paths, &fixture_session()).unwrap();
+        let cert_dir = tempfile::tempdir().unwrap();
+        let cert = write_cert_file(cert_dir.path(), &valid_cert_value(&planned_break));
+        run_with_head_cut(&paths, &fixture_session(), &cert, &NoHolders, Some(stop)).unwrap_err();
+        // Break planning: delete the compartments so a fresh plan would refuse
+        // `summaries_missing`, and corrupt the marker state. The resume must
+        // still finish from the persisted intent alone.
+        context_sql(&paths, "DELETE FROM compartments");
+        context_sql(
+            &paths,
+            "UPDATE session_meta SET compaction_marker_state='broken'",
+        );
+        assert!(plan(&paths, &fixture_session()).is_err());
+        resume(&paths, &fixture_session(), &NoHolders, None).unwrap();
+        assert_eq!(snapshot(&paths), reference, "stop={stop:?}");
+        let stored: MoveRecord = serde_json::from_str(&record(&paths).unwrap()).unwrap();
+        assert_eq!(stored.state, MoveState::Moved);
+        assert_eq!(stored.head_cut.mid, "msg_m006");
+    }
+}
+
+#[test]
+fn uncertain_commits_rerun_to_the_same_moved_state() {
+    let finished = tempfile::tempdir().unwrap();
+    let finished = write_moved_session_stores(finished.path());
+    moved(&finished);
+    let reference = snapshot(&finished);
+
+    // An uncertain host COMMIT: the host may hold the before- or the
+    // after-image while the record is still `relocating`. Both resumes end
+    // with byte-identical host rows and a `moved` record.
+    for stop in [StopAfter::Intent, StopAfter::Host] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_moved_session_stores(dir.path());
+        let planned_uncertain = plan(&paths, &fixture_session()).unwrap();
+        let cert_dir = tempfile::tempdir().unwrap();
+        let cert = write_cert_file(cert_dir.path(), &valid_cert_value(&planned_uncertain));
+        run_with_head_cut(&paths, &fixture_session(), &cert, &NoHolders, Some(stop)).unwrap_err();
+        resume(&paths, &fixture_session(), &NoHolders, None).unwrap();
+        assert_eq!(snapshot(&paths), reference, "host stop={stop:?}");
+    }
+
+    // An uncertain `moved` COMMIT: the host already carries the after-image
+    // while the record may still be `relocating` or already `moved`. Either
+    // rerun ends `moved` with the same bytes; the record is never cleared.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_moved_session_stores(dir.path());
+    let planned_moved = plan(&paths, &fixture_session()).unwrap();
+    let cert_dir = tempfile::tempdir().unwrap();
+    let cert = write_cert_file(cert_dir.path(), &valid_cert_value(&planned_moved));
+    run_with_head_cut(
+        &paths,
+        &fixture_session(),
+        &cert,
+        &NoHolders,
+        Some(StopAfter::Host),
+    )
+    .unwrap_err();
+    resume(&paths, &fixture_session(), &NoHolders, None).unwrap();
+    assert_eq!(snapshot(&paths), reference);
+    // A second resume after the `moved` COMMIT refuses by name without writing.
+    let before = all_store_bytes(&paths);
+    assert_eq!(refusal(&paths).code, "already_moved");
+    assert_eq!(all_store_bytes(&paths), before);
+    assert!(
+        record(&paths).is_some(),
+        "the authoritative record was cleared"
+    );
 }
 
 #[test]
@@ -1160,11 +1525,14 @@ fn plan_flag_prints_the_certification_inputs_without_writing() {
         paths.store_db.to_str().unwrap(),
     ]
     .map(str::to_owned);
-    let (parsed, session, read_only) = parse_args(&args).unwrap();
-    assert!(read_only);
+    let CliArgs {
+        paths: parsed,
+        session,
+        mode,
+    } = parse_args(&args).unwrap();
+    assert_eq!(mode, CliMode::Plan);
     let before = all_store_bytes(&paths);
-    let Outcome::Planned(plan) = run(&parsed, &session, read_only, &NoHolders, None).unwrap()
-    else {
+    let Outcome::Planned(plan) = run(&parsed, &session, true, &NoHolders, None).unwrap() else {
         panic!("--plan wrote")
     };
     assert_eq!(plan.to_value()["U"], "msg_m007");
@@ -1189,8 +1557,10 @@ fn apply_relocates_the_marker_onto_u_in_one_host_transaction() {
         let before_plan = plan(&paths, &fixture_session()).unwrap();
         assert_eq!(before_plan.record.cut, "msg_m007");
         assert_eq!(before_plan.marker_carrier, "msg_m005");
+        let cert_dir = tempfile::tempdir().unwrap();
+        let cert = write_cert_file(cert_dir.path(), &valid_cert_value(&before_plan));
         let Outcome::Moved(plan) =
-            run(&paths, &fixture_session(), false, &NoHolders, None).unwrap()
+            run_with_head_cut(&paths, &fixture_session(), &cert, &NoHolders, None).unwrap()
         else {
             panic!("relocation did not move");
         };
@@ -1198,7 +1568,7 @@ fn apply_relocates_the_marker_onto_u_in_one_host_transaction() {
         let marker = relocated_marker_data(&paths, &plan.record.marker_part);
         assert_eq!(
             marker["cortexkit"],
-            json!({"tag_checkpoint":20,"session":fixture_session(),"message_count":6})
+            json!({"tag_checkpoint":20,"session":fixture_session(),"message_count":6,"head_cut":{"mid":"msg_m006","digest":VECTOR_DIGEST,"written_at":VECTOR_WRITTEN_AT}})
         );
     }
 }

@@ -6,17 +6,27 @@
 //! backups". This command keeps no journal of its own. Its two writes are ordered so
 //! that running it again after a crash at any point ends in the same state:
 //!
-//! 1. the three marker rows are relocated onto the cut `U` in one host
+//! 1. the `relocating` intent is committed to `context.db` with the full
+//!    manifest, after a read-only plan and a certificate check that both pass
+//!    without writing anything. The certificate comes from THALAMUS's export
+//!    and is recorded as certified; this command never computes the runner's
+//!    digest.
+//! 2. the three marker rows are relocated onto the cut `U` in one host
 //!    transaction on `opencode.db`: the old triple is deleted and the new triple
 //!    (compaction part, summary message, summary text part) is inserted with the
 //!    plugin writer's bytes for `resolvedBoundary = U` and `endMessageId = P`,
 //!    plus exactly the `cortexkit` key
-//!    `{"tag_checkpoint": N, "session": S, "message_count": M}` on the
-//!    compaction part (the key gains `head_cut` once the runner's export
-//!    certifies it);
-//! 2. the moved record goes into `context.db`, last. It is the commit point: before
-//!    it exists the session still belongs to the standalone plugin; once it exists,
-//!    the plugin refuses the session and ck-mc's setup imports it.
+//!    `{"tag_checkpoint": N, "session": S, "message_count": M, "head_cut": H}`
+//!    on the compaction part, where `H` is the certified head cut of `P`;
+//! 3. the record's state becomes `moved` in `context.db`, last. It is the commit
+//!    point: before it exists the session still belongs to the standalone plugin;
+//!    once it exists, the plugin refuses the session and ck-mc's setup imports it.
+//!
+//! A rerun that finds `relocating` never plans again and never re-checks the
+//! certificate. It compares the host with the intent's recorded before and after
+//! images: the before image continues with the host transaction, the after image
+//! continues with the commit point, and any other host state refuses
+//! `move_host_state_unknown` with no further write.
 //!
 //! The moved record carries everything ck-mc's setup needs: the session's
 //! compartments, the cut (the boundary user message that holds the standalone
@@ -77,10 +87,12 @@ pub const MOVE_RECORD_PREFIX: &str = "mode3_move:opencode:";
 /// The setup refusal for a session that still has standalone state and was never
 /// moved, as compaction-provider 0.4.0 publishes it.
 pub use cortexkit_role_compaction_provider::errors::refuse_codes::STANDALONE_SESSION_NOT_MIGRATED;
-/// Version of the moved record's JSON shape. The per-endpoint CK block ids
-/// and the codec profile do not bump it; bump the version when adding the
-/// intent, the states and `head_cut`. No moved record exists anywhere yet.
-pub const RECORD_VERSION: u32 = 1;
+/// Version of the moved record's JSON shape. Version 2 adds the `relocating`/
+/// `moved` states, the certified `head_cut`, `P`, `message_count`, the before and
+/// after marker images with their ids, and the imported summary positions. The
+/// per-endpoint CK block ids and the codec profile did not bump it. No moved
+/// record exists anywhere yet, so no migration is needed.
+pub const RECORD_VERSION: u32 = 2;
 const HARNESS: &str = "opencode";
 /// The `providerID`/`modelID` standalone writes on its compaction summary message.
 const STANDALONE_MARKER_PROVIDER: &str = "magic-context";
@@ -147,19 +159,71 @@ fn generate_part_id(timestamp_ms: i64, counter: u64, identity: &str) -> String {
     generate_id("prt", timestamp_ms, counter, identity)
 }
 
-/// What the offline move hands to ck-mc's setup for one session.
+/// The certified head cut of `P`: the counted message immediately before the
+/// cut. The digest is opaque to ck-mc; THALAMUS's export computes it with the
+/// runner's ordinary content-digest procedure and takes `written_at` from the
+/// host's creation time. The move checks `mid` and `message_count` against its
+/// own read-only plan and records the whole cut exactly as certified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HeadCut {
+    pub mid: String,
+    pub digest: String,
+    pub written_at: u64,
+}
+
+/// The lifecycle state of the authoritative move record in `context.db`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveState {
+    /// The intent is committed but the host relocation and the commit point
+    /// have not finished yet. A rerun resumes from this intent alone.
+    #[default]
+    Relocating,
+    /// The host carries the after-image and the intent is committed. Terminal.
+    Moved,
+}
+
+/// What the offline move hands to ck-mc's setup for one session. Version 2
+/// carries the `relocating` intent and the `moved` commit: `U` (`cut`), `P`
+/// (`p`), the counted prefix length (`message_count`), the certified `head_cut`,
+/// the codec profile, the three marker rows before and after with their ids,
+/// the imported summaries with their counted positions and CK block ids, the
+/// resolved drops and the tag checkpoint. Resume uses only this persisted
+/// intent: it never plans again and never re-checks the certificate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MoveRecord {
     pub version: u32,
     pub session: String,
     pub harness: String,
+    pub state: MoveState,
     /// The highest tag number standalone ever allocated for the session. New
     /// runner numbers start above it.
     pub tag_checkpoint: u64,
-    /// The OpenCode message id of the boundary user message (the cut).
+    /// The OpenCode message id of the boundary user message (the cut, `U`).
     pub cut: String,
-    /// The compaction part that carries the checkpoint key.
+    /// The counted message immediately before the cut (`P = U - 1`). This is
+    /// also `head_cut.mid`; it is stored separately so the intent names both
+    /// ends of the cut without decoding the certificate.
+    #[serde(default)]
+    pub p: String,
+    /// The number of plugin-counted messages before the cut (`P`'s 1-based
+    /// position). Pages start here and the checkpoint carries it.
+    #[serde(default)]
+    pub message_count: u64,
+    /// The certified head cut of `P`, recorded exactly as the export gave it.
+    #[serde(default)]
+    pub head_cut: HeadCut,
+    /// The new compaction part id on `U`, carrying the four-member checkpoint key.
     pub marker_part: String,
+    /// The new summary message id at `U` (deterministic for `U` and `P`).
+    #[serde(default)]
+    pub new_summary_id: String,
+    /// The new summary text part id (deterministic for `U` and `P`).
+    #[serde(default)]
+    pub new_summary_part_id: String,
+    /// `U`'s `time_created`, pinning the writer's ordering times.
+    #[serde(default)]
+    pub u_time: i64,
     /// The codec the offline block ids were computed with: the serializer
     /// profile and how `nativeIndex` maps to the host part order.
     #[serde(default)]
@@ -169,6 +233,78 @@ pub struct MoveRecord {
     pub compartments: Vec<ImportedCompartment>,
     /// Applied and queued drops on parts after the cut.
     pub drops: Vec<CarriedDrop>,
+    /// The old compaction part id on the previous carrier, deleted by relocation.
+    #[serde(default)]
+    pub old_compaction_part: String,
+    /// The old summary message id being relocated away from its carrier.
+    #[serde(default)]
+    pub old_summary: String,
+    /// The old summary's text part id, deleted with it (empty when the old
+    /// summary carries no text part).
+    #[serde(default)]
+    pub old_summary_part: String,
+    /// The old compaction part's `data` as stored now (before-image).
+    #[serde(default)]
+    pub old_compaction_data: String,
+    /// The old summary message `data` as stored now (before-image).
+    #[serde(default)]
+    pub old_summary_data: String,
+    /// The old summary text part `data` as stored now (before-image).
+    #[serde(default)]
+    pub old_summary_part_data: String,
+    /// The relocated compaction part's `data` with the four-member key
+    /// (after-image).
+    #[serde(default)]
+    pub new_compaction_data: String,
+    /// The relocated summary message's `data` for `U` and `P` (after-image).
+    #[serde(default)]
+    pub new_summary_data: String,
+    /// The relocated summary text part's `data`, verbatim from the old part
+    /// (after-image).
+    #[serde(default)]
+    pub new_summary_part_data: String,
+}
+
+impl Default for MoveRecord {
+    fn default() -> Self {
+        Self {
+            version: RECORD_VERSION,
+            session: String::new(),
+            harness: HARNESS.into(),
+            state: MoveState::Relocating,
+            tag_checkpoint: 0,
+            cut: String::new(),
+            p: String::new(),
+            message_count: 0,
+            head_cut: HeadCut::default(),
+            marker_part: String::new(),
+            new_summary_id: String::new(),
+            new_summary_part_id: String::new(),
+            u_time: 0,
+            codec_profile: CodecProfile::default(),
+            compartments: Vec::new(),
+            drops: Vec::new(),
+            old_compaction_part: String::new(),
+            old_summary: String::new(),
+            old_summary_part: String::new(),
+            old_compaction_data: String::new(),
+            old_summary_data: String::new(),
+            old_summary_part_data: String::new(),
+            new_compaction_data: String::new(),
+            new_summary_data: String::new(),
+            new_summary_part_data: String::new(),
+        }
+    }
+}
+
+/// The export certificate THALAMUS writes: the counted prefix length and the
+/// certified head cut of `P`. `session` and `cut` members are accepted and
+/// ignored when present; only `message_count` and `head_cut.{mid, digest,
+/// written_at}` are checked and recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Certificate {
+    pub message_count: u64,
+    pub head_cut: HeadCut,
 }
 
 /// The offline codec profile for CK block ids: the `edge_block` serializer and
@@ -187,7 +323,8 @@ pub struct CodecProfile {
 
 /// One standalone compartment. Endpoints are OpenCode message ids; a partial
 /// endpoint also names the OpenCode part id where the compartment starts or ends
-/// inside that message. `start_block`/`end_block` are the CK block indexes of the
+/// inside that message. `start_position`/`end_position` are the endpoints' 1-based
+/// plugin-counted positions; `start_block`/`end_block` are the CK block indexes of the
 /// endpoint inside its host message, computed offline with the `edge_block`
 /// codec over that message (whole-message endpoints cover the first through the
 /// last CK block); the import step builds the exact `StoredCompartment` rows from them.
@@ -195,6 +332,12 @@ pub struct CodecProfile {
 pub struct ImportedCompartment {
     pub sequence: i64,
     pub start_message_id: String,
+    /// The 1-based counted position of the start message.
+    #[serde(default)]
+    pub start_position: usize,
+    /// The 1-based counted position of the end message.
+    #[serde(default)]
+    pub end_position: usize,
     #[serde(default)]
     pub start_part: Option<String>,
     #[serde(default)]
@@ -414,6 +557,7 @@ pub fn read_move_record_raw(conn: &Connection, session: &str) -> rusqlite::Resul
 
 /// The moved record of `session`. `Some(Err(_))` is a record that exists but does
 /// not parse: callers must treat the session as moved and refuse to use it.
+/// Version 2 is the only readable version; anything else is unreadable.
 pub fn read_move_record(
     conn: &Connection,
     session: &str,
@@ -432,6 +576,118 @@ pub fn read_move_record(
                 }
             })
     }))
+}
+
+/// Classify an unreadable move record: an unknown `state` string refuses
+/// `move_record_state_unknown`, every other decode failure refuses
+/// `move_record_unreadable`. The authoritative record is never cleared, so the
+/// caller refuses without writing anything.
+pub fn classify_record_error(raw: &str) -> &'static str {
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return "move_record_unreadable";
+    };
+    match value.get("state").and_then(Value::as_str) {
+        Some("relocating") | Some("moved") => "move_record_unreadable",
+        Some(_) => "move_record_state_unknown",
+        None => "move_record_unreadable",
+    }
+}
+
+/// Read THALAMUS's export certificate from `path`. Any missing file, invalid
+/// JSON, missing field or wrong type in `message_count` or
+/// `head_cut.{mid, digest, written_at}` refuses `certificate_mismatch`. The
+/// digest is opaque and never recomputed; `session` and `cut` members are
+/// accepted and ignored when present.
+pub fn load_certificate(path: &Path) -> Result<Certificate, Refusal> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        Refusal::new(
+            "certificate_mismatch",
+            format!("{}: {error}", path.display()),
+        )
+    })?;
+    let value: Value = serde_json::from_str(&text).map_err(|error| {
+        Refusal::new(
+            "certificate_mismatch",
+            format!("{}: {error}", path.display()),
+        )
+    })?;
+    let message_count = value
+        .get("message_count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            Refusal::new(
+                "certificate_mismatch",
+                format!(
+                    "{}: `message_count` must be a non-negative integer",
+                    path.display()
+                ),
+            )
+        })?;
+    let head = value.get("head_cut").ok_or_else(|| {
+        Refusal::new(
+            "certificate_mismatch",
+            format!("{}: missing `head_cut`", path.display()),
+        )
+    })?;
+    let mid = head.get("mid").and_then(Value::as_str).ok_or_else(|| {
+        Refusal::new(
+            "certificate_mismatch",
+            format!("{}: `head_cut.mid` must be a string", path.display()),
+        )
+    })?;
+    let digest = head.get("digest").and_then(Value::as_str).ok_or_else(|| {
+        Refusal::new(
+            "certificate_mismatch",
+            format!("{}: `head_cut.digest` must be a string", path.display()),
+        )
+    })?;
+    let written_at = head
+        .get("written_at")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            Refusal::new(
+                "certificate_mismatch",
+                format!(
+                    "{}: `head_cut.written_at` must be a non-negative integer",
+                    path.display()
+                ),
+            )
+        })?;
+    Ok(Certificate {
+        message_count,
+        head_cut: HeadCut {
+            mid: mid.to_owned(),
+            digest: digest.to_owned(),
+            written_at,
+        },
+    })
+}
+
+/// Check the certificate against a read-only plan before any write. The
+/// certificate's `head_cut.mid` must equal the plan's `P` and its
+/// `message_count` must equal the plan's. Any difference, however well-formed
+/// the digest, refuses `certificate_mismatch`. The digest and `written_at`
+/// are recorded exactly as certified and never recomputed.
+pub fn check_certificate(plan: &Plan, certificate: &Certificate) -> Result<(), Refusal> {
+    if certificate.head_cut.mid != plan.p {
+        return Err(Refusal::new(
+            "certificate_mismatch",
+            format!(
+                "certificate head_cut.mid {:?} does not match the plan's P {:?}",
+                certificate.head_cut.mid, plan.p
+            ),
+        ));
+    }
+    if certificate.message_count != plan.message_count as u64 {
+        return Err(Refusal::new(
+            "certificate_mismatch",
+            format!(
+                "certificate message_count {} does not match the plan's {}",
+                certificate.message_count, plan.message_count
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether `context.db` holds standalone OpenCode 1 state for `session`: rows the
@@ -880,7 +1136,7 @@ impl Plan {
             "returned_raw": self.returned_raw,
             "marker_part": self.record.marker_part,
             "marker_key": if self.marker_already_keyed { "present" } else { "to_write" },
-            "marker_key_value": {"tag_checkpoint": self.record.tag_checkpoint, "session": self.record.session, "message_count": self.message_count},
+            "marker_key_value": {"tag_checkpoint": self.record.tag_checkpoint, "session": self.record.session, "message_count": self.message_count, "head_cut": self.record.head_cut},
             "compartments": self.record.compartments.len(),
             "coverage_end": self.record.compartments.last().map(|c| c.end_message_id.clone()),
             "drops": {
@@ -1401,9 +1657,11 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
             start_part: None,
             start_block: None,
             start_message_id: start_id,
+            start_position: start,
             end_part: None,
             end_block: None,
             end_message_id: end_id,
+            end_position: end,
             title,
             content,
             p1,
@@ -1549,17 +1807,21 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
             }
         }
     }
-    // The relocated part already carries this exact 3-key when a previous
+    // The relocated part already carries the checkpoint prefix when a previous
     // apply relocated the rows but stopped before the moved record. The old
     // part's key is irrelevant: it is deleted with the old triple. A relocated
-    // part carrying a different session is a fork; one carrying the same
-    // session but a different checkpoint refuses, so a stale key is never
-    // kept.
-    let expected_key = json!({
-        "tag_checkpoint": tag_checkpoint,
-        "session": session,
-        "message_count": u - 1,
-    });
+    // part carrying a different session is a fork. The full four-member key,
+    // including the certified `head_cut`, is checked at apply time, when the
+    // certificate is known; the read-only plan only checks the prefix it can
+    // know (`tag_checkpoint`, `session`, `message_count`), so a stale key is
+    // never kept and a rerun still converges.
+    // The plan's placeholder head cut names `P`; the certified digest and time
+    // are recorded at apply. Prefix matching ignores any `head_cut` member.
+    let prefix_matches = |key: &Value| {
+        key.get("tag_checkpoint").and_then(Value::as_u64) == Some(tag_checkpoint)
+            && key.get("session").and_then(Value::as_str) == Some(session)
+            && key.get("message_count").and_then(Value::as_u64) == Some((u - 1) as u64)
+    };
     if let Some(existing) = opencode
         .query_row(
             "SELECT data FROM part WHERE id=?1 AND session_id=?2",
@@ -1581,7 +1843,7 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
                 ),
             ));
         }
-        if existing != expected_key {
+        if !prefix_matches(&existing) {
             return Err(Refusal::new(
                 "checkpoint_conflict",
                 format!(
@@ -1600,7 +1862,7 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
         .map_err(sql)?
         .and_then(|data| serde_json::from_str::<Value>(&data).ok())
         .and_then(|data| data.get("cortexkit").cloned())
-        .is_some_and(|key| key == expected_key);
+        .is_some_and(|key| prefix_matches(&key));
 
     // Drops: resolve every target after the cut to its OpenCode part.
     let by_number: HashMap<u64, &TagRow> = tags.iter().map(|tag| (tag.number, tag)).collect();
@@ -1840,28 +2102,61 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
     gone.dedup();
     not_served.sort_unstable();
     not_served.dedup();
+    // The plan's record carries a placeholder head cut naming `P`; the
+    // certified digest and time are recorded at apply. The placeholder keeps
+    // the read-only plan self-consistent without certifying anything.
+    let placeholder_head_cut = HeadCut {
+        mid: p.clone(),
+        digest: String::new(),
+        written_at: 0,
+    };
+    let placeholder_new_compaction_data = relocation_compaction_data(
+        tag_checkpoint,
+        session,
+        (u - 1) as u64,
+        &placeholder_head_cut,
+    );
+    let placeholder_new_summary_data =
+        relocation_summary_data(&cut, u_time, &summary_cwd, &summary_root);
+    let placeholder_new_summary_part_data = old_summary_part_data.clone();
     Ok(Plan {
         marker_carrier: old_cut.clone(),
         old_compaction_part: marker_part.clone(),
         old_summary: summary_id.clone(),
-        old_summary_part,
+        old_summary_part: old_summary_part.clone(),
         summary_text,
         summary_cwd,
         summary_root,
-        new_summary_id,
+        new_summary_id: new_summary_id.clone(),
         new_compaction_part_id: new_compaction_part_id.clone(),
-        new_summary_part_id,
+        new_summary_part_id: new_summary_part_id.clone(),
         u_time,
         record: MoveRecord {
             version: RECORD_VERSION,
             session: session.to_owned(),
             harness: HARNESS.to_owned(),
+            state: MoveState::Relocating,
             tag_checkpoint,
-            cut,
-            marker_part: new_compaction_part_id,
-            codec_profile,
+            cut: cut.clone(),
+            p: p.clone(),
+            message_count: (u - 1) as u64,
+            head_cut: placeholder_head_cut,
+            marker_part: new_compaction_part_id.clone(),
+            new_summary_id,
+            new_summary_part_id,
+            u_time,
+            codec_profile: codec_profile.clone(),
             compartments,
             drops,
+            old_compaction_part: marker_part.clone(),
+            old_summary: summary_id.clone(),
+            old_summary_part: old_summary_part.clone(),
+            old_compaction_data: marker_before.clone(),
+            old_summary_data: old_summary_data.clone(),
+            old_summary_part_data: old_summary_part_data.clone(),
+            new_compaction_data: placeholder_new_compaction_data,
+            new_summary_data: placeholder_new_summary_data,
+            new_summary_part_data: placeholder_new_summary_part_data,
         },
         p,
         message_count: u - 1,
@@ -1880,11 +2175,16 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
 
 // ── Writing ──────────────────────────────────────────────────────────────
 
-/// A point after which a test stops the move, as a crash would.
+/// A point after which a test stops the move, as a crash would. The restart
+/// window runs the same command again after any crash; the rerun resumes from
+/// the persisted `relocating` intent alone, without planning again and without
+/// re-reading the certificate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopAfter {
-    /// The checkpoint key is on the marker; the moved record is not written.
-    MarkerKey,
+    /// After the `relocating` intent is committed, before the host transaction.
+    Intent,
+    /// After the host COMMIT, before the record becomes `moved`.
+    Host,
 }
 
 #[derive(Debug)]
@@ -1915,12 +2215,14 @@ fn interrupted(step: &str) -> impl Fn(rusqlite::Error) -> MoveError + '_ {
 }
 
 /// The relocated compaction part's checkpoint key, in the plugin's member
-/// order (`tag_checkpoint`, `session`, `message_count`).
+/// order (`tag_checkpoint`, `session`, `message_count`, `head_cut`). The
+/// four-member key carries the certified head cut of `P`.
 #[derive(Serialize)]
 struct RelocatedCheckpointKey<'a> {
     tag_checkpoint: u64,
     session: &'a str,
-    message_count: usize,
+    message_count: u64,
+    head_cut: &'a HeadCut,
 }
 
 /// The relocated compaction part's `data`: the plugin's
@@ -1985,8 +2287,15 @@ struct RelocatedSummaryData<'a> {
 }
 
 /// The relocated compaction part's `data`: the plugin's
-/// `{"type":"compaction","auto":true}` plus exactly the `cortexkit` key.
-fn relocation_compaction_data(tag_checkpoint: u64, session: &str, message_count: usize) -> String {
+/// `{"type":"compaction","auto":true}` plus exactly the four-member
+/// `cortexkit` key. A struct, never `json!`, so the bytes match the plugin's
+/// `JSON.stringify` insertion order.
+fn relocation_compaction_data(
+    tag_checkpoint: u64,
+    session: &str,
+    message_count: u64,
+    head_cut: &HeadCut,
+) -> String {
     serde_json::to_string(&RelocatedCompactionData {
         kind: "compaction",
         auto: true,
@@ -1994,6 +2303,7 @@ fn relocation_compaction_data(tag_checkpoint: u64, session: &str, message_count:
             tag_checkpoint,
             session,
             message_count,
+            head_cut,
         },
     })
     .expect("compaction data serializes")
@@ -2029,17 +2339,19 @@ fn relocation_summary_data(boundary_id: &str, boundary_time: i64, cwd: &str, roo
     .expect("summary data serializes")
 }
 
-/// Write the plan: the three-row relocation and the checkpoint key in one host
-/// transaction on `opencode.db`, then the moved record last in `context.db`.
-/// The relocation deletes the old triple and inserts the new triple (with the
-/// 3-key) atomically; rerunning after the host COMMIT but before the record
-/// finds the new rows already in place and only writes the record.
-pub fn apply(paths: &StorePaths, plan: &Plan, stop: Option<StopAfter>) -> Result<(), MoveError> {
-    let record = &plan.record;
-    let new_compaction_data =
-        relocation_compaction_data(record.tag_checkpoint, &record.session, plan.message_count);
+/// Build the authoritative intent record from a read-only plan and a checked
+/// certificate. The certified `head_cut` is recorded exactly as given; the
+/// digest is opaque and never recomputed. The four-member checkpoint key and
+/// the after-image are derived from the certified cut.
+fn build_intent_record(plan: &Plan, certificate: &Certificate) -> MoveRecord {
+    let new_compaction_data = relocation_compaction_data(
+        plan.record.tag_checkpoint,
+        &plan.record.session,
+        plan.message_count as u64,
+        &certificate.head_cut,
+    );
     let new_summary_data = relocation_summary_data(
-        &record.cut,
+        &plan.record.cut,
         plan.u_time,
         &plan.summary_cwd,
         &plan.summary_root,
@@ -2047,202 +2359,255 @@ pub fn apply(paths: &StorePaths, plan: &Plan, stop: Option<StopAfter>) -> Result
     // The summary text is unchanged by the move: copy the old summary part's
     // `data` string verbatim, keeping `JSON.stringify`'s exact escaping.
     let new_summary_part_data = plan.old_summary_part_data.clone();
-    let summary_time = plan.u_time.saturating_add(1);
-    if !plan.marker_already_keyed {
-        let mut opencode = open_writer(&paths.opencode_db)?;
-        // A generated marker id that is already taken by an unrelated row has
-        // no refusal code yet: stop and ask rather than inventing one or
-        // overwriting the row. The check runs before the host transaction, so
-        // nothing is written when it fires.
-        for (id, expected, what) in [
-            (
-                &plan.new_summary_id,
-                new_summary_data.as_str(),
-                "summary message",
-            ),
-            (
-                &plan.new_compaction_part_id,
-                new_compaction_data.as_str(),
-                "compaction part",
-            ),
-            (
-                &plan.new_summary_part_id,
-                new_summary_part_data.as_str(),
-                "summary text part",
-            ),
+    MoveRecord {
+        version: RECORD_VERSION,
+        session: plan.record.session.clone(),
+        harness: HARNESS.to_owned(),
+        state: MoveState::Relocating,
+        tag_checkpoint: plan.record.tag_checkpoint,
+        cut: plan.record.cut.clone(),
+        p: plan.p.clone(),
+        message_count: plan.message_count as u64,
+        head_cut: certificate.head_cut.clone(),
+        marker_part: plan.new_compaction_part_id.clone(),
+        new_summary_id: plan.new_summary_id.clone(),
+        new_summary_part_id: plan.new_summary_part_id.clone(),
+        u_time: plan.u_time,
+        codec_profile: plan.record.codec_profile.clone(),
+        compartments: plan.record.compartments.clone(),
+        drops: plan.record.drops.clone(),
+        old_compaction_part: plan.old_compaction_part.clone(),
+        old_summary: plan.old_summary.clone(),
+        old_summary_part: plan.old_summary_part.clone(),
+        old_compaction_data: plan.marker_before.clone(),
+        old_summary_data: plan.old_summary_data.clone(),
+        old_summary_part_data: plan.old_summary_part_data.clone(),
+        new_compaction_data,
+        new_summary_data,
+        new_summary_part_data,
+    }
+}
+
+/// Read the authoritative move record for `apply`/`resume`, mapping decode
+/// failures to the stable refusal codes. `Ok(None)` means no intent exists yet.
+fn existing_intent(paths: &StorePaths, session: &str) -> Result<Option<MoveRecord>, MoveError> {
+    let conn = open_read_only(&paths.context_db)?;
+    let raw = read_move_record_raw(&conn, session).map_err(sql)?;
+    match raw {
+        None => Ok(None),
+        Some(raw) => match serde_json::from_str::<MoveRecord>(&raw) {
+            Ok(record) if record.version == RECORD_VERSION && record.session == session => {
+                Ok(Some(record))
+            }
+            Ok(_) => Err(Refusal::new(
+                "move_record_unreadable",
+                format!("the move record for {session} has an unexpected version or session"),
+            )
+            .into()),
+            Err(_) => Err(Refusal::new(
+                classify_record_error(&raw),
+                format!("the move record for {session} cannot be used"),
+            )
+            .into()),
+        },
+    }
+}
+
+/// Whether the host still carries the recorded before-image: the three old rows
+/// with their recorded `data`. The compare is by `data`; times and ids are
+/// pinned by the relocation itself.
+fn host_matches_before(conn: &Connection, record: &MoveRecord) -> Result<bool, MoveError> {
+    let old_ok = |id: &str, expected: &str| -> Result<bool, MoveError> {
+        Ok(conn
+            .query_row(
+                "SELECT data FROM message WHERE id=?1 UNION ALL SELECT data FROM part WHERE id=?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(interrupted("opencode.db relocation probe"))?
+            .as_deref()
+            == Some(expected))
+    };
+    Ok(
+        old_ok(&record.old_compaction_part, &record.old_compaction_data)?
+            && old_ok(&record.old_summary, &record.old_summary_data)?
+            && (record.old_summary_part.is_empty()
+                || old_ok(&record.old_summary_part, &record.old_summary_part_data)?),
+    )
+}
+
+/// Whether the host already carries the recorded after-image: the old triple is
+/// gone and the three new rows carry the recorded bytes.
+fn host_matches_after(conn: &Connection, record: &MoveRecord) -> Result<bool, MoveError> {
+    let old_gone: bool = conn
+        .query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM message WHERE id=?1) \
+             AND NOT EXISTS(SELECT 1 FROM part WHERE id=?2 OR id=?3)",
+            params![
+                record.old_summary,
+                record.old_compaction_part,
+                record.old_summary_part
+            ],
+            |row| row.get(0),
+        )
+        .map_err(interrupted("opencode.db relocation probe"))?;
+    if !old_gone {
+        return Ok(false);
+    }
+    let new_ok = |id: &str, expected: &str| -> Result<bool, MoveError> {
+        Ok(conn
+            .query_row(
+                "SELECT data FROM message WHERE id=?1 UNION ALL SELECT data FROM part WHERE id=?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(interrupted("opencode.db relocation probe"))?
+            .as_deref()
+            == Some(expected))
+    };
+    Ok(new_ok(&record.new_summary_id, &record.new_summary_data)?
+        && new_ok(&record.marker_part, &record.new_compaction_data)?
+        && new_ok(&record.new_summary_part_id, &record.new_summary_part_data)?)
+}
+
+/// Apply the recorded after-image when the host matches the recorded
+/// before-image, and complete when the after-image is already in place. Any
+/// other host state refuses `move_host_state_unknown` with no further write.
+/// The delete, the inserts and the checkpoint key are one host transaction.
+fn do_host_transaction(paths: &StorePaths, record: &MoveRecord) -> Result<(), MoveError> {
+    // A generated marker id occupied by an unrelated row interrupts for manual
+    // resolution instead of overwriting the row. The read-only probe runs
+    // before the host transaction, so nothing is written when it fires.
+    {
+        let probe = open_read_only(&paths.opencode_db)?;
+        for (id, expected) in [
+            (&record.new_summary_id, &record.new_summary_data),
+            (&record.marker_part, &record.new_compaction_data),
+            (&record.new_summary_part_id, &record.new_summary_part_data),
         ] {
-            let taken: Option<(String, String, i64, i64)> = opencode
+            let taken: Option<String> = probe
                 .query_row(
-                    "SELECT message_id, session_id, time_created, time_updated FROM part WHERE id=?1 \
-                     UNION ALL SELECT id, session_id, time_created, time_updated FROM message WHERE id=?1",
+                    "SELECT data FROM part WHERE id=?1 UNION ALL SELECT data FROM message WHERE id=?1",
                     [id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    |row| row.get(0),
                 )
                 .optional()
                 .map_err(interrupted("opencode.db taken id probe"))?;
-            // A row with one of the new ids is only expected when it is the
-            // relocated row itself (a rerun after the host COMMIT) or one of
-            // the old rows being replaced (ids never collide in practice, but
-            // the old triple is deleted in the same transaction).
-            if taken.is_some() {
-                let existing_data: Option<String> = opencode
-                    .query_row(
-                        "SELECT data FROM part WHERE id=?1 UNION ALL SELECT data FROM message WHERE id=?1",
-                        [id],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(interrupted("opencode.db taken id data"))?;
-                let is_old = id == &plan.old_compaction_part
-                    || id == &plan.old_summary
-                    || id == &plan.old_summary_part;
-                if existing_data.as_deref() != Some(expected) && !is_old {
+            if let Some(data) = taken {
+                let is_old = id == &record.old_compaction_part
+                    || id == &record.old_summary
+                    || id == &record.old_summary_part;
+                // The after-image itself is expected (a rerun after the host
+                // COMMIT); an old id is expected only when it still carries its
+                // before-image (ids never collide in practice, but the old triple
+                // is deleted in the same transaction).
+                let is_after = data == *expected;
+                let is_before = is_old
+                    && (data == record.old_compaction_data
+                        || data == record.old_summary_data
+                        || data == record.old_summary_part_data);
+                if !is_after && !is_before {
                     return Err(MoveError::Interrupted(format!(
-                        "generated marker {what} id {id} is already taken; manual resolution is required"
+                        "generated marker id {id} is already taken; manual resolution is required"
                     )));
                 }
             }
-            let _ = what;
         }
-        let tx = opencode
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(interrupted("opencode.db"))?;
-        // Rerun after the host COMMIT: the old rows are gone and the new rows
-        // already carry the expected bytes. Skip the relocation and only write
-        // the moved record below.
-        let old_gone: bool = tx
-            .query_row(
-                "SELECT NOT EXISTS(SELECT 1 FROM message WHERE id=?1) \
-                 AND NOT EXISTS(SELECT 1 FROM part WHERE id=?2 OR id=?3)",
-                params![
-                    plan.old_summary,
-                    plan.old_compaction_part,
-                    plan.old_summary_part
-                ],
-                |row| row.get(0),
-            )
-            .map_err(interrupted("opencode.db relocation probe"))?;
-        let new_ok = |id: &str, expected: &str| -> Result<bool, MoveError> {
-            Ok(tx
-                .query_row(
-                    "SELECT data FROM message WHERE id=?1 UNION ALL SELECT data FROM part WHERE id=?1",
-                    [id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(interrupted("opencode.db relocation probe"))?
-                .as_deref()
-                == Some(expected))
-        };
-        let already = old_gone
-            && new_ok(&plan.new_summary_id, &new_summary_data)?
-            && new_ok(&plan.new_compaction_part_id, &new_compaction_data)?
-            && new_ok(&plan.new_summary_part_id, &new_summary_part_data)?;
-        if !already {
-            // Fail closed when the host changed since planning: the old rows
-            // must still carry their before-images, otherwise a rerun is
-            // required to plan again. The compare is by `data`; times and ids
-            // are pinned by the relocation itself.
-            let old_ok = |id: &str, expected: &str| -> Result<bool, MoveError> {
-                Ok(tx
-                    .query_row(
-                        "SELECT data FROM message WHERE id=?1 UNION ALL SELECT data FROM part WHERE id=?1",
-                        [id],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                    .map_err(interrupted("opencode.db relocation probe"))?
-                    .as_deref()
-                    == Some(expected))
-            };
-            if !(old_ok(&plan.old_compaction_part, &plan.marker_before)?
-                && old_ok(&plan.old_summary, &plan.old_summary_data)?
-                && (plan.old_summary_part.is_empty()
-                    || old_ok(&plan.old_summary_part, &plan.old_summary_part_data)?))
-            {
-                return Err(Refusal::new(
-                    "source_changed",
-                    "the host marker changed after planning; rerun to plan again",
-                )
-                .into());
-            }
-            // One host transaction: delete the old triple, insert the new
-            // triple with the checkpoint key. The upserts make a rerun that
-            // stopped after a partial write converge on the same bytes.
-            tx.execute(
-                "DELETE FROM part WHERE id=?1 OR id=?2",
-                params![plan.old_compaction_part, plan.old_summary_part],
-            )
-            .map_err(interrupted("opencode.db delete old parts"))?;
-            tx.execute(
-                "DELETE FROM message WHERE id=?1",
-                [plan.old_summary.as_str()],
-            )
-            .map_err(interrupted("opencode.db delete old summary"))?;
-            tx.execute(
-                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(id) DO UPDATE SET
-                     message_id=excluded.message_id, session_id=excluded.session_id,
-                     time_created=excluded.time_created, time_updated=excluded.time_updated,
-                     data=excluded.data",
-                params![
-                    plan.new_compaction_part_id,
-                    record.cut,
-                    record.session,
-                    plan.u_time,
-                    plan.u_time,
-                    new_compaction_data,
-                ],
-            )
-            .map_err(interrupted("opencode.db insert compaction part"))?;
-            tx.execute(
-                "INSERT INTO message (id, session_id, time_created, time_updated, data)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(id) DO UPDATE SET
-                     session_id=excluded.session_id, time_created=excluded.time_created,
-                     time_updated=excluded.time_updated, data=excluded.data",
-                params![
-                    plan.new_summary_id,
-                    record.session,
-                    summary_time,
-                    summary_time,
-                    new_summary_data,
-                ],
-            )
-            .map_err(interrupted("opencode.db insert summary"))?;
-            tx.execute(
-                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(id) DO UPDATE SET
-                     message_id=excluded.message_id, session_id=excluded.session_id,
-                     time_created=excluded.time_created, time_updated=excluded.time_updated,
-                     data=excluded.data",
-                params![
-                    plan.new_summary_part_id,
-                    plan.new_summary_id,
-                    record.session,
-                    summary_time,
-                    summary_time,
-                    new_summary_part_data,
-                ],
-            )
-            .map_err(interrupted("opencode.db insert summary part"))?;
-        }
+    }
+    let mut opencode = open_writer(&paths.opencode_db)?;
+    let tx = opencode
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(interrupted("opencode.db"))?;
+    if host_matches_after(&tx, record)? {
         tx.commit().map_err(interrupted("opencode.db commit"))?;
+        return Ok(());
     }
-    if stop == Some(StopAfter::MarkerKey) {
-        return Err(MoveError::Interrupted(
-            "stopped after the marker key".into(),
-        ));
+    if !host_matches_before(&tx, record)? {
+        return Err(Refusal::new(
+            "move_host_state_unknown",
+            "the host matches neither the recorded before-image nor the after-image; \
+             restore the window's backups and rerun",
+        )
+        .into());
     }
+    let summary_time = record.u_time.saturating_add(1);
+    tx.execute(
+        "DELETE FROM part WHERE id=?1 OR id=?2",
+        params![record.old_compaction_part, record.old_summary_part],
+    )
+    .map_err(interrupted("opencode.db delete old parts"))?;
+    tx.execute(
+        "DELETE FROM message WHERE id=?1",
+        [record.old_summary.as_str()],
+    )
+    .map_err(interrupted("opencode.db delete old summary"))?;
+    tx.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(id) DO UPDATE SET
+             message_id=excluded.message_id, session_id=excluded.session_id,
+             time_created=excluded.time_created, time_updated=excluded.time_updated,
+             data=excluded.data",
+        params![
+            record.marker_part,
+            record.cut,
+            record.session,
+            record.u_time,
+            record.u_time,
+            record.new_compaction_data,
+        ],
+    )
+    .map_err(interrupted("opencode.db insert compaction part"))?;
+    tx.execute(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET
+             session_id=excluded.session_id, time_created=excluded.time_created,
+             time_updated=excluded.time_updated, data=excluded.data",
+        params![
+            record.new_summary_id,
+            record.session,
+            summary_time,
+            summary_time,
+            record.new_summary_data,
+        ],
+    )
+    .map_err(interrupted("opencode.db insert summary"))?;
+    tx.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(id) DO UPDATE SET
+             message_id=excluded.message_id, session_id=excluded.session_id,
+             time_created=excluded.time_created, time_updated=excluded.time_updated,
+             data=excluded.data",
+        params![
+            record.new_summary_part_id,
+            record.new_summary_id,
+            record.session,
+            summary_time,
+            summary_time,
+            record.new_summary_part_data,
+        ],
+    )
+    .map_err(interrupted("opencode.db insert summary part"))?;
+    tx.commit().map_err(interrupted("opencode.db commit"))?;
+    Ok(())
+}
+
+/// Commit the `relocating` intent. The plan and the certificate check both run
+/// read-only before this write, so any refusal writes nothing.
+fn write_relocating_intent(paths: &StorePaths, record: &MoveRecord) -> Result<(), MoveError> {
+    debug_assert_eq!(record.state, MoveState::Relocating);
     let mut context = open_writer(&paths.context_db)?;
     let tx = context
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(interrupted("context.db"))?;
     let value =
         serde_json::to_string(record).map_err(|error| MoveError::Interrupted(error.to_string()))?;
-    // A plain insert: an existing record is someone else's commit, never overwritten.
+    // A plain insert: an existing record is someone else's commit, never
+    // overwritten. The authoritative move record is never cleared.
     tx.execute(
         "INSERT INTO schema_migrations_meta(key, value) VALUES (?1, ?2)",
         params![move_record_key(&record.session), value],
@@ -2252,6 +2617,176 @@ pub fn apply(paths: &StorePaths, plan: &Plan, stop: Option<StopAfter>) -> Result
     Ok(())
 }
 
+/// Flip the persisted intent to `moved`. The host already carries the
+/// after-image when this runs.
+fn flip_to_moved(paths: &StorePaths, record: &MoveRecord) -> Result<(), MoveError> {
+    let mut moved = record.clone();
+    moved.state = MoveState::Moved;
+    let mut context = open_writer(&paths.context_db)?;
+    let tx = context
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(interrupted("context.db"))?;
+    let value =
+        serde_json::to_string(&moved).map_err(|error| MoveError::Interrupted(error.to_string()))?;
+    let changed = tx
+        .execute(
+            "UPDATE schema_migrations_meta SET value=?1 WHERE key=?2 AND value=?3",
+            params![
+                value,
+                move_record_key(&record.session),
+                serde_json::to_string(record)
+                    .map_err(|error| MoveError::Interrupted(error.to_string()))?
+            ],
+        )
+        .map_err(interrupted("context.db moved record"))?;
+    if changed == 0 {
+        // An uncertain `moved` COMMIT may already have flipped the record. The
+        // host already carries the after-image, so the move is complete.
+        let current = tx
+            .query_row(
+                "SELECT value FROM schema_migrations_meta WHERE key=?1",
+                [move_record_key(&record.session)],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(interrupted("context.db moved record"))?;
+        if let Some(current) = current {
+            if let Ok(current) = serde_json::from_str::<MoveRecord>(&current) {
+                if current.state == MoveState::Moved
+                    && current.head_cut == record.head_cut
+                    && current.marker_part == record.marker_part
+                {
+                    tx.commit().map_err(interrupted("context.db commit"))?;
+                    return Ok(());
+                }
+            }
+        }
+        return Err(MoveError::Interrupted(
+            "context.db moved record was replaced; restore the window's backups".into(),
+        ));
+    }
+    tx.commit().map_err(interrupted("context.db commit"))?;
+    Ok(())
+}
+
+/// Resume from the persisted intent alone. Never plans again and never
+/// re-checks the certificate: the before-image and after-image resumes finish
+/// with byte-identical host rows and a `moved` record even when planning again
+/// would now fail.
+fn resume_from_record(
+    paths: &StorePaths,
+    record: &MoveRecord,
+    stop: Option<StopAfter>,
+) -> Result<(), MoveError> {
+    if record.state != MoveState::Relocating {
+        return Err(Refusal::new(
+            "already_moved",
+            format!(
+                "context.db already holds the moved record {}",
+                move_record_key(&record.session)
+            ),
+        )
+        .into());
+    }
+    do_host_transaction(paths, record)?;
+    if stop == Some(StopAfter::Host) {
+        return Err(MoveError::Interrupted(
+            "stopped after the host COMMIT".into(),
+        ));
+    }
+    flip_to_moved(paths, record)?;
+    Ok(())
+}
+
+/// Write the plan with a checked certificate: commit the `relocating` intent
+/// first, then relocate the three marker rows and the four-member checkpoint
+/// key in one host transaction, then flip the record to `moved`. The plan and
+/// the certificate check both run read-only before the intent is committed, so
+/// any refusal writes nothing. A rerun that finds `relocating` resumes from
+/// the persisted intent alone and ignores the plan and the certificate.
+pub fn apply_with_certificate(
+    paths: &StorePaths,
+    plan: &Plan,
+    certificate: &Certificate,
+    stop: Option<StopAfter>,
+) -> Result<(), MoveError> {
+    // A rerun after any crash resumes from the persisted intent alone and
+    // never re-checks the certificate. The check below only runs when no
+    // intent exists yet.
+    if let Some(record) = existing_intent(paths, &plan.record.session)? {
+        return resume_from_record(paths, &record, stop);
+    }
+    check_certificate(plan, certificate)?;
+    let record = build_intent_record(plan, certificate);
+    write_relocating_intent(paths, &record)?;
+    if stop == Some(StopAfter::Intent) {
+        return Err(MoveError::Interrupted(
+            "stopped after the relocating intent".into(),
+        ));
+    }
+    do_host_transaction(paths, &record)?;
+    if stop == Some(StopAfter::Host) {
+        return Err(MoveError::Interrupted(
+            "stopped after the host COMMIT".into(),
+        ));
+    }
+    flip_to_moved(paths, &record)?;
+    Ok(())
+}
+
+/// Write the plan without a certificate (test and provider-setup helper).
+/// Production uses `apply_with_certificate` via `--apply --head-cut`. The
+/// placeholder head cut names `P`; the digest is empty and the time is zero.
+/// The write order, the host checks and the resume are otherwise identical.
+pub fn apply(paths: &StorePaths, plan: &Plan, stop: Option<StopAfter>) -> Result<(), MoveError> {
+    if let Some(record) = existing_intent(paths, &plan.record.session)? {
+        return resume_from_record(paths, &record, stop);
+    }
+    let placeholder = Certificate {
+        message_count: plan.message_count as u64,
+        head_cut: HeadCut {
+            mid: plan.p.clone(),
+            digest: String::new(),
+            written_at: 0,
+        },
+    };
+    let record = build_intent_record(plan, &placeholder);
+    write_relocating_intent(paths, &record)?;
+    if stop == Some(StopAfter::Intent) {
+        return Err(MoveError::Interrupted(
+            "stopped after the relocating intent".into(),
+        ));
+    }
+    do_host_transaction(paths, &record)?;
+    if stop == Some(StopAfter::Host) {
+        return Err(MoveError::Interrupted(
+            "stopped after the host COMMIT".into(),
+        ));
+    }
+    flip_to_moved(paths, &record)?;
+    Ok(())
+}
+
+/// Resume a `relocating` move from its persisted intent alone. Never plans
+/// again and never re-checks the certificate, so it completes even when
+/// planning again would now fail (for example, after the host already moved).
+pub fn resume(
+    paths: &StorePaths,
+    session: &str,
+    holders: &dyn HolderCheck,
+    stop: Option<StopAfter>,
+) -> Result<(), MoveError> {
+    check_holders(paths, holders)?;
+    let Some(record) = existing_intent(paths, session)? else {
+        return Err(Refusal::new(
+            "session_not_moved",
+            format!("context.db holds no move record for {session}; run --apply --head-cut first"),
+        )
+        .into());
+    };
+    resume_from_record(paths, &record, stop)
+}
+
 /// Outcome of one `move-session` run.
 #[derive(Debug)]
 pub enum Outcome {
@@ -2259,7 +2794,11 @@ pub enum Outcome {
     Moved(Plan),
 }
 
-/// Check, plan and (unless `dry_run`) write the move of `session`.
+/// Check, plan and (unless `dry_run`) write the move of `session`. The
+/// test/provider path without a certificate resumes a `relocating` intent when
+/// one exists and otherwise plans and applies with a placeholder head cut.
+/// Production uses `--apply --head-cut` (`run_with_head_cut`), which checks the
+/// export certificate before committing the intent.
 pub fn run(
     paths: &StorePaths,
     session: &str,
@@ -2268,6 +2807,13 @@ pub fn run(
     stop: Option<StopAfter>,
 ) -> Result<Outcome, MoveError> {
     check_holders(paths, holders)?;
+    if !dry_run {
+        if let Some(record) = existing_intent(paths, session)? {
+            resume_from_record(paths, &record, stop)?;
+            let plan = plan_for_moved_record(paths, session, &record)?;
+            return Ok(Outcome::Moved(plan));
+        }
+    }
     let plan = plan(paths, session)?;
     if dry_run {
         return Ok(Outcome::Planned(plan));
@@ -2276,13 +2822,103 @@ pub fn run(
     Ok(Outcome::Moved(plan))
 }
 
-const USAGE: &str = "usage: ck-mc offline move-session --session <id> --opencode-db <path> \
-     --context-db <path> --store-db <path> [--plan | --dry-run]";
+/// Rebuild a `Plan` view for an already-persisted record, for `run`'s return
+/// value after a resume. The host already carries the after-image, so planning
+/// again could fail (and must not be used for the resume itself); this only
+/// re-reads the stores to report the same `U`, `P` and `message_count` the
+/// intent holds. When the stores no longer admit a plan, it falls back to the
+/// intent's own values.
+fn plan_for_moved_record(
+    paths: &StorePaths,
+    session: &str,
+    record: &MoveRecord,
+) -> Result<Plan, MoveError> {
+    if let Ok(plan) = plan(paths, session) {
+        return Ok(plan);
+    }
+    // Planning again would now fail (the marker already moved): report the
+    // persisted intent's own cut, parent and prefix length instead.
+    Ok(Plan {
+        marker_carrier: record.old_compaction_part.clone(),
+        old_compaction_part: record.old_compaction_part.clone(),
+        old_summary: record.old_summary.clone(),
+        old_summary_part: record.old_summary_part.clone(),
+        summary_text: String::new(),
+        summary_cwd: String::new(),
+        summary_root: String::new(),
+        new_summary_id: record.new_summary_id.clone(),
+        new_compaction_part_id: record.marker_part.clone(),
+        new_summary_part_id: record.new_summary_part_id.clone(),
+        u_time: record.u_time,
+        record: record.clone(),
+        p: record.p.clone(),
+        message_count: record.message_count as usize,
+        dropped_summaries: Vec::new(),
+        returned_raw: Vec::new(),
+        marker_before: record.old_compaction_data.clone(),
+        old_summary_data: record.old_summary_data.clone(),
+        old_summary_part_data: record.old_summary_part_data.clone(),
+        marker_already_keyed: true,
+        behind_cut: 0,
+        missing: Vec::new(),
+        gone: Vec::new(),
+        not_served: Vec::new(),
+    })
+}
 
-fn parse_args(args: &[String]) -> Result<(StorePaths, String, bool), String> {
+/// Check, plan with a certificate and write the move of `session`. This is the
+/// `--apply --head-cut` path: it plans read-only, checks the certificate before
+/// committing the `relocating` intent, and never computes the runner's digest.
+/// A rerun that finds `relocating` resumes from the persisted intent alone and
+/// never re-reads or re-checks the certificate file.
+pub fn run_with_head_cut(
+    paths: &StorePaths,
+    session: &str,
+    head_cut: &Path,
+    holders: &dyn HolderCheck,
+    stop: Option<StopAfter>,
+) -> Result<Outcome, MoveError> {
+    check_holders(paths, holders)?;
+    if let Some(record) = existing_intent(paths, session)? {
+        resume_from_record(paths, &record, stop)?;
+        let plan = plan_for_moved_record(paths, session, &record)?;
+        return Ok(Outcome::Moved(plan));
+    }
+    let plan = plan(paths, session)?;
+    let certificate = load_certificate(head_cut)?;
+    check_certificate(&plan, &certificate)?;
+    apply_with_certificate(paths, &plan, &certificate, stop)?;
+    // Re-read the committed intent for the return value so the caller sees the
+    // certified head cut and the `moved` state.
+    let record = existing_intent(paths, session)?.ok_or_else(|| {
+        MoveError::Interrupted("the move record is missing after apply".to_string())
+    })?;
+    let mut plan = plan;
+    plan.record = record;
+    Ok(Outcome::Moved(plan))
+}
+
+const USAGE: &str = "usage: ck-mc offline move-session --session <id> --opencode-db <path> \
+     --context-db <path> --store-db <path> (--plan | --dry-run | --apply --head-cut <file>)";
+
+struct CliArgs {
+    paths: StorePaths,
+    session: String,
+    mode: CliMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CliMode {
+    Plan,
+    Apply { head_cut: PathBuf },
+}
+
+fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     let mut session = None;
     let (mut opencode_db, mut context_db, mut store_db) = (None, None, None);
-    let mut dry_run = false;
+    let mut plan_flag = false;
+    let mut apply_flag = false;
+    let mut head_cut: Option<PathBuf> = None;
     let mut iter = args.iter();
     match iter.next().map(String::as_str) {
         Some("move-session") => {}
@@ -2299,20 +2935,27 @@ fn parse_args(args: &[String]) -> Result<(StorePaths, String, bool), String> {
             "--opencode-db" => opencode_db = Some(PathBuf::from(value()?)),
             "--context-db" => context_db = Some(PathBuf::from(value()?)),
             "--store-db" => store_db = Some(PathBuf::from(value()?)),
-            "--plan" | "--dry-run" => dry_run = true,
+            "--plan" | "--dry-run" => plan_flag = true,
+            "--apply" => apply_flag = true,
+            "--head-cut" => head_cut = Some(PathBuf::from(value()?)),
             other => return Err(format!("unknown argument {other:?}; {USAGE}")),
         }
     }
+    let mode = match (plan_flag, apply_flag, head_cut) {
+        (true, false, None) => CliMode::Plan,
+        (false, true, Some(head_cut)) => CliMode::Apply { head_cut },
+        _ => return Err(USAGE.into()),
+    };
     match (session, opencode_db, context_db, store_db) {
-        (Some(session), Some(opencode_db), Some(context_db), Some(store_db)) => Ok((
-            StorePaths {
+        (Some(session), Some(opencode_db), Some(context_db), Some(store_db)) => Ok(CliArgs {
+            paths: StorePaths {
                 opencode_db,
                 context_db,
                 store_db,
             },
             session,
-            dry_run,
-        )),
+            mode,
+        }),
         _ => Err(USAGE.into()),
     }
 }
@@ -2323,7 +2966,11 @@ pub fn cli_main(args: &[String]) -> i32 {
     if args.first().map(String::as_str) == Some("first-pass") {
         return crate::offline_first_pass::cli_main(&args[1..]);
     }
-    let (paths, session, dry_run) = match parse_args(args) {
+    let CliArgs {
+        paths,
+        session,
+        mode,
+    } = match parse_args(args) {
         Ok(parsed) => parsed,
         Err(usage) => {
             println!(
@@ -2333,7 +2980,11 @@ pub fn cli_main(args: &[String]) -> i32 {
             return 2;
         }
     };
-    match run(&paths, &session, dry_run, &Lsof, None) {
+    let outcome = match mode {
+        CliMode::Plan => run(&paths, &session, true, &Lsof, None),
+        CliMode::Apply { head_cut } => run_with_head_cut(&paths, &session, &head_cut, &Lsof, None),
+    };
+    match outcome {
         Ok(Outcome::Planned(plan)) => {
             println!("{}", json!({"status":"dry_run","plan":plan.to_value()}));
             eprintln!("SESSION PLANNED {session}: no store was written");
