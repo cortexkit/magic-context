@@ -113,8 +113,21 @@ struct PendingStage {
 thread_local! { static CRASH_AFTER_STAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 #[cfg(test)]
+thread_local! { static CRASH_AFTER_DESCENT_BEGIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+#[cfg(test)]
 pub(super) fn crash_after_stage_for_test() {
     CRASH_AFTER_STAGE.with(|flag| flag.set(true));
+}
+
+#[cfg(test)]
+pub(super) fn crash_after_descent_begin_for_test() {
+    CRASH_AFTER_DESCENT_BEGIN.with(|flag| flag.set(true));
+}
+
+#[cfg(test)]
+pub(super) fn clear_crash_after_descent_begin_for_test() {
+    CRASH_AFTER_DESCENT_BEGIN.with(|flag| flag.set(false));
 }
 
 pub(super) fn split_head_at(ranges: &mut Vec<view::ViewRange>, first: u64) {
@@ -125,6 +138,109 @@ pub(super) fn split_head_at(ranges: &mut Vec<view::ViewRange>, first: u64) {
         if let view::ViewRange::Replace { to, .. } = &mut ranges[index] { *to = first; }
         ranges.insert(index + 1, view::ViewRange::replace(first, to, "[]"));
     }
+}
+
+/// The last retained ordinal the last applied view rendered, for a lineage
+/// starting at `first`. `None` when the view covers nothing at or after the
+/// cut (an empty suffix answers the head insertion). Cached or held entries
+/// after that ordinal never extend it: rows after `L` render raw outside the
+/// replacement.
+fn retained_through(applied: &view::CompactionView, first: u64) -> Option<u64> {
+    let through = applied.covers_through.ordinal;
+    (through >= first).then_some(through)
+}
+
+/// Render the retained rows `[first, last]` byte for byte as the last applied
+/// view rendered them: the history head is separate (the cut's stored head),
+/// and these are the window rows with that view's drops and replacements in
+/// effect. Rows after `last` are new and render raw outside the replacement.
+///
+/// The rendering replays the applied view's `Keep` edits onto the held rows
+/// ck-mc still holds under the parent lineage, so no `session.read` runs
+/// during Setup. A row the view removed stays absent; a changed digest would
+/// have different bytes and is therefore rendered raw by the caller refusing
+/// to use a stale edit (the caller only calls this when the held rows match).
+fn render_retained_rows(
+    entries: &BTreeMap<u64, std::sync::Arc<HeldEntry>>,
+    applied: &view::CompactionView,
+    first: u64,
+    last: u64,
+) -> Result<Vec<Value>, HandlerOutcome> {
+    let mut edits: BTreeMap<(u64, String), &view::PartEdit> = BTreeMap::new();
+    for range in &applied.ranges {
+        if let view::ViewRange::Keep {
+            edits: range_edits, ..
+        } = range
+        {
+            for edit in range_edits {
+                if edit.ordinal >= first && edit.ordinal <= last {
+                    edits.insert((edit.ordinal, edit.part.clone()), edit);
+                }
+            }
+        }
+    }
+    let mut out = Vec::with_capacity((last.saturating_sub(first) as usize).saturating_add(1));
+    for ordinal in first..=last {
+        let entry = entries
+            .get(&ordinal)
+            .ok_or_else(|| transient("async descent missing retained row"))?;
+        let read = entry.read()?;
+        let tags = &read.tags;
+        let message = read.message.clone();
+        let parts = parts(&message)?.into_owned();
+        let mut rendered = Vec::with_capacity(parts.len());
+        for (index, part) in parts.iter().enumerate() {
+            let part_id = tags
+                .get(index)
+                .map(|row| row.part.clone())
+                .unwrap_or_else(|| index.to_string());
+            if let Some(edit) = edits.get(&(ordinal, part_id)) {
+                if edit.drop {
+                    continue;
+                }
+                if let Some(bytes) = &edit.bytes {
+                    rendered.push(serde_json::from_str(bytes).map_err(transient)?);
+                    continue;
+                }
+            }
+            let mut kept = part.clone();
+            if let Some(tag) = tags.get(index).and_then(|row| row.tag.as_deref()) {
+                let pointer = if part.get("type").and_then(Value::as_str) == Some("tool") {
+                    "/state/output"
+                } else {
+                    "/text"
+                };
+                if let Some(text) = kept.pointer_mut(pointer) {
+                    if let Some(current) = text.as_str() {
+                        *text = json!(format!("{tag} {current}"));
+                    }
+                }
+            }
+            rendered.push(kept);
+        }
+        let mut out_message = message;
+        if out_message.get("parts").is_some() {
+            out_message["parts"] = json!(rendered);
+        } else if out_message
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some()
+        {
+            out_message["content"] = json!(rendered);
+        } else if out_message
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .is_some()
+        {
+            *out_message
+                .pointer_mut("/message/content")
+                .expect("checked pointer") = json!(rendered);
+        } else {
+            return Err(invalid("async descent cannot render retained row"));
+        }
+        out.push(out_message);
+    }
+    Ok(out)
 }
 
 impl AsyncRecord {
@@ -788,6 +904,138 @@ impl McHandler {
             return bytes(&with_checkpoint(answer, None));
         }
         if state.lineage == request.lineage_id {
+            // A crash between `begin_at_cut`'s internal save and the final
+            // Setup save leaves the new lineage with the old Setup answer.
+            // Complete from the selected cut instead of refusing `unknown_cut`:
+            // the validated rows, replayed edits and complete answer commit
+            // together on retry. Anything else fails closed as `unknown_cut`.
+            let first = request
+                .descends_from
+                .as_ref()
+                .and_then(|descends| descends.through_ordinal.checked_add(1));
+            let crashed = first.is_some_and(|first| state.cut_first_ordinal == Some(first));
+            if crashed {
+                let first = first.expect("checked");
+                if let Some(descends) = request.descends_from.as_ref() {
+                    if let Some((cut, seed)) = state
+                        .selected_cut_seed(store, first, &descends.lineage_id)?
+                        .filter(|(cut, seed)| {
+                            cut.lineage == descends.lineage_id && seed.boundary_safe()
+                        })
+                    {
+                        // The retried Setup reads only saved state and completes
+                        // from the selected cut; it does not read the suffix
+                        // from the runner.
+                        // The new lineage's entries were already persisted by the
+                        // crashed `begin_at_cut`; reload the latest window when
+                        // the cut is still the newest so rows read since staging
+                        // are included, exactly as the first attempt does.
+                        let mut seed = seed;
+                        let is_latest = state.published_cuts.values().map(|cut| cut.version).max()
+                            == Some(cut.version);
+                        if is_latest {
+                            seed.window.entries = store
+                                .load_async_compaction_entries_range(
+                                    &state.reference(),
+                                    first,
+                                    i64::MAX as u64,
+                                )
+                                .map_err(transient)?
+                                .into_iter()
+                                .collect();
+                        }
+                        let mut retained_entries: BTreeMap<u64, Arc<HeldEntry>> = BTreeMap::new();
+                        for (ordinal, raw) in &seed.window.entries {
+                            retained_entries
+                                .insert(*ordinal, Arc::new(HeldEntry::from_stored(raw.clone())?));
+                        }
+                        let parent_applied: Option<view::CompactionView> = match state.applied {
+                            Some(version) => store
+                                .load_async_compaction_view(&state.reference(), version)
+                                .map_err(transient)?
+                                .map(|raw| serde_json::from_str(&raw).map_err(transient))
+                                .transpose()?,
+                            None => None,
+                        };
+                        let retained_last: Option<u64> = parent_applied
+                            .as_ref()
+                            .and_then(|view| retained_through(view, first));
+                        let retained_rows: Vec<Value> = match (&parent_applied, retained_last) {
+                            (Some(view), Some(last)) => {
+                                let mut missing = false;
+                                for ordinal in first..=last {
+                                    if !retained_entries.contains_key(&ordinal) {
+                                        missing = true;
+                                        break;
+                                    }
+                                }
+                                if missing {
+                                    return unknown();
+                                }
+                                render_retained_rows(&retained_entries, view, first, last)?
+                            }
+                            _ => Vec::new(),
+                        };
+                        let retained_to = retained_last
+                            .and_then(|last| last.checked_add(1))
+                            .unwrap_or(first);
+                        let mut engine = state.engine_with_baselines()?;
+                        for view in [&mut engine.last_produced, &mut engine.last_applied]
+                            .into_iter()
+                            .flatten()
+                        {
+                            view.range.lineage_id = request.lineage_id.clone().expect("lineage");
+                        }
+                        state.adopt_engine(engine)?;
+                        if let Some(prefix) = &mut state.logical_prefix {
+                            Arc::make_mut(prefix).lineage =
+                                request.lineage_id.clone().expect("lineage");
+                        }
+                        state.applied = Some(cut.version);
+                        state.failure = None;
+                        state.resync = false;
+                        state.setup.lineage_id = request.lineage_id.clone();
+                        state.setup.descends_from = request.descends_from.clone();
+                        let old: compact::setup::SetupAnswer = decode(&state.initial)?;
+                        let codec =
+                            codec::Codec::from_params(&Value::Object(request.params.clone()))?;
+                        let mut replacement: Vec<Value> =
+                            serde_json::from_str(&cut.head).map_err(transient)?;
+                        replacement.extend(retained_rows);
+                        let initial = compact::message::CompactionMessage::new(
+                            format!("cut-{first}"),
+                            cut.version,
+                            compact::message::Range::new(first, retained_to),
+                            replacement,
+                        );
+                        let mut answer =
+                            compact::setup::SetupAnswer::ready(&request.request_id, initial)
+                                .with_cache_ttl(state.cache_policy.resolve(&request.model));
+                        if let Some(ceiling) = old.ceiling() {
+                            answer = answer.with_ceiling(ceiling.clone());
+                        }
+                        if let Some(wait) = old.ride_wait_ms() {
+                            answer = answer.with_ride_wait_ms(wait);
+                        }
+                        answer = answer.with_accepts(old.accepts().to_vec());
+                        state.initial = serde_json::to_value(answer).map_err(transient)?;
+                        state.initial["serializer_profile"] = json!(codec.wire_id());
+                        // The retried Setup only writes the small record: the
+                        // new lineage's rows were already persisted by the
+                        // crashed `begin_at_cut`. Allow the save without a
+                        // transcript load.
+                        state.journal = Journal::new_record();
+                        state.save(store, &[])?;
+                        self.provider_store
+                            .async_runtime
+                            .resident
+                            .lock()
+                            .expect("async resident cache")
+                            .forget(&state.reference());
+                        return bytes(&state.initial);
+                    }
+                }
+            }
             return unknown();
         }
         let descends = request.descends_from.as_ref().expect("descending Setup");
@@ -823,6 +1071,45 @@ impl McHandler {
                 .into_iter()
                 .collect();
         }
+        // One Setup rule: the new lineage's `initial` covers the retained rows
+        // the last applied view rendered, with that view's bytes. Setup does
+        // not call `session.read`: it renders retained rows from held rows
+        // and the cut seed's frozen edits. Cached or held entries after the
+        // last retained ordinal never extend it: they render raw outside the
+        // replacement.
+        // `existing` came from `load_head` without transcript rows; the held
+        // rows for the retained range come from the seed's window (reloaded
+        // from the store for the current cut to include rows read since
+        // staging), decoded here for rendering.
+        let mut retained_entries: BTreeMap<u64, Arc<HeldEntry>> = BTreeMap::new();
+        for (ordinal, raw) in &seed.window.entries {
+            retained_entries.insert(*ordinal, Arc::new(HeldEntry::from_stored(raw.clone())?));
+        }
+        let parent_applied: Option<view::CompactionView> = match state.applied {
+            Some(version) => store
+                .load_async_compaction_view(&state.reference(), version)
+                .map_err(transient)?
+                .map(|raw| serde_json::from_str(&raw).map_err(transient))
+                .transpose()?,
+            None => None,
+        };
+        let retained_last: Option<u64> = parent_applied
+            .as_ref()
+            .and_then(|view| retained_through(view, first));
+        let retained_rows: Vec<Value> = match (&parent_applied, retained_last) {
+            (Some(view), Some(last)) => {
+                for ordinal in first..=last {
+                    if !retained_entries.contains_key(&ordinal) {
+                        return unknown();
+                    }
+                }
+                render_retained_rows(&retained_entries, view, first, last)?
+            }
+            _ => Vec::new(),
+        };
+        let retained_to = retained_last
+            .and_then(|last| last.checked_add(1))
+            .unwrap_or(first);
         // A saved stage is immutable. A descendant gets its own namespace and
         // reads the live window on its next notice, so an undo cannot inherit
         // the parent's removed window rows or tag identities.
@@ -897,6 +1184,13 @@ impl McHandler {
                 .map_err(transient)?;
         }
         state.begin_at_cut(store, seed, cut_seed::CutStart::Descending)?;
+        #[cfg(test)]
+        if CRASH_AFTER_DESCENT_BEGIN.with(|flag| flag.get()) {
+            // A crash between the internal save and the final Setup save.
+            // The new lineage and cut are persisted, but the complete
+            // `initial` is not. A retry must complete from the selected cut.
+            return Err(transient("descent crash after begin_at_cut"));
+        }
         let mut engine = state.engine_with_baselines()?;
         for view in [&mut engine.last_produced, &mut engine.last_applied]
             .into_iter()
@@ -923,11 +1217,19 @@ impl McHandler {
         state.pending_undo_edits = true;
         let old: compact::setup::SetupAnswer = decode(&state.initial)?;
         let codec = codec::Codec::from_params(&Value::Object(request.params.clone()))?;
+        // The one Setup rule: the new lineage's `initial` spans from `first`
+        // through the last retained row, with the history head followed by
+        // those rows rendered byte for byte as the last applied view rendered
+        // them. Rows after the last retained ordinal stay outside and render
+        // raw. With no retained rows, the answer is the head insertion
+        // `[first, first)`.
+        let mut replacement: Vec<Value> = serde_json::from_str(&cut.head).map_err(transient)?;
+        replacement.extend(retained_rows);
         let initial = compact::message::CompactionMessage::new(
             format!("cut-{first}"),
             cut.version,
-            compact::message::Range::new(first, first),
-            serde_json::from_str(&cut.head).map_err(transient)?,
+            compact::message::Range::new(first, retained_to),
+            replacement,
         );
         let mut answer = compact::setup::SetupAnswer::ready(&request.request_id, initial)
             .with_cache_ttl(state.cache_policy.resolve(&request.model));

@@ -3044,27 +3044,22 @@ impl McHandler {
             &state.key.harness,
             route,
         );
-        // The adoption import runs after this one engine pass but before any
-        // save that could expose a partial record. The empty-window head pass
-        // cannot see the imported history: with compartments present but no live
-        // rows it would try to fold and miss its anchor. Running it empty gives
-        // the head insertion, then the import places the manifest's compartments
-        // at 0..message_count-1, copies only the imported sequences' artifacts,
-        // and `begin_at_cut` saves the `importing` stage (cut set, initial still
-        // null); the final save below completes it.
+        // The adoption import runs before the Setup engine pass and before any
+        // save that could expose a partial record. The manifest's compartments
+        // go in at 0..message_count-1 with only the imported sequences'
+        // artifacts, then `begin_at_cut` saves the `importing` stage (cut set,
+        // initial still null). The engine pass below then renders the head from
+        // that imported history, so a moved session's Setup `initial` already
+        // contains the history head. A repeat Setup that finds the `importing`
+        // stage restarts here from the move record.
         let moved_record = state
             .standalone_move
             .as_ref()
             .and_then(|moved| moved.pending.clone());
         let moved_first = moved_record.as_ref().map(|record| record.message_count);
-        // A repeat Setup after a crash inside the stage finds the previous
-        // import still in its namespace. Clear it before the empty head pass so
-        // this pass never sees history with no live rows; the import below
-        // restores the manifest's exact rows before any save.
-        if moved_record.is_some() {
-            store
-                .replace_compartments(&state.namespace(), &[])
-                .map_err(transient)?;
+        if let Some(record) = moved_record.clone() {
+            state.import_standalone_compartments(store, &record)?;
+            state.finish_standalone_import(store, &record)?;
         }
         let status = transform::compaction::Status {
             lineage_id: state.lineage.clone().unwrap_or_default(),
@@ -3090,16 +3085,17 @@ impl McHandler {
             &state,
             self.async_input_oracle() || state.logical_prefix.is_none(),
         )?;
-        // Finish the adoption import after the empty head pass but before the
-        // final save, so the stored record keeps the history, the cut and the
-        // tag checkpoint. The compartments go in first, then the seed: this save
-        // is the `importing` stage (cut set, initial still null); a repeat Setup
-        // that finds it restarts from the move record.
-        if let Some(record) = moved_record {
-            state.import_standalone_compartments(store, &record)?;
-            state.finish_standalone_import(store, &record)?;
-        }
         state.adopt_engine(engine)?;
+        // The imported history needs one refresh before it renders in views.
+        // Armed here, after the Setup engine pass already rendered the head
+        // from it, so the first notice refreshes once and only once.
+        if moved_record
+            .as_ref()
+            .is_some_and(|record| !record.compartments.is_empty())
+        {
+            let namespace = state.namespace();
+            store.arm_soft_refresh(&namespace).map_err(transient)?;
+        }
         // `serializer_profile` is a ck-mc extension member: the profile this
         // Setup accepted, so the runner can confirm ck-mc reads its schema.
         let mut answer = compact::setup::SetupAnswer::ready(

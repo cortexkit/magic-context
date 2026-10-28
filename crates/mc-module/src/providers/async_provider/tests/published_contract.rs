@@ -54,6 +54,276 @@ async fn descending_setup_uses_kept_head_without_runner_calls() {
 }
 
 #[tokio::test]
+async fn native_descent_initial_covers_retained_rows_with_drops_no_read_one_rebuild() {
+    // A native cut-descent Setup answers `initial` with the history head plus
+    // the rows the last applied view rendered, byte for byte with their drops
+    // in effect. Rows after that view's last covered ordinal render raw
+    // outside the replacement, `session.read` never runs during Setup, and the
+    // new lineage's first view renders the same retained range byte-identically
+    // with exactly one rebuild.
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(dir.path()).await;
+    rig.fill(40);
+    rig.history(20, "history for the native cut");
+    rig.notice(1, 90_000, None).await;
+    let baseline = rig.newest().expect("history publishes a view");
+    // Drop one retained tool part so the retained rows carry an applied edit.
+    // Ordinal 26 is a tool output in `Rig::fill` (`26 % 5 == 1`) and lies at
+    // or after the cut (`first` is 21 with history 20), with tag `178`.
+    rig.queue(&[178]).await;
+    rig.notice(2, 90_000, Some(baseline)).await;
+    let applied_version = rig.newest().expect("drops publish a view");
+    rig.notice(3, 1_000, Some(applied_version)).await;
+    let parent = rig.state();
+    assert_eq!(parent.applied, Some(applied_version));
+    let applied_view = rig.get(applied_version).await;
+    let last = applied_view.covers_through.ordinal;
+    let cut = parent
+        .newest_published_cut()
+        .expect("published adoptable cut");
+    let first = cut.first_ordinal;
+    assert!(
+        last >= first,
+        "retained rows exist: first={first} last={last}"
+    );
+    // Horizon: hold one more row after the last applied view before Setup.
+    // It must render raw outside the replacement and never extend `L`.
+    let extra_ordinal = parent.entries.keys().max().copied().unwrap_or(last) + 1;
+    {
+        let mut entries = rig.runner.entries.lock().unwrap();
+        let part = json!({"id":format!("p{extra_ordinal}"),"type":"text","text":format!("extra message {extra_ordinal} {}", "durable words ".repeat(4))});
+        entries.push(
+            ReadMessage::new(
+                extra_ordinal,
+                format!("m{extra_ordinal}"),
+                json!({"info":{"id":format!("m{extra_ordinal}"),"role":"assistant","time":{"created":1}},"parts":[part]}),
+            )
+            .with_tags(vec![tags::PartTag::tagged("0", format!("§{}§", 100 + extra_ordinal * 3))]),
+        );
+    }
+    rig.notice(4, 1_000, Some(applied_version)).await;
+    let parent = rig.state();
+    assert!(parent.entries.contains_key(&extra_ordinal));
+    assert_eq!(parent.applied, Some(applied_version));
+    // Debug the retained range before descent: fail here (not unknown_cut)
+    // if the held rows do not cover it.
+    for ordinal in first..=last {
+        assert!(
+            parent.entries.contains_key(&ordinal),
+            "held rows must cover retained [{first}, {last}]: missing {ordinal}"
+        );
+    }
+    let reads_before = rig
+        .runner
+        .routed_reads
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let passes_before = resident::counters::read().engine_passes;
+    let mut request = serde_json::to_value(&parent.setup).unwrap();
+    request["lineage_id"] = json!("L2");
+    request["descends_from"] = json!({"lineage_id":"L","through_ordinal":first - 1});
+    request["request_id"] = json!("descent-f");
+    let answer = rig.op("compaction.setup", request.clone()).await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    assert_eq!(
+        answer["initial"]["range"],
+        json!({"from": first, "to": last + 1}),
+        "Setup answers exactly through L: {answer}"
+    );
+    let replacement = answer["initial"]["replacement"].as_array().unwrap();
+    let head: Vec<Value> = serde_json::from_str(&cut.head).unwrap();
+    assert!(replacement.len() == head.len() + (last - first + 1) as usize);
+    assert_eq!(&replacement[..head.len()], &head);
+    // The dropped tool part stays dropped: ordinal 26 renders the drop
+    // placeholder, never its original output.
+    let dropped_at = replacement[head.len() + (26 - first) as usize].clone();
+    let dropped_text = serde_json::to_string(&dropped_at).unwrap();
+    assert!(
+        dropped_text.contains("[dropped §178§]"),
+        "dropped edit must stay in effect: {dropped_at}"
+    );
+    assert!(
+        !dropped_text.contains("exact spent output"),
+        "dropped content must not be served: {dropped_at}"
+    );
+    // The horizon row renders raw outside the replacement, never extending L.
+    assert!(
+        !replacement.iter().any(|message| {
+            message["parts"].as_array().is_some_and(|parts| {
+                parts.iter().any(|part| {
+                    part["text"].as_str().is_some_and(|text| {
+                        text.contains(&format!("extra message {extra_ordinal}"))
+                    }) || part["id"].as_str() == Some(&format!("p{extra_ordinal}"))
+                })
+            }) || message
+                .to_string()
+                .contains(&format!("extra message {extra_ordinal}"))
+                || message.to_string().contains(&format!("m{extra_ordinal}"))
+        }),
+        "row after L must stay outside the replacement"
+    );
+    assert_eq!(
+        rig.runner
+            .routed_reads
+            .load(std::sync::atomic::Ordering::Relaxed),
+        reads_before,
+        "native descent records no session.read"
+    );
+    assert_eq!(
+        resident::counters::read().engine_passes,
+        passes_before,
+        "Setup renders without a rebuild"
+    );
+    // First view of the new lineage renders `[f, L + 1)` byte-identically with
+    // exactly one rebuild, and the horizon row renders raw after it.
+    *rig.runner.lineage.lock().unwrap() = "L2".into();
+    rig.notice(5, 90_000, None).await;
+    let published = rig.newest().expect("first view publishes");
+    assert_eq!(
+        resident::counters::read().engine_passes,
+        passes_before + 1,
+        "publishing the first view is the one rebuild"
+    );
+    let child = rig.state();
+    assert_eq!(child.lineage.as_deref(), Some("L2"));
+    let first_view = rig.get(published).await;
+    let rendered = rig.render(&first_view);
+    let rendered_messages: Vec<Value> = serde_json::from_slice(&rendered).unwrap();
+    assert_eq!(&rendered_messages[..replacement.len()], replacement);
+}
+
+#[tokio::test]
+async fn descent_crash_after_begin_at_cut_recovers_with_full_initial() {
+    // A lineage start stays incomplete until the validated rows, replayed
+    // edits and complete Setup answer commit together. A crash after
+    // `begin_at_cut`'s internal save and before the final Setup save must
+    // retry from the selected cut with the full `initial`, never `unknown_cut`
+    // or a partial answer. This regression test pins that retry behavior.
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(dir.path()).await;
+    rig.fill(20);
+    rig.history(10, "history");
+    rig.notice(1, 90_000, None).await;
+    let v1 = rig.newest().expect("view");
+    rig.notice(2, 1_000, Some(v1)).await;
+    let parent = rig.state();
+    let cut = parent.newest_published_cut().expect("cut");
+    let first = cut.first_ordinal;
+    let applied = rig.get(v1).await;
+    let last = applied.covers_through.ordinal;
+    let mut request = serde_json::to_value(&parent.setup).unwrap();
+    request["lineage_id"] = json!("L2");
+    request["descends_from"] = json!({"lineage_id":"L","through_ordinal":first - 1});
+    request["request_id"] = json!("crash");
+    super::super::cut_runtime::crash_after_descent_begin_for_test();
+    let crashed = rig
+        .h
+        .dispatch_value(
+            7,
+            json!({"method":"compaction.setup","params":request.clone()}),
+        )
+        .await;
+    // The crash is injected as a transient error after the internal save;
+    // nothing is answered yet, and the partial lineage must not be served.
+    assert!(
+        matches!(crashed, HandlerOutcome::Error { ref code, .. } if code == "transient"),
+        "injected crash before final save: {crashed:?}"
+    );
+    super::super::cut_runtime::clear_crash_after_descent_begin_for_test();
+    let mut retry = request.clone();
+    retry["request_id"] = json!("retry");
+    let answer = rig.op("compaction.setup", retry.clone()).await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    assert_ne!(answer["code"], "unknown_cut", "{answer}");
+    assert_eq!(
+        answer["initial"]["range"],
+        json!({"from": first, "to": last + 1}),
+        "retry completes with the full initial: {answer}"
+    );
+    assert!(!answer["initial"]["replacement"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    // A repeated Setup on the same lineage returns the stored answer.
+    let mut again = retry.clone();
+    again["request_id"] = json!("again");
+    let repeated = rig.op("compaction.setup", again).await;
+    assert_eq!(repeated["initial"], answer["initial"]);
+}
+
+fn anthropic_text(n: u64, text: &str) -> ReadMessage {
+    ReadMessage::new(
+        n,
+        format!("m{n}"),
+        json!({"role":"user","content":[{"type":"text","text":text}]}),
+    )
+    .with_tags(vec![tags::PartTag::tagged(
+        "0",
+        format!("§{}§", 1000 + n * 4),
+    )])
+}
+
+#[tokio::test]
+async fn descent_crash_after_begin_at_cut_recovers_on_non_opencode_codec() {
+    // The one Setup rule and its crash safety hold on every host. The same
+    // crash-and-retry on the `anthropic-messages` serializer profile completes
+    // from the selected cut with the full `initial`, never `unknown_cut`.
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::open(
+        dir.path(),
+        "thalamus-harness",
+        "claude-code",
+        json!({"serializer_profile":"anthropic-messages"}),
+    )
+    .await;
+    for n in 0..20u64 {
+        rig.runner.entries.lock().unwrap().push(anthropic_text(
+            n,
+            &format!("anthropic message {n} {}", "durable words ".repeat(4)),
+        ));
+    }
+    rig.history(10, "anthropic history");
+    rig.notice(1, 90_000, None).await;
+    let v1 = rig.newest().expect("view");
+    rig.notice(2, 1_000, Some(v1)).await;
+    let parent = rig.state();
+    let cut = parent.newest_published_cut().expect("cut");
+    let first = cut.first_ordinal;
+    let applied = rig.get(v1).await;
+    let last = applied.covers_through.ordinal;
+    let mut request = serde_json::to_value(&parent.setup).unwrap();
+    request["lineage_id"] = json!("L2");
+    request["descends_from"] = json!({"lineage_id":"L","through_ordinal":first - 1});
+    request["request_id"] = json!("crash");
+    super::super::cut_runtime::crash_after_descent_begin_for_test();
+    let crashed = rig
+        .h
+        .dispatch_value(
+            7,
+            json!({"method":"compaction.setup","params":request.clone()}),
+        )
+        .await;
+    assert!(
+        matches!(crashed, HandlerOutcome::Error { ref code, .. } if code == "transient"),
+        "injected crash before final save: {crashed:?}"
+    );
+    super::super::cut_runtime::clear_crash_after_descent_begin_for_test();
+    let mut retry = request.clone();
+    retry["request_id"] = json!("retry");
+    let answer = rig.op("compaction.setup", retry.clone()).await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    assert_ne!(answer["code"], "unknown_cut", "{answer}");
+    assert_eq!(
+        answer["initial"]["range"],
+        json!({"from": first, "to": last + 1}),
+        "retry completes with the full initial on a non-OpenCode-1 codec: {answer}"
+    );
+    let mut again = retry.clone();
+    again["request_id"] = json!("again");
+    let repeated = rig.op("compaction.setup", again).await;
+    assert_eq!(repeated["initial"], answer["initial"]);
+}
+
+#[tokio::test]
 async fn unknown_cut_setup_is_terminal() {
     let dir = tempfile::tempdir().unwrap();
     let rig = Rig::new(dir.path()).await;
