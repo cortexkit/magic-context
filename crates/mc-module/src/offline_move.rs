@@ -22,6 +22,42 @@
 //! The record lives in `context.db`'s `schema_migrations_meta` key/value table under
 //! the key `mode3_move:opencode:<session id>`. That table already holds other
 //! per-session keys, so the move needs no schema migration.
+//!
+//! Stable refusal code table for admission and the move lifecycle. Planning is
+//! read-only; certificate, persisted-image, record-state and codec checks belong
+//! to the corresponding apply/resume/Setup stages, not admission.
+//!
+//! | Refusal condition | Code |
+//! | --- | --- |
+//! | Summary has a block index | `block_index` |
+//! | Summary has no endpoint id | `summary_id_missing` |
+//! | Summary endpoint is not counted | `summary_endpoint_missing` |
+//! | Summary starts after its end | `summary_inverted` |
+//! | First summary does not start at 1 | `prefix_gap` |
+//! | Summaries overlap or leave a gap | `prefix_not_tiled` |
+//! | Fold end T is absent | `fold_end_missing` |
+//! | Fold end T is not summarized | `fold_end_uncovered` |
+//! | No cut can carry a marker | `no_eligible_cut` |
+//! | Cut U is 1 | `empty_prefix` |
+//! | Summary crosses U | `cut_straddled` |
+//! | Imported prefix does not end at U - 1 | `prefix_end_mismatch` |
+//! | Every eligible carrier has a neighbour at its time or time + 1 | `adjacency_conflict` |
+//! | Projected marker would not be in effect | `marker_shadowed` |
+//! | Drop target cannot be found | `drop_target_missing` |
+//! | Drop target is not unique (formerly `target_ambiguous`) | `drop_target_ambiguous` |
+//! | Drop target cannot carry a runner tag | `drop_target_untagged` |
+//! | Export certificate disagrees with the plan | `certificate_mismatch` |
+//! | Host matches neither persisted image | `move_host_state_unknown` |
+//! | Move record cannot be decoded | `move_record_unreadable` |
+//! | Move record has an unknown state | `move_record_state_unknown` |
+//! | Setup codec differs from the move codec | `moved_session_codec_mismatch` |
+//!
+//! Kept verbatim: `marker_state_mismatch`, `marker_not_standalone`,
+//! `address_malformed`, `marker_pending_not_in_effect`, `destination_not_empty`,
+//! `marker_missing`, `summaries_missing`. All other existing codes stay unchanged:
+//! `session_not_found`, `already_moved`, `queue_invalid`, `marker_ambiguous`,
+//! `fork_unsupported`, `checkpoint_conflict`, `summary_boundary_unrepresentable`,
+//! `source_changed`, and the store-level refusal codes.
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -329,16 +365,20 @@ pub fn has_standalone_state(conn: &Connection, session: &str) -> rusqlite::Resul
 
 // ── Reading the source ───────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct MessageRow {
     id: String,
+    time: i64,
     role: String,
     summary: bool,
     finished: bool,
     errored: bool,
     parent: Option<String>,
     provider: Option<String>,
+    counted: bool,
 }
 
+#[derive(Clone)]
 struct PartRow {
     id: String,
     kind: String,
@@ -346,14 +386,51 @@ struct PartRow {
     /// A whitespace-only text part on an assistant message: standalone treats it
     /// as provider framing and replays only an exact tag for it.
     blank_text: bool,
+    synthetic: bool,
+    taggable: bool,
 }
 
 /// The session as OpenCode 1 stores it: messages in canonical `(time_created,
 /// id)` order and each message's parts in the order OpenCode loads them (by id).
+#[derive(Clone)]
 struct HostSession {
     messages: Vec<MessageRow>,
+    /// Plugin-counted, 1-based positions, not raw host row indexes.
     position: HashMap<String, usize>,
     parts: HashMap<String, Vec<PartRow>>,
+}
+
+/// The plugin skips only summary=true/1 with finish="stop", regardless of role.
+fn plugin_finished_summary(data: &Value) -> bool {
+    (data["summary"] == true || data["summary"].as_f64() == Some(1.0)) && data["finish"] == "stop"
+}
+
+/// Use the OpenCode decoder that exposes message content so this check handles
+/// error results and media attachments the same way. Empty text and opaque
+/// structured results cannot carry a visible tag number.
+fn runner_taggable_part(part: &Value) -> bool {
+    use crate::ck_wire::{CkKind, CkOutputKind, ResultBlockKind};
+    let decoded = crate::codec::opencode::decode_opencode(&[json!({
+        "info": {"id":"move-admission", "role":"assistant"},
+        "parts": [part],
+    })]);
+    decoded.messages.iter().any(|message| {
+        message.ck.content.iter().any(|block| match &block.kind {
+            CkKind::Text { text } => !text.is_empty(),
+            CkKind::ToolResult { output, .. } => match &output.kind {
+                CkOutputKind::Text { text } | CkOutputKind::ErrorText { text } => !text.is_empty(),
+                CkOutputKind::Content { blocks } | CkOutputKind::ErrorContent { blocks } => {
+                    blocks.iter().any(|block| match &block.kind {
+                        ResultBlockKind::Text { text } => !text.is_empty(),
+                        ResultBlockKind::Media { .. } => true,
+                        _ => false,
+                    })
+                }
+                _ => false,
+            },
+            _ => false,
+        })
+    })
 }
 
 fn load_host_session(conn: &Connection, session: &str) -> Result<HostSession, Refusal> {
@@ -368,30 +445,28 @@ fn load_host_session(conn: &Connection, session: &str) -> Result<HostSession, Re
     let mut messages = Vec::new();
     let mut statement = conn
         .prepare(
-            "SELECT id, COALESCE(json_extract(data,'$.role'),''),
-                    COALESCE(json_extract(data,'$.summary'),0),
-                    json_type(data,'$.finish') IS NOT NULL AND COALESCE(json_extract(data,'$.finish'),'') <> '',
-                    json_type(data,'$.error') IS NOT NULL,
-                    json_extract(data,'$.parentID'), json_extract(data,'$.providerID')
-               FROM message WHERE session_id=?1 ORDER BY time_created, id",
+            "SELECT id, time_created, data
+                FROM message WHERE session_id=?1 ORDER BY time_created, id",
         )
         .map_err(sql)?;
     let rows = statement
         .query_map([session], |row| {
-            let summary: Value =
-                row.get::<_, rusqlite::types::Value>(2)
-                    .map(|value| match value {
-                        rusqlite::types::Value::Integer(n) => json!(n),
-                        _ => Value::Null,
-                    })?;
+            // The plugin counts malformed JSON as an ordinary row.
+            let data: String = row.get(2)?;
+            let data: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
+            let summary = data["summary"] == true || data["summary"] == 1;
             Ok(MessageRow {
                 id: row.get(0)?,
-                role: row.get(1)?,
-                summary: summary.as_i64() == Some(1),
-                finished: row.get(3)?,
-                errored: row.get(4)?,
-                parent: row.get(5)?,
-                provider: row.get(6)?,
+                time: row.get(1)?,
+                role: data["role"].as_str().unwrap_or_default().into(),
+                summary,
+                finished: data["finish"]
+                    .as_str()
+                    .is_some_and(|finish| !finish.is_empty()),
+                errored: data.get("error").is_some(),
+                parent: data["parentID"].as_str().map(str::to_owned),
+                provider: data["providerID"].as_str().map(str::to_owned),
+                counted: !plugin_finished_summary(&data),
             })
         })
         .map_err(sql)?;
@@ -406,8 +481,9 @@ fn load_host_session(conn: &Connection, session: &str) -> Result<HostSession, Re
     }
     let position = messages
         .iter()
+        .filter(|message| message.counted)
         .enumerate()
-        .map(|(index, message)| (message.id.clone(), index))
+        .map(|(index, message)| (message.id.clone(), index + 1))
         .collect::<HashMap<_, _>>();
     let roles = messages
         .iter()
@@ -418,7 +494,10 @@ fn load_host_session(conn: &Connection, session: &str) -> Result<HostSession, Re
         .prepare(
             "SELECT id, message_id, COALESCE(json_extract(data,'$.type'),''),
                     json_extract(data,'$.callID'),
-                    length(trim(COALESCE(json_extract(data,'$.text'),''))) = 0
+                    length(trim(COALESCE(json_extract(data,'$.text'),''))) = 0,
+                    COALESCE(json_extract(data,'$.synthetic'),0)=1 OR
+                    COALESCE(json_extract(data,'$.syntheticTodoMarker'),0)=1,
+                    data
                FROM part WHERE session_id=?1 ORDER BY message_id, id",
         )
         .map_err(sql)?;
@@ -430,11 +509,13 @@ fn load_host_session(conn: &Connection, session: &str) -> Result<HostSession, Re
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, bool>(4)?,
+                row.get::<_, bool>(5)?,
+                row.get::<_, String>(6)?,
             ))
         })
         .map_err(sql)?;
     for row in rows {
-        let (message, id, kind, call_id, empty_text) = row.map_err(sql)?;
+        let (message, id, kind, call_id, empty_text, synthetic, data) = row.map_err(sql)?;
         let blank_text =
             kind == "text" && empty_text && roles.get(message.as_str()) == Some(&"assistant");
         parts.entry(message).or_default().push(PartRow {
@@ -442,6 +523,8 @@ fn load_host_session(conn: &Connection, session: &str) -> Result<HostSession, Re
             kind,
             call_id,
             blank_text,
+            synthetic,
+            taggable: runner_taggable_part(&serde_json::from_str(&data).unwrap_or(Value::Null)),
         });
     }
     Ok(HostSession {
@@ -565,13 +648,22 @@ fn resolve_positional_tags(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     pub record: MoveRecord,
+    /// Message currently carrying the in-effect marker, before relocation.
+    pub marker_carrier: String,
+    /// Last counted message before U.
+    pub p: String,
+    /// Number of plugin-counted messages before U (P's 1-based position).
+    pub message_count: usize,
+    pub dropped_summaries: Vec<i64>,
+    /// Previously folded messages U..=T, now returned raw.
+    pub returned_raw: Vec<String>,
     /// The compaction part's `data` as stored now.
     pub marker_before: String,
     /// Whether the part already carries this exact checkpoint key (a rerun).
     pub marker_already_keyed: bool,
     /// Drop targets standalone recorded before the cut; summaries cover them.
     pub behind_cut: usize,
-    /// Drop targets whose part no longer exists; nothing is carried for them.
+    /// Kept for plan-output compatibility; unresolved targets now refuse.
     pub missing: Vec<String>,
 }
 
@@ -593,6 +685,12 @@ impl Plan {
             "session": self.record.session,
             "tag_checkpoint": self.record.tag_checkpoint,
             "cut": self.record.cut,
+            "U": self.record.cut,
+            "P": self.p,
+            "message_count": self.message_count,
+            "imported_summaries": self.record.compartments.iter().map(|c| c.sequence).collect::<Vec<_>>(),
+            "dropped_summaries": self.dropped_summaries,
+            "returned_raw": self.returned_raw,
             "marker_part": self.record.marker_part,
             "marker_key": if self.marker_already_keyed { "present" } else { "to_write" },
             "marker_key_value": {"tag_checkpoint": self.record.tag_checkpoint, "session": self.record.session},
@@ -621,6 +719,129 @@ struct TagRow {
     status: String,
     drop_mode: Option<String>,
     owner: Option<String>,
+}
+
+/// Validate the imported side independently of cut selection so the selected
+/// cut cannot publish a partial compartment or leave a hole before the cut.
+fn imported_prefix_len(spans: &[(usize, usize)], u: usize) -> Result<usize, Refusal> {
+    if u == 1 {
+        return Err(Refusal::new(
+            "empty_prefix",
+            "U is the first counted message",
+        ));
+    }
+    if spans.iter().any(|&(start, end)| start < u && u <= end) {
+        return Err(Refusal::new("cut_straddled", "a summary crosses U"));
+    }
+    let imported = spans.iter().take_while(|&&(_, end)| end < u).count();
+    if imported == 0 || spans[imported - 1].1 != u - 1 {
+        return Err(Refusal::new(
+            "prefix_end_mismatch",
+            "the imported prefix must end at P = U - 1",
+        ));
+    }
+    Ok(imported)
+}
+
+fn choose_cut<'a>(
+    host: &'a HostSession,
+    spans: &[(usize, usize)],
+    t: usize,
+) -> Result<&'a MessageRow, Refusal> {
+    let mut adjacency_conflict = false;
+    for message in host.messages.iter().rev() {
+        let Some(&u) = host.position.get(&message.id) else {
+            continue;
+        };
+        if u > t + 1
+            || (u != t + 1 && !spans.iter().any(|&(start, _)| start == u))
+            || message.role != "user"
+        {
+            continue;
+        }
+        let other = host
+            .parts
+            .get(&message.id)
+            .into_iter()
+            .flatten()
+            .filter(|part| part.kind != "compaction")
+            .collect::<Vec<_>>();
+        if !other.is_empty() && other.iter().all(|part| part.synthetic) {
+            continue;
+        }
+        if host.messages.iter().any(|neighbour| {
+            neighbour.id != message.id
+                && neighbour.time >= message.time
+                && neighbour.time <= message.time.saturating_add(1)
+        }) {
+            adjacency_conflict = true;
+            continue;
+        }
+        return Ok(message);
+    }
+    Err(if adjacency_conflict {
+        Refusal::new(
+            "adjacency_conflict",
+            "every eligible carrier has a neighbour at U.time or U.time + 1",
+        )
+    } else {
+        Refusal::new(
+            "no_eligible_cut",
+            "no eligible user message at a summary start or T + 1",
+        )
+    })
+}
+
+/// Model the writer's ordering without generating ids or modifying SQL rows.
+/// The old summary is reinserted after U; all other completed marker pairs survive.
+fn check_projected_marker(
+    host: &HostSession,
+    old_cut: &str,
+    old_summary: &str,
+    old_part: &str,
+    u: &MessageRow,
+) -> Result<(), Refusal> {
+    let mut projected = host.clone();
+    projected
+        .messages
+        .retain(|message| message.id != old_summary);
+    projected.parts.remove(old_summary);
+    if let Some(parts) = projected.parts.get_mut(old_cut) {
+        parts.retain(|part| part.id != old_part);
+    }
+    projected
+        .parts
+        .entry(u.id.clone())
+        .or_default()
+        .push(PartRow {
+            id: old_part.into(),
+            kind: "compaction".into(),
+            call_id: None,
+            blank_text: false,
+            synthetic: false,
+            taggable: false,
+        });
+    let mut summary = host
+        .messages
+        .iter()
+        .find(|message| message.id == old_summary)
+        .unwrap()
+        .clone();
+    summary.parent = Some(u.id.clone());
+    summary.time = u.time + 1;
+    projected.messages.push(summary);
+    projected
+        .messages
+        .sort_by(|a, b| (a.time, &a.id).cmp(&(b.time, &b.id)));
+    if !in_effect_marker(&projected).is_some_and(|(index, summary)| {
+        projected.messages[index].id == u.id && summary.id == old_summary
+    }) {
+        return Err(Refusal::new(
+            "marker_shadowed",
+            "a surviving marker would be selected instead of the new marker at U",
+        ));
+    }
+    Ok(())
 }
 
 /// Compute the move of `session` from the three stores, read-only.
@@ -815,7 +1036,8 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
             ),
         ));
     }
-    let cut = host.messages[cut_index].id.clone();
+    let old_cut = host.messages[cut_index].id.clone();
+    let cut = old_cut.clone();
     let summary_id = summary.id.clone();
     let marker_parts: Vec<&PartRow> = host.parts[&cut]
         .iter()
@@ -831,13 +1053,18 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
         ));
     };
     let marker_part = marker.id.clone();
-    if let Some(state) = marker_state.filter(|state| !state.trim().is_empty()) {
-        let state: Value = serde_json::from_str(&state).map_err(|error| {
+    let state = marker_state
+        .as_deref()
+        .filter(|state| !state.trim().is_empty())
+        .map(serde_json::from_str::<Value>)
+        .transpose()
+        .map_err(|error| {
             Refusal::new(
                 "marker_state_mismatch",
                 format!("compaction_marker_state: {error}"),
             )
         })?;
+    if let Some(state) = &state {
         for (field, expected) in [
             ("boundaryMessageId", cut.as_str()),
             ("compactionPartId", marker_part.as_str()),
@@ -885,41 +1112,48 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
         }
     };
 
-    // Compartments: endpoints must be real messages of this session.
+    // Admission uses counted positions; raw host indexes are only for marker selection.
     let mut compartments = Vec::new();
-    let mut coverage_end = 0;
+    let mut spans = Vec::new();
     for (sequence, start_id, start_block, end_id, end_block, text, rest) in compartment_rows {
-        let part_at = |mid: &str, block: Option<i64>| -> Result<Option<String>, Refusal> {
-            let Some(block) = block else { return Ok(None) };
-            host.parts
-                .get(mid)
-                .and_then(|parts| parts.get(usize::try_from(block).ok()?))
-                .map(|part| Some(part.id.clone()))
-                .ok_or_else(|| {
-                    Refusal::new(
-                        "summary_boundary_unrepresentable",
-                        format!("compartment {sequence} names part {block} of {mid}, which does not exist"),
-                    )
-                })
-        };
+        if start_block.is_some() || end_block.is_some() {
+            return Err(Refusal::new(
+                "block_index",
+                format!("compartment {sequence} has a block index"),
+            ));
+        }
+        if start_id.is_empty() || end_id.is_empty() {
+            return Err(Refusal::new(
+                "summary_id_missing",
+                format!("compartment {sequence} has a missing endpoint id"),
+            ));
+        }
         for mid in [&start_id, &end_id] {
-            if !host.position.contains_key(mid.as_str()) || *mid == summary_id {
+            if !host.position.contains_key(mid.as_str()) {
                 return Err(Refusal::new(
-                    "summary_boundary_unrepresentable",
+                    "summary_endpoint_missing",
                     format!(
                         "compartment {sequence} endpoint {mid:?} is not a message of the session"
                     ),
                 ));
             }
         }
-        coverage_end = host.position[end_id.as_str()];
+        let start = host.position[&start_id];
+        let end = host.position[&end_id];
+        if start > end {
+            return Err(Refusal::new(
+                "summary_inverted",
+                format!("compartment {sequence} starts after its end"),
+            ));
+        }
+        spans.push((start, end));
         let (title, content, p1, p2, p3, p4) = text;
         let (importance, episode_type, legacy, created_at) = rest;
         compartments.push(ImportedCompartment {
             sequence,
-            start_part: part_at(&start_id, start_block)?,
+            start_part: None,
             start_message_id: start_id,
-            end_part: part_at(&end_id, end_block)?,
+            end_part: None,
             end_message_id: end_id,
             title,
             content,
@@ -933,12 +1167,63 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
             created_at,
         });
     }
-    if cut_index > coverage_end {
+    if spans[0].0 != 1 {
         return Err(Refusal::new(
-            "marker_state_mismatch",
-            format!("the cut {cut} lies after the last summarized message"),
+            "prefix_gap",
+            "the first summary must start at position 1",
         ));
     }
+    if spans.windows(2).any(|pair| pair[1].0 != pair[0].1 + 1) {
+        return Err(Refusal::new(
+            "prefix_not_tiled",
+            "summaries overlap or leave a gap",
+        ));
+    }
+    let target = state
+        .as_ref()
+        .and_then(|state| state["targetEndMessageId"].as_str());
+    let t = target
+        .and_then(|target| host.position.get(target))
+        .copied()
+        .ok_or_else(|| {
+            Refusal::new(
+                "fold_end_missing",
+                "targetEndMessageId is not a counted message",
+            )
+        })?;
+    if !spans.iter().any(|&(start, end)| start <= t && t <= end) {
+        return Err(Refusal::new(
+            "fold_end_uncovered",
+            "T is not covered by a summary",
+        ));
+    }
+    let carrier = choose_cut(&host, &spans, t)?;
+    let cut = carrier.id.clone();
+    let u = host.position[&cut];
+    let imported = imported_prefix_len(&spans, u)?;
+    let dropped_summaries = compartments[imported..]
+        .iter()
+        .map(|c| c.sequence)
+        .collect();
+    compartments.truncate(imported);
+    let p = host
+        .messages
+        .iter()
+        .find(|message| host.position.get(&message.id) == Some(&(u - 1)))
+        .unwrap()
+        .id
+        .clone();
+    let returned_raw = host
+        .messages
+        .iter()
+        .filter(|message| {
+            host.position
+                .get(&message.id)
+                .is_some_and(|&pos| u <= pos && pos <= t)
+        })
+        .map(|message| message.id.clone())
+        .collect();
+    check_projected_marker(&host, &old_cut, &summary_id, &marker_part, carrier)?;
 
     // Drops: resolve every target after the cut to its OpenCode part.
     let by_number: HashMap<u64, &TagRow> = tags.iter().map(|tag| (tag.number, tag)).collect();
@@ -954,7 +1239,7 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
             targets.push((*number, DropKind::Queued, *queued_at));
         }
     }
-    let after_cut = |mid: &str| host.position.get(mid).map(|index| *index >= cut_index);
+    let after_cut = |mid: &str| host.position.get(mid).map(|index| *index >= u);
     let mut positional: HashMap<&str, Vec<(PositionalKind, usize, u64)>> = HashMap::new();
     for tag in &tags {
         if tag.kind == "message" || tag.kind == "file" {
@@ -982,12 +1267,14 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
     }
     let mut drops = Vec::new();
     let mut behind_cut = 0;
-    let mut missing = Vec::new();
+    let missing = Vec::new();
     let mut carried_parts = HashSet::new();
     for (number, kind, queued_at) in targets {
         let Some(tag) = by_number.get(&number) else {
-            missing.push(format!("tag {number} (queued drop of an unknown tag)"));
-            continue;
+            return Err(Refusal::new(
+                "drop_target_missing",
+                format!("queued drop names unknown tag {number}"),
+            ));
         };
         let located = match tag.kind.as_str() {
             "message" | "file" => {
@@ -1016,15 +1303,31 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
                 }
             }
             "tool" => {
+                if tag
+                    .owner
+                    .as_deref()
+                    .is_some_and(|owner| after_cut(owner) == Some(false))
+                {
+                    behind_cut += 1;
+                    continue;
+                }
                 let candidates: Vec<&(&str, &str)> = tool_parts
                     .get(tag.address.as_str())
                     .into_iter()
                     .flatten()
                     .filter(|(mid, _)| tag.owner.as_deref().is_none_or(|owner| owner == *mid))
                     .collect();
+                if !candidates.is_empty()
+                    && candidates
+                        .iter()
+                        .all(|(mid, _)| after_cut(mid) == Some(false))
+                {
+                    behind_cut += 1;
+                    continue;
+                }
                 if candidates.len() > 1 {
                     return Err(Refusal::new(
-                        "target_ambiguous",
+                        "drop_target_ambiguous",
                         format!(
                             "tag {number}: call {} (owner {:?}) matches {} tool parts",
                             tag.address,
@@ -1050,13 +1353,27 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
             }
         };
         let Some((mid, part)) = located else {
-            missing.push(format!("tag {number} at {:?}", tag.address));
-            continue;
+            return Err(Refusal::new(
+                "drop_target_missing",
+                format!("tag {number} at {:?} cannot be resolved", tag.address),
+            ));
         };
         if !carried_parts.insert((mid.clone(), part.clone())) {
             return Err(Refusal::new(
-                "target_ambiguous",
+                "drop_target_ambiguous",
                 format!("tag {number} resolves to part {part} of {mid}, already carried for another tag"),
+            ));
+        }
+        if !host
+            .parts
+            .get(&mid)
+            .into_iter()
+            .flatten()
+            .any(|row| row.id == part && row.taggable)
+        {
+            return Err(Refusal::new(
+                "drop_target_untagged",
+                format!("part {part} of {mid} cannot carry a runner tag"),
             ));
         }
         drops.push(CarriedDrop {
@@ -1072,6 +1389,7 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
     }
     drops.sort_by(|a, b| (a.source_tag, &a.mid, &a.part).cmp(&(b.source_tag, &b.mid, &b.part)));
     Ok(Plan {
+        marker_carrier: old_cut,
         record: MoveRecord {
             version: RECORD_VERSION,
             session: session.to_owned(),
@@ -1082,6 +1400,10 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
             compartments,
             drops,
         },
+        p,
+        message_count: u - 1,
+        dropped_summaries,
+        returned_raw,
         marker_before,
         marker_already_keyed,
         behind_cut,
@@ -1128,6 +1450,16 @@ fn interrupted(step: &str) -> impl Fn(rusqlite::Error) -> MoveError + '_ {
 /// Write the plan: the marker checkpoint key first, the moved record last.
 pub fn apply(paths: &StorePaths, plan: &Plan, stop: Option<StopAfter>) -> Result<(), MoveError> {
     let record = &plan.record;
+    // Until the writer can relocate the marker, applying a different cut would
+    // store a checkpoint at a cut the host marker does not carry. Refuse before
+    // opening a writer, including reruns with an already-keyed old marker.
+    if record.cut != plan.marker_carrier {
+        return Err(Refusal::new(
+            "source_changed",
+            "the planned cut requires marker relocation; no checkpoint was written",
+        )
+        .into());
+    }
     if !plan.marker_already_keyed {
         let mut opencode = open_writer(&paths.opencode_db)?;
         let tx = opencode
@@ -1204,7 +1536,7 @@ pub fn run(
 }
 
 const USAGE: &str = "usage: ck-mc offline move-session --session <id> --opencode-db <path> \
-     --context-db <path> --store-db <path> [--dry-run]";
+     --context-db <path> --store-db <path> [--plan | --dry-run]";
 
 fn parse_args(args: &[String]) -> Result<(StorePaths, String, bool), String> {
     let mut session = None;
@@ -1226,7 +1558,7 @@ fn parse_args(args: &[String]) -> Result<(StorePaths, String, bool), String> {
             "--opencode-db" => opencode_db = Some(PathBuf::from(value()?)),
             "--context-db" => context_db = Some(PathBuf::from(value()?)),
             "--store-db" => store_db = Some(PathBuf::from(value()?)),
-            "--dry-run" => dry_run = true,
+            "--plan" | "--dry-run" => dry_run = true,
             other => return Err(format!("unknown argument {other:?}; {USAGE}")),
         }
     }

@@ -113,6 +113,40 @@ pub(crate) fn write_stores(dir: &Path) -> StorePaths {
     }
 }
 
+/// The plugin fixture includes a queued file drop. Successful move tests remove
+/// that stamp explicitly: files have no runner tag and cannot be carried.
+fn write_movable_stores(dir: &Path) -> StorePaths {
+    let paths = write_stores(dir);
+    Connection::open(&paths.context_db)
+        .unwrap()
+        .execute("DELETE FROM pending_ops WHERE tag_id=15", [])
+        .unwrap();
+    paths
+}
+
+/// The checkpoint-only writer needs a marker already on the selected cut. Put
+/// the old summary two ticks later so it does not violate carrier adjacency.
+fn write_writer_stores(dir: &Path) -> StorePaths {
+    let paths = write_movable_stores(dir);
+    host_sql(&paths, "UPDATE part SET message_id='msg_m007' WHERE json_extract(data,'$.type')='compaction';
+        UPDATE message SET data=json_set(data,'$.parentID','msg_m007'),time_created=7002 WHERE json_extract(data,'$.summary')=1");
+    context_sql(&paths, "UPDATE session_meta SET compaction_marker_state=json_set(compaction_marker_state,'$.boundaryMessageId','msg_m007')");
+    paths
+}
+
+/// Capture every database and WAL, not just the rows the writer currently edits.
+/// SQLite's disposable shared-memory index is not persistent store content.
+fn all_store_bytes(paths: &StorePaths) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    database_files(paths)
+        .into_iter()
+        .filter(|path| !path.to_string_lossy().ends_with("-shm"))
+        .map(|path| {
+            let bytes = std::fs::read(&path).ok();
+            (path, bytes)
+        })
+        .collect()
+}
+
 fn marker_data(paths: &StorePaths) -> Value {
     let part = fixture()["expected"]["marker_part"]
         .as_str()
@@ -154,10 +188,18 @@ fn moved(paths: &StorePaths) -> Plan {
 }
 
 fn refusal(paths: &StorePaths) -> Refusal {
-    match run(paths, &fixture_session(), false, &NoHolders, None) {
+    let before = all_store_bytes(paths);
+    let refused = match run(paths, &fixture_session(), false, &NoHolders, None) {
         Err(MoveError::Refused(refusal)) => refusal,
         other => panic!("expected a refusal, got {other:?}"),
-    }
+    };
+    assert_eq!(
+        all_store_bytes(paths),
+        before,
+        "{} wrote a store",
+        refused.code
+    );
+    refused
 }
 
 fn pairs(value: &Value) -> BTreeSet<(String, String)> {
@@ -186,7 +228,7 @@ fn carried(record: &MoveRecord, kind: DropKind) -> BTreeSet<(String, String)> {
 #[test]
 fn move_carries_summaries_cut_checkpoint_and_drops_after_the_cut() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = write_stores(dir.path());
+    let paths = write_writer_stores(dir.path());
     let fixture = fixture();
     let expected = &fixture["expected"];
     let before = snapshot(&paths);
@@ -198,7 +240,9 @@ fn move_carries_summaries_cut_checkpoint_and_drops_after_the_cut() {
         record.tag_checkpoint,
         expected["tag_checkpoint"].as_u64().unwrap()
     );
-    assert_eq!(record.cut, expected["cut"].as_str().unwrap());
+    assert_eq!(record.cut, "msg_m007");
+    assert_eq!(plan.p, "msg_m006");
+    assert_eq!(plan.message_count, 6);
     assert_eq!(
         record.marker_part,
         expected["marker_part"].as_str().unwrap()
@@ -239,6 +283,9 @@ fn move_carries_summaries_cut_checkpoint_and_drops_after_the_cut() {
     assert_eq!(
         carried(&record, DropKind::Queued),
         pairs(&expected["queued"])
+            .into_iter()
+            .filter(|(_, part)| part != "prt_m009_b")
+            .collect()
     );
     assert_eq!(
         plan.behind_cut,
@@ -273,7 +320,7 @@ fn record_of(paths: &StorePaths) -> String {
 #[test]
 fn move_dry_run_prints_the_plan_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = write_stores(dir.path());
+    let paths = write_movable_stores(dir.path());
     // Each database and its WAL, byte for byte. The `-shm` file is SQLite's
     // shared-memory index, which any reader may rebuild; it holds no data.
     let bytes = |paths: &StorePaths| {
@@ -297,7 +344,7 @@ fn move_dry_run_prints_the_plan_and_writes_nothing() {
     let value = plan.to_value();
     assert_eq!(value["tag_checkpoint"], 20);
     assert_eq!(value["drops"]["applied"], 2);
-    assert_eq!(value["drops"]["queued"], 3);
+    assert_eq!(value["drops"]["queued"], 2);
     assert_eq!(value["marker_key"], "to_write");
     assert!(record(&paths).is_none());
 }
@@ -305,14 +352,14 @@ fn move_dry_run_prints_the_plan_and_writes_nothing() {
 #[test]
 fn move_rerun_after_a_crash_at_each_write_step_ends_identical() {
     let finished = tempfile::tempdir().unwrap();
-    let finished = write_stores(finished.path());
+    let finished = write_writer_stores(finished.path());
     moved(&finished);
     let reference = snapshot(&finished);
 
     // A crash after the marker key: the session is not moved yet, because the
     // moved record, the commit point, is written last.
     let crashed = tempfile::tempdir().unwrap();
-    let crashed = write_stores(crashed.path());
+    let crashed = write_writer_stores(crashed.path());
     let stopped = run(
         &crashed,
         &fixture_session(),
@@ -368,7 +415,7 @@ fn move_refuses_each_case_by_name_without_writing() {
             }),
         ),
         (
-            "target_ambiguous",
+            "drop_target_ambiguous",
             Box::new(|paths| {
                 Connection::open(&paths.opencode_db).unwrap().execute(
                     "INSERT INTO part SELECT 'prt_m010_z', message_id, session_id, time_created, time_updated, data FROM part WHERE id='prt_m010_a'",
@@ -429,6 +476,32 @@ fn move_refuses_each_case_by_name_without_writing() {
             }),
         ),
         (
+            "marker_state_mismatch",
+            Box::new(|paths| {
+                Connection::open(&paths.context_db)
+                    .unwrap()
+                    .execute("UPDATE session_meta SET compaction_marker_state='{'", [])
+                    .unwrap();
+            }),
+        ),
+        (
+            "marker_not_standalone",
+            Box::new(|paths| {
+                Connection::open(&paths.opencode_db).unwrap().execute(
+                    "UPDATE message SET data=json_set(data,'$.providerID','other') WHERE json_extract(data,'$.summary')=1", [],
+                ).unwrap();
+            }),
+        ),
+        (
+            "summaries_missing",
+            Box::new(|paths| {
+                Connection::open(&paths.context_db)
+                    .unwrap()
+                    .execute("DELETE FROM compartments", [])
+                    .unwrap();
+            }),
+        ),
+        (
             "queue_invalid",
             Box::new(|paths| {
                 Connection::open(&paths.context_db)
@@ -443,7 +516,7 @@ fn move_refuses_each_case_by_name_without_writing() {
     ];
     for (code, break_source) in cases {
         let dir = tempfile::tempdir().unwrap();
-        let paths = write_stores(dir.path());
+        let paths = write_movable_stores(dir.path());
         break_source(&paths);
         let before = snapshot(&paths);
         let refused = refusal(&paths);
@@ -452,12 +525,14 @@ fn move_refuses_each_case_by_name_without_writing() {
     }
     // Another session, and a held store.
     let dir = tempfile::tempdir().unwrap();
-    let paths = write_stores(dir.path());
+    let paths = write_writer_stores(dir.path());
+    let before = all_store_bytes(&paths);
     let other = run(&paths, "ses_other", false, &NoHolders, None);
     assert!(
         matches!(&other, Err(MoveError::Refused(r)) if r.code == "not_standalone_opencode1"),
         "{other:?}"
     );
+    assert_eq!(all_store_bytes(&paths), before);
     let held = run(
         &paths,
         &fixture_session(),
@@ -469,6 +544,7 @@ fn move_refuses_each_case_by_name_without_writing() {
         matches!(&held, Err(MoveError::Refused(r)) if r.code == "stores_in_use" && r.detail.contains("opencode/4242")),
         "{held:?}"
     );
+    assert_eq!(all_store_bytes(&paths), before);
     moved(&paths);
     assert_eq!(refusal(&paths).code, "already_moved");
 }
@@ -477,7 +553,8 @@ fn move_refuses_each_case_by_name_without_writing() {
 #[test]
 fn move_refuses_while_another_process_holds_a_store() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = write_stores(dir.path());
+    let paths = write_movable_stores(dir.path());
+    let before = all_store_bytes(&paths);
     let mut child = std::process::Command::new("sh")
         .arg("-c")
         .arg("exec 3<\"$1\"; echo ready; exec sleep 30")
@@ -500,6 +577,7 @@ fn move_refuses_while_another_process_holds_a_store() {
         "{held:?}"
     );
     assert!(record(&paths).is_none());
+    assert_eq!(all_store_bytes(&paths), before);
     // With the holder gone the same check passes.
     check_holders(&paths, &Lsof).unwrap();
 }
@@ -510,6 +588,427 @@ fn part(id: &str, kind: &str) -> PartRow {
         kind: kind.into(),
         call_id: None,
         blank_text: false,
+        synthetic: false,
+        taggable: kind == "text",
+    }
+}
+
+fn context_sql(paths: &StorePaths, sql: &str) {
+    Connection::open(&paths.context_db)
+        .unwrap()
+        .execute_batch(sql)
+        .unwrap();
+}
+
+fn host_sql(paths: &StorePaths, sql: &str) {
+    Connection::open(&paths.opencode_db)
+        .unwrap()
+        .execute_batch(sql)
+        .unwrap();
+}
+
+#[test]
+fn admission_refusal_codes_are_exact_and_all_three_stores_are_unchanged() {
+    let cases = [
+        ("block_index", "UPDATE compartments SET start_block_index=0 WHERE sequence=1", ""),
+        ("summary_id_missing", "UPDATE compartments SET start_message_id=NULL WHERE sequence=1", ""),
+        ("summary_endpoint_missing", "UPDATE compartments SET end_message_id='absent' WHERE sequence=1", ""),
+        ("summary_inverted", "UPDATE compartments SET start_message_id='msg_m006',end_message_id='msg_m003' WHERE sequence=2", ""),
+        ("prefix_gap", "UPDATE compartments SET start_message_id='msg_m002' WHERE sequence=1", ""),
+        ("prefix_not_tiled", "UPDATE compartments SET start_message_id='msg_m002' WHERE sequence=2", ""),
+        ("fold_end_missing", "UPDATE session_meta SET compaction_marker_state=json_remove(compaction_marker_state,'$.targetEndMessageId')", ""),
+        ("fold_end_missing", "UPDATE session_meta SET compaction_marker_state=json_set(compaction_marker_state,'$.targetEndMessageId','absent')", ""),
+        ("fold_end_uncovered", "UPDATE session_meta SET compaction_marker_state=json_set(compaction_marker_state,'$.targetEndMessageId','msg_m012')", ""),
+        ("no_eligible_cut", "", "UPDATE message SET data=json_set(data,'$.role','assistant') WHERE id IN ('msg_m001','msg_m003','msg_m007')"),
+        ("empty_prefix", "", "UPDATE message SET data=json_set(data,'$.role','assistant') WHERE id IN ('msg_m003','msg_m007')"),
+        ("cut_straddled", "UPDATE session_meta SET compaction_marker_state=json_set(compaction_marker_state,'$.targetEndMessageId','msg_m003')", "UPDATE message SET data=json_set(data,'$.role','user') WHERE id='msg_m004'"),
+    ];
+    for (code, context, host) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_movable_stores(dir.path());
+        context_sql(&paths, context);
+        host_sql(&paths, host);
+        assert_eq!(refusal(&paths).code, code);
+    }
+}
+
+#[test]
+fn prefix_end_mismatch_defense_is_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_movable_stores(dir.path());
+    let before = all_store_bytes(&paths);
+    // Full admission rejects a gap as prefix_not_tiled first. Exercise the
+    // independent prefix guard with a gap ending just before P.
+    assert_eq!(
+        imported_prefix_len(&[(1, 2), (5, 6)], 4).unwrap_err().code,
+        "prefix_end_mismatch"
+    );
+    assert_eq!(all_store_bytes(&paths), before);
+}
+
+fn add_message(paths: &StorePaths, id: &str, time: i64, data: &str) {
+    Connection::open(&paths.opencode_db)
+        .unwrap()
+        .execute(
+            "INSERT INTO message VALUES (?1,?2,?3,?3,?4)",
+            params![id, fixture_session(), time, data],
+        )
+        .unwrap();
+}
+
+#[test]
+fn adjacency_at_u_time_and_u_time_plus_one_refuses_without_writes() {
+    for time in [7000, 7001] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_movable_stores(dir.path());
+        host_sql(&paths, "UPDATE message SET data=json_set(data,'$.role','assistant') WHERE id IN ('msg_m001','msg_m003')");
+        add_message(
+            &paths,
+            "neighbour",
+            time,
+            r#"{"role":"assistant","summary":true,"finish":"stop"}"#,
+        );
+        assert_eq!(refusal(&paths).code, "adjacency_conflict");
+    }
+}
+
+#[test]
+fn projected_marker_refuses_a_surviving_pair_between_u_and_w() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_movable_stores(dir.path());
+    host_sql(&paths, "UPDATE part SET message_id='msg_m011' WHERE json_extract(data,'$.type')='compaction';
+        UPDATE message SET data=json_set(data,'$.parentID','msg_m011'),time_created=11001 WHERE json_extract(data,'$.summary')=1;
+        INSERT INTO part SELECT 'shadow_part','msg_m009',session_id,9000,9000,'{\"type\":\"compaction\"}' FROM part LIMIT 1");
+    context_sql(&paths, "UPDATE session_meta SET compaction_marker_state=json_set(compaction_marker_state,'$.boundaryMessageId','msg_m011')");
+    add_message(
+        &paths,
+        "shadow_summary",
+        9001,
+        r#"{"role":"assistant","summary":true,"finish":"stop","parentID":"msg_m009"}"#,
+    );
+    assert_eq!(refusal(&paths).code, "marker_shadowed");
+    let host = load_host_session(
+        &open_read_only(&paths.opencode_db).unwrap(),
+        &fixture_session(),
+    )
+    .unwrap();
+    assert!(host
+        .messages
+        .iter()
+        .any(|message| message.id == "shadow_summary"));
+    assert!(host.parts["msg_m009"]
+        .iter()
+        .any(|part| part.id == "shadow_part"));
+}
+
+#[test]
+fn counting_matches_plugin_known_answer_and_is_invariant_under_relocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_movable_stores(dir.path());
+    host_sql(&paths, "DELETE FROM part; DELETE FROM message");
+    for (id, time, data) in [
+        ("b", 10, r#"{"role":"user"}"#),
+        ("a", 10, r#"{"role":"assistant"}"#),
+        ("skip_bool", 11, r#"{"summary":true,"finish":"stop"}"#),
+        ("skip_integer", 12, r#"{"summary":1,"finish":"stop"}"#),
+        ("skip_real", 13, r#"{"summary":1.0,"finish":"stop"}"#),
+        ("unfinished", 14, r#"{"summary":true}"#),
+        ("other_finish", 15, r#"{"summary":true,"finish":"length"}"#),
+        ("string_summary", 16, r#"{"summary":"1","finish":"stop"}"#),
+        ("malformed", 17, "{"),
+        ("ordinary_stop", 18, r#"{"finish":"stop"}"#),
+    ] {
+        add_message(&paths, id, time, data);
+    }
+    let expected = [
+        "a",
+        "b",
+        "unfinished",
+        "other_finish",
+        "string_summary",
+        "malformed",
+        "ordinary_stop",
+    ];
+    let read = || {
+        let host = load_host_session(
+            &open_read_only(&paths.opencode_db).unwrap(),
+            &fixture_session(),
+        )
+        .unwrap();
+        let mut counted = host.position.into_iter().collect::<Vec<_>>();
+        counted.sort_by_key(|(_, position)| *position);
+        counted
+    };
+    let answer = expected
+        .iter()
+        .enumerate()
+        .map(|(index, id)| ((*id).to_owned(), index + 1))
+        .collect::<Vec<_>>();
+    assert_eq!(read(), answer);
+    host_sql(
+        &paths,
+        "UPDATE message SET time_created=100 WHERE id LIKE 'skip_%'",
+    );
+    assert_eq!(read(), answer);
+}
+
+#[test]
+fn runner_tag_eligibility_matches_text_error_and_media_known_answers() {
+    for (name, part, expected) in [
+        ("user text", json!({"type":"text","text":"hello"}), true),
+        ("empty text", json!({"type":"text","text":""}), false),
+        ("whitespace text", json!({"type":"text","text":" "}), true),
+        (
+            "user file",
+            json!({"type":"file","mime":"text/plain","url":"file:///f"}),
+            false,
+        ),
+        (
+            "reasoning",
+            json!({"type":"reasoning","text":"thought"}),
+            false,
+        ),
+        (
+            "tool call",
+            json!({"type":"tool","state":{"status":"running","output":"not finished"}}),
+            false,
+        ),
+        (
+            "tool result",
+            json!({"type":"tool","state":{"status":"completed","output":"result"}}),
+            true,
+        ),
+        (
+            "error result",
+            json!({"type":"tool","state":{"status":"error","error":"failed"}}),
+            true,
+        ),
+        (
+            "whitespace result",
+            json!({"type":"tool","state":{"status":"completed","output":" "}}),
+            true,
+        ),
+        (
+            "empty result",
+            json!({"type":"tool","state":{"status":"completed","output":""}}),
+            false,
+        ),
+        (
+            "structured only",
+            json!({"type":"tool","state":{"status":"completed","output":{"answer":42}}}),
+            false,
+        ),
+        (
+            "image-only result",
+            json!({"type":"tool","state":{"status":"completed","output":"","attachments":[{"type":"file","mime":"image/png","url":"data:image/png;base64,AA=="}]}}),
+            true,
+        ),
+        (
+            "media-only result",
+            json!({"type":"tool","state":{"status":"completed","output":"","attachments":[{"type":"file","mime":"application/pdf","url":"file:///f.pdf"}]}}),
+            true,
+        ),
+        (
+            "text attachment",
+            json!({"type":"tool","state":{"status":"completed","output":"","attachments":[{"type":"text","text":"attached text"}]}}),
+            true,
+        ),
+        (
+            "opaque attachment",
+            json!({"type":"tool","state":{"status":"completed","output":"","attachments":[{"unknown":42}]}}),
+            false,
+        ),
+    ] {
+        assert_eq!(runner_taggable_part(&part), expected, "{name}");
+    }
+}
+
+#[test]
+fn drops_missing_and_untagged_fail_closed_for_applied_and_queued_targets() {
+    for queued in [false, true] {
+        for (code, host) in [
+            ("drop_target_missing", "DELETE FROM part WHERE message_id='msg_m008'; DELETE FROM message WHERE id='msg_m008'"),
+            ("drop_target_untagged", "UPDATE part SET data=json_set(data,'$.state.status','running') WHERE id='prt_m008_c'"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = write_movable_stores(dir.path());
+            if queued {
+                context_sql(&paths, "UPDATE tags SET status='active' WHERE tag_number=12; INSERT INTO pending_ops(session_id,tag_id,operation,queued_at,harness) SELECT session_id,12,'drop',1,'opencode' FROM session_meta");
+            }
+            host_sql(&paths, host);
+            assert_eq!(refusal(&paths).code, code);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_stores(dir.path());
+        if !queued {
+            context_sql(&paths, "DELETE FROM pending_ops WHERE tag_id=15; UPDATE tags SET status='dropped' WHERE tag_number=15");
+        }
+        assert_eq!(refusal(&paths).code, "drop_target_untagged");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_movable_stores(dir.path());
+    context_sql(&paths, "UPDATE pending_ops SET tag_id=999 WHERE tag_id=16");
+    assert_eq!(refusal(&paths).code, "drop_target_missing");
+}
+
+#[test]
+fn plan_flag_prints_the_certification_inputs_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_movable_stores(dir.path());
+    let args = [
+        "move-session",
+        "--plan",
+        "--session",
+        &fixture_session(),
+        "--opencode-db",
+        paths.opencode_db.to_str().unwrap(),
+        "--context-db",
+        paths.context_db.to_str().unwrap(),
+        "--store-db",
+        paths.store_db.to_str().unwrap(),
+    ]
+    .map(str::to_owned);
+    let (parsed, session, read_only) = parse_args(&args).unwrap();
+    assert!(read_only);
+    let before = all_store_bytes(&paths);
+    let Outcome::Planned(plan) = run(&parsed, &session, read_only, &NoHolders, None).unwrap()
+    else {
+        panic!("--plan wrote")
+    };
+    assert_eq!(plan.to_value()["U"], "msg_m007");
+    assert_eq!(plan.to_value()["P"], "msg_m006");
+    assert_eq!(plan.to_value()["message_count"], 6);
+    assert_eq!(all_store_bytes(&paths), before);
+}
+
+#[test]
+fn apply_refuses_a_cut_without_marker_relocation_even_if_already_keyed() {
+    for keyed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_movable_stores(dir.path());
+        if keyed {
+            Connection::open(&paths.opencode_db).unwrap().execute(
+                "UPDATE part SET data=json_set(data,'$.cortexkit',json(?1)) WHERE json_extract(data,'$.type')='compaction'",
+                [json!({"tag_checkpoint":20,"session":fixture_session()}).to_string()],
+            ).unwrap();
+        }
+        assert_eq!(refusal(&paths).code, "source_changed");
+    }
+}
+
+#[test]
+fn carrier_predicate_excludes_all_synthetic_parts_but_admits_no_parts() {
+    for field in ["synthetic", "syntheticTodoMarker"] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_movable_stores(dir.path());
+        host_sql(&paths, &format!("UPDATE part SET data=json_set(data,'$.{field}',json('true')) WHERE message_id='msg_m007'"));
+        let before = all_store_bytes(&paths);
+        let plan = plan(&paths, &fixture_session()).unwrap();
+        assert_eq!(plan.record.cut, "msg_m003");
+        assert_eq!(plan.message_count, 2);
+        assert_eq!(all_store_bytes(&paths), before);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_movable_stores(dir.path());
+    host_sql(&paths, "DELETE FROM part WHERE message_id='msg_m007'");
+    let before = all_store_bytes(&paths);
+    assert_eq!(
+        plan(&paths, &fixture_session()).unwrap().record.cut,
+        "msg_m007"
+    );
+    assert_eq!(all_store_bytes(&paths), before);
+}
+
+#[test]
+fn applied_and_queued_ambiguous_drops_refuse_the_same_code() {
+    for target in ["prt_m008_c", "prt_m010_a"] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_movable_stores(dir.path());
+        Connection::open(&paths.opencode_db).unwrap().execute(
+            "INSERT INTO part SELECT 'duplicate_tool',message_id,session_id,time_created,time_updated,data FROM part WHERE id=?1",
+            [target],
+        ).unwrap();
+        assert_eq!(refusal(&paths).code, "drop_target_ambiguous");
+    }
+}
+
+#[test]
+fn admission_matches_the_five_frozen_session_shapes() {
+    // Synthetic histories isolate distinct cut-selection shapes. The large
+    // case checks 2,010 returned rows without copying a live store.
+    for shape in [
+        "at_fold_end",
+        "published_later",
+        "raw_back",
+        "adjacent_newest",
+        "large_raw_back",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = write_movable_stores(dir.path());
+        let (u, t, dropped, raw_end) = match shape {
+            "at_fold_end" => (7, 6, vec![], 6),
+            "published_later" => (7, 6, vec![3], 6),
+            "raw_back" => (7, 8, vec![3], 8),
+            "adjacent_newest" => (7, 8, vec![3], 8),
+            "large_raw_back" => (7, 2016, vec![3], 2016),
+            _ => unreachable!(),
+        };
+        if shape != "at_fold_end" {
+            context_sql(&paths, "INSERT INTO compartments(session_id,sequence,start_message,end_message,start_message_id,end_message_id,title,content,importance,legacy,created_at,harness)
+                SELECT session_id,3,7,12,'msg_m007','msg_m012','late','late summary',50,0,1,'opencode' FROM session_meta");
+        }
+        if shape == "raw_back" {
+            host_sql(
+                &paths,
+                "UPDATE message SET data=json_set(data,'$.role','assistant') WHERE id='msg_m009'",
+            );
+        }
+        if shape == "adjacent_newest" {
+            add_message(
+                &paths,
+                "neighbour",
+                9001,
+                r#"{"summary":true,"finish":"stop"}"#,
+            );
+        }
+        if shape == "large_raw_back" {
+            for index in 13..=2017 {
+                add_message(
+                    &paths,
+                    &format!("msg_m{index:03}"),
+                    index * 1000,
+                    r#"{"role":"assistant"}"#,
+                );
+            }
+            context_sql(
+                &paths,
+                "UPDATE compartments SET end_message_id='msg_m2016' WHERE sequence=3",
+            );
+        }
+        context_sql(&paths, &format!("UPDATE session_meta SET compaction_marker_state=json_set(compaction_marker_state,'$.targetEndMessageId','msg_m{t:03}')"));
+        let before = all_store_bytes(&paths);
+        let plan = plan(&paths, &fixture_session()).unwrap();
+        assert_eq!(plan.record.cut, format!("msg_m{u:03}"), "{shape}");
+        assert_eq!(plan.p, "msg_m006", "{shape}");
+        assert_eq!(plan.message_count, 6, "{shape}");
+        assert_eq!(
+            plan.record
+                .compartments
+                .iter()
+                .map(|c| c.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "{shape}"
+        );
+        assert_eq!(plan.dropped_summaries, dropped, "{shape}");
+        assert_eq!(
+            plan.returned_raw,
+            (u..=raw_end)
+                .map(|index| format!("msg_m{index:03}"))
+                .collect::<Vec<_>>(),
+            "{shape}"
+        );
+        assert_eq!(all_store_bytes(&paths), before, "{shape}");
     }
 }
 
