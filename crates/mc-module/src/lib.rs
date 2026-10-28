@@ -12549,8 +12549,8 @@ mod tests {
     // slice merged together. Kept in its own files so the sequences it executes
     // read as one argument instead of being scattered through this module.
     mod broca_0_7_samples;
-    pub(crate) mod broca_rich_ui_stamp;
     mod broca_contract;
+    pub(crate) mod broca_rich_ui_stamp;
     mod guidance_get_golden;
     mod per_pass_cost;
     mod perf_audit_wire;
