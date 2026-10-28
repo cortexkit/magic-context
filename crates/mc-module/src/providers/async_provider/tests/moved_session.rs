@@ -42,13 +42,19 @@ pub(super) fn newest_marker_checkpoint(
     let rows = query
         .query_map([session], |row| row.get::<_, String>(0))
         .unwrap();
-    rows.filter_map(|raw| {
-        let data: Value = serde_json::from_str(&raw.unwrap()).ok()?;
-        let key: tags::MarkerCheckpoint = serde_json::from_value(data["cortexkit"].clone()).ok()?;
-        (key.session == session && key.message_count.is_some() && key.head_cut.is_some())
-            .then_some(key)
-    })
-    .next()
+    // The binding ends the iterator's borrows of `query` and `conn` before they
+    // drop; returning the chain directly would not compile.
+    #[allow(clippy::let_and_return)]
+    let checkpoint = rows
+        .filter_map(|raw| {
+            let data: Value = serde_json::from_str(&raw.unwrap()).ok()?;
+            let key: tags::MarkerCheckpoint =
+                serde_json::from_value(data["cortexkit"].clone()).ok()?;
+            (key.session == session && key.message_count.is_some() && key.head_cut.is_some())
+                .then_some(key)
+        })
+        .next();
+    checkpoint
 }
 
 /// The session as the runner reads it from `opencode.db`.
