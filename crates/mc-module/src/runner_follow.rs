@@ -4,6 +4,9 @@ use cortexkit_role_llm_runner::capabilities as caps;
 use serde_json::Value;
 use std::time::Duration;
 
+#[cfg(test)]
+pub(crate) mod held_calls;
+
 /// Four status probes per second while a stream is quiet bound completion latency
 /// without a tight polling loop.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(250);

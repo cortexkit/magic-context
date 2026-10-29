@@ -23,6 +23,8 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
+mod held_calls;
+
 struct TestClock(AtomicI64);
 impl Clock for TestClock {
     fn now_ms(&self) -> i64 {

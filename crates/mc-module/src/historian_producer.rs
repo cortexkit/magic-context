@@ -2758,6 +2758,7 @@ pub(crate) mod tests {
         /// Answer every llm-runner op bare instead of inside `{"result": ...}`,
         /// as a runner off the pinned reply shape would.
         bare: bool,
+        keep_stream_open: bool,
     }
 
     fn result_for_script(events: &[Value]) -> Value {
@@ -2835,7 +2836,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) struct FakeServer {
-        connection_file: PathBuf,
+        pub(crate) connection_file: PathBuf,
         log: Arc<Mutex<ServerLog>>,
         answers: Arc<Mutex<FakeAnswers>>,
         _temp: TempDir,
@@ -3089,13 +3090,15 @@ pub(crate) mod tests {
                                         )
                                         .await;
                                     }
-                                    send_stream_end(
-                                        &mut stream,
-                                        frame.header.channel,
-                                        frame.header.epoch,
-                                        frame.header.corr,
-                                    )
-                                    .await;
+                                    if !answers_task.lock().await.keep_stream_open {
+                                        send_stream_end(
+                                            &mut stream,
+                                            frame.header.channel,
+                                            frame.header.epoch,
+                                            frame.header.corr,
+                                        )
+                                        .await;
+                                    }
                                 }
                                 Some("run.status") => {
                                     log_task.lock().await.statuses.push(req["params"].clone());
@@ -3289,6 +3292,8 @@ pub(crate) mod tests {
         .await
         .unwrap()
     }
+
+    pub(crate) mod held_calls_tests;
 
     #[tokio::test]
     async fn lost_send_reply_retry_reuses_attempt_send_id_after_reconnect() {
