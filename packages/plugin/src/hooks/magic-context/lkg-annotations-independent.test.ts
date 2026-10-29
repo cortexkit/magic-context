@@ -265,7 +265,8 @@ for (const alreadyDropped of [false, true]) {
                 markTagDropped(f.db, f.sessionId, tag, "full");
             });
             // Frozen replay policy: retirement cannot rewrite served annotations on
-            // defer. A permitted SOFT rebuild may normalize the retired suffix away.
+            // a cache-preserving pass. The permitted rebuild that follows the user's
+            // flush below may normalize the retired suffix away.
             expect(f.old(replayed)?.parts[0].text).toBe(
                 `[dropped §${tag}§]${annotation === "note" ? note : hint}`,
             );
@@ -285,8 +286,9 @@ test("independent: pruned note stays frozen on defer and normalizes on a permitt
         pruneNoteNudgeAnchors(f.db, f.sessionId, new Set());
         markTagDropped(f.db, f.sessionId, tag, "full");
     });
-    // Frozen replay policy retains served annotations through defer; only the
-    // permitted SOFT rebuild below normalizes the retired note to a plain drop.
+    // Frozen replay policy retains served annotations through cache-preserving
+    // passes; only the permitted rebuild after the user's flush below
+    // normalizes the retired note to a plain drop.
     expect(f.old(replayed)?.parts[0].text).toBe(`[dropped §${tag}§]${note}`);
     const deferred = await f.serve();
     expect(JSON.stringify(f.old(deferred))).toBe(JSON.stringify(f.old(replayed)));

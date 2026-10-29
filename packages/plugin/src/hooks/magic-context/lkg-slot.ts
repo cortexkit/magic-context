@@ -41,7 +41,12 @@ export interface LkgEntryNote {
 
 const POSITIONAL_SYSTEM_KEY = "\0mc-system:";
 
-/** Replay-only identity; never assign it to a host message's info.id or to a ctx_reduce tag. */
+/**
+ * Identity used only to match a last-good replay against the current input.
+ * Never assign it to a host message's `info.id`, and never tag a message by
+ * it: tags are the `§N§` numbers the model passes to `ctx_reduce`, and they
+ * must stay keyed by real host message ids so a drop survives restarts.
+ */
 export function lkgInputIdentity(id: unknown, role: unknown, index: number): string | null {
     if (typeof id === "string" && id.length > 0)
         return id.startsWith(POSITIONAL_SYSTEM_KEY) ? null : id;
