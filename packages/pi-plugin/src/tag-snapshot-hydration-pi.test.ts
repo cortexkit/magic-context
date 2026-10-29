@@ -311,7 +311,7 @@ it("hydration reuses every unchanged frozen row", async () => {
 			else expect(candidate.tags[index]).toBe(old[index]);
 			expect(Object.isFrozen(candidate.tags[index])).toBe(true);
 		}
-		expect(candidate.active[0]).toBe(candidate.tags[2]);
+		expect(candidate.tags[2]).toBe(candidate.active[0]);
 	} finally {
 		close();
 	}
@@ -536,9 +536,9 @@ it("worker hydrates full active and fallback projections with bounded credited p
 		await job.released;
 		expect(result.candidate.tags).toEqual(getTagsBySession(db, "s"));
 		expect(result.candidate.tags[0]?.toolName).toBe(longName);
-		expect(result.candidate.active).toEqual(
+		expect(
 			result.candidate.tags.filter((tag) => tag.status === "active"),
-		);
+		).toEqual(result.candidate.active);
 		expect(result.candidate.fallback.map((tag) => tag.tag_number)).toEqual([
 			2, 8,
 		]);
