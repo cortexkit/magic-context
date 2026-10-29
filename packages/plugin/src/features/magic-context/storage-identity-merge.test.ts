@@ -288,7 +288,7 @@ describe("project identity merge", () => {
         });
     });
 
-    test("timestamps a mural-cue transfer to the collision survivor", () => {
+    test("copies a mural cue onto the collision survivor without marking it edited", () => {
         const database = makeDb();
         const sourceId = insertMemory(database, "dir:old", "canonical", "same-hash");
         const targetId = insertMemory(database, "git:new", "canonical", "same-hash");
@@ -311,11 +311,11 @@ describe("project identity merge", () => {
             mural_cue_hash: "cue-hash",
             mural_cue_at: 20,
             mural_cue_rejection_count: 2,
-            updated_at: 50,
+            updated_at: 1,
         });
     });
 
-    test("timestamps merged seen-count changes on the collision survivor", () => {
+    test("merges seen-count changes without marking the collision survivor edited", () => {
         const database = makeDb();
         const sourceId = insertMemory(database, "dir:old", "canonical", "same-hash");
         const targetId = insertMemory(database, "git:new", "canonical", "same-hash");
@@ -327,20 +327,30 @@ describe("project identity merge", () => {
             database
                 .prepare("SELECT seen_count, status, updated_at FROM memories WHERE id = ?")
                 .get(targetId),
-        ).toEqual({ seen_count: 4, status: "active", updated_at: 50 });
+        ).toEqual({ seen_count: 4, status: "active", updated_at: 1 });
     });
 
-    test("rekeys a memory with an audit timestamp", () => {
+    test("rekeys a memory without changing anything but project_path", () => {
         const database = makeDb();
         const sourceId = insertMemory(database, "dir:old", "legacy", "old-hash");
+        database
+            .prepare(
+                `UPDATE memories
+                    SET importance = 40, scope = 'workspace', shareable = 1, seen_count = 3,
+                        retrieval_count = 2, status = 'permanent', mural_cue = 'kept cue',
+                        mural_cue_hash = 'kept-hash', mural_cue_at = 8,
+                        mural_cue_rejection_count = 1, updated_at = 7, metadata_json = '{"k":1}'
+                  WHERE id = ?`,
+            )
+            .run(sourceId);
+        const before = database.prepare("SELECT * FROM memories WHERE id = ?").get(sourceId);
 
         mergeProjectIdentities(database, "dir:old", "git:new", { now: 10 });
 
-        expect(
-            database
-                .prepare("SELECT project_path, updated_at FROM memories WHERE id = ?")
-                .get(sourceId),
-        ).toEqual({ project_path: "git:new", updated_at: 10 });
+        expect(database.prepare("SELECT * FROM memories WHERE id = ?").get(sourceId)).toEqual({
+            ...(before as Record<string, unknown>),
+            project_path: "git:new",
+        });
     });
 
     test("refuses a module-owned source pool before any mutation", () => {

@@ -16,6 +16,7 @@ import {
 } from "../memory";
 import { indexSingleMessage } from "../message-index";
 import { runMigrations } from "../migrations";
+import { computeCueContentHash } from "../mural/storage-mural-cues";
 import { advanceSessionActivity } from "../session-activity";
 import { recordSessionProjectIdentity } from "../session-project-storage";
 import { initializeDatabase } from "../storage-db";
@@ -253,6 +254,74 @@ describe("dream task backlog probes", () => {
             pending: 3,
             total: 3,
         });
+    });
+
+    test("a timestamp-only memory write does not make compress-cues due, and a content change does", () => {
+        db = freshDb();
+        const unchanged = "/repo/cue-timestamp-only";
+        const edited = "/repo/cue-content-changed";
+        const unchangedText = "Keep the same memory text.";
+        const previousText = "The handler used the old name.";
+        const editedText = "The handler uses the new name.";
+        const unchangedId = insertMemory(db, {
+            projectPath: unchanged,
+            category: "ARCHITECTURE",
+            content: unchangedText,
+        }).id;
+        const editedId = insertMemory(db, {
+            projectPath: edited,
+            category: "ARCHITECTURE",
+            content: editedText,
+        }).id;
+        db.prepare(
+            `UPDATE memories
+                SET mural_cue = ?, mural_cue_hash = ?, mural_cue_at = ?, updated_at = ?
+              WHERE id = ?`,
+        ).run("kept cue", computeCueContentHash(unchangedText), 10, 99, unchangedId);
+        db.prepare(
+            `UPDATE memories
+                SET content = ?, normalized_hash = ?, mural_cue = ?, mural_cue_hash = ?,
+                    mural_cue_at = ?, updated_at = ?
+              WHERE id = ?`,
+        ).run(
+            editedText,
+            "edited-hash",
+            "stale cue",
+            computeCueContentHash(previousText),
+            100,
+            40,
+            editedId,
+        );
+        const context = {
+            db,
+            lastRunAt: null,
+            promotionThreshold: 3,
+        };
+
+        expect(getDreamTaskBacklog(db, unchanged, "compress-cues")).toEqual({
+            pending: 0,
+            total: 1,
+        });
+        expect(evaluateTaskGate("compress-cues", { ...context, projectIdentity: unchanged })).toBe(
+            false,
+        );
+        expect(getDreamTaskBacklog(db, edited, "compress-cues")).toEqual({
+            pending: 1,
+            total: 1,
+        });
+        expect(evaluateTaskGate("compress-cues", { ...context, projectIdentity: edited })).toBe(
+            true,
+        );
+
+        db.prepare("UPDATE memories SET content = ?, normalized_hash = ? WHERE id = ?").run(
+            "The handler uses a third name.",
+            "third-hash",
+            unchangedId,
+        );
+        expect(getDreamTaskBacklog(db, unchanged, "compress-cues").pending).toBe(1);
+        expect(evaluateTaskGate("compress-cues", { ...context, projectIdentity: unchanged })).toBe(
+            true,
+        );
     });
 
     test("verify probe counts only mapped memories that are still unverified", () => {
