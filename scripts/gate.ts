@@ -237,7 +237,8 @@ export async function preflightGroups(
         ? runGroup(steps.slice(build, publish), "dists")
         : Promise.resolve(false);
     const work = independent.map((step, index) => runGroup([step], `independent-${index}`));
-    // Typechecks emit retina declarations and lint reads generated TUI files, so both follow the build.
+    // Typechecks use retina-local-fs declarations and lint reads the plugin's generated
+    // terminal UI (TUI) files, so both follow the build.
     const dependent = production.then(() =>
         Promise.all(afterBuild.map((step, index) => runGroup([step], `after-build-${index}`))),
     );
