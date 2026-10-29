@@ -864,6 +864,10 @@ jobs:
           bun-version: latest
       - name: Install workspace dependencies
         run: bun install --frozen-lockfile
+      - name: Verify pinned OpenCode 2 default
+        # The Rust manifest also includes OC2 cases, which need a real default GA host.
+        # Verify cached lifecycle output or install the same exact host as the matrix lane.
+        run: bash scripts/ci/prepare-default-opencode2.sh
       - name: Install pinned OpenCode
         run: bash scripts/ci/e2e-rust-hermetic-install-pinned-opencode.sh
       - uses: ./.github/actions/restore-ci-dists

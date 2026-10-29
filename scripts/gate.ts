@@ -124,6 +124,23 @@ export function resources(id: string): { cpu: number; lock: string } {
     return { cpu: 2, lock: "" };
 }
 
+export function serializeTasks() {
+    let queue: Promise<unknown> = Promise.resolve();
+    return <T>(task: () => Promise<T>): Promise<T> => {
+        const result = queue.then(task);
+        queue = result.catch(() => undefined);
+        return result;
+    };
+}
+
+// CI jobs install into separate checkouts. Local lanes share the workspace,
+// including installs inside package test wrappers, so serialize those writers.
+export function writesWorkspace(command: string, id: string): boolean {
+    return (
+        command.trim() === "bun install --frozen-lockfile" || resources(id).lock === "package-tests"
+    );
+}
+
 async function main() {
     const args = process.argv.slice(2);
     const mode = args.shift();
@@ -243,6 +260,7 @@ async function main() {
     }> = [];
     const done = new Set<string>();
     const active = new Map<string, { promise: Promise<void>; cpu: number; lock: string }>();
+    const workspaceWriter = serializeTasks();
     let nativeReady: Promise<void> | undefined;
     let preflightOK = true;
 
@@ -292,22 +310,37 @@ async function main() {
             await Bun.write(file, "");
         let failed = false;
         async function check(name: string, command: string, extra: Record<string, string> = {}) {
-            const log = join(temp, `${records.length}-${name.replace(/[^a-z0-9]+/gi, "-")}.log`);
-            const before = Date.now();
-            const output = openSync(log, "w");
-            const child = Bun.spawn(
-                ["timeout", "--kill-after=30s", "110m", "bash", "-euo", "pipefail", "-c", command],
-                { cwd: root, env: { ...env, ...extra }, stdout: output, stderr: output },
-            );
-            const ok = (await child.exited) === 0;
-            closeSync(output);
-            const seconds = (Date.now() - before) / 1000;
-            records.push({ lane: lane.key, check: name, command, ok, seconds, log });
-            console.log(
-                `${ok ? "PASS" : "FAIL"} ${lane.key}: ${name} (${seconds.toFixed(1)}s) ${log}`,
-            );
-            if (!ok) failed = true;
-            return ok;
+            const operation = async () => {
+                const log = join(
+                    temp,
+                    `${records.length}-${name.replace(/[^a-z0-9]+/gi, "-")}.log`,
+                );
+                const before = Date.now();
+                const output = openSync(log, "w");
+                const child = Bun.spawn(
+                    [
+                        "timeout",
+                        "--kill-after=30s",
+                        "110m",
+                        "bash",
+                        "-euo",
+                        "pipefail",
+                        "-c",
+                        command,
+                    ],
+                    { cwd: root, env: { ...env, ...extra }, stdout: output, stderr: output },
+                );
+                const ok = (await child.exited) === 0;
+                closeSync(output);
+                const seconds = (Date.now() - before) / 1000;
+                records.push({ lane: lane.key, check: name, command, ok, seconds, log });
+                console.log(
+                    `${ok ? "PASS" : "FAIL"} ${lane.key}: ${name} (${seconds.toFixed(1)}s) ${log}`,
+                );
+                if (!ok) failed = true;
+                return ok;
+            };
+            return writesWorkspace(command, lane.id) ? workspaceWriter(operation) : operation();
         }
         try {
             if (["e2e-rust-hermetic-build", "rust-mc-module-integration"].includes(lane.id)) {
@@ -451,14 +484,16 @@ async function main() {
                 `\n## ${record.lane}: ${record.check} (${record.ok ? "PASS" : "FAIL"}, ${record.seconds.toFixed(1)}s)\n$ ${record.command}\n`,
             );
             evidence.push(
-                text
-                    .split("\n")
-                    .filter((line) =>
-                        /pass|fail|error|warning|tests? |checked |packages|vectors|cases|matches|stale|drift|expected|received|actual|pinned|cargo home|skip|caused by|^\s*(left|right):|^PASS|^FAIL/i.test(
-                            line,
-                        ),
-                    )
-                    .join("\n"),
+                record.ok
+                    ? text
+                          .split("\n")
+                          .filter((line) =>
+                              /pass|fail|error|warning|tests? |checked |packages|vectors|cases|matches|stale|drift|expected|received|actual|pinned|cargo home|skip|caused by|^\s*(left|right):|^PASS|^FAIL/i.test(
+                                  line,
+                              ),
+                          )
+                          .join("\n")
+                    : text,
             );
         }
         await Bun.write(`${prefix}.txt`, `${evidence.join("\n")}\n`);

@@ -11,6 +11,8 @@ import {
     githubOnly,
     lanes,
     resources,
+    serializeTasks,
+    writesWorkspace,
 } from "./gate";
 
 const root = resolve(import.meta.dir, "..");
@@ -24,6 +26,38 @@ test("full gate fits an eight-core slot by default and uses sixteen only explici
     expect(cpuBudget("16")).toBe(16);
     for (const value of ["1", "17", "NaN", "3.5"])
         expect(() => cpuBudget(value)).toThrow("GATE_CPUS");
+});
+
+test("shared workspace installs and package wrappers serialize without blocking after a rejection", async () => {
+    const serial = serializeTasks();
+    let active = 0;
+    let peak = 0;
+    const results = await Promise.all(
+        [0, 1, 2, 3].map((number) =>
+            serial(async () => {
+                active++;
+                peak = Math.max(peak, active);
+                await Bun.sleep(2);
+                active--;
+                return number;
+            }),
+        ),
+    );
+    expect(results).toEqual([0, 1, 2, 3]);
+    expect(peak).toBe(1);
+    await expect(
+        serial(async () => {
+            throw new Error("install failed");
+        }),
+    ).rejects.toThrow("install failed");
+    expect(await serial(async () => "next install ran")).toBe("next install ran");
+    expect(writesWorkspace("bun install --frozen-lockfile\n", "e2e-rust-hermetic")).toBe(true);
+    expect(writesWorkspace("bash scripts/ci/unit.sh", "unit-plugin")).toBe(true);
+    expect(writesWorkspace("bash scripts/ci/slow.sh", "slow-unit")).toBe(true);
+    expect(writesWorkspace("bun install --cwd target/private-host", "e2e-host-opencode2")).toBe(
+        false,
+    );
+    expect(writesWorkspace("cargo test", "rust-workspace-crates")).toBe(false);
 });
 
 test("local full expands CI's matrices, including both slow modes and every Rust shard", () => {

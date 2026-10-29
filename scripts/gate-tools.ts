@@ -133,6 +133,7 @@ export function requiredTools(mode: string, part: string): string[] {
         "rm",
         "find",
         "touch",
+        "cat",
     ];
     if (part === "all" || part === "native") tools.push("cc", "make", "pkg-config");
     if (part === "all" || part === "host") tools.push("pgrep", "script", "stty");

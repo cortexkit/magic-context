@@ -182,105 +182,127 @@ test("a runtime HOME must not inherit a checkout's Git identity", async () =>
         await expect(createTestHome(path)).rejects.toThrow("set TMPDIR outside all repositories");
     }));
 
-test("raw replay fetches the pinned baseline without writing the source Git metadata", async () =>
-    scratch(async (path) => {
-        const source = join(path, "source");
-        const remote = join(path, "remote.git");
-        const runtime = join(path, "runtime");
-        await mkdir(source);
-        await mkdir(runtime);
-        const git = (...args: string[]) => {
-            const result = Bun.spawnSync(["git", ...args], {
-                cwd: source,
-                stdout: "pipe",
-                stderr: "pipe",
-            });
-            expect(result.exitCode, result.stderr.toString()).toBe(0);
-            return result.stdout.toString().trim();
-        };
-        git("init", "-q");
-        for (const relative of [
-            "crates/mc-module/src",
-            "packages/plugin/src",
-            "packages/retina-local-fs/src",
-            "scripts",
-        ])
-            await mkdir(join(source, relative), { recursive: true });
-        await writeFile(
-            join(source, "crates/mc-module/src/baseline.rs"),
-            "fn baseline_marker() {}\n",
-        );
-        await writeFile(
-            join(source, "packages/plugin/src/baseline.ts"),
-            "export const baseline = true;\n",
-        );
-        await writeFile(
-            join(source, "packages/retina-local-fs/src/baseline.ts"),
-            "export const baseline = true;\n",
-        );
-        for (const relative of [
-            "package.json",
-            "packages/plugin/package.json",
-            "packages/retina-local-fs/package.json",
-        ])
-            await writeFile(join(source, relative), "{}\n");
-        git("add", "--all");
-        git(
-            "-c",
-            "user.name=Gate test",
-            "-c",
-            "user.email=gate-test@localhost",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-qm",
-            "baseline",
-        );
-        const baseline = git("rev-parse", "HEAD");
-        await writeFile(join(source, "crates/mc-module/src/baseline.rs"), "fn changed_tip() {}\n");
-        git("add", "--all");
-        git(
-            "-c",
-            "user.name=Gate test",
-            "-c",
-            "user.email=gate-test@localhost",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-qm",
-            "different tip",
-        );
-        git("clone", "--bare", source, remote);
-        git("remote", "add", "origin", `file://${remote}`);
-        await writeFile(join(source, "scripts/rust-raw-replay-baseline.commit"), `${baseline}\n`);
-        expect(existsSync(join(source, ".git/FETCH_HEAD"))).toBe(false);
-        const child = Bun.spawn(
-            [
-                "bash",
-                join(root, "scripts/ci/rust-raw-replay-review-fetch-pinned-master-baseline.sh"),
-            ],
-            {
-                cwd: source,
-                env: { ...process.env, GITHUB_WORKSPACE: source, RUNNER_TEMP: runtime },
-                stdout: "pipe",
-                stderr: "pipe",
-            },
-        );
-        const error = await new Response(child.stderr).text();
-        expect(await child.exited, error).toBe(0);
-        expect(existsSync(join(source, ".git/FETCH_HEAD"))).toBe(false);
-        const archive = Bun.spawnSync(
-            [
-                "tar",
-                "-xOf",
-                join(runtime, "rust-raw-replay-baseline.tar"),
-                "crates/mc-module/src/baseline.rs",
-            ],
-            { stdout: "pipe", stderr: "pipe" },
-        );
-        expect(archive.exitCode, archive.stderr.toString()).toBe(0);
-        expect(archive.stdout.toString()).toBe("fn baseline_marker() {}\n");
-    }));
+for (const unmounted of [false, true]) {
+    test(`raw replay fetches the pinned baseline without source Git writes, unmounted mirror=${unmounted}`, async () =>
+        scratch(async (path) => {
+            const source = join(path, "source");
+            const remote = join(path, "remote.git");
+            const runtime = join(path, "runtime");
+            await mkdir(source);
+            await mkdir(runtime);
+            const git = (...args: string[]) => {
+                const result = Bun.spawnSync(["git", ...args], {
+                    cwd: source,
+                    stdout: "pipe",
+                    stderr: "pipe",
+                });
+                expect(result.exitCode, result.stderr.toString()).toBe(0);
+                return result.stdout.toString().trim();
+            };
+            git("init", "-q");
+            for (const relative of [
+                "crates/mc-module/src",
+                "packages/plugin/src",
+                "packages/retina-local-fs/src",
+                "scripts",
+            ])
+                await mkdir(join(source, relative), { recursive: true });
+            await writeFile(
+                join(source, "crates/mc-module/src/baseline.rs"),
+                "fn baseline_marker() {}\n",
+            );
+            await writeFile(
+                join(source, "packages/plugin/src/baseline.ts"),
+                "export const baseline = true;\n",
+            );
+            await writeFile(
+                join(source, "packages/retina-local-fs/src/baseline.ts"),
+                "export const baseline = true;\n",
+            );
+            for (const relative of [
+                "package.json",
+                "packages/plugin/package.json",
+                "packages/retina-local-fs/package.json",
+            ])
+                await writeFile(join(source, relative), "{}\n");
+            await writeFile(
+                join(source, "packages/plugin/package.json"),
+                `${JSON.stringify({ repository: { url: `file://${remote}` } })}\n`,
+            );
+            git("add", "--all");
+            git(
+                "-c",
+                "user.name=Gate test",
+                "-c",
+                "user.email=gate-test@localhost",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "baseline",
+            );
+            const baseline = git("rev-parse", "HEAD");
+            await writeFile(
+                join(source, "crates/mc-module/src/baseline.rs"),
+                "fn changed_tip() {}\n",
+            );
+            git("add", "--all");
+            git(
+                "-c",
+                "user.name=Gate test",
+                "-c",
+                "user.email=gate-test@localhost",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "different tip",
+            );
+            git("clone", "--bare", source, remote);
+            git(
+                "remote",
+                "add",
+                "origin",
+                unmounted ? join(path, "not-mounted-mirror") : `file://${remote}`,
+            );
+            await writeFile(
+                join(source, "scripts/rust-raw-replay-baseline.commit"),
+                `${baseline}\n`,
+            );
+            expect(existsSync(join(source, ".git/FETCH_HEAD"))).toBe(false);
+            const child = Bun.spawn(
+                [
+                    "bash",
+                    join(root, "scripts/ci/rust-raw-replay-review-fetch-pinned-master-baseline.sh"),
+                ],
+                {
+                    cwd: source,
+                    env: {
+                        ...process.env,
+                        GITHUB_WORKSPACE: source,
+                        RUNNER_TEMP: runtime,
+                        GATE_GIT_REMOTE: "",
+                    },
+                    stdout: "pipe",
+                    stderr: "pipe",
+                },
+            );
+            const error = await new Response(child.stderr).text();
+            expect(await child.exited, error).toBe(0);
+            expect(existsSync(join(source, ".git/FETCH_HEAD"))).toBe(false);
+            const archive = Bun.spawnSync(
+                [
+                    "tar",
+                    "-xOf",
+                    join(runtime, "rust-raw-replay-baseline.tar"),
+                    "crates/mc-module/src/baseline.rs",
+                ],
+                { stdout: "pipe", stderr: "pipe" },
+            );
+            expect(archive.exitCode, archive.stderr.toString()).toBe(0);
+            expect(archive.stdout.toString()).toBe("fn baseline_marker() {}\n");
+        }));
+}
 
 test("package-scoped Bun checks keep the storage-leak guard without scanning archived fixtures", async () =>
     scratch(async (path) => {
@@ -312,3 +334,81 @@ test("package-scoped Bun checks keep the storage-leak guard without scanning arc
         expect(scoped.code, scoped.text).toBe(0);
         expect(scoped.text).toContain("1 pass");
     }));
+
+for (const mode of ["cached", "stub", "wrong-version"]) {
+    test(`default OC2 prerequisite ${mode} verifies the selected source or uses the shared exact-host installer`, async () =>
+        scratch(async (path) => {
+            const candidate = join(path, "cached-host");
+            await writeFile(
+                candidate,
+                mode === "stub"
+                    ? 'echo "Error: @opencode/cli\'s postinstall script was not run."\nexit 1\n'
+                    : "unit-test command responder input\n",
+            );
+            const executable = join(path, "bun");
+            await writeFile(
+                executable,
+                `#!/bin/bash
+case "$*" in
+ *pinnedOpenCode2Version*) echo 2.0.22;;
+ *execFileSync*)
+   if [[ "$MODE" == cached && "$MC_E2E_OPENCODE2_CLI" == "$CANDIDATE" ]]; then echo 'opencode v2.0.22';
+   elif [[ "$MODE" == stub && "$MC_E2E_OPENCODE2_CLI" == *'/node_modules/@opencode/cli/bin/opencode.exe' ]]; then echo 'opencode v2.0.22';
+   else echo 'unusable cached host' >&2; exit 3; fi;;
+ *'const { CLI }'*) echo "$CANDIDATE";;
+ 'install --cwd '*) printf installed > "$CAPTURE";;
+ *) echo "unexpected unit-test command: $*" >&2; exit 8;;
+esac
+`,
+            );
+            expect(Bun.spawnSync(["chmod", "+x", executable]).exitCode).toBe(0);
+            const runtime = join(path, "runtime");
+            await mkdir(runtime);
+            const environment = join(path, "github-env");
+            await writeFile(environment, "");
+            const capture = join(path, "installed");
+            const child = Bun.spawn(
+                ["bash", join(root, "scripts/ci/prepare-default-opencode2.sh")],
+                {
+                    cwd: root,
+                    env: {
+                        ...process.env,
+                        PATH: `${path}:${process.env.PATH}`,
+                        MODE: mode,
+                        CANDIDATE: candidate,
+                        CAPTURE: capture,
+                        RUNNER_TEMP: runtime,
+                        GITHUB_ENV: environment,
+                        GITHUB_WORKSPACE: root,
+                    },
+                    stdout: "pipe",
+                    stderr: "pipe",
+                },
+            );
+            const [code, stdout, stderr] = await Promise.all([
+                child.exited,
+                new Response(child.stdout).text(),
+                new Response(child.stderr).text(),
+            ]);
+            if (mode === "wrong-version") {
+                expect(code).not.toBe(0);
+                expect(stderr).toContain("failed exact-version verification");
+                expect(existsSync(capture)).toBe(false);
+            } else {
+                expect(code, stdout + stderr).toBe(0);
+                const selected = await Bun.file(environment).text();
+                if (mode === "cached") {
+                    expect(selected).toContain(`MC_E2E_OPENCODE2_CLI=${candidate}`);
+                    expect(existsSync(capture)).toBe(false);
+                } else {
+                    expect(selected).toContain(
+                        `${runtime}/oc2-host/node_modules/@opencode/cli/bin/opencode.exe`,
+                    );
+                    expect(existsSync(capture)).toBe(true);
+                    const manifest = await Bun.file(join(runtime, "oc2-host/package.json")).json();
+                    expect(manifest.dependencies["@opencode/cli"]).toBe("2.0.22");
+                    expect(manifest.trustedDependencies).toEqual(["@opencode/cli"]);
+                }
+            }
+        }));
+}

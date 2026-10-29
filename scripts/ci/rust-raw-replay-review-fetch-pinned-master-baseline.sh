@@ -6,7 +6,13 @@ if [[ ! "$baseline_commit" =~ ^[0-9a-f]{40}$ ]]; then
   echo "Invalid pinned Rust raw replay baseline commit: $baseline_commit" >&2
   exit 1
 fi
-remote="$(git remote get-url origin)"
+remote="${GATE_GIT_REMOTE:-$(git remote get-url origin)}"
+# Hosted snapshots may record a mirror path that is not mounted in the job.
+# The versioned package metadata names the same upstream; the commit pin remains exact.
+if [[ "$remote" == /* && ! -e "$remote" ]]; then
+  remote="$(bun -e 'const p = await Bun.file("packages/plugin/package.json").json(); const r = typeof p.repository === "string" ? p.repository : p.repository?.url; if (typeof r !== "string" || !/^(?:git\+)?https:\/\/|^ssh:\/\/|^git@|^file:\/\//.test(r)) throw new Error("No usable declared repository URL for pinned baseline fetch"); console.log(r.replace(/^git\+/, ""));')"
+  printf 'Pinned baseline fetch uses the declared repository URL because the local mirror is not mounted\n'
+fi
 repository="$(mktemp -d "$RUNNER_TEMP/raw-replay-git.XXXXXX")"
 git clone --shared --bare "$GITHUB_WORKSPACE" "$repository"
 git -C "$repository" remote set-url origin "$remote"
