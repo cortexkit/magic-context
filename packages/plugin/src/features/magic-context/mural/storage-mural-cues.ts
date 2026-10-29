@@ -113,15 +113,6 @@ export function memoryNeedsCue(state: MuralCueState | undefined, currentContent:
     return state.hash !== computeCueContentHash(currentContent);
 }
 
-/**
- * Write a compressed cue as a column-only update. `contentHash` MUST be the
- * hash of the content that was actually compressed (not a re-hash of the row's
- * current content): if the memory was edited mid-run, storing the prompt-time
- * hash leaves mural_cue_hash != sha256(current content), so resolveMural
- * excludes the now-stale cue and the compress-cues gate re-selects the memory
- * next run. Cache-neutral: the mural is rendered on demand from these columns,
- * not injected as part of the m[0] baseline bytes.
- */
 export interface CurrentCueStamp {
     id: number;
     content: string;
@@ -191,6 +182,15 @@ export function markCurrentCuesFresh(
     });
 }
 
+/**
+ * Write a compressed cue as a column-only update. `contentHash` MUST be the
+ * hash of the content that was actually compressed (not a re-hash of the row's
+ * current content): if the memory was edited mid-run, storing the prompt-time
+ * hash leaves mural_cue_hash != sha256(current content), so resolveMural
+ * excludes the now-stale cue and the compress-cues gate re-selects the memory
+ * next run. Cache-neutral: the mural is rendered on demand from these columns,
+ * not injected as part of the m[0] baseline bytes.
+ */
 export function setMuralCue(
     db: Database,
     projectPath: string,
