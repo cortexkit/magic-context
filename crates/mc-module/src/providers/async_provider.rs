@@ -5,6 +5,7 @@ use compact::{self as contract, ceiling::CeilingPolicy, notice, ride, view};
 use cortexkit_bus_trait::{ContentDigest, DurableOwner, Stream, StreamCursor};
 use cortexkit_role_llm_runner::{read::ReadMessage, tags};
 use serde::Deserialize;
+mod adoption_recovery;
 mod contract_policy;
 mod cut_runtime;
 mod cut_seed;
@@ -2675,6 +2676,24 @@ impl McHandler {
             .filter(|old| old.lineage != request.lineage_id || unsafe_existing)
         {
             self.authorize_async(binding, old)?;
+            // Read before the bootstrap writes any namespace or provider state.
+            // A runner that cannot answer while Setup is outstanding can retry
+            // without finding a partial import or losing the old applied view.
+            let recovery = if let Some(record) = &standalone_move {
+                match self.read_adoption_suffix(old, &request, record).await {
+                    Ok(recovery) => Some(recovery),
+                    Err(failure) => {
+                        tracing::warn!(session_ref = %reference, ?failure, "adoption suffix unreadable during Setup");
+                        return bytes(&moved_session::setup_refusal(
+                            &request.request_id,
+                            "setup_suffix_unreadable",
+                            "The runner could not read the retained suffix during Setup; retry Setup when session.read is available.",
+                        ));
+                    }
+                }
+            } else {
+                None
+            };
             let generation = old.next_generation()?;
             let history = store
                 .load_compartments(&old.namespace())
@@ -2721,6 +2740,10 @@ impl McHandler {
                     .replace_compartments(&state.namespace(), &history)
                     .map_err(transient)?;
             }
+            if let Some(recovery) = recovery {
+                state.offline_first_pass = old.offline_first_pass.clone();
+                state.install_adoption_suffix(store, recovery)?;
+            }
             self.ensure_lineage_window(&mut state, Duration::from_secs(10))
                 .await?;
             if state.cut_seed.is_none() {
@@ -2757,7 +2780,9 @@ impl McHandler {
                     .map_err(transient)?;
             }
             state.journal.truncate = Some(None);
-            state.save(store, &[])?;
+            let codec = codec::Codec::from_params(&Value::Object(request.params.clone()))?;
+            let rows = state.unsaved_tag_rows(codec)?;
+            state.save(store, &rows)?;
             self.provider_store
                 .async_runtime
                 .resident
@@ -3065,11 +3090,10 @@ impl McHandler {
         // The adoption import runs before the Setup engine pass and before any
         // save that could expose a partial record. The manifest's compartments
         // go in at 0..message_count-1 with only the imported sequences'
-        // artifacts, then `begin_at_cut` saves the `importing` stage (cut set,
-        // initial still null). The engine pass below then renders the head from
-        // that imported history, so a moved session's Setup `initial` already
-        // contains the history head. A repeat Setup that finds the `importing`
-        // stage restarts here from the move record.
+        // artifacts, then stages the cut fields without saving the record. The
+        // engine pass renders that imported history, so a moved session's Setup
+        // `initial` already contains the history head. The caller saves it with
+        // the seed and any validated recovery rows, never a partial record.
         let moved_record = state
             .standalone_move
             .as_ref()

@@ -34,7 +34,9 @@ fn change_record(paths: &offline_move::StorePaths, edit: impl FnOnce(&mut Value)
 
 // Compare logical contents rather than database file bytes: opening SQLite can
 // checkpoint a WAL without changing any stored row.
-fn snapshot(dir: &Path) -> Vec<Vec<(String, Vec<String>)>> {
+pub(in crate::providers::async_provider::tests) fn snapshot(
+    dir: &Path,
+) -> Vec<Vec<(String, Vec<String>)>> {
     ["opencode.db", "context.db", "store.db"]
         .iter()
         .map(|name| {
