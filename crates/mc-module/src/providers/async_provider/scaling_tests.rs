@@ -34,27 +34,52 @@ pub(super) mod view_work {
         pub engine_input: usize,
         pub renderer_input: usize,
     }
-    static WORK: Mutex<BTreeMap<String, Work>> = Mutex::new(BTreeMap::new());
+    // Independent stores can serve the same runner/session reference. Keep
+    // engine and renderer work under the project identity as well, including
+    // work recorded by a blocking worker rather than the test's own thread.
+    static WORK: Mutex<BTreeMap<(String, PathBuf), Work>> = Mutex::new(BTreeMap::new());
 
-    pub fn engine(reference: &str, count: usize) {
+    pub fn engine(reference: &str, project: &Path, count: usize) {
         let mut work = WORK.lock().unwrap();
-        let work = work.entry(reference.into()).or_default();
+        let work = work.entry((reference.into(), project.into())).or_default();
         work.engine_input += count;
     }
-    pub fn renderer(reference: &str, count: usize) {
+    pub fn renderer(reference: &str, project: &Path, count: usize) {
         let mut work = WORK.lock().unwrap();
-        let work = work.entry(reference.into()).or_default();
+        let work = work.entry((reference.into(), project.into())).or_default();
         work.renderer_input += count;
     }
     pub fn decoded(reference: &str, count: usize) {
         WORK.lock()
             .unwrap()
-            .entry(reference.into())
+            .entry((reference.into(), PathBuf::new()))
             .or_default()
             .decoded_entries += count;
     }
     pub fn take(reference: &str) -> Work {
-        WORK.lock().unwrap().remove(reference).unwrap_or_default()
+        let mut all = WORK.lock().unwrap();
+        let keys: Vec<_> = all
+            .keys()
+            .filter(|(key, _)| key == reference)
+            .cloned()
+            .collect();
+        let mut total = Work::default();
+        for key in keys {
+            let work = all.remove(&key).unwrap();
+            total.decoded_entries += work.decoded_entries;
+            total.engine_input += work.engine_input;
+            total.renderer_input += work.renderer_input;
+        }
+        total
+    }
+
+    /// Engine and renderer work for one project, without consuming measurements
+    /// under a different project identity for the same runner/session reference.
+    pub fn take_for(reference: &str, project: &Path) -> Work {
+        WORK.lock()
+            .unwrap()
+            .remove(&(reference.into(), project.into()))
+            .unwrap_or_default()
     }
 }
 

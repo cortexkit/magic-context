@@ -122,7 +122,7 @@ async fn broca_role_describe_first_notice_decodes_every_capture() {
 }
 
 #[tokio::test]
-async fn broca_role_describe_offline_rerun_pins_the_description_without_writing() {
+async fn broca_role_describe_offline_rerun_reprepares_changed_supported_descriptions() {
     let _clock = crate::tests::fixed_clock();
     for (name, writer, description) in captures() {
         let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -144,24 +144,33 @@ async fn broca_role_describe_offline_rerun_pins_the_description_without_writing(
                 matches!(result, Ok(OfflineOutcome::Unchanged(_))),
                 "{name}: {result:?}"
             );
+            assert_eq!(
+                store_rows(&prep.paths),
+                before,
+                "{name}: unchanged rerun wrote"
+            );
             setup["runner_describe"] = if name.ends_with("before") {
                 captures()[1].2.clone()
             } else {
                 captures()[0].2.clone()
             };
             std::fs::write(&prep.args.setup, setup.to_string()).unwrap();
-            assert_eq!(
-                refusal_code(first_pass(&prep.args, project.path(), &fixture::NoHolders).await),
-                "offline_state_differs",
-                "{name}: an upgrade or downgrade cannot reuse a different receipt"
+            let result = first_pass(&prep.args, project.path(), &fixture::NoHolders).await;
+            assert!(
+                matches!(result, Ok(OfflineOutcome::Prepared(ref report)) if report.generation == 1),
+                "{name}: an upgrade or downgrade needs a new preparation: {result:?}"
             );
         } else {
-            assert_eq!(refusal_code(result), "offline_state_differs", "{name}");
+            assert!(
+                format!("{result:?}").contains("checkpoint_unsupported"),
+                "{name}: {result:?}"
+            );
+            assert_eq!(
+                store_rows(&prep.paths),
+                before,
+                "{name}: refused rerun wrote"
+            );
         }
-        assert!(
-            store_rows(&prep.paths) == before,
-            "{name}: neither unchanged nor refused reruns write"
-        );
     }
 }
 
