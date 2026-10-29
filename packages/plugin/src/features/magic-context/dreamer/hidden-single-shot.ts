@@ -179,7 +179,8 @@ export async function runHiddenSingleShotPrompt<T>(
             let timer: ReturnType<typeof setTimeout> | undefined;
             try {
                 const completion = await Promise.race([
-                    args.executor.collect(handle, 200),
+                    args.executor.collectPartial?.(handle, 200) ??
+                        args.executor.collect(handle, 200),
                     new Promise<null>((resolve) => {
                         timer = setTimeout(() => resolve(null), 5_000);
                     }),

@@ -1,17 +1,54 @@
 import { describe, expect, it } from "bun:test";
 import { writeTaskStateJson } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
+import { _resetProjectEmbeddingRegistryForTests } from "@magic-context/core/features/magic-context/memory/embedding";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	getMemoryById,
 	insertMemory,
 } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import { getMemoryMutationsForRender } from "@magic-context/core/features/magic-context/storage";
+import { handleUntrustedLoad } from "@magic-context/core/plugin/embedding-bootstrap-helpers";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { Value } from "typebox/value";
 import { createTestDb, fakeContext } from "../test-utils.test";
 import { createCtxMemoryListTool, createCtxMemoryTool } from "./ctx-memory";
 
 describe("createCtxMemoryTool", () => {
+	it("names the invalid embedding field when an untrusted first load disables memory", async () => {
+		const db = createTestDb();
+		_resetProjectEmbeddingRegistryForTests();
+		try {
+			const ctx = fakeContext("ses-untrusted-memory");
+			const identity = resolveProjectIdentity(ctx.cwd);
+			handleUntrustedLoad(db, identity, ctx.cwd, {
+				config: { embedding: { provider: "off" } },
+				loadOutcome: "schema-recovery",
+				sources: { userConfig: "ok", projectConfig: "ok" },
+				substitutionFailures: [],
+				recoveredTopLevelKeys: ["embedding"],
+				recoveredFieldPaths: ["embedding.model", "embedding.endpoint"],
+			});
+			const tool = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+			});
+			const result = await tool.execute(
+				"call-untrusted",
+				{ action: "get", ids: [1] },
+				new AbortController().signal,
+				undefined,
+				ctx as never,
+			);
+			expect(result.isError).toBe(true);
+			expect(result.content[0]?.text).toBe(
+				"Cross-session memory is off for this project because magic-context.jsonc has invalid embedding or project identity settings: embedding.endpoint, embedding.model.",
+			);
+		} finally {
+			_resetProjectEmbeddingRegistryForTests();
+			closeQuietly(db);
+		}
+	});
 	it("advertises list only through the separate dreamer tool", async () => {
 		const db = createTestDb();
 		try {

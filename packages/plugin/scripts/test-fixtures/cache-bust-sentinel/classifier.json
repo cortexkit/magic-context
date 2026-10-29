@@ -11,7 +11,7 @@
     },
     {
         "class": "no_mc_pass_row",
-        "decisionTimestampOffsetMs": -30001,
+        "decisionTimestampOffsetMs": -300001,
         "decision": { "decision": "defer" },
         "input": {}
     },

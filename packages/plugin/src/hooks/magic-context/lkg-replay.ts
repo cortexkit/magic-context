@@ -1,5 +1,5 @@
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
-import { isCoveredInstructionRow } from "./host-served-rows";
+import { isCoveredInstructionRow, markCoveredInstructionRow } from "./host-served-rows";
 import { claimLkgRequestIdentity, noteCapturedLkgRequest } from "./lkg-measured-request";
 import {
     captureSlot,
@@ -13,6 +13,7 @@ import {
     type LkgSlot,
     lkgContentDigest,
     lkgContentFields,
+    lkgInputIdentity,
     noteEntry,
     sharedLkgEntryDigests,
 } from "./lkg-slot";
@@ -169,6 +170,7 @@ function projectEntryWithDigests(
             },
             enumerable: false,
         });
+        if (isCoveredInstructionRow(message.info)) markCoveredInstructionRow(projection);
         return projection;
     });
 }
@@ -293,6 +295,7 @@ function outputMessageIsPostAnchor(
     message: MessageLike,
     inputIndexById: Map<string, number>,
     anchorIndex: number,
+    systemIndices: Map<MessageLike, number>,
 ): boolean | null {
     const id = messageId(message);
     if (id !== null) {
@@ -312,6 +315,10 @@ function outputMessageIsPostAnchor(
     // A covered OpenCode 2 instruction row put back by postprocess has no id but
     // always comes before every retained row, so it belongs to the saved prefix.
     if (isCoveredInstructionRow(message.info)) return false;
+    if (messageRole(message) === "system") {
+        const index = systemIndices.get(message);
+        return index === undefined ? null : index > anchorIndex;
+    }
     if (!isSyntheticOutput(message)) return null;
     const linked = ["sourceMessageId", "ownerMessageId", "anchorMessageId"]
         .map((key) => recordValue(message.info, key))
@@ -344,7 +351,9 @@ export function buildLkgPrefix(
     const anchorIndex =
         completeOutput && projected.length > 0 ? projected.length - 1 : findLkgAnchor(projected);
     if (anchorIndex === null) return null;
-    const ids = projected.map((message) => message.id);
+    const ids = projected.map((message, index) =>
+        lkgInputIdentity(message.id, message.role, index),
+    );
     if (ids.some((id) => id === null)) return null;
     const validIds = ids as string[];
     if (new Set(validIds).size !== validIds.length) return null;
@@ -354,11 +363,43 @@ export function buildLkgPrefix(
         .map((message) => message.contentDigest?.() ?? null);
     if (inputContentDigests.some((digest) => digest === null)) return null;
     const inputIndexById = new Map(validIds.map((id, index) => [id, index]));
+    const systemIndices = new Map<MessageLike, number>();
+    if (!completeOutput) {
+        const inputSystems = projected.flatMap((message, index) =>
+            message.id === null && message.role === "system" && !isCoveredInstructionRow(message)
+                ? [{ message, index }]
+                : [],
+        );
+        const outputSystems = output.filter(
+            (message) => messageId(message) === null && messageRole(message) === "system",
+        );
+        // Require the ordinary instruction sequence, including post-anchor rows:
+        // a missing duplicate must not move another occurrence across the seam.
+        // Covered input rows are already digest-bound; legacy sessions can omit
+        // them. If served, they precede the ordinary sequence. Trimming can also
+        // newly mark an ordinary input row as covered without changing its bytes.
+        const restoredCount = outputSystems.length - inputSystems.length;
+        if (
+            restoredCount < 0 ||
+            outputSystems
+                .slice(0, restoredCount)
+                .some((message) => !isCoveredInstructionRow(message.info))
+        )
+            return null;
+        for (let index = 0; index < inputSystems.length; index += 1) {
+            const source = inputSystems[index];
+            const message = outputSystems[index + restoredCount];
+            const digest = source.message.contentDigest?.();
+            if (!digest || lkgContentDigest(message) !== digest) return null;
+            if (isCoveredInstructionRow(message.info) && source.index > anchorIndex) return null;
+            systemIndices.set(message, source.index);
+        }
+    }
     const prefix: MessageLike[] = [];
     for (const message of output) {
         const postAnchor = completeOutput
             ? false
-            : outputMessageIsPostAnchor(message, inputIndexById, anchorIndex);
+            : outputMessageIsPostAnchor(message, inputIndexById, anchorIndex, systemIndices);
         if (postAnchor === null) return null;
         // Store only what the provider receives (see provider-visible-parts.ts).
         // The hosts build the request from the replayed array through conversions

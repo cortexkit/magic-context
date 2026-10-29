@@ -42,7 +42,8 @@ function projectRawMessages(
         const message: RawMessage = {
             id: row.id,
             ordinal: ordinalFor(row, index),
-            role: row.type === "assistant" ? "assistant" : "user",
+            role:
+                row.type === "assistant" ? "assistant" : row.type === "system" ? "system" : "user",
             createdAt: row.time_created ?? row.data.time?.created,
             parts:
                 row.type === "assistant"

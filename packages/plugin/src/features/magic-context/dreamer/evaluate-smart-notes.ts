@@ -30,7 +30,11 @@ import type { SmartNoteCheckNote } from "../smart-notes/types";
 import { wakePlaneStatus } from "../smart-notes/wake-plane";
 import { getPendingSmartNotes, markNoteChecked, markNoteReady } from "../storage-notes";
 import type { SubagentInvocationStatus } from "../storage-subagent-invocations";
-import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
+import {
+    failedInvocationStatus,
+    recordChildInvocation,
+    type TokenTotals,
+} from "../subagent-token-capture";
 import { runHiddenSingleShotPrompt } from "./hidden-single-shot";
 import { type LeaseAcquisition, peekLeaseHolderAndExpiry, startLeaseHeartbeat } from "./lease";
 
@@ -492,6 +496,7 @@ async function confirmReadOnly(
     const recordInvocation = (params: {
         status: SubagentInvocationStatus;
         messages?: unknown[];
+        tokens?: TokenTotals;
         error?: unknown;
     }) => {
         if (!args.parentSessionId || invocationRecorded) return;
@@ -508,6 +513,10 @@ async function confirmReadOnly(
             startedAt,
             status: params.status,
             messages: params.messages,
+            tokens:
+                args.hiddenCompletionExecutor?.capabilities.harness === "opencode2"
+                    ? params.tokens
+                    : undefined,
             attemptedModel: args.model,
             configuredModels: args.fallbackModels,
             error: params.error,
@@ -541,7 +550,11 @@ async function confirmReadOnly(
                     parse: parseConfirmationVerdict,
                 });
                 promptSettled = true;
-                recordInvocation({ status: "completed", messages: run.completion.messages });
+                recordInvocation({
+                    status: "completed",
+                    messages: run.completion.messages,
+                    tokens: run.completion.usage,
+                });
                 return run.validated;
             } finally {
                 promptSignal.cleanup();

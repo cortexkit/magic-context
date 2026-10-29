@@ -21,6 +21,7 @@ async function git(root: string, args: string[]): Promise<string> {
         timeout: 10_000,
         maxBuffer: MAX_DIFF_BYTES,
         encoding: "utf8",
+        windowsHide: true,
     });
     return stdout;
 }

@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-
+import { isCommitRetentionPaused } from "../config/commit-retention-recovery";
 import type { DreamerConfig } from "../config/schema/magic-context";
 import { acquireLease, releaseLease } from "../features/magic-context/dreamer/lease";
 import { logDreamerNotOwnerOnce } from "../features/magic-context/dreamer/module-apply";
@@ -845,6 +845,7 @@ export async function sweepGitCommits(args: {
         const result = await indexCommitsForProject(db, projectIdentity, directory, {
             sinceDays: gitCommitIndexing.since_days,
             maxCommits: gitCommitIndexing.max_commits,
+            skipRetention: isCommitRetentionPaused(gitCommitIndexing),
         });
         if (result.nonIndexable) {
             // Not a repo / repo with no commits: park on the long re-probe

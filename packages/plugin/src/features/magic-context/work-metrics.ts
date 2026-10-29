@@ -1,3 +1,4 @@
+import type { OpenCodeHostGeneration } from "../../shared/opencode-db-path";
 import type { Database } from "../../shared/sqlite";
 
 export interface WorkMetrics {
@@ -122,6 +123,7 @@ export function computeOpenCodeWorkMetrics(openCodeDb: Database, sessionId: stri
 export interface AssistantUsageRow {
     /** json_extract(data,'$.agent'); null when absent (its own partition). */
     agent: string | null;
+    /** Ordering key: v1 time_created, or v2 seq (the store's append order). */
     timeCreated: number;
     id: string;
     /** input + cache.read + cache.write. */
@@ -147,7 +149,7 @@ export interface WorkMetricsCarry {
     perAgent: Map<string, AgentCarry>;
     /** Σ max(0, prompt - prevPrompt) across every folded row (metric A body). */
     newWorkSum: number;
-    /** Watermark: last folded row's ordering key. */
+    /** Watermark: last folded row's ordering key (v1 time_created or v2 seq). */
     lastTimeCreated: number;
     lastId: string;
 }
@@ -258,6 +260,25 @@ WHERE session_id = ?
   AND (time_created > ? OR (time_created = ? AND id > ?))
 ORDER BY time_created, id`;
 
+// OpenCode 2 stores the role in `type`, not data.role. Its append order is seq;
+// alias it to the fold's ordering key so missing or nonmonotonic timestamps do
+// not skip turns or change the phase-peak calculation.
+const V2_ASSISTANT_USAGE_ROWS_AFTER_SQL = `
+SELECT
+  json_extract(data, '$.agent') AS agent,
+  seq AS time_created,
+  id AS id,
+  COALESCE(json_extract(data, '$.tokens.input'), 0)
+    + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
+    + COALESCE(json_extract(data, '$.tokens.cache.write'), 0) AS prompt,
+  COALESCE(json_extract(data, '$.tokens.output'), 0) AS output
+FROM session_message
+WHERE session_id = ?
+  AND type = 'assistant'
+  AND data IS NOT NULL
+  AND (seq > ? OR (seq = ? AND id > ?))
+ORDER BY seq, id`;
+
 interface AssistantUsageDbRow {
     agent: string | null;
     time_created: number;
@@ -272,9 +293,14 @@ export function readAssistantUsageRowsAfter(
     sessionId: string,
     afterTimeCreated: number,
     afterId: string,
+    generation: OpenCodeHostGeneration = "v1",
 ): AssistantUsageRow[] {
     const rows = openCodeDb
-        .prepare(ASSISTANT_USAGE_ROWS_AFTER_SQL)
+        .prepare(
+            generation === "v2"
+                ? V2_ASSISTANT_USAGE_ROWS_AFTER_SQL
+                : ASSISTANT_USAGE_ROWS_AFTER_SQL,
+        )
         .all(sessionId, afterTimeCreated, afterTimeCreated, afterId) as AssistantUsageDbRow[];
     return rows.map((r) => ({
         agent: r.agent ?? null,
@@ -302,12 +328,14 @@ export function computeOpenCodeWorkMetricsIncremental(
     openCodeDb: Database,
     sessionId: string,
     carry: WorkMetricsCarry,
+    generation: OpenCodeHostGeneration = "v1",
 ): { carry: WorkMetricsCarry; metrics: WorkMetrics } {
     const rows = readAssistantUsageRowsAfter(
         openCodeDb,
         sessionId,
         carry.lastTimeCreated,
         carry.lastId,
+        generation,
     );
     if (rows.length === 0) {
         // No uncommitted rows at all (only possible when the session has zero

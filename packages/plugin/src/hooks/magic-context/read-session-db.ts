@@ -50,13 +50,13 @@ export interface LatestPersistedMessage {
  * A Pi or OMP process never reads OpenCode's store (see harnessOwnsOpenCodeStore),
  * so it reports the store as absent there, exactly as on a Pi-only install.
  */
-export function openCodeDbExists(): boolean {
-    return harnessOwnsOpenCodeStore() && openCodeDbPathExists(resolveOpenCodeDbPath());
+export function openCodeDbExists(generation: OpenCodeHostGeneration = "v1"): boolean {
+    return harnessOwnsOpenCodeStore() && openCodeDbPathExists(resolveOpenCodeDbPath(generation));
 }
 
 // One cached read-only handle per store generation. The v1 handle serves every
 // OpenCode 1 reader in this module; the v2 handle serves only the readers that
-// also know the OpenCode 2 schema (see getMessageTimesFromOpenCodeDb).
+// also know the OpenCode 2 schema.
 const cachedReadOnlyDbs: Record<OpenCodeHostGeneration, { path: string; db: Database } | null> = {
     v1: null,
     v2: null,
@@ -83,7 +83,7 @@ function getReadOnlySessionDb(generation: OpenCodeHostGeneration = "v1"): Databa
             "OpenCode session database is not readable from a Pi-compatible process; its history lives in Pi sessions",
         );
     }
-    const resolution = resolveOpenCodeDbPath();
+    const resolution = resolveOpenCodeDbPath(generation);
     const dbPath = resolution.path;
     if (!openCodeDbPathExists(resolution)) {
         throw new Error(
@@ -108,8 +108,11 @@ function getReadOnlySessionDb(generation: OpenCodeHostGeneration = "v1"): Databa
     return db;
 }
 
-export function withReadOnlySessionDb<T>(fn: (db: Database) => T): T {
-    return fn(getReadOnlySessionDb());
+export function withReadOnlySessionDb<T>(
+    fn: (db: Database) => T,
+    generation: OpenCodeHostGeneration = "v1",
+): T {
+    return fn(getReadOnlySessionDb(generation));
 }
 
 // Intentional: exported for tests; production relies on process-exit cleanup (same as closeDatabase)
