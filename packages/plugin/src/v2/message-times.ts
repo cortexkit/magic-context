@@ -42,22 +42,22 @@ export class V2MessageTimesCache {
                 current.identity = identity;
                 const reusable = previous?.identity === identity ? previous.entries : undefined;
                 const known: string[] = [];
-                const unknown: string[] = [];
+                const refresh: string[] = [];
                 let first = Infinity;
                 let last = -Infinity;
                 for (const id of missing) {
                     const entry = reusable?.get(id);
-                    if (entry) {
+                    if (
+                        entry &&
+                        (entry.version.type === "user" || entry.time.completed !== undefined)
+                    ) {
                         known.push(id);
                         first = Math.min(first, entry.version.seq);
                         last = Math.max(last, entry.version.seq);
-                    } else unknown.push(id);
+                    } else refresh.push(id);
                 }
                 const versions = reader.messageTimeVersions(sessionID, known, { first, last });
-                for (const [id, version] of reader.messageTimeVersions(sessionID, unknown))
-                    versions.set(id, version);
-                const refresh: string[] = [];
-                for (const id of missing) {
+                for (const id of known) {
                     const version = versions.get(id);
                     const cached = reusable?.get(id);
                     if (!version) {
@@ -71,7 +71,9 @@ export class V2MessageTimesCache {
                         passTimes.set(id, cached.time);
                     } else refresh.push(id);
                 }
-                const times = reader.messageTimes(sessionID, refresh);
+                // Fresh reads return their revisions too: cold and incomplete
+                // rows need no separate metadata lookup before reading times.
+                const times = reader.messageTimes(sessionID, refresh, versions);
                 for (const id of refresh) {
                     const time = times.get(id);
                     const version = versions.get(id);

@@ -48,13 +48,15 @@ test("OC2 times cache reads only new or incomplete times on later passes", () =>
     const f = fixture();
     const real = f.reader.messageTimes.bind(f.reader);
     const reads: string[][] = [];
-    const spy = spyOn(f.reader, "messageTimes").mockImplementation((session, ids) => {
+    const spy = spyOn(f.reader, "messageTimes").mockImplementation((session, ids, versions) => {
         reads.push([...ids]);
-        return real(session, ids);
+        return real(session, ids, versions);
     });
+    const metadata = spyOn(f.reader, "messageTimeVersions");
     try {
         expect(f.cache.pass("s")(f.reader, f.ids).size).toBe(1000);
         expect(reads.flat()).toHaveLength(1000);
+        expect(metadata.mock.calls.flatMap((args) => args[1])).toHaveLength(0);
         reads.length = 0;
         expect(f.cache.pass("s")(f.reader, f.ids).size).toBe(1000);
         expect(reads.flat()).toHaveLength(0);
@@ -73,6 +75,7 @@ test("OC2 times cache reads only new or incomplete times on later passes", () =>
         f.cache.pass("s")(f.reader, ids);
         expect(reads.flat()).toHaveLength(0);
     } finally {
+        metadata.mockRestore();
         spy.mockRestore();
         f.cleanup();
     }

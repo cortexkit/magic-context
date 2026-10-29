@@ -152,9 +152,10 @@ function countTimeReads() {
         this: V2StoreReader,
         sessionID: string,
         ids: readonly string[],
+        versions?: Parameters<V2StoreReader["messageTimes"]>[2],
     ) {
         reads.push([...ids]);
-        return real.call(this, sessionID, ids);
+        return real.call(this, sessionID, ids, versions);
     });
     return { reads, restore: () => spy.mockRestore() };
 }

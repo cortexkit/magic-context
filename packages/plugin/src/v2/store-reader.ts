@@ -457,9 +457,10 @@ export class V2StoreReaderPool {
  * row of the session for each batch of ids. The session is still checked on
  * each row found.
  */
-export function messageTimesQuery(count: number): string {
+export function messageTimesQuery(count: number, withVersions = false): string {
     return `SELECT id, COALESCE(time_created, json_extract(data, '$.time.created')) AS created,
                    json_extract(data, '$.time.completed') AS completed
+                   ${withVersions ? ", type, seq, time_created AS version_created, time_updated AS version_updated" : ""}
             FROM session_message WHERE +session_id = ? AND id IN (${Array.from({ length: count }, () => "?").join(",")})`;
 }
 
@@ -890,25 +891,38 @@ export class V2StoreReader {
     messageTimes(
         sessionID: string,
         ids: readonly string[],
+        versions?: Map<string, V2MessageTimeVersion>,
     ): Map<string, { created?: number; completed?: number }> {
         const times = new Map<string, { created?: number; completed?: number }>();
         // Read only timing metadata for the served draft, not full stored content
         // or the session's archived history. Bound each query's parameter count.
         for (let offset = 0; offset < ids.length; offset += 500) {
             const batch = ids.slice(offset, offset + 500);
-            const rows = this.prepare(messageTimesQuery(batch.length)).all(
+            const rows = this.prepare(messageTimesQuery(batch.length, versions !== undefined)).all(
                 sessionID,
                 ...batch,
             ) as Array<{
                 id: string;
                 created: number | null;
                 completed: number | null;
+                type: string;
+                seq: number;
+                version_created: number | null;
+                version_updated: number | null;
             }>;
-            for (const row of rows)
+            for (const row of rows) {
                 times.set(row.id, {
                     created: typeof row.created === "number" ? row.created : undefined,
                     completed: typeof row.completed === "number" ? row.completed : undefined,
                 });
+                versions?.set(row.id, {
+                    id: row.id,
+                    type: row.type,
+                    seq: row.seq,
+                    created: row.version_created,
+                    updated: row.version_updated,
+                });
+            }
         }
         return times;
     }
