@@ -213,6 +213,11 @@ pub(crate) struct Runtime {
     pub(crate) decision_lines: Mutex<Vec<String>>,
 }
 
+struct RecordStart {
+    generation: u64,
+    preparation: Option<offline_first_pass::OfflineFirstPass>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AsyncRecord {
     #[serde(default, skip_serializing_if = "user_commands::Ledger::is_empty")]
@@ -411,8 +416,8 @@ pub(crate) struct AsyncRecord {
     conditions: Option<BTreeMap<String, String>>,
     resync: bool,
     generation: u64,
-    /// Set on a record `ck-mc offline first-pass` prepared, until the first
-    /// live notice adopts or discards it; see `offline_first_pass`.
+    /// Offline preparation and durable live adoption provenance, retained
+    /// across generations; see `offline_first_pass`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     offline_first_pass: Option<offline_first_pass::OfflineFirstPass>,
     /// The record format; see `cut_seed::RECORD_VERSION`. Absent on records
@@ -1298,7 +1303,16 @@ impl State {
         self.reindex()?;
         self.restore_sources(store, codec)?;
         self.restore_undo_edits(store)?;
-        self.bind_standalone_move(store, codec)?;
+        let bound = self
+            .offline_first_pass
+            .as_ref()
+            .is_some_and(|offline| offline.bound_generation == Some(self.generation));
+        if !bound {
+            self.bind_standalone_move(store, codec)?;
+            if let Some(offline) = &mut self.offline_first_pass {
+                offline.bound_generation = Some(self.generation);
+            }
+        }
         let rows = self.unsaved_tag_rows(codec)?;
         self.save(store, &rows)
     }
@@ -2159,8 +2173,11 @@ impl State {
     fn finish_reset(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
         self.resync = true;
         self.partial_read_seq = None;
-        // The held entries an offline proof described are gone with the reset.
-        self.offline_first_pass = None;
+        // A reset invalidates an unadopted proof, not durable adoption. An
+        // adopted conversation never needs offline preparation again.
+        if !offline_first_pass::adopted(self) {
+            self.offline_first_pass = None;
+        }
         // A runner that lost its state continues under a new lineage
         // (contract §5.3), which reaches here as a resync: the conversation
         // starts over, so an earlier protocol failure no longer applies.
@@ -2523,7 +2540,7 @@ impl McHandler {
     ) -> Result<Vec<u8>, HandlerOutcome> {
         // Setup can hold both the old and new lineage records during recovery.
         // Keep that future off the caller's stack, including on small runtimes.
-        Box::pin(self.async_setup_inner(channel, binding, params)).await
+        Box::pin(self.async_setup_inner(channel, binding, params, None)).await
     }
 
     async fn async_setup_inner(
@@ -2531,6 +2548,7 @@ impl McHandler {
         channel: u16,
         binding: &SessionBinding,
         params: &Value,
+        preparation: Option<offline_first_pass::OfflineFirstPass>,
     ) -> Result<Vec<u8>, HandlerOutcome> {
         let request: compact::setup::SetupRequest = decode(params)?;
         let bound_session = binding.session.as_str();
@@ -2644,6 +2662,37 @@ impl McHandler {
                 "Rerun `ck-mc offline first-pass` to prepare the retained interval before live adoption.",
             ));
         }
+        if preparation.is_none()
+            && standalone_move.is_some()
+            && !existing.as_ref().is_some_and(|state| {
+                offline_first_pass::adopted(state) || offline_first_pass::prepared(state)
+            })
+        {
+            return bytes(&moved_session::setup_refusal(
+                &request.request_id,
+                "moved_session_unprepared",
+                "Run `ck-mc offline first-pass` before the moved session's first live adoption.",
+            ));
+        }
+        if preparation.is_none() && standalone_move.is_some() {
+            if let Some(state) = existing
+                .as_ref()
+                .filter(|state| !offline_first_pass::adopted(state))
+            {
+                let mismatch = offline_first_pass::setup_mismatch(state, binding, &request)
+                    .is_some()
+                    || live_describe.as_ref().is_some_and(|describe| {
+                        offline_first_pass::describe_mismatch(state, describe).is_some()
+                    });
+                if mismatch {
+                    return bytes(&moved_session::setup_refusal(
+                        &request.request_id,
+                        "moved_session_unprepared",
+                        "Setup differs from the preparation; rerun `ck-mc offline first-pass` with this Setup.",
+                    ));
+                }
+            }
+        }
         // A crash inside the adoption import leaves the cut stage saved but the
         // Setup answer incomplete. Restart from the move record in a fresh
         // generation (a fresh namespace, so the empty head pass never sees the
@@ -2714,7 +2763,10 @@ impl McHandler {
                 &request,
                 key,
                 standalone_move.clone(),
-                generation,
+                RecordStart {
+                    generation,
+                    preparation: preparation.clone(),
+                },
             )?;
             // A moved session that already bound its drops replays the durable
             // `(mid, part, digest)` bindings in the fresh generation instead of
@@ -2736,6 +2788,7 @@ impl McHandler {
                 state.withdraw_pruning_permission()?;
             }
             state.cache_policy = old.cache_policy.clone();
+            state.offline_first_pass = old.offline_first_pass.clone();
             state.published_cuts = old.published_cuts.clone();
             state.retired_cut_stages = old.retired_cut_stages.clone();
             state.cut_history_gc_pending =
@@ -2814,10 +2867,11 @@ impl McHandler {
         // It is also kept only for the runner `role.describe` it was prepared
         // against. The answer read here serves the moved session's checkpoint
         // check below as well, so this Setup asks the runner once.
-        if let Some(state) = existing
-            .as_ref()
-            .filter(|state| discarded.is_none() && state.offline_first_pass.is_some())
-        {
+        if let Some(state) = existing.as_ref().filter(|state| {
+            discarded.is_none()
+                && state.offline_first_pass.is_some()
+                && !offline_first_pass::adopted(state)
+        }) {
             let describe = match live_describe.take() {
                 Some(describe) => describe,
                 None => {
@@ -2828,6 +2882,13 @@ impl McHandler {
             discarded = offline_first_pass::describe_mismatch(state, &describe)
                 .map(|reason| (state.generation, reason));
             live_describe = Some(describe);
+        }
+        if preparation.is_none() && standalone_move.is_some() && discarded.is_some() {
+            return bytes(&moved_session::setup_refusal(
+                &request.request_id,
+                "moved_session_unprepared",
+                "Setup differs from the preparation; rerun `ck-mc offline first-pass` with this Setup.",
+            ));
         }
         // A record discarded for a fresh generation keeps the floor it stored.
         let stored_floor = existing
@@ -2951,8 +3012,17 @@ impl McHandler {
                 None => 0,
             }
         };
-        let mut state =
-            self.new_async_record(channel, binding, &request, key, standalone_move, generation)?;
+        let mut state = self.new_async_record(
+            channel,
+            binding,
+            &request,
+            key,
+            standalone_move,
+            RecordStart {
+                generation,
+                preparation,
+            },
+        )?;
         state.full_array_floor = full_array_floor;
         if discarded.is_some() {
             state.forget_discarded_rows();
@@ -2985,7 +3055,7 @@ impl McHandler {
         request: &compact::setup::SetupRequest,
         key: Key,
         standalone_move: Option<crate::offline_move::MoveRecord>,
-        generation: u64,
+        start: RecordStart,
     ) -> Result<State, HandlerOutcome> {
         let store = self
             .store
@@ -3068,8 +3138,8 @@ impl McHandler {
             marker_outcomes: BTreeMap::new(),
             conditions: None,
             resync: false,
-            generation,
-            offline_first_pass: None,
+            generation: start.generation,
+            offline_first_pass: start.preparation,
             record_version: cut_seed::RECORD_VERSION,
             cut_first_ordinal: None,
             cut_seed: None,
@@ -4433,7 +4503,7 @@ impl McHandler {
                 false
             };
             if state.resync
-                || state.offline_first_pass.is_some()
+                || (state.offline_first_pass.is_some() && !offline_first_pass::adopted(&state))
                 || state.lineage.as_deref() != Some(&view.lineage_id)
                 || invalid_cut
             {
@@ -4545,6 +4615,12 @@ impl McHandler {
         state = self
             .checkout(store, &notice.session_ref)?
             .ok_or_else(|| transient("async session disappeared"))?;
+        if state.standalone_move.is_some()
+            && !offline_first_pass::adopted(&state)
+            && !offline_first_pass::prepared(&state)
+        {
+            return Err(offline_first_pass::unprepared());
+        }
         if state.active_seed_is_unsafe(store)? {
             return Err(error(
                 "unsafe_cut_seed",
@@ -4594,7 +4670,7 @@ impl McHandler {
         // A record the offline first pass prepared is checked against what the
         // runner serves now, once, before anything else: it is either adopted
         // whole or discarded for a fresh record.
-        if state.offline_first_pass.is_some() {
+        if state.offline_first_pass.is_some() && !offline_first_pass::adopted(&state) {
             // Boxed: this one-time check reads the whole transcript, and an
             // inline future of that size would grow every notice's future.
             state =
@@ -5953,7 +6029,9 @@ impl McHandler {
                 .ok_or_else(|| transient("async session disappeared"))?;
             // An offline-prepared record serves nothing until a notice has
             // checked it against the runner's transcript.
-            if state.resync || state.offline_first_pass.is_some() {
+            if state.resync
+                || (state.offline_first_pass.is_some() && !offline_first_pass::adopted(&state))
+            {
                 let answer = ride::RideAnswer::nothing().with_cache_ttl(state.cache_ttl());
                 self.checkin(state);
                 return bytes(&answer);

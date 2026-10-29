@@ -11,6 +11,8 @@ use super::*;
 
 #[path = "broca_role_describe_offline.rs"]
 mod broca_role_describe;
+#[path = "preparation_lifecycle.rs"]
+mod preparation_lifecycle;
 use crate::offline_first_pass as command;
 use crate::offline_move::{self, tests as fixture, HolderCheck, StorePaths};
 use crate::providers::offline_first_pass_engine::{EntryInputProof, OfflineOutcome, PagesRunner};
@@ -954,7 +956,7 @@ async fn offline_first_pass_is_adopted_by_the_first_live_notice_without_a_first_
     let passes = resident::counters::read().engine_passes;
     assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
     let state = arm.state();
-    assert!(state.offline_first_pass.is_none(), "adopted");
+    assert!(super::super::offline_first_pass::adopted(&state), "adopted");
     assert_eq!(
         state.generation, 0,
         "adoption keeps the prepared generation"
@@ -982,7 +984,7 @@ async fn offline_first_pass_is_adopted_by_the_first_live_notice_without_a_first_
         .matches(state.prefix_input_proof.as_ref(), prefix.tail_from));
     assert_eq!(
         state.entries.first_key_value().map(|(ordinal, _)| *ordinal),
-        Some(prefix.from)
+        Some(prefix.from.max(state.lineage_first_ordinal))
     );
     assert!(prefix.context_sources.iter().all(|(ordinal, source)| state
         .entries
@@ -1062,7 +1064,7 @@ async fn a_changed_entry_discards_the_offline_first_pass_and_runs_the_ordinary_o
     );
     assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
     let state = arm.state();
-    assert!(state.offline_first_pass.is_none());
+    assert!(super::super::offline_first_pass::adopted(&state));
     assert_eq!(state.generation, 1, "the stored pass was discarded");
     assert!(
         state
@@ -1086,11 +1088,21 @@ async fn a_changed_entry_discards_the_offline_first_pass_and_runs_the_ordinary_o
     assert!(views.len() >= 2, "the ordinary first pass published a view");
     assert!(!arm.announced.0.lock().unwrap().contains(&views[0].0));
 
-    // The ordinary first pass, run on the same served entries in stores that
-    // never saw the offline command, commits the same engine state.
+    // A fresh preparation on the changed entries commits the same engine state.
     let control_store = tempfile::tempdir().unwrap();
     let (control_paths, _, _) = moved_stores(control_store.path(), fixture_stores);
     pin_history_generation(&control_paths.context_db, &prep.session, &[0]);
+    let work = tempfile::tempdir().unwrap();
+    let args = command_args(
+        work.path(),
+        &control_paths,
+        &prep.session,
+        &export(&changed, LINEAGE, 7),
+        &setup_file(project.path(), &setup_request(&prep.session, "fixture")),
+    );
+    first_pass(&args, project.path(), &fixture::NoHolders)
+        .await
+        .unwrap();
     let control = Arm::open(
         control_store.path(),
         project.path(),
@@ -1130,7 +1142,7 @@ async fn a_changed_entry_discards_the_offline_first_pass_and_runs_the_ordinary_o
 }
 
 #[tokio::test]
-async fn a_live_setup_that_differs_discards_the_offline_first_pass() {
+async fn a_live_setup_that_differs_refuses_without_discarding_the_preparation() {
     let _clock = crate::tests::fixed_clock();
     let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
@@ -1141,33 +1153,13 @@ async fn a_live_setup_that_differs_discards_the_offline_first_pass() {
         Served::new(prep.served.clone(), 7),
         config(),
     );
-    let offline_edits = arm.edit_baselines();
+    let before = store_rows(&prep.paths);
     // Another model than the one the pass was prepared under.
     let answer = arm.setup(setup_request(&prep.session, "fixture-2")).await;
-    assert_eq!(answer["answer"], "ready", "{answer}");
-    let state = arm.state();
-    assert!(state.offline_first_pass.is_none());
-    assert_eq!(state.generation, 1);
-    assert!(state.entries.is_empty(), "no offline entry survives");
-    assert_eq!(state.setup.model, "fixture-2");
-    let empty = frozen_edits::FrozenEdits::default().json().unwrap();
-    assert!(
-        offline_edits
-            .iter()
-            .any(|(slot, json)| slot == "frozen_edits" && *json != empty),
-        "the offline pass carried the moved drops as native edits: {offline_edits:?}"
-    );
-    assert!(
-        arm.edit_baselines()
-            .iter()
-            .any(|(slot, json)| slot == "frozen_edits" && *json == empty),
-        "the offline native edits are gone: {:?}",
-        arm.edit_baselines()
-    );
-    assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
-    let state = arm.state();
-    assert_eq!(state.entries.len(), prep.served.len());
-    assert!(state.published_engine.keys().any(|version| *version > 1));
+    assert_eq!(answer["code"], "moved_session_unprepared", "{answer}");
+    assert_eq!(store_rows(&prep.paths), before);
+    assert_eq!(arm.state().generation, 0);
+    assert!(arm.announced.0.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1196,7 +1188,7 @@ async fn inputs_that_changed_after_the_offline_pass_discard_it() {
     );
     assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
     let state = arm.state();
-    assert!(state.offline_first_pass.is_none());
+    assert!(super::super::offline_first_pass::adopted(&state));
     assert_eq!(
         state.generation, 1,
         "a changed configuration discards the pass"
@@ -1241,14 +1233,21 @@ async fn an_offline_run_that_stopped_before_its_proof_is_never_adopted() {
         Served::new(prep.served.clone(), 7),
         config(),
     );
+    let before = store_rows(&prep.paths);
     assert_eq!(
-        arm.setup(setup_request(&prep.session, "fixture")).await["answer"],
-        "ready"
+        arm.setup(setup_request(&prep.session, "fixture")).await["code"],
+        "moved_session_unprepared"
     );
-    assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
-    let state = arm.state();
-    assert!(state.offline_first_pass.is_none());
-    assert_eq!(state.generation, 1, "an unproven run is discarded");
+    assert!(arm
+        .notice(1, 0, None, Vec::new())
+        .await
+        .contains("moved_session_unprepared"));
+    assert_eq!(store_rows(&prep.paths), before);
+    assert_eq!(
+        arm.state().generation,
+        0,
+        "an unproven run is never adopted"
+    );
 }
 
 #[tokio::test]
@@ -1305,32 +1304,23 @@ async fn a_rerun_leaves_the_prepared_state_unchanged_or_refuses_by_name() {
         assert!(store_rows(&prep.paths) == before, "a refused rerun wrote");
     }
 
-    // A session ck-mc already set up live is not offline work any more.
-    let live_store = tempfile::tempdir().unwrap();
-    let (paths, session, served) = moved_stores(live_store.path(), fixture_stores);
+    // A session a live notice adopted is not offline work any more.
     let live = Arm::open(
-        live_store.path(),
+        store.path(),
         project.path(),
-        &session,
-        Served::new(served.clone(), 7),
+        &prep.session,
+        Served::new(prep.served.clone(), 7),
         config(),
     );
     assert_eq!(
-        live.setup(setup_request(&session, "fixture")).await["answer"],
+        live.setup(setup_request(&prep.session, "fixture")).await["answer"],
         "ready"
     );
+    assert_eq!(live.notice(1, 0, None, Vec::new()).await, "ok");
     drop(live);
-    let work = tempfile::tempdir().unwrap();
-    let args = command_args(
-        work.path(),
-        &paths,
-        &session,
-        &export(&served, LINEAGE, 3),
-        &setup_file(project.path(), &setup_request(&session, "fixture")),
-    );
     assert_eq!(
-        refusal_code(first_pass(&args, project.path(), &fixture::NoHolders).await),
-        "async_record_exists"
+        refusal_code(first_pass(&prep.args, project.path(), &fixture::NoHolders).await),
+        "offline_already_adopted"
     );
 }
 
@@ -1568,7 +1558,7 @@ fn changed_describe() -> Value {
 }
 
 #[tokio::test]
-async fn a_live_runner_describe_that_differs_discards_the_offline_first_pass_at_setup() {
+async fn a_live_runner_describe_that_differs_refuses_at_setup_without_writes() {
     let _clock = crate::tests::fixed_clock();
     let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
@@ -1582,15 +1572,14 @@ async fn a_live_runner_describe_that_differs_discards_the_offline_first_pass_at_
         config(),
     );
     let answer = arm.setup(setup_request(&prep.session, "fixture")).await;
-    assert_eq!(answer["answer"], "ready", "{answer}");
-    assert_eq!(answer["checkpoint"]["tag_checkpoint"], 20, "{answer}");
+    assert_eq!(answer["code"], "moved_session_unprepared", "{answer}");
     let state = arm.state();
-    assert!(state.offline_first_pass.is_none());
+    assert!(!super::super::offline_first_pass::adopted(&state));
     assert_eq!(
-        state.generation, 1,
-        "the stored pass was discarded at Setup"
+        state.generation, 0,
+        "Setup cannot discard a prepared record into an unprepared live pass"
     );
-    assert!(state.entries.is_empty(), "no offline entry survives");
+    assert_eq!(state.entries.len(), prep.served.len());
     assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
     assert_eq!(arm.state().entries.len(), prep.served.len());
 }
@@ -1612,7 +1601,7 @@ async fn a_live_runner_describe_that_differs_discards_the_offline_first_pass_at_
     // No Setup on this module first: the notice's own check must catch it.
     assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
     let state = arm.state();
-    assert!(state.offline_first_pass.is_none());
+    assert!(super::super::offline_first_pass::adopted(&state));
     assert_eq!(
         state.generation, 1,
         "a changed runner describe discards the pass"
@@ -1689,7 +1678,7 @@ fn observed(arm: &Arm) -> Value {
         "engine": engine_state(arm.store(), &arm.reference()),
         "certificate": certificate_state(&state),
         "decisions": [state.seq, state.completed_seq, state.applied.unwrap_or(0), state.generation],
-        "offline": state.offline_first_pass.is_some(),
+        "offline": state.offline_first_pass.is_some() && !super::super::offline_first_pass::adopted(&state),
         "sends": arm.runner.sends.lock().unwrap().len(),
     })
 }
@@ -1730,7 +1719,19 @@ fn publish_summary(arm: &Arm, end: u64) {
         .map_or((1, state.lineage_first_ordinal as i64), |last| {
             (last.sequence + 1, last.end_message + 1)
         });
-    let mid = |ordinal: i64| state.entries[&(ordinal as u64)].mid.clone();
+    let mid = |ordinal: i64| {
+        state
+            .entries
+            .get(&(ordinal as u64))
+            .unwrap_or_else(|| {
+                panic!(
+                    "summary endpoint {ordinal} missing from held rows {:?}",
+                    state.entries.keys().collect::<Vec<_>>()
+                )
+            })
+            .mid
+            .clone()
+    };
     compartments.push(mc_store::StoredCompartment {
         sequence,
         start_message: start,
@@ -1813,7 +1814,7 @@ async fn differential(
     );
     assert_eq!(live.notice(1, 0, None, Vec::new()).await, "ok", "{label}");
     assert!(
-        offline.state().offline_first_pass.is_none(),
+        super::super::offline_first_pass::adopted(&offline.state()),
         "{label}: adopted"
     );
     assert_same(
@@ -1996,7 +1997,7 @@ async fn offline_first_pass_175k_child() {
     assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
     let adopt_ms = started.elapsed().as_millis();
     let adopted = arm.state();
-    assert!(adopted.offline_first_pass.is_none());
+    assert!(super::super::offline_first_pass::adopted(&adopted));
     assert_eq!(adopted.generation, 0, "adopted, not discarded");
     let adopt_passes = resident::counters::read().engine_passes - passes;
     {
@@ -2142,7 +2143,7 @@ async fn first_notice_at(
             "{label} est={est}: outcomes differ: offline {offline_outcome} live {live_outcome}"
         ));
     }
-    if offline.state().offline_first_pass.is_some() {
+    if !super::super::offline_first_pass::adopted(&offline.state()) {
         return Err(format!("{label} est={est}: not adopted"));
     }
     let (offline_seen, live_seen) = (observed(&offline), observed(&live));

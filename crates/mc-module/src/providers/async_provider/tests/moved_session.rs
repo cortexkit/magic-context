@@ -145,6 +145,48 @@ pub(super) fn served_entries(opencode_db: &Path, session: &str) -> Vec<ReadMessa
 }
 
 pub(super) async fn moved_rig(dir: &Path, run_move: bool) -> (Rig, Value) {
+    moved_rig_stage(dir, run_move, true).await
+}
+
+async fn moved_offline_setup_rig(dir: &Path) -> (Rig, Value) {
+    moved_rig_stage(dir, true, false).await
+}
+
+pub(super) async fn prepare_for_live(h: &McHandler, dir: &Path, request: Value) -> Value {
+    let describe = h
+        .provider_runner
+        .call(
+            dir,
+            &fixture::fixture_session(),
+            "role.describe",
+            json!({}),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    let setup = super::super::offline_first_pass::OfflineSetup {
+        request: decode(&request).unwrap(),
+        project_root: dir.into(),
+        runner_module: MODULE.into(),
+        runner_describe: describe,
+    };
+    h.offline_first_pass(&setup).await.unwrap();
+    let binding = SessionBinding {
+        principal: Some(subc_protocol::Principal::Reserved {
+            module_id: MODULE.into(),
+        }),
+        scope: None,
+        project_root: dir.into(),
+        harness: "runner".into(),
+        session: fixture::fixture_session(),
+        model_key: None,
+        config: h.effective_config(dir),
+        history_budget_tokens: 4_000.0,
+    };
+    serde_json::from_slice(&h.async_setup(7, &binding, &request).await.unwrap()).unwrap()
+}
+
+async fn moved_rig_stage(dir: &Path, run_move: bool, prepare: bool) -> (Rig, Value) {
     let session = fixture::fixture_session();
     // The move's apply step refuses with `source_changed` unless the marker is
     // on the selected cut, so the fixture stores put it there before each move.
@@ -162,7 +204,7 @@ pub(super) async fn moved_rig(dir: &Path, run_move: bool) -> (Rig, Value) {
     if run_move {
         apply_certified_move(&paths);
     }
-    let (rig, answer) = Rig::try_setup_with_model(
+    let (rig, mut answer) = Rig::try_setup_with_model(
         dir,
         MODULE,
         ("runner", &session),
@@ -173,6 +215,52 @@ pub(super) async fn moved_rig(dir: &Path, run_move: bool) -> (Rig, Value) {
     )
     .await;
     *rig.runner.entries.lock().unwrap() = served_entries(&paths.opencode_db, &session);
+    if run_move && answer["code"] == "moved_session_unprepared" {
+        let request = json!({"session":session,"harness":"opencode","request_id":"setup","model":"fixture","context_window":100_000,"composition":{"render_tags":true},"params":{"serializer_profile":"opencode-aisdk"},"lineage_id":"L","now":1});
+        if prepare {
+            answer = prepare_for_live(&rig.h, dir, request).await;
+        } else {
+            let marker = super::super::offline_first_pass::OfflineFirstPass {
+                version: super::super::offline_first_pass::MARKER_VERSION,
+                state: super::super::offline_first_pass::PreparationState::Preparing,
+                bound_generation: None,
+                setup: super::super::offline_first_pass::setup_identity_digest(
+                    &decode(&request).unwrap(),
+                    MODULE,
+                )
+                .unwrap(),
+                describe: None,
+                inputs: None,
+                proof: None,
+            };
+            let binding = SessionBinding {
+                principal: Some(subc_protocol::Principal::Reserved {
+                    module_id: MODULE.into(),
+                }),
+                scope: None,
+                project_root: dir.into(),
+                harness: "runner".into(),
+                session,
+                model_key: None,
+                config: rig.h.effective_config(dir),
+                history_budget_tokens: 4_000.0,
+            };
+            answer = serde_json::from_slice(
+                &rig.h
+                    .async_setup_inner(7, &binding, &request, Some(marker))
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+        }
+    }
+    if answer["answer"] == "ready" {
+        *rig.runner.setup_checkpoint.lock().unwrap() =
+            serde_json::from_value::<contract::setup::SetupAnswer>(answer.clone())
+                .unwrap()
+                .checkpoint()
+                .cloned();
+    }
     (rig, answer)
 }
 
@@ -457,11 +545,11 @@ async fn moved_session_sets_up_from_the_import_and_carries_drops_onto_the_same_p
 async fn moved_setup_initial_contains_imported_history_head() {
     // The one Setup rule owns every lineage-start `initial`: the bootstrap
     // runs before the Setup engine pass, so the rendered head already
-    // includes the imported history. A moved session's Setup `initial` is an
+    // includes the imported history. The offline Setup's `initial` is an
     // empty `[message_count, message_count)` insertion whose replacement is
     // the imported history head, not an empty head.
     let dir = tempfile::tempdir().unwrap();
-    let (_rig, answer) = moved_rig(dir.path(), true).await;
+    let (_rig, answer) = moved_offline_setup_rig(dir.path()).await;
     assert_eq!(answer["answer"], "ready", "{answer}");
     assert_eq!(
         answer["initial"]["range"],
@@ -510,7 +598,7 @@ async fn moved_session_first_read_binds_without_pre_cut_rows() {
     // drops-only and never serves anything below the cut. A read starting at
     // the cut (without pre-cut rows) must succeed and bind drops.
     let dir = tempfile::tempdir().unwrap();
-    let (rig, _) = moved_rig(dir.path(), true).await;
+    let (rig, _) = moved_offline_setup_rig(dir.path()).await;
     {
         let mut entries = rig.runner.entries.lock().unwrap();
         entries.retain(|entry| entry.ordinal >= 6);
@@ -546,7 +634,7 @@ async fn importing_stage_restarts_from_the_move_record() {
     // final Setup save must restart from the move record and never answer the
     // partial record as complete.
     let dir = tempfile::tempdir().unwrap();
-    let (rig, answer) = moved_rig(dir.path(), true).await;
+    let (rig, answer) = moved_offline_setup_rig(dir.path()).await;
     assert_eq!(answer["answer"], "ready", "{answer}");
     let store = rig.h.store.get().unwrap();
     // Simulate the crash: keep the cut stage, drop the complete initial.
@@ -556,14 +644,20 @@ async fn importing_stage_restarts_from_the_move_record() {
     state.save(store, &[]).unwrap();
     let stored = load_head(store, &rig.reference).unwrap().unwrap();
     assert!(stored.is_importing_stage(), "must look importing");
-    // A repeat Setup restarts and answers ready, not the partial record.
-    let again = rig
-        .op("compaction.setup", {
-            let mut request = setup_request(&fixture::fixture_session(), "retry");
-            request["params"] = json!({"serializer_profile":"opencode-aisdk"});
-            request
-        })
-        .await;
+    // A repeat offline Setup restarts the import; live callers cannot adopt it.
+    let request = {
+        let mut request = setup_request(&fixture::fixture_session(), "retry");
+        request["params"] = json!({"serializer_profile":"opencode-aisdk"});
+        request
+    };
+    let binding = rig.h.async_binding(&stored);
+    let again: Value = serde_json::from_slice(
+        &rig.h
+            .async_setup_inner(7, &binding, &request, stored.offline_first_pass.clone())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(again["answer"], "ready", "{again}");
     assert_eq!(
         again["checkpoint"], answer["checkpoint"],
@@ -578,7 +672,7 @@ async fn importing_stage_restarts_from_the_move_record() {
 #[tokio::test]
 async fn second_bind_adds_no_duplicate_and_keeps_the_move_record() {
     let dir = tempfile::tempdir().unwrap();
-    let (rig, _) = moved_rig(dir.path(), true).await;
+    let (rig, _) = moved_offline_setup_rig(dir.path()).await;
     let store = rig.h.store.get().unwrap();
     // First bind through the same ingest a notice uses, without running the
     // engine in between so nothing consumes the queue.
@@ -637,7 +731,7 @@ async fn second_bind_adds_no_duplicate_and_keeps_the_move_record() {
 async fn unbindable_drop_target_refuses_drop_target_unbound() {
     // A carried drop whose served part has no tag cannot be bound: fail closed.
     let dir = tempfile::tempdir().unwrap();
-    let (rig, _) = moved_rig(dir.path(), true).await;
+    let (rig, _) = moved_offline_setup_rig(dir.path()).await;
     // Drop the applied target msg_m008 entirely, so no served part matches it.
     {
         let mut entries = rig.runner.entries.lock().unwrap();
@@ -698,7 +792,7 @@ async fn replay_skips_removed_and_changed_digests() {
     }
     state.journal.complete = true;
     state
-        .ingest_read(store, codec::Codec::OpencodeAiSdk)
+        .bind_standalone_move(store, codec::Codec::OpencodeAiSdk)
         .expect("removed target is skipped, not refused");
     // Changed digest: serve the same part with a different digest. The old drop
     // must not be applied to the changed content.
@@ -714,7 +808,7 @@ async fn replay_skips_removed_and_changed_digests() {
     }
     changed.journal.complete = true;
     changed
-        .ingest_read(store, codec::Codec::OpencodeAiSdk)
+        .bind_standalone_move(store, codec::Codec::OpencodeAiSdk)
         .expect("changed digest is skipped, not dropped");
 }
 
@@ -746,7 +840,7 @@ async fn replay_same_digest_untagged_refuses_before_any_model_call() {
     let dropped = tag_to_drop.map(|tag| state.tag_index.remove(&tag).unwrap());
     assert!(dropped.is_some(), "expected a tagged applied target");
     state.journal.complete = true;
-    let refused = state.ingest_read(store, codec::Codec::OpencodeAiSdk);
+    let refused = state.bind_standalone_move(store, codec::Codec::OpencodeAiSdk);
     let Err(HandlerOutcome::Error { code, message }) = refused else {
         panic!("{refused:?}");
     };
