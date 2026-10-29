@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * Capture the shipped OpenCode builders, not Rust's catalog or a copy of its
- * renderer. Run from the repository root:
+ * Capture the shipped OpenCode builders and the catalog generator's tools-only
+ * guidance, without running Rust. Run from the repository root:
  * bun crates/mc-module/testdata/tool_surfaces/generate.ts [--refresh-assets]
  * Strings are interned losslessly so the exhaustive language/config product
  * does not duplicate megabytes of identical guidance. No stores are opened.
@@ -9,6 +9,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
+import { answer, EXAMPLE_CONFIG, renderText } from "../../gen/gen-tool-catalog";
 import { buildMagicContextSection } from "../../../../packages/plugin/src/agents/magic-context-prompt";
 import {
 	buildPrimaryLanguageDirective,
@@ -267,6 +268,61 @@ for (const variant of tools) {
 	)!;
 	advertisedSchema(reduce.name, reduce.input_schema);
 }
+// A catalog head without compaction has no archive to expand. Its guidance
+// comes from the catalog's tools-only templates, not the standalone builder.
+const goldenPath = resolve(import.meta.dir, "golden.json");
+const checkMode =
+	process.argv.includes("--check") ||
+	process.argv.includes("--report-icu-drift");
+const catalogLanguages = checkMode
+	? (
+			JSON.parse(readFileSync(goldenPath, "utf8")) as {
+				languages: typeof languages;
+			}
+		).languages
+	: languages;
+const catalogToolsOnly: number[][] = [];
+const catalogToolsOnlyDescriptions = Object.fromEntries(
+	surfaces.map((surface) => {
+		const catalog = answer(
+			{ preset: "head", params: {} },
+			{
+				...EXAMPLE_CONFIG,
+				compaction_enabled: false,
+				prompt_surface: { default: surface, models: {} },
+			},
+		);
+		const tools = catalog.tools as Array<{ name: string; description: string }>;
+		return [
+			surface,
+			Object.fromEntries(tools.map((tool) => [tool.name, tool.description])),
+		];
+	}),
+);
+for (let flags = 0; flags < 16; flags++) {
+	for (let surface = 0; surface < surfaces.length; surface++) {
+		for (let language = 0; language < catalogLanguages.length; language++) {
+			const locale = catalogLanguages[language];
+			const text = renderText(
+				`tools_only/${surfaces[surface]}`,
+				{
+					memory: (flags & 1) !== 0,
+					dreamer: (flags & 2) !== 0,
+					temporal: (flags & 4) !== 0,
+					caveman: (flags & 8) !== 0,
+					language: locale.directive !== "",
+				},
+				{ language_directive: locale.directive },
+			);
+			catalogToolsOnly.push([
+				flags,
+				surface,
+				language,
+				...capture(text, locale.directive),
+			]);
+		}
+	}
+}
 const golden = {
 	format: "magic-context/typescript-tool-surfaces/1",
 	generator: "bun crates/mc-module/testdata/tool_surfaces/generate.ts",
@@ -280,12 +336,10 @@ const golden = {
 	strings,
 	guidance_cases: guidanceCases,
 	extras,
+	catalog_tools_only: catalogToolsOnly,
+	catalog_tools_only_descriptions: catalogToolsOnlyDescriptions,
 };
-const goldenPath = resolve(import.meta.dir, "golden.json");
 const serialized = `${JSON.stringify(golden)}\n`;
-const checkMode =
-	process.argv.includes("--check") ||
-	process.argv.includes("--report-icu-drift");
 if (checkMode) {
 	const saved = JSON.parse(readFileSync(goldenPath, "utf8")) as typeof golden;
 	if (
@@ -347,8 +401,27 @@ if (checkMode) {
 			);
 		checked++;
 	}
+	const catalogText = (row: number[], fragments: string[]) =>
+		fragments[row[3]] + fragments[row[4]];
+	if (
+		JSON.stringify(saved.catalog_tools_only_descriptions) !==
+			JSON.stringify(catalogToolsOnlyDescriptions) ||
+		saved.catalog_tools_only.length !== catalogToolsOnly.length ||
+		saved.catalog_tools_only.some(
+			(row, index) =>
+				row
+					.slice(0, 3)
+					.some((value, key) => value !== catalogToolsOnly[index][key]) ||
+				catalogText(row, saved.strings) !==
+					catalogText(catalogToolsOnly[index], strings),
+		)
+	) {
+		throw new Error(
+			"Catalog tools-only guidance differs from the committed capture.",
+		);
+	}
 	console.log(
-		`Canonical table matches ${saved.languages.length - 1} committed names; 20 tool schemas and ${checked} no-language/override builder outputs are fresh. Live ICU is not the language contract.`,
+		`Canonical table matches ${saved.languages.length - 1} committed names; 20 tool schemas, ${checked} no-language/override builder outputs and ${catalogToolsOnly.length} catalog tools-only outputs are fresh. Live ICU is not the language contract.`,
 	);
 	if (process.argv.includes("--report-icu-drift")) {
 		const currentNames = Object.fromEntries(
