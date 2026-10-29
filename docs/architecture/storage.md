@@ -94,12 +94,9 @@ durable.
 
 ## Session-scoped tables
 
-`SESSION_SCOPED_TABLES` in `storage-session-tables.ts` lists every table keyed by session, and whether each is harness-scoped. Two consumers depend on it being complete:
+`SESSION_SCOPED_TABLES` in `storage-session-tables.ts` lists every table keyed by session, and whether each is harness-scoped. Session deletion (`clearSession` on the host's delete event) depends on this list being complete to remove the session's rows from every table. Startup and background maintenance do not infer session deletion from absence in a local host store.
 
-- **Session deletion** (`clearSession` on the host's delete event) removes the session's rows from every listed table.
-- **The orphan sweep** (`message-index.ts`, run from the dream timer) finds sessions with rows in any listed table that the host no longer knows about, and removes them.
-
-A deletion that also needs the Rust module to delete its rows is recorded in `pending_session_cleanup` (tagged as a Rust deletion) and retried on dream-timer ticks; the session's coordinates are protected from the sweep until the module acknowledges. A table missing from the list leaks rows forever.
+A deletion that also needs the Rust module to delete its rows is recorded in `pending_session_cleanup` (tagged as a Rust deletion) and retried on dream-timer ticks. The host-side session-to-project mapping is retained until the Rust module acknowledges deletion; removing it sooner would make the durable retry unreachable. A table missing from the list leaks rows forever.
 
 ## Clones
 

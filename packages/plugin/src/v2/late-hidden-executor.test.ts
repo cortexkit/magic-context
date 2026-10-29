@@ -34,5 +34,8 @@ describe("createLateHiddenExecutor", () => {
         expect(await late.open(run)).toBe(handle);
         expect(opened).toEqual([run]);
         expect(late.capabilities).toEqual({ tools: false, harness: "opencode2" });
+        expect(await late.collectPartial?.(handle, 200)).toEqual({ text: "done" });
+        wired.collectPartial = async () => ({ text: "unfinished" }) as never;
+        expect(await late.collectPartial?.(handle, 200)).toEqual({ text: "unfinished" });
     });
 });

@@ -18,11 +18,7 @@ const fencedSources: Array<{ path: string; sites: string[]; reporterCalls?: stri
     },
     {
         path: "packages/plugin/src/features/magic-context/message-index.ts",
-        sites: [
-            "message_index_incremental",
-            "message_index_reconcile",
-            "message_index_orphan_sweep",
-        ],
+        sites: ["message_index_incremental", "message_index_reconcile"],
     },
     {
         path: "packages/plugin/src/features/magic-context/storage-meta-persisted.ts",
@@ -126,7 +122,6 @@ const newlyCoveredSites = [
     "opencode_soft_refresh_cache",
     "message_index_incremental",
     "message_index_reconcile",
-    "message_index_orphan_sweep",
     "message_index_clear",
     "message_fts_rowid_backfill",
     "storage_meta_wrapup_expiry_cleanup",

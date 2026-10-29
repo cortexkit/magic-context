@@ -420,16 +420,13 @@ describe("dream-timer startup is fail-open at the index.ts call site (static)", 
 describe("dream-timer message-history maintenance (static)", () => {
     const source = readFileSync(join(import.meta.dir, "dream-timer.ts"), "utf8");
 
-    test("runs durable cleanup retries and the orphan sweep from the global tick", () => {
+    test("runs durable explicit-deletion cleanup retries from the global tick", () => {
         const tick = source.slice(
             source.indexOf("function runTick("),
             source.indexOf("function startupJitterMs("),
         );
         expect(tick).toContain("runMessageHistoryMaintenance(db)");
         expect(tick).toContain("retryPendingSessionCleanups(db)");
-        expect(tick).toContain(
-            "await sweepOrphanedOpenCodeMessageIndexesOffThread(db, openOpenCodeDb)",
-        );
     });
 });
 

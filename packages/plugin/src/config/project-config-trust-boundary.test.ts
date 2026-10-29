@@ -2,7 +2,9 @@ import { describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isConfigLoadUntrusted } from "../plugin/embedding-bootstrap-helpers";
 import { createTestTempDirFromPath } from "../shared/test-temp-dir";
+import { isCommitRetentionPaused } from "./commit-retention-recovery";
 import { loadPluginConfigDetailed } from "./index";
 
 /**
@@ -38,6 +40,61 @@ function loadUserAndProject(user: unknown, project: unknown) {
 }
 
 describe("project config cannot reset user settings with a wrong-typed parent block", () => {
+    it("pauses retention eviction for a recovered commit cap without making memory untrusted", () => {
+        const loaded = loadUserAndProject(
+            { memory: { git_commit_indexing: { enabled: true, max_commits: 0 } } },
+            {},
+        );
+        expect(loaded.config.memory.git_commit_indexing.max_commits).toBe(2000);
+        expect(isCommitRetentionPaused(loaded.config.memory.git_commit_indexing)).toBe(true);
+        expect(isConfigLoadUntrusted(loaded)).toBe(false);
+        expect(
+            loaded.config.configWarnings?.filter((warning) =>
+                warning.includes("retention eviction is paused"),
+            ),
+        ).toHaveLength(1);
+        expect(loaded.config.configWarnings?.join("\n")).toContain(
+            "memory.git_commit_indexing.max_commits",
+        );
+        expect(
+            loaded.warningDetails.filter((warning) =>
+                warning.message.includes("retention eviction is paused"),
+            ),
+        ).toHaveLength(1);
+        const valid = loadUserAndProject(
+            { memory: { git_commit_indexing: { enabled: true, max_commits: 100 } } },
+            {},
+        );
+        expect(isCommitRetentionPaused(valid.config.memory.git_commit_indexing)).toBe(false);
+    });
+
+    it("recovers an out-of-range injection budget without making memory untrusted", () => {
+        const loaded = loadUserAndProject({}, { memory: { injection_budget_tokens: 20001 } });
+        expect(loaded.config.memory.enabled).toBe(true);
+        expect(loaded.config.memory.injection_budget_tokens).toBe(4000);
+        expect(loaded.recoveredFieldPaths).toEqual(["memory.injection_budget_tokens"]);
+        expect(loaded.config.configWarnings?.join("\n")).toContain(
+            "memory.injection_budget_tokens",
+        );
+        expect(isConfigLoadUntrusted(loaded)).toBe(false);
+    });
+
+    it("records the exact restored project leaf without distrusting a plain threshold", () => {
+        const loaded = loadUserAndProject(
+            { memory: { auto_search: { score_threshold: 0.7 } } },
+            { memory: { auto_search: { score_threshold: "invalid" } } },
+        );
+        expect(loaded.config.memory.auto_search.score_threshold).toBe(0.7);
+        expect(loaded.recoveredFieldPaths).toEqual(["memory.auto_search.score_threshold"]);
+        expect(isConfigLoadUntrusted(loaded)).toBe(false);
+    });
+
+    it("keeps an invalid embedding model untrusted after field recovery", () => {
+        const loaded = loadUserAndProject({ embedding: { model: 123 } }, {});
+        expect(loaded.recoveredFieldPaths).toEqual(["embedding.model"]);
+        expect(isConfigLoadUntrusted(loaded)).toBe(true);
+    });
+
     it("keeps the user's compaction block when the project sets compaction:false", () => {
         const loaded = loadUserAndProject(
             { compaction: { enabled: false } },

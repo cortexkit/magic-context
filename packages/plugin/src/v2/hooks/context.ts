@@ -1770,6 +1770,113 @@ export async function registerContext(context: V2Context) {
             ...args.messages.filter((message) => message !== args.incoming),
         ];
     };
+    // Construct retained callbacks outside the request scope. Even callbacks that
+    // only read instance state can keep a shared closure environment alive, along
+    // with replay helpers that hold the request's messages and attachments.
+    const initializeTransform = (database: NonNullable<typeof db>) =>
+        (transform ??= createTransform({
+            ...createV2TransformFeatureDeps(
+                config,
+                compactionOff,
+                directory,
+                embeddings.ensureRegistered,
+            ),
+            cacheTtlConfig: config.cache_ttl,
+            cacheTtlConfigured: config.cacheTtlConfigured,
+            sampleCacheTtlConfig: () => liveConfigReader.poll().effective,
+            db: database,
+            tagger,
+            ...createV2ThresholdDeps(config),
+            contextUsageMap: usage,
+            compactionOff,
+            // OpenCode 2 reads `session_message`, which numbers the same
+            // conversation differently from the v1 tables a converted store
+            // still carries.
+            storeGeneration: "v2",
+            // The host stores copied `§N§` notation unchanged (no hook runs before
+            // it writes a finished reply), so assistant text restored from a saved
+            // source copy gets the same strip `adaptPayload` gives the live text.
+            normalizeRestoredAssistantText: (text, providerID) =>
+                stripCopiedTagNotation(text, providerID === "anthropic"),
+            refreshSourceContents: (sessionID) =>
+                nativeFoldReplay?.needsHeadRebuild(sessionID) ?? false,
+            // OpenCode 2 owns its native checkpoints; this adapter never writes the
+            // OpenCode 1 synthetic marker rows that the shared off-transition deletes.
+            hostCleanupCompactionMarkers: () => ({
+                verified: true,
+                removedLineages: 0,
+                removedRows: 0,
+                retainedLineages: 0,
+            }),
+            protectedTokens: config.protected_tokens,
+            protectedTokenTierOverrides: getProtectedTokensTierOverrides(config),
+            liveModelBySession: liveModels,
+            getToolSetHash: (sessionId) => {
+                const model = liveModels.get(sessionId);
+                if (!model) return "";
+                return getCurrentToolSetHash(
+                    model.providerID,
+                    model.modelID,
+                    agents.get(sessionId),
+                    sessionId,
+                );
+            },
+            channel1StateBySession: channel1,
+            historyRefreshSessions,
+            pendingMaterializationSessions,
+            lastHeuristicsTurnId,
+            commitSeenLastPass,
+            variantBySession: variants,
+            keepReasoningTokens: config.keep_reasoning_tokens,
+            directory,
+            sessionDirectoryBySession: sessionDirectories,
+            projectPath: resolveProjectIdentityForSession(directory, config.allow_home_project),
+            getHistorianChunkTokens: () => sampleHistorian().chunkTokens,
+            getFallbackModelId: (sessionID) => {
+                const model = liveModels.get(sessionID);
+                return model ? `${model.providerID}/${model.modelID}` : undefined;
+            },
+            maybeAutoEmbedSession: createV2AutoEmbedSession(
+                {
+                    db: database,
+                    resolveDirectory: (sessionID) => sessionDirectories.get(sessionID) ?? directory,
+                    allowHomeProject: config.allow_home_project,
+                    recompProgressBySession: new Map(),
+                },
+                embeddings.ensureRegistered,
+            ),
+            hiddenCompletionExecutor,
+            historianRunnable:
+                !compactionOff &&
+                hiddenCompletionExecutor !== undefined &&
+                config.historian?.disable !== true,
+            historianModel: historianModels.primary,
+            historianContextLimit: sampleHistorian().contextLimit,
+            fallbackModels: historianModels.fallbacks,
+            resolveHistorianRun: sampleHistorian,
+            historianTimeoutMs: config.historian_timeout_ms,
+            // Raw config on purpose: absent means the user configured no
+            // output cap, and the hidden carrier only puts a cap on the wire
+            // when one was configured. The producer-window arithmetic applies
+            // its own default, so no fallback belongs here.
+            historianMaxOutputTokens: config.historian?.maxTokens,
+            historianTwoPass: config.historian?.two_pass,
+            historianExpandTools: config.historian?.expand_tools,
+            historianRunner: config.historian?.runner,
+            historianHostRunnerEnabled: config.historian?.host_runner?.enabled,
+            // OpenCode 2 folds on the host's own compaction rows, so the marker
+            // carrier stays inert.
+            compactionMarkerStrategy: v2CompactionMarkerStrategy,
+            signedThinkingHold: config.signed_thinking_hold,
+            promptSurface: config.prompt_surface,
+            promptSurfaceRuntime,
+            memoryConfig: {
+                enabled: config.memory.enabled,
+                injectionBudgetTokens: config.memory.injection_budget_tokens,
+                autoPromote: config.memory.auto_promote,
+            },
+            ...createHostSeams(context, readAllForConversion, pagedRead, liveModels),
+        }));
     const runManagedContext = async (draft: SessionContext): Promise<void> => {
         // Learn the host's message and attachment classes, so attachments on rows restored
         // after a host checkpoint can be rebuilt in the host's own shape.
@@ -2146,110 +2253,7 @@ export async function registerContext(context: V2Context) {
             // Background historian reads outlive the context callback. Keep its source
             // registered until plugin disposal, rather than falling back to the v1 store.
             prepareHistorySession(draft.sessionID);
-            transform ??= createTransform({
-                ...createV2TransformFeatureDeps(
-                    config,
-                    compactionOff,
-                    directory,
-                    embeddings.ensureRegistered,
-                ),
-                cacheTtlConfig: config.cache_ttl,
-                cacheTtlConfigured: config.cacheTtlConfigured,
-                sampleCacheTtlConfig: () => liveConfigReader.poll().effective,
-                db,
-                tagger,
-                ...createV2ThresholdDeps(config),
-                contextUsageMap: usage,
-                compactionOff,
-                // OpenCode 2 reads `session_message`, which numbers the same
-                // conversation differently from the v1 tables a converted store
-                // still carries.
-                storeGeneration: "v2",
-                // The host stores copied `§N§` notation unchanged (no hook runs before
-                // it writes a finished reply), so assistant text restored from a saved
-                // source copy gets the same strip `adaptPayload` gives the live text.
-                normalizeRestoredAssistantText: (text, providerID) =>
-                    stripCopiedTagNotation(text, providerID === "anthropic"),
-                refreshSourceContents: (sessionID) =>
-                    nativeFoldReplay?.needsHeadRebuild(sessionID) ?? false,
-                // GA owns its native checkpoints; this adapter never writes the v1
-                // synthetic marker rows that the shared off-transition deletes.
-                hostCleanupCompactionMarkers: () => ({
-                    verified: true,
-                    removedLineages: 0,
-                    removedRows: 0,
-                    retainedLineages: 0,
-                }),
-                protectedTokens: config.protected_tokens,
-                protectedTokenTierOverrides: getProtectedTokensTierOverrides(config),
-                liveModelBySession: liveModels,
-                getToolSetHash: (sessionId) => {
-                    const model = liveModels.get(sessionId);
-                    if (!model) return "";
-                    return getCurrentToolSetHash(
-                        model.providerID,
-                        model.modelID,
-                        agents.get(sessionId),
-                        sessionId,
-                    );
-                },
-                channel1StateBySession: channel1,
-                historyRefreshSessions,
-                pendingMaterializationSessions,
-                lastHeuristicsTurnId,
-                commitSeenLastPass,
-                variantBySession: variants,
-                keepReasoningTokens: config.keep_reasoning_tokens,
-                directory,
-                sessionDirectoryBySession: sessionDirectories,
-                projectPath: resolveProjectIdentityForSession(directory, config.allow_home_project),
-                getHistorianChunkTokens: () => sampleHistorian().chunkTokens,
-                getFallbackModelId: (sessionID) => {
-                    const model = liveModels.get(sessionID);
-                    return model ? `${model.providerID}/${model.modelID}` : undefined;
-                },
-                maybeAutoEmbedSession: createV2AutoEmbedSession(
-                    {
-                        db,
-                        resolveDirectory: (sessionID) =>
-                            sessionDirectories.get(sessionID) ?? directory,
-                        allowHomeProject: config.allow_home_project,
-                        recompProgressBySession: new Map(),
-                    },
-                    embeddings.ensureRegistered,
-                ),
-                hiddenCompletionExecutor,
-                historianRunnable:
-                    !compactionOff &&
-                    hiddenCompletionExecutor !== undefined &&
-                    config.historian?.disable !== true,
-                historianModel: historianModels.primary,
-                historianContextLimit: sampleHistorian().contextLimit,
-                fallbackModels: historianModels.fallbacks,
-                resolveHistorianRun: sampleHistorian,
-                historianTimeoutMs: config.historian_timeout_ms,
-                // Raw config on purpose: absent means the user configured no
-                // output cap, and the hidden carrier only puts a cap on the wire
-                // when one was configured. The producer-window arithmetic applies
-                // its own default, so no fallback belongs here.
-                historianMaxOutputTokens: config.historian?.maxTokens,
-                historianTwoPass: config.historian?.two_pass,
-                historianExpandTools: config.historian?.expand_tools,
-                historianRunner: config.historian?.runner,
-                historianHostRunnerEnabled: config.historian?.host_runner?.enabled,
-                // OpenCode 2 folds on the host's own compaction rows, so the marker
-                // carrier stays inert.
-                compactionMarkerStrategy: v2CompactionMarkerStrategy,
-                signedThinkingHold: config.signed_thinking_hold,
-                promptSurface: config.prompt_surface,
-                promptSurfaceRuntime,
-                memoryConfig: {
-                    enabled: config.memory.enabled,
-                    injectionBudgetTokens: config.memory.injection_budget_tokens,
-                    autoPromote: config.memory.auto_promote,
-                },
-                ...createHostSeams(context, readAllForConversion, pagedRead, liveModels),
-            });
+            transform = initializeTransform(db);
             const admitted = new Set<string>();
             let messageTimes: ReturnType<V2StoreReader["messageTimes"]> | undefined;
             const reader = openStoreReader();

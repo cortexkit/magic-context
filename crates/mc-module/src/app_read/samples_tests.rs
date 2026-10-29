@@ -525,6 +525,18 @@ fn search_messages_sql(with_project: bool) -> String {
 fn search_records() -> Vec<Record> {
     vec![
         plain(
+            "refusal-session-not-found",
+            "context.search/refusal-session-not-found.json",
+            "context.search",
+            "",
+            "",
+            json!({
+                "query": "needle",
+                "scope": {"session": {"runner": "pi", "harness": "pi", "session": "unmanaged"}},
+                "sources": ["message"],
+            }),
+        ),
+        plain(
             "hits",
             "context.search/hits.json",
             "context.search",

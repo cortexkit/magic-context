@@ -517,7 +517,10 @@ export function createCtxMemoryTool(
 					? !snapshot.features.memoryEnabled
 					: deps.memoryEnabled === false
 			) {
-				return err("Cross-session memory is disabled for this project.");
+				return err(
+					snapshot?.memoryDisabledReason ??
+						"Cross-session memory is disabled for this project.",
+				);
 			}
 			const sessionId = ctx.sessionManager.getSessionId();
 			let curateSuccessor: Memory | null = null;

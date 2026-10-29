@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-
+import { isCommitRetentionPaused } from "../config/commit-retention-recovery";
 import type { DreamerConfig } from "../config/schema/magic-context";
 import { acquireLease, releaseLease } from "../features/magic-context/dreamer/lease";
 import { logDreamerNotOwnerOnce } from "../features/magic-context/dreamer/module-apply";
@@ -48,7 +48,6 @@ import {
 } from "../features/magic-context/memory/embedding";
 import { isUsableProjectIdentity } from "../features/magic-context/memory/project-identity";
 import { pruneMissingProjectIdentities } from "../features/magic-context/memory/project-identity-cache";
-import { sweepOrphanedOpenCodeMessageIndexesOffThread } from "../features/magic-context/message-index-async";
 import {
     drainCommitBacklogForProject,
     drainProjectEmbeddingIdentityMaintenance,
@@ -273,7 +272,7 @@ export async function startDreamScheduleTimer(
     const embeddingSweepEnabled = args.memoryEnabled === true;
     const commitIndexingEnabled = args.gitCommitIndexing?.enabled === true;
 
-    // The timer also owns global message-history privacy maintenance, so an
+    // The timer also retries explicitly requested session deletions, so an
     // enabled plugin registers even when project dream/embedding/git work is off.
 
     // Idempotent registration — re-registering the same directory replaces
@@ -474,14 +473,6 @@ async function runMessageHistoryMaintenance(db: Database): Promise<void> {
                 `[message-index] pending Rust session cleanup: cleared=${rustCleanup.cleared} failed=${rustCleanup.failedSessionIds.length}`,
             );
         }
-    }
-
-    const sweep = await sweepOrphanedOpenCodeMessageIndexesOffThread(db, openOpenCodeDb);
-    if (sweep.reason) log(`[message-index] orphan sweep parked: ${sweep.reason}`);
-    if (sweep.deleted > 0) {
-        log(
-            `[message-index] orphan sweep: scanned=${sweep.scanned} deleted=${sweep.deleted} cursor=${sweep.cursor || "<complete>"}`,
-        );
     }
 }
 
@@ -854,6 +845,7 @@ export async function sweepGitCommits(args: {
         const result = await indexCommitsForProject(db, projectIdentity, directory, {
             sinceDays: gitCommitIndexing.since_days,
             maxCommits: gitCommitIndexing.max_commits,
+            skipRetention: isCommitRetentionPaused(gitCommitIndexing),
         });
         if (result.nonIndexable) {
             // Not a repo / repo with no commits: park on the long re-probe

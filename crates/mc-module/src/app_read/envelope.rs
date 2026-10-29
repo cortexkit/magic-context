@@ -5,7 +5,33 @@ use subc_client_rs::HandlerOutcome;
 
 pub const REQUEST_LIMIT: usize = 64 * 1024;
 pub const ROW_BUDGET: usize = 448 * 1024;
-pub const REPLY_LIMIT: usize = 512 * 1024;
+/// The management surface wraps a success as `{"result": <reply>}` (see
+/// [`wrap_management_result`]), and that wire body must still fit the phone's
+/// 512 KiB frame. So every reply is sized against the frame minus the wrapper,
+/// and both lanes stay under 512 KiB.
+pub const MANAGEMENT_RESULT_PREFIX: &[u8] = b"{\"result\":";
+pub const MANAGEMENT_RESULT_SUFFIX: &[u8] = b"}";
+pub const REPLY_LIMIT: usize =
+    512 * 1024 - MANAGEMENT_RESULT_PREFIX.len() - MANAGEMENT_RESULT_SUFFIX.len();
+
+/// Wraps a management-surface success the way every module's management reply
+/// reads through callosum: `{"result": <reply>}`. The reply bytes are spliced in
+/// unchanged, so the payload is byte-identical to the internal lane's reply.
+/// Refusals pass through untouched; the SDK sends them as error frames.
+pub fn wrap_management_result(outcome: HandlerOutcome) -> HandlerOutcome {
+    match outcome {
+        HandlerOutcome::Response(bytes) => {
+            let mut wrapped = Vec::with_capacity(
+                MANAGEMENT_RESULT_PREFIX.len() + bytes.len() + MANAGEMENT_RESULT_SUFFIX.len(),
+            );
+            wrapped.extend_from_slice(MANAGEMENT_RESULT_PREFIX);
+            wrapped.extend_from_slice(&bytes);
+            wrapped.extend_from_slice(MANAGEMENT_RESULT_SUFFIX);
+            HandlerOutcome::Response(wrapped)
+        }
+        other => other,
+    }
+}
 
 #[derive(Debug)]
 pub struct Request {

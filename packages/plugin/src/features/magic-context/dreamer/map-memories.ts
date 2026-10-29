@@ -72,18 +72,20 @@ import { DreamTokenBudgetExceeded } from "./token-budget";
 // Five memories at three investigation calls plus one answer each need about
 // 20 steps. Even ten calls plus an answer each fit the mapper agent's 60-step
 // limit, leaving room to finalize output rather than aborting an oversized batch.
+// Timeouts retry smaller groups: five becomes 2+2+1, and two becomes 1+1.
 const MAP_BATCH_SIZE = 5;
 
 /**
  * Minimum wall-clock budget for one agentic mapping batch. Keep the existing
  * four-minute floor even with smaller batches: reducing the memory count does
  * not bound the latency of a slow provider or an individual tool investigation.
- * Large backfills then bank
- * each committed batch and resume their remainder on a later run.
+ * Timeout splits each receive this same floor, if the task deadline permits;
+ * otherwise the unmapped remainder resumes on a later run.
  */
 export const MAP_BATCH_FLOOR_MS = 240_000;
 
-/** Stop only when two timed-out batches bank no decisions, not on slow progress. */
+/** Split timed-out multi-memory batches; stop after two consecutive singleton
+ * timeouts with no committed mappings. */
 const CONSECUTIVE_TIMEOUT_LIMIT = 2;
 
 /** Cap on already-mapped file-independent rows re-queued per run. A silent
@@ -411,8 +413,8 @@ export async function mapMemories(args: MapMemoriesArgs): Promise<MapMemoriesRes
                 result.failureStage = outcome.failure.stage;
             }
             const committed = outcome.mapped + outcome.independent;
+            const committedIds = new Set(outcome.committedIds);
             runLeaseGuardedWrite(args.db, args.holderId, args.leaseKey, () => {
-                const committedIds = new Set(outcome.committedIds);
                 for (const memory of batch.inputs) {
                     if (committedIds.has(memory.id)) {
                         delete retries[memory.id];
@@ -458,7 +460,32 @@ export async function mapMemories(args: MapMemoriesArgs): Promise<MapMemoriesRes
                 }
             }
 
-            if (outcome.failure?.class === "timeout" && committed === 0) {
+            if (outcome.failure?.class === "timeout" && batch.inputs.length > 1) {
+                const unmapped = batch.inputs.filter((memory) => !committedIds.has(memory.id));
+                const splitSize = Math.floor(batch.inputs.length / 2);
+                const splits: typeof batches = [];
+                for (let offset = 0; offset < unmapped.length; offset += splitSize) {
+                    splits.push({
+                        inputs: unmapped.slice(offset, offset + splitSize),
+                        isOmissionRetry: batch.isOmissionRetry,
+                    });
+                }
+                if (splits.length > 0) {
+                    // Queue children before later work and include each in the batch
+                    // count used to divide the deadline. Try these splits now, before
+                    // backoff, to distinguish a slow memory from an oversized batch.
+                    batches.splice(i + 1, 0, ...splits);
+                    log(
+                        `[dreamer] map-memories: splitting batch [${batch.inputs.map((memory) => memory.id).join(",")}] into ${splits.map((split) => split.inputs.length).join("+")} after timeout; retrying ${unmapped.length} uncommitted mapping(s)`,
+                    );
+                }
+            }
+
+            if (
+                outcome.failure?.class === "timeout" &&
+                batch.inputs.length === 1 &&
+                committed === 0
+            ) {
                 consecutiveTimeouts += 1;
                 timeoutStreakElapsedMs.push(outcome.failure.elapsedMs);
                 if (consecutiveTimeouts >= CONSECUTIVE_TIMEOUT_LIMIT) {
@@ -468,7 +495,7 @@ export async function mapMemories(args: MapMemoriesArgs): Promise<MapMemoriesRes
                     );
                     break;
                 }
-            } else {
+            } else if (committed > 0 || outcome.failure?.class !== "timeout") {
                 // A success or non-timeout failure should not poison the next
                 // timeout streak; those preserve the existing retry-next-run path.
                 consecutiveTimeouts = 0;
@@ -545,6 +572,7 @@ async function mapOneBatch(
             recordInvocation(args, startedAt, {
                 status: "completed",
                 messages: run.completion.messages ?? [],
+                tokens: run.completion.usage,
             });
             stage = "apply";
             const outcome = await applyParsedBatchMappings(
@@ -656,6 +684,7 @@ async function mapOneBatch(
             status: failedInvocationStatus(error),
             error,
             messages,
+            tokens: failedCompletion?.usage,
         });
         // Stop if another worker took ownership of this task or the shared memory
         // module rejected its write. Neither condition permits a local fallback write.
@@ -902,7 +931,12 @@ async function applyParsedBatchMappings(
 function recordInvocation(
     args: MapMemoriesArgs,
     startedAt: number,
-    params: { status: SubagentInvocationStatus; messages?: unknown[]; error?: unknown },
+    params: {
+        status: SubagentInvocationStatus;
+        messages?: unknown[];
+        tokens?: HiddenCompletion["usage"];
+        error?: unknown;
+    },
 ): void {
     if (!args.parentSessionId) return;
     recordChildInvocation({
@@ -914,6 +948,10 @@ function recordInvocation(
         startedAt,
         status: params.status,
         messages: params.messages,
+        tokens:
+            args.hiddenCompletionExecutor?.capabilities.harness === "opencode2"
+                ? params.tokens
+                : undefined,
         attemptedModel: args.model,
         configuredModels: args.fallbackModels,
         error: params.error,

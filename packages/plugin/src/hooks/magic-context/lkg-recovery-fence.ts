@@ -1,13 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-    type Dir,
-    lstatSync,
-    opendirSync,
-    readdirSync,
-    readFileSync,
-    rmdirSync,
-    rmSync,
-} from "node:fs";
+import { lstatSync, readdirSync, readFileSync, rmdirSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getMagicContextStorageDir } from "../../shared/data-path";
@@ -82,66 +74,6 @@ export function lkgRecoveryFencePath(sessionId: string): string {
     return join(getMagicContextStorageDir(), "lkg-recovery-fences", `${hash(sessionId)}.json`);
 }
 
-let lockSweepDirectory: { path: string; dir: Dir } | undefined;
-
-export function closeLkgLockSweepDirectory(): void {
-    lockSweepDirectory?.dir.closeSync();
-    lockSweepDirectory = undefined;
-}
-
-/** Keep a directory cursor in the timer process; short-lived workers consume only one page. */
-export function takeLkgRecoveryLockSweepPage(maxEntries = 200): string[] {
-    const path = join(getMagicContextStorageDir(), "lkg-recovery-fences");
-    if (lockSweepDirectory?.path !== path) closeLkgLockSweepDirectory();
-    const names: string[] = [];
-    try {
-        lockSweepDirectory ??= { path, dir: opendirSync(path) };
-        for (let i = 0; i < Math.min(200, Math.max(1, maxEntries)); i++) {
-            const entry = lockSweepDirectory.dir.readSync();
-            if (!entry) {
-                closeLkgLockSweepDirectory();
-                break;
-            }
-            if (entry.isDirectory() && /^[a-f0-9]{64}\.json\.locks$/.test(entry.name))
-                names.push(entry.name);
-        }
-    } catch {
-        closeLkgLockSweepDirectory();
-    }
-    return names;
-}
-
-/** Preserve entries inside lock directories: atomic rmdir fails if a contender creates one after our check. */
-export function sweepEmptyLkgRecoveryLockDirectories(
-    names: readonly string[],
-    retainedSessionIds: Iterable<string>,
-): number {
-    if (!durableFencesSupported()) return 0;
-    const retainedHashes = new Set(Array.from(retainedSessionIds, hash));
-    const root = join(getMagicContextStorageDir(), "lkg-recovery-fences");
-    let removed = 0;
-    for (const name of names.slice(0, 200)) {
-        if (!/^[a-f0-9]{64}\.json\.locks$/.test(name) || retainedHashes.has(name.slice(0, 64)))
-            continue;
-        const path = join(root, name);
-        try {
-            // A fence file is still a recovery obligation even when its session
-            // is not in the host's current projection. Leave it to session cleanup.
-            try {
-                lstatSync(path.slice(0, -".locks".length));
-                continue;
-            } catch (error) {
-                if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
-            }
-            if (!lstatSync(path).isDirectory()) continue;
-            rmdirSync(path);
-            removed++;
-        } catch {
-            // Nonempty, replaced, symlinked or inaccessible directories are not ours to reclaim.
-        }
-    }
-    return removed;
-}
 function metadata(slot: LkgSlot) {
     return [
         slot.inputIdSeq,

@@ -1,20 +1,17 @@
-import { takeLkgRecoveryLockSweepPage } from "../../hooks/magic-context/lkg-recovery-fence";
 import { runSessionWarmupWorker } from "../../hooks/magic-context/raw-ordinal-warmup";
 import type {
     RawMessage,
     RawMessageOrdinalAnchor,
 } from "../../hooks/magic-context/read-session-raw";
 import { scheduleAfterBootQuiet } from "../../plugin/boot-quiet";
-import { getDataDir } from "../../shared/data-path";
 import { getHarness } from "../../shared/harness";
 import { log, sessionLog } from "../../shared/logger";
 import {
-    Database,
+    type Database,
     getSqliteDatabasePath,
     indexCoordinationInput,
     withSqliteBackgroundWriter,
 } from "../../shared/sqlite";
-import { gaDatabasePath } from "../../v2/store-reader";
 import {
     clearIndexedMessages,
     getLastIndexedOrdinal,
@@ -24,9 +21,6 @@ import {
     indexSingleMessage,
     isMessageIndexReconciledThrough,
     isMessageIndexSourceCurrent,
-    type MessageHistoryOrphanSweepOptions,
-    type MessageHistoryOrphanSweepResult,
-    sweepOrphanedOpenCodeMessageIndexesCooperatively,
 } from "./message-index";
 import type { IndexWorkerMeasurements } from "./message-index-bounded";
 
@@ -601,55 +595,6 @@ export async function indexSingleMessageOffThread(
             );
     }
     return result.inserted;
-}
-
-/** Candidate scans, cascaded deletes and FTS commits belong on a worker, not a timer's event loop. */
-export async function sweepOrphanedOpenCodeMessageIndexesOffThread(
-    db: Database,
-    openSource: () => Database | null,
-    options: MessageHistoryOrphanSweepOptions = {},
-): Promise<MessageHistoryOrphanSweepResult> {
-    if (getHarness() === "opencode" || getHarness() === "opencode2")
-        options = {
-            ...options,
-            fenceLockNames: options.fenceLockNames ?? takeLkgRecoveryLockSweepPage(),
-        };
-    // The legacy opener validates v1 tables and rejects a native OC2 store.
-    // Its path must be resolved independently; the sweep validates session_v2
-    // through V2StoreReader before treating any context row as orphaned.
-    if (getHarness() === "opencode2")
-        openSource = () =>
-            new Database(gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"), {
-                readonly: true,
-                fileMustExist: true,
-            });
-    const path = getSqliteDatabasePath(db);
-    if (!path || (getHarness() !== "opencode" && getHarness() !== "opencode2"))
-        return sweepOrphanedOpenCodeMessageIndexesCooperatively(db, openSource, options);
-    let source: Database | null = null;
-    let sourcePath: string | null = null;
-    try {
-        source = openSource();
-        if (source) sourcePath = getSqliteDatabasePath(source);
-    } catch {
-        // An unavailable source needs only the persisted probe cooldown below,
-        // not the expensive candidate scan or deletion work delegated to a worker.
-    } finally {
-        if (sourcePath) source?.close();
-    }
-    if (!sourcePath)
-        return sweepOrphanedOpenCodeMessageIndexesCooperatively(db, () => source, options);
-    const reply = await runSessionWarmupWorker(
-        {
-            path,
-            sessionId: "",
-            harness: getHarness(),
-            orphanSweep: { sourcePath, options },
-        },
-        {},
-    );
-    if (!("orphanSweep" in reply)) throw new Error("message history orphan sweep worker failed");
-    return reply.orphanSweep;
 }
 
 export function scheduleClearAndReindex(

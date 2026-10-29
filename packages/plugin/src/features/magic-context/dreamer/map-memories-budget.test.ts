@@ -81,6 +81,7 @@ function driver(args: MapMemoriesArgs, fail = false, investigationCalls?: number
                         args.db,
                         args.projectIdentity,
                         args.sessionDirectory,
+                        true,
                     ).find((m) => m.id === id);
                     return `<memory id="${id}" files="${memory?.candidates[0]}"/>`;
                 });
@@ -164,23 +165,26 @@ test("five-memory batches also fit the observed ten-call investigation cost", as
 test("timeout banks complete memory elements before a truncated tail", async () => {
     const { args, memories } = fixture(2);
     driver(args, true);
+    const durable: number[] = [];
+    args.onProgress = (processed) => durable.push(processed);
     args.deadline = Date.now() + 300_000;
     const result = await mapMemories(args);
-    expect(result.mapped).toBe(1);
+    expect(durable).toEqual([1, 2]);
+    expect(result.mapped).toBe(2);
     expect(
         getMemoryVerifications(
             args.db,
             memories.map((m) => m.id),
         ).size,
-    ).toBe(1);
+    ).toBe(2);
 });
 
 test("progressing timeouts do not trip the no-progress breaker", async () => {
     const { args } = fixture(15);
     const { batches } = driver(args, true);
     const result = await mapMemories(args);
-    expect(batches).toHaveLength(3);
-    expect(result.mapped).toBe(3);
+    expect(batches).toHaveLength(15);
+    expect(result.mapped).toBe(15);
     expect(result.stopReason).not.toBe("timeout-circuit-breaker");
 });
 

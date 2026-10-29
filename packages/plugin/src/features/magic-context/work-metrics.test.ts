@@ -100,6 +100,55 @@ describe("work metrics", () => {
         ).toEqual({ newWorkTokens: 244, totalInputTokens: 320 });
     });
 
+    test("OpenCode 2 folds assistant usage in seq order and refreshes the streaming tail", () => {
+        const db = new Database(":memory:");
+        try {
+            db.exec(`CREATE TABLE session_message (
+                id TEXT PRIMARY KEY, session_id TEXT, type TEXT,
+                seq INTEGER, time_created INTEGER, data TEXT
+            )`);
+            const insert = db.prepare(
+                "INSERT INTO session_message (id, session_id, type, seq, time_created, data) VALUES (?, ?, ?, ?, ?, ?)",
+            );
+            const usage = (input: number, output: number) =>
+                JSON.stringify({
+                    agent: "build",
+                    tokens: { input, output, cache: { read: 20, write: 10 } },
+                });
+            insert.run("m1", "ses", "assistant", 1, 300, usage(70, 1));
+            insert.run("m2", "ses", "assistant", 2, 200, usage(170, 2));
+            insert.run("m3", "ses", "assistant", 3, null, usage(50, 3));
+            insert.run("m4", "ses", "assistant", 4, 100, usage(90, 4));
+            insert.run("user", "ses", "user", 5, 500, usage(10_000, 100));
+            insert.run("other", "other-session", "assistant", 6, 600, usage(10_000, 100));
+
+            const first = computeOpenCodeWorkMetricsIncremental(
+                db,
+                "ses",
+                emptyWorkMetricsCarry(),
+                "v2",
+            );
+            // Prompt phases are [100, 200] and [80, 120]: peaks 200 + 120,
+            // positive deltas 100 + 100 + 40, plus the last output 4.
+            expect(first.metrics).toEqual({ newWorkTokens: 244, totalInputTokens: 320 });
+            expect(first.carry.lastTimeCreated).toBe(3);
+
+            db.prepare("UPDATE session_message SET data = ? WHERE id = 'm4'").run(usage(100, 5));
+            const second = computeOpenCodeWorkMetricsIncremental(db, "ses", first.carry, "v2");
+            expect(second.metrics).toEqual({ newWorkTokens: 255, totalInputTokens: 330 });
+
+            insert.run("m5", "ses", "assistant", 7, null, usage(130, 6));
+            const third = computeOpenCodeWorkMetricsIncremental(db, "ses", second.carry, "v2");
+            expect(third.metrics).toEqual({ newWorkTokens: 286, totalInputTokens: 360 });
+            expect(third.carry.lastTimeCreated).toBe(4);
+            expect(
+                computeOpenCodeWorkMetricsIncremental(db, "ses", third.carry, "v2").metrics,
+            ).toEqual(third.metrics);
+        } finally {
+            db.close();
+        }
+    });
+
     // ── Incremental (watermark) fold ──────────────────────────────────────
     // The incremental driver must produce byte-identical results to the
     // window-function oracle, while only ever folding rows past its watermark.

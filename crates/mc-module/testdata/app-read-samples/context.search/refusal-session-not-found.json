@@ -1,0 +1,24 @@
+{
+  "name": "refusal-session-not-found",
+  "refusal": {
+    "code": "session_not_found",
+    "detail": null,
+    "message": "No session matches the reference."
+  },
+  "request": {
+    "method": "context.search",
+    "params": {
+      "query": "needle",
+      "scope": {
+        "session": {
+          "harness": "pi",
+          "runner": "pi",
+          "session": "unmanaged"
+        }
+      },
+      "sources": [
+        "message"
+      ]
+    }
+  }
+}

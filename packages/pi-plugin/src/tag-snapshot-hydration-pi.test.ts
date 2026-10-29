@@ -558,12 +558,14 @@ it("worker finishes module evaluation before it needs its first packet ACK", asy
 	// real worker module has settled, and this parent holds every ACK until
 	// then, so the same deadlock shows up on any runtime.
 	const { db, path, close } = fixture();
+	// Seed before the worker starts: it reads pages on its own thread, and a
+	// write landing between two of its pages is correctly refused as stale.
+	seedPages(db);
 	const worker = new Worker(
 		new URL("./tag-snapshot-worker-evaluation.fixture.ts", import.meta.url),
 		{ workerData: requestFor(path) },
 	);
 	try {
-		seedPages(db);
 		let evaluated = false;
 		const held: PiHydrationMessage[] = [];
 		const ack = (message: PiHydrationMessage) => {

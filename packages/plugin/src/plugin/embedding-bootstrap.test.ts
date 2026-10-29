@@ -11,6 +11,8 @@ import {
     registerProjectShadowEmbedding,
 } from "../features/magic-context/memory/embedding";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
+import { insertMemory } from "../features/magic-context/memory/storage-memory";
+import { sweepStaleEmbeddingIdentitiesForProject } from "../features/magic-context/project-embedding-registry";
 import { closeDatabase, openDatabase } from "../features/magic-context/storage";
 import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "./embedding-bootstrap";
@@ -80,6 +82,72 @@ afterEach(() => {
 });
 
 describe("ensureProjectRegisteredFromOpenCodeDirectory", () => {
+    it("keeps memory on at first startup after recovering an out-of-range injection budget", async () => {
+        const projectDir = tempDir("mc-budget-boot-");
+        process.env.HOME = tempDir("mc-budget-home-");
+        const configHome = tempDir("mc-budget-config-");
+        process.env.XDG_CONFIG_HOME = configHome;
+        process.env.XDG_DATA_HOME = tempDir("mc-budget-data-");
+        writeUserConfig(configHome, {
+            embedding: {
+                provider: "openai-compatible",
+                model: "fixture",
+                endpoint: "http://127.0.0.1:9/v1",
+            },
+            memory: { injection_budget_tokens: 20001 },
+        });
+        await ensureProjectRegisteredFromOpenCodeDirectory(projectDir, openDatabase());
+        const snapshot = getProjectEmbeddingSnapshot(resolveProjectIdentity(projectDir));
+        expect(snapshot?.features.memoryEnabled).toBe(true);
+        expect(snapshot?.enabled).toBe(true);
+        expect(snapshot?.runtimeFingerprint).not.toStartWith("observation:");
+    });
+
+    it("preserves stored embeddings and last-known-good registration after an invalid model recovery", async () => {
+        const projectDir = tempDir("mc-invalid-model-boot-");
+        process.env.HOME = tempDir("mc-invalid-model-home-");
+        const configHome = tempDir("mc-invalid-model-config-");
+        process.env.XDG_CONFIG_HOME = configHome;
+        process.env.XDG_DATA_HOME = tempDir("mc-invalid-model-data-");
+        const embedding = {
+            provider: "openai-compatible",
+            model: "fixture",
+            endpoint: "http://127.0.0.1:9/v1",
+        };
+        writeUserConfig(configHome, { embedding });
+        const db = openDatabase();
+        const identity = resolveProjectIdentity(projectDir);
+        await ensureProjectRegisteredFromOpenCodeDirectory(projectDir, db);
+        const prior = getProjectEmbeddingSnapshot(identity);
+        const memory = insertMemory(db, {
+            projectPath: identity,
+            category: "CONSTRAINTS",
+            content: "Preserve this vector.",
+        });
+        db.prepare(
+            "INSERT INTO memory_embeddings(memory_id, model_id, embedding) VALUES (?, 'expired-model', ?)",
+        ).run(memory.id, new Uint8Array(4));
+        db.prepare(
+            "INSERT INTO embedding_identity_active VALUES (?, 'memory', 'expired-model', 0)",
+        ).run(identity);
+
+        writeUserConfig(configHome, { embedding: { ...embedding, model: 123 } });
+        await ensureProjectRegisteredFromOpenCodeDirectory(projectDir, db);
+        expect(getProjectEmbeddingSnapshot(identity)?.runtimeFingerprint).toBe(
+            prior?.runtimeFingerprint,
+        );
+        expect(sweepStaleEmbeddingIdentitiesForProject(db, identity).memoryRowsDeleted).toBe(0);
+        expect(
+            db
+                .prepare("SELECT COUNT(*) AS n FROM memory_embeddings WHERE memory_id = ?")
+                .get(memory.id),
+        ).toEqual({ n: 1 });
+
+        writeUserConfig(configHome, { embedding });
+        await ensureProjectRegisteredFromOpenCodeDirectory(projectDir, db);
+        expect(sweepStaleEmbeddingIdentitiesForProject(db, identity).memoryRowsDeleted).toBe(1);
+    });
+
     it("reads the legacy config and registers the real identity (not observation) when only legacy config exists", async () => {
         const projectDir = tempDir("mc-legacy-boot-");
         process.env.HOME = tempDir("mc-legacy-home-");

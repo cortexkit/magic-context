@@ -430,6 +430,90 @@ describe("Pi dreamer wiring", () => {
 		await runPiDreamForProject(identity, "curate", owner);
 		expect(caps).toEqual([4096, 8192]);
 	});
+	async function runnerTimeoutsFor(
+		identity: string,
+		curate: Record<string, unknown>,
+	): Promise<{
+		timeouts: Array<number | undefined>;
+		fallbackModels: Array<readonly unknown[] | undefined>;
+	}> {
+		db = createDb();
+		const owner = {};
+		const timeouts: Array<number | undefined> = [];
+		const fallbackModels: Array<readonly unknown[] | undefined> = [];
+		__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
+		__test.setPiSubagentRunnerFactory(
+			() =>
+				({
+					run: mock(
+						async (args: {
+							timeoutMs?: number;
+							fallbackModels?: readonly unknown[];
+						}) => {
+							timeouts.push(args.timeoutMs);
+							fallbackModels.push(args.fallbackModels);
+							return { ok: true, assistantText: "curation complete" };
+						},
+					),
+				}) as never,
+		);
+		const config = DreamerConfigSchema.parse({
+			pi: { model: "test/model", tasks: { curate } },
+			tasks: { curate: { schedule: "0 4 * * *" } },
+		});
+		insertMemory(db, {
+			projectPath: identity,
+			category: "PROJECT_RULES",
+			content: "Keep configured task timeout.",
+		});
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectIdentity: identity,
+				projectDir: process.cwd(),
+				registrationOwner: owner,
+				config,
+			}),
+		);
+		const result = await runPiDreamForProject(identity, "curate", owner);
+		expect(result.failed).toEqual([]);
+		return { timeouts, fallbackModels };
+	}
+
+	test("Pi dreamer gives a task configured above 30 minutes a runner ceiling above its timeout", async () => {
+		const { timeouts, fallbackModels } = await runnerTimeoutsFor(
+			"git:pi-task-timeout",
+			{ timeout_minutes: 120 },
+		);
+		// 120 minutes of task timeout plus 5 minutes of headroom, so the
+		// executor's own timeout ends the run, not the subprocess ceiling.
+		expect(timeouts).toEqual([(120 + 5) * 60 * 1000]);
+		expect(fallbackModels).toEqual([undefined]);
+	});
+
+	test("Pi dreamer maps every child title to its configured task", () => {
+		// The task name decides which timeout and model config a child gets,
+		// so a title that maps to no task falls back to the unknown-task ceiling.
+		expect(__test.accountingTaskFromTitle("magic-context-dream-curate")).toBe(
+			"curate",
+		);
+		expect(__test.accountingTaskFromTitle("magic-context-dream-classify")).toBe(
+			"classify-memories",
+		);
+		expect(
+			__test.accountingTaskFromTitle("magic-context-dream-user-memories"),
+		).toBe("review-user-memories");
+		expect(
+			__test.accountingTaskFromTitle("magic-context-smart-note-confirm-1"),
+		).toBe("evaluate-smart-notes");
+		expect(__test.accountingTaskFromTitle("something-else")).toBeNull();
+	});
+
+	test("Pi dreamer keeps the runner ceiling above the default task timeout", async () => {
+		const { timeouts } = await runnerTimeoutsFor("git:pi-task-default", {});
+		// An unconfigured task runs with the shared 20-minute default.
+		expect(timeouts).toEqual([(20 + 5) * 60 * 1000]);
+	});
 	test("drops an unknown fallback with a warning while the valid primary runs", async () => {
 		db = createDb();
 		const identity = "git:pi-model-validation";

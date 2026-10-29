@@ -66,6 +66,19 @@ export const RECENT_TOOL_SKELETON_WINDOW = 20;
 export function buildReplacementContent(tagId: number): string {
     return `[dropped \u00a7${tagId}\u00a7]`;
 }
+
+const FROZEN_TEXT_ANNOTATION_SUFFIX =
+    /(?:\n\n(?:<instruction name="deferred_notes">(?:(?!<\/instruction>)[\s\S])*<\/instruction>|<ctx-search-hint>(?:(?!<\/ctx-search-hint>)[\s\S])*<\/ctx-search-hint>))+$/;
+
+/** Render a captured served part; raw healthy input has no annotation provenance. */
+export function renderDroppedText(tagId: number, renderedText?: string | null): string {
+    const placeholder = buildReplacementContent(tagId);
+    // Only complete reserved annotation blocks at the end belong to the frozen
+    // suffix. A placeholder followed by other prose is not an already-rendered
+    // drop: reconstructing the canonical body reduces that prose too.
+    const annotations = renderedText?.match(FROZEN_TEXT_ANNOTATION_SUFFIX)?.[0] ?? "";
+    return placeholder + annotations;
+}
 export interface NewToolDropOutcome {
     result: ToolDropResult;
     /** The drop mode to persist so every later pass replays the same bytes. */

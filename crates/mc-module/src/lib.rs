@@ -1845,6 +1845,12 @@ struct RuntimeStoreError {
 pub struct McHandler {
     agent_data: Option<agent_data::AgentDataService>,
     app_channels: Mutex<HashMap<u16, app_read::admission::AppCaller>>,
+    // Management routes also handle requests unrelated to app reads. Keep app-read
+    // admission separate so those requests can continue through the usual dispatcher,
+    // while app-data requests must pass the same check as the internal service.
+    management_app_callers: Mutex<
+        HashMap<u16, Result<app_read::admission::AppCaller, app_read::admission::AppRefusal>>,
+    >,
     move_visibility: Arc<agent_data::MoveVisibility>,
     registered_module_id: String,
     store: Arc<OnceLock<Arc<McStore>>>,
@@ -2675,6 +2681,7 @@ impl McHandler {
         McHandler {
             agent_data,
             app_channels: Mutex::default(),
+            management_app_callers: Mutex::default(),
             move_visibility,
             registered_module_id: module_id,
             store,
@@ -3107,6 +3114,7 @@ impl McHandler {
             move_visibility,
             registered_module_id: DEFAULT_MODULE_ID.into(),
             app_channels: Mutex::default(),
+            management_app_callers: Mutex::default(),
             store,
             log_directory: None,
             store_open: Arc::new(StoreOpenCoordinator::new()),
@@ -9096,6 +9104,10 @@ impl ModuleHandler for McHandler {
             .lock()
             .expect("app channels")
             .remove(&req.handle.channel);
+        self.management_app_callers
+            .lock()
+            .expect("management app callers")
+            .remove(&req.handle.channel);
         if let Some(service) = &self.agent_data {
             service
                 .channels
@@ -9116,8 +9128,22 @@ impl ModuleHandler for McHandler {
                         .insert(req.handle.channel, caller);
                     subc_client_rs::BindDecision::accept()
                 }
-                Err(refusal) => refusal,
+                Err(refusal) => refusal.bind_decision(),
             };
+        }
+        if matches!(
+            &req.target,
+            subc_protocol::RouteTarget::ManagementSurface { .. }
+        ) {
+            let allow_direct = !matches!(req.principal, Some(subc_protocol::Principal::Direct))
+                || config::user_app_read_allow_direct();
+            self.management_app_callers
+                .lock()
+                .expect("management app callers")
+                .insert(
+                    req.handle.channel,
+                    app_read::admission::admit(req, &self.registered_module_id, allow_direct),
+                );
         }
         if let subc_protocol::RouteTarget::InternalService {
             module_id,
@@ -9226,6 +9252,10 @@ impl ModuleHandler for McHandler {
             .lock()
             .expect("app channels")
             .remove(&handle.channel);
+        self.management_app_callers
+            .lock()
+            .expect("management app callers")
+            .remove(&handle.channel);
         if let Some(service) = &self.agent_data {
             service
                 .channels
@@ -9243,6 +9273,15 @@ impl ModuleHandler for McHandler {
 
 impl McHandler {
     async fn handle_channel(&self, channel: u16, body: Vec<u8>) -> HandlerOutcome {
+        self.handle_channel_at(channel, body, now_ms()).await
+    }
+
+    async fn handle_channel_at(
+        &self,
+        channel: u16,
+        body: Vec<u8>,
+        as_of_ms: i64,
+    ) -> HandlerOutcome {
         let app_caller = self
             .app_channels
             .lock()
@@ -9250,23 +9289,7 @@ impl McHandler {
             .get(&channel)
             .cloned();
         if let Some(caller) = app_caller {
-            let allow_direct = !caller.is_direct() || config::user_app_read_allow_direct();
-            let context = app_read::AppReadContext::from_parts(
-                self.store.get().cloned(),
-                Arc::clone(&self.config),
-                {
-                    let roots = self
-                        .active_project_roots
-                        .lock()
-                        .expect("active project roots");
-                    let mut paths: Vec<_> = roots.values().cloned().collect();
-                    paths.sort();
-                    paths.dedup();
-                    paths
-                },
-                now_ms(),
-            );
-            return app_read::handle(&caller, allow_direct, &body, &context);
+            return self.handle_app_read(&caller, &body, as_of_ms);
         }
         // A flow-scoped route never takes the agent-data lane: it falls through to
         // the dispatcher, whose flow fence admits only the flow ops.
@@ -9321,6 +9344,26 @@ impl McHandler {
         if request
             .get("method")
             .and_then(Value::as_str)
+            .is_some_and(|method| app_read::MANAGEMENT_METHODS.contains(&method))
+        {
+            let admission = self
+                .management_app_callers
+                .lock()
+                .expect("management app callers")
+                .get(&channel)
+                .cloned();
+            if let Some(admission) = admission {
+                return match admission {
+                    Ok(caller) => app_read::envelope::wrap_management_result(
+                        self.handle_app_read(&caller, &body, as_of_ms),
+                    ),
+                    Err(refusal) => refusal.outcome(),
+                };
+            }
+        }
+        if request
+            .get("method")
+            .and_then(Value::as_str)
             .is_some_and(|method| app_read::APP_READ_METHODS.contains(&method))
         {
             return HandlerOutcome::Error {
@@ -9339,6 +9382,31 @@ impl McHandler {
             };
         }
         self.dispatch_request(channel, request).await
+    }
+
+    fn handle_app_read(
+        &self,
+        caller: &app_read::admission::AppCaller,
+        body: &[u8],
+        as_of_ms: i64,
+    ) -> HandlerOutcome {
+        let allow_direct = !caller.is_direct() || config::user_app_read_allow_direct();
+        let context = app_read::AppReadContext::from_parts(
+            self.store.get().cloned(),
+            Arc::clone(&self.config),
+            {
+                let roots = self
+                    .active_project_roots
+                    .lock()
+                    .expect("active project roots");
+                let mut paths: Vec<_> = roots.values().cloned().collect();
+                paths.sort();
+                paths.dedup();
+                paths
+            },
+            as_of_ms,
+        );
+        app_read::handle(caller, allow_direct, body, &context)
     }
 }
 
@@ -12418,6 +12486,10 @@ pub fn manifest_with_route_targets_and_smart_notes(
     // project, whereas MC uses one machine-wide store with project-keyed rows.
     let mut capabilities = vec![
         cortexkit_role_compaction_provider::PROVIDES.to_string(),
+        // Core discovers tool providers from the daemon's module catalog by this
+        // claim, before it calls role.describe. Without it, core never composes
+        // Magic Context into a worker plan: no tools and no compaction.
+        cortexkit_role_tool_provider::PROVIDES.to_string(),
         MCP_CONVERSATION_BINDING_V1.to_string(),
         // basal reaches `subagent_invocations.read` over the calling flow's own
         // scoped route, which the daemon opens only to a module declaring this.
@@ -12433,7 +12505,19 @@ pub fn manifest_with_route_targets_and_smart_notes(
             emits_push: false,
             sub_supervises: false,
         },
-        subagent_invocations_read::management_role(),
+        {
+            let mut role = subagent_invocations_read::management_role();
+            if let ProviderRole::ManagementSurface { operations, .. } = &mut role {
+                operations.extend(app_read::MANAGEMENT_METHODS.iter().map(|method| {
+                    subc_protocol::manifest::ManagementOperation {
+                        name: (*method).into(),
+                        kind: subc_protocol::manifest::ManagementOperationKind::Query,
+                        description: None,
+                    }
+                }));
+            }
+            role
+        },
         ProviderRole::InternalService {
             service_id: app_read::SERVICE_ID.into(),
             transport: subc_protocol::manifest::InternalTransport::Bulk,
@@ -14430,6 +14514,26 @@ mod tests {
             "bindings must stay absent: the store is machine-scoped"
         );
         let wire = serde_json::to_value(&m).expect("manifest serializes");
+        let management = wire["provides"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|role| role["role"] == "management_surface")
+            .expect("HELLO management surface");
+        assert_eq!(
+            management["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|op| (op["name"].as_str().unwrap(), op["kind"].as_str().unwrap()))
+                .collect::<Vec<_>>(),
+            [
+                ("subagent_invocations.read", "query"),
+                ("session_data.read", "query"),
+                ("context.cache_why", "query"),
+                ("context.search", "query")
+            ]
+        );
         assert_eq!(wire["trust_tier"], serde_json::json!("first_party"));
         assert!(
             wire.get("bindings").is_none() || wire["bindings"].is_null(),
@@ -14476,6 +14580,7 @@ mod tests {
         );
         let mut expected_capabilities = vec![
             "compaction-provider/v1".to_string(),
+            "tool-provider/v1".to_string(),
             "mcp-conversation-binding/v1".to_string(),
             "flow-scopes/v1".to_string(),
         ];

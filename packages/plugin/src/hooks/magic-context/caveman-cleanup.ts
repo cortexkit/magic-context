@@ -335,6 +335,40 @@ function applyCompressedText(
 }
 
 /**
+ * The text `applyCompressedText` leaves on the wire for one tag, computed
+ * without a target, and whether one of its writes took the message's
+ * reasoning off the wire (the original-rule write is a drop). Null when it
+ * would leave the text unchanged. Used for a part that is no longer a target
+ * but must keep serving the bytes earlier passes served (another plugin's
+ * appended text that an older release compressed). cavemanCompress is pure
+ * in (text, level, rules, word rules), so equal input text gives equal bytes.
+ */
+export function cavemanReplayText(
+    tagNumber: number,
+    originalText: string,
+    depth: number,
+    state: CavemanReplayState,
+    textPrefix: string,
+): { text: string; dropsReasoning: boolean } | null {
+    const level = DEPTH_TO_LEVEL[depth];
+    if (!level) return null;
+    let served: { text: string; dropsReasoning: boolean } | null = null;
+    if (!state.currentRules || state.legacyReasoningTags.has(tagNumber)) {
+        const legacy = cavemanCompress(originalText, level, "ascii-v1");
+        if (legacy.length > 0) served = { text: legacy, dropsReasoning: true };
+        if (!state.currentRules) return served;
+    }
+    const compressed = cavemanCompress(
+        originalText,
+        level,
+        CURRENT_CAVEMAN_RULES,
+        wordRulesFor(state),
+    );
+    if (compressed.length === 0) return served;
+    return { text: `${textPrefix}${compressed}`, dropsReasoning: served?.dropsReasoning ?? false };
+}
+
+/**
  * Re-apply persisted caveman compression on every transform pass (defer
  * included). This is the cache-stability counterpart to applyCavemanCleanup.
  *

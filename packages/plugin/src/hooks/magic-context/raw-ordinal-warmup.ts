@@ -16,10 +16,6 @@
  * same session until FAILURE_BACKOFF_MS has passed.
  */
 import { Worker } from "node:worker_threads";
-import type {
-    MessageHistoryOrphanSweepOptions,
-    MessageHistoryOrphanSweepResult,
-} from "../../features/magic-context/message-index";
 import type { IndexWorkerMeasurements } from "../../features/magic-context/message-index-bounded";
 import type {
     TagOwnerDelta,
@@ -55,7 +51,6 @@ export interface RawOrdinalWarmupInput {
     openCancellation?: SharedArrayBuffer;
     indexCoordination?: SharedArrayBuffer;
     indexOwner?: number;
-    orphanSweep?: { sourcePath: string | null; options: MessageHistoryOrphanSweepOptions };
     /** Ordinals whose message ids the worker reads exactly (see raw-exact-ordinal-read.ts). */
     exactOrdinalIds?: number[];
     ftsRowidBackfill?: boolean;
@@ -76,7 +71,6 @@ export type RawOrdinalWarmupReply =
     | { kind: "tag-summary"; summary: TagOwnerSummary }
     | { kind: "tag-delta"; delta: TagOwnerDelta }
     | { kind: "indexed"; inserted: boolean; measurements?: IndexWorkerMeasurements }
-    | { kind: "orphan-sweep"; result: MessageHistoryOrphanSweepResult }
     | { kind: "exact-ordinal-ids"; ids: Array<[number, string | null]> }
     | { kind: "search-archive"; text: string | null }
     | { kind: "fts-rowid-backfill" }
@@ -113,7 +107,7 @@ const RESULT_TIMEOUT_MS = 10 * 60_000;
 /**
  * How long a stopped warm-up may take to close its connections and exit before
  * it is terminated. The worker reads the close request between awaits: an index
- * or orphan-sweep chunk waits at most its 250 ms busy timeout and then writes a
+ * chunk waits at most its 250 ms busy timeout and then writes a
  * short batch. A single summary scan cannot be interrupted; one still running
  * after this is terminated, as every stopped warm-up was before.
  */
@@ -182,7 +176,6 @@ export function runSessionWarmupWorker(
                 | { summary: TagOwnerSummary }
                 | { delta: TagOwnerDelta }
                 | { inserted: boolean; measurements?: IndexWorkerMeasurements }
-                | { orphanSweep: MessageHistoryOrphanSweepResult }
                 | { exactOrdinalIds: Array<[number, string | null]> }
                 | { searchArchive: string | null }
                 | { ftsRowidBackfill: true }
@@ -249,7 +242,6 @@ export function runSessionWarmupWorker(
             else if (reply.kind === "tag-delta") finish({ delta: reply.delta });
             else if (reply.kind === "indexed")
                 finish({ inserted: reply.inserted, measurements: reply.measurements });
-            else if (reply.kind === "orphan-sweep") finish({ orphanSweep: reply.result });
             else if (reply.kind === "exact-ordinal-ids") finish({ exactOrdinalIds: reply.ids });
             else if (reply.kind === "search-archive") finish({ searchArchive: reply.text });
             else if (reply.kind === "fts-rowid-backfill") finish({ ftsRowidBackfill: true });
@@ -359,7 +351,6 @@ type WorkerResult =
     | { summary: TagOwnerSummary }
     | { delta: TagOwnerDelta }
     | { inserted: boolean; measurements?: IndexWorkerMeasurements }
-    | { orphanSweep: MessageHistoryOrphanSweepResult }
     | { exactOrdinalIds: Array<[number, string | null]> }
     | { searchArchive: string | null }
     | { ftsRowidBackfill: true }

@@ -120,6 +120,11 @@ import {
 	resolveKnownHistorianContextLimit,
 } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import {
+	clearHistorianHistoryWait,
+	recordHistorianNoProgress,
+	shouldWaitForNewHistorianHistory,
+} from "@magic-context/core/hooks/magic-context/historian-history-wait";
+import {
 	describeHistorianPromptTrim,
 	fitHistorianPrompt,
 	PRODUCER_PROMPT_FIT_FAILURE_PATTERN,
@@ -413,6 +418,7 @@ function shouldSuppressHistorianAlert(sessionId: string): boolean {
 
 /** Cleanup module-scope state on session deletion. */
 export function clearPiHistorianAlertState(sessionId: string): void {
+	clearHistorianHistoryWait(sessionId);
 	lastHistorianAlertBySession.delete(sessionId);
 }
 
@@ -760,6 +766,21 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				return;
 			}
 			const protectedTailStart = boundarySnapshot.protectedTailStart;
+			if (
+				!forceDrainQuota &&
+				shouldWaitForNewHistorianHistory(boundarySnapshot, {
+					emergency: getOverflowState(db, sessionId).needsEmergencyRecovery,
+				})
+			) {
+				telemetry.status = "noop";
+				telemetry.failureReason =
+					"waiting for new history after no forward progress";
+				sessionLog(
+					sessionId,
+					"historian no-op: waiting for new history after no forward progress",
+				);
+				return;
+			}
 			const eligibleEndOrdinal = Math.min(
 				boundarySnapshot.eligibleEndOrdinal,
 				protectedTailStart,
@@ -1201,6 +1222,12 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					: runner;
 
 			// First pass.
+			if (!forceDrainQuota) {
+				shouldWaitForNewHistorianHistory(boundarySnapshot, {
+					emergency: getOverflowState(db, sessionId).needsEmergencyRecovery,
+					claim: true,
+				});
+			}
 			const firstResult = await runHistorianSubagentWithTransientRetries({
 				runner: publicationRunner,
 				sessionId,
@@ -1525,6 +1552,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					const failCount = incrementHistorianFailure(db, sessionId, errorMsg);
 					await notify(buildHistorianFailureNotice(failCount, errorMsg));
 				}
+				recordHistorianNoProgress(boundarySnapshot, inEmergency);
 				rollbackDrainReservation();
 				return;
 			}
@@ -1782,6 +1810,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				}
 				db.exec("COMMIT");
 				published = true;
+				clearHistorianHistoryWait(sessionId);
 				logSlowWriteTransaction("pi_historian_publish", transactionStartedAt);
 			} finally {
 				if (!published) {

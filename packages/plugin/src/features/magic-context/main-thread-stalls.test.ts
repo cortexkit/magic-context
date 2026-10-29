@@ -7,7 +7,6 @@ import {
     resolveProtectedTailBoundary,
 } from "../../hooks/magic-context/protected-tail-boundary";
 import { withRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
-import { setHarness } from "../../shared/harness";
 import { Database } from "../../shared/sqlite";
 import {
     createStallContext,
@@ -25,8 +24,6 @@ import {
     LEGACY_MARKER_LINEAGE_SQL,
     prepareCompactionMarkerCandidates,
 } from "./compaction-marker";
-import { sweepOrphanedOpenCodeMessageIndexes } from "./message-index";
-import { sweepOrphanedOpenCodeMessageIndexesOffThread } from "./message-index-async";
 import { findPiFallbackToolOwnerTags, getAllStatusTagTokenTotalsFlat } from "./storage-tags";
 
 const dirs: string[] = [];
@@ -257,42 +254,5 @@ it("Pi fallback owner lookup retains ASCII LIKE matches with indexed prefix seek
         ).toBe(true);
     } finally {
         db.close();
-    }
-});
-
-it("orphan sweep keeps the event loop responsive and matches synchronous deletion and cursor", async () => {
-    const dir = fixtureDir();
-    const db = createStallContext(join(dir, "context.db"), 4096);
-    const control = createStallContext(join(dir, "control.db"), 4096);
-    const host = new Database(join(dir, "host.db"));
-    host.exec("CREATE TABLE session(id TEXT PRIMARY KEY)");
-    host.close();
-    setHarness("opencode");
-    const options = { now: 2_000_000_000_000, cooldownMs: 0 };
-    let ticks = 0;
-    const interval = setInterval(() => ticks++, 1);
-    try {
-        const result = await sweepOrphanedOpenCodeMessageIndexesOffThread(
-            db,
-            () => new Database(join(dir, "host.db"), { readonly: true }),
-            options,
-        );
-        expect(ticks).toBeGreaterThan(0);
-        expect(result).toEqual(
-            sweepOrphanedOpenCodeMessageIndexes(
-                control,
-                () => new Database(join(dir, "host.db"), { readonly: true }),
-                options,
-            ),
-        );
-        expect(result.deleted).toBe(1);
-        expect(db.prepare("SELECT count(*) AS n FROM tags").get()).toEqual({ n: 0 });
-        expect(db.prepare("SELECT * FROM message_history_orphan_sweep").all()).toEqual(
-            control.prepare("SELECT * FROM message_history_orphan_sweep").all(),
-        );
-    } finally {
-        clearInterval(interval);
-        db.close();
-        control.close();
     }
 });
