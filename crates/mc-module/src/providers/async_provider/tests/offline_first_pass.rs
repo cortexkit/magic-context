@@ -11,6 +11,8 @@ use super::*;
 
 #[path = "broca_role_describe_offline.rs"]
 mod broca_role_describe;
+#[path = "moved_cost.rs"]
+mod moved_cost;
 #[path = "preparation_lifecycle.rs"]
 mod preparation_lifecycle;
 use crate::offline_first_pass as command;

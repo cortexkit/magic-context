@@ -1126,7 +1126,7 @@ const PHASES: [&str; 21] = [
     "pub:ranges",
 ];
 
-fn phase_stats(reference: &str) -> Vec<save_meter::SaveStats> {
+pub(super) fn phase_stats(reference: &str) -> Vec<save_meter::SaveStats> {
     PHASES
         .iter()
         .map(|kind| save_meter::read_kind(reference, kind))
@@ -1134,7 +1134,7 @@ fn phase_stats(reference: &str) -> Vec<save_meter::SaveStats> {
 }
 
 /// Thread-CPU milliseconds and call counts per notice phase since `before`.
-fn phases(reference: &str, before: &[save_meter::SaveStats]) -> String {
+pub(super) fn phases(reference: &str, before: &[save_meter::SaveStats]) -> String {
     PHASES
         .iter()
         .zip(phase_stats(reference).iter().zip(before))
@@ -1245,7 +1245,7 @@ async fn storage_scaling_benchmark() {
 }
 
 /// Peak and current resident set size of this process, in bytes (Linux).
-fn rss() -> (u64, u64) {
+pub(super) fn rss() -> (u64, u64) {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     let field = |name: &str| {
         status
@@ -2110,8 +2110,18 @@ impl CostTiming {
 }
 
 fn cpu_cost_failure(name: &str, small: CostTiming, large: CostTiming) -> Option<String> {
+    cpu_cost_failure_for_sizes(name, "1k", "150k", small, large)
+}
+
+fn cpu_cost_failure_for_sizes(
+    name: &str,
+    small_size: &str,
+    large_size: &str,
+    small: CostTiming,
+    large: CostTiming,
+) -> Option<String> {
     let ratio = large.process_cpu_p50_ms / small.process_cpu_p50_ms;
-    eprintln!("cost rule {name}: 1k process CPU p50 {:.1} / p90 {:.1} ms, wall p50 {:.1} / p90 {:.1} ms; 150k process CPU p50 {:.1} / p90 {:.1} ms, wall p50 {:.1} / p90 {:.1} ms; process CPU ratio {ratio:.2}",
+    eprintln!("cost rule {name}: {small_size} process CPU p50 {:.1} / p90 {:.1} ms, wall p50 {:.1} / p90 {:.1} ms; {large_size} process CPU p50 {:.1} / p90 {:.1} ms, wall p50 {:.1} / p90 {:.1} ms; process CPU ratio {ratio:.2}",
         small.process_cpu_p50_ms, small.process_cpu_p90_ms, small.wall_p50_ms, small.wall_p90_ms,
         large.process_cpu_p50_ms, large.process_cpu_p90_ms, large.wall_p50_ms, large.wall_p90_ms);
     (!ratio.is_finite() || ratio > 2.0).then(|| format!("{name} process CPU p50 {ratio:.2}x"))
@@ -2137,6 +2147,204 @@ fn cpu_cost_bar_rejects_work_growth_but_not_wall_stalls() {
     assert!(cpu_cost_failure("invalid", small, invalid).is_some());
 }
 
+/// Samples from a fresh moved-session child. Only repeated live operations are
+/// ratio-gated; rebuilding a lost runner's state and offline preparation are
+/// session-sized recovery work, not work on each step.
+#[derive(Serialize, Deserialize, Debug)]
+pub(super) struct MovedCostSample {
+    pub size: u64,
+    pub cut: u64,
+    pub compartments: usize,
+    pub retained: usize,
+    pub applied_drops: usize,
+    pub context_window: u64,
+    pub rows: Vec<MovedCostRow>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub(super) struct MovedCostRow {
+    pub name: String,
+    pub timings: Vec<(f64, f64, f64)>,
+    pub read_rows: u64,
+    pub read_bytes: u64,
+    pub read_requests: Vec<u64>,
+    pub peak_rss_bytes: u64,
+    pub peak_rss_net_bytes: u64,
+    pub resident_record_bytes: u64,
+    pub phases: String,
+    pub phase_samples: Vec<String>,
+    pub window_rows: Vec<usize>,
+}
+
+fn moved_session_samples(size: u64, window: u64) -> Vec<MovedCostSample> {
+    (0..5)
+            .map(|_| {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "providers::async_provider::tests::offline_first_pass::moved_cost::moved_session_cost_child",
+                        "--ignored",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env("MC_MOVED_COST_SIZE", size.to_string())
+                    .env("MC_MOVED_COST_WINDOW", window.to_string())
+                    .output()
+                    .unwrap();
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    output.status.success(),
+                    "moved benchmark at {size} failed:\n{stdout}\n{stderr}"
+                );
+                let line = stderr
+                    .lines()
+                    .find_map(|line| line.strip_prefix("MOVED_COST "))
+                    .expect("moved child must print its measurements");
+                eprintln!("MOVED_COST {line}");
+                let sample = serde_json::from_str::<MovedCostSample>(line).unwrap();
+                assert_eq!(sample.retained as u64, window);
+                assert_eq!(sample.cut, size - window);
+                assert_eq!(sample.context_window, 1_000_000);
+                for row in &sample.rows {
+                    assert_eq!(row.timings.len(), row.phase_samples.len());
+                    assert_eq!(row.timings.len(), row.window_rows.len());
+                }
+                sample
+            })
+            .collect::<Vec<_>>()
+}
+
+fn moved_session_cost_failures() -> Vec<String> {
+    // A 3,750-row window cannot fit in a 1,000-message total: the smaller
+    // fixture has 1,000 messages of history plus that same live window.
+    let small = moved_session_samples(4_750, 3_750);
+    let large = moved_session_samples(150_000, 3_750);
+    let small_size = small[0].size.to_string();
+    let large_size = large[0].size.to_string();
+    let mut failures = Vec::new();
+    for (index, row) in small[0].rows.iter().enumerate() {
+        let summarize = |samples: &[MovedCostSample]| {
+            let rows = samples
+                .iter()
+                .map(|sample| {
+                    let row = &sample.rows[index];
+                    assert_eq!(row.name, small[0].rows[index].name);
+                    assert!(row.read_requests.iter().all(|from| *from >= sample.cut));
+                    row
+                })
+                .collect::<Vec<_>>();
+            let timing = CostTiming::from_samples(
+                &rows
+                    .iter()
+                    .flat_map(|row| row.timings.iter().copied())
+                    .collect::<Vec<_>>(),
+            );
+            let maximum =
+                |get: fn(&MovedCostRow) -> u64| rows.iter().map(|row| get(row)).max().unwrap();
+            eprintln!(
+                "moved row {} size={} samples={} CPU_p50_ms={:.3} CPU_p90_ms={:.3} wall_p50_ms={:.3} wall_p90_ms={:.3} read_rows_max={} read_bytes_max={} peak_RSS_bytes={} peak_RSS_net_bytes={} resident_record_bytes={}",
+                row.name, samples[0].size, rows.iter().map(|row| row.timings.len()).sum::<usize>(),
+                timing.process_cpu_p50_ms, timing.process_cpu_p90_ms, timing.wall_p50_ms, timing.wall_p90_ms,
+                maximum(|row| row.read_rows), maximum(|row| row.read_bytes), maximum(|row| row.peak_rss_bytes),
+                maximum(|row| row.peak_rss_net_bytes), maximum(|row| row.resident_record_bytes),
+            );
+            timing
+        };
+        let small_time = summarize(&small);
+        let large_time = summarize(&large);
+        if matches!(
+            row.name.as_str(),
+            "live Setup" | "first adopting notice" | "quiet notice"
+        ) {
+            if let Some(failure) = cpu_cost_failure_for_sizes(
+                &format!("moved {}", row.name),
+                &small_size,
+                &large_size,
+                small_time,
+                large_time,
+            ) {
+                failures.push(failure);
+            }
+            for (name, get) in [
+                (
+                    "rows read",
+                    (|row: &MovedCostRow| row.read_rows) as fn(&MovedCostRow) -> u64,
+                ),
+                ("bytes read", |row: &MovedCostRow| row.read_bytes),
+                ("peak RSS net bytes", |row: &MovedCostRow| {
+                    row.peak_rss_net_bytes
+                }),
+                ("resident record bytes", |row: &MovedCostRow| {
+                    row.resident_record_bytes
+                }),
+            ] {
+                let maximum = |samples: &[MovedCostSample]| {
+                    samples
+                        .iter()
+                        .map(|sample| get(&sample.rows[index]))
+                        .max()
+                        .unwrap()
+                };
+                let (small, large) = (maximum(&small), maximum(&large));
+                // Prepared Setup and truly quiet paths may read no rows at either size.
+                let ratio = if small == 0 && large == 0 {
+                    1.0
+                } else {
+                    large as f64 / small as f64
+                };
+                eprintln!(
+                    "cost rule moved {} {name}: {small_size} {small} {large_size} {large} ratio {ratio:.2}",
+                    row.name
+                );
+                if !ratio.is_finite() || ratio > 2.0 {
+                    failures.push(format!("moved {} {name} {ratio:.2}x", row.name));
+                }
+            }
+        } else {
+            eprintln!(
+                "moved {} report-only CPU ratio {:.2}",
+                row.name,
+                large_time.process_cpu_p50_ms / small_time.process_cpu_p50_ms
+            );
+        }
+    }
+    failures
+}
+
+/// Report window work separately from the fixed-window history gate. Both
+/// fixtures have exactly 150,000 messages below the cut and identical imported
+/// summaries; only the retained window and its carried drops change.
+#[test]
+#[ignore = "window-scaling diagnostic, not a cost gate; run with --release --ignored --nocapture"]
+fn moved_window_scaling_diagnostic() {
+    for window in [400, 4_000] {
+        let samples = moved_session_samples(150_000 + window, window);
+        for index in 0..3 {
+            let timings = samples
+                .iter()
+                .flat_map(|sample| {
+                    let row = &sample.rows[index];
+                    row.timings
+                        .iter()
+                        .zip(&row.window_rows)
+                        .map(|(timing, rows)| {
+                            assert!(*rows > 0);
+                            (
+                                timing.0 / *rows as f64,
+                                timing.1 / *rows as f64,
+                                timing.2 / *rows as f64,
+                            )
+                        })
+                })
+                .collect::<Vec<_>>();
+            let timing = CostTiming::from_samples(&timings);
+            eprintln!("window diagnostic {} history=150000 initial_window={window} samples={} CPU_p50_ms_per_window_row={:.6} own_CPU_p50_ms_per_window_row={:.6} wall_p50_ms_per_window_row={:.6}",
+                samples[0].rows[index].name, timings.len(), timing.process_cpu_p50_ms, timing.thread_cpu_p50_ms, timing.wall_p50_ms);
+        }
+    }
+}
+
 /// The cost rule as an assertion: per-step work scales with new messages and
 /// resident memory with the window, so a 150,000-message session whose
 /// compartments cover all but the same ~40k-token tail must cost no more than
@@ -2149,6 +2357,9 @@ fn cpu_cost_bar_rejects_work_growth_but_not_wall_stalls() {
 /// processes. Wall p50/p90 stay visible beside CPU but are not a pass bar:
 /// scheduling and I/O stalls on a shared host are not session-sized CPU work.
 /// Other measurements still come from one full benchmark per size and mode.
+/// The moved-session rows compare 4,750 total messages (1,000 below the cut)
+/// with 150,000 total messages, holding the retained window at 3,750 messages
+/// and the model context window at 1,000,000 tokens in both fixtures.
 /// Linux only (RSS comes from /proc). Run with:
 ///
 /// ```sh
@@ -2219,6 +2430,7 @@ fn cost_rule_150k_vs_1k() {
             .unwrap_or_else(|| panic!("no cost line at {size}:\n{stdout}\n{stderr}"));
         (Some(serde_json::from_str(line).unwrap()), first_notice)
     };
+    let mut failures = Vec::new();
     for fresh in [false, true] {
         eprintln!(
             "cost rule mode={}",
@@ -2285,16 +2497,18 @@ fn cost_rule_150k_vs_1k() {
                 large.cut_seed_bytes as f64,
             ),
         ];
-        let mut failures = checks
-            .iter()
-            .map(|(name, small, large)| {
-                let ratio = large / small;
-                eprintln!("cost rule {name}: 1k {small:.1} 150k {large:.1} ratio {ratio:.2}");
-                (name, ratio)
-            })
-            .filter(|(_, ratio)| !ratio.is_finite() || *ratio > 2.0)
-            .map(|(name, ratio)| format!("{name} {ratio:.2}x"))
-            .collect::<Vec<_>>();
+        failures.extend(
+            checks
+                .iter()
+                .map(|(name, small, large)| {
+                    let ratio = large / small;
+                    eprintln!("cost rule {name}: 1k {small:.1} 150k {large:.1} ratio {ratio:.2}");
+                    (name, ratio)
+                })
+                .filter(|(_, ratio)| !ratio.is_finite() || *ratio > 2.0)
+                .map(|(name, ratio)| format!("{name} {ratio:.2}x"))
+                .collect::<Vec<_>>(),
+        );
         failures.extend(
             time_checks
                 .iter()
@@ -2308,12 +2522,13 @@ fn cost_rule_150k_vs_1k() {
                 ));
             }
         }
-        assert!(
-            failures.is_empty(),
-            "150k vs 1k above 2x: {}",
-            failures.join(", ")
-        );
     }
+    failures.extend(moved_session_cost_failures());
+    assert!(
+        failures.is_empty(),
+        "session cost rows above 2x: {}",
+        failures.join(", ")
+    );
 }
 
 #[tokio::test]
