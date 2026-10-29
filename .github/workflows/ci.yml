@@ -941,22 +941,7 @@ jobs:
           test -x "$RUNNER_TEMP/raw-replay-artifact/rust-raw-replay-probe"
       - name: Fetch pinned master baseline
         shell: bash
-        run: |
-          set -euo pipefail
-          baseline_commit="$(tr -d '\r\n' < scripts/rust-raw-replay-baseline.commit)"
-          if [[ ! "$baseline_commit" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Invalid pinned Rust raw replay baseline commit: $baseline_commit" >&2
-            exit 1
-          fi
-          git fetch --no-tags --depth=1 origin "$baseline_commit"
-          git cat-file -e "${baseline_commit}^{commit}"
-          baseline_archive="$RUNNER_TEMP/rust-raw-replay-baseline.tar"
-          git archive --format=tar "$baseline_commit" \
-            crates/mc-module/src packages/plugin/src packages/plugin/package.json \
-            packages/retina-local-fs/src packages/retina-local-fs/package.json package.json \
-            > "$baseline_archive"
-          test -s "$baseline_archive"
-          echo "Pinned Rust raw replay baseline: $baseline_commit"
+        run: bash scripts/ci/rust-raw-replay-review-fetch-pinned-master-baseline.sh
       - name: Run staged raw replay witnesses
         env:
           MC_RAW_REPLAY_REQUIRED: "1"

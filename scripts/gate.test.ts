@@ -101,13 +101,15 @@ test("split full parts partition the CI graph and only the four Docker lanes are
     expect(area("check-dashboard")).toBe("unit");
 });
 
-test("root Bun test arguments select exact paths rather than matching archived scratch copies", async () => {
+test("shared Bun checks select exact package paths rather than archived scratch copies", async () => {
     const compiled = await Bun.file(
         join(root, "scripts/ci/preflight-check-compiled-contracts.sh"),
     ).text();
     const pins = await Bun.file(join(root, "scripts/ci/preflight-pins-and-lockfiles.sh")).text();
-    expect(compiled).toContain("bun test ./packages/e2e-tests/scripts/ci-dists.test.ts");
-    expect(pins).toContain("bun test ./packages/e2e-tests/tests/opencode2/pins.test.ts");
+    expect(compiled).toContain("cd packages/e2e-tests");
+    expect(compiled).toContain("bun test ./scripts/ci-dists.test.ts");
+    expect(pins).toContain("cd packages/e2e-tests");
+    expect(pins).toContain("bun test ./tests/opencode2/pins.test.ts");
 });
 
 async function scratch<T>(body: (path: string) => Promise<T>): Promise<T> {

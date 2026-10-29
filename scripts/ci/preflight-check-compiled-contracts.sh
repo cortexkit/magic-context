@@ -3,4 +3,4 @@
 set -euo pipefail
 bun run --cwd packages/plugin check:tui-compiled
 bun crates/mc-module/gen/gen-historian-prompt-golden.ts --check
-bun test ./packages/e2e-tests/scripts/ci-dists.test.ts
+(cd packages/e2e-tests && bun test ./scripts/ci-dists.test.ts)

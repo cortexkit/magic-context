@@ -9,6 +9,7 @@
         "scripts/ci-dists.test.ts",
         "../../scripts/gate.ts",
         "../../scripts/gate.test.ts",
+        "../../scripts/gate-tools.test.ts",
         "tests/opencode2/pins.test.ts",
         "tests/pi-context-tool-surface.test.ts"
     ]

@@ -1,6 +1,7 @@
 import { closeSync, openSync } from "node:fs";
 import { copyFile, mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { createTestHome, prepareTestTools } from "./gate-tools";
 
 type Step = {
     name?: string;
@@ -193,6 +194,38 @@ async function main() {
         throw new Error("GATE_CPUS must be an integer from 2 to 16");
     const run = join(root, "target/gate", `${Date.now()}-${process.pid}`);
     await mkdir(run, { recursive: true });
+    const nodeMajor =
+        mode === "smoke"
+            ? ""
+            : String(
+                  workflow.jobs.preflight?.steps.find((step) =>
+                      step.uses?.startsWith("actions/setup-node@"),
+                  )?.with?.["node-version"] ?? "",
+              );
+    const prerequisiteMode =
+        mode === "full" &&
+        !selected.some((lane) => !["preflight", "check-docs-layout"].includes(lane.id))
+            ? "preflight"
+            : mode!;
+    const nextest =
+        prerequisiteMode === "full" && ["all", "native"].includes(part)
+            ? workflow.jobs["rust-lib-archive"]?.steps
+                  .find((step) => step.uses?.startsWith("taiki-e/install-action@"))
+                  ?.with?.tool?.match(/^cargo-nextest@(.+)$/)?.[1]
+            : "";
+    if (mode !== "smoke" && !/^\d+$/.test(nodeMajor))
+        throw new Error("CI must declare a literal Node major for local prerequisite verification");
+    if (prerequisiteMode === "full" && ["all", "native"].includes(part) && !nextest)
+        throw new Error(
+            "CI must declare the cargo-nextest version for local prerequisite verification",
+        );
+    const testToolsPath = await prepareTestTools(
+        root,
+        prerequisiteMode,
+        part,
+        nodeMajor,
+        nextest ?? "",
+    );
     const sha = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: root }).stdout.toString().trim();
     const results = new Map<string, boolean>();
     const records: Array<{
@@ -211,8 +244,9 @@ async function main() {
     async function execute(lane: Lane) {
         const temp = join(run, lane.key);
         await mkdir(temp, { recursive: true });
-        const home = join(temp, "home");
-        await mkdir(home, { recursive: true });
+        // A HOME inside the checkout resolves to that project instead of a directory fallback.
+        // Keep runtime homes outside any .git ancestor, as on CI.
+        const home = await createTestHome();
         const env: Record<string, string> = Object.fromEntries(
             Object.entries(process.env).filter(
                 (item): item is [string, string] => item[1] !== undefined,
@@ -241,6 +275,7 @@ async function main() {
             RUST_TEST_THREADS: String(Math.min(4, cpus)),
             NEXTEST_TEST_THREADS: String(Math.min(4, cpus)),
         });
+        if (testToolsPath && lane.id !== "preflight") env.PATH = `${testToolsPath}:${env.PATH}`;
         for (const [key, value] of Object.entries(lane.job.env ?? {}))
             env[key] = expand(value, lane.matrix, root, temp);
         for (const file of [
@@ -392,6 +427,7 @@ async function main() {
         mode,
         part,
         cpus,
+        testToolsPath: testToolsPath ?? "system PATH",
         seconds: (Date.now() - started) / 1000,
         checks: records.length,
         passed: records.filter((item) => item.ok).length,
@@ -413,7 +449,7 @@ async function main() {
                 text
                     .split("\n")
                     .filter((line) =>
-                        /pass|fail|error|warning|tests? |checked |packages|vectors|cases|matches|stale|drift|expected|pinned|cargo home|^PASS|^FAIL/i.test(
+                        /pass|fail|error|warning|tests? |checked |packages|vectors|cases|matches|stale|drift|expected|received|actual|pinned|cargo home|skip|caused by|^\s*(left|right):|^PASS|^FAIL/i.test(
                             line,
                         ),
                     )

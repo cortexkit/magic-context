@@ -16,7 +16,7 @@ check cargo-path-dependencies timeout 180s python3 scripts/check-cargo-path-depe
 check cargo-path-self-test timeout 180s python3 scripts/check-cargo-path-dependencies.py --self-test
 check golden-checker-tests python3 scripts/check-goldens.test.py -v
 check mode-manifest bun packages/e2e-tests/scripts/validate-mode-manifest.ts
-check gate-tests bun test ./scripts/gate.test.ts
+check gate-tests bash -c 'cd packages/e2e-tests && bun test ../../scripts/gate.test.ts ../../scripts/gate-tools.test.ts'
 check shard-contracts bash -c 'cd packages/e2e-tests && bun test scripts/validate-mode-manifest.test.ts scripts/select-rust-shard.test.ts scripts/select-host-shard.test.ts scripts/select-unit-shard.test.ts scripts/ci-workflow.test.ts scripts/run-slow-unit-tests.test.ts'
 check slow-unit-inventory bash -c 'cd packages/e2e-tests && bun scripts/run-slow-unit-tests.ts --dry-run'
 exit "$status"
