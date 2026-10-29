@@ -1516,7 +1516,7 @@ describe("stripped placeholder replay across temporary marker windows", () => {
     });
 
     for (const providerID of ["anthropic", "openai-compatible"]) {
-        it(`freezes a marker-only final assistant across a priced pass and appended defer (${providerID})`, async () => {
+        it(`defers a new blank-tag marker byte-identically until the next rebuild (${providerID})`, async () => {
             db = new Database(":memory:");
             initializeDatabase(db);
             const sessionId = `ses-marker-only-${providerID}`;
@@ -1548,13 +1548,12 @@ describe("stripped placeholder replay across temporary marker windows", () => {
             expect(first[1]?.parts).toEqual([
                 { type: "text", text: providerID === "anthropic" ? "" : "[dropped]" },
             ]);
-            const second = [
-                ...makePrefix(),
-                {
-                    info: { id: "new", role: "assistant", sessionID: sessionId },
-                    parts: [{ type: "text", text: "§655§ [cleared]" }],
-                },
-            ] as MessageLike[];
+            const appended = {
+                info: { id: "new", role: "assistant", sessionID: sessionId },
+                parts: [{ type: "text", text: "§775§ [dropped ]" }],
+            };
+            const deferWire = JSON.stringify([...first, appended]);
+            const second = [...makePrefix(), structuredClone(appended)] as MessageLike[];
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, second, {
                     schedulerDecision: "defer",
@@ -1562,8 +1561,22 @@ describe("stripped placeholder replay across temporary marker windows", () => {
                 }),
             );
             expect(JSON.stringify(second.slice(0, first.length))).toBe(prefix);
-            expect(second[2]?.parts).toEqual([{ type: "text", text: "§655§ [cleared]" }]);
+            expect(JSON.stringify(second)).toBe(deferWire);
             expect(getStrippedPlaceholderIds(db, sessionId).has("new")).toBe(false);
+
+            const rebuilt = [...makePrefix(), structuredClone(appended)] as MessageLike[];
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, rebuilt, {
+                    schedulerDecision: "execute",
+                    pendingMaterializationSessions: new Set([sessionId]),
+                    schedulerDeferReason: null,
+                    resolvedProviderID: providerID,
+                }),
+            );
+            expect(getStrippedPlaceholderIds(db, sessionId).has("new")).toBe(true);
+            expect(rebuilt[2]?.parts).toEqual([
+                { type: "text", text: providerID === "anthropic" ? "" : "[dropped]" },
+            ]);
         });
     }
 
