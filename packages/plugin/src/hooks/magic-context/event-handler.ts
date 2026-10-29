@@ -1,4 +1,5 @@
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
+import { clearHostTokenBreakdownMemo } from "../../features/magic-context/host-token-breakdown-state";
 import {
     awaitSessionIdentityDecision,
     forgetSessionIdentityDecision,
@@ -1305,6 +1306,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 return;
             }
 
+            clearHostTokenBreakdownMemo(deps.db, sessionId);
             forgetSessionIdentityDecision(sessionId);
             dropSlot(sessionId, "session.deleted");
             clearLkgMeasuredRequest(sessionId);

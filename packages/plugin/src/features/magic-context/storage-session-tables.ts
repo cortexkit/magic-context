@@ -2,6 +2,7 @@ import { clearLkgRecoveryFence } from "../../hooks/magic-context/lkg-recovery-fe
 import { getHarness } from "../../shared/harness";
 import { type Database, prepareCachedStatement, type Statement } from "../../shared/sqlite";
 import { deleteChunkEmbedBackoffForSession } from "./compartment-chunk-embedding";
+import { clearHostTokenBreakdownMemo } from "./host-token-breakdown-state";
 import { releaseMemoryReservations } from "./memory/lifecycle-applier";
 import { deleteUncommittedPublications } from "./memory/turn-one-publication";
 import { closeTurnTwoChildrenOfSessions } from "./memory/turn-two-children";
@@ -216,7 +217,10 @@ export function deleteSessionScopedRows(
             );
     }
 
-    for (const sessionId of deletableSessionIds) deleteChunkEmbedBackoffForSession(db, sessionId);
+    for (const sessionId of deletableSessionIds) {
+        clearHostTokenBreakdownMemo(db, sessionId);
+        deleteChunkEmbedBackoffForSession(db, sessionId);
+    }
     for (const definition of SESSION_SCOPED_TABLES) {
         if (definition.table === "message_history_fts") {
             cleanupStatement(

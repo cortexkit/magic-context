@@ -1,4 +1,5 @@
 import { readSessionMetaCollection } from "../../plugin/src/features/magic-context/storage-session-collections";
+
 /**
  * Pi `context` event handler — the per-LLM-call transform pipeline.
  *
@@ -44,6 +45,7 @@ import {
 	renewCompartmentLease,
 } from "@magic-context/core/features/magic-context/compartment-lease";
 import { isFailClosedBlockingError } from "@magic-context/core/features/magic-context/fail-closed-block";
+import { clearHostTokenBreakdownMemo } from "@magic-context/core/features/magic-context/host-token-breakdown-state";
 import { isUsableProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	awaitSessionIdentityDecision,
@@ -216,6 +218,10 @@ import {
 } from "@magic-context/core/hooks/magic-context/execute-reclaim";
 import { foldExecutesThisPass } from "@magic-context/core/hooks/magic-context/fold-execution-gate";
 import { isHistorianDrainBudgetSpent } from "@magic-context/core/hooks/magic-context/historian-drain-gate";
+import {
+	type HostTokenPass,
+	scheduleHostTokenBreakdown,
+} from "@magic-context/core/hooks/magic-context/host-token-breakdown";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import {
 	hasActiveAnthropicThinkingTurn,
@@ -361,6 +367,7 @@ import {
 	repairPiHistoryBoundary,
 } from "./history-boundary-repair-pi";
 import { readHostSystemPrompt } from "./host-system-prompt";
+import { hostToolSchemaBytes } from "./host-token-breakdown";
 import {
 	clearM0M1PiCache,
 	clearPiInjectionTokenCountCache,
@@ -7111,6 +7118,14 @@ export function registerPiContextHandler(
 			}
 			recordServedSystemHash();
 			finishPrefix();
+			if (!budget.sideTurn && result.hostTokenPass)
+				scheduleHostTokenBreakdown(options.db, sessionId, {
+					...result.hostTokenPass,
+					measuredAt: Date.now(),
+					readToolSchemas: pi.getAllTools
+						? () => hostToolSchemaBytes(pi.getAllTools())
+						: undefined,
+				});
 			return { messages: outputMessages } as {
 				messages: typeof event.messages;
 			};
@@ -8624,6 +8639,10 @@ interface PiChannelBaselineSnapshot {
 }
 
 interface RunPipelineResult {
+	hostTokenPass?: Pick<
+		HostTokenPass,
+		"conversationTokens" | "toolCallTokens" | "prefixChanged"
+	>;
 	prefixPass?: PiPrefixPass;
 	prefixStableIds?: ReadonlyMap<object, string>;
 	recoveryNormalized?: boolean;
@@ -12851,6 +12870,7 @@ function runSynchronousPipeline(
 	// injected, stripped) so the numbers reflect what the LLM actually
 	// receives. Mirrors OpenCode's transform.ts:996-1127. Best-effort —
 	// never fail the pipeline on a stats write error.
+	let hostTokenPass: RunPipelineResult["hostTokenPass"];
 	try {
 		const tTokenAccounting = performance.now();
 		let tokenCache = piMessageTokenCacheBySession.get(args.sessionId);
@@ -12875,6 +12895,15 @@ function runSynchronousPipeline(
 			conversationTokens: counts.conversation,
 			toolCallTokens: counts.toolCall,
 		});
+		hostTokenPass = {
+			conversationTokens: counts.conversation,
+			toolCallTokens: counts.toolCall,
+			prefixChanged:
+				foldExecutedThisPass ||
+				publishedM1RefreshedThisPass ||
+				injectionResult?.m0Materialized === true ||
+				injectionResult?.m1RenderedCoverage != null,
+		};
 		logTransformTiming(args.sessionId, "tokenAccounting", tTokenAccounting);
 	} catch (err) {
 		sessionLog(
@@ -13070,6 +13099,7 @@ function runSynchronousPipeline(
 	if (bustedThisPass) clearExecuteReclaimState(args.db, args.sessionId);
 	return {
 		prefixPass,
+		hostTokenPass,
 		prefixStableIds: postCommitStableIdByRef,
 		messages: outputMessages,
 		recoveryNormalized,
@@ -13678,7 +13708,11 @@ function clearPiCompactionOffInMemoryState(sessionId: string): void {
 // merely switched away from — a data-loss bug far worse than the bounded
 // orphan-row cost for sessions that are genuinely abandoned and never resumed.
 // Do not add DB clearSession here.
-export function clearContextHandlerSession(sessionId: string): void {
+export function clearContextHandlerSession(
+	sessionId: string,
+	db?: ContextDatabase,
+): void {
+	if (db) clearHostTokenBreakdownMemo(db, sessionId);
 	cancelPiTagSnapshotSession(sessionId);
 	lastServedSystemHashBySession.delete(sessionId);
 	clearPiHistoryBoundaryRepairSession(sessionId);

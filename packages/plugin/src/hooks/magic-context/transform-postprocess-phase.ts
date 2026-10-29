@@ -1948,6 +1948,8 @@ interface RunPostTransformPhaseArgs {
 }
 
 export interface PostTransformPhaseResult {
+    /** A completed fold or delta refresh can change the cached attribution blocks. */
+    prefixChanged: boolean;
     finalizeServedPrefix?: (publish?: boolean) => boolean;
     prefixRecordWritable?: boolean;
     thinkingReleasedForFit?: boolean;
@@ -5975,6 +5977,11 @@ export async function runPostTransformPhase(
         if (!parkedTriggers?.pending) parkedBustTriggersBySession.delete(args.sessionId);
         return {
             finalizeServedPrefix: prefixRecordEnabled ? finalizeServedPrefix : undefined,
+            prefixChanged:
+                foldExecutedThisPass ||
+                publishedM1RefreshedThisPass ||
+                m0RematerializedThisPass ||
+                deliveredPrefix?.m1Refreshed === true,
             prefixRecordWritable: prefixRecordEnabled && !activeThinkingPrefixHold,
             explicitMaterializedSuccessfully,
             deferredMaterializedSuccessfully,
