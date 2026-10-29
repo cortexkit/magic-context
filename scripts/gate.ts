@@ -54,6 +54,13 @@ export function area(id: string): string {
     return id.startsWith("e2e-host-") ? "host" : "unit";
 }
 
+export function cpuBudget(value = "8"): number {
+    const cpus = Number(value);
+    if (!Number.isInteger(cpus) || cpus < 2 || cpus > 16)
+        throw new Error("GATE_CPUS must be an integer from 2 to 16");
+    return cpus;
+}
+
 export function expand(value: string, matrix: Lane["matrix"], workspace = root, temp = ""): string {
     return value.replace(/\$\{\{\s*([^}]+?)\s*\}\}/g, (_, expression: string) => {
         if (expression.startsWith("matrix.") && expression.slice(7) in matrix)
@@ -189,9 +196,7 @@ async function main() {
         return;
     }
     const started = Date.now();
-    const cpus = Number(process.env.GATE_CPUS ?? "16");
-    if (!Number.isInteger(cpus) || cpus < 2 || cpus > 16)
-        throw new Error("GATE_CPUS must be an integer from 2 to 16");
+    const cpus = cpuBudget(process.env.GATE_CPUS);
     const run = join(root, "target/gate", `${Date.now()}-${process.pid}`);
     await mkdir(run, { recursive: true });
     const nodeMajor =

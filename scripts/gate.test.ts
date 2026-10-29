@@ -5,6 +5,7 @@ import {
     area,
     ciOnlyJobs,
     condition,
+    cpuBudget,
     dependencies,
     expand,
     githubOnly,
@@ -16,6 +17,14 @@ const root = resolve(import.meta.dir, "..");
 const workflow = Bun.YAML.parse(await Bun.file(join(root, ".github/workflows/ci.yml")).text()) as {
     jobs: Parameters<typeof lanes>[0];
 };
+
+test("full gate fits an eight-core slot by default and uses sixteen only explicitly", () => {
+    expect(cpuBudget()).toBe(8);
+    expect(cpuBudget("4")).toBe(4);
+    expect(cpuBudget("16")).toBe(16);
+    for (const value of ["1", "17", "NaN", "3.5"])
+        expect(() => cpuBudget(value)).toThrow("GATE_CPUS");
+});
 
 test("local full expands CI's matrices, including both slow modes and every Rust shard", () => {
     const full = lanes(workflow.jobs);
