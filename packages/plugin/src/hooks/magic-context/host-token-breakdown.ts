@@ -12,7 +12,8 @@ export const HOST_BREAKDOWN_TOLERANCE = { ratio: 0.01, tokens: 500 } as const;
 /** Hash-keyed measurements shared with sidebar/status reads; no prompt bytes are retained. */
 export class HostTokenMeasurementCache {
     private readonly counts = new Map<string, number>();
-    private tokenizerAvailable = hasTokenizerForFit();
+    // Probe on first measurement so imports cannot preempt the prompt's async tokenizer preload.
+    private tokenizerAvailable: boolean | undefined;
 
     constructor(private readonly estimate = estimateFixedPromptTokens) {}
 

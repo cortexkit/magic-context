@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
@@ -25,6 +26,37 @@ import { computeM0BlockTokens } from "./m0-token-breakdown";
 import * as tokenCount from "./token-count-exact";
 
 export const drainHostBreakdown = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+test("host token measurements leave tokenizer loading to the prompt preload", () => {
+    const breakdownUrl = new URL("./host-token-breakdown.ts", import.meta.url).href;
+    const formattingUrl = new URL("./read-session-formatting.ts", import.meta.url).href;
+    // A fresh process detects import-time loads even when earlier tests already used the tokenizer.
+    const script = `
+        const { HostTokenMeasurementCache } = await import(${JSON.stringify(breakdownUrl)});
+        const { getTokenizerNativeMemoryStats, preloadTokenizer } = await import(${JSON.stringify(formattingUrl)});
+        const afterImport = getTokenizerNativeMemoryStats();
+        const cache = new HostTokenMeasurementCache();
+        const afterConstruction = getTokenizerNativeMemoryStats();
+        const preloaded = await preloadTokenizer();
+        const tokens = cache.text("hello");
+        console.log(JSON.stringify({ afterImport, afterConstruction, preloaded, tokens }));
+    `;
+    const child = spawnSync(process.execPath, ["--no-install", "-e", script], {
+        encoding: "utf8",
+        timeout: 20_000,
+        windowsHide: true,
+    });
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(0);
+    expect(child.stderr).toBe("");
+    const result = JSON.parse(child.stdout);
+    expect(result.afterImport.loadAttempted).toBe(false);
+    expect(result.afterImport.loaded).toBe(false);
+    expect(result.afterConstruction.loadAttempted).toBe(false);
+    expect(result.afterConstruction.loaded).toBe(false);
+    expect(result.preloaded).toBe(true);
+    expect(result.tokens).toBe(1);
+});
 
 test("prefix attribution reads once per fold or delta refresh, never on a memoized defer, and reloads after restart or clear", async () => {
     const { dir, cleanup } = createTestTempDir("host-token-prefix-memo-");
