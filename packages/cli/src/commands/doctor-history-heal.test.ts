@@ -1,35 +1,36 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
-import { resolve, join } from "node:path";
-import { Database } from "@magic-context/core/shared/sqlite";
+import { join, resolve } from "node:path";
+import { buildCompactionMarkerRows } from "@magic-context/core/features/magic-context/compaction-marker";
+import { getHistoryHealQueue } from "@magic-context/core/features/magic-context/history-heal-queue";
 import {
     getOrCreateSessionMeta,
     initializeDatabase,
     runMigrations,
 } from "@magic-context/core/features/magic-context/storage";
 import {
+    getPersistedCompactionMarkerState,
+    setPendingCompactionMarkerState,
+    setPersistedCompactionMarkerState,
+} from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import {
     materializeM0,
     mustMaterialize,
 } from "@magic-context/core/hooks/magic-context/inject-compartments";
-import { buildCompactionMarkerRows } from "@magic-context/core/features/magic-context/compaction-marker";
+import { Database } from "@magic-context/core/shared/sqlite";
 import {
-    setPersistedCompactionMarkerState,
-    getPersistedCompactionMarkerState,
-    setPendingCompactionMarkerState,
-} from "@magic-context/core/features/magic-context/storage-meta-persisted";
-import { getHistoryHealQueue } from "@magic-context/core/features/magic-context/history-heal-queue";
-import {
-    buildHistoryHealPlan,
-    runHistoryHealCli,
-    applyHistoryHealPlan,
     applyHealRewrites,
+    applyHistoryHealPlan,
+    buildHistoryHealPlan,
     type HistoryHealDeps,
+    runHistoryHealCli,
 } from "./doctor-history-heal";
 import {
-    inventory,
+    canonical,
     digest,
-    selectHealMarker,
     type HistoryHealPlan,
+    inventory,
+    selectHealMarker,
 } from "./doctor-history-heal-plan";
 
 let root: string, dbPath: string, hostPath: string, db: Database, host: Database;
@@ -765,4 +766,106 @@ it("refuses mode-3 handoffs during planning and when they appear after a plan", 
     expect(
         db.prepare("SELECT start_message,end_message FROM compartments WHERE sequence=1").get(),
     ).toEqual({ start_message: 4, end_message: 7 });
+});
+
+describe("independent history heal review witnesses", () => {
+    it("does not execute an edited cross-session DELETE when resuming a host-only commit", () => {
+        marker(2, 1);
+        db.exec("UPDATE compartments SET start_message=4,end_message=7 WHERE sequence=1");
+        db.prepare(
+            "INSERT INTO notes(content,session_id,created_at,updated_at) VALUES ('irreplaceable note','other-session',1,1)",
+        ).run();
+        const victim = db.prepare("SELECT * FROM notes WHERE session_id='other-session'").get() as {
+            id: number;
+        };
+        const p = plan();
+        host.transaction(() =>
+            applyHealRewrites(
+                host,
+                p.sessions[0].rewrites.filter((r) => r.store === "host"),
+            ),
+        )();
+        p.sessions[0].rewrites.push({
+            store: "context",
+            table: "notes",
+            key: { id: victim.id },
+            before: victim,
+            after: null,
+            reason: "edited resume proposal",
+        });
+        try {
+            apply(p);
+        } catch {
+            // Rejecting the edited manifest before any write is also a safe outcome.
+        }
+        expect(db.prepare("SELECT content FROM notes WHERE id=?").get(victim.id)).toEqual({
+            content: "irreplaceable note",
+        });
+    });
+
+    it("backs up the original store identity before writable-open initialization", () => {
+        marker(2, 1);
+        db.exec("DELETE FROM context_store_meta WHERE key='store_uuid'");
+        const before = db.prepare("SELECT * FROM context_store_meta ORDER BY key").all();
+        apply();
+        const backup = readdirSync(root).find((n) => n.startsWith("history-heal-backup-"))!;
+        const saved = new Database(join(root, backup, "context.db"), { readonly: true });
+        try {
+            expect(saved.prepare("SELECT * FROM context_store_meta ORDER BY key").all()).toEqual(
+                before,
+            );
+        } finally {
+            saved.close();
+        }
+    });
+
+    it("refuses unresolved rebases before proposing structural writes", () => {
+        db.exec(
+            "UPDATE compartments SET start_message=4,end_message=7,rebase_status='unresolved' WHERE sequence=1",
+        );
+        const p = plan().sessions[0];
+        expect(p.refusals.map((r) => r.code)).toContain("unresolved_rebase");
+        expect(p.rewrites).toEqual([]);
+    });
+
+    it("reopens paired WAL backups at the exact pre-apply logical table state", () => {
+        const snapshot = (store: Database) => {
+            const tables = store
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                .all() as { name: string }[];
+            return Object.fromEntries(
+                tables.map(({ name }) => [
+                    name,
+                    store
+                        .prepare(`SELECT * FROM "${name.replaceAll('"', '""')}"`)
+                        .all()
+                        .map(canonical)
+                        .sort(),
+                ]),
+            );
+        };
+        db.exec("PRAGMA journal_mode=WAL");
+        host.exec("PRAGMA journal_mode=WAL");
+        db.prepare(
+            "INSERT OR IGNORE INTO context_store_meta VALUES ('store_uuid','review-fixture')",
+        ).run();
+        marker(2, 1);
+        seedIndex();
+        db.exec("UPDATE compartments SET start_message=4,end_message=7 WHERE sequence=1");
+        const before = [snapshot(db), snapshot(host)];
+        expect(applyHistoryHealPlan(plan(), false, deps)).toBe(0);
+        const backup = readdirSync(root).find((n) => n.startsWith("history-heal-backup-"))!;
+        const saved = ["context.db", "opencode.db"].map(
+            (name) => new Database(join(root, backup, name), { readonly: true }),
+        );
+        try {
+            expect(saved.map(snapshot)).toEqual(before);
+            for (const store of saved)
+                expect(store.prepare("PRAGMA integrity_check").get()).toEqual({
+                    integrity_check: "ok",
+                });
+        } finally {
+            for (const store of saved) store.close();
+        }
+    });
 });

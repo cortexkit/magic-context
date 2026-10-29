@@ -1,18 +1,18 @@
 import { afterEach, beforeEach, expect, it } from "bun:test";
+import { promoteRecompStagingWithM0Mutation } from "../../hooks/magic-context/compartment-runner-recomp";
 import { Database } from "../../shared/sqlite";
-import { initializeDatabase } from "./storage-db";
-import { runMigrations } from "./migrations";
-import { clearSession, getOrCreateSessionMeta } from "./storage-meta";
-import { clearCachedM0M1 } from "./storage-meta-shared";
-import { getM0MutationsBySession } from "./storage-m0-mutation-log";
 import { acquireCompartmentLease } from "./compartment-lease";
 import { saveRecompStagingPass } from "./compartment-storage";
-import { promoteRecompStagingWithM0Mutation } from "../../hooks/magic-context/compartment-runner-recomp";
 import {
     drainHistoryHealQueue,
     getHistoryHealQueue,
     setHistoryHealQueue,
 } from "./history-heal-queue";
+import { runMigrations } from "./migrations";
+import { initializeDatabase } from "./storage-db";
+import { getM0MutationsBySession } from "./storage-m0-mutation-log";
+import { clearSession, getOrCreateSessionMeta } from "./storage-meta";
+import { clearCachedM0M1 } from "./storage-meta-shared";
 import { writeSessionRenderCache } from "./storage-session-cache";
 
 let db: Database;
@@ -94,4 +94,46 @@ it("queued partial publication preserves cache bytes and records the existing st
     const state = getOrCreateSessionMeta(db, sessionId);
     expect(Buffer.from(state.cachedM0Bytes!).toString()).toBe("frozen m0");
     expect(Buffer.from(state.cachedM1Bytes!).toString()).toBe("frozen m1");
+});
+
+it("does not repeat a committed heal publication after interruption before acknowledgement", async () => {
+    setHistoryHealQueue(db, sessionId, [work]);
+    expect(acquireCompartmentLease(db, sessionId, "holder")).not.toBeNull();
+    let publications = 0;
+    const publish = async () => {
+        saveRecompStagingPass(
+            db,
+            sessionId,
+            1,
+            [
+                {
+                    sequence: 0,
+                    startMessage: 1,
+                    endMessage: 4,
+                    startMessageId: "m1",
+                    endMessageId: "m4",
+                    title: "rebuilt",
+                    content: "prose",
+                },
+            ],
+            [],
+        );
+        expect(
+            promoteRecompStagingWithM0Mutation(db, sessionId, "holder", {
+                preserveCachedM0M1: true,
+            }),
+        ).not.toBeNull();
+        publications++;
+        return true;
+    };
+    await expect(
+        drainHistoryHealQueue(db, sessionId, async () => {
+            await publish();
+            // The compartment swap has committed, but the durable queue still contains its head.
+            throw new Error("interrupted after publication commit");
+        }),
+    ).rejects.toThrow("interrupted after publication commit");
+    expect(await drainHistoryHealQueue(db, sessionId, publish)).toBe(true);
+    expect(getHistoryHealQueue(db, sessionId)).toEqual([]);
+    expect(publications).toBe(1);
 });
