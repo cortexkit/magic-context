@@ -133,6 +133,36 @@ async fn native_descent_initial_covers_retained_rows_with_drops_no_read_one_rebu
     let head: Vec<Value> = serde_json::from_str(&cut.head).unwrap();
     assert!(replacement.len() == head.len() + (last - first + 1) as usize);
     assert_eq!(&replacement[..head.len()], &head);
+    let applied_messages: Vec<Value> = serde_json::from_slice(&rig.render(&applied_view)).unwrap();
+    let raw_suffix: Vec<Value> = rig
+        .runner
+        .entries
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry.ordinal > last)
+        .map(|entry| entry.message.clone())
+        .collect();
+    assert_eq!(raw_suffix.len(), 1);
+    let mut first_request = replacement.clone();
+    first_request.extend(raw_suffix.clone());
+    let mut expected_request = head.clone();
+    for ordinal in first..=last {
+        let mid = &parent.entries.get(&ordinal).unwrap().mid;
+        expected_request.push(
+            applied_messages
+                .iter()
+                .find(|message| message["info"]["id"].as_str() == Some(mid))
+                .unwrap()
+                .clone(),
+        );
+    }
+    expected_request.extend(raw_suffix);
+    assert_eq!(
+        serde_json::to_vec(&first_request).unwrap(),
+        serde_json::to_vec(&expected_request).unwrap(),
+        "the first request keeps applied retained bytes and the post-horizon row raw"
+    );
     // The dropped tool part stays dropped: ordinal 26 renders the drop
     // placeholder, never its original output.
     let dropped_at = replacement[head.len() + (26 - first) as usize].clone();

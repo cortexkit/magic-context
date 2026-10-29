@@ -2104,13 +2104,9 @@ fn review_card() -> bool {
     std::env::var("MC_REVIEW_CARD").is_ok_and(|value| value == "1")
 }
 
-/// The first live notice of a moved session usually reports real usage: a
-/// moved session is long. The offline pass runs at zero usage (see
-/// `offline_first_pass`, which builds its notice with `est_tokens` 0), so
-/// adoption is byte-identical to the ordinary first pass only if the adopting
-/// notice then publishes exactly what an ordinary first pass at the notice's
-/// usage would. Compares everything observable after that one notice on both
-/// arms.
+/// Compare independent offline preparations when their first live notice
+/// reports real usage. Both arms must cross the preparation gate; usage may
+/// change the next view, but must not require an unprepared live first pass.
 async fn first_notice_at(
     label: &str,
     write: impl Fn(&Path) -> (StorePaths, String),
@@ -2119,13 +2115,18 @@ async fn first_notice_at(
     let _clock = crate::tests::fixed_clock();
     let project = tempfile::tempdir().unwrap();
     let (offline_dir, live_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let (_prep, outcome) = prepared(offline_dir.path(), project.path(), &write).await;
+    let (prep, outcome) = prepared(offline_dir.path(), project.path(), &write).await;
     assert!(
         matches!(outcome, OfflineOutcome::Prepared(_)),
         "{label}: {outcome:?}"
     );
-    let (live_paths, session, served) = moved_stores(live_dir.path(), &write);
-    pin_history_generation(&live_paths.context_db, &session, &[0, 1]);
+    let (fresh, fresh_outcome) = prepared(live_dir.path(), project.path(), &write).await;
+    let OfflineOutcome::Prepared(report) = fresh_outcome else {
+        panic!("{label}: {fresh_outcome:?}")
+    };
+    assert!(report.proof.origin > 0);
+    assert_eq!(prep.served, fresh.served);
+    let (session, served) = (fresh.session, fresh.served);
     let live = Arm::open(
         live_dir.path(),
         project.path(),
@@ -2180,7 +2181,7 @@ async fn first_notice_at(
             .unwrap_or_default()
     };
     Err(format!(
-        "{label} est={est}: adopted state differs from the ordinary first pass in {keys:?}; views offline {:?} live {:?}; newest view equal: {}; engine fields {:?}",
+        "{label} est={est}: independent prepared states differ in {keys:?}; views offline {:?} fresh {:?}; newest view equal: {}; engine fields {:?}",
         versions(&offline_seen),
         versions(&live_seen),
         newest_view(&offline_seen) == newest_view(&live_seen),
@@ -2191,11 +2192,10 @@ async fn first_notice_at(
     ))
 }
 
-/// Witness: adoption at the first live notice equals the ordinary first pass
-/// when that notice reports usage of 0, 30,000, 72,000, 87,000 or 96,000
-/// tokens of a 100,000-token window.
+/// Adoption of independent preparations agrees when the first live notice
+/// reports usage of 0, 30,000, 72,000, 87,000 or 96,000 tokens.
 #[tokio::test]
-async fn card_review_adoption_matches_the_ordinary_first_pass_at_live_usage() {
+async fn card_review_adoption_matches_fresh_preparation_at_live_usage() {
     if !review_card() {
         return;
     }
