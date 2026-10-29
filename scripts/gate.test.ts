@@ -175,3 +175,50 @@ for (const selection of ["empty", "failed", "selected"]) {
             }
         }));
 }
+
+for (const probe of ["hit", "miss"]) {
+    test(`daemon Cargo cache ${probe} preserves the module home and chooses a locked graph`, async () =>
+        scratch(async (path) => {
+            const bin = join(path, "cargo");
+            await Bun.write(
+                bin,
+                '#!/bin/bash\nif [[ "$*" == "fetch --locked --offline" ]]; then [[ "$PROBE" == hit ]]; else [[ "$*" == "fetch --locked" ]] || exit 8; printf "%s" "$CARGO_HOME" > "$CAPTURE"; fi\n',
+            );
+            expect(Bun.spawnSync(["chmod", "+x", bin]).exitCode).toBe(0);
+            const selected = join(path, "daemon-home");
+            const capture = join(path, "fetch-home");
+            const child = Bun.spawn(
+                [
+                    "bash",
+                    "-euo",
+                    "pipefail",
+                    "-c",
+                    'source scripts/ci/daemon-cargo-home.sh; prepare_daemon_cargo_home "$RUNNER_TEMP"; printf "SELECTED=%s\\nMODULE=%s\\n" "$DAEMON_CARGO_HOME" "$CARGO_HOME"',
+                ],
+                {
+                    cwd: root,
+                    env: {
+                        ...process.env,
+                        PATH: `${path}:${process.env.PATH}`,
+                        PROBE: probe,
+                        CAPTURE: capture,
+                        CARGO_HOME: "shared-module-home",
+                        RUNNER_TEMP: path,
+                        GATE_DAEMON_CARGO_HOME: selected,
+                    },
+                    stdout: "pipe",
+                    stderr: "pipe",
+                },
+            );
+            const output = await new Response(child.stdout).text();
+            expect(await child.exited).toBe(0);
+            expect(output).toContain("MODULE=shared-module-home");
+            if (probe === "hit") {
+                expect(output).toContain("SELECTED=shared-module-home");
+                expect(await Bun.file(capture).exists()).toBe(false);
+            } else {
+                expect(output).toContain(`SELECTED=${selected}`);
+                expect(await Bun.file(capture).text()).toBe(selected);
+            }
+        }));
+}

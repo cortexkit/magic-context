@@ -231,6 +231,7 @@ async function main() {
             GITHUB_PATH: join(temp, "path"),
             GITHUB_OUTPUT: join(temp, "output"),
             GITHUB_STEP_SUMMARY: join(temp, "summary"),
+            GATE_DAEMON_CARGO_HOME: join(run, "cargo-home-daemon"),
             // Build-server checkout copies can be root-owned. Preserve Git access after isolating HOME.
             GIT_CONFIG_COUNT: "1",
             GIT_CONFIG_KEY_0: "safe.directory",
@@ -412,7 +413,7 @@ async function main() {
                 text
                     .split("\n")
                     .filter((line) =>
-                        /pass|fail|error|warning|tests? |checked |packages|vectors|cases|matches|stale|drift|expected|pinned|^PASS|^FAIL/i.test(
+                        /pass|fail|error|warning|tests? |checked |packages|vectors|cases|matches|stale|drift|expected|pinned|cargo home|^PASS|^FAIL/i.test(
                             line,
                         ),
                     )
