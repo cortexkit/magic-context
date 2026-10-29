@@ -1,6 +1,6 @@
 {
-  "generation": "153bd71664a1cd68e32224ba3ae4021d4e02f95b638a18740a3a60fe50c3db6f",
-  "catalog_digest": "153bd71664a1cd68e32224ba3ae4021d4e02f95b638a18740a3a60fe50c3db6f",
+  "generation": "d3bdac110b5b0e88bce77ff7e9224b473f75893d623dd5c3981ed8531d2f1987",
+  "catalog_digest": "d3bdac110b5b0e88bce77ff7e9224b473f75893d623dd5c3981ed8531d2f1987",
   "presets": [
     "head",
     "worker",
@@ -151,7 +151,7 @@
       "capabilities": [
         "magic-context:archive.search/v1"
       ],
-      "description": "Search the archive — everything that ever happened in this project, not just what is on your desk.\n\nRetrieval matches meaning and exact words and fuses them, so phrase `query` as a natural-language question that still carries the exact terms you expect in the answer (paths, symbols, config keys, error strings); a bare keyword stack finds less.\n- \"where is the opencode source code path?\"  (a location you once knew)\n- \"why did we choose SQLite over postgres?\"  (a decision and its reasons)\n- \"how does the dreamer lease work?\"  (a mechanism discussed or implemented earlier)\n- Not: \"upload client retry backoff config\"\n\nResults only contain what you CANNOT currently see — memories already in <project-memory> and the live tail are filtered out. A query that is just memory ids (`#7234`, `12, 34`) resolves them directly.\n\nSources (omit for all):\n- memory — rules, constraints, conventions; \"what's our convention for X\"\n- message — the raw conversation behind compacted history; \"did we discuss this\"; hits carry ordinals for ctx_expand(start=N-10, end=N+5)\n- git_commit — commit history; \"when did this change\" (pair with message for regression hunts)\n- primer — reusable project Q&A the dreamer distils from recurring questions; \"have we answered this before\"\n- note — parked follow-ups with their recorded text; \"did we leave a follow-up\"\nUse from/to to restrict every source to an inclusive UTC date range.",
+      "description": "Search this project's available memories, stored conversation, commits, primers and session notes. Results are plain search hits: this session has no compaction views, so results are not filtered against what is currently visible.\n\nPhrase query as a natural-language question carrying exact terms you expect in the answer (paths, symbols, config keys, error strings), for example \"why did we choose SQLite over postgres?\" A bare keyword stack finds less. A query containing only memory ids (`#7234`, `12, 34`) resolves them directly.\n\nSources (omit for all): memory (rules, constraints, conventions), message (stored conversation), git_commit (commit history), primer (reusable project Q&A), note (recorded follow-ups). Use from/to to restrict every source to an inclusive UTC date range. History recovery tools require active compaction and are not available in this tool set.",
       "input_schema": {
         "type": "object",
         "properties": {
