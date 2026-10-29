@@ -625,10 +625,11 @@ impl Hub {
                 crate::now_ms(),
             );
             // This work is not admission. Legacy drop-mode conversion, growing
-            // output/input sizes, cold token backfill, and direct name/queued-at
-            // edits need a full hash because the frozen schema has no counter
-            // for them. Check every max(10 seconds, 100 * last hash duration),
-            // then deliver differences on the next one-second coalesced wake.
+            // output/input sizes, legacy output/input token-count backfills after
+            // a restart or loss of in-memory tag assignments, and direct
+            // name/queued-at edits need a full hash because the frozen schema has
+            // no counter for them. Check every max(10 seconds, 100 * last hash
+            // duration), then deliver differences on the next one-second coalesced wake.
             ctx.budget = Duration::from_secs(30);
             let result = slow_digest(&ctx, &session);
             let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -643,10 +644,11 @@ impl Hub {
                     let confirm_admission = slow.admission_fast.take().is_some();
                     let changed = slow.digest.as_ref().is_some_and(|old| old != &digest);
                     slow.digest = Some(digest);
-                    // The reply-time fast snapshot cannot exclude a payload-only
-                    // edit before this first baseline. Confirm once after the
-                    // baseline; clients then read at/after that boundary. Future
-                    // baseline differences also invalidate, closing both windows.
+                    // The reply-time fast snapshot cannot exclude payload-only
+                    // edits between the initial notice/client read and the first
+                    // full-baseline capture. Confirm once after capture so clients
+                    // re-read at/after that boundary. Later baseline differences
+                    // cover edits between successive full-baseline captures.
                     if confirm_admission || changed {
                         state.slow_dirty.insert(k);
                         self.wake.notify_one();

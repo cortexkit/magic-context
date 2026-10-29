@@ -142,7 +142,8 @@ impl AppCaller {
         matches!(self.principal, Some(Principal::Direct))
     }
 
-    /// All Direct routes share a quota; phone routes share their attested device class/key.
+    /// All Direct routes share one quota; non-Direct routes are grouped by
+    /// their stored harness value.
     pub(crate) fn watch_key(&self) -> String {
         if self.is_direct() {
             "direct".into()
