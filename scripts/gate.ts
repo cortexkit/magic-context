@@ -1,5 +1,5 @@
 import { closeSync, openSync } from "node:fs";
-import { copyFile, mkdir, readFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, utimes } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createTestHome, prepareTestTools } from "./gate-tools";
 
@@ -13,8 +13,10 @@ type Step = {
 };
 type Job = {
     name: string;
+    if?: string;
+    "timeout-minutes"?: number;
     env?: Record<string, string>;
-    needs?: string[];
+    needs?: string | string[];
     steps: Step[];
     strategy?: { matrix: Record<string, Array<string | number>> };
 };
@@ -72,6 +74,7 @@ export function expand(value: string, matrix: Lane["matrix"], workspace = root, 
 }
 
 export function lanes(jobs: Record<string, Job>): Lane[] {
+    validateJobs(jobs);
     return Object.entries(jobs).flatMap(([id, job]) => {
         if (aggregates.has(id)) return [];
         let combinations: Lane["matrix"][] = [{}];
@@ -94,6 +97,7 @@ export function condition(
     value: string | undefined,
     matrix: Lane["matrix"],
     failed: boolean,
+    distsRestored = false,
 ): boolean {
     if (!value) return !failed;
     if (!value.includes("!cancelled()"))
@@ -104,14 +108,144 @@ export function condition(
         "",
     );
     if (remainder) throw new Error(`Unsupported local step condition: ${value}`);
-    return !shard || matrix.shard === Number(shard[1]);
+    return (
+        (!shard || matrix.shard === Number(shard[1])) &&
+        (!value.includes("steps.dists.outcome") || distsRestored)
+    );
 }
 
 export function dependencies(id: string): string[] {
     if (id === "rust-mc-module-lib") return ["rust-lib-archive"];
-    if (["e2e-rust-hermetic", "rust-raw-replay-review", "rust-mc-module-integration"].includes(id))
+    if (["e2e-rust-hermetic", "rust-raw-replay-review"].includes(id))
         return ["e2e-rust-hermetic-build"];
     return [];
+}
+
+const slowUnitCondition =
+    "github.event_name == 'schedule' || startsWith(github.ref, 'refs/heads/train/check-')";
+
+export function yamlNeeds(job: Job): string[] {
+    const value = job.needs;
+    if (value === undefined) return [];
+    const needs = typeof value === "string" ? [value] : value;
+    if (!Array.isArray(needs) || needs.some((id) => typeof id !== "string" || !/^[\w-]+$/.test(id)))
+        throw new Error(`Unsupported local job needs: ${JSON.stringify(value)}`);
+    return needs;
+}
+
+export function validateJobs(jobs: Record<string, Job>): void {
+    for (const [id, job] of Object.entries(jobs)) {
+        // Full deliberately represents a check-candidate run, where both slow modes are required.
+        if (
+            job.if !== undefined &&
+            !(id === "slow-unit" && job.if === slowUnitCondition) &&
+            !(aggregates.has(id) && job.if === "${{ always() }}")
+        )
+            throw new Error(`Unsupported local job condition for ${id}: ${job.if}`);
+        for (const needed of yamlNeeds(job)) {
+            if (!(needed in jobs)) throw new Error(`Unknown job dependency ${needed} for ${id}`);
+            if (!aggregates.has(id) && (aggregates.has(needed) || ciOnlyJobs.has(needed)))
+                throw new Error(`Local job ${id} cannot consume CI-only dependency ${needed}`);
+        }
+        workflowTimeoutMs(job);
+    }
+}
+
+export function workflowTimeoutMs(job: Job): number {
+    const minutes = job["timeout-minutes"] ?? 360;
+    if (!Number.isInteger(minutes) || minutes <= 0 || minutes > 360)
+        throw new Error(`Unsupported workflow timeout-minutes: ${minutes}`);
+    return minutes * 60_000;
+}
+
+export class JobBudget {
+    private readonly deadline: number;
+    constructor(
+        readonly milliseconds: number,
+        private readonly now = () => performance.now(),
+    ) {
+        this.deadline = now() + milliseconds;
+    }
+    expired(): boolean {
+        return this.now() >= this.deadline;
+    }
+    remaining(): number {
+        const remaining = this.deadline - this.now();
+        if (remaining <= 0) throw new Error("Workflow job timeout budget exhausted");
+        return remaining;
+    }
+    timeoutArgument(): string {
+        return `${(Math.ceil(this.remaining()) / 1000).toFixed(3)}s`;
+    }
+}
+
+export function budgetedCommand(command: string, budget: JobBudget): string[] {
+    return [
+        "timeout",
+        "--kill-after=30s",
+        budget.timeoutArgument(),
+        "bash",
+        "-euo",
+        "pipefail",
+        "-c",
+        command,
+    ];
+}
+
+export function requiresDists(job: Job): boolean {
+    return job.steps.some((step) => step.uses === "./.github/actions/restore-ci-dists");
+}
+
+export function laneDependencies(lane: Lane): string[] {
+    return [...new Set([...yamlNeeds(lane.job), ...dependencies(lane.id)])];
+}
+
+export function dependencyState(
+    lane: Lane,
+    all: Lane[],
+    results: ReadonlyMap<string, boolean>,
+    distsReady: boolean,
+): "ready" | "wait" | "blocked" {
+    if (requiresDists(lane.job) && !distsReady) return "blocked";
+    const producers = all.filter((candidate) => laneDependencies(lane).includes(candidate.id));
+    if (producers.some((producer) => !results.has(producer.key))) return "wait";
+    return producers.some((producer) => !results.get(producer.key)) ? "blocked" : "ready";
+}
+
+export async function preflightGroups(
+    steps: Step[],
+    runGroup: (steps: Step[], label: string) => Promise<boolean>,
+): Promise<{ ok: boolean; distsReady: boolean }> {
+    const build = steps.findIndex((step) => step.name === "Build complete dists");
+    const publish = steps.findIndex(
+        (step) =>
+            step.uses === "actions/upload-artifact@v4" && step.with?.name?.startsWith("ci-dists-"),
+    );
+    if (build < 0 || publish <= build)
+        throw new Error("Preflight dist producer/publication boundary is not supported");
+    const setup = await runGroup(steps.slice(0, build), "setup");
+    const checks = steps.slice(publish + 1);
+    const independent: Step[] = [];
+    const afterBuild: Step[] = [];
+    for (const step of checks) {
+        const phase = step.env?.GATE_PREFLIGHT_PHASE;
+        if (phase !== undefined && phase !== "independent")
+            throw new Error(`Unsupported preflight phase: ${phase}`);
+        (phase === "independent" ? independent : afterBuild).push(step);
+    }
+    const production = setup
+        ? runGroup(steps.slice(build, publish), "dists")
+        : Promise.resolve(false);
+    const work = independent.map((step, index) => runGroup([step], `independent-${index}`));
+    // Typechecks emit retina declarations and lint reads generated TUI files, so both follow the build.
+    const dependent = production.then(() =>
+        Promise.all(afterBuild.map((step, index) => runGroup([step], `after-build-${index}`))),
+    );
+    const [produced, first, rest] = await Promise.all([production, Promise.all(work), dependent]);
+    return {
+        ok: setup && produced && [...first, ...rest].every(Boolean),
+        distsReady: setup && produced,
+    };
 }
 
 export function resources(id: string): { cpu: number; lock: string } {
@@ -167,10 +301,10 @@ async function main() {
     process.chdir(root);
     const workflow = Bun.YAML.parse(
         await readFile(join(root, ".github/workflows/ci.yml"), "utf8"),
-    ) as { jobs: Record<string, Job> };
+    ) as { jobs: Record<string, Job>; env?: Record<string, string | number | boolean> };
     const smoke = Bun.YAML.parse(
         await readFile(join(root, ".github/workflows/smoke-opencode-linux.yml"), "utf8"),
-    ) as { jobs: Record<string, Job> };
+    ) as { jobs: Record<string, Job>; env?: Record<string, string | number | boolean> };
     let selected = lanes(mode === "smoke" ? smoke.jobs : workflow.jobs);
     if (mode === "preflight") selected = selected.filter((lane) => lane.id === "preflight");
     for (const [id, label] of ciOnlyJobs) {
@@ -198,6 +332,15 @@ async function main() {
             );
         }
     }
+    const allSelected = [...selected];
+    for (const lane of selected) {
+        for (const producer of laneDependencies(lane)) {
+            if (!selected.some((candidate) => candidate.id === producer))
+                throw new Error(
+                    `Selected job ${lane.id} requires unselected dependency ${producer}`,
+                );
+        }
+    }
     if (plan) {
         for (const lane of selected) {
             console.log(lane.key);
@@ -205,7 +348,7 @@ async function main() {
                 if (
                     step.run &&
                     !githubOnly.has(step.name ?? "") &&
-                    condition(step.if, lane.matrix, false)
+                    condition(step.if, lane.matrix, false, true)
                 )
                     console.log(`  ${expand(step.run, lane.matrix)}`);
             }
@@ -258,13 +401,14 @@ async function main() {
         seconds: number;
         log: string;
     }> = [];
-    const done = new Set<string>();
     const active = new Map<string, { promise: Promise<void>; cpu: number; lock: string }>();
     const workspaceWriter = serializeTasks();
     let nativeReady: Promise<void> | undefined;
     let preflightOK = true;
+    let distsReady = false;
 
     async function execute(lane: Lane) {
+        const budget = new JobBudget(workflowTimeoutMs(lane.job));
         const temp = join(run, lane.key);
         await mkdir(temp, { recursive: true });
         // A HOME inside the checkout resolves to that project instead of a directory fallback.
@@ -289,6 +433,7 @@ async function main() {
             GITHUB_OUTPUT: join(temp, "output"),
             GITHUB_STEP_SUMMARY: join(temp, "summary"),
             GATE_DAEMON_CARGO_HOME: join(run, "cargo-home-daemon"),
+            GATE_CPUS: String(cpus),
             // Build-server checkout copies can be root-owned. Preserve Git access after isolating HOME.
             GIT_CONFIG_COUNT: "1",
             GIT_CONFIG_KEY_0: "safe.directory",
@@ -299,6 +444,8 @@ async function main() {
             NEXTEST_TEST_THREADS: String(Math.min(4, cpus)),
         });
         if (testToolsPath && lane.id !== "preflight") env.PATH = `${testToolsPath}:${env.PATH}`;
+        for (const [key, value] of Object.entries((mode === "smoke" ? smoke : workflow).env ?? {}))
+            env[key] = expand(String(value), lane.matrix, root, temp);
         for (const [key, value] of Object.entries(lane.job.env ?? {}))
             env[key] = expand(value, lane.matrix, root, temp);
         for (const file of [
@@ -309,28 +456,28 @@ async function main() {
         ])
             await Bun.write(file, "");
         let failed = false;
-        async function check(name: string, command: string, extra: Record<string, string> = {}) {
+        async function check(
+            name: string,
+            command: string,
+            extra: Record<string, string> = {},
+            checkEnv = env,
+        ) {
             const operation = async () => {
                 const log = join(
                     temp,
                     `${records.length}-${name.replace(/[^a-z0-9]+/gi, "-")}.log`,
                 );
                 const before = Date.now();
+                const invocation = budgetedCommand(command, budget);
                 const output = openSync(log, "w");
-                const child = Bun.spawn(
-                    [
-                        "timeout",
-                        "--kill-after=30s",
-                        "110m",
-                        "bash",
-                        "-euo",
-                        "pipefail",
-                        "-c",
-                        command,
-                    ],
-                    { cwd: root, env: { ...env, ...extra }, stdout: output, stderr: output },
-                );
-                const ok = (await child.exited) === 0;
+                const child = Bun.spawn(invocation, {
+                    cwd: root,
+                    env: { ...checkEnv, ...extra },
+                    stdout: output,
+                    stderr: output,
+                });
+                const exit = await child.exited;
+                const ok = exit === 0 && !budget.expired();
                 closeSync(output);
                 const seconds = (Date.now() - before) / 1000;
                 records.push({ lane: lane.key, check: name, command, ok, seconds, log });
@@ -368,51 +515,105 @@ async function main() {
                 ])
                     await copyFile(join(producer, name), join(artifact, name));
             }
-            for (const step of lane.job.steps) {
-                if (
-                    step.uses &&
-                    (!localActions.has(step.uses) ||
-                        (step.with?.repository &&
-                            step.with.repository !== "cortexkit/subconscious"))
-                )
-                    throw new Error(
-                        `Local implementation required for workflow action: ${step.uses}`,
-                    );
-                if (!step.run || githubOnly.has(step.name ?? "")) continue;
-                if (!condition(step.if, lane.matrix, failed)) continue;
-                const extra = Object.fromEntries(
-                    Object.entries(step.env ?? {}).map(([key, value]) => [
-                        key,
-                        expand(value, lane.matrix, root, temp),
-                    ]),
-                );
-                await check(
-                    step.name ?? step.run,
-                    expand(step.run, lane.matrix, root, temp),
-                    extra,
-                );
-                // GitHub exposes these files to subsequent steps; mirror its simple key=value protocol.
-                for (const line of (await readFile(env.GITHUB_ENV!, "utf8"))
-                    .split("\n")
-                    .filter(Boolean)) {
-                    const equals = line.indexOf("=");
-                    if (equals < 1 || line.includes("<<"))
-                        throw new Error(`Unsupported GITHUB_ENV record: ${line}`);
-                    env[line.slice(0, equals)] = line.slice(equals + 1);
+            const runSteps = async (
+                steps: Step[],
+                groupEnv: Record<string, string>,
+            ): Promise<boolean> => {
+                let sequenceFailed = false;
+                let restored = false;
+                try {
+                    for (const step of steps) {
+                        budget.remaining();
+                        if (
+                            step.uses &&
+                            (!localActions.has(step.uses) ||
+                                (step.with?.repository &&
+                                    step.with.repository !== "cortexkit/subconscious"))
+                        )
+                            throw new Error(
+                                `Local implementation required for workflow action: ${step.uses}`,
+                            );
+                        if (!condition(step.if, lane.matrix, sequenceFailed, restored)) continue;
+                        if (step.uses === "./.github/actions/restore-ci-dists") {
+                            if (!distsReady)
+                                throw new Error(
+                                    "Dist production did not succeed; stale outputs cannot be consumed",
+                                );
+                            const now = new Date();
+                            await utimes(join(root, "packages/plugin/dist/index.js"), now, now);
+                            restored = true;
+                        }
+                        if (!step.run || githubOnly.has(step.name ?? "")) continue;
+                        const extra = Object.fromEntries(
+                            Object.entries(step.env ?? {}).map(([key, value]) => [
+                                key,
+                                expand(value, lane.matrix, root, groupEnv.RUNNER_TEMP),
+                            ]),
+                        );
+                        if (
+                            !(await check(
+                                step.name ?? step.run,
+                                expand(step.run, lane.matrix, root, groupEnv.RUNNER_TEMP),
+                                extra,
+                                groupEnv,
+                            ))
+                        )
+                            sequenceFailed = true;
+                        // Each parallel group has its own handoff files, while sequential steps retain their environment.
+                        for (const line of (await readFile(groupEnv.GITHUB_ENV!, "utf8"))
+                            .split("\n")
+                            .filter(Boolean)) {
+                            const equals = line.indexOf("=");
+                            if (equals < 1 || line.includes("<<"))
+                                throw new Error(`Unsupported GITHUB_ENV record: ${line}`);
+                            groupEnv[line.slice(0, equals)] = line.slice(equals + 1);
+                        }
+                        const paths = (await readFile(groupEnv.GITHUB_PATH!, "utf8"))
+                            .split("\n")
+                            .filter(Boolean);
+                        if (paths.length)
+                            groupEnv.PATH = `${paths.reverse().join(":")}:${groupEnv.PATH}`;
+                        await Bun.write(groupEnv.GITHUB_ENV!, "");
+                        await Bun.write(groupEnv.GITHUB_PATH!, "");
+                    }
+                } catch (error) {
+                    console.error(`FAIL ${lane.key}: ${error}`);
+                    sequenceFailed = true;
                 }
-                const paths = (await readFile(env.GITHUB_PATH!, "utf8"))
-                    .split("\n")
-                    .filter(Boolean);
-                if (paths.length) env.PATH = `${paths.reverse().join(":")}:${env.PATH}`;
-                await Bun.write(env.GITHUB_ENV!, "");
-                await Bun.write(env.GITHUB_PATH!, "");
+                if (sequenceFailed) failed = true;
+                return !sequenceFailed;
+            };
+            if (lane.id === "preflight") {
+                const outcome = await preflightGroups(lane.job.steps, async (steps, label) => {
+                    if (label === "setup") return runSteps(steps, env);
+                    const directory = join(temp, label);
+                    await mkdir(directory, { recursive: true });
+                    const groupEnv: Record<string, string> = { ...env, RUNNER_TEMP: directory };
+                    for (const name of [
+                        "GITHUB_ENV",
+                        "GITHUB_PATH",
+                        "GITHUB_OUTPUT",
+                        "GITHUB_STEP_SUMMARY",
+                    ]) {
+                        groupEnv[name] = join(directory, name);
+                        await Bun.write(groupEnv[name]!, "");
+                    }
+                    return runSteps(steps, groupEnv);
+                });
+                distsReady = outcome.distsReady;
+                if (!outcome.ok) failed = true;
+            } else {
+                await runSteps(lane.job.steps, env);
             }
+            if (budget.expired())
+                throw new Error(
+                    `Workflow job ${lane.key} exceeded its ${workflowTimeoutMs(lane.job) / 60_000}-minute timeout`,
+                );
         } catch (error) {
             console.error(`FAIL ${lane.key}: ${error}`);
             failed = true;
         }
         results.set(lane.key, !failed);
-        done.add(lane.key);
     }
 
     // Preflight always runs whole; independent native producers still run if a static check failed.
@@ -427,16 +628,14 @@ async function main() {
         let launched = false;
         for (let index = 0; index < pending.length; ) {
             const lane = pending[index]!;
-            const deps = dependencies(lane.id);
-            const producers = selected.filter((candidate) => deps.includes(candidate.id));
-            if (producers.some((producer) => !done.has(producer.key))) {
+            const readiness = dependencyState(lane, allSelected, results, distsReady);
+            if (readiness === "wait") {
                 index++;
                 continue;
             }
-            if (producers.some((producer) => !results.get(producer.key))) {
-                console.error(`FAIL ${lane.key}: prerequisite producer failed`);
+            if (readiness === "blocked") {
+                console.error(`FAIL ${lane.key}: prerequisite production failed; lane not run`);
                 results.set(lane.key, false);
-                done.add(lane.key);
                 pending.splice(index, 1);
                 continue;
             }
@@ -471,6 +670,7 @@ async function main() {
         passed: records.filter((item) => item.ok).length,
         failed,
         preflightOK,
+        distsReady,
         records,
     };
     await Bun.write(join(run, "results.json"), `${JSON.stringify(summary, null, 2)}\n`);

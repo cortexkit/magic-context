@@ -100,12 +100,16 @@ jobs:
       # checks. CI (required) still rejects any failed preflight check.
       - name: Layout, manifest and shard contracts
         if: ${{ !cancelled() }}
+        env:
+          GATE_PREFLIGHT_PHASE: independent
         run: bash scripts/ci/preflight-layout-manifest-and-shard-contracts.sh
       - name: Pins and lockfiles
         if: ${{ !cancelled() }}
         run: bash scripts/ci/preflight-pins-and-lockfiles.sh
       - name: Format check
         if: ${{ !cancelled() }}
+        env:
+          GATE_PREFLIGHT_PHASE: independent
         run: bash scripts/ci/preflight-format-check.sh
       - name: TypeScript typecheck
         if: ${{ !cancelled() }}

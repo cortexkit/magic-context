@@ -3,15 +3,21 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
     area,
+    budgetedCommand,
     ciOnlyJobs,
     condition,
     cpuBudget,
     dependencies,
+    dependencyState,
     expand,
     githubOnly,
+    JobBudget,
+    laneDependencies,
     lanes,
+    preflightGroups,
     resources,
     serializeTasks,
+    workflowTimeoutMs,
     writesWorkspace,
 } from "./gate";
 
@@ -90,10 +96,17 @@ test("matrix substitutions and once-only checks fail closed on unknown workflow 
             "${{ !cancelled() && matrix.shard == 0 && steps.dists.outcome == 'success' }}",
             { shard: 0 },
             true,
+            true,
         ),
     ).toBe(true);
     expect(condition("${{ !cancelled() && matrix.shard == 0 }}", { shard: 1 }, false)).toBe(false);
     expect(() => condition("${{ success() }}", {}, false)).toThrow("Unsupported");
+    expect(
+        condition("${{ !cancelled() && steps.dists.outcome == 'success' }}", {}, false, false),
+    ).toBe(false);
+    expect(
+        condition("${{ !cancelled() && steps.dists.outcome == 'success' }}", {}, true, true),
+    ).toBe(true);
 });
 
 test("every non-transport CI check is runnable locally and shared scripts have no Actions expressions", async () => {
@@ -124,8 +137,87 @@ test("local producer dependencies and writable output locks preserve the CI hand
     expect(dependencies("rust-mc-module-lib")).toEqual(["rust-lib-archive"]);
     expect(dependencies("rust-raw-replay-review")).toEqual(["e2e-rust-hermetic-build"]);
     expect(dependencies("e2e-rust-hermetic")).toEqual(["e2e-rust-hermetic-build"]);
+    expect(dependencies("rust-mc-module-integration")).toEqual([]);
     expect(resources("rust-mc-module-lib").lock).toBe("nextest-junit");
     expect(resources("rust-lib-archive").lock).toBe(resources("rust-clippy").lock);
+});
+
+test("workflow job timeouts are shared across commands instead of resetting per step", () => {
+    expect(workflowTimeoutMs({ name: "default", steps: [] })).toBe(360 * 60_000);
+    expect(workflowTimeoutMs({ name: "CI cap", steps: [], "timeout-minutes": 10 })).toBe(600_000);
+    for (const minutes of [0, -1, 1.5, 361])
+        expect(() =>
+            workflowTimeoutMs({ name: "invalid", steps: [], "timeout-minutes": minutes }),
+        ).toThrow("timeout-minutes");
+    let time = 0;
+    const budget = new JobBudget(1000, () => time);
+    expect(budgetedCommand("first", budget)[2]).toBe("1.000s");
+    time = 700;
+    expect(budgetedCommand("second", budget)[2]).toBe("0.300s");
+    time = 999.9;
+    expect(budgetedCommand("last fraction", budget)[2]).toBe("0.001s");
+    time = 1000;
+    expect(budget.expired()).toBe(true);
+    expect(() => budgetedCommand("must not start", budget)).toThrow("budget exhausted");
+});
+
+test("unknown job-level conditions and uninterpretable needs fail before execution", () => {
+    expect(() =>
+        lanes({
+            surprise: { name: "surprise", if: "${{ github.event_name == 'push' }}", steps: [] },
+        }),
+    ).toThrow("Unsupported local job condition");
+    expect(() =>
+        lanes({ surprise: { name: "surprise", needs: "${{ inputs.producer }}", steps: [] } }),
+    ).toThrow("Unsupported local job needs");
+    expect(() => lanes({ surprise: { name: "surprise", needs: ["missing"], steps: [] } })).toThrow(
+        "Unknown job dependency",
+    );
+    const jobs = lanes({
+        producer: { name: "producer", steps: [] },
+        consumer: { name: "consumer", needs: "producer", steps: [] },
+    });
+    const consumer = jobs.find((lane) => lane.id === "consumer")!;
+    expect(laneDependencies(consumer)).toEqual(["producer"]);
+    expect(dependencyState(consumer, jobs, new Map(), false)).toBe("wait");
+    expect(dependencyState(consumer, jobs, new Map([["producer", false]]), false)).toBe("blocked");
+    expect(dependencyState(consumer, jobs, new Map([["producer", true]]), false)).toBe("ready");
+});
+
+test("failed dist production cannot feed consumers, while unrelated static failures do not suppress good dists", async () => {
+    const jobs = lanes({
+        preflight: { name: "preflight", steps: [] },
+        consumer: { name: "consumer", steps: [{ uses: "./.github/actions/restore-ci-dists" }] },
+        docs: { name: "docs", needs: ["preflight"], steps: [] },
+    });
+    const consumer = jobs.find((lane) => lane.id === "consumer")!;
+    const docs = jobs.find((lane) => lane.id === "docs")!;
+    const staticsFailed = new Map([["preflight", false]]);
+    expect(dependencyState(consumer, jobs, staticsFailed, false)).toBe("blocked");
+    expect(dependencyState(consumer, jobs, staticsFailed, true)).toBe("ready");
+    expect(dependencyState(docs, jobs, staticsFailed, true)).toBe("blocked");
+    const outcome = await preflightGroups(
+        workflow.jobs.preflight!.steps,
+        async (_steps, label) => label !== "dists",
+    );
+    expect(outcome).toEqual({ ok: false, distsReady: false });
+    const staticFailure = await preflightGroups(
+        workflow.jobs.preflight!.steps,
+        async (_steps, label) => !label.startsWith("independent"),
+    );
+    expect(staticFailure).toEqual({ ok: false, distsReady: true });
+});
+
+test("preflight overlaps independent checks but keeps generated-output readers after the producer", async () => {
+    const events: string[] = [];
+    await preflightGroups(workflow.jobs.preflight!.steps, async (_steps, label) => {
+        events.push(`start:${label}`);
+        await Bun.sleep(label === "dists" ? 15 : 1);
+        events.push(`end:${label}`);
+        return true;
+    });
+    expect(events.indexOf("start:independent-0")).toBeLessThan(events.indexOf("end:dists"));
+    expect(events.indexOf("start:after-build-0")).toBeGreaterThan(events.indexOf("end:dists"));
 });
 
 test("split full parts partition the CI graph and only the four Docker lanes are CI-only", () => {
@@ -267,3 +359,56 @@ for (const probe of ["hit", "miss"]) {
             }
         }));
 }
+
+test("package typechecks overlap and still collect every result after a failure", async () =>
+    scratch(async (path) => {
+        const barrier = join(path, "barrier");
+        await mkdir(barrier);
+        const mock = join(path, "bun");
+        await Bun.write(
+            mock,
+            `#!/bin/bash
+if [[ "$*" == *tsconfig.build.json* ]]; then exit 0; fi
+package="$3"
+touch "$BARRIER/\${package##*/}"
+for ((attempt=0; attempt<200; attempt++)); do
+  shopt -s nullglob
+  files=("$BARRIER"/*)
+  if [[ "\${#files[@]}" == 6 ]]; then
+    [[ "$package" == packages/cli ]] && exit 7
+    exit 0
+  fi
+  sleep 0.01
+done
+exit 8
+`,
+        );
+        expect(Bun.spawnSync(["chmod", "+x", mock]).exitCode).toBe(0);
+        const child = Bun.spawn(["bash", "scripts/ci/preflight-typescript-typecheck.sh"], {
+            cwd: root,
+            env: {
+                ...process.env,
+                PATH: `${path}:${process.env.PATH}`,
+                BARRIER: barrier,
+                RUNNER_TEMP: path,
+                TYPECHECK_JOBS: "6",
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+        });
+        const [code, stdout, stderr] = await Promise.all([
+            child.exited,
+            new Response(child.stdout).text(),
+            new Response(child.stderr).text(),
+        ]);
+        expect(code).toBe(1);
+        expect(stderr).toContain("FAIL typecheck cli (exit 7)");
+        for (const packageName of [
+            "plugin",
+            "retina-local-fs",
+            "pi-plugin",
+            "dashboard",
+            "e2e-tests",
+        ])
+            expect(stdout).toContain(`PASS typecheck ${packageName}`);
+    }));
