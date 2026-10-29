@@ -152,12 +152,37 @@ function countTimeReads() {
         this: V2StoreReader,
         sessionID: string,
         ids: readonly string[],
+        versions?: Parameters<V2StoreReader["messageTimes"]>[2],
     ) {
         reads.push([...ids]);
-        return real.call(this, sessionID, ids);
+        return real.call(this, sessionID, ids, versions);
     });
     return { reads, restore: () => spy.mockRestore() };
 }
+
+test("OC2 temporal passes reuse settled times instead of rereading the draft", async () => {
+    const failure = installTransientFailure();
+    const limit = spyOn(models, "getSdkContextLimit").mockReturnValue(1_000_000);
+    const f = await oc2ContextFixture(9204, { area: AREA, instructions: false });
+    const counted = countTimeReads();
+    try {
+        await f.pass();
+        expect(counted.reads.flat().length).toBeGreaterThan(20);
+        counted.reads.length = 0;
+        await f.pass();
+        expect(counted.reads.flat()).toEqual([]);
+        f.respond();
+        f.user(`9204 the next turn: ${prose}`, 120000);
+        counted.reads.length = 0;
+        await f.pass();
+        expect(counted.reads.flat()).toHaveLength(2);
+    } finally {
+        counted.restore();
+        failure.restore();
+        limit.mockRestore();
+        await f.cleanup();
+    }
+}, 60000);
 
 // Temporal awareness off: a pass reads only the times the saved copy's anchor
 // needs (the latest assistant message and the messages after it), not every
