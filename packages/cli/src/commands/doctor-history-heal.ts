@@ -1,47 +1,62 @@
-import { existsSync, mkdtempSync, readFileSync, realpathSync, statfsSync, statSync } from "node:fs";
+import {
+    existsSync,
+    mkdtempSync,
+    readFileSync,
+    realpathSync,
+    rmSync,
+    statfsSync,
+    statSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
-import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
-import type { Database } from "@magic-context/core/shared/sqlite";
-import { writeStorageFileAtomicSync } from "@magic-context/core/shared/storage-permissions";
-import { setPersistedCompactionMarkerState } from "@magic-context/core/features/magic-context/storage-meta-persisted";
-import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import { setRecompPartialRange } from "@magic-context/core/features/magic-context/compartment-storage";
 import { setHistoryHealQueue } from "@magic-context/core/features/magic-context/history-heal-queue";
 import { queueM0Mutation } from "@magic-context/core/features/magic-context/storage-m0-mutation-log";
+import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
+import { setPersistedCompactionMarkerState } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
+import { type Database, openImmutableDatabase } from "@magic-context/core/shared/sqlite";
+import { writeStorageFileAtomicSync } from "@magic-context/core/shared/storage-permissions";
 import {
     CLI_SCHEMA_FLOOR_VERSION,
     getPersistedSchemaVersion,
     openExistingContextDatabase,
     openExistingDatabase,
 } from "../lib/database-access";
-import { probeHostProcessesUsing } from "./doctor-opencode2-cache";
-import { copyDatabaseBundle, defaultInspectHolders } from "./doctor-repair-db";
+import { assertHealWriteContract } from "./doctor-history-heal-contract";
 import {
     canonical,
     digest,
-    inventory,
-    hasMode3MoveRecord,
-    planHealSession,
-    quote,
-    readHealMeta,
     type HealSession,
     type HistoryHealPlan,
+    hasMode3MoveRecord,
+    inventory,
+    planHealSession,
+    quote,
     type Rewrite,
     type Row,
+    readHealMeta,
 } from "./doctor-history-heal-plan";
+import { probeHostProcessesUsing } from "./doctor-opencode2-cache";
+import { defaultInspectHolders } from "./doctor-repair-db";
 
 export interface HistoryHealDeps {
     inspectHolders: typeof defaultInspectHolders;
     probe: typeof probeHostProcessesUsing;
     freeBytes: (path: string) => number;
 }
-function open(path: string, context: boolean, readonly: boolean): Database {
+function openReadOnly(path: string, context: boolean): Database {
     const db = context
         ? openExistingContextDatabase(path, {
-              readonly,
+              readonly: true,
               minimumSupportedVersion: CLI_SCHEMA_FLOOR_VERSION,
           })
-        : openExistingDatabase(path, { readonly });
+        : openExistingDatabase(path, { readonly: true });
+    if (!db) throw new Error(`Database does not exist: ${path}`);
+    return db;
+}
+function openForApply(path: string): Database {
+    // This raw existing-file open performs no migration, journal-mode change or UUID initialization.
+    const db = openExistingDatabase(path, { readonly: false });
     if (!db) throw new Error(`Database does not exist: ${path}`);
     return db;
 }
@@ -127,7 +142,7 @@ function fingerprint(db: Database, s: HealSession, host = false): string {
 }
 function validate(plan: HistoryHealPlan): void {
     if (
-        plan.version !== 1 ||
+        plan?.version !== 1 ||
         plan.counting !== "opencode1-created-id-finished-summary-v1" ||
         !Array.isArray(plan.sessions) ||
         typeof plan.dbPath !== "string" ||
@@ -135,6 +150,29 @@ function validate(plan: HistoryHealPlan): void {
         !Number.isSafeInteger(plan.schemaVersion)
     )
         throw new Error("Invalid history heal plan");
+    if (
+        plan.sessions.some(
+            (s) =>
+                !s ||
+                typeof s.id !== "string" ||
+                !s.id ||
+                typeof s.title !== "string" ||
+                !Array.isArray(s.refusals) ||
+                !Array.isArray(s.rewrites) ||
+                !s.before ||
+                !s.after ||
+                ![s.before.context, s.before.host, s.after.context, s.after.host].every(
+                    (h) => typeof h === "string" && /^[a-f0-9]{64}$/.test(h),
+                ) ||
+                !s.metaBefore ||
+                !s.metaAfter ||
+                !Array.isArray(s.metaBefore.queue) ||
+                !Array.isArray(s.metaAfter.queue) ||
+                !Array.isArray(s.metaBefore.mutations) ||
+                !Array.isArray(s.metaAfter.mutations),
+        )
+    )
+        throw new Error("invalid_plan: malformed history heal session");
     if (
         realpathSync.native(plan.dbPath) !== plan.dbPath ||
         realpathSync.native(plan.hostDbPath) !== plan.hostDbPath ||
@@ -144,6 +182,118 @@ function validate(plan: HistoryHealPlan): void {
     if (new Set(plan.sessions.map((s) => s.id)).size !== plan.sessions.length)
         throw new Error("Duplicate planned session");
 }
+
+interface AuthorizedSession {
+    session: HealSession;
+    authorized: HealSession | null;
+    contextDone: boolean;
+    hostDone: boolean;
+    observed: { context: string; host: string };
+}
+function pendingContextProposal(s: HealSession): unknown {
+    return {
+        ...s,
+        rewrites: s.rewrites.filter((r) => r.store === "context"),
+        before: { ...s.before, host: null },
+        after: { ...s.after, host: null },
+    };
+}
+function authorizeSession(db: Database, host: Database, s: HealSession): AuthorizedSession {
+    if (hasMode3MoveRecord(db, s.id) && !s.refusals.some((r) => r.code === "already_moved"))
+        throw new Error(
+            `already_moved: ${s.title}; standalone history heal must not change a mode-3 session`,
+        );
+    const observed = { context: fingerprint(db, s), host: fingerprint(host, s, true) };
+    const contextDone = observed.context === s.after.context,
+        hostDone = observed.host === s.after.host;
+    assertHealWriteContract(db, host, s, { context: contextDone, host: hostDone });
+    if (
+        (!contextDone && observed.context !== s.before.context) ||
+        (!hostDone && observed.host !== s.before.host)
+    )
+        throw new Error(`stale_plan: ${s.title} changed; re-plan before applying`);
+    let authorized: HealSession | null = null;
+    if (!contextDone || !hostDone) {
+        if (observed.context === s.before.context && observed.host === s.before.host) {
+            authorized = planHealSession(db, host, s.id);
+            if (canonical(authorized) !== canonical(s))
+                throw new Error(`plan_mismatch: ${s.title}; re-plan`);
+        } else if (contextDone && !hostDone) {
+            throw new Error(
+                `inconsistent_commit_order: ${s.title}; restore both stores from backup`,
+            );
+        } else {
+            // Context-before and the actual committed host-after are the authoritative resume inputs.
+            authorized = planHealSession(db, host, s.id);
+            if (authorized.rewrites.some((r) => r.store === "host"))
+                throw new Error(`resume_host_changed: ${s.title}; host projection is not a no-op`);
+            if (
+                canonical(pendingContextProposal(authorized)) !==
+                canonical(pendingContextProposal(s))
+            )
+                throw new Error(
+                    `plan_mismatch: ${s.title}; pending resume writes differ from re-derivation`,
+                );
+        }
+        assertHealWriteContract(db, host, authorized, { context: false, host: false });
+    }
+    return { session: s, authorized, contextDone, hostDone, observed };
+}
+
+function backupBeforeMutation(
+    plan: HistoryHealPlan,
+    states: AuthorizedSession[],
+    deps: Partial<HistoryHealDeps>,
+): void {
+    const context = openReadOnly(plan.dbPath, true),
+        host = openReadOnly(plan.hostDbPath, false);
+    const backup = mkdtempSync(join(dirname(plan.dbPath), "history-heal-backup-"));
+    const mask = process.umask(0o077);
+    try {
+        held(plan, deps);
+        // VACUUM INTO takes a consistent read-only SQLite snapshot, including committed WAL frames.
+        context.prepare("VACUUM main INTO ?").run(join(backup, "context.db"));
+        host.prepare("VACUUM main INTO ?").run(join(backup, "opencode.db"));
+        held(plan, deps);
+        const savedContext = openImmutableDatabase(join(backup, "context.db"));
+        const savedHost = openImmutableDatabase(join(backup, "opencode.db"));
+        try {
+            for (const state of states)
+                if (
+                    fingerprint(savedContext, state.session) !== state.observed.context ||
+                    fingerprint(savedHost, state.session, true) !== state.observed.host
+                )
+                    throw new Error(`stale_plan: ${state.session.title} changed before backup`);
+        } finally {
+            savedHost.close();
+            savedContext.close();
+        }
+        writeStorageFileAtomicSync(
+            join(backup, "manifest.json"),
+            JSON.stringify(
+                {
+                    dbPath: plan.dbPath,
+                    hostDbPath: plan.hostDbPath,
+                    restore:
+                        "Close all hosts and restore BOTH snapshots; remove live WAL/SHM sidecars first. Retain the first pre-heal backup for whole-operation rollback.",
+                    plan,
+                },
+                null,
+                2,
+            ),
+        );
+        console.log(
+            `Paired backup: ${backup}. Restore both stores or neither; store.db is not changed.`,
+        );
+    } catch (error) {
+        rmSync(backup, { recursive: true, force: true });
+        throw error;
+    } finally {
+        process.umask(mask);
+        host.close();
+        context.close();
+    }
+}
 export function applyHistoryHealPlan(
     plan: HistoryHealPlan,
     check = false,
@@ -151,36 +301,13 @@ export function applyHistoryHealPlan(
 ): number {
     validate(plan);
     held(plan, deps);
-    const db = open(plan.dbPath, true, true),
-        host = open(plan.hostDbPath, false, true);
-    const states: { session: HealSession; contextDone: boolean; hostDone: boolean }[] = [];
+    const db = openReadOnly(plan.dbPath, true),
+        host = openReadOnly(plan.hostDbPath, false);
+    const states: AuthorizedSession[] = [];
     try {
         if (getPersistedSchemaVersion(db) !== plan.schemaVersion)
             throw new Error("Schema changed; re-plan history heal");
-        for (const s of plan.sessions) {
-            if (hasMode3MoveRecord(db, s.id) && !s.refusals.some((r) => r.code === "already_moved"))
-                throw new Error(
-                    `already_moved: ${s.title}; standalone history heal must not change a mode-3 session`,
-                );
-            const c = fingerprint(db, s),
-                h = fingerprint(host, s, true);
-            const contextDone = c === s.after.context,
-                hostDone = h === s.after.host;
-            if ((!contextDone && c !== s.before.context) || (!hostDone && h !== s.before.host))
-                throw new Error(`stale_plan: ${s.title} changed; re-plan before applying`);
-            if (!contextDone || !hostDone) {
-                // On a fresh pair, independently derive every proposed write rather than trusting JSON edits.
-                if (c === s.before.context && h === s.before.host) {
-                    const fresh = planHealSession(db, host, s.id);
-                    if (canonical(fresh) !== canonical(s))
-                        throw new Error(`plan_mismatch: ${s.title}; re-plan`);
-                } else if (contextDone && !hostDone)
-                    throw new Error(
-                        `inconsistent_commit_order: ${s.title}; restore both stores from backup`,
-                    );
-            }
-            states.push({ session: s, contextDone, hostDone });
-        }
+        for (const s of plan.sessions) states.push(authorizeSession(db, host, s));
     } finally {
         host.close();
         db.close();
@@ -207,39 +334,10 @@ export function applyHistoryHealPlan(
     )(dirname(plan.dbPath));
     if (!Number.isFinite(free) || free < bytes * 1.1)
         throw new Error(`insufficient_space: paired backup needs ${Math.ceil(bytes * 1.1)} bytes`);
-    const writable = open(plan.dbPath, true, false),
-        writableHost = open(plan.hostDbPath, false, false);
+    backupBeforeMutation(plan, states, deps);
+    const writable = openForApply(plan.dbPath),
+        writableHost = openForApply(plan.hostDbPath);
     try {
-        // Freeze both bundles while copying; these backup lock transactions do not change rows.
-        // Each session below still gets its own write transaction in each store.
-        writable.exec("BEGIN IMMEDIATE");
-        try {
-            writableHost.exec("BEGIN IMMEDIATE");
-            held(plan, deps);
-            const backup = mkdtempSync(join(dirname(plan.dbPath), "history-heal-backup-"));
-            copyDatabaseBundle(plan.dbPath, join(backup, "context.db"));
-            copyDatabaseBundle(plan.hostDbPath, join(backup, "opencode.db"));
-            writeStorageFileAtomicSync(
-                join(backup, "manifest.json"),
-                JSON.stringify(
-                    {
-                        dbPath: plan.dbPath,
-                        hostDbPath: plan.hostDbPath,
-                        restore:
-                            "Close all hosts and restore BOTH database bundles, including WAL/SHM, or neither.",
-                        plan,
-                    },
-                    null,
-                    2,
-                ),
-            );
-            console.log(
-                `Paired backup: ${backup}. Restore both stores or neither; store.db is not changed.`,
-            );
-        } finally {
-            if (writableHost.inTransaction) writableHost.exec("ROLLBACK");
-            if (writable.inTransaction) writable.exec("ROLLBACK");
-        }
         for (const state of work) {
             const s = state.session;
             writable.exec("BEGIN IMMEDIATE");
@@ -247,26 +345,25 @@ export function applyHistoryHealPlan(
                 writableHost.exec("BEGIN IMMEDIATE");
                 try {
                     held(plan, deps);
-                    if (hasMode3MoveRecord(writable, s.id))
-                        throw new Error(`already_moved: ${s.title}`);
-                    if (
-                        fingerprint(writable, s) !==
-                            (state.contextDone ? s.after.context : s.before.context) ||
-                        fingerprint(writableHost, s, true) !==
-                            (state.hostDone ? s.after.host : s.before.host)
-                    )
+                    if (getPersistedSchemaVersion(writable) !== plan.schemaVersion)
+                        throw new Error("schema_mismatch: context schema changed before apply");
+                    const verified = authorizeSession(writable, writableHost, s);
+                    if (canonical(verified.observed) !== canonical(state.observed))
                         throw new Error(`stale_plan: ${s.title} changed before writer locks`);
+                    const authorized = verified.authorized;
+                    if (!authorized)
+                        throw new Error(`stale_plan: ${s.title} changed transaction state`);
                     if (!state.hostDone)
                         applyHealRewrites(
                             writableHost,
-                            s.rewrites.filter((r) => r.store === "host"),
+                            authorized.rewrites.filter((r) => r.store === "host"),
                         );
                     if (!state.contextDone) {
                         applyHealRewrites(
                             writable,
-                            s.rewrites.filter((r) => r.store === "context"),
+                            authorized.rewrites.filter((r) => r.store === "context"),
                         );
-                        metadata(writable, s);
+                        metadata(writable, authorized);
                     }
                     if (
                         fingerprint(writable, s) !== s.after.context ||
@@ -320,8 +417,8 @@ export function runHistoryHealCli(args: string[], deps: Partial<HistoryHealDeps>
     if (!hostDbPath) throw new Error(usage);
     dbPath = realpathSync.native(dbPath);
     hostDbPath = realpathSync.native(hostDbPath);
-    const db = open(dbPath, true, true),
-        host = open(hostDbPath, false, true);
+    const db = openReadOnly(dbPath, true),
+        host = openReadOnly(hostDbPath, false);
     try {
         const plan = buildHistoryHealPlan(db, host, dbPath, hostDbPath, ids);
         const path = join(

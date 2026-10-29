@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Database } from "../../shared/sqlite";
 
 export interface HistoryHealRecomp {
@@ -58,7 +59,36 @@ export function setHistoryHealQueue(
     );
 }
 
-/** A failed or interrupted recomp keeps its queue entry; only publication acknowledges it. */
+interface HealPublication {
+    db: Database;
+    sessionId: string;
+    work: HistoryHealRecomp;
+    acknowledged: boolean;
+}
+const publications = new AsyncLocalStorage<HealPublication>();
+
+/** Called inside the compartment publication transaction, so the queue and prose commit together. */
+export function acknowledgeHistoryHealPublication(db: Database, sessionId: string): boolean {
+    const active = publications.getStore();
+    if (!active || active.db !== db || active.sessionId !== sessionId) return false;
+    if (!db.inTransaction) throw new Error("history_heal_ack_outside_publication");
+    const queue = getHistoryHealQueue(db, sessionId),
+        head = queue[0];
+    if (
+        !head ||
+        ["start", "end", "sequence", "gapStart", "gapEnd"].some(
+            (key) =>
+                head[key as keyof HistoryHealRecomp] !==
+                active.work[key as keyof HistoryHealRecomp],
+        )
+    )
+        throw new Error("history_heal_queue_changed: publication no longer owns the queue head");
+    setHistoryHealQueue(db, sessionId, queue.slice(1));
+    active.acknowledged = true;
+    return true;
+}
+
+/** Unpublished work remains queued; committed recomp publication already contains its acknowledgement. */
 export async function drainHistoryHealQueue(
     db: Database,
     sessionId: string,
@@ -66,9 +96,23 @@ export async function drainHistoryHealQueue(
 ): Promise<boolean> {
     let queue = getHistoryHealQueue(db, sessionId);
     while (queue.length) {
-        if (!(await publish(queue[0]))) return false;
-        queue = queue.slice(1);
-        setHistoryHealQueue(db, sessionId, queue);
+        const active: HealPublication = { db, sessionId, work: queue[0], acknowledged: false };
+        const changes = () =>
+            (db.prepare("SELECT total_changes() AS count").get() as { count: number }).count;
+        const before = changes();
+        if (!(await publications.run(active, () => publish(active.work)))) return false;
+        if (!active.acknowledged) {
+            // A no-database-work publisher can finish with a queue-only transaction. A real
+            // publication must acknowledge inside its own transaction, never after its commit.
+            if (changes() !== before)
+                throw new Error(
+                    "history_heal_ack_missing: publication did not atomically acknowledge its work",
+                );
+            publications.run(active, () =>
+                db.transaction(() => acknowledgeHistoryHealPublication(db, sessionId)).immediate(),
+            );
+        }
+        queue = getHistoryHealQueue(db, sessionId);
     }
     return true;
 }

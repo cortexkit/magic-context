@@ -137,3 +137,71 @@ it("does not repeat a committed heal publication after interruption before ackno
     expect(getHistoryHealQueue(db, sessionId)).toEqual([]);
     expect(publications).toBe(1);
 });
+
+it("rolls back prose, structural mutation and queue acknowledgement together", async () => {
+    setHistoryHealQueue(db, sessionId, [work]);
+    expect(acquireCompartmentLease(db, sessionId, "holder")).not.toBeNull();
+    const publish = async () => {
+        saveRecompStagingPass(
+            db,
+            sessionId,
+            1,
+            [
+                {
+                    sequence: 0,
+                    startMessage: 1,
+                    endMessage: 4,
+                    startMessageId: "m1",
+                    endMessageId: "m4",
+                    title: "rebuilt",
+                    content: "prose",
+                },
+            ],
+            [],
+        );
+        return (
+            promoteRecompStagingWithM0Mutation(db, sessionId, "holder", {
+                preserveCachedM0M1: true,
+            }) !== null
+        );
+    };
+    db.exec(
+        "CREATE TRIGGER abort_queue_ack BEFORE DELETE ON session_render_cache WHEN OLD.cache_key='history_heal_recomp_queue' BEGIN SELECT RAISE(ABORT,'interrupted inside publication'); END",
+    );
+    await expect(drainHistoryHealQueue(db, sessionId, publish)).rejects.toThrow(
+        "interrupted inside publication",
+    );
+    expect(db.prepare("SELECT * FROM compartments WHERE session_id=?").all(sessionId)).toEqual([]);
+    expect(getM0MutationsBySession(db, sessionId)).toEqual([]);
+    expect(getHistoryHealQueue(db, sessionId)).toEqual([work]);
+    db.exec("DROP TRIGGER abort_queue_ack");
+    expect(await drainHistoryHealQueue(db, sessionId, publish)).toBe(true);
+    expect(getHistoryHealQueue(db, sessionId)).toEqual([]);
+    expect(getM0MutationsBySession(db, sessionId)).toHaveLength(1);
+});
+
+it("ordinary recomp publication cannot acknowledge a queue item it does not own", () => {
+    setHistoryHealQueue(db, sessionId, [work]);
+    expect(acquireCompartmentLease(db, sessionId, "holder")).not.toBeNull();
+    saveRecompStagingPass(
+        db,
+        sessionId,
+        1,
+        [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 4,
+                startMessageId: "m1",
+                endMessageId: "m4",
+                title: "ordinary",
+                content: "prose",
+            },
+        ],
+        [],
+    );
+    expect(
+        promoteRecompStagingWithM0Mutation(db, sessionId, "holder", { preserveCachedM0M1: true }),
+    ).not.toBeNull();
+    expect(getHistoryHealQueue(db, sessionId)).toEqual([work]);
+});

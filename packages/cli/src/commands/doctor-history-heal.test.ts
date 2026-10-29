@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { buildCompactionMarkerRows } from "@magic-context/core/features/magic-context/compaction-marker";
 import { getHistoryHealQueue } from "@magic-context/core/features/magic-context/history-heal-queue";
@@ -8,6 +8,7 @@ import {
     initializeDatabase,
     runMigrations,
 } from "@magic-context/core/features/magic-context/storage";
+import { queueM0Mutation } from "@magic-context/core/features/magic-context/storage-m0-mutation-log";
 import {
     getPersistedCompactionMarkerState,
     setPendingCompactionMarkerState,
@@ -18,6 +19,7 @@ import {
     mustMaterialize,
 } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "@magic-context/core/shared/test-temp-dir";
 import {
     applyHealRewrites,
     applyHistoryHealPlan,
@@ -30,6 +32,7 @@ import {
     digest,
     type HistoryHealPlan,
     inventory,
+    readHealMeta,
     selectHealMarker,
 } from "./doctor-history-heal-plan";
 
@@ -107,7 +110,7 @@ function seedIndex() {
 beforeEach(() => {
     const scratch = resolve("../../target/scratch");
     mkdirSync(scratch, { recursive: true });
-    root = realpathSync(mkdtempSync(join(scratch, "history-heal-test-")));
+    root = realpathSync(createTestTempDirFromPath(join(scratch, "history-heal-test-")));
     dbPath = join(root, "fixture-context.sqlite");
     hostPath = join(root, "fixture-host.sqlite");
     db = new Database(dbPath);
@@ -867,5 +870,149 @@ describe("independent history heal review witnesses", () => {
         } finally {
             for (const store of saved) store.close();
         }
+    });
+});
+
+describe("history heal authorization and crash states", () => {
+    it("re-derives a same-session resume patch even when its supplied after-hash matches", () => {
+        marker(2, 1);
+        db.exec("UPDATE compartments SET start_message=4,end_message=7 WHERE sequence=1");
+        db.prepare(
+            "INSERT INTO notes(content,session_id,created_at,updated_at,anchor_ordinal) VALUES ('keep',?,1,1,2)",
+        ).run(id);
+        const note = db.prepare("SELECT id FROM notes WHERE session_id=?").get(id) as {
+            id: number;
+        };
+        const p = plan(),
+            s = p.sessions[0];
+        host.transaction(() =>
+            applyHealRewrites(
+                host,
+                s.rewrites.filter((r) => r.store === "host"),
+            ),
+        )();
+        s.rewrites.push({
+            store: "context",
+            table: "notes",
+            key: { id: note.id },
+            before: { anchor_ordinal: 2 },
+            after: { anchor_ordinal: 99 },
+            reason: "edited same-session patch",
+        });
+        db.exec("BEGIN");
+        try {
+            applyHealRewrites(
+                db,
+                s.rewrites.filter((r) => r.store === "context"),
+            );
+            queueM0Mutation(db, { sessionId: id, mutationType: "recomp_boundary_change" });
+            s.after.context = digest(inventory(db, id), readHealMeta(db, id));
+        } finally {
+            db.exec("ROLLBACK");
+        }
+        expect(() => apply(p)).toThrow("plan_mismatch");
+        expect(db.prepare("SELECT anchor_ordinal FROM notes WHERE id=?").get(note.id)).toEqual({
+            anchor_ordinal: 2,
+        });
+        expect(readdirSync(root).filter((n) => n.startsWith("history-heal-backup-"))).toEqual([]);
+    });
+
+    it("refuses a resume if re-planning still proposes host writes", () => {
+        marker(2, 1);
+        db.exec("UPDATE compartments SET start_message=4,end_message=7 WHERE sequence=1");
+        const p = plan(),
+            s = p.sessions[0];
+        host.transaction(() =>
+            applyHealRewrites(
+                host,
+                s.rewrites.filter((r) => r.store === "host"),
+            ),
+        )();
+        marker(4, 3);
+        s.after.host = digest(inventory(host, id, true));
+        expect(() => apply(p)).toThrow("resume_host_changed");
+        expect(
+            db.prepare("SELECT start_message,end_message FROM compartments WHERE sequence=1").get(),
+        ).toEqual({ start_message: 4, end_message: 7 });
+    });
+
+    it("resumes an already relocated newest-partial marker without another host rewrite", () => {
+        db.exec("UPDATE compartments SET end_block_index=2 WHERE sequence=1");
+        const p = plan(),
+            s = p.sessions[0];
+        host.transaction(() =>
+            applyHealRewrites(
+                host,
+                s.rewrites.filter((r) => r.store === "host"),
+            ),
+        )();
+        const beforeHost = digest(inventory(host, id, true));
+        expect(plan().sessions[0].rewrites.filter((r) => r.store === "host")).toEqual([]);
+        apply(p);
+        expect(digest(inventory(host, id, true))).toBe(beforeHost);
+        expect(
+            db
+                .prepare("SELECT end_message,end_block_index FROM compartments WHERE sequence=1")
+                .get(),
+        ).toEqual({ end_message: 7, end_block_index: null });
+    });
+
+    it("rejects an unknown table in a later session before writing an earlier session", () => {
+        db.exec("UPDATE compartments SET start_message=4,end_message=7 WHERE sequence=1");
+        const p = buildHistoryHealPlan(db, host, dbPath, hostPath, [id, "ses_unknown"]);
+        p.sessions[1].rewrites.push({
+            store: "context",
+            table: "schema_migrations_meta",
+            key: { key: "schema_version" },
+            before: { value: "103" },
+            after: null,
+            reason: "unknown table",
+        });
+        for (const table of ["schema_migrations_meta", "__proto__", "constructor"]) {
+            p.sessions[1].rewrites[0].table = table;
+            expect(() => apply(p)).toThrow("rewrite_contract");
+        }
+        expect(
+            db.prepare("SELECT start_message,end_message FROM compartments WHERE sequence=1").get(),
+        ).toEqual({ start_message: 4, end_message: 7 });
+        expect(readdirSync(root).filter((n) => n.startsWith("history-heal-backup-"))).toEqual([]);
+    });
+
+    it("rejects context-after host-before instead of reversing commit order", () => {
+        marker(2, 1);
+        db.exec("UPDATE compartments SET start_message=4,end_message=7 WHERE sequence=1");
+        const p = plan(),
+            s = p.sessions[0];
+        db.transaction(() => {
+            applyHealRewrites(
+                db,
+                s.rewrites.filter((r) => r.store === "context"),
+            );
+            queueM0Mutation(db, { sessionId: id, mutationType: "recomp_boundary_change" });
+        })();
+        expect(() => apply(p)).toThrow("inconsistent_commit_order");
+    });
+
+    it("rolls back both stores when a session fails before host commit", () => {
+        marker(2, 1);
+        db.exec("UPDATE compartments SET start_message=4,end_message=7 WHERE sequence=1");
+        db.exec(
+            "CREATE TRIGGER abort_heal BEFORE UPDATE ON compartments BEGIN SELECT RAISE(ABORT,'interrupted before host commit'); END",
+        );
+        const p = plan(),
+            contextBefore = digest(inventory(db, id), readHealMeta(db, id)),
+            hostBefore = digest(inventory(host, id, true));
+        expect(() => apply(p)).toThrow("interrupted before host commit");
+        expect(digest(inventory(db, id), readHealMeta(db, id))).toBe(contextBefore);
+        expect(digest(inventory(host, id, true))).toBe(hostBefore);
+    });
+
+    it("does not initialize a missing store UUID as a side effect of repair", () => {
+        marker(2, 1);
+        db.exec("DELETE FROM context_store_meta WHERE key='store_uuid'");
+        apply();
+        expect(db.prepare("SELECT * FROM context_store_meta WHERE key='store_uuid'").all()).toEqual(
+            [],
+        );
     });
 });

@@ -5,6 +5,7 @@ import {
     getHistoryHealQueue,
     type HistoryHealRecomp,
 } from "@magic-context/core/features/magic-context/history-heal-queue";
+import { getM0MutationsBySession } from "@magic-context/core/features/magic-context/storage-m0-mutation-log";
 import {
     getPendingCompactionMarkerState,
     getPersistedCompactionMarkerState,
@@ -12,9 +13,8 @@ import {
     loadProtectedTailMeta,
     type PersistedCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
-import type { Database } from "@magic-context/core/shared/sqlite";
 import { areRustHistorianSyntheticParts } from "@magic-context/core/hooks/magic-context/read-session-raw";
-import { getM0MutationsBySession } from "@magic-context/core/features/magic-context/storage-m0-mutation-log";
+import type { Database } from "@magic-context/core/shared/sqlite";
 
 export type Row = Record<string, any>;
 export interface Rewrite {
@@ -277,6 +277,11 @@ export function planHealSession(db: Database, host: Database, id: string): HealS
             );
         if (getPendingCompactionMarkerState(db, id))
             refuse("pending_marker", "retry after the pending marker settles");
+        if ([...ctx.compartments, ...ctx.recomp_compartments].some((c) => c.rebase_status !== "ok"))
+            refuse(
+                "unresolved_rebase",
+                "Resolve the session's coordinate rebase before healing history",
+            );
         if (ctx.recomp_compartments.length || meta.partial)
             refuse("active_recomp", "Finish the active recomp before healing history");
         const messages = ordered(hs.message),
@@ -453,7 +458,27 @@ export function planHealSession(db: Database, host: Database, id: string): HealS
         const t = target!;
         const movedNewest =
             cs[cs.length - 1].end_block_index !== null && t === healed[healed.length - 1];
-        const relocate = movedNewest;
+        const relocationBoundary = movedNewest ? boundaryFor(t.end_message) : undefined;
+        const replacement = relocationBoundary
+            ? buildCompactionMarkerRows(
+                  {
+                      sessionId: id,
+                      endOrdinal: t.end_message,
+                      endMessageId: t.end_message_id,
+                      summaryText: json(texts[0]).text,
+                      directory: json(pair.summary).path?.cwd ?? "",
+                  },
+                  { id: relocationBoundary.id, timeCreated: relocationBoundary.time_created },
+              )
+            : null;
+        // A crash can leave the canonical replacement committed before context metadata.
+        // Recognize those exact rows so re-planning host-after never proposes another host write.
+        const replacementPresent =
+            replacement &&
+            canonical(pair.summary) === canonical(replacement.message) &&
+            canonical(compactions[0]) === canonical(replacement.compaction) &&
+            canonical(texts[0]) === canonical(replacement.text);
+        const relocate = movedNewest && !replacementPresent;
         if (!relocate && boundaryFor(t.end_message)?.id !== pair.carrier.id)
             refuse("marker_coverage", "Host marker disagrees with summary coverage");
         let marker: PersistedCompactionMarkerState = {
@@ -538,16 +563,7 @@ export function planHealSession(db: Database, host: Database, id: string): HealS
                     "marker_collision",
                     "Relocated marker would collide with another host message",
                 );
-            const built = buildCompactionMarkerRows(
-                {
-                    sessionId: id,
-                    endOrdinal: t.end_message,
-                    endMessageId: t.end_message_id,
-                    summaryText: json(texts[0]).text,
-                    directory: json(pair.summary).path?.cwd ?? "",
-                },
-                { id: boundary!.id, timeCreated: boundary!.time_created },
-            );
+            const built = replacement!;
             for (const [table, row] of [
                 ["part", built.compaction],
                 ["message", built.message],
