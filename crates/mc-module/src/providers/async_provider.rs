@@ -1281,7 +1281,7 @@ impl State {
         self.key.reference()
     }
     fn namespace(&self) -> String {
-        format!("{}:async:{}", self.key.engine_key(), self.generation)
+        self.key.async_namespace(self.generation)
     }
 
     /// Persist the entries of a read the budget cut short, with their tag
@@ -7111,6 +7111,12 @@ impl McHandler {
 }
 
 impl McHandler {
+    pub(crate) fn facade_compaction_record_exists(&self, binding: &SessionBinding) -> bool {
+        self.store
+            .get()
+            .is_some_and(|store| route_records(store, binding).is_ok_and(|rows| !rows.is_empty()))
+    }
+
     pub(crate) fn async_compaction_namespace(
         &self,
         binding: &SessionBinding,

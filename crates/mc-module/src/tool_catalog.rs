@@ -89,7 +89,7 @@ pub(crate) struct Definition {
     preset_tools: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     /// Transitional input spellings, shared with the TypeScript generator.
     preset_aliases: BTreeMap<String, String>,
-    /// `{full: {tool: text}, light: {tool: text}}`.
+    /// Descriptions by surface and tool, with separate non-compacting overrides.
     descriptions: Value,
     /// `{full: {tool: {param: text}}, light: ...}`.
     parameter_descriptions: Value,
@@ -489,7 +489,7 @@ pub(crate) fn catalog_answer(
     let surface = tool_surface(&request.params, config);
     let tools = served
         .iter()
-        .map(|tool| catalog_tool(tool, surface, config))
+        .map(|tool| catalog_tool(tool, surface, compacting, config))
         .collect::<Result<Vec<_>, _>>()?;
     content.insert("tools".to_string(), Value::Array(tools));
     if compacting && preset == Preset::Head {
@@ -725,6 +725,7 @@ pub(crate) fn input_schema(tool: &ToolDefinition, surface: Surface) -> Result<Va
 fn catalog_tool(
     tool: &ToolDefinition,
     surface: Surface,
+    compacting: bool,
     config: &CatalogConfig,
 ) -> Result<Value, CatalogError> {
     let mut schema = input_schema(tool, surface)?;
@@ -741,8 +742,17 @@ fn catalog_tool(
     }
     let description = match config.tool_descriptions.get(&tool.name) {
         Some(text) => text.as_str(),
-        None => definition()
-            .description(surface, &tool.name)
+        None => (!compacting)
+            .then(|| {
+                definition()
+                    .descriptions
+                    .get("not_compacting")?
+                    .get(surface.as_str())?
+                    .get(&tool.name)?
+                    .as_str()
+            })
+            .flatten()
+            .or_else(|| definition().description(surface, &tool.name))
             .ok_or_else(|| {
                 CatalogError::Internal(format!(
                     "no {} description for {}",
@@ -825,6 +835,7 @@ fn guidance_text(
                 );
                 "override".to_string()
             }
+            None if !compacting => format!("tools_only/{surface}"),
             None if reduce => format!("head/reduce/{surface}"),
             None => format!("head/no_reduce/{surface}"),
         },
@@ -1177,6 +1188,7 @@ mod parity_runtime_tests {
         let reduce = catalog_tool(
             definition().tool("ctx_reduce").unwrap(),
             Surface::Full,
+            true,
             &config,
         )
         .unwrap();

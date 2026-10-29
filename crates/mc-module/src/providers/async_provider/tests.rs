@@ -16,6 +16,7 @@ mod moved_session;
 mod offline_first_pass;
 mod open_tool_notice;
 mod pass_decision_review;
+mod plain_head_tools;
 mod pruned_reasoning_review;
 mod pruned_reasoning_tests;
 mod published_contract;
@@ -550,6 +551,24 @@ impl Rig {
         params: Value,
         configure: impl FnOnce(&mut McHandler),
     ) -> (Self, Value) {
+        let rig = Self::without_setup(dir, module, bind, setup, configure).await;
+        let (setup_harness, setup_session) = setup;
+        let answer = rig
+            .op(
+                "compaction.setup",
+                json!({"session":setup_session,"harness":setup_harness,"request_id":"setup","model":model,"context_window":100_000,"composition":{"render_tags":true},"params":params,"lineage_id":"L","now":1}),
+            )
+            .await;
+        (rig, answer)
+    }
+
+    async fn without_setup(
+        dir: &Path,
+        module: &str,
+        bind: (&str, &str),
+        setup: (&str, &str),
+        configure: impl FnOnce(&mut McHandler),
+    ) -> Self {
         let (bind_harness, bind_session) = bind;
         let (setup_harness, setup_session) = setup;
         let descriptor = StorageDescriptor {
@@ -610,7 +629,7 @@ impl Rig {
             .await
             .unwrap();
         let reference = runner_session_ref(module, setup_harness, setup_session);
-        let rig = Self {
+        Self {
             h,
             resolver,
             runner,
@@ -618,14 +637,7 @@ impl Rig {
             task,
             reference,
             module: module.into(),
-        };
-        let answer = rig
-            .op(
-                "compaction.setup",
-                json!({"session":setup_session,"harness":setup_harness,"request_id":"setup","model":model,"context_window":100_000,"composition":{"render_tags":true},"params":params,"lineage_id":"L","now":1}),
-            )
-            .await;
-        (rig, answer)
+        }
     }
     async fn op(&self, method: &str, params: Value) -> Value {
         if method == "compaction.setup" {
@@ -2571,7 +2583,7 @@ async fn without_an_async_conversation_a_harness_bind_keeps_its_own_path() {
     // the answer, exactly as a handler with no async table rows gives it.
     assert_eq!(
         answer,
-        outcome(session_unresolved_error()),
+        json!({"code":"session_unresolved", "message":SESSION_UNRESOLVED_MESSAGE}),
         "unchanged unresolved-session answer"
     );
 }

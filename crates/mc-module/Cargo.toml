@@ -105,7 +105,7 @@ mc-store = { workspace = true, features = ["test-support"] }
 tempfile = "3"
 filetime = "0.2"
 tracing-subscriber = "0.3"
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, features = ["trace"] }
 # Parse the shipped-source census instead of mistaking comments for nonce readers.
 syn = { version = "2", features = ["full", "visit"] }
 quote = "1"

@@ -42,6 +42,8 @@ struct Golden {
     strings: Vec<String>,
     guidance_cases: Vec<[usize; 5]>,
     extras: Vec<Extra>,
+    catalog_tools_only: Vec<[usize; 5]>,
+    catalog_tools_only_descriptions: Value,
 }
 
 fn golden() -> &'static Golden {
@@ -154,6 +156,28 @@ fn expected_text(pair: [usize; 2]) -> String {
     format!("{}{}", golden.strings[pair[0]], golden.strings[pair[1]])
 }
 
+fn catalog_tools_only_text(config: &McModuleConfig, preset: PromptSurfacePreset) -> String {
+    let golden = golden();
+    let flags = usize::from(config.memory_enabled)
+        | (usize::from(config.catalog.dreamer_runnable && config.smart_notes_enabled) << 1)
+        | (usize::from(config.temporal_awareness) << 2)
+        | (usize::from(config.caveman.enabled) << 3);
+    let surface = usize::from(preset == PromptSurfacePreset::Light);
+    let language = golden
+        .languages
+        .iter()
+        .position(|language| language.code == config.language.as_deref().unwrap_or_default())
+        .unwrap();
+    let index = (flags * 2 + surface) * golden.languages.len() + language;
+    let [case_flags, case_surface, case_language, prefix, suffix] =
+        golden.catalog_tools_only[index];
+    assert_eq!(
+        [case_flags, case_surface, case_language],
+        [flags, surface, language]
+    );
+    expected_text([prefix, suffix])
+}
+
 fn assert_tool(actual: &Value, expected: &Value, context: &str) {
     assert_eq!(actual["name"], expected["name"], "{context}");
     assert_eq!(
@@ -261,7 +285,7 @@ fn assert_guidance(
     denied: bool,
     primary_override: Option<&str>,
     expected: &str,
-) {
+) -> bool {
     let subagent = mask & 32 != 0;
     let mut config = config(mask, language, preset);
     config.prompt_surface_guidance_override = primary_override.map(str::to_string);
@@ -282,9 +306,23 @@ fn assert_guidance(
         "composer mask={mask} preset={preset:?} language={language:?} denied={denied}"
     );
     let answer = catalog_for_config(&catalog_request(&config, subagent, denied), &config).unwrap();
+    let tools_only = !config.compaction_enabled && !subagent && primary_override.is_none();
+    let catalog_expected = if tools_only {
+        catalog_tools_only_text(&config, preset)
+    } else {
+        expected.to_string()
+    };
+    if tools_only {
+        assert_ne!(
+            answer["system_text"]["text"].as_str().unwrap().as_bytes(),
+            expected.as_bytes(),
+            "non-compacting head must take tools_only/{} instead of standalone no_reduce",
+            preset.as_str()
+        );
+    }
     assert_eq!(
         answer["system_text"]["text"].as_str().unwrap().as_bytes(),
-        expected.as_bytes(),
+        catalog_expected.as_bytes(),
         "catalog mask={mask} preset={preset:?} language={language:?} denied={denied}"
     );
     let case = golden()
@@ -298,8 +336,14 @@ fn assert_guidance(
             .iter()
             .find(|tool| tool["name"] == actual["name"])
             .unwrap();
-        assert_tool(actual, expected, &format!("matrix mask={mask} {language}"));
+        let mut expected = expected.clone();
+        if !config.compaction_enabled && actual["name"] == "ctx_search" {
+            expected["description"] =
+                golden().catalog_tools_only_descriptions[preset.as_str()]["ctx_search"].clone();
+        }
+        assert_tool(actual, &expected, &format!("matrix mask={mask} {language}"));
     }
+    tools_only
 }
 
 #[test]
@@ -310,7 +354,12 @@ fn typescript_guidance_matrix_matches_every_config_and_language() {
         golden.guidance_cases.len(),
         128 * 2 * golden.languages.len()
     );
+    assert_eq!(
+        golden.catalog_tools_only.len(),
+        16 * 2 * golden.languages.len()
+    );
     let mut seen = vec![false; golden.guidance_cases.len()];
+    let mut tools_only_cases = 0;
     for &[mask, surface, language, prefix, suffix] in &golden.guidance_cases {
         let index = (mask * 2 + surface) * golden.languages.len() + language;
         assert!(!seen[index], "duplicate config case");
@@ -320,27 +369,28 @@ fn typescript_guidance_matrix_matches_every_config_and_language() {
         } else {
             PromptSurfacePreset::Light
         };
-        assert_guidance(
+        tools_only_cases += usize::from(assert_guidance(
             mask,
             preset,
             &golden.languages[language].code,
             false,
             None,
             &expected_text([prefix, suffix]),
-        );
+        ));
     }
     assert!(seen.iter().all(|seen| *seen));
     for case in &golden.extras {
-        assert_guidance(
+        tools_only_cases += usize::from(assert_guidance(
             case.mask,
             case.preset,
             &case.language,
             case.denied,
             case.primary_override.as_deref(),
             &expected_text(case.text),
-        );
+        ));
     }
-    println!("Compared {} exhaustive guidance cases and {} override/permission cases on both Rust serving composers", golden.guidance_cases.len(), golden.extras.len());
+    assert_eq!(tools_only_cases, 32 * 2 * (golden.languages.len() + 1));
+    println!("Compared {} exhaustive guidance cases and {} override/permission cases on both Rust serving composers, including {tools_only_cases} catalog tools-only cases", golden.guidance_cases.len(), golden.extras.len());
 }
 
 #[test]

@@ -136,6 +136,7 @@ import {
 import { renderUserProfileContent } from "@magic-context/core/hooks/magic-context/user-profile-render";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { sessionLog as logSession } from "@magic-context/core/shared/logger";
+import { isSqliteTransactionOpen } from "@magic-context/core/shared/sqlite";
 import {
 	logSlowWriteTransaction,
 	WriteTransactionSteps,
@@ -1934,7 +1935,10 @@ export function materializeM0Pi(
 	state.beforeCacheCommitForTest?.();
 	// Validate the m[0] snapshot, render m[1], and persist the pair atomically.
 	let writer: ReturnType<typeof beginPrefixWrite>;
-	const nested = db.inTransaction;
+	// Node exposes isTransaction, not Bun's inTransaction. Keep the cached
+	// prefix update in the open transaction so it commits or rolls back with
+	// the persisted removal of thinking signed against the previous prefix.
+	const nested = isSqliteTransactionOpen(db);
 	try {
 		if (!nested) db.exec("BEGIN IMMEDIATE");
 		writer = beginPrefixWrite(db, nested);
@@ -2801,7 +2805,7 @@ function softRefreshCachedM1Pi(args: {
 } {
 	const steps = new WriteTransactionSteps();
 	args.state.beforeCacheCommitForTest?.();
-	const nested = args.db.inTransaction;
+	const nested = isSqliteTransactionOpen(args.db);
 	if (!nested) args.db.exec("BEGIN IMMEDIATE");
 	const writer = beginPrefixWrite(args.db, nested);
 	const transactionStartedAt = performance.now();
