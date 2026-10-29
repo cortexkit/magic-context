@@ -3639,8 +3639,10 @@ export async function runPostTransformPhase(
                     firstRenderBust,
                     heldIdleExpiryRebuild,
                     historyRebuiltThisPass: args.historyRebuiltThisPass === true,
-                    compartmentInjectionRebuiltFromDb: args.compartmentInjectionRebuiltFromDb === true,
-                    rebuiltHistoryFromInitialPrepare: args.rebuiltHistoryFromInitialPrepare === true,
+                    compartmentInjectionRebuiltFromDb:
+                        args.compartmentInjectionRebuiltFromDb === true,
+                    rebuiltHistoryFromInitialPrepare:
+                        args.rebuiltHistoryFromInitialPrepare === true,
                 });
                 // An independent mutation is already pricing this pass. Rearm the
                 // emergency batch so all candidates accumulated during sustained
@@ -3649,7 +3651,8 @@ export async function runPostTransformPhase(
                     emergencyEpisodeRearms({
                         emergencyDropEligible,
                         rewriteAlreadyPriced,
-                        emergencyInputSample: () => getEmergencyInputSample(args.db, args.sessionId),
+                        emergencyInputSample: () =>
+                            getEmergencyInputSample(args.db, args.sessionId),
                     })
                 ) {
                     clearEmergencyDropSample(args.db, args.sessionId);

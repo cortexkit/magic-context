@@ -103,7 +103,11 @@ function makeWorld(env: Env) {
         },
         readExecuteReclaimState: (_db: unknown, _s: string) => {
             log.push("readExecuteReclaimState");
-            return { heldPasses: state.heldPasses, floorOrdinal: state.floorOrdinal, floorPromptId: null };
+            return {
+                heldPasses: state.heldPasses,
+                floorOrdinal: state.floorOrdinal,
+                floorPromptId: null,
+            };
         },
         estimateExecuteReclaimTokens: (_a: unknown) => {
             log.push("estimateExecuteReclaimTokens");
@@ -137,7 +141,9 @@ function buildArgs(env: Env) {
         forceMaterializationPercentage: env.forceMaterializationPercentage,
         pendingMaterializationSessions: new Set<string>(),
         pendingCompartmentInjection:
-            env.pendingCompartmentCount > 0 ? { compartmentCount: env.pendingCompartmentCount } : undefined,
+            env.pendingCompartmentCount > 0
+                ? { compartmentCount: env.pendingCompartmentCount }
+                : undefined,
         historyRebuiltThisPass: env.historyRebuiltThisPass,
         sessionMeta: { compartmentInProgress: env.compartmentInProgress },
         deferredHistoryRefreshSessions: new Set(env.deferredHistoryRefresh ? ["ses"] : []),

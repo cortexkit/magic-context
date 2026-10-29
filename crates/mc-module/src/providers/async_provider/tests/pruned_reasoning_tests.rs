@@ -709,11 +709,16 @@ async fn a_trimmed_tool_output_never_resends_a_pruned_call_signature() {
     rig.history(20, "history before the reduction");
     rig.notice(2, 1_000, None).await;
     let baseline = rig.newest().unwrap();
-    // An execute pass keeps the call as a skeleton and trims its output to
-    // the dropped placeholder: one edit re-encoding the whole tool part.
+    // A low-pressure cache-expiry ride trims the output while keeping the
+    // call as a skeleton. At force pressure the emergency selector can drop
+    // the whole part, leaving no acknowledged edit to reconcile after pruning.
     rig.queue(&[163]).await;
-    rig.notice(3, 90_000, Some(baseline)).await;
-    let view = rig.get(rig.newest().unwrap()).await;
+    rig.notice(3, 1_000, Some(baseline)).await;
+    let view = ride_view(
+        &rig,
+        json!({"session_ref":rig.reference,"cause":"ttl_expired","deadline_ms":10_000}),
+    )
+    .await;
     let edit_on_21 = |view: &view::CompactionView| {
         view.ranges
             .iter()
