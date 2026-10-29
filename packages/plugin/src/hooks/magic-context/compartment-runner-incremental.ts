@@ -29,7 +29,6 @@ import {
     type TurnOneFact,
     type TurnOneSend,
 } from "../../features/magic-context/memory/turn-one-publication";
-import { getRecordedSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     clearEmergencyDrainLatch,
     clearEmergencyRecovery,
@@ -751,7 +750,6 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         );
         const sessionDirectory = parentSession?.directory ?? directory;
         const projectPath =
-            getRecordedSessionProjectIdentity(db, sessionId) ??
             ("projectIdentity" in deps
                 ? deps.projectIdentity
                 : await resolveSessionProjectIdentity(
@@ -760,8 +758,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                       {
                           db,
                       },
-                  )) ??
-            "";
+                  )) ?? "";
         // On an `enabled` turn-one lane (see `TurnOneLane`) with memory on, the
         // historian gets no project-memory block and anchors every fact to its source
         // lines; the anchor is stored with the fact's candidate row, and a later

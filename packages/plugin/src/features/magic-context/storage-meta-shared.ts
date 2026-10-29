@@ -530,6 +530,8 @@ export function persistCachedM0(
     sessionId: string,
     payload: PersistCachedM0Payload,
 ): void {
+    // The project identity is the served block's owner, not a newer directory
+    // decision. Commit it in the same transaction as the bytes it identifies.
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
         writeSessionRenderCache(db, sessionId, "cached_m0_bytes", Buffer.from(payload.m0Bytes));

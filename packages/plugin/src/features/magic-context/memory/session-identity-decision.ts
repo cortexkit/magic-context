@@ -6,8 +6,12 @@ import type { Database } from "../../../shared/sqlite";
 import { getDefaultSubcConnectionFile } from "../../../shared/subc-connection-file";
 import {
     getRecordedSessionProjectIdentity,
+    getServedSessionProjectIdentity,
+    reconcileServedSessionProjectIdentity,
     recordSessionProjectIdentity,
 } from "../session-project-storage";
+import { readSessionMeta } from "../storage-meta-session";
+import type { SessionMeta } from "../types";
 import { type EntorhinalResolveOptions, resolveEntorhinalProject } from "./entorhinal-resolve";
 import { readGitCheckoutMetadata } from "./git-common-dir";
 import {
@@ -22,6 +26,7 @@ import {
     readRememberedProjectIdentity,
 } from "./project-identity-cache";
 
+/** A directory decision may be pending while another project's prefix is served. */
 export interface SessionIdentityDecision {
     directory: string;
     identity: string | undefined;
@@ -32,12 +37,15 @@ export interface SessionIdentityDecisionOptions extends EntorhinalResolveOptions
     db?: Database | null;
     /** A launch-directory fallback cannot establish that the host session moved. */
     directoryIsFallback?: boolean;
+    /** The transform already loaded this snapshot; cached owners are not pending decisions. */
+    sessionMeta?: SessionMeta;
 }
 
 interface Entry {
     directory: string;
     decision?: SessionIdentityDecision;
     recordedIdentity?: string;
+    observedDirectoryMove?: boolean;
     promise: Promise<SessionIdentityDecision>;
 }
 
@@ -144,12 +152,21 @@ export function awaitSessionIdentityDecision(
 ): Promise<SessionIdentityDecision> {
     directory = path.resolve(directory);
     const existing = decisions.get(sessionId);
+    const served = getServedSessionProjectIdentity(options.sessionMeta);
     if (existing) {
         const recorded =
-            options.directoryIsFallback && options.db
-                ? getRecordedSessionProjectIdentity(options.db, sessionId)
-                : undefined;
-        if (recorded) return Promise.resolve({ directory: existing.directory, identity: recorded });
+            options.directoryIsFallback && served !== undefined
+                ? served
+                : options.directoryIsFallback &&
+                    options.db &&
+                    options.sessionMeta?.cachedM0Bytes == null
+                  ? getRecordedSessionProjectIdentity(options.db, sessionId)
+                  : undefined;
+        if (recorded) {
+            existing.recordedIdentity = recorded;
+            return Promise.resolve({ directory: existing.directory, identity: recorded });
+        }
+        if (options.directoryIsFallback) return existing.promise;
         if (existing.directory !== directory) {
             readSessionIdentityDecision(sessionId, directory, options);
             return decisions.get(sessionId)?.promise ?? existing.promise;
@@ -160,13 +177,17 @@ export function awaitSessionIdentityDecision(
     const entry: Entry = {
         directory,
         promise: Promise.resolve().then(async () => {
-            const recorded = options.db
-                ? getRecordedSessionProjectIdentity(options.db, sessionId)
-                : undefined;
+            const recorded =
+                options.db && served === undefined
+                    ? getRecordedSessionProjectIdentity(options.db, sessionId)
+                    : undefined;
             entry.recordedIdentity = recorded;
-            const decision = recorded
-                ? { directory, identity: recorded }
-                : await decide(sessionId, directory, options);
+            const decision =
+                options.directoryIsFallback && served !== undefined
+                    ? { directory, identity: served }
+                    : recorded
+                      ? { directory, identity: recorded }
+                      : await decide(sessionId, directory, options);
             // A completed attempt may pin its own directory, but cannot replace
             // the session's decision for a newer directory.
             if (decisions.get(sessionId) === entry) entry.decision = decision;
@@ -177,17 +198,37 @@ export function awaitSessionIdentityDecision(
     return entry.promise;
 }
 
-/** Tools and background work use the stored owner, even when only a launch directory is available. */
+/** Prefer the served block's owner; an unowned prefix falls back to the shared decision. */
 export async function resolveSessionProjectIdentity(
     sessionId: string,
     directory: string,
     options: SessionIdentityDecisionOptions = {},
 ): Promise<string | undefined> {
+    const sessionMeta =
+        options.sessionMeta ?? (options.db ? readSessionMeta(options.db, sessionId) : undefined);
+    const served =
+        options.db && sessionMeta
+            ? reconcileServedSessionProjectIdentity(options.db, sessionId, sessionMeta, true)
+            : getServedSessionProjectIdentity(sessionMeta);
+    if (served !== undefined) return served;
+    if (sessionMeta?.cachedM0Bytes != null) {
+        // Legacy prefixes have no proven owner. Use their shared decision, not
+        // an attribution row that may describe a different pending directory.
+        const decision = await awaitSessionIdentityDecision(sessionId, directory, {
+            ...options,
+            sessionMeta,
+        });
+        if (options.db) recordSessionProjectIdentity(options.db, sessionId, decision.identity);
+        return decision.identity;
+    }
     const recorded = options.db
         ? getRecordedSessionProjectIdentity(options.db, sessionId)
         : undefined;
     if (recorded !== undefined) return recorded;
-    const decision = await awaitSessionIdentityDecision(sessionId, directory, options);
+    const decision = await awaitSessionIdentityDecision(sessionId, directory, {
+        ...options,
+        sessionMeta,
+    });
     // A transform may have recorded the owner while the first attempt was in flight.
     const identity =
         (options.db ? getRecordedSessionProjectIdentity(options.db, sessionId) : undefined) ??
@@ -196,14 +237,19 @@ export async function resolveSessionProjectIdentity(
     return identity;
 }
 
-/** Read the session value synchronously; a directory move reads sidecars without a registry call. */
+/**
+ * Read the pending decision; an undefined directory peeks without observing a move.
+ * Host-directory moves read pinned IDs from local project-identity JSON records,
+ * then use the Git/path fallback without contacting the project registry.
+ */
 export function readSessionIdentityDecision(
     sessionId: string,
-    directory: string,
+    directory: string | undefined,
     options: SessionIdentityDecisionOptions = {},
 ): SessionIdentityDecision | undefined {
-    directory = path.resolve(directory);
     const entry = decisions.get(sessionId);
+    if (directory === undefined) return entry?.decision;
+    directory = path.resolve(directory);
     if (!entry) return undefined;
     if (entry.directory !== directory) {
         const decision = {
@@ -220,6 +266,7 @@ export function readSessionIdentityDecision(
             recordedIdentity: options.db
                 ? getRecordedSessionProjectIdentity(options.db, sessionId)
                 : undefined,
+            observedDirectoryMove: true,
             promise: Promise.resolve(decision),
         });
         const move = `${entry.directory}\0${directory}`;
@@ -234,10 +281,19 @@ export function readSessionIdentityDecision(
         return decision;
     }
     const decision = entry.decision;
-    const recorded = options.db
-        ? getRecordedSessionProjectIdentity(options.db, sessionId)
-        : undefined;
-    if (decision && recorded !== undefined && recorded !== entry.recordedIdentity) {
+    const served = getServedSessionProjectIdentity(options.sessionMeta);
+    if (decision && served !== undefined && served === decision.identity)
+        entry.observedDirectoryMove = false;
+    const recorded =
+        options.db && options.sessionMeta?.cachedM0Bytes == null
+            ? getRecordedSessionProjectIdentity(options.db, sessionId)
+            : undefined;
+    if (
+        decision &&
+        !entry.observedDirectoryMove &&
+        recorded !== undefined &&
+        recorded !== entry.recordedIdentity
+    ) {
         // A durable decision can outlive this process's earlier fallback.
         // An unchanged row must not undo a directory move awaiting persistence.
         entry.recordedIdentity = recorded;
@@ -255,6 +311,16 @@ export function readSessionIdentityDecision(
         if (revalidated && !isPinnedProjectIdentity(revalidated)) decision.identity = revalidated;
     }
     return decision;
+}
+
+/**
+ * Whether this decision already has recorded project attribution.
+ * During an unresolved-directory pass, the transform uses this cached fact to
+ * replay the existing M0/M1 prefix messages instead of rebuilding for the launch folder.
+ * The predicate does not query session_projects or choose a memory owner.
+ */
+export function hasSessionProjectAttribution(sessionId: string): boolean {
+    return decisions.get(sessionId)?.recordedIdentity !== undefined;
 }
 
 export function forgetSessionIdentityDecision(sessionId: string): void {

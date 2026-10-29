@@ -34,7 +34,10 @@ import { scheduleClearAndReindex } from "../../features/magic-context/message-in
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import { backfillSessionActivity } from "../../features/magic-context/session-activity";
-import { getRecordedSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
+import {
+    getServedSessionProjectIdentity,
+    reconcileServedSessionProjectIdentity,
+} from "../../features/magic-context/session-project-storage";
 import {
     getOrCreateSessionMeta,
     getOverflowState,
@@ -44,7 +47,7 @@ import {
     recordDetectedContextLimit,
     recordOverflowDetected,
 } from "../../features/magic-context/storage";
-import { clearSession } from "../../features/magic-context/storage-meta-session";
+import { clearSession, readSessionMeta } from "../../features/magic-context/storage-meta-session";
 import { clearCachedM0 } from "../../features/magic-context/storage-meta-shared";
 import { rebaseSessionCoordinatesAsync } from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
@@ -1081,19 +1084,23 @@ export async function registerContext(context: V2Context) {
         sessionDirectories.get(sessionID) ?? directory;
     const prepareSessionIdentity = async (sessionID: string) => {
         await cacheV2SessionDirectory(context.session, sessionID, sessionDirectories);
-        const recorded = db ? getRecordedSessionProjectIdentity(db, sessionID) : undefined;
-        if (recorded && !sessionDirectories.has(sessionID))
-            return { directory: sessionProjectDirectory(sessionID), identity: recorded };
+        const existing = readSessionIdentityDecision(sessionID, sessionDirectories.get(sessionID), {
+            allowHomeProject: config.allow_home_project,
+        });
+        if (existing) return existing;
+        const sessionMeta = db ? readSessionMeta(db, sessionID) : undefined;
+        if (db && sessionMeta) reconcileServedSessionProjectIdentity(db, sessionID, sessionMeta);
         return awaitSessionIdentityDecision(sessionID, sessionProjectDirectory(sessionID), {
             db,
+            sessionMeta,
+            directoryIsFallback: !sessionDirectories.has(sessionID),
             allowHomeProject: config.allow_home_project,
             connectionFile: config.subc?.connection_file,
         });
     };
     const sessionProjectIdentity = (sessionID: string) =>
-        (db ? getRecordedSessionProjectIdentity(db, sessionID) : undefined) ??
+        getServedSessionProjectIdentity(db ? readSessionMeta(db, sessionID) : undefined) ??
         readSessionIdentityDecision(sessionID, sessionProjectDirectory(sessionID), {
-            db,
             allowHomeProject: config.allow_home_project,
         })?.identity;
     const historyRefreshSessions = new Set<string>();
@@ -1538,7 +1545,14 @@ export async function registerContext(context: V2Context) {
             }) ||
             draft.model.limit?.context ||
             (state.lastObservedModelKey === modelKey ? state.lastUsageContextLimit : undefined);
-        const projectIdentity = sessionProjectIdentity(draft.sessionID);
+        const projectIdentity = readSessionIdentityDecision(
+            draft.sessionID,
+            sessionDirectories.get(draft.sessionID),
+            {
+                sessionMeta: state,
+                allowHomeProject: config.allow_home_project,
+            },
+        )?.identity;
         return materializeM0({
             ...createM0RenderOptions(
                 {

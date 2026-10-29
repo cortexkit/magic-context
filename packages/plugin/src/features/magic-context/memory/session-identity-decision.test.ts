@@ -28,6 +28,7 @@ import { Database } from "../../../shared/sqlite";
 import { createTestTempDir } from "../../../shared/test-temp-dir";
 import { recordSessionProjectIdentity } from "../session-project-storage";
 import { closeDatabase, openDatabase } from "../storage";
+import { readSessionMeta, updateSessionMeta } from "../storage-meta-session";
 import { createTagger } from "../tagger";
 import { ENTORHINAL_RESOLVE_DEADLINE_MS } from "./entorhinal-resolve";
 import {
@@ -518,6 +519,83 @@ function sessionTools(directory: string, session: string, connectionFile: string
 }
 
 describe("OpenCode session decision integration", () => {
+    test("a tool decision before the first prefix is not replaced by a guessed launch directory", async () => {
+        const a = folder("first-prefix-launch"),
+            b = folder("first-prefix-tool");
+        rememberPinnedProjectIdentity(a, "pj-FIRST-LAUNCH");
+        rememberPinnedProjectIdentity(b, "pj-FIRST-TOOL");
+        const db = hostDatabase();
+        const session = "first-prefix-tool";
+        const connectionFile = join(temp.dir, "absent-subc.json");
+        insertMemory(db, {
+            projectPath: "pj-FIRST-LAUNCH",
+            category: "USER_DIRECTIVES",
+            content: "wrong first launch memory",
+        });
+        const beta = insertMemory(db, {
+            projectPath: "pj-FIRST-TOOL",
+            category: "USER_DIRECTIVES",
+            content: "first tool project memory",
+        });
+        const { tools, context } = sessionTools(b, session, connectionFile);
+        expect(
+            await tools.ctx_memory!.execute(
+                {
+                    action: "write",
+                    category: "USER_DIRECTIVES",
+                    content: "before first prefix write",
+                },
+                context,
+            ),
+        ).toContain("Saved memory");
+        const deps = {
+            ...hostDeps(db, session, a, connectionFile),
+            sessionDirectoryBySession: new Map<string, string>(),
+            client: {
+                session: {
+                    get: async () => {
+                        throw new Error("host unavailable");
+                    },
+                },
+            } as unknown as PluginContext["client"],
+        };
+        const output = { messages: messages(session) };
+        await createTransform(deps)({}, output);
+        expect(rendered(output)).toContain(beta.content);
+        expect(rendered(output)).toContain("before first prefix write");
+        expect(rendered(output)).not.toContain("wrong first launch memory");
+        expect(readSessionMeta(db, session).cachedM0ProjectIdentity).toBe("pj-FIRST-TOOL");
+    });
+
+    test("a legacy cached prefix with no owner stays byte-identical and its tools use the decision", async () => {
+        const directory = folder("legacy-owner");
+        rememberPinnedProjectIdentity(directory, "pj-LEGACY-OWNER");
+        const db = hostDatabase();
+        const session = "legacy-owner";
+        const alpha = insertMemory(db, {
+            projectPath: "pj-LEGACY-OWNER",
+            category: "USER_DIRECTIVES",
+            content: "legacy cached directive",
+        });
+        const deps = hostDeps(db, session, directory, join(temp.dir, "absent-subc.json"));
+        const first = { messages: messages(session) };
+        await createTransform(deps)({}, first);
+        const materializedAt = readSessionMeta(db, session).cachedM0MaterializedAt;
+        updateSessionMeta(db, session, { cachedM0ProjectIdentity: null });
+        __resetSessionIdentityDecisionsForTests();
+        const upgraded = { messages: messages(session) };
+        await createTransform(deps)({}, upgraded);
+        expect(JSON.stringify(upgraded.messages.slice(0, 2))).toBe(
+            JSON.stringify(first.messages.slice(0, 2)),
+        );
+        expect(readSessionMeta(db, session).cachedM0MaterializedAt).toBe(materializedAt);
+        expect(readSessionMeta(db, session).cachedM0ProjectIdentity).toBeNull();
+        const { tools, context } = sessionTools(directory, session, deps.subcConnectionFile);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [alpha.id] }, context),
+        ).toContain(alpha.content);
+    });
+
     test("review witness: a tool-first move cannot replace the owner of a held fallback prefix", async () => {
         const a = folder("review-fallback-a");
         const b = folder("review-fallback-b");

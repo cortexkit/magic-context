@@ -3,7 +3,7 @@ import { getLastCompartmentEndMessage } from "../../features/magic-context/compa
 import { takeDubiousOwnershipProjectIdentityWarning } from "../../features/magic-context/memory/project-identity";
 import {
     awaitSessionIdentityDecision,
-    readSessionIdentityDecision,
+    hasSessionProjectAttribution,
 } from "../../features/magic-context/memory/session-identity-decision";
 import {
     type MessageReconciliationSource,
@@ -16,8 +16,8 @@ import { computeHardCacheExpired } from "../../features/magic-context/scheduler"
 import { resolveSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
 import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
 import {
-    getRecordedSessionProjectIdentity,
-    hasRecordedSessionProjectIdentity,
+    getServedSessionProjectIdentity,
+    reconcileServedSessionProjectIdentity,
     recordSessionProjectIdentity,
 } from "../../features/magic-context/session-project-storage";
 import {
@@ -52,7 +52,6 @@ import {
     resetProtectedTailNoEligibleHead,
     resolveEpochFloorForPass,
 } from "../../features/magic-context/storage-meta-persisted";
-import { readSessionMeta } from "../../features/magic-context/storage-meta-session";
 import { isTagOwnerSummaryReady } from "../../features/magic-context/storage-tags";
 import type { CoordinateGeneration } from "../../features/magic-context/store-generation-rebase";
 import { rebaseSessionCoordinatesAsync } from "../../features/magic-context/store-generation-rebase";
@@ -703,7 +702,10 @@ export interface TransformDeps {
         wordRules?: CavemanWordRules;
     };
     /** Fire-and-forget active-session embed backfill after transform returns. */
-    maybeAutoEmbedSession?: (sessionId: string) => void;
+    maybeAutoEmbedSession?: (
+        sessionId: string,
+        owner?: { projectIdentity: string | undefined },
+    ) => void;
     /**
      * Called once per pass, before the transform runs, with the session and the
      * host's input messages: the request these messages belong to is being built.
@@ -992,6 +994,7 @@ export function createTransform(deps: TransformDeps) {
         let sessionMeta: import("../../features/magic-context/types").SessionMeta | undefined;
         try {
             sessionMeta = getOrCreateSessionMeta(db, sessionId);
+            reconcileServedSessionProjectIdentity(db, sessionId, sessionMeta);
             const ttlModel =
                 findNewestUserModel(messages) ??
                 deps.liveModelBySession?.get(sessionId) ??
@@ -1245,35 +1248,26 @@ export function createTransform(deps: TransformDeps) {
                 sessionDirectoryFellBack = true;
             }
         }
-        const recordedIdentity = sessionDirectoryFellBack
-            ? getRecordedSessionProjectIdentity(db, sessionId)
-            : undefined;
+        let servedProjectIdentity = getServedSessionProjectIdentity(sessionMeta);
+        let decidedProjectIdentity = sessionDirectoryFellBack ? servedProjectIdentity : undefined;
         if (sessionDirectory) {
-            await awaitSessionIdentityDecision(sessionId, sessionDirectory, {
+            const decision = await awaitSessionIdentityDecision(sessionId, sessionDirectory, {
                 db,
                 allowHomeProject: deps.allowHomeProject,
                 connectionFile: deps.subcConnectionFile,
                 directoryIsFallback: sessionDirectoryFellBack,
+                sessionMeta,
             });
+            decidedProjectIdentity ??= decision.identity;
         }
-        const decidedProjectIdentity =
-            recordedIdentity ??
-            (sessionDirectory
-                ? readSessionIdentityDecision(sessionId, sessionDirectory, {
-                      db,
-                      allowHomeProject: deps.allowHomeProject,
-                  })?.identity
-                : undefined);
         // The launch directory can belong to a different project than the
         // session (`opencode -s <id>` started elsewhere). A pass that fell back
         // to it must not render that project's memories and docs into m[0]/m[1]:
         // a rebuild is persisted and replayed by every later pass. When a frozen
         // pair exists, this pass replays it byte-identically, as a defer pass
         // does, and leaves every rebuild signal pending for the next pass that
-        // resolves the directory. Two cases render with the launch directory,
-        // as they always have: a session with nothing frozen yet, and one the
-        // host has never resolved (no stored project binding), whose frozen
-        // pair was itself rendered with the launch directory.
+        // resolves the directory. Legacy prefixes with no known owner keep
+        // their shared decision and their existing rebuild-admission rules.
         const activeThinkingModel =
             findLastAssistantModel(messages) ?? deps.liveModelBySession?.get(sessionId);
         const thinkingRecovery = prepareLatestThinkingRecovery({
@@ -1292,16 +1286,11 @@ export function createTransform(deps: TransformDeps) {
         );
         const unresolvedDirectoryHold =
             sessionDirectoryFellBack &&
+            (servedProjectIdentity !== undefined ||
+                recordedSessionProjectIdentity.has(sessionId) ||
+                hasSessionProjectAttribution(sessionId)) &&
             sessionMeta.cachedM0Bytes != null &&
-            sessionMeta.cachedM1Bytes != null &&
-            (() => {
-                try {
-                    return hasRecordedSessionProjectIdentity(db, sessionId);
-                } catch {
-                    // Unknown: keep the frozen pair rather than risk a rebuild.
-                    return true;
-                }
-            })();
+            sessionMeta.cachedM1Bytes != null;
         // Whether this pass is held for recent heavy signed thinking is decided
         // once the execute threshold and the pass's usage are known (see
         // decideSignedThinkingHold below). Until then only the directory freeze
@@ -1330,6 +1319,11 @@ export function createTransform(deps: TransformDeps) {
                 sessionDecisionCalibration(db, sessionId).proseRatio,
             );
             sessionMeta = getOrCreateSessionMeta(db, sessionId);
+            servedProjectIdentity = reconcileServedSessionProjectIdentity(
+                db,
+                sessionId,
+                sessionMeta,
+            );
             logTransformTiming(sessionId, "tagOwners.prepare", tOwners);
         }
 
@@ -1901,6 +1895,16 @@ export function createTransform(deps: TransformDeps) {
             deps.memoryConfig?.enabled ? decidedProjectIdentity : undefined,
         );
         const { historyBudgetTokens, projectPath: projectIdentity } = renderOptions;
+        // A held pass serves the old block. An admitted move pass authorizes the
+        // historian to prepare the new block before its final publication.
+        const signedRebuildAuthorized =
+            !unresolvedDirectoryHold &&
+            signedThinkingPolicy.mayRebuildForFit &&
+            (thinkingFitRetries.has(sessionId) || !!recovery.rebuildReason);
+        const passProjectIdentity =
+            freezeM0M1 && !signedRebuildAuthorized
+                ? (servedProjectIdentity ?? decidedProjectIdentity)
+                : decidedProjectIdentity;
         // Ceiling for the tiered emergency drop = contextLimit × executeThreshold%
         // (the usable working ceiling, NOT scaled by history_budget_percentage).
         // Resolve the limit the same way resolveHistoryBudgetTokens does: prefer
@@ -2078,7 +2082,7 @@ export function createTransform(deps: TransformDeps) {
                     model: historianRun?.model ?? deps.historianModel,
                     fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
                     directory: compartmentDirectory,
-                    projectIdentity: decidedProjectIdentity,
+                    projectIdentity: passProjectIdentity,
                     fallbackModelId,
                     getNotificationParams: () => notificationParams,
                     experimentalUserMemories:
@@ -2180,15 +2184,10 @@ export function createTransform(deps: TransformDeps) {
                 notificationParams,
             );
         }
-        // Session-scoped project identity for note-nudge and auto-search, which
-        // must target the SESSION's project — not the launch cwd. `deps.projectPath`
-        // is resolved once at hook init from the launch directory; on
-        // `opencode -s <id>` started from a different repo it points at the wrong
-        // project, so note nudges and auto-search would query the launch project's
-        // notes/memories. Reuse the memory identity when memory is enabled
-        // (identical value); otherwise read the same session decision.
+        // Notes and automatic recall follow the owner this pass is authorized
+        // to serve, not a pending directory decision or the plugin launch cwd.
         const sessionProjectIdentity =
-            projectIdentity ?? (sessionDirectory ? decidedProjectIdentity : deps.projectPath);
+            passProjectIdentity ?? (sessionDirectory ? undefined : deps.projectPath);
         const sessionIdentityForBinding = decidedProjectIdentity;
         if (sessionDirectory) {
             maybeSendProjectIdentityWarning(deps, sessionId, sessionDirectory, notificationParams);
@@ -2202,24 +2201,24 @@ export function createTransform(deps: TransformDeps) {
             sessionProjectIdentity;
         if (authorityProjectPath) {
         }
-        // Establish an initial owner before background work starts. A directory
-        // move is committed only with the served prefix below: signed-thinking
-        // holds must leave tools on the owner of the block still being replayed.
+        // Without a known served owner, including a legacy null marker, use the
+        // shared decision for attribution without guessing an owner for the bytes.
         if (
             sessionIdentityForBinding &&
             sessionDirectoryResolvedFromHost &&
-            !getRecordedSessionProjectIdentity(db, sessionId)
+            servedProjectIdentity === undefined &&
+            recordedSessionProjectIdentity.get(sessionId) !== sessionIdentityForBinding
         ) {
-            const initialOwner = sessionMeta.cachedM0ProjectIdentity ?? sessionIdentityForBinding;
-            recordSessionProjectIdentity(db, sessionId, initialOwner);
-            recordedSessionProjectIdentity.set(sessionId, initialOwner);
+            recordSessionProjectIdentity(db, sessionId, sessionIdentityForBinding);
+            recordedSessionProjectIdentity.set(sessionId, sessionIdentityForBinding);
         }
         // Queue the fold immediately, but leave ownership on the frozen block
         // until a permitted rebuild can publish the new project's prefix.
         if (
             sessionIdentityForBinding &&
             sessionDirectoryResolvedFromHost &&
-            getRecordedSessionProjectIdentity(db, sessionId) !== sessionIdentityForBinding &&
+            servedProjectIdentity !== undefined &&
+            servedProjectIdentity !== sessionIdentityForBinding &&
             !deps.pendingMaterializationSessions?.has(sessionId)
         ) {
             deps.pendingMaterializationSessions?.add(sessionId);
@@ -2824,7 +2823,8 @@ export function createTransform(deps: TransformDeps) {
             coveredInstructions: coveredHostInstructions,
             pendingCompartmentInjection,
             fallbackModelId,
-            projectPath: projectIdentity,
+            projectPath: passProjectIdentity,
+            projectIdentity: passProjectIdentity,
             injectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
             getNotificationParams: rawGetNotifParams
                 ? () => rawGetNotifParams(sessionId)
@@ -4017,7 +4017,12 @@ export function createTransform(deps: TransformDeps) {
             `transform completed in ${elapsed}ms (${messages.length} messages, ${targets.size} targets, watermark: ${watermark})`,
         );
 
-        withoutSqliteTransformPass(() => deps.maybeAutoEmbedSession?.(sessionId));
+        withoutSqliteTransformPass(() =>
+            deps.maybeAutoEmbedSession?.(sessionId, {
+                projectIdentity:
+                    getServedSessionProjectIdentity(sessionMeta) ?? decidedProjectIdentity,
+            }),
+        );
 
         const bindingRecovery = postTransformResult.thinkingBindingRecovery;
         if (bindingRecovery) {
@@ -4046,24 +4051,9 @@ export function createTransform(deps: TransformDeps) {
         // request was really served: give it its served-capture id now.
         // Publish the prefix before releasing its saved-request capture. A
         // failed prefix write must leave the old record and certificate intact.
-        let publishedProjectIdentity: string | undefined;
         const publishServed = () => {
             if (postTransformResult.finalizeServedPrefix?.())
                 postTransformResult.bustedThisPass = true;
-            // The cached identity changes only when M0 is rebuilt, not when a
-            // thinking hold replays its bytes. Switch tool ownership in the same
-            // successful publication as the new project's block, never earlier.
-            if (
-                sessionIdentityForBinding &&
-                sessionDirectoryResolvedFromHost &&
-                recordedSessionProjectIdentity.get(sessionId) !== sessionIdentityForBinding &&
-                (!deps.memoryConfig?.enabled ||
-                    readSessionMeta(db, sessionId)?.cachedM0ProjectIdentity ===
-                        sessionIdentityForBinding)
-            ) {
-                recordSessionProjectIdentity(db, sessionId, sessionIdentityForBinding);
-                publishedProjectIdentity = sessionIdentityForBinding;
-            }
             return servedAtReturn
                 ? recordServedCapture(
                       db,
@@ -4078,8 +4068,12 @@ export function createTransform(deps: TransformDeps) {
             postTransformResult.prefixRecordWritable && !compactionOff
                 ? db.transaction(publishServed).immediate()
                 : publishServed();
-        if (publishedProjectIdentity)
-            recordedSessionProjectIdentity.set(sessionId, publishedProjectIdentity);
+        if (sessionDirectoryResolvedFromHost) {
+            // Materialization updated this same snapshot with the bytes and
+            // their owner. Mirror that owner only after publication succeeds.
+            const owner = reconcileServedSessionProjectIdentity(db, sessionId, sessionMeta);
+            if (owner) recordedSessionProjectIdentity.set(sessionId, owner);
+        }
         if (servedAtReturn) {
             const { slot } = servedAtReturn;
             releaseWithheldServedCapture(sessionId, slot, servedCaptureId);

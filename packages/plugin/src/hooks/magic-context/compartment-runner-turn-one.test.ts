@@ -30,8 +30,8 @@ import {
     openDatabase,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
-import { createTagger } from "../../features/magic-context/tagger";
 import { readSessionMeta } from "../../features/magic-context/storage-meta-session";
+import { createTagger } from "../../features/magic-context/tagger";
 import type { PluginContext } from "../../plugin/types";
 import { __resetNotificationStateForTests } from "../../shared/rpc-notifications";
 import { Database } from "../../shared/sqlite";

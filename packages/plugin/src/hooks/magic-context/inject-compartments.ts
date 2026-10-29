@@ -2040,14 +2040,9 @@ export function mustMaterialize(args: {
     // ── HARD: genuine m[0] CONTENT change (the rendered baseline bytes differ) ──
     if (current.projectIdentity !== null) {
         const cachedProjectIdentity = args.state.cachedM0ProjectIdentity ?? null;
-        if (cachedProjectIdentity === null) {
-            args.state.cachedM0ProjectIdentity = current.projectIdentity;
-            args.db
-                .prepare(
-                    "UPDATE session_meta SET cached_m0_project_identity = ? WHERE session_id = ?",
-                )
-                .run(current.projectIdentity, args.sessionId);
-        } else if (cachedProjectIdentity !== current.projectIdentity) {
+        // Old prefixes have no proven owner. Neither guess one without replacing
+        // their bytes nor force a fold solely to populate the ownership field.
+        if (cachedProjectIdentity !== null && cachedProjectIdentity !== current.projectIdentity) {
             return withToolSetHashComparison({ value: true, reason: "project_change" });
         }
     }

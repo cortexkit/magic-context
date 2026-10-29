@@ -42,6 +42,7 @@ import {
 } from "../../features/magic-context/memory/session-identity-decision";
 import { getEmbeddingCoverageStatus } from "../../features/magic-context/project-embedding-registry";
 import type { Scheduler } from "../../features/magic-context/scheduler";
+import { getServedSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     getDatabasePersistenceError,
     getSessionsWithPendingMarker,
@@ -52,6 +53,7 @@ import {
     type DatabaseBootTimings,
     openDatabaseAsync,
 } from "../../features/magic-context/storage-db";
+import { readSessionMeta } from "../../features/magic-context/storage-meta-session";
 import { describeStorageUnavailability } from "../../features/magic-context/storage-unavailable-reason";
 import type { Tagger } from "../../features/magic-context/tagger";
 import { getCurrentToolSetHash } from "../../features/magic-context/tool-definition-tokens";
@@ -99,7 +101,7 @@ import type { ManagedRecompContext } from "./recomp-orchestrator";
 import { runManagedRecomp } from "./recomp-orchestrator";
 import { openCodeRescoreCommand } from "./rescore-opencode";
 import { createTextCompleteHandler } from "./text-complete";
-import { createTransform } from "./transform";
+import { createTransform, type TransformDeps } from "./transform";
 import { type ManagedWrapupContext, runManagedWrapup } from "./wrapup-orchestrator";
 
 export type { CommandExecuteInput, CommandExecuteOutput } from "./command-handler";
@@ -559,11 +561,19 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const pauseEmbedDrain = (sessionId: string): string =>
         pauseEmbedHistoryDrain(embedHistoryDeps, sessionId);
 
+    const sessionProjectIdentityForBackground = (sessionId: string, directory: string) => {
+        const sessionMeta = readSessionMeta(db, sessionId);
+        return (
+            getServedSessionProjectIdentity(sessionMeta) ??
+            readSessionIdentityDecision(sessionId, directory, {
+                sessionMeta,
+                allowHomeProject: deps.config.allow_home_project,
+            })?.identity
+        );
+    };
     const getEmbedStatusText = (sessionId: string): string => {
         const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
-        const sessionProjectIdentity = readSessionIdentityDecision(sessionId, directory, {
-            allowHomeProject: deps.config.allow_home_project,
-        })?.identity;
+        const sessionProjectIdentity = sessionProjectIdentityForBackground(sessionId, directory);
         if (!sessionProjectIdentity) return "No project identity is bound for the home directory.";
         maybeSendProjectIdentitySessionWarning(sessionId, directory);
         const coverage = getEmbeddingCoverageStatus(db, sessionProjectIdentity, sessionId);
@@ -576,11 +586,14 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         });
     };
 
-    const maybeAutoEmbedSession = (sessionId: string): void => {
+    const maybeAutoEmbedSession: NonNullable<TransformDeps["maybeAutoEmbedSession"]> = (
+        sessionId,
+        owner,
+    ): void => {
         const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
-        const identity = readSessionIdentityDecision(sessionId, directory, {
-            allowHomeProject: deps.config.allow_home_project,
-        })?.identity;
+        const identity = owner
+            ? owner.projectIdentity
+            : sessionProjectIdentityForBackground(sessionId, directory);
         if (!identity) return;
         maybeAutoEmbedSessionBackfill(
             {
