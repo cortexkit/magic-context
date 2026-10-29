@@ -36,6 +36,8 @@ serde_json = { workspace = true }
 # lookarounds in those patterns); fancy-regex stays confined to mc-tokenizer.
 regex = "1"
 tokio = { workspace = true }
+# Native database/WAL notifications shared by all app subscriptions; no store polling.
+notify = "8.2"
 sha2 = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The single-store writer opens the host's context.db directly (src/host_store.rs).

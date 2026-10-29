@@ -110,3 +110,17 @@ differ, so the samples cannot drift from the handlers. `SHA256SUMS` is
 - `config.read/effective.json`: the effective config with secrets redacted.
 - `config.embedding_probe/disabled.json`: no embedding is configured, so
   the probe refuses with `embedding_disabled`.
+
+## Live context subscription
+
+`context.watch` uses a held-open subc subscription. Each StreamData payload is a
+cursor-only invalidation, not a unary read response. Management-surface consumers
+unwrap `{"result": <notice>}` just as they do the other phone reads. The cursor's
+fixture epoch is pinned to `abc`; production epochs change with the handler.
+
+- `context.watch/resync.json`: first subscription (or an unresumable cursor),
+  requiring the app to read its watched sessions.
+- `context.watch/changes.json`: a committed historian-progress update invalidates
+  the watched session, without embedding rows.
+- `context.watch/refusal.json`: the caller already holds eight watches and receives
+  `watch_limit_exceeded` before any notice.
