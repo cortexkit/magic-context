@@ -1,12 +1,13 @@
 //! Recorded app-read exchanges for the Alfonso phone (CKIOS) and desktop
 //! (CKDESK) decoders.
 //!
-//! Every sample is produced by the real handlers through the real dispatch
+//! Unary samples are produced by the real handlers through the real dispatch
 //! path: a `Direct` bind with no scope is admitted by `admission::admit`
 //! (with `app_read.allow_direct` on, as the local desktop binds), then the
 //! request bytes go through `app_read::handle` exactly as the daemon would
 //! deliver them. The files only record what the handlers served; nothing in
-//! them is hand-written.
+//! them is hand-written. Watch notices/refusals come from the live subscription
+//! hub; the daemon subscription tests separately check their StreamData framing.
 //!
 //! Layout: `testdata/app-read-samples/<op>/<case>.json` plus `SHA256SUMS`
 //! (`sha256sum` format, sorted by path) and a `README.md` that lists each
@@ -119,8 +120,8 @@ fn normalize(method: &str, served: &mut Served) {
     let Served::Reply(reply) = served else {
         return;
     };
-    if let Some(object) = reply.as_object_mut() {
-        object.insert("as_of_ms".into(), json!(NOW_MS));
+    if let Some(as_of_ms) = reply.get_mut("as_of_ms") {
+        *as_of_ms = json!(NOW_MS);
     }
     if method == "store.health" {
         if let Some(databases) = reply
@@ -823,6 +824,38 @@ fn all_records() -> Vec<Record> {
     records.extend(dreamer_records());
     records.extend(health_records());
     records.extend(config_records());
+    for (name, params, result) in super::watch::samples() {
+        let (file, served) = match result {
+            Ok(value) => (
+                if name == "resync" {
+                    "context.watch/resync.json"
+                } else {
+                    "context.watch/changes.json"
+                },
+                Served::Reply(value),
+            ),
+            Err(HandlerOutcome::ErrorWithDetail {
+                code,
+                message,
+                detail,
+            }) => (
+                "context.watch/refusal.json",
+                Served::Refusal {
+                    code,
+                    message,
+                    detail,
+                },
+            ),
+            Err(other) => panic!("unexpected watch refusal {other:?}"),
+        };
+        records.push(Record {
+            name,
+            file,
+            method: super::watch::METHOD,
+            params,
+            served,
+        });
+    }
     records
 }
 fn sample_root() -> PathBuf {
@@ -880,6 +913,15 @@ fn app_read_samples_match_handlers() {
                 record.file,
                 first_difference("", &got, &wanted).unwrap_or_default()
             );
+        }
+        if record.method == super::watch::METHOD {
+            if let Served::Reply(notice) = &record.served {
+                let exchange: Value = serde_json::from_slice(&actual).expect("watch sample JSON");
+                assert_eq!(
+                    &exchange["response"], notice,
+                    "watch samples must not invent wire fields"
+                );
+            }
         }
         assert!(
             expected.len() <= super::envelope::REPLY_LIMIT,

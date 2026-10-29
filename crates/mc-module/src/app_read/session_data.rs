@@ -512,7 +512,7 @@ fn meta(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutcome {
 const META_COMPARTMENTS_SQL: &str =
     "SELECT COUNT(*), MAX(created_at) FROM compartments WHERE session_id = ?1";
 
-const META_SQL: &str =
+pub(super) const META_SQL: &str =
     "SELECT session_id, last_response_time, cache_ttl, counter, last_nudge_tokens, \
      last_nudge_band, is_subagent, last_context_percentage, last_input_tokens, \
      compartment_in_progress, system_prompt_hash, memory_block_count, new_work_tokens, \
