@@ -166,6 +166,7 @@ test("OC2 temporal passes reuse settled times instead of rereading the draft", a
     const f = await oc2ContextFixture(9204, { area: AREA, instructions: false });
     const counted = countTimeReads();
     try {
+        f.raw.exec("UPDATE session_message SET time_updated = time_created");
         await f.pass();
         expect(counted.reads.flat().length).toBeGreaterThan(20);
         counted.reads.length = 0;
@@ -173,6 +174,7 @@ test("OC2 temporal passes reuse settled times instead of rereading the draft", a
         expect(counted.reads.flat()).toEqual([]);
         f.respond();
         f.user(`9204 the next turn: ${prose}`, 120000);
+        f.raw.exec("UPDATE session_message SET time_updated = time_created");
         counted.reads.length = 0;
         await f.pass();
         expect(counted.reads.flat()).toHaveLength(2);

@@ -1395,7 +1395,7 @@ export async function registerContext(context: V2Context) {
                     if (usageController.signal.aborted) break;
                     const event = value as {
                         type?: string;
-                        data?: { sessionID?: string; error?: unknown };
+                        data?: { sessionID?: string; assistantMessageID?: string; error?: unknown };
                     };
                     try {
                         hiddenModelActivity.observe(event);
@@ -1423,6 +1423,15 @@ export async function registerContext(context: V2Context) {
                             nativeFoldReplay?.onEvent(event);
                             restoredRows.forget(sessionID);
                             messageTimesCache.delete(sessionID);
+                        }
+                        if (
+                            event.type === "session.step.started" ||
+                            event.type === "session.step.ended" ||
+                            event.type === "session.step.failed"
+                        ) {
+                            const messageID = event.data.assistantMessageID;
+                            if (typeof messageID === "string")
+                                messageTimesCache.deleteMessage(sessionID, messageID);
                         }
                         if (
                             event.type === "session.error" ||

@@ -14,7 +14,7 @@ function fixture(count = 1000) {
     db.exec(`CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT,
         seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT);
         CREATE UNIQUE INDEX session_message_session_seq_idx ON session_message(session_id,seq);`);
-    const insert = db.prepare("INSERT INTO session_message VALUES (?, 's', ?, ?, ?, NULL, ?)");
+    const insert = db.prepare("INSERT INTO session_message VALUES (?, 's', ?, ?, ?, 1, ?)");
     const ids: string[] = [];
     for (let i = 0; i < count; i++) {
         const id = `m${i}`;
@@ -77,6 +77,75 @@ test("OC2 times cache reads only new or incomplete times on later passes", () =>
     } finally {
         metadata.mockRestore();
         spy.mockRestore();
+        f.cleanup();
+    }
+});
+
+test("OC2 times written less than one second before the read are never cached", () => {
+    const f = fixture(2);
+    const clock = spyOn(Date, "now").mockReturnValue(5999);
+    const reads = spyOn(f.reader, "messageTimes");
+    try {
+        f.db.exec(`UPDATE session_message SET time_created = 1000, time_updated = 5000,
+            data = '{"time":{"created":1000,"completed":4000}}' WHERE id = 'm1'`);
+        for (let pass = 0; pass < 3; pass++)
+            expect(f.cache.pass("s")(f.reader, ["m1"]).get("m1")?.completed).toBe(4000);
+        expect(reads.mock.calls.flatMap((args) => args[1])).toEqual(["m1", "m1", "m1"]);
+        clock.mockReturnValue(6000);
+        f.cache.pass("s")(f.reader, ["m1"]);
+        reads.mockClear();
+        f.cache.pass("s")(f.reader, ["m1"]);
+        expect(reads.mock.calls.flatMap((args) => args[1])).toEqual([]);
+    } finally {
+        reads.mockRestore();
+        clock.mockRestore();
+        f.cleanup();
+    }
+});
+
+test("OC2 later writes get a newer stamp and refresh a previously settled completion", () => {
+    const f = fixture(2);
+    const clock = spyOn(Date, "now").mockReturnValue(6000);
+    const reads = spyOn(f.reader, "messageTimes");
+    try {
+        f.db.exec(`UPDATE session_message SET time_created = 1000, time_updated = 5000,
+            data = '{"time":{"created":1000,"completed":4500}}' WHERE id = 'm1'`);
+        expect(f.cache.pass("s")(f.reader, ["m1"]).get("m1")?.completed).toBe(4500);
+        reads.mockClear();
+        f.cache.pass("s")(f.reader, ["m1"]);
+        expect(reads.mock.calls.flatMap((args) => args[1])).toEqual([]);
+        clock.mockReturnValue(7000);
+        f.db.exec(`UPDATE session_message SET time_updated = 7000,
+            data = '{"time":{"created":1000,"completed":7000}}' WHERE id = 'm1'`);
+        expect(f.cache.pass("s")(f.reader, ["m1"]).get("m1")).toEqual({
+            created: 1000,
+            completed: 7000,
+        });
+        expect(reads.mock.calls.flatMap((args) => args[1])).toEqual(["m1"]);
+    } finally {
+        reads.mockRestore();
+        clock.mockRestore();
+        f.cleanup();
+    }
+});
+
+test("OC2 message invalidation removes only that cached message", () => {
+    const f = fixture(4);
+    const reads = spyOn(f.reader, "messageTimes");
+    try {
+        f.cache.pass("s")(f.reader, ["m1", "m3"]);
+        f.db.exec(
+            `UPDATE session_message SET data = '{"time":{"completed":900000}}' WHERE id = 'm1'`,
+        );
+        f.cache.deleteMessage("s", "m1");
+        f.cache.deleteMessage("absent", "m3");
+        reads.mockClear();
+        const times = f.cache.pass("s")(f.reader, ["m1", "m3"]);
+        expect(times.get("m1")?.completed).toBe(900000);
+        expect(times.get("m3")?.completed).toBe(1801000);
+        expect(reads.mock.calls.flatMap((args) => args[1])).toEqual(["m1"]);
+    } finally {
+        reads.mockRestore();
         f.cleanup();
     }
 });

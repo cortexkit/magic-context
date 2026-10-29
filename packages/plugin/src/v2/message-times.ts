@@ -4,6 +4,18 @@ type Times = { created?: number; completed?: number };
 type Entry = { version: V2MessageTimeVersion; time: Times };
 type SessionTimes = { identity?: string; entries: Map<string, Entry> };
 
+function isSettled(entry: Entry, readAt: number): boolean {
+    // OpenCode stamps writes with Date.now(), not a unique revision. Only cache
+    // writes at least 1s before this read; a backward wall-clock step over 1s
+    // can still hide a rewrite with the same timestamp.
+    return (
+        (entry.version.type === "user" || entry.time.completed !== undefined) &&
+        typeof entry.version.updated === "number" &&
+        Number.isFinite(entry.version.updated) &&
+        entry.version.updated <= readAt - 1000
+    );
+}
+
 function sameVersion(a: V2MessageTimeVersion, b: V2MessageTimeVersion): boolean {
     return (
         a.type === b.type && a.seq === b.seq && a.created === b.created && a.updated === b.updated
@@ -18,6 +30,10 @@ export class V2MessageTimesCache {
 
     delete(sessionID: string): void {
         this.sessions.delete(sessionID);
+    }
+
+    deleteMessage(sessionID: string, messageID: string): void {
+        this.sessions.get(sessionID)?.entries.delete(messageID);
     }
 
     clear(): void {
@@ -38,6 +54,7 @@ export class V2MessageTimesCache {
         return (reader: V2StoreReader, ids: readonly string[]): Map<string, Times> => {
             const missing = [...new Set(ids)].filter((id) => !passTimes.has(id));
             if (missing.length > 0) {
+                const readAt = Date.now();
                 const identity = reader.hostIdentity();
                 current.identity = identity;
                 const reusable = previous?.identity === identity ? previous.entries : undefined;
@@ -47,10 +64,7 @@ export class V2MessageTimesCache {
                 let last = -Infinity;
                 for (const id of missing) {
                     const entry = reusable?.get(id);
-                    if (
-                        entry &&
-                        (entry.version.type === "user" || entry.time.completed !== undefined)
-                    ) {
+                    if (entry && isSettled(entry, readAt)) {
                         known.push(id);
                         first = Math.min(first, entry.version.seq);
                         last = Math.max(last, entry.version.seq);
@@ -78,7 +92,10 @@ export class V2MessageTimesCache {
                     const time = times.get(id);
                     const version = versions.get(id);
                     passTimes.set(id, time ?? null);
-                    if (time && version) current.entries.set(id, { version, time });
+                    if (time && version) {
+                        const entry = { version, time };
+                        if (isSettled(entry, readAt)) current.entries.set(id, entry);
+                    }
                 }
             }
             const result = new Map<string, Times>();
