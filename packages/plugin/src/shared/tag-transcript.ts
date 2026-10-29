@@ -76,6 +76,8 @@ import type { Transcript, TranscriptMessage, TranscriptPart } from "./transcript
 export { TEXT_TAG_IDENTITY_MARKER };
 
 export interface TagTranscriptOptions {
+    /** Independently validated text sources; does not authorize tool accounting reuse. */
+    reuseTextMessageIds?: ReadonlySet<string>;
     /** Keep tag-only assistant slots inert when their original text must survive stripping. */
     preserveTagOnlyAssistantText?: boolean;
     /**
@@ -125,6 +127,8 @@ export interface TagTranscriptResult {
     targets: Map<number, TagTarget>;
 }
 
+type PersistedDropTag = Pick<TagEntry, "tagNumber" | "messageId" | "type" | "toolOwnerMessageId">;
+
 /**
  * Bind durable drops to a saved request without tagging it again. Recovery must
  * not allocate identities, inject prefixes, or write accounting while the store
@@ -132,7 +136,7 @@ export interface TagTranscriptResult {
  */
 export function buildPersistedDropTargets(
     transcript: Transcript,
-    tags: readonly TagEntry[],
+    tags: readonly PersistedDropTag[],
     options: { allowReasoningPrefixRewrite?: boolean } = {},
 ): Map<number, TagTarget> {
     const targets = new Map<number, TagTarget>();
@@ -147,7 +151,7 @@ export function buildPersistedDropTargets(
     const byNumber = new Map(tags.map((tag) => [tag.tagNumber, tag]));
     const aggregates = new Map<
         string,
-        { tag?: TagEntry; occurrences: ToolOccurrence[]; reasoning: boolean }
+        { tag?: PersistedDropTag; occurrences: ToolOccurrence[]; reasoning: boolean }
     >();
     const pending = new Map<string, string[]>();
     const resolved = new Map<string, string>();
@@ -421,7 +425,10 @@ export function tagTranscript(
                     skipPrefixInjection,
                     preserveTagOnlyAssistantText: options.preserveTagOnlyAssistantText,
                     entryFingerprint: options.entryFingerprintByMessageId?.get(messageId) ?? null,
-                    reuseIdentity: reuseIdentity || contentDerivedTextIds !== undefined,
+                    reuseIdentity:
+                        reuseIdentity ||
+                        options.reuseTextMessageIds?.has(messageId) === true ||
+                        contentDerivedTextIds !== undefined,
                     timing,
                     textIdentitySourceCache: options.textIdentitySourceCache,
                     textTokenCache: options.textTokenCache,
@@ -512,6 +519,11 @@ export function tagTranscript(
                             timing,
                             options.toolTokenCache,
                             tokenCacheKey,
+                            {
+                                byteSize: existing.maxByteSize,
+                                tokenCount: existing.maxTokenCount,
+                                inputTokenCount: existing.inputTokenCount,
+                            },
                         );
                         text = accounting.text;
                         if (part.kind === "tool_result") {
@@ -627,6 +639,7 @@ export function tagTranscript(
                         timing,
                         options.toolTokenCache,
                         tokenCacheKey,
+                        tagger.getToolTagAccounting(sessionId, callId, messageId),
                     );
                     text = accounting.text;
                     const outputByteSize = part.kind === "tool_result" ? accounting.byteSize : 0;
@@ -784,12 +797,22 @@ function readAggregateToolAccounting(
     timing: TagTranscriptTiming | undefined,
     tokenCache?: Map<string, { text: string; tokenCount: number }>,
     tokenCacheKey?: string,
+    persisted?: { byteSize: number; tokenCount: number | null; inputTokenCount: number | null },
 ): AggregateToolAccounting {
     const text = part.getText() ?? "";
     const byteSize = getToolPartByteSize(part, text);
-    const metadata = part.getToolMetadata();
+    // Persisted tool-result accounting tracks the largest byte size seen. Skip
+    // output tokenization when that size has not grown and a count is stored;
+    // known input counts also need no tokenization. Growth and missing counts still take
+    // the original counting path, even when the identity was not reusable.
+    const metadata = part.getToolMetadata({
+        skipInputTokenCount: persisted?.inputTokenCount != null,
+    });
     let tokenCount = 0;
-    if (part.kind === "tool_result") {
+    if (
+        part.kind === "tool_result" &&
+        (!persisted || persisted.tokenCount === null || byteSize > persisted.byteSize)
+    ) {
         const tokenStart = timing ? performance.now() : 0;
         tokenCount = getCachedToolPartTokenCount(part, text, tokenCache, tokenCacheKey);
         if (timing) timing.tokenCounting += performance.now() - tokenStart;

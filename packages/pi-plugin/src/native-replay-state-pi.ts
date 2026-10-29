@@ -191,6 +191,57 @@ export function preparePiToolRemovalMeasurements(args: {
 	}
 }
 
+/**
+ * Batch only within a caller-owned rendering transaction. Without that boundary,
+ * retain per-call authorization so an interrupted renderer cannot authorize calls
+ * it never reached. The caller must also restore its permission map on rollback.
+ */
+export function preparePiToolRemovalChecks(args: {
+	db?: ContextDatabase;
+	rows: readonly { tagNumber: number; callId: string | null }[];
+	targets: ReadonlyMap<number, TagTarget>;
+	messages: readonly unknown[];
+	prepare: (callIds: readonly string[]) => void;
+}): void {
+	if (!args.db?.inTransaction || args.rows.length === 0) return;
+	const occurrences = new Map<string, number>();
+	for (const raw of args.messages) {
+		if (!raw || typeof raw !== "object") continue;
+		const message = raw as { role?: string; content?: unknown };
+		if (message.role !== "assistant" || !Array.isArray(message.content))
+			continue;
+		for (const rawPart of message.content) {
+			if (!rawPart || typeof rawPart !== "object") continue;
+			const part = rawPart as { type?: string; id?: unknown };
+			if (part.type === "toolCall" && typeof part.id === "string")
+				occurrences.set(part.id, (occurrences.get(part.id) ?? 0) + 1);
+		}
+	}
+	const requested: string[] = [];
+	for (const row of args.rows) {
+		if (row.callId === null || occurrences.get(row.callId) !== 1) continue;
+		const target = args.targets.get(row.tagNumber);
+		if (target?.requiresToolArcSkeleton || target?.canDrop?.() !== true)
+			continue;
+		if (
+			!target.mutationParts?.some(
+				({ part }) =>
+					part !== null &&
+					typeof part === "object" &&
+					"kind" in part &&
+					part.kind === "tool_use" &&
+					"id" in part &&
+					part.id === row.callId,
+			)
+		)
+			continue;
+		requested.push(row.callId);
+	}
+	// A bare call ID can repeat under another owner. Such arcs retain per-call
+	// authorization; the batch must not use authorization associated with another owner.
+	if (requested.length) args.prepare(requested);
+}
+
 /** Freeze structural removal before touching either half of a Pi tool arc. */
 export function authorizePiToolRemoval(args: {
 	db: ContextDatabase;
@@ -225,3 +276,5 @@ export function authorizePiToolRemoval(args: {
 		return priorDrop ? false : "defer";
 	}
 }
+
+import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";

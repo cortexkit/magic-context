@@ -15,6 +15,8 @@ import { encodePiHydrationOperation } from "./tag-snapshot-codec-pi";
 import {
 	PI_FALLBACK_ROW_COLUMNS,
 	PI_FALLBACK_ROW_PREDICATE,
+	type PiSnapshotTag,
+	projectPiPassTag,
 } from "./tag-snapshot-pi";
 import type {
 	PiHydrationGeneration,
@@ -136,7 +138,10 @@ async function stream(kind: PiHydrationStream) {
 		`${query} ORDER BY tag_number ASC, id ASC LIMIT 256`,
 	);
 	const nextPage = connection.prepare(
-		`${query} AND ((? IS NULL AND tag_number IS NOT NULL) OR tag_number > ? OR (tag_number IS ? AND id > ?)) ORDER BY tag_number ASC, id ASC LIMIT 256`,
+		`${query} AND (tag_number, id) > (?, ?) ORDER BY tag_number ASC, id ASC LIMIT 256`,
+	);
+	const nextNullPage = connection.prepare(
+		`${query} AND ((tag_number IS NULL AND id > ?) OR tag_number IS NOT NULL) ORDER BY tag_number ASC, id ASC LIMIT 256`,
 	);
 	let buffer = new Uint8Array(65_536);
 	for (;;) {
@@ -164,13 +169,9 @@ async function stream(kind: PiHydrationStream) {
 			// whether a matching row exists. Neither selects a first match.
 			rows = (
 				cursor
-					? nextPage.all(
-							request.sessionId,
-							cursor.tag_number,
-							cursor.tag_number,
-							cursor.tag_number,
-							cursor.id,
-						)
+					? cursor.tag_number === null
+						? nextNullPage.all(request.sessionId, cursor.id)
+						: nextPage.all(request.sessionId, cursor.tag_number, cursor.id)
 					: firstPage.all(request.sessionId)
 			) as Record<string, unknown>[];
 			connection.exec("COMMIT");
@@ -206,7 +207,11 @@ async function stream(kind: PiHydrationStream) {
 		for (const raw of rows) {
 			// Advance over raw SQL rows even when the shared mapper rejects one.
 			cursor = { tag_number: raw.tag_number, id: raw.id as number };
-			const row = kind === "tags" ? normalizeTagSnapshotRow(raw) : raw;
+			const normalized = kind === "tags" ? normalizeTagSnapshotRow(raw) : raw;
+			const row =
+				kind === "tags" && normalized && request.projection === "pass"
+					? projectPiPassTag(normalized as PiSnapshotTag)
+					: normalized;
 			if (!row) continue;
 			for (const operation of operations(
 				row as unknown as Record<string, unknown>,
