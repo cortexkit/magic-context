@@ -1,14 +1,20 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { join } from "node:path";
+import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
+    clearSession,
     getOrCreateSessionMeta,
     updateSessionMeta,
 } from "../../features/magic-context/storage-meta";
+import { clearSessionRenderCache } from "../../features/magic-context/storage-session-cache";
 import {
     recordToolDefinition,
     recordToolDefinitionSet,
 } from "../../features/magic-context/tool-definition-tokens";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDir } from "../../shared/test-temp-dir";
+import * as decayRender from "./decay-render";
 import {
     HOST_BREAKDOWN_KEY,
     HostTokenMeasurementCache,
@@ -19,6 +25,152 @@ import { computeM0BlockTokens } from "./m0-token-breakdown";
 import * as tokenCount from "./token-count-exact";
 
 export const drainHostBreakdown = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+test("prefix attribution reads once per fold or delta refresh, never on a memoized defer, and reloads after restart or clear", async () => {
+    const { dir, cleanup } = createTestTempDir("host-token-prefix-memo-");
+    const filename = join(dir, "context.db");
+    let db = new Database(filename);
+    initializeDatabase(db);
+    runMigrations(db);
+    const session = "host-prefix-memo";
+    getOrCreateSessionMeta(db, session);
+    updateSessionMeta(db, session, {
+        cachedM0Bytes: Buffer.from(
+            "<project-docs>memo docs</project-docs><user-profile>memo profile</user-profile><project-memory>memo memory</project-memory><session-history>memo history</session-history>",
+        ),
+    });
+    let reads = 0;
+    const observeReads = () => {
+        const prepare = db.prepare.bind(db);
+        return spyOn(db, "prepare").mockImplementation(((sql: string) => {
+            const statement = prepare(sql);
+            if (!sql.trimStart().startsWith("SELECT") || !sql.includes("FROM session_render_cache"))
+                return statement;
+            return new Proxy(statement, {
+                get(target, key) {
+                    const value = Reflect.get(target, key, target);
+                    if (typeof value !== "function") return value;
+                    return (...args: unknown[]) => {
+                        if (key === "all" || key === "get") reads++;
+                        return value.apply(target, args);
+                    };
+                },
+            });
+        }) as never);
+    };
+    let readSpy = observeReads();
+    const extract = spyOn(decayRender, "extractM0Block");
+    const pass = {
+        prefixChanged: false,
+        conversationTokens: 50_000,
+        toolCallTokens: 80_000,
+        toolDefinitionTokens: 10_000,
+    };
+    let clock = 1;
+    const run = (prefixChanged = false, updates = {}) =>
+        persistHostTokenBreakdown(db, session, {
+            ...pass,
+            measuredAt: clock++,
+            prefixChanged,
+            ...updates,
+        });
+    const reset = () => {
+        reads = 0;
+        extract.mockClear();
+    };
+    const expectOneDerivation = () => {
+        expect(reads).toBe(1);
+        // Four m[0] slices and the m[1] history delta: exactly one extraction per slice.
+        expect(extract).toHaveBeenCalledTimes(5);
+        for (const tag of [
+            "project-docs",
+            "user-profile",
+            "project-memory",
+            "session-history",
+            "new-compartments",
+        ])
+            expect(extract.mock.calls.filter(([, actual]) => actual === tag)).toHaveLength(1);
+    };
+    try {
+        expect(run()).toBe(true);
+        expectOneDerivation();
+        reset();
+        expect(run()).toBe(false);
+        expect(reads).toBe(0);
+        expect(extract).not.toHaveBeenCalled();
+
+        expect(run(false, { conversationTokens: 51_000, toolCallTokens: 81_000 })).toBe(true);
+        expect(reads).toBe(0);
+        expect(extract).not.toHaveBeenCalled();
+
+        // Coalescing a fold's deferred task with a later defer must keep the dirty prefix.
+        scheduleHostTokenBreakdown(db, session, {
+            ...pass,
+            measuredAt: clock++,
+            prefixChanged: true,
+        });
+        scheduleHostTokenBreakdown(db, session, { ...pass, measuredAt: clock++ });
+        await drainHostBreakdown();
+        expectOneDerivation();
+
+        reset();
+        expect(run(true)).toBe(false);
+        expectOneDerivation();
+
+        updateSessionMeta(db, session, {
+            cachedM1Bytes: Buffer.from(
+                `<new-compartments>${"new history ".repeat(1000)}</new-compartments>`,
+            ),
+        });
+        reset();
+        expect(run(true)).toBe(true);
+        expectOneDerivation();
+        reset();
+        expect(run()).toBe(false);
+        expect(reads).toBe(0);
+        expect(extract).not.toHaveBeenCalled();
+
+        // A fold can persist its prefix before a later stage refuses the pass.
+        // The next pass has no new fold flag, but must still refresh attribution.
+        updateSessionMeta(db, session, {
+            cachedM1Bytes: Buffer.from(
+                `<new-compartments>${"changed history ".repeat(2000)}</new-compartments>`,
+            ),
+        });
+        reset();
+        expect(run()).toBe(true);
+        expectOneDerivation();
+
+        readSpy.mockRestore();
+        db.close();
+        db = new Database(filename);
+        readSpy = observeReads();
+        reset();
+        expect(run()).toBe(false);
+        expectOneDerivation();
+
+        scheduleHostTokenBreakdown(db, session, { ...pass, measuredAt: clock++ });
+        clearSessionRenderCache(db, session);
+        reset();
+        await drainHostBreakdown();
+        expect(reads).toBe(0);
+        expect(extract).not.toHaveBeenCalled();
+        reset();
+        expect(run()).toBe(true);
+        expectOneDerivation();
+
+        clearSession(db, session);
+        getOrCreateSessionMeta(db, session);
+        reset();
+        expect(run()).toBe(true);
+        expectOneDerivation();
+    } finally {
+        extract.mockRestore();
+        readSpy.mockRestore();
+        db.close();
+        cleanup();
+    }
+});
 
 describe("host pass token breakdown", () => {
     for (const generation of ["OpenCode 1", "OpenCode 2"]) {
@@ -57,7 +209,12 @@ describe("host pass token breakdown", () => {
                     .get(session, HOST_BREAKDOWN_KEY) as { value: string } | null;
             const writes = () =>
                 (db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
-            const pass = { measuredAt: 123, conversationTokens: 50_000, toolCallTokens: 80_000 };
+            const pass = {
+                measuredAt: 123,
+                prefixChanged: false,
+                conversationTokens: 50_000,
+                toolCallTokens: 80_000,
+            };
             const encode = spyOn(tokenCount, "countTokensExactly");
             try {
                 scheduleHostTokenBreakdown(db, session, pass);
@@ -117,7 +274,12 @@ describe("host pass token breakdown", () => {
         initializeDatabase(db);
         getOrCreateSessionMeta(db, "small");
         try {
-            const pass = { measuredAt: 1, conversationTokens: 1000, toolCallTokens: 1000 };
+            const pass = {
+                measuredAt: 1,
+                prefixChanged: false,
+                conversationTokens: 1000,
+                toolCallTokens: 1000,
+            };
             expect(persistHostTokenBreakdown(db, "small", pass)).toBe(true);
             expect(
                 persistHostTokenBreakdown(db, "small", {

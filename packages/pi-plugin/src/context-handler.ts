@@ -45,6 +45,7 @@ import {
 	renewCompartmentLease,
 } from "@magic-context/core/features/magic-context/compartment-lease";
 import { isFailClosedBlockingError } from "@magic-context/core/features/magic-context/fail-closed-block";
+import { clearHostTokenBreakdownMemo } from "@magic-context/core/features/magic-context/host-token-breakdown-state";
 import { isUsableProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	awaitSessionIdentityDecision,
@@ -8638,7 +8639,10 @@ interface PiChannelBaselineSnapshot {
 }
 
 interface RunPipelineResult {
-	hostTokenPass?: Pick<HostTokenPass, "conversationTokens" | "toolCallTokens">;
+	hostTokenPass?: Pick<
+		HostTokenPass,
+		"conversationTokens" | "toolCallTokens" | "prefixChanged"
+	>;
 	prefixPass?: PiPrefixPass;
 	prefixStableIds?: ReadonlyMap<object, string>;
 	recoveryNormalized?: boolean;
@@ -12894,6 +12898,11 @@ function runSynchronousPipeline(
 		hostTokenPass = {
 			conversationTokens: counts.conversation,
 			toolCallTokens: counts.toolCall,
+			prefixChanged:
+				foldExecutedThisPass ||
+				publishedM1RefreshedThisPass ||
+				injectionResult?.m0Materialized === true ||
+				injectionResult?.m1RenderedCoverage != null,
 		};
 		logTransformTiming(args.sessionId, "tokenAccounting", tTokenAccounting);
 	} catch (err) {
@@ -13699,7 +13708,11 @@ function clearPiCompactionOffInMemoryState(sessionId: string): void {
 // merely switched away from — a data-loss bug far worse than the bounded
 // orphan-row cost for sessions that are genuinely abandoned and never resumed.
 // Do not add DB clearSession here.
-export function clearContextHandlerSession(sessionId: string): void {
+export function clearContextHandlerSession(
+	sessionId: string,
+	db?: ContextDatabase,
+): void {
+	if (db) clearHostTokenBreakdownMemo(db, sessionId);
 	cancelPiTagSnapshotSession(sessionId);
 	lastServedSystemHashBySession.delete(sessionId);
 	clearPiHistoryBoundaryRepairSession(sessionId);

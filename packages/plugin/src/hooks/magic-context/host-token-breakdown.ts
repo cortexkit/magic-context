@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { getHostTokenBreakdownMemo } from "../../features/magic-context/host-token-breakdown-state";
 import { getSessionToolDefinitionTokens } from "../../features/magic-context/tool-definition-tokens";
 import type { Database } from "../../shared/sqlite";
 import { extractM0Block } from "./decay-render";
@@ -64,6 +65,8 @@ export interface HostTokenBreakdown {
 
 export interface HostTokenPass {
     measuredAt: number;
+    /** An executed fold or m[1] refresh, not merely a scheduler request to rebuild. */
+    prefixChanged: boolean;
     conversationTokens: number;
     toolCallTokens: number;
     /** Existing OpenCode measurement: OC2's exact request set or OC1's recent route activity. */
@@ -98,44 +101,52 @@ export function persistHostTokenBreakdown(
     sessionId: string,
     pass: HostTokenPass,
 ): boolean {
-    const cache = db
-        .prepare(
-            "SELECT cache_key, value FROM session_render_cache WHERE session_id = ? AND cache_key IN ('cached_m0_bytes', 'cached_m1_bytes', 'host_token_breakdown')",
-        )
-        .all(sessionId) as { cache_key: string; value: unknown }[];
-    const text = (key: string): string => {
-        const value = cache.find((row) => row.cache_key === key)?.value;
-        return value instanceof Uint8Array
-            ? Buffer.from(value).toString("utf8")
-            : typeof value === "string"
-              ? value
-              : "";
-    };
-    let previous: HostTokenBreakdown | undefined;
-    try {
-        const saved = JSON.parse(text(HOST_BREAKDOWN_KEY)) as HostTokenBreakdown;
-        if (
-            saved.version === HOST_BREAKDOWN_VERSION &&
-            saved.parts &&
-            Object.values(saved.parts).every(
-                (tokens) => tokens === null || (Number.isSafeInteger(tokens) && tokens >= 0),
+    const memo = getHostTokenBreakdownMemo(db, sessionId);
+    if (memo.previous && memo.previous.measured_at > pass.measuredAt) return false;
+    memo.prefixDirty ||= pass.prefixChanged;
+    if (!memo.blocks || memo.prefixDirty) {
+        const cache = db
+            .prepare(
+                "SELECT cache_key, value FROM session_render_cache WHERE session_id = ? AND cache_key IN ('cached_m0_bytes', 'cached_m1_bytes', 'host_token_breakdown')",
             )
-        )
-            previous = saved;
-    } catch {
-        /* No usable measurement has been saved yet. */
+            .all(sessionId) as { cache_key: string; value: unknown }[];
+        const text = (key: string): string => {
+            const value = cache.find((row) => row.cache_key === key)?.value;
+            return value instanceof Uint8Array
+                ? Buffer.from(value).toString("utf8")
+                : typeof value === "string"
+                  ? value
+                  : "";
+        };
+        memo.previous = undefined;
+        try {
+            const saved = JSON.parse(text(HOST_BREAKDOWN_KEY)) as HostTokenBreakdown;
+            if (
+                saved.version === HOST_BREAKDOWN_VERSION &&
+                saved.parts &&
+                Object.values(saved.parts).every(
+                    (tokens) => tokens === null || (Number.isSafeInteger(tokens) && tokens >= 0),
+                )
+            )
+                memo.previous = saved;
+        } catch {
+            /* No usable measurement has been saved yet. */
+        }
+        if (memo.previous && memo.previous.measured_at > pass.measuredAt) return false;
+        const m0 = text("cached_m0_bytes");
+        const m1 = text("cached_m1_bytes");
+        const block = (source: string, tag: string): number => {
+            const rendered = extractM0Block(source, tag);
+            return rendered ? measureHostTokenText(rendered) : 0;
+        };
+        const docs = block(m0, "project-docs");
+        const profile = block(m0, "user-profile");
+        const memory = block(m0, "project-memory");
+        const history = block(m0, "session-history") + block(m1, "new-compartments");
+        memo.blocks = { docs, profile, memory, history };
+        memo.prefixDirty = false;
     }
-    if (previous && previous.measured_at > pass.measuredAt) return false;
-    const m0 = text("cached_m0_bytes");
-    const m1 = text("cached_m1_bytes");
-    const block = (source: string, tag: string): number => {
-        const rendered = extractM0Block(source, tag);
-        return rendered ? measureHostTokenText(rendered) : 0;
-    };
-    const docs = block(m0, "project-docs");
-    const profile = block(m0, "user-profile");
-    const memory = block(m0, "project-memory");
-    const history = block(m0, "session-history") + block(m1, "new-compartments");
+    const { docs, profile, memory, history } = memo.blocks;
     const injected = docs + profile + memory + history;
     const tools =
         pass.toolDefinitionTokens ??
@@ -155,17 +166,16 @@ export function persistHostTokenBreakdown(
             last_user_message: 0,
         },
     };
-    if (!hostBreakdownChanged(previous, next)) return false;
-    return (
+    if (!hostBreakdownChanged(memo.previous, next)) return false;
+    const written =
         db
             .prepare(`INSERT INTO session_render_cache(session_id, cache_key, value)
         SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM session_meta WHERE session_id = ?)
         ON CONFLICT(session_id, cache_key) DO UPDATE SET value = excluded.value`)
-            .run(sessionId, HOST_BREAKDOWN_KEY, JSON.stringify(next), sessionId).changes > 0
-    );
+            .run(sessionId, HOST_BREAKDOWN_KEY, JSON.stringify(next), sessionId).changes > 0;
+    if (written) memo.previous = next;
+    return written;
 }
-
-const pending = new WeakMap<Database, Map<string, ReturnType<typeof setTimeout>>>();
 
 /** Defer block measurements and the small thresholded write until the host has its messages. */
 export function scheduleHostTokenBreakdown(
@@ -173,15 +183,13 @@ export function scheduleHostTokenBreakdown(
     sessionId: string,
     pass: HostTokenPass,
 ): void {
-    let sessions = pending.get(db);
-    if (!sessions) {
-        sessions = new Map();
-        pending.set(db, sessions);
-    }
-    const old = sessions.get(sessionId);
+    const memo = getHostTokenBreakdownMemo(db, sessionId);
+    // A newer defer can replace a queued fold's task, but must not lose its refresh.
+    memo.prefixDirty ||= pass.prefixChanged;
+    const old = memo.pending;
     if (old) clearTimeout(old);
     const timer = setTimeout(() => {
-        sessions.delete(sessionId);
+        memo.pending = undefined;
         try {
             persistHostTokenBreakdown(db, sessionId, {
                 ...pass,
@@ -192,6 +200,6 @@ export function scheduleHostTokenBreakdown(
             // Ignore deferred-write failures, including a session database that has already closed.
         }
     }, 0);
-    sessions.set(sessionId, timer);
+    memo.pending = timer;
     timer.unref();
 }

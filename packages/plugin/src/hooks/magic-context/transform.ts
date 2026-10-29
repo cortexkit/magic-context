@@ -1,5 +1,6 @@
 import type { ProtectedTokensTierOverrides } from "../../config/project-security";
 import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
+import { clearHostTokenBreakdownMemo } from "../../features/magic-context/host-token-breakdown-state";
 import { takeDubiousOwnershipProjectIdentityWarning } from "../../features/magic-context/memory/project-identity";
 import {
     awaitSessionIdentityDecision,
@@ -775,6 +776,7 @@ export function createTransform(deps: TransformDeps) {
     // before its thinking strip is recorded, so the retry still strips.
     const compactionModeTransitionPending = new Set<string>();
     const clearSessionLogState = (sessionId: string): void => {
+        clearHostTokenBreakdownMemo(deps.db, sessionId);
         prefixHoldLogTurnIds.delete(sessionId);
         clearDiagnosticLogState(sessionId);
     };
@@ -4066,6 +4068,7 @@ export function createTransform(deps: TransformDeps) {
         if (tokenAccountingPersisted)
             scheduleHostTokenBreakdown(db, sessionId, {
                 measuredAt: Date.now(),
+                prefixChanged: postTransformResult.prefixChanged,
                 conversationTokens,
                 toolCallTokens,
             });

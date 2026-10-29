@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import * as decayRender from "@magic-context/core/hooks/magic-context/decay-render";
 import {
 	HOST_BREAKDOWN_KEY,
 	persistHostTokenBreakdown,
@@ -68,11 +69,36 @@ test("Pi served pass measures off path, persists once, shares status cache, and 
 				.get(sessionId, HOST_BREAKDOWN_KEY) as { value: string } | undefined
 		)?.value;
 	const encode = spyOn(tokenCount, "countTokensExactly");
+	const extract = spyOn(decayRender, "extractM0Block");
+	let cacheReads = 0;
+	const prepare = db.prepare.bind(db);
+	const readSpy = spyOn(db, "prepare").mockImplementation(((sql: string) => {
+		const statement = prepare(sql);
+		if (
+			!sql.trimStart().startsWith("SELECT") ||
+			!sql.includes("FROM session_render_cache")
+		)
+			return statement;
+		return new Proxy(statement, {
+			get(target, key) {
+				const value = Reflect.get(target, key, target);
+				if (typeof value !== "function") return value;
+				return (...args: unknown[]) => {
+					if (key === "all" || key === "get") cacheReads++;
+					return value.apply(target, args);
+				};
+			},
+		});
+	}) as never);
 	try {
 		await handler({ messages: structuredClone(raw) } as never, ctx as never);
 		expect(saved()).toBeUndefined();
 		const readsAtReturn = schemaReads;
+		cacheReads = 0;
+		extract.mockClear();
 		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(cacheReads).toBe(1);
+		expect(extract).toHaveBeenCalledTimes(5);
 		const first = saved()!;
 		const snapshot = JSON.parse(first);
 		expect(snapshot.parts.history_raw).toBeGreaterThan(0);
@@ -85,11 +111,16 @@ test("Pi served pass measures off path, persists once, shares status cache, and 
 		expect(encode).not.toHaveBeenCalled();
 		await handler({ messages: structuredClone(raw) } as never, ctx as never);
 		encode.mockClear();
+		cacheReads = 0;
+		extract.mockClear();
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(encode).not.toHaveBeenCalled();
+		expect(cacheReads).toBe(0);
+		expect(extract).not.toHaveBeenCalled();
 		expect(saved()).toBe(first);
 		const pass = {
 			measuredAt: snapshot.measured_at + 1,
+			prefixChanged: false,
 			conversationTokens: snapshot.parts.history_raw,
 			toolCallTokens: 0,
 			readToolSchemas: () => hostToolSchemaBytes(tools),
@@ -101,9 +132,26 @@ test("Pi served pass measures off path, persists once, shares status cache, and 
 				toolCallTokens: 501,
 			}),
 		).toBe(true);
+
+		const beforeClear = saved();
+		clearContextHandlerSession(sessionId, db);
+		expect(saved()).toBe(beforeClear);
+		cacheReads = 0;
+		extract.mockClear();
+		expect(
+			persistHostTokenBreakdown(db, sessionId, {
+				...pass,
+				measuredAt: pass.measuredAt + 1,
+				toolCallTokens: 501,
+			}),
+		).toBe(false);
+		expect(cacheReads).toBe(1);
+		expect(extract).toHaveBeenCalledTimes(5);
 	} finally {
 		encode.mockRestore();
-		clearContextHandlerSession(sessionId);
+		extract.mockRestore();
+		readSpy.mockRestore();
+		clearContextHandlerSession(sessionId, db);
 		db.close();
 	}
 });

@@ -1200,6 +1200,8 @@ export interface InjectM0M1Result {
     injected: boolean;
     prependedMessageCount: number;
     m0RematerializedThisPass: boolean;
+    /** Fresh m[1] rendering, excluding a replay or non-persisted contention fallback. */
+    m1Refreshed?: boolean;
     materializationContentionRetryExhausted: boolean;
     decision: MaterializeDecision;
     m0Bytes: Buffer | null;
@@ -5095,6 +5097,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         m0RematerializedThisPass: rematerialized,
         materializationContentionRetryExhausted: contentionExhausted,
         decision,
+        m1Refreshed: m1Recomputed && !contentionExhausted,
         m0Bytes: options.state.cachedM0Bytes,
         m1Text,
         preparedMessages,
