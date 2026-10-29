@@ -11,6 +11,10 @@ import {
     getLastCompartmentEndMessageId,
 } from "../../features/magic-context/compartment-storage";
 import { isWrapupInProgress, updateSessionMeta } from "../../features/magic-context/storage-meta";
+import {
+    drainHistoryHealQueue,
+    getHistoryHealQueue,
+} from "../../features/magic-context/history-heal-queue";
 import { sessionLog } from "../../shared/logger";
 import { withoutSqliteTransformPass } from "../../shared/sqlite";
 import { runCompartmentAgent } from "./compartment-runner-incremental";
@@ -198,8 +202,29 @@ function startBackgroundCompartmentAgent(
     // event-loop turn, not a microtask, so the awaiting transform can finish before
     // raw-history reads, boundary validation and prompt fitting begin.
     const promise = new Promise<void>((resolve) => setTimeout(resolve, 0))
-        .then(() =>
-            withRawSessionMessageCache(() => {
+        .then(async () => {
+            if (getHistoryHealQueue(deps.db, deps.sessionId).length) {
+                // Repair old gaps under the existing lease before taking another incremental snapshot.
+                // Publication queues the existing structural m[0] mutation for the next pass.
+                await drainHistoryHealQueue(deps.db, deps.sessionId, async (range) => {
+                    let published = false;
+                    await executePartialRecompInternal(
+                        {
+                            ...runnerDeps,
+                            onCompartmentStatePublished: (id) => {
+                                published = true;
+                                runnerDeps.onCompartmentStatePublished?.(id);
+                            },
+                        },
+                        range,
+                        { preserveCachedPrefix: true },
+                    );
+                    return published;
+                });
+                updateSessionMeta(deps.db, deps.sessionId, { compartmentInProgress: false });
+                return;
+            }
+            return withRawSessionMessageCache(() => {
                 const snapshot = deps.boundarySnapshot;
                 try {
                     primeTailRawMessageCache({
@@ -231,8 +256,8 @@ function startBackgroundCompartmentAgent(
                     runnerDeps.boundarySnapshot = boundary;
                 }
                 return runAgent(runnerDeps);
-            }),
-        )
+            });
+        })
         .catch((err) => {
             sessionLog(deps.sessionId, "compartment agent: unhandled rejection:", err);
             // Ensure compartmentInProgress is cleared on any failure

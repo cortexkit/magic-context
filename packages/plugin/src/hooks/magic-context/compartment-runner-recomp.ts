@@ -96,6 +96,7 @@ export function promoteRecompStagingWithM0Mutation(
     db: Database,
     sessionId: string,
     holderId: string,
+    options: { preserveCachedM0M1?: boolean } = {},
 ): {
     compartments: CandidateCompartment[];
     facts: Array<{ category: string; content: string }>;
@@ -135,7 +136,7 @@ export function promoteRecompStagingWithM0Mutation(
         });
         db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
-        clearCachedM0M1(db, sessionId);
+        if (!options.preserveCachedM0M1) clearCachedM0M1(db, sessionId);
 
         db.exec("COMMIT");
         finished = true;

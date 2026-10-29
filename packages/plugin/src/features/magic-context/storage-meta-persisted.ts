@@ -2475,6 +2475,29 @@ export function getPersistedCompactionMarkerState(
     );
 }
 
+/** Reconcile both target-ID copies; normal reads prefer the dedicated column over the JSON value. */
+export function getPersistedCompactionMarkerTargets(
+    db: Database,
+    sessionId: string,
+): { jsonTarget: string | null; columnTarget: string | null } {
+    const row = db
+        .prepare(
+            "SELECT compaction_marker_state, compaction_marker_target_end_message_id FROM session_meta WHERE session_id=?",
+        )
+        .get(sessionId) as
+        | {
+              compaction_marker_state?: string;
+              compaction_marker_target_end_message_id?: string | null;
+          }
+        | undefined;
+    return {
+        jsonTarget:
+            parsePersistedCompactionMarkerState(row?.compaction_marker_state)?.targetEndMessageId ??
+            null,
+        columnTarget: row?.compaction_marker_target_end_message_id || null,
+    };
+}
+
 export function setPersistedCompactionMarkerState(
     db: Database,
     sessionId: string,
