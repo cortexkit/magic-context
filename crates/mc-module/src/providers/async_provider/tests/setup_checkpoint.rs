@@ -14,7 +14,7 @@ pub(super) mod broca_role_describe;
 const MODULE: &str = "thalamus-harness";
 
 #[path = "message_checkpoint.rs"]
-mod message_checkpoint;
+pub(super) mod message_checkpoint;
 
 #[tokio::test]
 async fn a_moved_session_answers_setup_with_its_checkpoint_and_the_runner_anchors_at_its_cut() {

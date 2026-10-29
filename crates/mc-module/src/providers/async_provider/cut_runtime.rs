@@ -244,7 +244,7 @@ fn retained_initial(
 /// during Setup. A row the view removed stays absent; a changed digest would
 /// have different bytes and is therefore rendered raw by the caller refusing
 /// to use a stale edit (the caller only calls this when the held rows match).
-fn render_retained_rows(
+pub(super) fn render_retained_rows(
     entries: &BTreeMap<u64, std::sync::Arc<HeldEntry>>,
     applied: &view::CompactionView,
     first: u64,

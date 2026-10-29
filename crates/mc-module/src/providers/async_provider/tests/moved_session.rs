@@ -176,7 +176,7 @@ pub(super) async fn moved_rig(dir: &Path, run_move: bool) -> (Rig, Value) {
     (rig, answer)
 }
 
-async fn settle_historian(rig: &Rig) {
+pub(super) async fn settle_historian(rig: &Rig) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while rig
             .h

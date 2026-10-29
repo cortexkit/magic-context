@@ -1,5 +1,6 @@
 use super::*;
 use cortexkit_bus_inmemory::{InMemoryBus, InMemoryConfig};
+mod adoption_recovery;
 mod broca_0_7;
 mod broca_account_change_samples;
 mod broca_provider_fallback;
@@ -79,10 +80,14 @@ struct Runner {
     module: String,
     entries: Mutex<Vec<ReadMessage>>,
     lineage: Mutex<String>,
+    /// During Setup, `session.head` and `session.read` report the requested
+    /// lineage before it becomes the runner's active lineage.
+    setup_lineage: Mutex<Option<String>>,
     read_delay_ms: std::sync::atomic::AtomicU64,
     routed_reads: std::sync::atomic::AtomicU64,
     sent: Mutex<Vec<Value>>,
     read_unavailable: std::sync::atomic::AtomicBool,
+    refuses_setup_read: std::sync::atomic::AtomicBool,
     read_gate: Mutex<Option<Arc<ReadGate>>>,
     reads: Mutex<Vec<Value>>,
     bind_identities: Mutex<Vec<session_resolver::RunnerBindIdentity>>,
@@ -268,7 +273,12 @@ impl session_resolver::ProviderRunner for Runner {
                 Some((count, cut)) => json!({"first_ordinal":count,"cut":cut}),
                 None => json!({"first_ordinal":0}),
             };
-            head["lineage_id"] = json!(*self.lineage.lock().unwrap());
+            head["lineage_id"] = json!(self
+                .setup_lineage
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| self.lineage.lock().unwrap().clone()));
             if let Some(state) = self.reasoning_pruned.lock().unwrap().clone() {
                 head["reasoning_pruned"] = state;
             }
@@ -305,6 +315,16 @@ impl session_resolver::ProviderRunner for Runner {
         }
         assert_eq!(method, "session.read");
         self.reads.lock().unwrap().push(params.clone());
+        if self
+            .refuses_setup_read
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && self.setup_lineage.lock().unwrap().is_some()
+        {
+            return Err(SessionResolveError::Refused {
+                code: "setup_outstanding".into(),
+                message: "session.read is unavailable while Setup is outstanding".into(),
+            });
+        }
         if let Some(page) = self.page_override.lock().unwrap().clone() {
             return Ok(page);
         }
@@ -325,7 +345,12 @@ impl session_resolver::ProviderRunner for Runner {
         if delay > 0 {
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
-        let lineage = self.lineage.lock().unwrap().clone();
+        let lineage = self
+            .setup_lineage
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| self.lineage.lock().unwrap().clone());
         if params["lineage_id"]
             .as_str()
             .is_some_and(|held| held != lineage)
@@ -602,11 +627,18 @@ impl Rig {
         (rig, answer)
     }
     async fn op(&self, method: &str, params: Value) -> Value {
+        if method == "compaction.setup" {
+            *self.runner.setup_lineage.lock().unwrap() =
+                params["lineage_id"].as_str().map(str::to_owned);
+        }
         let answer = response(
             self.h
                 .dispatch_value(7, json!({"method":method,"params":params}))
                 .await,
         );
+        if method == "compaction.setup" {
+            *self.runner.setup_lineage.lock().unwrap() = None;
+        }
         if method == "compaction.setup" && answer["answer"] == "ready" {
             *self.runner.setup_checkpoint.lock().unwrap() =
                 serde_json::from_value::<contract::setup::SetupAnswer>(answer.clone())

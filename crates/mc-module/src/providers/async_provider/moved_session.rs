@@ -314,8 +314,8 @@ impl AsyncRecord {
         Ok(())
     }
 
-    /// The adoption seed for the manifest, without touching the record. The
-    /// caller sets it with `begin_at_cut` after the Setup engine pass.
+    /// The adoption seed for the manifest, without touching the record. Setup
+    /// stages it before the engine pass so that pass renders the imported head.
     fn standalone_seed(record: &MoveRecord) -> Result<cut_seed::CutSeed, HandlerOutcome> {
         let last = record
             .compartments
@@ -340,10 +340,8 @@ impl AsyncRecord {
         Ok(seed)
     }
 
-    /// Build the adoption seed from the certified head and mark the `importing`
-    /// stage. `begin_at_cut` saves the cut while `initial` is still null, so a
-    /// repeat Setup that finds this stage restarts here from the move record and
-    /// never answers the partial record as complete. It sets
+    /// Build the adoption seed from the certified head without saving a partial
+    /// provider record. Setup commits the seed with the complete answer. It sets
     /// `lineage_first_ordinal`, `cut_digest` and `time_basis` from the certified
     /// `head_cut`, and `pre_cut_tags`/`max_tag` from the tag checkpoint, so an
     /// old `ctx_reduce` tag answers as already in the history summary.
@@ -359,7 +357,7 @@ impl AsyncRecord {
     ) -> Result<(), HandlerOutcome> {
         let seed = Self::standalone_seed(record)?;
         self.lineage_first_ordinal = record.message_count;
-        self.begin_at_cut(store, seed, cut_seed::CutStart::Fresh)?;
+        self.stage_fresh_cut(store, seed)?;
         Ok(())
     }
 
