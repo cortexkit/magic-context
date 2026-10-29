@@ -43,6 +43,19 @@ fn response_bytes(outcome: HandlerOutcome) -> Vec<u8> {
     }
 }
 
+/// A management reply must be exactly `{"result": <payload>}`, the envelope
+/// callosum's phone reader requires; returns the payload.
+fn management_payload(bytes: &[u8]) -> Value {
+    let value: Value = serde_json::from_slice(bytes).unwrap();
+    let object = value.as_object().expect("management reply is an object");
+    assert_eq!(
+        object.keys().collect::<Vec<_>>(),
+        vec!["result"],
+        "management reply must carry only `result`"
+    );
+    value["result"].clone()
+}
+
 fn code(outcome: HandlerOutcome) -> String {
     match outcome {
         HandlerOutcome::Error { code, .. } | HandlerOutcome::ErrorWithDetail { code, .. } => code,
@@ -117,8 +130,14 @@ async fn phone_reads_match_internal_and_management_bytes() {
     ] {
         let internal = response_bytes(call(&handler, 1, method, params.clone()).await);
         let management = response_bytes(call(&handler, 2, method, params).await);
-        assert_eq!(internal, management, "{method}");
-        let value: Value = serde_json::from_slice(&management).unwrap();
+        // The phone's wire body is the internal reply, byte for byte, inside
+        // `{"result": ...}`. The app-read samples record the internal reply, so
+        // they are exactly the payload the phone unwraps.
+        let mut expected = b"{\"result\":".to_vec();
+        expected.extend_from_slice(&internal);
+        expected.push(b'}');
+        assert_eq!(management, expected, "{method}");
+        let value = management_payload(&management);
         assert_eq!(value[field].as_array().unwrap().len(), 1, "{method}");
         assert_eq!(value["as_of_ms"], AS_OF_MS);
         if method == "context.cache_why" {
@@ -233,7 +252,7 @@ async fn management_compartments_page_below_the_phone_reply_cap() {
     let mut pages = 0;
     loop {
         let bytes = response_bytes(call(&handler, 2, "session_data.read", params.clone()).await);
-        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let value = management_payload(&bytes);
         pages += 1;
         assert!(pages <= 200, "cursor failed to progress");
         let rows = value["rows"].as_array().unwrap();
@@ -270,7 +289,7 @@ async fn management_cache_why_pages_windows_and_refuses_oversize_producer_sets()
     let mut producers = Vec::new();
     loop {
         let bytes = response_bytes(call(&handler, 2, "context.cache_why", params.clone()).await);
-        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let value = management_payload(&bytes);
         let rows = value["decisions"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["changes"]["model"]["prev"], model);
@@ -330,7 +349,7 @@ async fn management_search_pages_large_results_without_dropping_hits() {
     let mut pages = 0;
     loop {
         let bytes = response_bytes(call(&handler, 2, "context.search", params.clone()).await);
-        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let value = management_payload(&bytes);
         pages += 1;
         assert!(pages <= 4, "cursor failed to progress");
         let hits = value["hits"].as_array().unwrap();
@@ -366,7 +385,7 @@ async fn management_search_refuses_when_size_paging_exhausts_the_cursor() {
         json!({"query":"needle", "scope":{"session":session()}, "sources":["message"], "limit":25});
     for _ in 0..3 {
         let bytes = response_bytes(call(&handler, 2, "context.search", params.clone()).await);
-        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let value = management_payload(&bytes);
         assert_eq!(value["hits"].as_array().unwrap().len(), 1);
         assert!(value["next_cursor"].is_string());
         params["cursor"] = value["next_cursor"].clone();

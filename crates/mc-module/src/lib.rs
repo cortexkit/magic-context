@@ -9354,7 +9354,9 @@ impl McHandler {
                 .cloned();
             if let Some(admission) = admission {
                 return match admission {
-                    Ok(caller) => self.handle_app_read(&caller, &body, as_of_ms),
+                    Ok(caller) => app_read::envelope::wrap_management_result(
+                        self.handle_app_read(&caller, &body, as_of_ms),
+                    ),
                     Err(refusal) => refusal.outcome(),
                 };
             }
