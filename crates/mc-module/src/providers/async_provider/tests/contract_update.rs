@@ -352,6 +352,22 @@ async fn summary_waiting_compares_the_newest_compartment_end_with_coverage() {
     let rig = Rig::new(dir.path()).await;
     rig.fill(40);
     rig.notice(1, 1_000, None).await;
+    // Notice completion does not wait for the historian's background identity
+    // and metadata writes. Let them finish so the coverage commits cannot race.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while rig
+            .h
+            .provider_store
+            .async_runtime
+            .historian_inflight
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial notice's historian evaluation did not finish");
     let store = rig.h.store.get().unwrap();
     let namespace = rig.state().namespace();
     let waiting = || rig.h.decision_facts(&rig.state()).summary_waiting;
