@@ -1,7 +1,7 @@
 //! Moved sessions in the same process-CPU cost gate as ordinary covered sessions.
 use super::*;
 use crate::providers::async_provider::scaling_tests::{
-    phase_stats, phases, rss, MovedCostRow, MovedCostSample,
+    phase_stats, phases, rss, save_meter, MovedCostRow, MovedCostSample,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -84,17 +84,54 @@ impl session_resolver::ProviderRunner for CostRunner {
     }
 }
 
-/// Scale the checkpoint cut, imported summaries and returned raw band.
-/// All contents are generated, not copied from a real conversation.
-fn stores(dir: &Path, size: usize) -> (StorePaths, String) {
-    let cut = (size * 5340 / 9086) & !1;
-    let summaries = (size * 92 / 9086).max(1);
-    let returned = (size * 187 / 9086).max(1) | 1;
+#[derive(Debug)]
+struct Shape {
+    total: usize,
+    window: usize,
+    history: usize,
+    summaries: usize,
+    returned: usize,
+    applied_drops: usize,
+}
+
+impl Shape {
+    fn new(total: usize, window: usize) -> Self {
+        assert!(total > window);
+        let history = total - window;
+        assert!(history.is_multiple_of(2), "the cut must be a user turn");
+        Self {
+            total,
+            window,
+            history,
+            summaries: (history * 92 / 5340).max(1),
+            returned: (window * 187 / 3750).max(1) | 1,
+            applied_drops: window * 2785 / 3750,
+        }
+    }
+}
+
+#[test]
+fn moved_gate_keeps_the_same_3750_row_window_as_history_grows() {
+    for (total, history, summaries) in [(4750, 1000, 17), (150_000, 146_250, 2519)] {
+        let shape = Shape::new(total, 3750);
+        assert_eq!(shape.history, history);
+        assert_eq!(shape.window, 3750);
+        assert_eq!(shape.summaries, summaries);
+        assert_eq!(shape.returned, 187);
+        assert_eq!(shape.applied_drops, 2785);
+    }
+}
+
+/// History determines imported summaries; the independently bounded window
+/// determines raw rows, the returned band and carried applied drops. All
+/// contents are generated, not copied from a real conversation.
+fn stores(dir: &Path, shape: &Shape) -> (StorePaths, String) {
+    let (cut, summaries, returned) = (shape.history, shape.summaries, shape.returned);
     let paths = fixture::write_synthetic_stores(
         dir,
         &fixture::Synthetic {
-            messages: size,
-            tail: size - cut,
+            messages: shape.total,
+            tail: shape.window,
             text_bytes: 64,
             compartments: summaries,
         },
@@ -121,24 +158,56 @@ fn stores(dir: &Path, size: usize) -> (StorePaths, String) {
         ).unwrap();
     }
     tx.execute("UPDATE session_meta SET compaction_marker_state=json_set(compaction_marker_state,'$.targetEndMessageId',?1)", [format!("msg_{:07}", cut + returned - 1)]).unwrap();
-    // Keep the generator's one-in-ten applied drops. Scaling the denser
-    // functional fixture's drops would exceed the protocol's 3 MiB view cap
-    // before a live adoption could be measured.
+    tx.execute("UPDATE tags SET status='active'", []).unwrap();
+    tx.execute(
+        "UPDATE tags SET status='dropped' WHERE tag_number IN (
+            SELECT tag_number FROM tags
+            WHERE (tool_owner_message_id >= ?1 OR (type='message' AND message_id >= ?1))
+              AND tag_number NOT IN (SELECT tag_id FROM pending_ops)
+            ORDER BY tag_number LIMIT ?2)",
+        rusqlite::params![format!("msg_{cut:07}"), shape.applied_drops],
+    )
+    .unwrap();
     tx.commit().unwrap();
     let plan = offline_move::plan(&paths, &session).unwrap();
     assert_eq!(plan.message_count, cut);
     assert_eq!(plan.record.compartments.len(), summaries);
     assert_eq!(plan.dropped_summaries.len(), 1);
     assert_eq!(plan.returned_raw.len(), returned);
+    assert_eq!(
+        plan.record
+            .drops
+            .iter()
+            .filter(|drop| drop.kind == offline_move::DropKind::Applied)
+            .count(),
+        shape.applied_drops
+    );
     (paths, session)
 }
 
 fn setup(session: &str) -> Value {
     let mut request = setup_request(session, "fixture");
-    // The retained suffix scales with the cut. A fixed, ample window admits
-    // both sizes, so a size-dependent refusal cannot masquerade as cheap work.
-    request["context_window"] = json!(32_000_000);
+    request["context_window"] = json!(1_000_000);
     request
+}
+
+const SETUP_PHASES: [&str; 2] = ["moved:setup_dispatch", "moved:setup_decode"];
+
+/// Separate provider dispatch from decoding its prepared response. These are
+/// test-driver boundaries, not invented subphases inside the Setup handler.
+async fn live_setup(arm: &Arm, request: Value) -> Value {
+    let reference = arm.reference();
+    let outcome = {
+        let _timer = save_meter::start_kind(&reference, SETUP_PHASES[0]);
+        arm.h
+            .dispatch_value(
+                CHANNEL,
+                json!({"method":"compaction.setup","params":request}),
+            )
+            .await
+    };
+    let _timer = save_meter::start_kind(&reference, SETUP_PHASES[1]);
+    response(outcome)
 }
 
 async fn advance(arm: &Arm, seq: u64, applied: Option<u64>) -> String {
@@ -159,7 +228,7 @@ async fn advance(arm: &Arm, seq: u64, applied: Option<u64>) -> String {
         1_000,
         "fixture",
     )
-    .with_window(32_000_000);
+    .with_window(1_000_000);
     if let Some(version) = applied {
         notice = notice.with_applied_view_version(version);
     }
@@ -200,6 +269,7 @@ async fn measure<T>(
     #[cfg(target_os = "linux")]
     std::fs::write("/proc/self/clear_refs", "5").expect("reset peak before measured work");
     let before = phase_stats(reference);
+    let setup_before = SETUP_PHASES.map(|kind| save_meter::read_kind(reference, kind));
     let reads = runner.map_or(0, |runner| runner.requests.lock().unwrap().len());
     let rows = runner.map_or(0, |runner| runner.rows.load(Ordering::Relaxed));
     let bytes = runner.map_or(0, |runner| runner.bytes.load(Ordering::Relaxed));
@@ -213,6 +283,16 @@ async fn measure<T>(
         process.elapsed().as_secs_f64() * 1e3,
     );
     let peak = rss().0;
+    let mut profile = phases(reference, &before);
+    for (kind, before) in SETUP_PHASES.into_iter().zip(setup_before) {
+        let after = save_meter::read_kind(reference, kind);
+        profile.push_str(&format!(
+            " {kind}={:.3}cpu-ms/{:.3}wall-ms/{}",
+            (after.cpu_nanos - before.cpu_nanos) as f64 / 1e6,
+            (after.wall_nanos - before.wall_nanos) as f64 / 1e6,
+            after.saves - before.saves
+        ));
+    }
     (
         result,
         MovedCostRow {
@@ -226,7 +306,9 @@ async fn measure<T>(
             peak_rss_bytes: peak,
             peak_rss_net_bytes: peak.saturating_sub(baseline_rss),
             resident_record_bytes: 0,
-            phases: phases(reference, &before),
+            phases: profile.clone(),
+            phase_samples: vec![profile],
+            window_rows: vec![0],
         },
     )
 }
@@ -265,8 +347,13 @@ async fn moved_session_cost_child() {
         .expect("cost parent supplies size")
         .parse::<usize>()
         .unwrap();
+    let window = std::env::var("MC_MOVED_COST_WINDOW")
+        .unwrap_or_else(|_| "3750".into())
+        .parse::<usize>()
+        .unwrap();
+    let shape = Shape::new(size, window);
     let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let (paths, session) = stores(store.path(), size);
+    let (paths, session) = stores(store.path(), &shape);
     let reference = runner_session_ref(MODULE, "opencode", &session);
     let plan = offline_move::plan(&paths, &session).unwrap();
     let cut = plan.message_count as u64;
@@ -296,6 +383,11 @@ async fn moved_session_cost_child() {
         .collect::<Vec<_>>();
     assert_eq!(served.first().unwrap().ordinal, cut);
     assert_eq!(served.len(), size - cut as usize);
+    assert_eq!(
+        served.len(),
+        window,
+        "history must not enlarge the retained window"
+    );
     pin_history_generation(&paths.context_db, &session, &[0, 1]);
     let pages = served
         .chunks(350)
@@ -356,7 +448,7 @@ async fn moved_session_cost_child() {
         &reference,
         Some(&runner),
         baseline,
-        arm.setup(setup(&session)),
+        live_setup(&arm, setup(&session)),
     )
     .await;
     assert_eq!(answer["answer"], "ready", "{answer}");
@@ -367,6 +459,7 @@ async fn moved_session_cost_child() {
         "prepared Setup must not read the transcript"
     );
     setup_row.resident_record_bytes = record_bytes(&arm);
+    setup_row.window_rows[0] = retained;
     drop(answer);
     let (outcome, mut adopt_row) = measure(
         "first adopting notice",
@@ -387,6 +480,7 @@ async fn moved_session_cost_child() {
     );
     no_rows_below_cut(&arm, cut);
     adopt_row.resident_record_bytes = record_bytes(&arm);
+    adopt_row.window_rows[0] = retained;
     let version = arm.newest().expect("prepared view");
     assert_eq!(advance(&arm, 2, Some(version)).await, "ok");
     let count = std::env::var("MC_ASYNC_NOTICES")
@@ -403,7 +497,7 @@ async fn moved_session_cost_child() {
             let tag = highest_tag(&entries) + 1;
             entries.push(appended(&session, next, tag));
         }
-        let (outcome, row) = measure(
+        let (outcome, mut row) = measure(
             "quiet notice",
             &reference,
             Some(&runner),
@@ -412,8 +506,11 @@ async fn moved_session_cost_child() {
         )
         .await;
         assert_eq!(outcome, "ok");
+        row.window_rows[0] = retained + (seq as usize - 2) * 4;
         if let Some(quiet) = &mut quiet_row {
             quiet.timings.extend(row.timings);
+            quiet.phase_samples.extend(row.phase_samples);
+            quiet.window_rows.extend(row.window_rows);
             quiet.read_rows = quiet.read_rows.max(row.read_rows);
             quiet.read_bytes = quiet.read_bytes.max(row.read_bytes);
             quiet.read_requests.extend(row.read_requests);
@@ -439,7 +536,7 @@ async fn moved_session_cost_child() {
         &reference,
         Some(&runner),
         baseline,
-        arm.setup(request),
+        live_setup(&arm, request),
     )
     .await;
     assert_eq!(answer["answer"], "ready", "{answer}");
@@ -450,12 +547,15 @@ async fn moved_session_cost_child() {
         retained + count as usize * 4
     );
     recovery_row.resident_record_bytes = record_bytes(&arm);
+    recovery_row.window_rows[0] = retained + count as usize * 4;
     no_rows_below_cut(&arm, cut);
     let sample = MovedCostSample {
         size: size as u64,
         cut,
         compartments,
         retained,
+        applied_drops: shape.applied_drops,
+        context_window: 1_000_000,
         rows: vec![
             setup_row,
             adopt_row,
