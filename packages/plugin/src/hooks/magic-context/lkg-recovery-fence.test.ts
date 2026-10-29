@@ -1,15 +1,7 @@
 import { Database as BunDatabase } from "bun:sqlite";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import {
-    existsSync,
-    mkdirSync,
-    readdirSync,
-    readFileSync,
-    rmSync,
-    statSync,
-    symlinkSync,
-} from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
     LKG_SLOT_CHUNKS_DDL,
@@ -18,8 +10,6 @@ import {
 import { clearSession, closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { deleteSessionScopedRows } from "../../features/magic-context/storage-session-tables";
 import type { Database } from "../../shared/sqlite";
-import { withStorageFileMutex } from "../../shared/storage-file-mutex";
-import * as storagePermissions from "../../shared/storage-permissions";
 import { writeStorageFileSync } from "../../shared/storage-permissions";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import {
@@ -32,14 +22,11 @@ import {
     __test,
     clearLkgFenceProcessState,
     clearLkgRecoveryFence,
-    closeLkgLockSweepDirectory,
     hasCleanLkgRecoveryFence,
     lkgFenceRequiresRebuild,
     lkgRecoveryFencePath,
     lkgRecoverySlotKey,
     markLkgRecoveryDirty,
-    sweepEmptyLkgRecoveryLockDirectories,
-    takeLkgRecoveryLockSweepPage,
 } from "./lkg-recovery-fence";
 import type { LkgSlot } from "./lkg-slot";
 
@@ -49,7 +36,6 @@ const previousXdg = process.env.XDG_DATA_HOME;
 const roots: string[] = [];
 const restorers: (() => void)[] = [];
 afterEach(() => {
-    closeLkgLockSweepDirectory();
     clearLkgFenceProcessState();
     for (const restore of restorers.splice(0).reverse()) restore();
     closeDatabase();
@@ -131,84 +117,6 @@ ${code}`,
 }
 
 describe.skipIf(process.platform === "win32")("durable recovery fence", () => {
-    test("empty orphan lock sweep is bounded and preserves live sessions, fences and symlinks", () => {
-        const f = fixture(false);
-        const lock = (id: string) => `${lkgRecoveryFencePath(id)}.locks`;
-        try {
-            for (let i = 0; i < 205; i++) mkdirSync(lock(`gone-${i}`), { recursive: true });
-            mkdirSync(lock("live"));
-            mkdirSync(lock("fenced"));
-            writeStorageFileSync(lkgRecoveryFencePath("fenced"), "invalid but still an obligation");
-            symlinkSync(lock("live"), lock("symlink"));
-            const first = takeLkgRecoveryLockSweepPage();
-            expect(first.length).toBeLessThanOrEqual(200);
-            const removed = sweepEmptyLkgRecoveryLockDirectories(first, ["live"]);
-            expect(removed).toBeLessThanOrEqual(200);
-            expect(removed).toBeGreaterThan(0);
-            for (let i = 0; i < 5; i++)
-                sweepEmptyLkgRecoveryLockDirectories(takeLkgRecoveryLockSweepPage(), ["live"]);
-            for (let i = 0; i < 205; i++) expect(existsSync(lock(`gone-${i}`))).toBe(false);
-            expect(existsSync(lock("live"))).toBe(true);
-            expect(existsSync(lock("fenced"))).toBe(true);
-            expect(existsSync(lock("symlink"))).toBe(true);
-        } finally {
-            f.raw.close();
-        }
-    });
-
-    test("orphan lock sweep never removes a held bakery mutex or its live ticket", () => {
-        const f = fixture(false);
-        const path = `${lkgRecoveryFencePath("held-orphan")}.locks`;
-        try {
-            withStorageFileMutex(path, () => {
-                const tickets = readdirSync(path);
-                expect(tickets).toHaveLength(1);
-                expect(sweepEmptyLkgRecoveryLockDirectories([path.split("/").at(-1)!], [])).toBe(0);
-                expect(readdirSync(path)).toEqual(tickets);
-            });
-            expect(sweepEmptyLkgRecoveryLockDirectories([path.split("/").at(-1)!], [])).toBe(1);
-            expect(existsSync(path)).toBe(false);
-        } finally {
-            f.raw.close();
-        }
-    });
-
-    test("mutex acquisition retries when the orphan sweep removes its directory before ticket creation", () => {
-        const f = fixture(false);
-        const path = `${lkgRecoveryFencePath("acquiring-orphan")}.locks`;
-        const write = storagePermissions.writeStorageFileSync;
-        let swept = false;
-        const observe = spyOn(storagePermissions, "writeStorageFileSync").mockImplementation(
-            (...args: Parameters<typeof write>) => {
-                if (!swept && String(args[0]).startsWith(`${path}/`)) {
-                    swept = true;
-                    expect(existsSync(path)).toBe(true);
-                    expect(
-                        sweepEmptyLkgRecoveryLockDirectories([path.split("/").at(-1)!], []),
-                    ).toBe(1);
-                    expect(existsSync(path)).toBe(false);
-                }
-                return write(...args);
-            },
-        );
-        try {
-            withStorageFileMutex(path, () => {
-                expect(swept).toBe(true);
-                const tickets = readdirSync(path);
-                expect(tickets).toHaveLength(1);
-                expect(JSON.parse(readFileSync(join(path, tickets[0]!), "utf8"))).toMatchObject({
-                    choosing: false,
-                    number: 1,
-                });
-                expect(sweepEmptyLkgRecoveryLockDirectories([path.split("/").at(-1)!], [])).toBe(0);
-            });
-            expect(readdirSync(path)).toEqual([]);
-        } finally {
-            observe.mockRestore();
-            f.raw.close();
-        }
-    });
-
     test("warm synchronous captures perform zero fence I/O", () => {
         const f = fixture();
         const operations: string[] = [];

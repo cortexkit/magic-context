@@ -253,7 +253,7 @@ fn every_role_and_compaction_cell_serves_its_exact_tools_and_text() {
                 let text = answer["system_text"]["text"].as_str().unwrap();
                 let variant = match (preset, compacting) {
                     ("head", true) => Some(format!("primary/reduce/{surface}")),
-                    ("head", false) => Some(format!("primary/no_reduce/{surface}")),
+                    ("head", false) => Some(format!("tools_only/{surface}")),
                     (_, true) => Some(format!("subagent/{surface}")),
                     (_, false) => None,
                 };
@@ -273,6 +273,9 @@ fn every_role_and_compaction_cell_serves_its_exact_tools_and_text() {
                     })
                     .unwrap_or_default();
                 assert_eq!(text, expected_text);
+                if !compacting {
+                    assert!(!text.contains("ctx_reduce") && !text.contains("ctx_expand"));
+                }
                 if preset != "head" {
                     assert!(!text.contains("ctx_note") && !text.contains("ctx_memory"));
                 }

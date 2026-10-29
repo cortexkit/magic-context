@@ -998,7 +998,7 @@ export function restoreTrustedValuesOverInvalidProjectValues(args: {
     trustedRaw: Record<string, unknown>;
     projectRaw: Record<string, unknown>;
     collectIssuePaths: (raw: Record<string, unknown>) => readonly ConfigIssuePath[];
-}): { warnings: string[]; restoredTopLevelKeys: string[] } {
+}): { warnings: string[]; restoredTopLevelKeys: string[]; restoredFieldPaths: string[] } {
     const warnings: string[] = [];
     const restoredTopLevelKeys = new Set<string>();
     const restored = new Set<string>();
@@ -1025,7 +1025,11 @@ export function restoreTrustedValuesOverInvalidProjectValues(args: {
         if (!changed) break;
     }
 
-    return { warnings, restoredTopLevelKeys: [...restoredTopLevelKeys] };
+    return {
+        warnings,
+        restoredTopLevelKeys: [...restoredTopLevelKeys],
+        restoredFieldPaths: [...restored],
+    };
 }
 
 const PROJECT_COMMAND_STRING_FIELDS = ["description", "agent", "model"] as const;

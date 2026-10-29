@@ -452,25 +452,14 @@ export function nearestCacheBustDecision(
         (decision.requestObservedAtMs ?? decision.timestampMs) - requestTimestampMs;
     const withinJoinWindow = (decision: CacheBustDecisionAttribution): boolean => {
         const delta = timeDelta(decision);
-        return delta >= -30_000 && delta <= 5_000;
+        return decision.disruption === undefined && delta >= -DEFAULT_CACHE_TTL_MS && delta <= 0;
     };
-    // A transform pass runs before the request it shapes is put on the wire, so
-    // the pass that SERVED a request is the latest one at or before it. Ranking
-    // purely by absolute distance let a later pass — the one preparing the NEXT
-    // request — win whenever it happened to be closer in time: a request sent 9 s
-    // after its execute pass, with the next turn's defer pass 4 s after it, was
-    // attributed to that defer and reported as an unaccounted defer bust.
+    // A pass prepares a request before it is sent. Allow a slow pass or host send
+    // delay up to one default cache TTL, but never borrow the next request's pass.
     const byServeOrder = (
         left: CacheBustDecisionAttribution,
         right: CacheBustDecisionAttribution,
-    ): number => {
-        const leftDelta = timeDelta(left);
-        const rightDelta = timeDelta(right);
-        const leftServed = leftDelta <= 0;
-        const rightServed = rightDelta <= 0;
-        if (leftServed !== rightServed) return leftServed ? -1 : 1;
-        return Math.abs(leftDelta) - Math.abs(rightDelta);
-    };
+    ): number => timeDelta(right) - timeDelta(left);
     const exact = messageId
         ? decisions
               .filter((decision) => decision.messageId === messageId && withinJoinWindow(decision))
@@ -478,6 +467,22 @@ export function nearestCacheBustDecision(
         : undefined;
     if (exact) return exact;
     return decisions.filter(withinJoinWindow).sort(byServeOrder)[0];
+}
+
+/** Join one session's requests in send order, claiming each pass at most once. */
+export function createCacheBustDecisionJoiner(
+    decisions: readonly CacheBustDecisionAttribution[],
+): (requestTimestampMs: number, messageId?: string) => CacheBustDecisionAttribution | undefined {
+    const claimed = new Set<CacheBustDecisionAttribution>();
+    return (requestTimestampMs, messageId) => {
+        const matched = nearestCacheBustDecision(
+            decisions.filter((decision) => !claimed.has(decision)),
+            requestTimestampMs,
+            messageId,
+        );
+        if (matched) claimed.add(matched);
+        return matched;
+    };
 }
 
 export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDivergenceClass {

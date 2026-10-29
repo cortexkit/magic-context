@@ -63,15 +63,25 @@ and all 190 ICU-resolvable two-letter codes), and 768 additional denied-reduce
 and custom-guidance cases. The seven mask bits are memory, Dreamer, temporal,
 caveman, smart notes, subagent and compaction, in that order. Bounded children
 without callable reduce get no guidance, exactly as the TypeScript caller gates
-its builder. Head sessions without compaction use the real no-reduce builder,
-not separately authored tools-only prose. Tools served by the catalog's role
-filter are each compared to their real builder; serving-role membership itself
-is not inferred from a standalone TypeScript factory.
+its builder. The standalone composer's head sessions without compaction use the
+real no-reduce builder. Catalog heads without compaction or a user override use
+the catalog generator's `tools_only/{surface}` render instead: those sessions
+have no compaction history or expandable placeholders. The golden separately
+captures all 6,112 combinations of tools-only flags, surfaces and languages;
+the Rust parity test checks 12,288 catalog cases against those exact bytes and
+asserts they differ from standalone no-reduce guidance. User overrides still
+replace the head section, and non-compacting workers still get no guidance.
+Tools served by the catalog's role filter are each compared to their real
+builder, except for the non-compacting `ctx_search` description captured from
+the catalog generator. That description promises plain search hits rather than
+compaction-aware filtering. Serving-role membership itself is not inferred from
+a standalone TypeScript factory.
 
-The 260 string fragments are lossless interning of actual builder output, not
+The string fragments are lossless interning of actual generator output, not
 rewritten expected text: each case stores prefix/suffix indices and the Rust
 test concatenates their exact bytes. The generator first composes every full
-string with the real builder. Interpreting the fixture never calls the Rust
+string with the real builder or the catalog generator's tools-only renderer.
+Interpreting the fixture never calls the Rust
 renderer to calculate an expected value. Existing guidance text assets also
 compare directly against the TypeScript golden.
 

@@ -64,7 +64,7 @@ Results the agent can already see are hidden: memories already rendered in `<ses
 
 ## The raw-message index
 
-`message-index.ts` keeps an FTS5 index of raw message text, maintained outside the search path: live `message.updated` events write incrementally, and an asynchronous reconciler fills gaps. A failed incremental write lowers a per-session dirty floor (`dirty_floor_ordinal`) so the reconciler rewinds and covers it. The same module runs an out-of-band orphan sweep that finds index rows for sessions the host no longer has, by checking every session-scoped table against the host's session list.
+`message-index.ts` keeps an FTS5 index of raw message text, maintained outside the search path: live `message.updated` events write incrementally, and an asynchronous reconciler fills gaps. A failed incremental write lowers a per-session dirty floor (`dirty_floor_ordinal`) so the reconciler rewinds and covers it. A session missing from the local OpenCode store is not evidence of deletion: other OpenCode instances can share the Magic Context store. Its data is retained unless explicitly deleted.
 
 ## The git-commit index
 

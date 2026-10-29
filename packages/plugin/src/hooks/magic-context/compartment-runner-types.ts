@@ -108,7 +108,7 @@ export interface HiddenRunHandle {
 export interface HiddenCompletion {
     text: string | null;
     reasoning?: string | null;
-    usage: TokenTotals;
+    usage: TokenTotals & { reasoning?: number };
     lengthCapped: boolean;
     failed?: boolean;
     tokenLog?: import("../../shared/run-token-log").RunTokenLog;
@@ -140,6 +140,8 @@ export interface HiddenCompletionExecutor {
      * this method.
      */
     detach?(handle: HiddenRunHandle): void;
+    /** Read an interrupted child's output without treating it as a settled completion. */
+    collectPartial?(handle: HiddenRunHandle, limit: number): Promise<HiddenCompletion>;
     close(
         handle: HiddenRunHandle | null,
         settlement: {

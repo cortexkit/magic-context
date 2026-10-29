@@ -2,7 +2,7 @@ import type { ContextDatabase } from "../../features/magic-context/storage";
 import { getTagsBySession } from "../../features/magic-context/storage";
 import { makeToolCompositeKey } from "../../features/magic-context/tagger";
 import { recoveryReasoningPrefixes } from "../../shared/recovery-reasoning-prefix";
-import { applyFlushedStatuses } from "./apply-operations";
+import { applyFlushedStatuses, renderDroppedText } from "./apply-operations";
 import { isThinkingPart } from "./tag-content-primitives";
 import type { MessageLike, TagTarget, ThinkingLikePart } from "./tag-messages";
 import { isTextPart } from "./tag-part-guards";
@@ -49,6 +49,7 @@ export function replayCommittedDrops(
     const toolThinking = new Map<string, ThinkingLikePart[]>();
     const batch = new ToolMutationBatch(messages);
     for (const message of messages) {
+        if (message.info.syntheticHead === true) continue;
         if (message.info.role === "user") precedingThinking = [];
         const thinking = message.parts.filter(isThinkingPart);
         for (let p = 0; p < message.parts.length; p++) {
@@ -84,10 +85,17 @@ export function replayCommittedDrops(
                 if (tag && tag.type !== "tool")
                     targets.set(tag.tagNumber, {
                         message,
+                        // Reduce source text even when marked synthetic, as the normal
+                        // early drop phase does. Injected syntheticHead messages are
+                        // excluded above. The normal late sweep skips synthetic parts
+                        // that history preparation may repurpose; recovery instead
+                        // reconciles a captured request with newly committed drops,
+                        // preserving each part's captured annotation suffix.
                         setContent(content) {
                             if (isTextPart(part)) {
-                                if (part.text === content) return false;
-                                part.text = content;
+                                const rendered = renderDroppedText(tag.tagNumber, part.text);
+                                if (part.text === rendered) return false;
+                                part.text = rendered;
                             } else message.parts[p] = { type: "text", text: content };
                             return true;
                         },

@@ -130,6 +130,8 @@ fn manifest_before_participant(
         // mcp-conversation-binding/v1; it changes no route or service.
         provides: vec![
             cortexkit_role_compaction_provider::PROVIDES.to_string(),
+            // Core discovers tool providers by this claim; agent-data changes nothing here.
+            cortexkit_role_tool_provider::PROVIDES.to_string(),
             crate::MCP_CONVERSATION_BINDING_V1.to_string(),
             // Declared with the flow fence; the agent-data feature changes nothing here.
             subc_protocol::scope::FLOW_SCOPES_CAPABILITY.to_string(),
@@ -151,9 +153,22 @@ fn manifest_before_participant(
             emits_push: false,
             sub_supervises: false,
         },
-        // Added after the participant and independent of it: the read-only
-        // management query basal flows call. The agent-data feature changes nothing here.
-        crate::subagent_invocations_read::management_role(),
+        // Phone queries and basal's management query are independent of agent-data.
+        {
+            let mut role = crate::subagent_invocations_read::management_role();
+            if let ProviderRole::ManagementSurface { operations, .. } = &mut role {
+                operations.extend(
+                    ["session_data.read", "context.cache_why", "context.search"].map(|name| {
+                        subc_protocol::manifest::ManagementOperation {
+                            name: name.into(),
+                            kind: subc_protocol::manifest::ManagementOperationKind::Query,
+                            description: None,
+                        }
+                    }),
+                );
+            }
+            role
+        },
         // App-read design §3.1: this independent read service remains present with agent-data off.
         ProviderRole::InternalService {
             service_id: crate::app_read::SERVICE_ID.into(),

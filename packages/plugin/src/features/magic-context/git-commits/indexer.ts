@@ -39,6 +39,8 @@ const embedInProgress = new Set<string>();
 export interface IndexCommitsOptions {
     sinceDays: number;
     maxCommits: number;
+    /** A recovered retention cap may bound reads, but must not delete stored commits. */
+    skipRetention?: boolean;
     /** If true, skip the embed step after indexing. Useful when the caller
      *  plans to embed in a separate scheduled pass. Default false. */
     skipEmbed?: boolean;
@@ -114,7 +116,9 @@ export async function indexCommitsForProject(
 
         if (commits.length === 0) {
             // No new commits. Still enforce the cap in case prior runs overflowed.
-            result.evicted = enforceProjectCap(db, projectPath, options.maxCommits);
+            if (!options.skipRetention) {
+                result.evicted = enforceProjectCap(db, projectPath, options.maxCommits);
+            }
             log(
                 `[git-commits] no new commits for ${projectPath} (sinceMs=${sinceMs} latestIndexed=${latestIndexed?.slice(0, 7) ?? "none"} evicted=${result.evicted})`,
             );
@@ -128,7 +132,9 @@ export async function indexCommitsForProject(
         const upsert = upsertCommits(db, projectPath, commits);
         result.inserted = upsert.inserted;
         result.updated = upsert.updated;
-        result.evicted = enforceProjectCap(db, projectPath, options.maxCommits);
+        if (!options.skipRetention) {
+            result.evicted = enforceProjectCap(db, projectPath, options.maxCommits);
+        }
 
         const snapshot = getProjectEmbeddingSnapshot(projectPath);
         if (options.skipEmbed || !snapshot?.gitCommitEnabled) {

@@ -168,7 +168,9 @@ interface Definition {
     tools: ToolDefinition[];
     preset_tools: Record<"compacting" | "not_compacting", Record<Preset, ToolId[]>>;
     preset_aliases: Record<string, Preset>;
-    descriptions: Record<Surface, Record<ToolId, string>>;
+    descriptions: Record<Surface, Record<ToolId, string>> & {
+        not_compacting: Record<Surface, Partial<Record<ToolId, string>>>;
+    };
     parameter_descriptions: Record<Surface, Record<ToolId, Record<string, string>>>;
     /** Guidance templates and the fragments they include, by name (see `renderText`). */
     texts: Record<string, string>;
@@ -336,7 +338,11 @@ function checkDefinitionMatchesPlugin(): void {
         },
     };
     for (const key of ["descriptions", "parameter_descriptions"] as const) {
-        if (jcs(DEFINITION[key] as unknown as Json) !== jcs(plugin[key] as unknown as Json)) {
+        // The plugin uses compaction descriptions; tools-only variants are provider-only.
+        const shared = key === "descriptions"
+            ? { full: DEFINITION.descriptions.full, light: DEFINITION.descriptions.light }
+            : DEFINITION[key];
+        if (jcs(shared as unknown as Json) !== jcs(plugin[key] as unknown as Json)) {
             throw new Error(`tool_catalog_v1.json ${key} differ from the plugin's`);
         }
     }
@@ -641,6 +647,9 @@ function catalogTools(request: CatalogRequest, config: ResolvedConfig): JsonObje
         const definition = toolDefinition(tool);
         const description =
             config.tool_descriptions[tool] ??
+            (!compactsSession(request.composition)
+                ? DEFINITION.descriptions.not_compacting[surface][tool]
+                : undefined) ??
             (surface === "light" ? LIGHT_DESCRIPTIONS[tool] : FULL_DESCRIPTIONS[tool]);
         return {
             name: tool,
@@ -701,7 +710,7 @@ function guidanceText(request: CatalogRequest, config: ResolvedConfig): string {
         if (!reduce) return "";
         return renderVariant("worker", inputs);
     }
-    return renderVariant(reduce ? "head/reduce" : "head/no_reduce", inputs);
+    return renderVariant(!compacting ? "tools_only" : reduce ? "head/reduce" : "head/no_reduce", inputs);
 }
 
 /**

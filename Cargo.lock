@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "mc-core"
-version = "0.49.26"
+version = "0.49.29"
 dependencies = [
  "cortexkit-cache-core",
  "serde",
@@ -1120,7 +1120,7 @@ dependencies = [
 
 [[package]]
 name = "mc-module"
-version = "0.49.26"
+version = "0.49.29"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "mc-store"
-version = "0.49.26"
+version = "0.49.29"
 dependencies = [
  "cortexkit-cache-core",
  "cortexkit-store",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "mc-tokenizer"
-version = "0.49.26"
+version = "0.49.29"
 dependencies = [
  "base64",
  "rustc-hash",

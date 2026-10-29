@@ -125,6 +125,31 @@ function verifyAssistantText(messages: unknown[]): string | null {
     const start = text.lastIndexOf("<verify>");
     return start >= 0 ? text.slice(start) : text;
 }
+
+function validateVerifyCompletion(
+    messages: unknown[],
+    text: string,
+    expectedIds: ReadonlySet<number>,
+    responseText = text,
+): ParsedVerifyManifest {
+    let parsed: ParsedVerifyManifest;
+    try {
+        parsed = validateVerifyManifest(text, expectedIds);
+    } catch (error) {
+        throw providerOutputFailureFromInvalidManifest(messages, responseText) ?? error;
+    }
+    const ids = [...parsed.verified, ...parsed.updated, ...parsed.archived, ...parsed.skipped].map(
+        (entry) => entry.id,
+    );
+    // A valid manifest covering every requested id once is authoritative even
+    // when tiny. Missing or extra ids cannot rule out a provider-outage fragment.
+    if (ids.length !== expectedIds.size || ids.some((id) => !expectedIds.has(id))) {
+        const providerFailure = providerOutputFailureFromInvalidManifest(messages, responseText);
+        if (providerFailure) throw providerFailure;
+    }
+    return parsed;
+}
+
 // One batch already exhausts the configured model fallback chain. A second
 // identical provider-shaped completion means continuing this run only hammers
 // the same outage, so leave the remaining memories for the scheduler retry.
@@ -434,6 +459,7 @@ async function verifyOneBatch(
     );
     const batchSignal = batchController.signal;
     const tokenBudget = verifyBatchTokenBudget(batch.length, args.tokenBudget);
+    const expectedIds = new Set(batch.map((memory) => memory.id));
     let agentSessionId: string | null = null;
     let hiddenSessionId: string | null = null;
     let promptSettled = false;
@@ -499,24 +525,22 @@ async function verifyOneBatch(
                     onBudgetUpdate({ spent: 0, finalizeFired: false, sessionId });
                 },
                 parse: (text, completion) => {
-                    const providerFailure = providerOutputFailureFromInvalidManifest(
-                        completion.messages ?? [],
-                        text,
-                    );
-                    if (providerFailure) throw providerFailure;
                     const manifest =
                         verifyAssistantText(completion.messages ?? []) ??
                         (text.trim() ? text : null);
                     if (!manifest) throw new Error("verify returned no output");
-                    return validateVerifyManifest(
+                    return validateVerifyCompletion(
+                        completion.messages ?? [],
                         manifest,
-                        new Set(batch.map((memory) => memory.id)),
+                        expectedIds,
+                        text,
                     );
                 },
             });
             recordInvocation(args, startedAt, {
                 status: "completed",
                 messages: run.completion.messages ?? [],
+                tokens: run.completion.usage,
             });
             reportUsage(
                 run.completion.messages ?? [],
@@ -597,15 +621,7 @@ async function verifyOneBatch(
                     }
                     const text = verifyAssistantText(messages);
                     if (!text) throw new Error("verify returned no output");
-                    // A provider outage can arrive as a closed but tiny XML fragment.
-                    // Detect that response shape before accepting a subset, so transport
-                    // garbage cannot bank a verdict simply because its root is complete.
-                    const providerFailure = providerOutputFailureFromInvalidManifest(
-                        messages,
-                        text,
-                    );
-                    if (providerFailure) throw providerFailure;
-                    return validateVerifyManifest(text, new Set(batch.map((memory) => memory.id)));
+                    return validateVerifyCompletion(messages, text, expectedIds);
                 },
             },
         );
@@ -642,6 +658,7 @@ async function verifyOneBatch(
             status: failedInvocationStatus(error),
             error,
             messages,
+            tokens: failedCompletion?.usage,
         });
         if (error instanceof DreamerModuleFailureError || signal.aborted) throw error;
         // A timeout is a budget verdict, not a failure of this run: report it so the
@@ -966,7 +983,12 @@ async function normalizeFiles(args: VerifyArgs, rawFiles: readonly string[]): Pr
 function recordInvocation(
     args: VerifyArgs,
     startedAt: number,
-    params: { status: SubagentInvocationStatus; messages?: unknown[]; error?: unknown },
+    params: {
+        status: SubagentInvocationStatus;
+        messages?: unknown[];
+        tokens?: HiddenCompletion["usage"];
+        error?: unknown;
+    },
 ): void {
     if (!args.parentSessionId) return;
     recordChildInvocation({
@@ -978,6 +1000,10 @@ function recordInvocation(
         startedAt,
         status: params.status,
         messages: params.messages,
+        tokens:
+            args.hiddenCompletionExecutor?.capabilities.harness === "opencode2"
+                ? params.tokens
+                : undefined,
         attemptedModel: args.model,
         configuredModels: args.fallbackModels,
         error: params.error,

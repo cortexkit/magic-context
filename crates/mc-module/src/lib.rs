@@ -447,9 +447,10 @@ use transform::{HistorianDiagnostics, SerializedOutputCache, TransformRequest};
 
 /// The per-route binding: the project, harness, session-slot value, and fallback render
 /// budget frozen at bind. Transform routes carry the durable session in `session`. Facade
-/// routes have two identity modes: the OpenCode Rust route binds its durable session directly,
-/// while the Claude Code wrapper binds an instance token that must be resolved before touching
-/// the store. The project is NEVER taken from a per-pass request field — a crafted request could
+/// routes accept a runner-attested durable session, an observed OpenCode transform session,
+/// or a Claude Code wrapper instance token that must be resolved before its project memory
+/// is read.
+/// The project is NEVER taken from a per-pass request field — a crafted request could
 /// spoof it to read another project's memories — so it lives here, keyed by the route channel
 /// the daemon controls.
 #[derive(Debug, Clone, PartialEq)]
@@ -1520,6 +1521,8 @@ struct FacadeScope {
     /// The conversation is an asynchronous compaction conversation, so its
     /// history tools take the async lane.
     async_conversation: bool,
+    /// Runner-attested tools without Setup have no compaction views to suppress search hits.
+    tools_only: bool,
     memory_enabled: bool,
     /// Why memory is paused for this route, when its project identity is unavailable.
     memory_paused: Option<String>,
@@ -1851,6 +1854,12 @@ struct RuntimeStoreError {
 pub struct McHandler {
     agent_data: Option<agent_data::AgentDataService>,
     app_channels: Mutex<HashMap<u16, app_read::admission::AppCaller>>,
+    // Management routes also handle requests unrelated to app reads. Keep app-read
+    // admission separate so those requests can continue through the usual dispatcher,
+    // while app-data requests must pass the same check as the internal service.
+    management_app_callers: Mutex<
+        HashMap<u16, Result<app_read::admission::AppCaller, app_read::admission::AppRefusal>>,
+    >,
     move_visibility: Arc<agent_data::MoveVisibility>,
     registered_module_id: String,
     store: Arc<OnceLock<Arc<McStore>>>,
@@ -2718,6 +2727,7 @@ impl McHandler {
             agent_data,
             app_channels: Mutex::default(),
             memory_sync: memory_sync::Service::new(connection_file.clone(), module_id.clone()),
+            management_app_callers: Mutex::default(),
             move_visibility,
             registered_module_id: module_id,
             store,
@@ -3171,6 +3181,7 @@ impl McHandler {
             move_visibility,
             registered_module_id: DEFAULT_MODULE_ID.into(),
             app_channels: Mutex::default(),
+            management_app_callers: Mutex::default(),
             store,
             log_directory: None,
             store_open: Arc::new(StoreOpenCoordinator::new()),
@@ -7581,6 +7592,42 @@ impl McHandler {
         )
     }
 
+    fn log_facade_refusal(&self, channel: u16, outcome: &HandlerOutcome) {
+        let code = match outcome {
+            HandlerOutcome::Error { code, .. } | HandlerOutcome::ErrorWithDetail { code, .. } => {
+                Some(code.as_str())
+            }
+            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(bytes)
+                .ok()
+                .filter(|body| body.get("isError") == Some(&Value::Bool(true)))
+                .map(|_| "tool_error"),
+            _ => None,
+        };
+        if let Some(code) = code {
+            let binding = self.facade_binding(channel).ok();
+            let harness = binding
+                .as_ref()
+                .map_or("unbound", |binding| binding.harness.as_str());
+            let attested = binding.as_ref().is_some_and(|binding| {
+                route_targets::SessionRunnerRoute::for_principal(
+                    binding.principal.as_ref(),
+                    &binding.session,
+                )
+                .is_some()
+            });
+            let record_exists = binding
+                .as_ref()
+                .is_some_and(|binding| self.facade_compaction_record_exists(binding));
+            tracing::info!(
+                code = %code,
+                harness = %harness,
+                attested,
+                record_exists,
+                "mc-module: facade refusal"
+            );
+        }
+    }
+
     async fn handle_facade_value(&self, channel: u16, request: Value) -> HandlerOutcome {
         let Some(name) = request.get("name").and_then(Value::as_str) else {
             return unrecognized_request_error(&request);
@@ -7718,6 +7765,24 @@ impl McHandler {
         if !name.starts_with("ctx_") {
             return Ok(());
         }
+        if matches!(name, "ctx_reduce" | "ctx_expand") {
+            if let Ok(binding) = self.facade_binding(channel) {
+                if route_targets::SessionRunnerRoute::for_principal(
+                    binding.principal.as_ref(),
+                    &binding.session,
+                )
+                .is_some()
+                    && self.async_compaction_namespace(&binding, true)?.is_none()
+                {
+                    return Err(HandlerOutcome::Error {
+                        code: "compaction_inactive".into(),
+                        message: format!(
+                            "{name} is unavailable: compaction is not active for this session"
+                        ),
+                    });
+                }
+            }
+        }
         let preset = match request.get("preset") {
             Some(Value::String(name)) => {
                 Some(tool_catalog::Preset::parse(name).ok_or_else(|| {
@@ -7854,23 +7919,22 @@ impl McHandler {
             .map_err(|_| session_unresolved_error())?;
         let bound_session = binding.session.trim();
         if bound_session.is_empty() {
-            return Err(session_unresolved_error());
+            return Err(session_unresolved_for_harness(Some(&binding.harness)));
         }
 
         let route_project_root = binding.project_root.to_string_lossy().to_string();
         let requested_project =
             arguments.and_then(|arguments| non_empty_string_arg(arguments, "memory_project"));
-        // Both OpenCode entry points use server-observed transform state as the session proof.
+        // Unattested OpenCode entry points use server-observed transform state as session proof.
         // Wrapper labels and authority routes alone are insufficient: either could otherwise
         // rebind a known project to a second root without a host session lookup.
         let opencode_harness =
             binding.harness == OPENCODE_HARNESS || binding.harness == "opencode2";
         let transform_session_known =
             self.module_knows_transform_session(bound_session, &binding.project_root);
-        // The bind's (project_root, session) names an asynchronous compaction
-        // conversation whatever harness the bind declares: an MCP facade binds
-        // a runner's conversation by its session alone. More than one match
-        // refuses rather than guessing; none keeps the harness's own path.
+        // An existing async record wins over harness-specific session proof. Attested
+        // routes match by runner and session; unattested routes also need Setup's root.
+        // More than one match refuses rather than guessing.
         let async_key = if binding.harness == session_resolver::RUNNER_BIND_HARNESS
             || self.store.get().is_some()
         {
@@ -7879,10 +7943,21 @@ impl McHandler {
             None
         };
         let async_conversation = async_key.is_some();
+        let runner = route_targets::SessionRunnerRoute::for_principal(
+            binding.principal.as_ref(),
+            &binding.session,
+        );
+        let tools_only = !async_conversation && runner.is_some();
         let conversation_key = if let Some(key) = async_key {
             key
+        } else if tools_only {
+            // First Setup uses generation zero. Notes carry over only when Setup keeps
+            // the same (runner, harness, session); changing the harness names a different
+            // conversation, so use the route's exact harness rather than guessing one.
+            // Attestation, not a caller's harness label, authorizes tools without Setup.
+            providers::Key::new(&binding, &binding.session, &binding.harness)?.async_namespace(0)
         } else if binding.harness == session_resolver::RUNNER_BIND_HARNESS {
-            return Err(session_unresolved_error());
+            return Err(session_unresolved_for_harness(Some(&binding.harness)));
         } else if opencode_harness && transform_session_known {
             bound_session.to_string()
         } else {
@@ -7892,7 +7967,7 @@ impl McHandler {
                 .await
             {
                 Ok(Some(resolved)) => resolved.session_id,
-                Ok(None) => return Err(session_unresolved_error()),
+                Ok(None) => return Err(session_unresolved_for_harness(Some(&binding.harness))),
                 Err(SessionResolveError::Timeout) => {
                     return Err(HandlerOutcome::Error {
                         code: "session_resolve_timeout".to_string(),
@@ -7956,6 +8031,7 @@ impl McHandler {
             route_project_root,
             conversation_key,
             async_conversation,
+            tools_only,
             memory_enabled: binding.config.memory_enabled && memory_paused.is_none(),
             memory_paused,
         })
@@ -8698,11 +8774,15 @@ impl McHandler {
             Ok(membership) => membership,
             Err(error) => return tool_error_result(format!("Error: {error}")),
         };
-        let visible_memory_ids = store
-            .fully_visible_memory_ids(conversation_key)
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let visible_memory_ids = if facade_scope.tools_only {
+            BTreeSet::new()
+        } else {
+            store
+                .fully_visible_memory_ids(conversation_key)
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        };
 
         if include_memories {
             if let Some(ids) = parse_search_memory_ids(query) {
@@ -8726,6 +8806,7 @@ impl McHandler {
                                 &outcome.diagnostics,
                                 conversation_key,
                                 workspace_membership.as_ref(),
+                                !facade_scope.tools_only,
                             ),
                             false,
                         )
@@ -8758,6 +8839,7 @@ impl McHandler {
                     &outcome.diagnostics,
                     conversation_key,
                     workspace_membership.as_ref(),
+                    !facade_scope.tools_only,
                 ),
                 false,
             ),
@@ -9331,6 +9413,10 @@ impl ModuleHandler for McHandler {
             .lock()
             .expect("app channels")
             .remove(&req.handle.channel);
+        self.management_app_callers
+            .lock()
+            .expect("management app callers")
+            .remove(&req.handle.channel);
         if let Some(service) = &self.agent_data {
             service
                 .channels
@@ -9351,8 +9437,22 @@ impl ModuleHandler for McHandler {
                         .insert(req.handle.channel, caller);
                     subc_client_rs::BindDecision::accept()
                 }
-                Err(refusal) => refusal,
+                Err(refusal) => refusal.bind_decision(),
             };
+        }
+        if matches!(
+            &req.target,
+            subc_protocol::RouteTarget::ManagementSurface { .. }
+        ) {
+            let allow_direct = !matches!(req.principal, Some(subc_protocol::Principal::Direct))
+                || config::user_app_read_allow_direct();
+            self.management_app_callers
+                .lock()
+                .expect("management app callers")
+                .insert(
+                    req.handle.channel,
+                    app_read::admission::admit(req, &self.registered_module_id, allow_direct),
+                );
         }
         if let subc_protocol::RouteTarget::InternalService {
             module_id,
@@ -9499,6 +9599,10 @@ impl ModuleHandler for McHandler {
             .lock()
             .expect("app channels")
             .remove(&handle.channel);
+        self.management_app_callers
+            .lock()
+            .expect("management app callers")
+            .remove(&handle.channel);
         if let Some(service) = &self.agent_data {
             service
                 .channels
@@ -9516,6 +9620,15 @@ impl ModuleHandler for McHandler {
 
 impl McHandler {
     async fn handle_channel(&self, channel: u16, body: Vec<u8>) -> HandlerOutcome {
+        self.handle_channel_at(channel, body, now_ms()).await
+    }
+
+    async fn handle_channel_at(
+        &self,
+        channel: u16,
+        body: Vec<u8>,
+        as_of_ms: i64,
+    ) -> HandlerOutcome {
         let app_caller = self
             .app_channels
             .lock()
@@ -9523,23 +9636,7 @@ impl McHandler {
             .get(&channel)
             .cloned();
         if let Some(caller) = app_caller {
-            let allow_direct = !caller.is_direct() || config::user_app_read_allow_direct();
-            let context = app_read::AppReadContext::from_parts(
-                self.store.get().cloned(),
-                Arc::clone(&self.config),
-                {
-                    let roots = self
-                        .active_project_roots
-                        .lock()
-                        .expect("active project roots");
-                    let mut paths: Vec<_> = roots.values().cloned().collect();
-                    paths.sort();
-                    paths.dedup();
-                    paths
-                },
-                now_ms(),
-            );
-            return app_read::handle(&caller, allow_direct, &body, &context);
+            return self.handle_app_read(&caller, &body, as_of_ms);
         }
         // A flow-scoped route never takes the agent-data lane: it falls through to
         // the dispatcher, whose flow fence admits only the flow ops.
@@ -9594,6 +9691,26 @@ impl McHandler {
         if request
             .get("method")
             .and_then(Value::as_str)
+            .is_some_and(|method| app_read::MANAGEMENT_METHODS.contains(&method))
+        {
+            let admission = self
+                .management_app_callers
+                .lock()
+                .expect("management app callers")
+                .get(&channel)
+                .cloned();
+            if let Some(admission) = admission {
+                return match admission {
+                    Ok(caller) => app_read::envelope::wrap_management_result(
+                        self.handle_app_read(&caller, &body, as_of_ms),
+                    ),
+                    Err(refusal) => refusal.outcome(),
+                };
+            }
+        }
+        if request
+            .get("method")
+            .and_then(Value::as_str)
             .is_some_and(|method| app_read::APP_READ_METHODS.contains(&method))
         {
             return HandlerOutcome::Error {
@@ -9612,6 +9729,31 @@ impl McHandler {
             };
         }
         self.dispatch_request(channel, request).await
+    }
+
+    fn handle_app_read(
+        &self,
+        caller: &app_read::admission::AppCaller,
+        body: &[u8],
+        as_of_ms: i64,
+    ) -> HandlerOutcome {
+        let allow_direct = !caller.is_direct() || config::user_app_read_allow_direct();
+        let context = app_read::AppReadContext::from_parts(
+            self.store.get().cloned(),
+            Arc::clone(&self.config),
+            {
+                let roots = self
+                    .active_project_roots
+                    .lock()
+                    .expect("active project roots");
+                let mut paths: Vec<_> = roots.values().cloned().collect();
+                paths.sort();
+                paths.dedup();
+                paths
+            },
+            as_of_ms,
+        );
+        app_read::handle(caller, allow_direct, body, &context)
     }
 }
 
@@ -9665,6 +9807,22 @@ impl McHandler {
     }
 
     async fn dispatch_request(&self, channel: u16, request: Value) -> HandlerOutcome {
+        let facade = request
+            .get("method")
+            .and_then(Value::as_str)
+            .or_else(|| request.get("kind").and_then(Value::as_str))
+            .is_none()
+            && request.get("name").is_some()
+            && request.get("arguments").is_some();
+        let outcome = self.dispatch_request_inner(channel, request).await;
+        if facade {
+            // Include refusals from the shared flow, move and store gates, not just tools.
+            self.log_facade_refusal(channel, &outcome);
+        }
+        outcome
+    }
+
+    async fn dispatch_request_inner(&self, channel: u16, request: Value) -> HandlerOutcome {
         let method = request
             .get("method")
             .and_then(Value::as_str)
@@ -10346,8 +10504,18 @@ fn tool_error_result(message: impl Into<String>) -> HandlerOutcome {
 fn session_unresolved_error() -> HandlerOutcome {
     HandlerOutcome::Error {
         code: "session_unresolved".to_string(),
-        message: SESSION_UNRESOLVED_MESSAGE.to_string(),
+        message: "session unresolved; ctx_* requires a resolved conversation or a runner-attested session route".into(),
     }
+}
+
+fn session_unresolved_for_harness(harness: Option<&str>) -> HandlerOutcome {
+    if harness == Some("claude-code") {
+        return HandlerOutcome::Error {
+            code: "session_unresolved".into(),
+            message: SESSION_UNRESOLVED_MESSAGE.into(),
+        };
+    }
+    session_unresolved_error()
 }
 
 fn capability_refusal_message(domain: &str) -> &'static str {
@@ -10752,6 +10920,7 @@ fn render_facade_search_results(
     diagnostics: &memory_tool::MemorySearchDiagnostics,
     current_session_id: &str,
     workspace_membership: Option<&mc_store::WorkspaceMembership>,
+    history_active: bool,
 ) -> String {
     let visible_ids = &diagnostics.suppressed_visible_memory_ids;
     if results.is_empty() {
@@ -10830,23 +10999,27 @@ fn render_facade_search_results(
             join_i64s(visible_ids)
         ));
     }
-    if results.iter().any(|result| {
-        matches!(
-            result.source_kind,
-            memory_tool::MemorySearchSourceKind::CompartmentTitle
-                | memory_tool::MemorySearchSourceKind::CompartmentBody
-        )
-    }) {
+    if history_active
+        && results.iter().any(|result| {
+            matches!(
+                result.source_kind,
+                memory_tool::MemorySearchSourceKind::CompartmentTitle
+                    | memory_tool::MemorySearchSourceKind::CompartmentBody
+            )
+        })
+    {
         body.push(
             "Use ctx_expand(start, end) with the range from any message result above to read the full conversation context."
                 .to_string(),
         );
     }
-    if results.iter().any(|result| {
-        result.source_kind == memory_tool::MemorySearchSourceKind::Note
-            && result.note_anchor_ordinal.is_some()
-            && result.note_session_id.as_deref() == Some(current_session_id)
-    }) {
+    if history_active
+        && results.iter().any(|result| {
+            result.source_kind == memory_tool::MemorySearchSourceKind::Note
+                && result.note_anchor_ordinal.is_some()
+                && result.note_session_id.as_deref() == Some(current_session_id)
+        })
+    {
         body.push(
             "Use ctx_expand(start=N-10, end=N) around any note @msg anchor above to read the surrounding conversation context."
                 .to_string(),
@@ -12707,6 +12880,10 @@ pub fn manifest_with_route_targets_and_smart_notes(
     // project, whereas MC uses one machine-wide store with project-keyed rows.
     let mut capabilities = vec![
         cortexkit_role_compaction_provider::PROVIDES.to_string(),
+        // Core discovers tool providers from the daemon's module catalog by this
+        // claim, before it calls role.describe. Without it, core never composes
+        // Magic Context into a worker plan: no tools and no compaction.
+        cortexkit_role_tool_provider::PROVIDES.to_string(),
         MCP_CONVERSATION_BINDING_V1.to_string(),
         // basal reaches `subagent_invocations.read` over the calling flow's own
         // scoped route, which the daemon opens only to a module declaring this.
@@ -12722,7 +12899,19 @@ pub fn manifest_with_route_targets_and_smart_notes(
             emits_push: false,
             sub_supervises: false,
         },
-        subagent_invocations_read::management_role(),
+        {
+            let mut role = subagent_invocations_read::management_role();
+            if let ProviderRole::ManagementSurface { operations, .. } = &mut role {
+                operations.extend(app_read::MANAGEMENT_METHODS.iter().map(|method| {
+                    subc_protocol::manifest::ManagementOperation {
+                        name: (*method).into(),
+                        kind: subc_protocol::manifest::ManagementOperationKind::Query,
+                        description: None,
+                    }
+                }));
+            }
+            role
+        },
         ProviderRole::InternalService {
             service_id: app_read::SERVICE_ID.into(),
             transport: subc_protocol::manifest::InternalTransport::Bulk,
@@ -14755,6 +14944,26 @@ mod tests {
             "bindings must stay absent: the store is machine-scoped"
         );
         let wire = serde_json::to_value(&m).expect("manifest serializes");
+        let management = wire["provides"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|role| role["role"] == "management_surface")
+            .expect("HELLO management surface");
+        assert_eq!(
+            management["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|op| (op["name"].as_str().unwrap(), op["kind"].as_str().unwrap()))
+                .collect::<Vec<_>>(),
+            [
+                ("subagent_invocations.read", "query"),
+                ("session_data.read", "query"),
+                ("context.cache_why", "query"),
+                ("context.search", "query")
+            ]
+        );
         assert_eq!(wire["trust_tier"], serde_json::json!("first_party"));
         assert!(
             wire.get("bindings").is_none() || wire["bindings"].is_null(),
@@ -14801,6 +15010,7 @@ mod tests {
         );
         let mut expected_capabilities = vec![
             "compaction-provider/v1".to_string(),
+            "tool-provider/v1".to_string(),
             "mcp-conversation-binding/v1".to_string(),
             "flow-scopes/v1".to_string(),
         ];

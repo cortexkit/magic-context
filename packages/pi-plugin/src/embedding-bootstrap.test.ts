@@ -31,6 +31,48 @@ import {
 import { createTestDb } from "./test-utils.test";
 
 describe("ensureProjectRegisteredFromPiDirectory", () => {
+	it("keeps memory on at first startup after recovering an out-of-range injection budget", async () => {
+		const db = createTestDb();
+		const directory = createTestTempDir("pi-budget-bootstrap-").dir;
+		const home = createTestTempDir("pi-budget-home-").dir;
+		const previous = {
+			HOME: process.env.HOME,
+			XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+		};
+		process.env.HOME = home;
+		process.env.XDG_CONFIG_HOME = path.join(home, ".config");
+		_resetProjectEmbeddingRegistryForTests();
+		try {
+			const configDir = path.join(home, ".config", "cortexkit");
+			await fs.mkdir(configDir, { recursive: true });
+			await fs.writeFile(
+				path.join(configDir, "magic-context.json"),
+				JSON.stringify({
+					embedding: {
+						provider: "openai-compatible",
+						model: "fixture",
+						endpoint: "http://127.0.0.1:9/v1",
+					},
+					memory: { injection_budget_tokens: 20001 },
+				}),
+			);
+			await ensureProjectRegisteredFromPiDirectory(directory, db);
+			const snapshot = getProjectEmbeddingSnapshot(
+				resolveProjectIdentity(directory),
+			);
+			expect(snapshot?.features.memoryEnabled).toBe(true);
+			expect(snapshot?.enabled).toBe(true);
+			expect(snapshot?.runtimeFingerprint).not.toStartWith("observation:");
+		} finally {
+			unregisterPiProjectEmbeddings(db);
+			_resetProjectEmbeddingRegistryForTests();
+			closeQuietly(db);
+			for (const [key, value] of Object.entries(previous)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
 	it("resumes project repair on the cached Pi registration path", async () => {
 		const db = createTestDb();
 		const directory = createTestTempDir("pi-embedding-bootstrap-").dir;

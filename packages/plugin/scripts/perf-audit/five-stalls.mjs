@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { __test as piTest } from "../../../pi-plugin/src/context-handler.ts";
@@ -18,14 +18,11 @@ import {
     LEGACY_MARKER_LINEAGE_SQL,
     prepareCompactionMarkerCandidates,
 } from "../../src/features/magic-context/compaction-marker.ts";
-import { sweepOrphanedOpenCodeMessageIndexes } from "../../src/features/magic-context/message-index.ts";
-import { sweepOrphanedOpenCodeMessageIndexesOffThread } from "../../src/features/magic-context/message-index-async.ts";
 import {
     findPiFallbackToolOwnerTags,
     getAllStatusTagTokenTotalsFlat,
 } from "../../src/features/magic-context/storage-tags.ts";
 import { setHarness } from "../../src/shared/harness.ts";
-import { Database } from "../../src/shared/sqlite.ts";
 
 const dir = join(tmpdir(), "magic-context", `five-stalls-${process.pid}`);
 mkdirSync(dir, { recursive: true });
@@ -173,30 +170,6 @@ try {
         ),
         oldHeaders,
     );
-    context.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    copyFileSync(join(dir, "context.db"), join(dir, "orphan-control.db"));
-    const control = new Database(join(dir, "orphan-control.db"));
-    const source = new Database(join(dir, "empty-host.db"));
-    source.exec("CREATE TABLE session(id TEXT PRIMARY KEY)");
-    source.close();
-    const open = () => new Database(join(dir, "empty-host.db"), { readonly: true });
-    const options = { now: 2000000000000, cooldownMs: 0 };
-    try {
-        const old = await heartbeat("orphan sweep before main-thread", () =>
-            sweepOrphanedOpenCodeMessageIndexes(control, open, options),
-        );
-        const current = await heartbeat("orphan sweep after off-thread", () =>
-            sweepOrphanedOpenCodeMessageIndexesOffThread(context, open, options),
-        );
-        assert.deepEqual(current, old);
-        assert.deepEqual(
-            context.prepare("SELECT * FROM message_history_orphan_sweep").all(),
-            control.prepare("SELECT * FROM message_history_orphan_sweep").all(),
-        );
-        assert.equal(context.prepare("SELECT count(*) AS n FROM tags").get().n, 0);
-    } finally {
-        control.close();
-    }
     console.log(JSON.stringify({ ...results, differential_checks: "all passed" }, null, 2));
 } finally {
     closeCompactionMarkerDb();

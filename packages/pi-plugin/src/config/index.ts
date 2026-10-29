@@ -8,6 +8,7 @@ import {
 import "@magic-context/core/config/prune-config-leaf";
 import { existsSync } from "node:fs";
 import { migrateLegacyAgentEnabledInMemory } from "@magic-context/core/config/agent-disable";
+import { applyCommitRetentionRecovery } from "@magic-context/core/config/commit-retention-recovery";
 import {
 	warnDeprecatedMuralModel,
 	warnDeprecatedWindowOverlayPath,
@@ -79,6 +80,7 @@ export interface LoadPiConfigResultDetailed extends LoadPiConfigResult {
 		message: string;
 	}>;
 	recoveredTopLevelKeys: string[];
+	recoveredFieldPaths: string[];
 }
 
 interface LoadedConfigFile {
@@ -293,6 +295,7 @@ function mergeRawConfigs(
 function parsePiConfig(
 	rawConfig: Record<string, unknown>,
 	recoveredTopLevelKeys: string[] = [],
+	recoveredFieldPaths: string[] = [],
 ): {
 	config: MagicContextConfig;
 	warnings: string[];
@@ -396,6 +399,9 @@ function parsePiConfig(
 			}
 			if (prunedLeaves.length === issuePaths.length) {
 				patched[key] = prunedBlock;
+				recoveredFieldPaths.push(
+					...prunedLeaves.map((leaf) => `${key}.${leaf}`),
+				);
 				warnings.push(
 					`"${key}": invalid nested field(s) ${prunedLeaves.map((leaf) => `"${key}.${leaf}"`).join(", ")}, using defaults for those.`,
 				);
@@ -405,6 +411,7 @@ function parsePiConfig(
 
 		// Root-level or unreachable agent errors cannot be repaired safely because
 		// guessing a model configuration could select an expensive unintended model.
+		recoveredFieldPaths.push(key);
 		if (isAgentConfig) {
 			delete patched[key];
 			warnings.push(
@@ -442,6 +449,13 @@ function parsePiConfig(
 	}
 
 	warnings.push("Config recovery failed, using all defaults.");
+	recoveredFieldPaths.push(
+		"embedding",
+		"memory",
+		"subc",
+		"shadow_embedding",
+		"allow_home_project",
+	);
 	return { config: defaults, warnings };
 }
 
@@ -648,6 +662,7 @@ export function loadPiConfigDetailed(
 	let rawConfig = trustedProfiledRaw;
 	const trustedBaseConfig = parsePiConfig(trustedProfiledRaw).config;
 	let projectRestoredTopLevelKeys: string[] = [];
+	let projectRestoredFieldPaths: string[] = [];
 	if (projectLayer) {
 		rawConfig = mergeRawConfigs(rawConfig, profileResolution.projectBase);
 		for (const warning of dropInheritedEmbeddingKeyOnRedirect(
@@ -674,6 +689,7 @@ export function loadPiConfigDetailed(
 			warnings.push(`[project config] ${warning}`);
 		}
 		projectRestoredTopLevelKeys = restoredOverProject.restoredTopLevelKeys;
+		projectRestoredFieldPaths = restoredOverProject.restoredFieldPaths;
 	}
 
 	const hasDeprecatedProtectedTags =
@@ -681,8 +697,14 @@ export function loadPiConfigDetailed(
 		Object.hasOwn(projectRaw, "protected_tags") ||
 		Object.hasOwn(rawConfig, "protected_tags");
 	const recoveredTopLevelKeys: string[] = [];
+	const recoveredFieldPaths: string[] = [];
 	const cacheTtlConfigured = Object.hasOwn(rawConfig, "cache_ttl");
-	const parsed = parsePiConfig(rawConfig, recoveredTopLevelKeys);
+	const parsed = parsePiConfig(
+		rawConfig,
+		recoveredTopLevelKeys,
+		recoveredFieldPaths,
+	);
+	recoveredFieldPaths.push(...projectRestoredFieldPaths);
 	// This runtime-only flag records whether cache_ttl was present; do not expose it as a user setting.
 	Object.defineProperty(parsed.config, "cacheTtlConfigured", {
 		value: cacheTtlConfigured,
@@ -703,6 +725,11 @@ export function loadPiConfigDetailed(
 	if (applyRuntimeGlobals) {
 		setOutputReserveConfig(parsed.config.output_reserve);
 	}
+	applyCommitRetentionRecovery(
+		parsed.config,
+		recoveredFieldPaths,
+		parsed.warnings,
+	);
 	warnings.push(
 		...parsed.warnings.map((warning) => `[merged config] ${warning}`),
 	);
@@ -747,6 +774,7 @@ export function loadPiConfigDetailed(
 		sources,
 		substitutionFailures,
 		recoveredTopLevelKeys,
+		recoveredFieldPaths,
 		configParseFailures,
 		warningDetails,
 		cacheTtlConfigured,

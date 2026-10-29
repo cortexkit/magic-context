@@ -1,4 +1,5 @@
 import { log } from "../shared/logger";
+import { copyCommitRetentionRecovery } from "./commit-retention-recovery";
 import { loadPluginConfigDetailed, type MagicContextPluginConfig } from "./index";
 import { LiveConfigReader } from "./live-snapshot";
 import { LIVE_RELOAD_CONFIG_PATHS, type MagicContextConfig } from "./schema/magic-context";
@@ -32,7 +33,13 @@ export function sampleLiveConfig<T extends MagicContextConfig>(boot: T, fresh: T
         const leaf = parts.at(-1);
         if (leaf !== undefined) target[leaf] = value;
     }
-    return result as T;
+    const sampled = result as T;
+    const freshCommitIndexing = fresh.memory?.git_commit_indexing;
+    const sampledCommitIndexing = sampled.memory?.git_commit_indexing;
+    if (freshCommitIndexing && sampledCommitIndexing) {
+        copyCommitRetentionRecovery(freshCommitIndexing, sampledCommitIndexing);
+    }
+    return sampled;
 }
 
 function removeLeaf(root: Record<string, unknown>, parts: string[]): void {

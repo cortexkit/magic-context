@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 
 import { SMART_NOTE_COMPILER_AGENT } from "../../../agents/smart-note-compiler";
 import { createChildSessionWithFence } from "../../../hooks/magic-context/child-session-spawn";
-import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-types";
+import type {
+    HiddenCompletion,
+    HiddenCompletionExecutor,
+} from "../../../hooks/magic-context/compartment-runner-types";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
@@ -105,6 +108,7 @@ Remember: output only the JSON object described by the system prompt.`;
     let childSessionId: string | null = null;
     let promptSettled = false;
     let invocationRecorded = false;
+    let completionUsage: HiddenCompletion["usage"] | undefined;
     const recordInvocation = (params: {
         status: "completed" | "failed" | "aborted";
         messages?: unknown[];
@@ -124,6 +128,10 @@ Remember: output only the JSON object described by the system prompt.`;
             startedAt,
             status: params.status,
             messages: params.messages,
+            tokens:
+                args.hiddenCompletionExecutor?.capabilities.harness === "opencode2"
+                    ? completionUsage
+                    : undefined,
             attemptedModel: args.model,
             configuredModels: args.fallbackModels,
             error: params.error,
@@ -150,11 +158,15 @@ Remember: output only the JSON object described by the system prompt.`;
                 timeoutMs: remainingMs,
                 signal: args.signal,
                 metadata: { task: "evaluate-smart-notes" },
+                onFailureOutput: (completion) => {
+                    completionUsage = completion.usage;
+                },
                 parse: parseCompilerOutput,
             });
             promptSettled = true;
             response = carried.validated;
             outputMessages = carried.completion.messages;
+            completionUsage = carried.completion.usage;
         } else {
             const client = args.client;
             if (!client) {

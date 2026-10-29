@@ -13,6 +13,7 @@ import {
 } from "../../../config/schema/magic-context";
 import { createChildSessionWithFence } from "../../../hooks/magic-context/child-session-spawn";
 import {
+    type HiddenCompletion,
     type HiddenCompletionExecutor,
     HiddenCompletionRefusal,
     type HiddenRunHandle,
@@ -49,7 +50,11 @@ import {
 
 import { runCompressCues } from "../mural/compress-cues";
 import { detectOverflow } from "../overflow-detection";
-import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
+import {
+    emptyTokenTotals,
+    failedInvocationStatus,
+    recordChildInvocation,
+} from "../subagent-token-capture";
 import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { runClassify } from "./classify";
 import {
@@ -271,6 +276,21 @@ function classifyFailure(error: unknown): { transient: boolean; brief: string } 
             combined,
         );
     return { transient, brief };
+}
+
+function sumCompletionUsages(usages: HiddenCompletion["usage"][]): HiddenCompletion["usage"] {
+    return usages.reduce<HiddenCompletion["usage"]>(
+        (total, usage) => ({
+            input: total.input + usage.input,
+            output: total.output + usage.output,
+            cacheRead: total.cacheRead + usage.cacheRead,
+            cacheWrite: total.cacheWrite + usage.cacheWrite,
+            ...(total.reasoning !== undefined || usage.reasoning !== undefined
+                ? { reasoning: (total.reasoning ?? 0) + (usage.reasoning ?? 0) }
+                : {}),
+        }),
+        emptyTokenTotals(),
+    );
 }
 
 /** Ids present in `afterIds` but not in `beforeIds` (set difference). */
@@ -1499,6 +1519,7 @@ async function runRetrospectiveTask(
 
     let childSessionId: string | null = null;
     let hiddenHandle: HiddenRunHandle | null = null;
+    const hiddenUsages: HiddenCompletion["usage"][] = [];
     let promptSettled = false;
     let invocationRecorded = false;
     const recordInvocation = (
@@ -1517,6 +1538,11 @@ async function runRetrospectiveTask(
             startedAt: helpers.invocationStartedAt,
             status,
             messages,
+            tokens:
+                deps.hiddenCompletionExecutor?.capabilities.harness === "opencode2" &&
+                hiddenUsages.length
+                    ? sumCompletionUsages(hiddenUsages)
+                    : undefined,
             attemptedModel: config.model,
             configuredModels: config.fallbackModels,
             error,
@@ -1631,6 +1657,7 @@ async function runRetrospectiveTask(
                 },
             );
             promptSettled = true;
+            if (hiddenHandle) hiddenUsages.push((run.output as HiddenCompletion).usage);
             const output: unknown[] = hiddenHandle
                 ? ((run.output as { messages?: unknown[] }).messages ?? [])
                 : (run.output as unknown[]);
@@ -1871,6 +1898,7 @@ async function runAgenticTask(
     let childSessionId: string | null = null;
     let promptSettled = false;
     let expiredArchived = 0;
+    const hiddenUsages: HiddenCompletion["usage"][] = [];
     let invocationRecorded = false;
     const recordInvocation = (
         status: ReturnType<typeof failedInvocationStatus> | "completed",
@@ -1888,6 +1916,11 @@ async function runAgenticTask(
             startedAt: invocationStartedAt,
             status,
             messages,
+            tokens:
+                deps.hiddenCompletionExecutor?.capabilities.harness === "opencode2" &&
+                hiddenUsages.length
+                    ? sumCompletionUsages(hiddenUsages)
+                    : undefined,
             attemptedModel: config.model,
             configuredModels: config.fallbackModels,
             error,
@@ -2050,6 +2083,7 @@ async function runAgenticTask(
                     },
                 });
                 childSessionId = hidden.childSessionId;
+                hiddenUsages.push(hidden.completion.usage);
                 run = { output: hidden.completion.messages ?? [], validated: hidden.validated };
                 promptSettled = true;
             } else {

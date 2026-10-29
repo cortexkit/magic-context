@@ -155,6 +155,8 @@ export interface ProjectEmbeddingRegistrationSnapshot {
     runtimeFingerprint: string;
     generation: number;
     features: EmbeddingFeatures;
+    /** Short user-facing cause when an untrusted config forced observation mode. */
+    memoryDisabledReason?: string;
     /** Memory embeddings are on: a provider is configured and `memory.enabled`
      *  is not false. Gates only memory rows, never session history. */
     enabled: boolean;
@@ -174,6 +176,7 @@ export interface ProjectEmbeddingRegistrationSnapshot {
 }
 
 interface ProjectEmbeddingRegistration {
+    memoryDisabledReason?: string;
     projectIdentity: string;
     sourceDirectory: string;
     config: EmbeddingConfig;
@@ -854,6 +857,9 @@ function snapshotFor(
         runtimeFingerprint: registration.runtimeFingerprint,
         generation: registration.generation,
         features: { ...registration.features },
+        ...(registration.memoryDisabledReason
+            ? { memoryDisabledReason: registration.memoryDisabledReason }
+            : {}),
         enabled,
         historyEnabled,
         gitCommitEnabled,
@@ -2460,6 +2466,7 @@ export function registerProjectInObservationMode(
     sourceDirectory: string,
     failedConfig: EmbeddingConfig,
     failureSummary: string,
+    memoryDisabledReason?: string,
 ): ProjectEmbeddingRegistrationSnapshot {
     void db;
     const prior = projectRegistrations.get(projectIdentity);
@@ -2480,6 +2487,7 @@ export function registerProjectInObservationMode(
         modelId: "off",
         chunkModelId: "off",
         observationMode: true,
+        memoryDisabledReason,
     };
 
     projectRegistrations.set(projectIdentity, registration);

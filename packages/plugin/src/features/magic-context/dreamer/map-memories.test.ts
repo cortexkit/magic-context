@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-types";
 import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
@@ -18,7 +19,7 @@ import {
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { getSubagentInvocations } from "../storage-subagent-invocations";
-import { acquireLease } from "./lease";
+import { acquireLease, renewLease } from "./lease";
 import {
     applyBatchMappings,
     computeMapBatchSliceMs,
@@ -149,6 +150,50 @@ function timeoutMapClient(
     };
 }
 
+/** Model elapsed time without waiting minutes for the real batch timers. */
+function timedMapExecutor(
+    args: MapMemoriesArgs,
+    advanceClock: (elapsedMs: number) => void,
+    durationFor: (ids: number[]) => number,
+    partialFor: (ids: number[]) => number[] = () => [],
+) {
+    const calls: Array<{ ids: number[]; sliceMs: number }> = [];
+    let sliceMs = 0;
+    let text = "";
+    const executor: HiddenCompletionExecutor = {
+        capabilities: { tools: true, harness: "pi" },
+        open: async (run) => {
+            sliceMs = run.timeoutMs;
+            return { id: `timed-map-${calls.length}` };
+        },
+        attempt: async (_handle, request) => {
+            const prompt = request.body.parts.map((part) => part.text ?? "").join("");
+            const ids = [...prompt.matchAll(/^\[(\d+)\]/gm)].map((match) => Number(match[1]));
+            calls.push({ ids, sliceMs });
+            const durationMs = durationFor(ids);
+            const timedOut = durationMs > sliceMs;
+            const committedIds = timedOut ? partialFor(ids) : ids;
+            text = `<mappings>${committedIds.map((id) => `<memory id="${id}" independent="true"/>`).join("")}${timedOut ? "" : "</mappings>"}`;
+            let elapsedMs = Math.min(durationMs, sliceMs);
+            // Simulate the heartbeat that would renew the lease during real work.
+            while (elapsedMs > 0) {
+                const step = Math.min(60_000, elapsedMs);
+                advanceClock(step);
+                elapsedMs -= step;
+                expect(renewLease(args.db, args.holderId, args.leaseKey)).toBe(true);
+            }
+            if (timedOut) throw new Error(`prompt timed out after ${sliceMs}ms`);
+        },
+        collect: async () => ({
+            text,
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            lengthCapped: false,
+        }),
+        close: async () => {},
+    };
+    return { executor, calls };
+}
+
 describe("mapMemories disposition", () => {
     test("banks a completed batch and reports the deadline remainder", async () => {
         const db = freshDb();
@@ -265,12 +310,155 @@ describe("mapMemories disposition", () => {
         }
     });
 
-    test("two consecutive batch timeouts trip the starvation circuit breaker", async () => {
+    test("size-dependent mapper drains the backlog by splitting timed-out batches", async () => {
+        const db = freshDb();
+        let now = Date.now();
+        const clock = spyOn(Date, "now").mockImplementation(() => now);
+        const logs = spyOn(logger, "log").mockImplementation(() => {});
+        try {
+            const projectIdentity = "git:map-size-dependent-timeout";
+            const dir = tempProject();
+            const ids = Array.from(
+                { length: 26 },
+                (_, index) =>
+                    insertMemory(db, {
+                        projectPath: projectIdentity,
+                        category: "ARCHITECTURE",
+                        content: `Batch-size mapping fact ${index}.`,
+                        sourceSessionId: "ses",
+                    }).id,
+            );
+            const args = mapArgs(db, dir, projectIdentity);
+            args.deadline = now + 7 * MAP_BATCH_FLOOR_MS;
+            // Large batches exhaust their slice; small batches avoid that investigation cost.
+            const mapper = timedMapExecutor(
+                args,
+                (elapsedMs) => (now += elapsedMs),
+                (batch) => (batch.length === 5 ? 300_000 : batch.length * 1_000),
+            );
+            args.hiddenCompletionExecutor = mapper.executor;
+
+            const result = await mapMemories(args);
+
+            expect(result).toMatchObject({ independent: 26, remaining: 0, complete: true });
+            expect(result.stopReason).toBeUndefined();
+            expect(mapper.calls.map((call) => call.ids.length)).toEqual([
+                ...Array.from({ length: 5 }, () => [5, 2, 2, 1]).flat(),
+                1,
+            ]);
+            expect(mapper.calls[0]?.sliceMs).toBe(280_000);
+            expect(mapper.calls[1]?.sliceMs).toBe(MAP_BATCH_FLOOR_MS);
+            expect(now).toBeLessThanOrEqual(args.deadline);
+            expect(getUnmappedMemoryIds(db, ids)).toEqual([]);
+            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toEqual([]);
+            const splitLogs = logs.mock.calls
+                .map(([message]) => message)
+                .filter((message) => message.includes("splitting"));
+            expect(splitLogs).toHaveLength(5);
+            expect(splitLogs[0]).toContain(ids.slice(0, 5).join(","));
+            expect(splitLogs[0]).toContain("2+2+1");
+            expect(splitLogs[0]).toContain("timeout");
+        } finally {
+            logs.mockRestore();
+            clock.mockRestore();
+            closeQuietly(db);
+        }
+    });
+
+    test("a timed-out partial commit splits only unmapped memories", async () => {
+        const db = freshDb();
+        try {
+            const projectIdentity = "git:map-partial-timeout-split";
+            const dir = tempProject();
+            const ids = Array.from(
+                { length: 5 },
+                (_, index) =>
+                    insertMemory(db, {
+                        projectPath: projectIdentity,
+                        category: "ARCHITECTURE",
+                        content: `Partial timeout mapping fact ${index}.`,
+                        sourceSessionId: "ses",
+                    }).id,
+            );
+            const args = mapArgs(db, dir, projectIdentity);
+            const orderedIds = selectMapMemoryInputs(db, projectIdentity, dir).map(
+                (memory) => memory.id,
+            );
+            const mapper = timedMapExecutor(
+                args,
+                () => {},
+                (batch) => (batch.length === 5 ? 1_000_000 : 1_000),
+                (batch) => batch.slice(0, 2),
+            );
+            args.hiddenCompletionExecutor = mapper.executor;
+
+            const result = await mapMemories(args);
+
+            expect(mapper.calls.map((call) => call.ids)).toEqual([
+                orderedIds,
+                orderedIds.slice(2, 4),
+                orderedIds.slice(4),
+            ]);
+            expect(result).toMatchObject({ independent: 5, remaining: 0, complete: true });
+            expect(getMemoryVerifications(db, ids).size).toBe(5);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("timeout splitting stops before a child cannot fit its floor in the task deadline", async () => {
+        const db = freshDb();
+        let now = Date.now();
+        const clock = spyOn(Date, "now").mockImplementation(() => now);
+        try {
+            const projectIdentity = "git:map-split-deadline";
+            const dir = tempProject();
+            for (let index = 0; index < 11; index += 1) {
+                insertMemory(db, {
+                    projectPath: projectIdentity,
+                    category: "ARCHITECTURE",
+                    content: `Split deadline mapping fact ${index}.`,
+                    sourceSessionId: "ses",
+                });
+            }
+            const args = mapArgs(db, dir, projectIdentity);
+            const ids = selectMapMemoryInputs(db, projectIdentity, dir).map((memory) => memory.id);
+            args.deadline = now + 2 * MAP_BATCH_FLOOR_MS;
+            const mapper = timedMapExecutor(
+                args,
+                (elapsedMs) => (now += elapsedMs),
+                (batch) => (batch.length > 2 ? 1_000_000 : 60_000),
+            );
+            args.hiddenCompletionExecutor = mapper.executor;
+
+            const result = await mapMemories(args);
+
+            expect(mapper.calls.map((call) => call.ids.length)).toEqual([5, 2]);
+            expect(mapper.calls.map((call) => call.sliceMs)).toEqual([
+                MAP_BATCH_FLOOR_MS,
+                MAP_BATCH_FLOOR_MS,
+            ]);
+            expect(result).toMatchObject({
+                independent: 2,
+                remaining: 9,
+                complete: false,
+                stopReason: "deadline",
+            });
+            expect(now).toBe(args.deadline - 180_000);
+            expect(getUnmappedMemoryIds(db, ids)).toHaveLength(9);
+        } finally {
+            clock.mockRestore();
+            closeQuietly(db);
+        }
+    });
+
+    test("two consecutive singleton timeouts trip the breaker and defer the failed memories", async () => {
         const db = freshDb();
         try {
             const projectIdentity = "git:map-timeout-breaker";
             const dir = tempProject();
-            // Three batches prove the third is left unattempted by the two-timeout breaker.
+            // Multi-memory batches split; two consecutive singleton timeouts with
+            // no committed mappings stop the remaining work.
             for (let index = 0; index < 61; index += 1) {
                 insertMemory(db, {
                     projectPath: projectIdentity,
@@ -280,6 +468,9 @@ describe("mapMemories disposition", () => {
                 });
             }
             const args = mapArgs(db, dir, projectIdentity);
+            const initialIds = selectMapMemoryInputs(db, projectIdentity, dir).map(
+                (memory) => memory.id,
+            );
             let promptCalls = 0;
             args.client = timeoutMapClient(() => {
                 promptCalls += 1;
@@ -287,7 +478,7 @@ describe("mapMemories disposition", () => {
 
             const result = await mapMemories(args);
 
-            expect(promptCalls).toBe(2);
+            expect(promptCalls).toBe(4); // 5 -> 2 -> 1, 1; no unbounded singleton retry.
             expect(result).toEqual({
                 mapped: 0,
                 independent: 0,
@@ -298,12 +489,17 @@ describe("mapMemories disposition", () => {
                 failure: expect.any(Error),
                 failureStage: "prompt",
             });
+            const selectable = selectMapMemoryInputs(db, projectIdentity, dir).map(
+                (memory) => memory.id,
+            );
+            expect(selectable).toEqual(initialIds.slice(2));
+            expect(selectMapMemoryInputs(db, projectIdentity, dir, true)).toHaveLength(61);
         } finally {
             closeQuietly(db);
         }
     });
 
-    test("two consecutive host request timeouts also trip the starvation circuit breaker", async () => {
+    test("two consecutive singleton host request timeouts also trip the starvation circuit breaker", async () => {
         const db = freshDb();
         try {
             const projectIdentity = "git:map-host-timeout-breaker";
@@ -329,7 +525,7 @@ describe("mapMemories disposition", () => {
 
             const result = await mapMemories(args);
 
-            expect(promptCalls).toBe(2);
+            expect(promptCalls).toBe(4);
             expect(result.stopReason).toBe("timeout-circuit-breaker");
             expect(result.complete).toBe(false);
         } finally {

@@ -67,7 +67,7 @@ async function main(): Promise<void> {
             throw new Error("warm-up owner closed before database open");
         }
         db =
-            input.indexMessage || input.orphanSweep || input.ftsRowidBackfill
+            input.indexMessage || input.ftsRowidBackfill
                 ? new Database(input.path)
                 : new Database(input.path, { readonly: true });
         openConnections.add(db);
@@ -122,32 +122,6 @@ async function main(): Promise<void> {
                     db,
                     input.sessionId,
                     input.exactOrdinalIds,
-                ),
-            };
-        } else if (input.orphanSweep) {
-            const [
-                { setHarness },
-                { sweepOrphanedOpenCodeMessageIndexesCooperatively },
-                { configureContextDatabasePragmas },
-            ] = await Promise.all([
-                import("../../shared/harness"),
-                import("../../features/magic-context/message-index"),
-                import("../../shared/sqlite-context-pragmas"),
-            ]);
-            setHarness(input.harness ?? "opencode");
-            configureContextDatabasePragmas(db);
-            const sourcePath = input.orphanSweep.sourcePath;
-            reply = {
-                kind: "orphan-sweep",
-                result: await sweepOrphanedOpenCodeMessageIndexesCooperatively(
-                    db,
-                    () => {
-                        if (!sourcePath) return null;
-                        const source = new Database(sourcePath, { readonly: true });
-                        openConnections.add(source);
-                        return source;
-                    },
-                    input.orphanSweep.options,
                 ),
             };
         } else if (input.indexMessage) {

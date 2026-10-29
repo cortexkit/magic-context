@@ -78,7 +78,60 @@ class GateTests(unittest.TestCase):
             gate.wait_ci(SHA, "train/check-pr-123", 23, 10)
 
 
-GREEN = {"id": 7, "status": "completed", "conclusion": "success"}
+GREEN = {"id": 7, "name": "CI", "head_sha": SHA, "head_branch": "train/check-pr-123",
+         "event": "push", "status": "completed", "conclusion": "success"}
+SMOKE = dict(GREEN, id=8, name="Smoke (opencode bring-up on Linux)")
+
+
+class ReleaseEvidenceTests(unittest.TestCase):
+    def verify(self, runs):
+        def inventory(route, key):
+            return runs if key == "workflow_runs" else SLOW_JOBS
+
+        with patch.object(gate, "inventory", side_effect=inventory):
+            gate.verify_release(SHA, sleep=lambda seconds: None)
+
+    def test_green_check_run_survives_queued_push_and_in_progress_schedule(self):
+        runs = [GREEN, SMOKE,
+                dict(GREEN, id=9, head_branch="master", status="queued", conclusion=None),
+                dict(GREEN, id=10, head_branch="master", event="schedule",
+                     status="in_progress", conclusion=None),
+                dict(SMOKE, id=11, status="queued", conclusion=None)]
+        self.verify(runs)
+
+    def test_completed_failure_vetoes_success_for_each_workflow_regardless_of_order(self):
+        for workflow in (GREEN, SMOKE):
+            for conclusion in ("failure", "timed_out", "startup_failure", "action_required", "stale"):
+                for run_id in (1, 9):
+                    with self.subTest(workflow=workflow["name"], conclusion=conclusion, run_id=run_id):
+                        failed = dict(workflow, id=run_id, conclusion=conclusion)
+                        name = "CI" if workflow is GREEN else "Smoke"
+                        with self.assertRaisesRegex(RuntimeError, f"{name} for {SHA}: completed/{conclusion}"):
+                            self.verify([GREEN, SMOKE, failed])
+
+    def test_missing_smoke_run_refuses(self):
+        with self.assertRaisesRegex(RuntimeError, f"Smoke for {SHA}: missing"):
+            self.verify([GREEN])
+
+    def test_only_cancelled_run_refuses(self):
+        for workflow in (GREEN, SMOKE):
+            with self.subTest(workflow=workflow["name"]):
+                runs = [dict(run, conclusion="cancelled") if run is workflow else run
+                        for run in (GREEN, SMOKE)]
+                name = "CI" if workflow is GREEN else "Smoke"
+                with self.assertRaisesRegex(RuntimeError, f"{name} for {SHA}: completed/cancelled"):
+                    self.verify(runs)
+
+    def test_cancelled_reruns_do_not_veto_success(self):
+        self.verify([GREEN, SMOKE, dict(GREEN, id=9, conclusion="cancelled"),
+                     dict(SMOKE, id=10, conclusion="cancelled")])
+
+    def test_other_sha_runs_neither_veto_nor_certify(self):
+        other_failures = [dict(run, id=int(run["id"]) + 10, head_sha="b" * 40, conclusion="failure")
+                          for run in (GREEN, SMOKE)]
+        self.verify([GREEN, SMOKE] + other_failures)
+        with self.assertRaisesRegex(RuntimeError, f"Smoke for {SHA}: missing"):
+            self.verify([GREEN, dict(SMOKE, head_sha="b" * 40)])
 
 
 class ReleaseRetryTests(unittest.TestCase):
@@ -88,13 +141,12 @@ class ReleaseRetryTests(unittest.TestCase):
         calls = []
         sleeps = []
 
-        def latest_run(sha, name, slow_only=False):
-            if slow_only:
-                return GREEN
+        def matching_runs(sha, name):
             calls.append(name)
-            return lookups(name, calls.count(name))
+            run = lookups(name, calls.count(name))
+            return [run] if run else []
 
-        with patch.object(gate, "latest_run", side_effect=latest_run), \
+        with patch.object(gate, "matching_runs", side_effect=matching_runs), \
                 patch.object(gate, "inventory", return_value=SLOW_JOBS), \
                 patch.dict(gate.os.environ, {}, clear=False):
             gate.os.environ.pop("CI_GATE_MISSING_RUN_RETRY_SECONDS", None)
@@ -132,7 +184,7 @@ class ReleaseRetryTests(unittest.TestCase):
     def test_release_refuses_skipped_missing_or_failed_slow_mode(self):
         for jobs in ([], SLOW_JOBS[:1], [dict(job, conclusion="failure") for job in SLOW_JOBS],
                      [dict(job, conclusion="skipped") for job in SLOW_JOBS]):
-            with self.subTest(jobs=jobs), patch.object(gate, "latest_run", return_value=GREEN), \
+            with self.subTest(jobs=jobs), patch.object(gate, "matching_runs", return_value=[GREEN]), \
                     patch.object(gate, "inventory", return_value=jobs):
                 with self.assertRaisesRegex(RuntimeError, "required slow lane"):
                     gate.verify_release(SHA)

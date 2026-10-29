@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isCommitRetentionPaused } from "@magic-context/core/config/commit-retention-recovery";
 import {
 	MURAL_MODEL_DEPRECATION_WARNING,
 	WINDOW_OVERLAY_PATH_DEPRECATION_WARNING,
@@ -12,6 +13,7 @@ import { REMOVED_AGENT_CONFIG_WARNING } from "@magic-context/core/config/removed
 import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
 import { buildDreamTaskRuntimeConfigs } from "@magic-context/core/features/magic-context/dreamer/task-config";
 import { resolveEpochFloorForPass } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { isConfigLoadUntrusted } from "@magic-context/core/plugin/embedding-bootstrap-helpers";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { loadPiConfig, loadPiConfigDetailed } from "./index";
@@ -990,6 +992,69 @@ describe("loadPiConfig — project config cannot reset user settings", () => {
 		writeProjectConfig(cwd, JSON.stringify(project));
 		return loadPiConfigDetailed({ cwd }, false);
 	}
+
+	it("pauses retention eviction for a recovered commit cap without making memory untrusted", () => {
+		const loaded = load(
+			{ memory: { git_commit_indexing: { enabled: true, max_commits: 0 } } },
+			{},
+		);
+		expect(loaded.config.memory.git_commit_indexing.max_commits).toBe(2000);
+		expect(
+			isCommitRetentionPaused(loaded.config.memory.git_commit_indexing),
+		).toBe(true);
+		expect(isConfigLoadUntrusted(loaded)).toBe(false);
+		expect(
+			loaded.warnings.filter((warning) =>
+				warning.includes("retention eviction is paused"),
+			),
+		).toHaveLength(1);
+		expect(loaded.warnings.join("\n")).toContain(
+			"memory.git_commit_indexing.max_commits",
+		);
+		expect(
+			loaded.warningDetails.filter((warning) =>
+				warning.message.includes("retention eviction is paused"),
+			),
+		).toHaveLength(1);
+		const valid = load(
+			{ memory: { git_commit_indexing: { enabled: true, max_commits: 100 } } },
+			{},
+		);
+		expect(
+			isCommitRetentionPaused(valid.config.memory.git_commit_indexing),
+		).toBe(false);
+	});
+
+	it("recovers an out-of-range injection budget without making memory untrusted", () => {
+		const result = load({}, { memory: { injection_budget_tokens: 20001 } });
+		expect(result.config.memory.enabled).toBe(true);
+		expect(result.config.memory.injection_budget_tokens).toBe(4000);
+		expect(result.recoveredFieldPaths).toEqual([
+			"memory.injection_budget_tokens",
+		]);
+		expect(result.warnings.join("\n")).toContain(
+			"memory.injection_budget_tokens",
+		);
+		expect(isConfigLoadUntrusted(result)).toBe(false);
+	});
+
+	it("records the exact restored project leaf without distrusting a plain threshold", () => {
+		const result = load(
+			{ memory: { auto_search: { score_threshold: 0.7 } } },
+			{ memory: { auto_search: { score_threshold: "invalid" } } },
+		);
+		expect(result.config.memory.auto_search.score_threshold).toBe(0.7);
+		expect(result.recoveredFieldPaths).toEqual([
+			"memory.auto_search.score_threshold",
+		]);
+		expect(isConfigLoadUntrusted(result)).toBe(false);
+	});
+
+	it("keeps an invalid embedding model untrusted after field recovery", () => {
+		const result = load({ embedding: { model: 123 } }, {});
+		expect(result.recoveredFieldPaths).toEqual(["embedding.model"]);
+		expect(isConfigLoadUntrusted(result)).toBe(true);
+	});
 
 	it("keeps the user's compaction block when the project sets compaction:false", () => {
 		const result = load(

@@ -540,8 +540,9 @@ pub(crate) fn search(
     store: &Connection,
     _caller: &super::admission::AppCaller,
     params: &Value,
+    as_of_ms: i64,
 ) -> HandlerOutcome {
-    match run_search(context, store, params) {
+    match run_search(context, store, params, as_of_ms) {
         Ok(outcome) | Err(outcome) => outcome,
     }
 }
@@ -600,9 +601,9 @@ fn run_search(
     context: &Connection,
     store: &Connection,
     value: &Value,
+    now: i64,
 ) -> Result<HandlerOutcome, HandlerOutcome> {
     let params = Params::parse(value)?;
-    let now = chrono::Utc::now().timestamp_millis();
     let cursor = Cursor::read(&params, now)?;
     let _context_tx = context
         .is_autocommit()
@@ -845,10 +846,19 @@ fn run_search(
     let mut page = Vec::new();
     let mut bytes = 0;
     let mut complete = started.elapsed() < Duration::from_millis(250);
+    let mut size_limited = false;
     for hit in hits.into_iter().skip(cursor.offset).take(params.limit) {
         bytes += serde_json::to_vec(&hit).unwrap().len();
         if bytes > envelope::ROW_BUDGET {
+            // A cursor cannot make progress when even the first hit is too large.
+            if page.is_empty() {
+                return Err(super::named(
+                    "reply_too_large",
+                    "A search hit exceeds the reply row budget.",
+                ));
+            }
             complete = false;
+            size_limited = true;
             break;
         }
         page.push(hit);
@@ -863,6 +873,12 @@ fn run_search(
         }
         .encode()
     });
+    if size_limited && next.is_none() {
+        return Err(super::named(
+            "reply_too_large",
+            "Search hits exceed the reply budget and cursor page limit.",
+        ));
+    }
     Ok(envelope::reply("context.search", now, json!({"complete":complete,"agent_resolution":agent_ids::RESOLUTION,"source_status":source_status,"diagnostics":{"omitted_sessions":omitted,"project_resolution":if project.is_some() { json!({"status":"ok"}) } else { json!({"status":"unavailable","reason":"project_identity_not_recorded","lanes":["memory","git_commit","primer"]}) }},"hits":page,"next_cursor":next}).as_object().unwrap().clone()))
 }
 
@@ -872,7 +888,12 @@ pub(crate) fn search_for_test(
     store: &Connection,
     params: &Value,
 ) -> HandlerOutcome {
-    match run_search(context, store, params) {
+    match run_search(
+        context,
+        store,
+        params,
+        chrono::Utc::now().timestamp_millis(),
+    ) {
         Ok(outcome) | Err(outcome) => outcome,
     }
 }
@@ -904,7 +925,12 @@ mod tests {
     }
 
     fn reply(db: &TestStores, params: &Value) -> Value {
-        match run_search(&db.context, &db.store, params) {
+        match run_search(
+            &db.context,
+            &db.store,
+            params,
+            chrono::Utc::now().timestamp_millis(),
+        ) {
             Ok(HandlerOutcome::Response(bytes)) => serde_json::from_slice(&bytes).unwrap(),
             other => panic!("unexpected search result: {other:?}"),
         }
@@ -1154,7 +1180,12 @@ mod tests {
             changed["cursor"] = cursor.clone();
             changed[name] = value;
             assert_eq!(
-                code(run_search(&db.context, &db.store, &changed)),
+                code(run_search(
+                    &db.context,
+                    &db.store,
+                    &changed,
+                    chrono::Utc::now().timestamp_millis()
+                )),
                 "cursor_mismatch"
             );
         }
@@ -1176,7 +1207,12 @@ mod tests {
         assert_eq!(ids.len(), 40);
         p["cursor"] = json!("invalid");
         assert_eq!(
-            code(run_search(&db.context, &db.store, &p)),
+            code(run_search(
+                &db.context,
+                &db.store,
+                &p,
+                chrono::Utc::now().timestamp_millis()
+            )),
             "cursor_invalid"
         );
         let parsed = Params::parse(&request("needle")).unwrap();
@@ -1202,7 +1238,12 @@ mod tests {
             } else {
                 p["scope"]["surprise"] = json!(1);
             }
-            match run_search(&db.context, &db.store, &p) {
+            match run_search(
+                &db.context,
+                &db.store,
+                &p,
+                chrono::Utc::now().timestamp_millis(),
+            ) {
                 Err(HandlerOutcome::ErrorWithDetail { code, detail, .. }) => {
                     assert_eq!(code, "invalid_params");
                     assert_eq!(detail["field"], path);
@@ -1219,7 +1260,12 @@ mod tests {
             let mut p = request("needle");
             p[key] = value;
             assert_eq!(
-                code(run_search(&db.context, &db.store, &p)),
+                code(run_search(
+                    &db.context,
+                    &db.store,
+                    &p,
+                    chrono::Utc::now().timestamp_millis()
+                )),
                 "invalid_params"
             );
         }

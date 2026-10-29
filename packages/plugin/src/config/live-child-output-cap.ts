@@ -39,6 +39,8 @@ export function withLiveDreamerOutputCap<T extends MagicContextConfig>(
         attempt: (handle, request) => executor.attempt(handle, request),
         collect: (handle, limit) => executor.collect(handle, limit),
         detach: (handle) => executor.detach?.(handle),
+        collectPartial: (handle, limit) =>
+            executor.collectPartial?.(handle, limit) ?? executor.collect(handle, limit),
         close: (handle, settlement) => executor.close(handle, settlement),
     };
 }
