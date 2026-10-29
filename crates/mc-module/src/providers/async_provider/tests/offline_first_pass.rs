@@ -952,7 +952,7 @@ async fn offline_first_pass_is_adopted_by_the_first_live_notice_without_a_first_
             .entries
             .matches(state.prefix_input_proof.as_ref(), prefix.tail_from));
     }
-    scaling_tests::view_work::take(&reference);
+    scaling_tests::view_work::take_for(&reference, project.path());
     let passes = resident::counters::read().engine_passes;
     assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
     let state = arm.state();
@@ -961,7 +961,7 @@ async fn offline_first_pass_is_adopted_by_the_first_live_notice_without_a_first_
         state.generation, 0,
         "adoption keeps the prepared generation"
     );
-    let work = scaling_tests::view_work::take(&reference);
+    let work = scaling_tests::view_work::take_for(&reference, project.path());
     let ran = resident::counters::read().engine_passes - passes;
     assert!(
         ran == 0 || work.engine_input < prep.served.len(),
@@ -1004,7 +1004,7 @@ async fn offline_first_pass_is_adopted_by_the_first_live_notice_without_a_first_
         entries.push(appended(&prep.session, next, tag));
     }
     assert_eq!(arm.notice(2, 0, Some(1), Vec::new()).await, "ok");
-    let work = scaling_tests::view_work::take(&reference);
+    let work = scaling_tests::view_work::take_for(&reference, project.path());
     assert!(
         work.engine_input < prep.served.len(),
         "later notices take the certified path: engine input {}",
@@ -1196,7 +1196,7 @@ async fn inputs_that_changed_after_the_offline_pass_discard_it() {
 }
 
 #[tokio::test]
-async fn an_offline_run_that_stopped_before_its_proof_is_never_adopted() {
+async fn an_offline_run_that_stopped_before_its_proof_requires_an_offline_rerun() {
     let _clock = crate::tests::fixed_clock();
     let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
@@ -1222,10 +1222,6 @@ async fn an_offline_run_that_stopped_before_its_proof_is_never_adopted() {
     )
     .unwrap();
     drop(conn);
-    assert_eq!(
-        refusal_code(first_pass(&prep.args, project.path(), &fixture::NoHolders).await),
-        "offline_run_incomplete"
-    );
     let arm = Arm::open(
         store.path(),
         project.path(),
@@ -1248,10 +1244,15 @@ async fn an_offline_run_that_stopped_before_its_proof_is_never_adopted() {
         0,
         "an unproven run is never adopted"
     );
+    drop(arm);
+    assert!(matches!(
+        first_pass(&prep.args, project.path(), &fixture::NoHolders).await,
+        Ok(OfflineOutcome::Prepared(_))
+    ));
 }
 
 #[tokio::test]
-async fn a_rerun_leaves_the_prepared_state_unchanged_or_refuses_by_name() {
+async fn a_rerun_keeps_unchanged_preparations_and_replaces_mismatches_until_adopted() {
     let _clock = crate::tests::fixed_clock();
     let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
@@ -1297,12 +1298,17 @@ async fn a_rerun_leaves_the_prepared_state_unchanged_or_refuses_by_name() {
             &pages,
             &setup_file(project.path(), &setup),
         );
-        assert_eq!(
-            refusal_code(first_pass(&args, project.path(), &fixture::NoHolders).await),
-            "offline_state_differs"
-        );
-        assert!(store_rows(&prep.paths) == before, "a refused rerun wrote");
+        assert!(matches!(
+            first_pass(&args, project.path(), &fixture::NoHolders).await,
+            Ok(OfflineOutcome::Prepared(_))
+        ));
     }
+
+    // Restore the original Setup and pages before adopting the last preparation.
+    assert!(matches!(
+        first_pass(&prep.args, project.path(), &fixture::NoHolders).await,
+        Ok(OfflineOutcome::Prepared(_))
+    ));
 
     // A session a live notice adopted is not offline work any more.
     let live = Arm::open(

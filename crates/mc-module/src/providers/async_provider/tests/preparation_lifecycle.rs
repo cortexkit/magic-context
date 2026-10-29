@@ -102,6 +102,41 @@ impl ModelRecorder {
         self.requests.push(request.clone());
         request
     }
+
+    fn view(&mut self, view: &view::CompactionView, entries: &[ReadMessage]) -> Vec<Value> {
+        let request = apply_view(view, entries);
+        self.rebuilds += usize::from(self.requests.last() != Some(&request));
+        self.requests.push(request.clone());
+        request
+    }
+}
+
+fn move_record(paths: &StorePaths, session: &str) -> offline_move::MoveRecord {
+    offline_move::read_move_record(
+        &rusqlite::Connection::open(&paths.context_db).unwrap(),
+        session,
+    )
+    .unwrap()
+    .unwrap()
+    .unwrap()
+}
+
+fn assert_no_applied_drops(request: &[Value], moved: &offline_move::MoveRecord) {
+    for drop in moved
+        .drops
+        .iter()
+        .filter(|drop| drop.kind == offline_move::DropKind::Applied)
+    {
+        assert!(
+            request
+                .iter()
+                .flat_map(|message| message["parts"].as_array().into_iter().flatten())
+                .all(|part| part["id"].as_str() != Some(drop.part.as_str())),
+            "request retained applied drop {}:{}",
+            drop.mid,
+            drop.part
+        );
+    }
 }
 
 #[tokio::test]
@@ -421,4 +456,326 @@ async fn adopted_survives_restart_recovery_and_native_descent_without_preparatio
     arm.restart();
     assert_eq!(arm.setup(request).await["answer"], "ready");
     assert!(adopted(&arm.state()));
+}
+
+#[tokio::test]
+async fn first_notice_mismatch_keeps_prepared_bytes_and_adopts_the_fresh_generation() {
+    let _clock = crate::tests::fixed_clock();
+    for change in ["proof", "changed_row", "removed_row"] {
+        for notice_first in [false, true] {
+            let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
+            let moved = move_record(&prep.paths, &prep.session);
+            if change == "proof" {
+                rewrite_offline_marker(&prep, |marker| {
+                    marker["inputs"] = json!("different-inputs");
+                });
+            }
+            let mut current = prep.served.clone();
+            let index = current
+                .iter()
+                .position(|entry| !moved.drops.iter().any(|drop| drop.mid == entry.mid))
+                .unwrap();
+            match change {
+                "changed_row" => {
+                    let ordinal = current[index].ordinal;
+                    edit_entry(&mut current, ordinal);
+                }
+                "removed_row" => {
+                    current.remove(index);
+                    for entry in &mut current[index..] {
+                        entry.ordinal -= 1;
+                    }
+                }
+                _ => {}
+            }
+            let mut arm = Arm::open(
+                store.path(),
+                project.path(),
+                &prep.session,
+                Served::new(current.clone(), 7),
+                config(),
+            );
+            let prepared_answer = arm.state().initial;
+            let mut model = ModelRecorder::default();
+            if !notice_first {
+                let answer = arm.setup(setup_request(&prep.session, "fixture")).await;
+                assert_eq!(answer["answer"], "ready", "{answer}");
+                assert_eq!(answer["initial"], prepared_answer["initial"]);
+                assert!(arm.runner.read_from.lock().unwrap().is_empty());
+                assert_no_applied_drops(&model.setup(&answer, &current), &moved);
+            } else {
+                // The runner holds the offline answer even when it sends a notice first.
+                assert_no_applied_drops(&model.setup(&prepared_answer, &current), &moved);
+            }
+            assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok", "{change}");
+            let state = arm.state();
+            assert!(adopted(&state));
+            assert_eq!(state.generation, 1, "{change}");
+            assert_eq!(state.initial, prepared_answer);
+            let bound = state.standalone_move.unwrap();
+            assert!(bound.pending.is_none());
+            assert_eq!(bound.bound_drops.len(), moved.drops.len());
+            let views = arm.views();
+            assert_eq!(views.len(), 2, "one reconciliation view: {change}");
+            assert_eq!(views[0].2, -1);
+            let view: view::CompactionView = serde_json::from_str(&views[1].1).unwrap();
+            assert_no_applied_drops(&model.view(&view, &current), &moved);
+            assert!(model.rebuilds <= 2, "at most one extra rebuild: {change}");
+            assert_eq!(
+                serde_json::to_value(move_record(&prep.paths, &prep.session)).unwrap(),
+                serde_json::to_value(&moved).unwrap()
+            );
+            arm.restart();
+            for _ in 0..2 {
+                let answer = arm.setup(setup_request(&prep.session, "fixture")).await;
+                assert_eq!(answer["answer"], "ready", "{answer}");
+                assert_eq!(answer["initial"], prepared_answer["initial"]);
+            }
+            assert!(adopted(&arm.state()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn command_interruptions_refuse_live_setup_and_recover_on_immediate_offline_rerun() {
+    let _clock = crate::tests::fixed_clock();
+    for stage in ["importing", "after_setup", "after_binding"] {
+        let (store, project, work) = (
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let (paths, session, served) = moved_stores(store.path(), fixture_stores);
+        let moved = serde_json::to_value(move_record(&paths, &session)).unwrap();
+        let args = command_args(
+            work.path(),
+            &paths,
+            &session,
+            &export(&served, LINEAGE, 7),
+            &setup_file(project.path(), &setup_request(&session, "fixture")),
+        );
+        crate::providers::async_provider::offline_first_pass::INTERRUPT_PREPARATION
+            .with(|flag| flag.set(Some(stage)));
+        let outcome = first_pass(&args, project.path(), &fixture::NoHolders).await;
+        assert!(
+            matches!(outcome, Err(command::RunError::Interrupted(ref reason)) if reason.contains(stage)),
+            "{stage}: {outcome:?}"
+        );
+        let arm = Arm::open(
+            store.path(),
+            project.path(),
+            &session,
+            Served::new(served.clone(), 7),
+            config(),
+        );
+        let state = arm.state();
+        let marker = state.offline_first_pass.as_ref().unwrap();
+        assert_eq!(marker.state, PreparationState::Preparing);
+        assert!(marker.proof.is_none());
+        assert_eq!(state.is_importing_stage(), stage == "importing");
+        if stage == "after_binding" {
+            assert!(state.standalone_move.as_ref().unwrap().pending.is_none());
+            assert!(!state
+                .standalone_move
+                .as_ref()
+                .unwrap()
+                .bound_drops
+                .is_empty());
+        }
+        let before = store_rows(&paths);
+        assert_eq!(
+            arm.setup(setup_request(&session, "fixture")).await["code"],
+            "moved_session_unprepared",
+            "{stage}"
+        );
+        assert_eq!(store_rows(&paths), before);
+        drop(arm);
+        let outcome = first_pass(&args, project.path(), &fixture::NoHolders)
+            .await
+            .unwrap();
+        let OfflineOutcome::Prepared(report) = outcome else {
+            panic!("{stage}: {outcome:?}")
+        };
+        assert_eq!(report.generation, 1);
+        assert_eq!(
+            serde_json::to_value(move_record(&paths, &session)).unwrap(),
+            moved
+        );
+        let arm = Arm::open(
+            store.path(),
+            project.path(),
+            &session,
+            Served::new(served, 7),
+            config(),
+        );
+        let answer = arm.setup(setup_request(&session, "fixture")).await;
+        assert_eq!(answer["answer"], "ready", "{stage}: {answer}");
+        assert_no_applied_drops(
+            &ModelRecorder::default().setup(&answer, &[]),
+            &move_record(&paths, &session),
+        );
+        assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
+        assert!(adopted(&arm.state()));
+    }
+}
+
+#[tokio::test]
+async fn rerun_recovers_missing_preparation_setup_mismatch_and_changed_inputs() {
+    let _clock = crate::tests::fixed_clock();
+    for change in ["missing", "setup", "inputs"] {
+        let (store, project, work) = (
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
+        let moved = move_record(&prep.paths, &prep.session);
+        let mut request = setup_request(&prep.session, "fixture");
+        if change == "missing" {
+            rewrite_offline_marker(&prep, |marker| *marker = Value::Null);
+        } else if change == "setup" {
+            request = setup_request(&prep.session, "fixture-2");
+        } else {
+            let writer = McStore::open_for_test(&fixture::store_descriptor(store.path())).unwrap();
+            writer
+                .seed_user_profile_for_test(&["changed after preparation".into()], 999)
+                .unwrap();
+        }
+        let arm = Arm::open(
+            store.path(),
+            project.path(),
+            &prep.session,
+            Served::new(prep.served.clone(), 7),
+            config(),
+        );
+        let before = store_rows(&prep.paths);
+        let answer = arm.setup(request.clone()).await;
+        if change == "inputs" {
+            assert_eq!(answer["answer"], "ready");
+        } else {
+            assert_eq!(answer["code"], "moved_session_unprepared");
+        }
+        assert_eq!(store_rows(&prep.paths), before);
+        drop(arm);
+        let args = command_args(
+            work.path(),
+            &prep.paths,
+            &prep.session,
+            &export(&prep.served, LINEAGE, 3),
+            &setup_file(project.path(), &request),
+        );
+        let outcome = first_pass(&args, project.path(), &fixture::NoHolders)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, OfflineOutcome::Prepared(ref report) if report.generation == 1),
+            "{change}: {outcome:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(move_record(&prep.paths, &prep.session)).unwrap(),
+            serde_json::to_value(&moved).unwrap()
+        );
+        assert!(matches!(
+            first_pass(&args, project.path(), &fixture::NoHolders).await,
+            Ok(OfflineOutcome::Unchanged(_))
+        ));
+        let arm = Arm::open(
+            store.path(),
+            project.path(),
+            &prep.session,
+            Served::new(prep.served, 7),
+            config(),
+        );
+        let answer = arm.setup(request).await;
+        assert_eq!(answer["answer"], "ready", "{change}: {answer}");
+        assert_no_applied_drops(&ModelRecorder::default().setup(&answer, &[]), &moved);
+        assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
+        drop(arm);
+        assert_eq!(
+            refusal_code(first_pass(&args, project.path(), &fixture::NoHolders).await),
+            "offline_already_adopted"
+        );
+    }
+}
+
+#[tokio::test]
+async fn non_moved_records_keep_existing_offline_rerun_refusals_without_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(dir.path()).await;
+    let store = rig.h.store.get().unwrap();
+    let paths = StorePaths {
+        opencode_db: dir.path().join("opencode.db"),
+        context_db: dir.path().join("context.db"),
+        store_db: dir.path().join("store.db"),
+    };
+    for (stage, code) in [
+        ("live", "async_record_exists"),
+        ("incomplete", "offline_run_incomplete"),
+        ("different", "offline_state_differs"),
+    ] {
+        let mut state = rig.state();
+        assert!(state.standalone_move.is_none());
+        if stage != "live" {
+            let mut offline = marker(&serde_json::to_value(&state.setup).unwrap());
+            if stage == "different" {
+                offline.setup = "earlier-setup".into();
+                offline.proof = Some(EntryInputProof {
+                    lineage: LINEAGE.into(),
+                    origin: 0,
+                    count: 0,
+                    end: 0,
+                    digest: "unused".into(),
+                });
+            }
+            state.offline_first_pass = Some(offline);
+            state.save(store, &[]).unwrap();
+            rig.h.resident_cache().forget(&rig.reference);
+        }
+        let before = store_rows(&paths);
+        let outcome = rig
+            .h
+            .offline_first_pass(
+                &crate::providers::async_provider::offline_first_pass::OfflineSetup {
+                    project_root: dir.path().into(),
+                    runner_module: MODULE.into(),
+                    runner_describe: runner_describe(),
+                    request: state.setup,
+                },
+            )
+            .await;
+        assert!(
+            matches!(outcome, Err(crate::providers::async_provider::offline_first_pass::OfflineError::Refused(actual, _)) if actual == code),
+            "{stage}: {outcome:?}"
+        );
+        assert_eq!(store_rows(&paths), before);
+    }
+}
+
+#[tokio::test]
+async fn project_scoped_work_counts_a_real_full_input_pass_and_cross_thread_work() {
+    let _clock = crate::tests::fixed_clock();
+    let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
+    let reference = runner_session_ref(MODULE, "opencode", &prep.session);
+    let other_project = tempfile::tempdir().unwrap();
+    let worker_reference = reference.clone();
+    let worker_project = other_project.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        scaling_tests::view_work::engine(&worker_reference, &worker_project, 123);
+    })
+    .await
+    .unwrap();
+    let work = scaling_tests::view_work::take_for(&reference, project.path());
+    assert!(!prep.served.is_empty());
+    assert_eq!(
+        work.engine_input,
+        prep.served.len(),
+        "the offline pass must count its entire input"
+    );
+    assert_eq!(
+        scaling_tests::view_work::take_for(&reference, other_project.path()).engine_input,
+        123,
+        "work on another thread is counted without contaminating this store"
+    );
 }

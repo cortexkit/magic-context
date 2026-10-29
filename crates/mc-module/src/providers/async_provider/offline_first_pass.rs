@@ -53,6 +53,35 @@ const OFFLINE_READ_BUDGET: Duration = Duration::from_secs(24 * 3600);
 /// The route channel the offline run binds its Setup to.
 const OFFLINE_CHANNEL: u16 = 1;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static INTERRUPT_PREPARATION: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn interrupt_preparation(
+    stage: &str,
+    state: &mut State,
+    store: &McStore,
+) -> Result<(), HandlerOutcome> {
+    if INTERRUPT_PREPARATION.with(|flag| {
+        if flag.get() == Some(stage) {
+            flag.set(None);
+            true
+        } else {
+            false
+        }
+    }) {
+        // Preserve the durable boundary so reopening the command exercises
+        // recovery from an incomplete record, without an in-memory resident copy.
+        state.save(store, &[])?;
+        return Err(transient(format!(
+            "interrupted offline preparation at {stage}"
+        )));
+    }
+    Ok(())
+}
+
 /// Durable preparation and adoption provenance on the provider record.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OfflineFirstPass {
@@ -749,9 +778,9 @@ impl McHandler {
     /// against the pages `self.provider_runner` serves, and store it with its
     /// proof. The handler must have its store open; its runner must be a
     /// [`PagesRunner`]. A rerun on a compatible proof writes nothing: it answers
-    /// `Unchanged` when the proof, Setup and inputs are the same, and refuses
-    /// `offline_state_differs` otherwise. An unadopted record with an older
-    /// proof version is replaced with a preparation in a fresh generation.
+    /// `Unchanged` when the proof, Setup, runner description and inputs match.
+    /// An incomplete or incompatible unadopted moved-session preparation is
+    /// restarted in a fresh generation; a notice's durable adoption cannot be replaced.
     pub(crate) async fn offline_first_pass(
         &self,
         setup: &OfflineSetup,
@@ -802,33 +831,55 @@ impl McHandler {
         };
         if let Some(old) = load_head(store, &reference).map_err(interrupted)? {
             if proof_version_matches(&old) {
-                return self
+                if let Some(outcome) = self
                     .offline_rerun(store, &key, &reference, &setup_digest, &describe_digest)
-                    .await;
-            }
-            // A marker still present has not been adopted. Replace only the
-            // provider's preparation; the authoritative move record stays intact.
-            let _serial = self.provider_serial.lock_for(&key).await;
-            let moved = match moved_session::setup_fence(
-                store,
-                &request.harness,
-                &request.session,
-                &request.request_id,
-            )
-            .map_err(interrupted)?
-            {
-                moved_session::Fence::Moved(record) => Some(*record),
-                _ => {
-                    return Err(OfflineError::Refused(
-                        "session_not_moved",
-                        "the old proof needs the authoritative move checkpoint".into(),
-                    ))
+                    .await?
+                {
+                    return Ok(outcome);
                 }
-            };
+            }
+            // Only the provider's unadopted preparation is replaced. Re-import
+            // and re-bind in a fresh namespace, leaving the move record intact.
+            let _serial = self.provider_serial.lock_for(&key).await;
+            let moved =
+                match moved_session::setup_fence(
+                    store,
+                    &request.harness,
+                    &request.session,
+                    &request.request_id,
+                )
+                .map_err(interrupted)?
+                {
+                    moved_session::Fence::Moved(record) => Some(*record),
+                    _ => return Err(OfflineError::Refused(
+                        "session_not_moved",
+                        "rerun `ck-mc offline first-pass` with the authoritative move checkpoint"
+                            .into(),
+                    )),
+                };
             let generation = old
                 .generation
                 .checked_add(1)
                 .ok_or_else(|| OfflineError::Interrupted("async generation exhausted".into()))?;
+            // Validate the runner before replacing a preparation. An unsupported
+            // description must not leave a new partial record behind.
+            if let Some(refusal) = self
+                .refuse_checkpoint_unsupported(
+                    moved.as_ref().map(moved_session::checkpoint).as_ref(),
+                    CheckpointSource::StandaloneMove,
+                    &old.runner().map_err(interrupted)?,
+                    &old.runner_identity(),
+                    &request.request_id,
+                    Some(setup.runner_describe.clone()),
+                )
+                .await
+                .map_err(interrupted)?
+            {
+                return Err(OfflineError::Refused(
+                    "setup_refused",
+                    format!("Setup answered {refusal:?}"),
+                ));
+            }
             let mut fresh = self
                 .new_async_record(
                     OFFLINE_CHANNEL,
@@ -880,6 +931,8 @@ impl McHandler {
             .checkout(store, &reference)
             .map_err(interrupted)?
             .ok_or_else(|| OfflineError::Interrupted("the record Setup made is gone".into()))?;
+        #[cfg(test)]
+        interrupt_preparation("after_setup", &mut state, store).map_err(interrupted)?;
         let codec = codec::Codec::from_params(&Value::Object(state.setup.params.clone()))
             .map_err(interrupted)?;
         let origin = proof_origin(&state);
@@ -932,6 +985,8 @@ impl McHandler {
         headers.insert("lineage_id".into(), lineage.clone());
         state.conditions = Some(headers);
         state.ingest_read(store, codec).map_err(interrupted)?;
+        #[cfg(test)]
+        interrupt_preparation("after_binding", &mut state, store).map_err(interrupted)?;
         self.advance_async_policy(&mut state, &notice, codec)
             .map_err(interrupted)?;
         let view = self
@@ -1006,8 +1061,9 @@ impl McHandler {
     }
 
     /// A rerun on a record that already exists: unchanged when this command
-    /// prepared it from the same pages, Setup and inputs; otherwise refused by
-    /// name. Nothing is written either way.
+    /// prepared it from the same pages, Setup, runner description and inputs.
+    /// `None` asks the command to restart an unadopted moved-session preparation.
+    /// This check writes nothing; non-moved live records retain their refusal behaviour.
     async fn offline_rerun(
         &self,
         store: &McStore,
@@ -1015,13 +1071,16 @@ impl McHandler {
         reference: &str,
         setup_digest: &str,
         describe_digest: &str,
-    ) -> Result<OfflineOutcome, OfflineError> {
+    ) -> Result<Option<OfflineOutcome>, OfflineError> {
         let _serial = self.provider_serial.lock_for(key).await;
         let mut state = self
             .checkout(store, reference)
             .map_err(interrupted)?
             .ok_or_else(|| OfflineError::Interrupted("the record disappeared".into()))?;
         let Some(offline) = state.offline_first_pass.clone() else {
+            if state.standalone_move.is_some() {
+                return Ok(None);
+            }
             return Err(OfflineError::Refused(
                 "async_record_exists",
                 "ck-mc already holds a live record for this session; its first pass is not offline work any more".into(),
@@ -1034,19 +1093,32 @@ impl McHandler {
                     .into(),
             ));
         }
+        let restartable = state.standalone_move.is_some();
+        if restartable && offline.state == PreparationState::Preparing {
+            return Ok(None);
+        }
         let Some(proof) = offline.proof.clone() else {
+            if restartable {
+                return Ok(None);
+            }
             return Err(OfflineError::Refused(
                 "offline_run_incomplete",
-                "an earlier run stopped before its last save; restore the window's backups and run again, or start the apps and let the first live read run the ordinary first pass".into(),
+                "an earlier run stopped before its last save; restore the window's backups and rerun `ck-mc offline first-pass`".into(),
             ));
         };
         if offline.setup != setup_digest {
+            if restartable {
+                return Ok(None);
+            }
             return Err(OfflineError::Refused(
                 "offline_state_differs",
                 "the stored first pass was prepared under another Setup".into(),
             ));
         }
         if offline.describe.as_deref() != Some(describe_digest) {
+            if restartable {
+                return Ok(None);
+            }
             return Err(OfflineError::Refused(
                 "offline_state_differs",
                 "the stored first pass was prepared against another runner_describe".into(),
@@ -1063,6 +1135,9 @@ impl McHandler {
             .await
             .map_err(interrupted)?;
         if served.as_ref() != Some(&proof) {
+            if restartable {
+                return Ok(None);
+            }
             return Err(OfflineError::Refused(
                 "offline_state_differs",
                 "the stored first pass was prepared from other pages".into(),
@@ -1070,6 +1145,9 @@ impl McHandler {
         }
         let inputs = self.offline_inputs_digest(&state).map_err(interrupted)?;
         if offline.inputs.as_deref() != Some(inputs.as_str()) {
+            if restartable {
+                return Ok(None);
+            }
             return Err(OfflineError::Refused(
                 "offline_state_differs",
                 "the configuration or store inputs changed since the stored first pass".into(),
@@ -1084,6 +1162,6 @@ impl McHandler {
         };
         // The resident copy was only read; the store still holds its record.
         self.checkin(state);
-        Ok(OfflineOutcome::Unchanged(report))
+        Ok(Some(OfflineOutcome::Unchanged(report)))
     }
 }

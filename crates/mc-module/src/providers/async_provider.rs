@@ -3183,6 +3183,10 @@ impl McHandler {
             state.import_standalone_compartments(store, &record)?;
             state.finish_standalone_import(store, &record)?;
         }
+        #[cfg(test)]
+        if state.offline_first_pass.is_some() {
+            offline_first_pass::interrupt_preparation("importing", &mut state, store)?;
+        }
         let status = transform::compaction::Status {
             lineage_id: state.lineage.clone().unwrap_or_default(),
             newest_ordinal: None,
@@ -3451,7 +3455,7 @@ impl McHandler {
             inbound_messages(state.entries.values())?
         };
         #[cfg(test)]
-        scaling_tests::view_work::engine(&state.reference(), messages.len());
+        scaling_tests::view_work::engine(&state.reference(), state.project(), messages.len());
         // Positions count from the lineage's first ordinal, also in a
         // lineage that begins at a cut (Pi derives fallback tool ids from them).
         let source_from = state.lineage_from();
@@ -3577,7 +3581,11 @@ impl McHandler {
                     .unwrap_or_default();
                 messages.extend(inbound_messages(state.entries.values())?);
                 #[cfg(test)]
-                scaling_tests::view_work::engine(&state.reference(), messages.len());
+                scaling_tests::view_work::engine(
+                    &state.reference(),
+                    state.project(),
+                    messages.len(),
+                );
                 state.reminder_echoes.prepare_with(
                     codec,
                     &mut template,
@@ -3679,14 +3687,14 @@ fn rendered_view(
         )?
     };
     #[cfg(test)]
-    scaling_tests::view_work::renderer(&state.reference(), entries.len());
+    scaling_tests::view_work::renderer(&state.reference(), state.project(), entries.len());
     match codec.render_view(view, &state.key.session, &entries) {
         Ok(output) => Ok(output),
         Err(_) if !full_lineage => {
             tracing::debug!(session_ref=%state.reference(), reason="native_render_context", "rendering with full-lineage sources");
             let entries = inbound_messages(state.entries.values())?;
             #[cfg(test)]
-            scaling_tests::view_work::renderer(&state.reference(), entries.len());
+            scaling_tests::view_work::renderer(&state.reference(), state.project(), entries.len());
             codec.render_view(view, &state.key.session, &entries)
         }
         Err(error) => Err(error),
@@ -5684,7 +5692,11 @@ impl McHandler {
             rendered_view(codec, &candidate, state, false)?
         } else {
             #[cfg(test)]
-            scaling_tests::view_work::renderer(&state.reference(), template.messages.len());
+            scaling_tests::view_work::renderer(
+                &state.reference(),
+                state.project(),
+                template.messages.len(),
+            );
             match codec.render_prepared_view(&candidate, &state.key.session, &template) {
                 Ok(wire) => wire,
                 Err(_) => rendered_view(codec, &candidate, state, true)?,
