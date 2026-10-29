@@ -1,12 +1,9 @@
 import { dirname } from "node:path";
 import { Worker } from "node:worker_threads";
 import { log } from "../../../shared/logger";
-import {
-    setStoragePrivatePermissionEnforcement,
-    shouldEnforcePrivateStoragePermissions,
-    writeStorageFileAtomicSync,
-} from "../../../shared/storage-permissions";
+import { shouldEnforcePrivateStoragePermissions } from "../../../shared/storage-permissions";
 import type { ProjectIdentityRecord } from "./project-identity-cache";
+import { persistPinRequest } from "./project-pin-persistence";
 import type { PinWriteRequest } from "./project-pin-worker";
 
 type WritePin = (request: PinWriteRequest) => Promise<void>;
@@ -56,6 +53,18 @@ export class ProjectPinWriter {
         pin.awaitingDecision = false;
         this.pins.set(destination, pin);
         this.schedule(pin);
+    }
+
+    removeIfUnchanged(destination: string, record: ProjectIdentityRecord, bytes: string): void {
+        if (this.pins.has(destination)) return;
+        this.schedule({
+            destination,
+            record,
+            removeIfUnchanged: bytes,
+            privateStorage: false,
+            persisted: false,
+            awaitingDecision: false,
+        });
     }
 
     lookup(destination: string): ProjectIdentityRecord | undefined {
@@ -205,8 +214,7 @@ export class PinWorker {
             workerUnavailableReported = true;
             this.report("[magic-context] pin worker unavailable; writing pins in process");
         }
-        setStoragePrivatePermissionEnforcement(request.privateStorage);
-        writeStorageFileAtomicSync(request.destination, JSON.stringify(request.record));
+        persistPinRequest(request);
     }
 
     private failed(worker: Worker, error: unknown): void {

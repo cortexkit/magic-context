@@ -5,6 +5,7 @@ import { getMagicContextStorageDir } from "../../../shared/data-path";
 import { log } from "../../../shared/logger";
 import { projectDirectoryKey } from "../../../shared/project-directory-key";
 import { writeStorageFileAtomicSync } from "../../../shared/storage-permissions";
+import { readGitCheckoutMetadata } from "./git-common-dir";
 import { projectPinWriter } from "./project-pin-writer";
 
 // Lives in shared/ so the TUI (which ships without features/) can use the same
@@ -121,6 +122,7 @@ export function readRememberedGitIdentity(
 export function findPinnedIdentityByGitCommonDir(
     gitCommonDir: string,
     storageDir = getMagicContextStorageDir(),
+    preferCheckoutRoot = false,
 ): string | undefined {
     const sidecarDir = path.join(storageDir, "project-identities");
     let files: string[];
@@ -141,6 +143,17 @@ export function findPinnedIdentityByGitCommonDir(
         if (record && !records.has(record.directory)) records.set(record.directory, record);
     }
     for (const record of records.values()) {
+        if (preferCheckoutRoot && isPinnedProjectIdentity(record.identity)) {
+            const checkout = readGitCheckoutMetadata(record.directory);
+            // Older root pins predate gitCommonDir. Verify their topology on disk,
+            // rather than mistaking an independently registered subfolder for the root.
+            if (
+                checkout?.gitCommonDir === gitCommonDir &&
+                !checkout.linkedWorktree &&
+                projectDirectoryKey(checkout.checkoutRoot) === record.directory
+            )
+                return record.identity;
+        }
         if (record.gitCommonDir === gitCommonDir && isPinnedProjectIdentity(record.identity))
             identities.add(record.identity);
     }
@@ -153,6 +166,22 @@ export function findPinnedIdentityByGitCommonDir(
         }
     }
     return undefined;
+}
+
+/** Worktrees inherit the checkout's pj- identity without saving it; retire only the git: bytes read here. */
+export function removeStaleWorktreeIdentity(directory: string): void {
+    const destination = cachePath(directory);
+    try {
+        const bytes = readFileSync(destination, "utf8");
+        const record = JSON.parse(bytes);
+        if (
+            record.directory === projectDirectoryKey(directory) &&
+            /^git:[0-9a-f]{7,64}$/.test(record.identity)
+        )
+            projectPinWriter().removeIfUnchanged(destination, record, bytes);
+    } catch {
+        // Missing or unreadable sidecars need no cleanup.
+    }
 }
 
 /** Maintenance only: an inaccessible directory may still exist; prune only confirmed ENOENT records. */

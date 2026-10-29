@@ -7,16 +7,13 @@ import { getDefaultSubcConnectionFile } from "../../../shared/subc-connection-fi
 import { type EntorhinalResolveOptions, resolveEntorhinalProject } from "./entorhinal-resolve";
 import { readGitCheckoutMetadata } from "./git-common-dir";
 import {
+    borrowedProjectIdentity,
     isUserHomeDirectory,
     rememberResolvedProjectIdentity,
     resolveProjectIdentityForSession,
     shouldSkipHomeProjectMemory,
 } from "./project-identity";
-import {
-    findPinnedIdentityByGitCommonDir,
-    isPinnedProjectIdentity,
-    readRememberedProjectIdentity,
-} from "./project-identity-cache";
+import { isPinnedProjectIdentity, readRememberedProjectIdentity } from "./project-identity-cache";
 
 export interface SessionIdentityDecision {
     directory: string;
@@ -62,8 +59,7 @@ function pin(directory: string): string | undefined {
 }
 
 function commonDirPin(directory: string): string | undefined {
-    const commonDir = readGitCheckoutMetadata(directory)?.gitCommonDir;
-    return commonDir ? findPinnedIdentityByGitCommonDir(commonDir) : undefined;
+    return borrowedProjectIdentity(directory);
 }
 
 function rustManaged(db: Database | null | undefined, identity: string | undefined): boolean {

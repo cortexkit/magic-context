@@ -25,6 +25,10 @@ import {
     rememberGitIdentity,
 } from "./project-identity-cache";
 import { __setProjectPinWriterForTests, flushProjectPinWrites } from "./project-pin-writer";
+import {
+    __resetSessionIdentityDecisionsForTests,
+    awaitSessionIdentityDecision,
+} from "./session-identity-decision";
 
 function tempDir(): string {
     return createTestTempDirFromPath(join(tmpdir(), "mc-identity-"));
@@ -178,6 +182,84 @@ function sidecarBytes(): Map<string, string> {
 }
 
 describe("live project pin writes", () => {
+    for (const row of parity.cases.filter((row) => row.name.startsWith("worktree-"))) {
+        test(`parity worktree resolvers: ${row.name}`, async () => {
+            const expand = (value: string) => value.replaceAll("<fixture>", testRoot);
+            const fixture = parity.fixtures.linked;
+            for (const repo of fixture.repositories) {
+                mkdirSync(expand(repo.root), { recursive: true });
+                mkdirSync(expand(repo.gitDir), { recursive: true });
+                if (repo.kind === "worktree") {
+                    writeFileSync(
+                        join(expand(repo.root), ".git"),
+                        `gitdir: ${expand(repo.gitDir)}\n`,
+                    );
+                    writeFileSync(
+                        join(expand(repo.gitDir), "commondir"),
+                        `${expand(repo.commonDir)}\n`,
+                    );
+                }
+            }
+            for (const record of row.sidecars) {
+                const file = pin(expand(record.directory), record.identity);
+                writeFileSync(
+                    file,
+                    JSON.stringify({
+                        ...record,
+                        directory: expand(record.directory),
+                        ...("gitCommonDir" in record
+                            ? { gitCommonDir: expand(record.gitCommonDir) }
+                            : {}),
+                    }),
+                );
+            }
+            const before = sidecarBytes();
+            let probes = 0;
+            __setProjectIdentityTestHooks({
+                execFileSync: (() => {
+                    probes++;
+                    return parity.gitRootCommit;
+                }) as unknown as typeof execFileSync,
+            });
+            const directory = expand(row.directory);
+            const expected = row.expected.identity;
+            if (row.name === "worktree-stale-git-sidecar-retired") {
+                expect(resolveProjectIdentityStrict(directory, false, { cache: false })).toBe(
+                    expected,
+                );
+                expect(await flushProjectPinWrites(2_000)).toBe(true);
+                expect(sidecarBytes()).toEqual(before);
+            }
+            expect(resolveProjectIdentityStrict(directory)).toBe(expected);
+            expect(resolveProjectIdentity(directory)).toBe(expected);
+            expect(resolveProjectIdentityForSession(directory)).toBe(expected);
+            __resetSessionIdentityDecisionsForTests();
+            try {
+                expect(
+                    (
+                        await awaitSessionIdentityDecision(row.name, directory, {
+                            connectionFile: join(testRoot, "absent.json"),
+                        })
+                    ).identity,
+                ).toBe(expected);
+            } finally {
+                __resetSessionIdentityDecisionsForTests();
+            }
+            expect(await flushProjectPinWrites(2_000)).toBe(true);
+            const after = sidecarBytes();
+            const removed = "sidecarRemovals" in row.expected ? row.expected.sidecarRemovals : [];
+            for (const [file, bytes] of before) {
+                if (removed?.some((folder) => expand(folder) === JSON.parse(bytes).directory))
+                    expect(after.has(file)).toBe(false);
+                else expect(after.get(file)).toBe(bytes);
+            }
+            expect([...after.keys()].filter((file) => !before.has(file))).toEqual([]);
+            expect(probes).toBe(row.expected.gitProbeCalls);
+            __setProjectIdentityTestHooks({ homeDirectory: () => directory });
+            expect(resolveProjectIdentityForSession(directory, false)).toBeUndefined();
+        });
+    }
+
     const rowNames = [
         "registered-root",
         "registered-subfolder",

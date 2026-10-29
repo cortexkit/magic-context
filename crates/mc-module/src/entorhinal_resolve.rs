@@ -311,7 +311,7 @@ async fn resolve_with_store_attempt(
             Ok(project_id)
         }
         ResolveAnswer::NotAnswering | ResolveAnswer::Implicit => {
-            if let Some(pin) = identities.common_dir_pin(&directory) {
+            if let Some(pin) = identities.borrowed_identity(&directory) {
                 return Ok(pin);
             }
             identities.resolve(&directory)

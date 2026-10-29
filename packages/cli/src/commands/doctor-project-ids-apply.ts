@@ -332,6 +332,39 @@ function pinUpdates(
     return updates;
 }
 
+/** Repair main-checkout pj- sidecars even when a previous apply already moved all data. */
+function rootPinRepairs(storageDir: string): Array<{ path: string; content: string }> {
+    const directory = join(storageDir, "project-identities");
+    if (!existsSync(directory)) return [];
+    const updates: Array<{ path: string; content: string }> = [];
+    for (const file of readdirSync(directory)) {
+        if (!/^[0-9a-f]{64}\.json$/.test(file)) continue;
+        let record: { directory?: unknown; identity?: unknown; gitCommonDir?: unknown };
+        try {
+            record = JSON.parse(readFileSync(join(directory, file), "utf8"));
+        } catch {
+            continue;
+        }
+        if (!record || typeof record !== "object") continue;
+        if (typeof record.directory !== "string" || !isPinnedProjectIdentity(record.identity))
+            continue;
+        const metadata = readGitCheckoutMetadata(record.directory);
+        if (
+            !metadata?.gitCommonDir ||
+            metadata.linkedWorktree ||
+            projectDirectoryKey(metadata.checkoutRoot) !== record.directory ||
+            file !== `${createHash("sha256").update(record.directory).digest("hex")}.json` ||
+            record.gitCommonDir === metadata.gitCommonDir
+        )
+            continue;
+        updates.push({
+            path: join(directory, file),
+            content: JSON.stringify({ ...record, gitCommonDir: metadata.gitCommonDir }),
+        });
+    }
+    return updates;
+}
+
 function backupProjectIds(dbPath: string): void {
     const storageDir = dirname(dbPath);
     const backup = mkdtempSync(join(storageDir, "project-ids-backup-"));
@@ -387,9 +420,12 @@ export function runProjectIdsApplyCli(
         return result.refusals.length ? 1 : 0;
     }
     const storageDir = dirname(result.dbPath);
-    const pendingWrites = result.pairs.some(
-        ({ pair, liveRows }) => liveRows > 0 || pinUpdates(pair, storageDir).length > 0,
-    );
+    const repairs = rootPinRepairs(storageDir);
+    const pendingWrites =
+        repairs.length > 0 ||
+        result.pairs.some(
+            ({ pair, liveRows }) => liveRows > 0 || pinUpdates(pair, storageDir).length > 0,
+        );
     // A finished plan needs neither another backup nor a writable database handle.
     if (pendingWrites) backupProjectIds(result.dbPath);
     const db = openExistingDatabase(result.dbPath, { readonly: !pendingWrites });
@@ -410,6 +446,10 @@ export function runProjectIdsApplyCli(
                       : "already applied";
             console.log(`${pair.from} → ${pair.to}: ${status}`);
         }
+        // Re-read after pair writes so a repaired metadata field cannot restore an old identity.
+        for (const pin of rootPinRepairs(storageDir))
+            writeStorageFileAtomicSync(pin.path, pin.content);
+        if (repairs.length) console.log(`Root pin metadata repaired: ${repairs.length}`);
     } finally {
         db.close();
     }

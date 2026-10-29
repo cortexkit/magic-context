@@ -3,7 +3,8 @@
  *
  * Strategy:
  *   1. Exact-directory registered project pin → pinned pj- identity without probing git
- *   2. Git repo with commits → root commit hash (same across worktrees, clones, forks)
+ *   2. Linked worktree with a registered checkout pin → borrow that pj- identity
+ *      Otherwise, Git repo with commits → root commit hash (same across clones and forks)
  *   3. Git repo with an unborn HEAD → directory hash until the first commit
  *   4. Transient git failure → reuse durable identity or defer
  *   5. No git repo → fallback to directory hash via resolveProjectIdentity()
@@ -21,12 +22,14 @@ import path from "node:path";
 import { log } from "../../../shared/logger";
 import { readGitCheckoutMetadata } from "./git-common-dir";
 import {
+    findPinnedIdentityByGitCommonDir,
     isPinnedProjectIdentity,
     projectDirectoryKey,
     readRememberedGitIdentity,
     readRememberedProjectIdentity,
     rememberGitIdentity,
     rememberPinnedProjectIdentity,
+    removeStaleWorktreeIdentity,
 } from "./project-identity-cache";
 import { isUnbornHeadOnDisk } from "./unborn-head";
 
@@ -336,7 +339,7 @@ function classifyGitError(error: unknown, rawDirectory: string): ProjectIdentity
 /**
  * Strictly resolve the project identity for a filesystem directory.
  *
- * Returns an exact-directory `pj-` pin or `git:<root-commit-sha>` and never silently falls back.
+ * Returns an exact-directory or inherited worktree `pj-` pin, or `git:<root-commit-sha>`.
  * Failures are thrown as `ProjectIdentityError` with a stable `errorClass` so callers can
  * distinguish deterministic non-git directories from transient git/runtime failures.
  *
@@ -344,7 +347,7 @@ function classifyGitError(error: unknown, rawDirectory: string): ProjectIdentity
  * identities. Transient failures are never cached.
  * Exact-directory `pj-` pins retain precedence. For an unpinned directory, set `cache: false`
  * to bypass the git-identity cache and return a fresh result without updating caches or
- * durable identity pins.
+ * durable identity records (including stale-sidecar cleanup).
  */
 export function resolveProjectIdentityStrict(
     directory: string,
@@ -353,7 +356,7 @@ export function resolveProjectIdentityStrict(
 ): string {
     assertProjectAllowed(directory, allowHomeProject);
     const canonical = path.resolve(directory);
-    const pinned = pinForUsableDirectory(canonical, directory);
+    const pinned = pinForUsableDirectory(canonical, directory, options.cache !== false);
     if (pinned !== undefined) return pinned;
     const cached = options.cache === false ? undefined : identityCache.get(canonical);
     if (cached !== undefined) {
@@ -564,7 +567,11 @@ function assertProjectAllowed(directory: string, allowHomeProject: boolean): voi
     }
 }
 
-function pinForUsableDirectory(canonical: string, directory: string): string | undefined {
+function pinForUsableDirectory(
+    canonical: string,
+    directory: string,
+    cleanup = true,
+): string | undefined {
     try {
         assertDirectoryUsable(canonical, directory);
         accessSync(canonical, constants.R_OK | constants.X_OK);
@@ -574,7 +581,27 @@ function pinForUsableDirectory(canonical: string, directory: string): string | u
         return undefined;
     }
     const pinned = readRememberedProjectIdentity(canonical)?.identity;
-    return isPinnedProjectIdentity(pinned) ? pinned : undefined;
+    return isPinnedProjectIdentity(pinned)
+        ? pinned
+        : readGitCheckoutMetadata(canonical)?.linkedWorktree
+          ? borrowedProjectIdentity(canonical, cleanup)
+          : undefined;
+}
+
+export function borrowedProjectIdentity(directory: string, cleanup = true): string | undefined {
+    const metadata = readGitCheckoutMetadata(directory);
+    const pin = metadata?.gitCommonDir
+        ? findPinnedIdentityByGitCommonDir(
+              metadata.gitCommonDir,
+              undefined,
+              metadata.linkedWorktree,
+          )
+        : undefined;
+    if (cleanup && pin && metadata?.linkedWorktree) {
+        removeStaleWorktreeIdentity(directory);
+        if (metadata.checkoutRoot !== directory) removeStaleWorktreeIdentity(metadata.checkoutRoot);
+    }
+    return pin;
 }
 
 export interface LiveProjectIdentityAnswer {
@@ -804,6 +831,21 @@ export function resolveProjectIdentityForSession(
 ): string | undefined {
     const resolvedDirectory = path.resolve(directory);
     const cacheKey = `${allowHomeProject ? "1" : "0"}\0${resolvedDirectory}`;
+    // A main checkout can gain a registered pin after this process cached git:.
+    if (readGitCheckoutMetadata(resolvedDirectory)?.linkedWorktree) {
+        try {
+            assertProjectAllowed(directory, allowHomeProject);
+        } catch (error) {
+            if (
+                error instanceof ProjectIdentityError &&
+                error.errorClass === "home_project_disabled"
+            )
+                return undefined;
+            throw error;
+        }
+        const pinned = pinForUsableDirectory(resolvedDirectory, directory);
+        if (pinned) return pinned;
+    }
     const cached = sessionIdentityCache.get(cacheKey);
     if (
         cached &&

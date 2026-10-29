@@ -1,4 +1,4 @@
-//! One non-blocking persistence lane for registered project pins.
+//! One non-blocking writer for registered pins and obsolete worktree-record cleanup.
 
 use super::{sidecar_path, IdentityRecord};
 use mc_store::private_permissions::write_file_atomic;
@@ -17,6 +17,7 @@ struct Pin {
     private: bool,
     revision: u64,
     persisted: bool,
+    remove_if_unchanged: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -118,6 +119,26 @@ impl PinWriter {
         self.shared.changed.notify_all();
     }
 
+    pub(super) fn remove_if_unchanged(&self, path: PathBuf, bytes: Vec<u8>) {
+        let mut state = self.shared.state.lock().unwrap();
+        if state.pins.contains_key(&path) {
+            return;
+        }
+        let Ok(record) = serde_json::from_slice(&bytes) else {
+            return;
+        };
+        state.revision += 1;
+        let pin = Pin {
+            record,
+            private: false,
+            revision: state.revision,
+            persisted: false,
+            remove_if_unchanged: Some(bytes),
+        };
+        Self::schedule(&mut state, &path, pin);
+        self.shared.changed.notify_all();
+    }
+
     fn enqueue_latest(state: &mut State, path: PathBuf, record: IdentityRecord, private: bool) {
         state.revision += 1;
         let pin = Pin {
@@ -125,6 +146,7 @@ impl PinWriter {
             private,
             revision: state.revision,
             persisted: false,
+            remove_if_unchanged: None,
         };
         state.pins.insert(path.clone(), pin.clone());
         Self::schedule(state, &path, pin);
@@ -147,9 +169,20 @@ impl PinWriter {
             };
             // Serialization and all filesystem work happen without holding the
             // overlay lock: neither a slow disk nor fsync can stall a bind.
-            let result = serde_json::to_vec(&pin.record)
-                .map_err(std::io::Error::other)
-                .and_then(|bytes| write(&path, &bytes, pin.private));
+            let result = if let Some(expected) = &pin.remove_if_unchanged {
+                match std::fs::read(&path) {
+                    Ok(bytes) if bytes == *expected => std::fs::remove_file(&path).inspect(|()| {
+                        tracing::info!(path = %path.display(), "Removed stale git worktree identity; borrowing checkout project pin");
+                    }),
+                    Ok(_) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error),
+                }
+            } else {
+                serde_json::to_vec(&pin.record)
+                    .map_err(std::io::Error::other)
+                    .and_then(|bytes| write(&path, &bytes, pin.private))
+            };
             let mut state = shared.state.lock().unwrap();
             state.active = None;
             if result.is_ok() {
@@ -258,6 +291,41 @@ mod tests {
             identity: identity.into(),
             git_common_dir: None,
         }
+    }
+
+    #[test]
+    fn worktree_cleanup_preserves_a_changed_sidecar_and_does_not_publish_a_pin() {
+        let temp = temp();
+        let sidecars = temp.path().join("sidecars");
+        let directory = temp.path().join("worktree");
+        let path = sidecar_path(&sidecars, &directory);
+        let bytes = serde_json::to_vec(&record(&directory, "git:abcdef123")).unwrap();
+        write_file_atomic(&path, &bytes, false).unwrap();
+        let (writer, gate) = blocked_writer();
+        writer.publish(
+            &sidecars,
+            record(&temp.path().join("other"), "pj-OTHER"),
+            false,
+        );
+        gate.wait_for_write();
+        writer.remove_if_unchanged(path.clone(), bytes.clone());
+        write_file_atomic(
+            &path,
+            &serde_json::to_vec(&record(&directory, "pj-NEW")).unwrap(),
+            false,
+        )
+        .unwrap();
+        gate.release();
+        assert!(writer.flush(Duration::from_secs(5)));
+        assert_eq!(
+            read_record(&sidecars, &directory).unwrap().identity,
+            "pj-NEW"
+        );
+        assert!(writer.lookup(&path).is_none());
+        write_file_atomic(&path, &bytes, false).unwrap();
+        writer.remove_if_unchanged(path.clone(), bytes);
+        assert!(writer.flush(Duration::from_secs(5)));
+        assert!(!path.exists());
     }
 
     async fn bind(resolver: &ProjectIdentityResolver, folder: &Path, identity: &str) -> String {

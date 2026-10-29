@@ -109,6 +109,31 @@ function bytes(path: string): string {
     return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+it("repairs root pin common-dir metadata when re-running apply on an already-applied store", async () => {
+    const main = folder("registered-root");
+    folder("registered-root/.git");
+    const path = sidecar(main, to);
+    writeFileSync(join(root, "project-identities", `${"0".repeat(64)}.json`), "null");
+    db.prepare("INSERT INTO project_state(project_path) VALUES (?)").run(to);
+    const plan = await buildProjectIdPlan(db, dbPath, null, {
+        resolve: async () => {
+            throw new Error("No legacy ids remain");
+        },
+    });
+    expect(plan.pairs).toEqual([]);
+    expect((await apply(plan)).code).toBe(0);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
+        directory: main,
+        identity: to,
+        gitCommonDir: join(main, ".git"),
+    });
+    const repaired = bytes(path);
+    const backupCount = backups().length;
+    expect((await apply(plan)).code).toBe(0);
+    expect(bytes(path)).toBe(repaired);
+    expect(backups()).toHaveLength(backupCount);
+});
+
 const second = "dir:second";
 async function orderedPlan(): Promise<ProjectIdPlan> {
     db.prepare("INSERT INTO project_state(project_path) VALUES (?)").run(second);

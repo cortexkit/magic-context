@@ -769,7 +769,8 @@ impl ProjectIdentityResolver {
     /// A pin found through a shared git common directory is used only for this session;
     /// it must not be saved as a pin for the queried directory.
     pub fn common_dir_pin(&self, directory: &Path) -> Option<String> {
-        let common = git_checkout(directory)?.git_common_dir;
+        let checkout = git_checkout(directory)?;
+        let common = checkout.git_common_dir;
         let sidecars = self.sidecar_dir.as_deref()?;
         let mut records = self.pin_writer.records(sidecars);
         let mut identities = HashSet::new();
@@ -786,6 +787,16 @@ impl ProjectIdentityResolver {
             }
         }
         for record in records.into_values() {
+            if checkout.worktree
+                && is_project_pin(&record.identity)
+                && git_checkout(Path::new(&record.directory)).is_some_and(|checkout| {
+                    !checkout.worktree
+                        && checkout.git_common_dir == common
+                        && project_directory_key(&checkout.root) == record.directory
+                })
+            {
+                return Some(record.identity);
+            }
             if record.git_common_dir.as_deref() == Some(&common) && is_project_pin(&record.identity)
             {
                 identities.insert(record.identity);
@@ -885,10 +896,13 @@ impl ProjectIdentityResolver {
     pub fn resolve(&self, directory: &Path) -> Result<String, ProjectIdentityError> {
         let resolved =
             self.legacy_directory_with_home(directory, crate::config::user_home_dir().as_deref())?;
-        if let Some(pin) = std::fs::read_dir(&resolved)
-            .ok()
-            .and_then(|_| self.pinned_identity(&resolved))
-        {
+        if let Some(pin) = std::fs::read_dir(&resolved).ok().and_then(|_| {
+            self.pinned_identity(&resolved).or_else(|| {
+                git_checkout(&resolved)
+                    .filter(|checkout| checkout.worktree)
+                    .and_then(|_| self.borrowed_identity(&resolved))
+            })
+        }) {
             return Ok(pin);
         }
         if let Some(cached) = self
@@ -938,6 +952,32 @@ impl ProjectIdentityResolver {
                 );
         }
         outcome
+    }
+
+    /// Use the checkout's registered identity for this decision without saving a
+    /// worktree pin. Remove its stale git record with the pin writer only if the
+    /// bytes still match the record read here.
+    pub(crate) fn borrowed_identity(&self, directory: &Path) -> Option<String> {
+        let pin = self.common_dir_pin(directory)?;
+        if let Some(checkout) = git_checkout(directory).filter(|checkout| checkout.worktree) {
+            if let Some(sidecars) = self.sidecar_dir.as_deref() {
+                for folder in [directory, checkout.root.as_path()] {
+                    let path = sidecar_path(sidecars, folder);
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        if serde_json::from_slice::<IdentityRecord>(&bytes)
+                            .ok()
+                            .is_some_and(|record| {
+                                record.directory == project_directory_key(folder)
+                                    && record.identity.starts_with("git:")
+                            })
+                        {
+                            self.pin_writer.remove_if_unchanged(path, bytes);
+                        }
+                    }
+                }
+            }
+        }
+        Some(pin)
     }
 
     fn resolve_uncached(&self, resolved: &Path) -> Result<String, ProjectIdentityError> {
@@ -1562,6 +1602,18 @@ mod pin_tests {
         assert_eq!(common, expected["gitCommonDir"], "{name}: common dir");
         resolver.flush_pins();
         let after = sidecar_bytes(&sidecars);
+        let removals: Vec<PathBuf> = expected["sidecarRemovals"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|directory| sidecar_path(&sidecars, Path::new(directory.as_str().unwrap())))
+            .collect();
+        for file in &removals {
+            assert!(
+                before.contains_key(file) && !after.contains_key(file),
+                "{name}: removed sidecar"
+            );
+        }
         let mut writes: Vec<Value> = after
             .iter()
             .filter(|(file, bytes)| before.get(*file) != Some(*bytes))
@@ -1572,6 +1624,9 @@ mod pin_tests {
         wanted.sort_by_key(Value::to_string);
         assert_eq!(writes, wanted, "{name}: writes");
         for (file, bytes) in &before {
+            if removals.contains(file) {
+                continue;
+            }
             if !writes.iter().any(|record| {
                 sidecar_path(&sidecars, Path::new(record["directory"].as_str().unwrap())) == *file
             }) {
@@ -1632,6 +1687,10 @@ mod pin_tests {
     }
 
     parity_tests! {
+        worktree_checkout_pin_absent_endpoint => "worktree-checkout-pin-absent-endpoint",
+        worktree_checkout_pin_without_common_dir => "worktree-checkout-pin-without-common-dir",
+        worktree_stale_git_sidecar_retired => "worktree-stale-git-sidecar-retired",
+        worktree_without_checkout_pin_keeps_git => "worktree-without-checkout-pin-keeps-git",
         registered_root => "registered-root",
         registered_subfolder => "registered-subfolder",
         registered_linked_worktree => "registered-linked-worktree",
