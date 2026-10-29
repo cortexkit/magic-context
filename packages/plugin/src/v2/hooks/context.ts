@@ -690,6 +690,7 @@ function coveredInstructionRows(
 export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
     const config = loadPluginConfigDetailed(directory).config;
+    log(`[magic-context] OpenCode 2 keep_subagents=${config.keep_subagents === true}`);
     setHomeProjectPermission(config.allow_home_project);
     if (!config.enabled) return;
     const nativeRemove = nativeSessionRemove(context.session);
