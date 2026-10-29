@@ -442,7 +442,8 @@ use transform::{HistorianDiagnostics, SerializedOutputCache, TransformRequest};
 /// The per-route binding: the project, harness, session-slot value, and fallback render
 /// budget frozen at bind. Transform routes carry the durable session in `session`. Facade
 /// routes accept a runner-attested durable session, an observed OpenCode transform session,
-/// or a Claude Code wrapper instance token that must be resolved before touching the store.
+/// or a Claude Code wrapper instance token that must be resolved before its project memory
+/// is read.
 /// The project is NEVER taken from a per-pass request field — a crafted request could
 /// spoof it to read another project's memories — so it lives here, keyed by the route channel
 /// the daemon controls.
