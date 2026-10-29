@@ -191,14 +191,19 @@ export function preparePiToolRemovalMeasurements(args: {
 	}
 }
 
-/** Batch only calls whose ordinary structural-removal check would request a marker. */
+/**
+ * Batch only within a caller-owned rendering transaction. Without that boundary,
+ * retain per-call authorization so an interrupted renderer cannot authorize calls
+ * it never reached. The caller must also restore its permission map on rollback.
+ */
 export function preparePiToolRemovalChecks(args: {
+	db?: ContextDatabase;
 	rows: readonly { tagNumber: number; callId: string | null }[];
 	targets: ReadonlyMap<number, TagTarget>;
 	messages: readonly unknown[];
 	prepare: (callIds: readonly string[]) => void;
 }): void {
-	if (args.rows.length === 0) return;
+	if (!args.db?.inTransaction || args.rows.length === 0) return;
 	const occurrences = new Map<string, number>();
 	for (const raw of args.messages) {
 		if (!raw || typeof raw !== "object") continue;

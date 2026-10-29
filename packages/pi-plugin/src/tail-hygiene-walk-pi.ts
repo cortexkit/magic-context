@@ -588,6 +588,22 @@ function attributeTags(
 	return { messageTags, tagsByNumber };
 }
 
+interface PiAttributionProjection {
+	messageIds: readonly string[];
+	content: readonly string[];
+	owners: ReadonlySet<string>;
+	calls: ReadonlySet<string>;
+	numbers: ReadonlySet<number>;
+	projection: readonly PiTagMetadata[];
+}
+
+// Weakly key by the input tag array so this cache cannot keep that array alive
+// after its snapshot is released. Store only selected rows in each cached value.
+const attributionProjections = new WeakMap<
+	readonly PiTagMetadata[],
+	PiAttributionProjection
+>();
+
 /** Index only identities the rendered request can ask about, from the pinned pass rows. */
 function attributionProjection(
 	input: PiTailHygieneWalkInput,
@@ -619,7 +635,29 @@ function attributionProjection(
 					notePrefix(part.text);
 		}
 	}
-	return input.tags.filter((tag) => {
+	const cacheable = input.tagCacheKey !== undefined;
+	const cached = cacheable ? attributionProjections.get(input.tags) : undefined;
+	// Tags are canonical immutable snapshots. Messages are not: capture values on
+	// every walk so branch switches and in-place content edits cannot reuse an old
+	// projection just because the host reused its message objects.
+	const content = cacheable
+		? input.messages.map(safeStableStringify)
+		: undefined;
+	if (
+		cached &&
+		cached.messageIds.length === messageIds.length &&
+		messageIds.every((id, index) => id === cached.messageIds[index]) &&
+		content?.length === cached.content.length &&
+		content.every((value, index) => value === cached.content[index]) &&
+		owners.size === cached.owners.size &&
+		[...owners].every((owner) => cached.owners.has(owner)) &&
+		calls.size === cached.calls.size &&
+		[...calls].every((call) => cached.calls.has(call)) &&
+		numbers.size === cached.numbers.size &&
+		[...numbers].every((number) => cached.numbers.has(number))
+	)
+		return cached.projection;
+	const projection = input.tags.filter((tag) => {
 		if (numbers.has(tag.tagNumber)) return true;
 		const owner = messageIdForTag(tag);
 		if (owner !== null && owners.has(owner)) return true;
@@ -631,6 +669,16 @@ function attributionProjection(
 			calls.has(tag.messageId)
 		);
 	});
+	if (cacheable && content)
+		attributionProjections.set(input.tags, {
+			messageIds,
+			content,
+			owners,
+			calls,
+			numbers,
+			projection,
+		});
+	return projection;
 }
 
 const partJsonMemo = new TailHygieneJsonMemo();

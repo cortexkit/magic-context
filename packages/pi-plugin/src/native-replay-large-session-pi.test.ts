@@ -101,6 +101,7 @@ function replay(batch: boolean, count: number, rejectWrites = false) {
 					prepareRemovals: batch
 						? (rows) =>
 								preparePiToolRemovalChecks({
+									db,
 									rows,
 									targets,
 									messages: input,
@@ -193,15 +194,18 @@ test("removal batches exclude repeated call IDs signed arcs incomplete arcs and 
 			.filter((tag) => tag.type === "tool")
 			.map((tag) => ({ tagNumber: tag.tagNumber, callId: tag.messageId }));
 		const prepared: string[][] = [];
-		preparePiToolRemovalChecks({
-			rows: [
-				...rows,
-				{ tagNumber: rows[0]?.tagNumber ?? -1, callId: "signed" },
-			],
-			targets,
-			messages,
-			prepare: (ids) => prepared.push([...ids]),
-		});
+		db.transaction(() =>
+			preparePiToolRemovalChecks({
+				db,
+				rows: [
+					...rows,
+					{ tagNumber: rows[0]?.tagNumber ?? -1, callId: "signed" },
+				],
+				targets,
+				messages,
+				prepare: (ids) => prepared.push([...ids]),
+			}),
+		).immediate();
 		expect(prepared).toEqual([["plain"]]);
 	} finally {
 		db.close();

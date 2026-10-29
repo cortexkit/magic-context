@@ -9923,6 +9923,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						{
 							prepareRemovals: (rows) =>
 								preparePiToolRemovalChecks({
+									db: args.db,
 									rows,
 									targets,
 									messages: args.messages,
@@ -10258,21 +10259,49 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	);
 	const tFlushed = performance.now();
 	runPersistedReplayStage("flushed-status-failure", undefined, () => {
-		if (isCacheBustingPass)
-			preparePiToolRemovalChecks({
-				rows: flushedDroppedTags
-					.filter((tag) => tag.type === "tool" && tag.dropMode === "full")
-					.map((tag) => ({ tagNumber: tag.tagNumber, callId: tag.messageId })),
+		const render = () =>
+			applyFlushedStatuses(
+				args.sessionId,
+				args.db,
 				targets,
-				messages: args.messages,
-				prepare: transcript.prepareToolRemovalMeasurements,
-			});
-		return applyFlushedStatuses(
-			args.sessionId,
-			args.db,
-			targets,
-			flushedDroppedTags,
-		);
+				flushedDroppedTags,
+			);
+		const savedRemovalInputs = nativeRemovalInputs;
+		const needsRemovalPreparation =
+			savedRemovalInputs !== undefined &&
+			flushedDroppedTags.some(
+				(tag) =>
+					tag.type === "tool" &&
+					tag.dropMode === "full" &&
+					savedRemovalInputs.get(tag.messageId) !== NATIVE_TOOL_REMOVAL_MARKER,
+			);
+		// Replaying existing permissions does not need a new write transaction.
+		if (!isCacheBustingPass || !needsRemovalPreparation) return render();
+		try {
+			// Eager markers and rendering have one failure boundary. A failed render
+			// must not publish durable or in-memory permission for unvisited calls.
+			nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
+			return args.db
+				.transaction(() => {
+					preparePiToolRemovalChecks({
+						db: args.db,
+						rows: flushedDroppedTags
+							.filter((tag) => tag.type === "tool" && tag.dropMode === "full")
+							.map((tag) => ({
+								tagNumber: tag.tagNumber,
+								callId: tag.messageId,
+							})),
+						targets,
+						messages: args.messages,
+						prepare: transcript.prepareToolRemovalMeasurements,
+					});
+					return render();
+				})
+				.immediate();
+		} catch (error) {
+			nativeRemovalInputs = savedRemovalInputs;
+			throw error;
+		}
 	});
 	logTransformTiming(args.sessionId, "applyFlushedStatuses", tFlushed);
 	logTransformTiming(args.sessionId, "batchFinalize:flushed", tFlushed);

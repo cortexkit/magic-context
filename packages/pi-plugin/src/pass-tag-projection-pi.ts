@@ -37,6 +37,7 @@ export function projectPiReplayDrops(
 			(tag.type === "tool"
 				? calls.has(tag.messageId) &&
 					(tag.toolOwnerMessageId === null ||
+						tag.toolOwnerMessageId === "" ||
 						owners.has(tag.toolOwnerMessageId))
 				: addresses.has(tag.messageId))
 		)
