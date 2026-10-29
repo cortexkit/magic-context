@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "werni_first_request.rs"]
+mod werni_first_request;
 use crate::providers::async_provider::offline_first_pass::{
     adopted, OfflineFirstPass, PreparationState, MARKER_VERSION,
 };
@@ -83,6 +86,7 @@ fn apply_view(view: &view::CompactionView, entries: &[ReadMessage]) -> Vec<Value
 #[derive(Default)]
 struct ModelRecorder {
     requests: Vec<Vec<Value>>,
+    request_bytes: Vec<Vec<u8>>,
     prefix: Option<Value>,
     rebuilds: usize,
 }
@@ -99,6 +103,8 @@ impl ModelRecorder {
         );
         self.rebuilds += usize::from(self.prefix.as_ref() != Some(&answer["initial"]));
         self.prefix = Some(answer["initial"].clone());
+        self.request_bytes
+            .push(serde_json::to_vec(&request).unwrap());
         self.requests.push(request.clone());
         request
     }
@@ -106,6 +112,8 @@ impl ModelRecorder {
     fn view(&mut self, view: &view::CompactionView, entries: &[ReadMessage]) -> Vec<Value> {
         let request = apply_view(view, entries);
         self.rebuilds += usize::from(self.requests.last() != Some(&request));
+        self.request_bytes
+            .push(serde_json::to_vec(&request).unwrap());
         self.requests.push(request.clone());
         request
     }
@@ -359,6 +367,10 @@ async fn prepared_setup_and_notice_first_keep_the_exact_view_and_append_horizon(
         for _ in 0..2 {
             let answer = arm.setup(setup_request(&prep.session, "fixture")).await;
             assert_eq!(answer["answer"], "ready", "{answer}");
+            assert_eq!(
+                answer["checkpoint"]["message_count"],
+                answer["initial"]["range"]["from"]
+            );
             assert_eq!(answer["initial"], stored);
             assert_eq!(
                 answer["initial"]["range"],
@@ -369,6 +381,10 @@ async fn prepared_setup_and_notice_first_keep_the_exact_view_and_append_horizon(
             assert_eq!(
                 model.setup(&answer, &arm.runner.entries.lock().unwrap()),
                 request
+            );
+            assert_eq!(
+                model.request_bytes.last().unwrap(),
+                &serde_json::to_vec(&request).unwrap()
             );
         }
         assert!(
@@ -382,6 +398,28 @@ async fn prepared_setup_and_notice_first_keep_the_exact_view_and_append_horizon(
         }
         assert!(adopted(&arm.state()));
         assert_eq!(arm.state().initial["initial"], stored);
+        let views = arm.views();
+        let adopted_view: view::CompactionView = serde_json::from_str(
+            &views
+                .iter()
+                .find(|(version, _, _)| *version == 1)
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert_eq!(adopted_view.view_version, 1);
+        assert!(arm
+            .announced
+            .0
+            .lock()
+            .unwrap()
+            .contains(&adopted_view.view_version));
+        model.view(&adopted_view, &arm.runner.entries.lock().unwrap());
+        assert_eq!(model.request_bytes.last(), model.request_bytes.first());
+        assert_eq!(
+            model.rebuilds, 1,
+            "adopting the prepared view must not rebuild"
+        );
         arm.restart();
         assert_eq!(
             arm.setup(setup_request(&prep.session, "fixture")).await["initial"],
@@ -389,6 +427,32 @@ async fn prepared_setup_and_notice_first_keep_the_exact_view_and_append_horizon(
         );
         assert!(adopted(&arm.state()));
     }
+}
+
+#[tokio::test]
+async fn repeated_setup_returns_the_stored_answer_without_reads_or_writes() {
+    let _clock = crate::tests::fixed_clock();
+    let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
+    let arm = Arm::open(
+        store.path(),
+        project.path(),
+        &prep.session,
+        Served::new(prep.served.clone(), 7),
+        config(),
+    );
+    let request = setup_request(&prep.session, "fixture");
+    let first = arm.setup(request.clone()).await;
+    assert_eq!(first["answer"], "ready", "{first}");
+    let before = store_rows(&prep.paths);
+    arm.runner.read_from.lock().unwrap().clear();
+    let repeated = arm.setup(request).await;
+    assert_eq!(
+        serde_json::to_vec(&repeated).unwrap(),
+        serde_json::to_vec(&first).unwrap()
+    );
+    assert_eq!(store_rows(&prep.paths), before);
+    assert!(arm.runner.read_from.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
