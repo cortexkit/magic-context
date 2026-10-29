@@ -34,11 +34,12 @@
 //! live runner whose `role.describe` differs from the one the run read
 //! (`describe_mismatch`, at that Setup and again at the first notice).
 use super::*;
+use crate::offline_move::MoveRecord;
 use std::path::PathBuf;
 
-/// Version of the [`OfflineFirstPass`] marker's shape. Version 2 proves the
-/// runner's served digests and records the runner's `role.describe`.
-const MARKER_VERSION: u32 = 2;
+/// Version 3 proves the retained interval starting at the move checkpoint,
+/// rather than requiring a zero-origin transcript.
+const MARKER_VERSION: u32 = 3;
 /// The time the one verification read of an offline-prepared record may take.
 /// It reads the whole transcript once, so it gets far more than a notice's
 /// read budget; a runner that cannot serve it in time leaves the notice to be
@@ -74,11 +75,15 @@ pub(crate) struct OfflineFirstPass {
     pub proof: Option<EntryInputProof>,
 }
 
-/// A digest over the held entries `0..count` of one lineage.
+/// A digest over the held entries `[origin, end)` of one lineage.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EntryInputProof {
     pub lineage: String,
+    #[serde(default)]
+    pub origin: u64,
     pub count: u64,
+    #[serde(default)]
+    pub end: u64,
     pub digest: String,
 }
 
@@ -88,8 +93,8 @@ fn framed(hash: &mut Sha256, bytes: &[u8]) {
 }
 
 impl EntryInputProof {
-    /// The proof over the held entries `0..count` (every held entry for
-    /// `None`), or `None` when those ordinals are not all held. Each entry
+    /// The proof over the held entries `[origin, end)` (through the last held
+    /// entry for `None`), or `None` when those ordinals are not all held. Each entry
     /// adds its ordinal, mid, the runner's served content digest, the SHA-256
     /// of its whole served form (which also covers role, timestamps and
     /// attributions), and for every part its key, its tag (empty when
@@ -102,17 +107,26 @@ impl EntryInputProof {
     pub(super) fn of(
         entries: &held_entries::HeldEntries,
         lineage: &str,
-        count: Option<u64>,
+        origin: u64,
+        end: Option<u64>,
         codec: codec::Codec,
     ) -> Result<Option<Self>, HandlerOutcome> {
-        let count = match count {
-            Some(count) => count,
-            None => entries.last_key_value().map_or(0, |(last, _)| last + 1),
+        let end = match end {
+            Some(end) => end,
+            None => entries
+                .last_key_value()
+                .map_or(origin, |(last, _)| last + 1),
+        };
+        let Some(count) = end.checked_sub(origin) else {
+            return Ok(None);
         };
         let mut hash = Sha256::new();
-        framed(&mut hash, b"mc-offline-entry-proof/v2");
+        framed(&mut hash, b"mc-offline-entry-proof/v3");
         framed(&mut hash, lineage.as_bytes());
-        for ordinal in 0..count {
+        hash.update(origin.to_le_bytes());
+        hash.update(count.to_le_bytes());
+        hash.update(end.to_le_bytes());
+        for ordinal in origin..end {
             let Some(held) = entries.get(&ordinal) else {
                 return Ok(None);
             };
@@ -135,10 +149,32 @@ impl EntryInputProof {
         }
         Ok(Some(Self {
             lineage: lineage.to_owned(),
+            origin,
             count,
+            end,
             digest: hex(&hash.finalize()),
         }))
     }
+}
+
+/// Old marker shapes deserialize so live callers can refuse them by name and
+/// the offline command can replace them without reading entries before the move
+/// checkpoint.
+pub(super) fn proof_version_matches(state: &State) -> bool {
+    state.offline_first_pass.as_ref().is_none_or(|offline| {
+        offline.version == MARKER_VERSION
+            && offline.proof.as_ref().is_none_or(|proof| {
+                proof.origin == proof_origin(state)
+                    && proof.origin.checked_add(proof.count) == Some(proof.end)
+            })
+    })
+}
+
+fn proof_origin(state: &State) -> u64 {
+    state
+        .standalone_move
+        .as_ref()
+        .map_or(state.lineage_first_ordinal, |moved| moved.message_count)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -200,9 +236,6 @@ pub(super) fn setup_mismatch(
     request: &compact::setup::SetupRequest,
 ) -> Option<&'static str> {
     let offline = state.offline_first_pass.as_ref()?;
-    if offline.version != MARKER_VERSION {
-        return Some("marker_version_differs");
-    }
     let Some(module) = super::records::attested_runner(binding) else {
         return Some("setup_differs");
     };
@@ -244,6 +277,7 @@ impl AsyncRecord {
 pub(crate) struct PagesRunner {
     pages: Vec<ServedPage>,
     describe: Value,
+    head: Value,
 }
 
 /// One exported page: its first and last ordinals and its line.
@@ -255,7 +289,20 @@ pub(crate) struct ServedPage {
 
 impl PagesRunner {
     pub(crate) fn new(pages: Vec<ServedPage>, describe: Value) -> Self {
-        Self { pages, describe }
+        Self {
+            pages,
+            describe,
+            head: json!({"first_ordinal":0}),
+        }
+    }
+
+    pub(crate) fn with_move_record(mut self, record: &MoveRecord) -> Self {
+        self.head = json!({
+                "first_ordinal": record.message_count,
+                "cut": record.head_cut,
+                "lineage_id": self.pages.first().and_then(|page| serde_json::from_str::<Value>(&page.line).ok()).and_then(|page| page["lineage_id"].as_str().map(str::to_owned)),
+        });
+        self
     }
 }
 
@@ -291,9 +338,7 @@ impl session_resolver::ProviderRunner for PagesRunner {
             return Ok(self.describe.clone());
         }
         if method == "session.head" {
-            // Exported first-pass pages describe an uncut lineage. No pre-cut
-            // facts may be inferred from their first page's position.
-            return Ok(json!({"first_ordinal":0}));
+            return Ok(self.head.clone());
         }
         if method != "session.read" {
             return Err(SessionResolveError::InvalidResponse(format!(
@@ -511,27 +556,28 @@ impl McHandler {
         Ok(hex(&hash.finalize()))
     }
 
-    /// Read the whole transcript again from ordinal 0 through the ordinary
+    /// Read the retained transcript again from the checkpoint through the ordinary
     /// read, beside the held entries, and return the proof of the served
-    /// entries `0..count`, or `None` when the runner no longer serves all of
+    /// entries `[origin, end)`, or `None` when the runner no longer serves all of
     /// them. The held entries and the record are left as they were.
     async fn served_entry_proof(
         &self,
         state: &mut State,
         lineage: &str,
-        count: u64,
+        origin: u64,
+        end: u64,
         budget: Duration,
     ) -> Result<Option<EntryInputProof>, HandlerOutcome> {
         let held = std::mem::take(&mut state.entries);
         let cadence = state.reminder_cadence.take();
         let held_lineage = state.lineage.clone();
-        let read = self.read_async(state, 0, budget).await;
+        let read = self.read_async(state, origin, budget).await;
         let served = std::mem::replace(&mut state.entries, held);
         state.reminder_cadence = cadence;
         state.lineage = held_lineage;
         read?;
         let codec = codec::Codec::from_params(&Value::Object(state.setup.params.clone()))?;
-        EntryInputProof::of(&served, lineage, Some(count), codec)
+        EntryInputProof::of(&served, lineage, origin, Some(end), codec)
     }
 
     /// Adopt or discard an offline-prepared record on its first live notice;
@@ -546,9 +592,14 @@ impl McHandler {
         let Some(offline) = state.offline_first_pass.clone() else {
             return Ok(state);
         };
+        if !proof_version_matches(&state) {
+            return Err(error(
+                "offline_proof_version",
+                "rerun `ck-mc offline first-pass` before live adoption",
+            ));
+        }
         let reason = match &offline.proof {
             None => Some("offline_run_incomplete"),
-            Some(_) if offline.version != MARKER_VERSION => Some("marker_version_differs"),
             Some(proof)
                 if headers
                     .get("lineage_id")
@@ -574,7 +625,13 @@ impl McHandler {
             }
             Some(proof) => {
                 let served = self
-                    .served_entry_proof(&mut state, &proof.lineage, proof.count, VERIFY_READ_BUDGET)
+                    .served_entry_proof(
+                        &mut state,
+                        &proof.lineage,
+                        proof.origin,
+                        proof.end,
+                        VERIFY_READ_BUDGET,
+                    )
                     .await?;
                 (served.as_ref() != Some(proof)).then_some("entries_differ")
             }
@@ -629,9 +686,10 @@ impl McHandler {
     /// Run the moved session's first pass offline, through the ordinary lane,
     /// against the pages `self.provider_runner` serves, and store it with its
     /// proof. The handler must have its store open; its runner must be a
-    /// [`PagesRunner`]. A rerun on a record this command already prepared
-    /// writes nothing: it answers `Unchanged` when the proof, Setup and inputs
-    /// are the same, and refuses `offline_state_differs` otherwise.
+    /// [`PagesRunner`]. A rerun on a compatible proof writes nothing: it answers
+    /// `Unchanged` when the proof, Setup and inputs are the same, and refuses
+    /// `offline_state_differs` otherwise. An unadopted record with an older
+    /// proof version is replaced with a preparation in a fresh generation.
     pub(crate) async fn offline_first_pass(
         &self,
         setup: &OfflineSetup,
@@ -671,10 +729,51 @@ impl McHandler {
             setup_identity_digest(request, &setup.runner_module).map_err(interrupted)?;
         let describe_digest =
             runner_describe_digest(&setup.runner_describe).map_err(interrupted)?;
-        if load_head(store, &reference).map_err(interrupted)?.is_some() {
-            return self
-                .offline_rerun(store, &key, &reference, &setup_digest, &describe_digest)
-                .await;
+        if let Some(old) = load_head(store, &reference).map_err(interrupted)? {
+            if proof_version_matches(&old) {
+                return self
+                    .offline_rerun(store, &key, &reference, &setup_digest, &describe_digest)
+                    .await;
+            }
+            // A marker still present has not been adopted. Replace only the
+            // provider's preparation; the authoritative move record stays intact.
+            let _serial = self.provider_serial.lock_for(&key).await;
+            let moved = match moved_session::setup_fence(
+                store,
+                &request.harness,
+                &request.session,
+                &request.request_id,
+            )
+            .map_err(interrupted)?
+            {
+                moved_session::Fence::Moved(record) => Some(*record),
+                _ => {
+                    return Err(OfflineError::Refused(
+                        "session_not_moved",
+                        "the old proof needs the authoritative move checkpoint".into(),
+                    ))
+                }
+            };
+            let generation = old
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| OfflineError::Interrupted("async generation exhausted".into()))?;
+            let mut fresh = self
+                .new_async_record(
+                    OFFLINE_CHANNEL,
+                    &binding,
+                    request,
+                    key.clone(),
+                    moved,
+                    generation,
+                )
+                .map_err(interrupted)?;
+            fresh.forget_discarded_rows();
+            self.resident_cache().forget(&reference);
+            fresh.save(store, &[]).map_err(interrupted)?;
+            store
+                .retire_unannounced_async_views(&reference)
+                .map_err(|e| OfflineError::Interrupted(e.to_string()))?;
         }
         let answer = self
             .async_setup(
@@ -718,8 +817,9 @@ impl McHandler {
         state.save(store, &[]).map_err(interrupted)?;
         let codec = codec::Codec::from_params(&Value::Object(state.setup.params.clone()))
             .map_err(interrupted)?;
+        let origin = proof_origin(&state);
         match self
-            .read_async_resumable(&mut state, 0, OFFLINE_READ_BUDGET)
+            .read_async_resumable(&mut state, origin, OFFLINE_READ_BUDGET)
             .await
             .map_err(interrupted)?
         {
@@ -772,12 +872,12 @@ impl McHandler {
         self.publish_async(0, &mut state, codec, false)
             .map_err(interrupted)?;
         state.engine_failed = false;
-        let proof = EntryInputProof::of(&state.entries, &lineage, None, codec)
+        let proof = EntryInputProof::of(&state.entries, &lineage, origin, None, codec)
             .map_err(interrupted)?
             .ok_or_else(|| {
                 OfflineError::Refused(
                     "pages_not_chained",
-                    "the held entries do not start at ordinal 0".into(),
+                    format!("the held entries do not cover the retained interval from {origin}"),
                 )
             })?;
         let inputs = self.offline_inputs_digest(&state).map_err(interrupted)?;
@@ -840,7 +940,13 @@ impl McHandler {
             ));
         }
         let served = self
-            .served_entry_proof(&mut state, &proof.lineage, proof.count, OFFLINE_READ_BUDGET)
+            .served_entry_proof(
+                &mut state,
+                &proof.lineage,
+                proof.origin,
+                proof.end,
+                OFFLINE_READ_BUDGET,
+            )
             .await
             .map_err(interrupted)?;
         if served.as_ref() != Some(&proof) {

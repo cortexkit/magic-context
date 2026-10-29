@@ -259,6 +259,7 @@ async fn broca_provider_fallback_offline_import_and_first_pass() {
     let pages = crate::offline_first_pass::parse_pages(
         std::io::Cursor::new(answer.to_string()),
         codec::Codec::OwnedBroca,
+        0,
     )
     .unwrap();
     assert_eq!(pages.entries, 4);

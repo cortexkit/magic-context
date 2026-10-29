@@ -16,9 +16,9 @@
 //! - `--pages`: THALAMUS's export, one `session.read` page per line. Each line
 //!   is the bare `ReadPage` body (`cortexkit-role-llm-runner` 0.4.0
 //!   `read::ReadPage`) that a descriptors-mode `session.read` would answer,
-//!   never wrapped in a reply envelope, and the pages chain from ordinal 0 to
-//!   the end of the transcript. Every message carries the runner's `digest`
-//!   and `part_digests`.
+//!   never wrapped in a reply envelope, and the pages chain from the move's
+//!   `message_count` to the end of the transcript. Every message carries the
+//!   runner's `digest` and `part_digests`.
 //! - `--setup`: `{"project_root": <abs path>, "runner_module": <module id>,
 //!   "runner_describe": <the runner's role.describe answer>,
 //!   "request": <the exact compaction.setup request the runner will send>}`.
@@ -40,11 +40,13 @@
 //!
 //! **Rerun.** On a session it already prepared from the same pages, Setup and
 //! inputs it writes nothing and answers `unchanged`; anything else is refused
-//! by name.
+//! by name. An unadopted record with an older proof version is prepared again
+//! from the authoritative move checkpoint in a fresh generation.
 //!
 //! **Refusals.** `usage`, `stores_in_use`, `offline_exclusivity_unproven`,
 //! `store_missing`, `store_unreadable`, `session_not_moved`,
-//! `moved_session_record_unreadable`, `setup_unreadable`,
+//! `moved_session_record_unreadable`, `moved_session_codec_mismatch`,
+//! `setup_unreadable`,
 //! `setup_session_mismatch`, `pages_unreadable`,
 //! `pages_bare_wrapped_mismatch`, `pages_not_chained`, `served_digest_missing`,
 //! `checkpoint_mismatch`, `tag_checkpoint_unsupported`, `setup_refused`,
@@ -109,14 +111,18 @@ fn refusal(code: &'static str, detail: impl Into<String>) -> Refusal {
 /// under `codec`'s serializer profile, keyed exactly as its tag rows are and
 /// in the same order, as a live descriptors-mode read requires; a message
 /// without them is refused as `served_digest_missing`, because ck-mc never
-/// computes them in the runner's place. The pages must chain: the first starts at
-/// ordinal 0, ordinals are contiguous inside and across pages, every page but
-/// the last names the next page's first ordinal in `next_from_ordinal`, the
-/// last names none, and every page carries the same lineage.
-pub(crate) fn parse_pages(reader: impl BufRead, codec: Codec) -> Result<Pages, Refusal> {
+/// computes them in the runner's place. The pages must chain: the first starts
+/// at the move checkpoint's `origin`, ordinals are contiguous inside and across
+/// pages, every page but the last names the next page's first ordinal in
+/// `next_from_ordinal`, the last names none, and every page carries the same lineage.
+pub(crate) fn parse_pages(
+    reader: impl BufRead,
+    codec: Codec,
+    origin: u64,
+) -> Result<Pages, Refusal> {
     let mut served: Vec<ServedPage> = Vec::new();
     let mut lineage: Option<String> = None;
-    let mut expected = 0u64;
+    let mut expected = origin;
     let mut pending_next: Option<u64> = None;
     let mut finished = false;
     let mut lowest_tag: Option<u64> = None;
@@ -247,7 +253,7 @@ pub(crate) fn parse_pages(reader: impl BufRead, codec: Codec) -> Result<Pages, R
     Ok(Pages {
         lineage,
         served,
-        entries: expected,
+        entries: expected - origin,
         lowest_tag,
     })
 }
@@ -349,13 +355,21 @@ pub(crate) fn check(args: &Args, holders: &dyn HolderCheck) -> Result<Checked, R
                 format!("request.params.serializer_profile: {error:?}"),
             )
         })?;
+    if codec.wire_id() != record.codec_profile.serializer
+        || record.codec_profile.native_index != "part_index"
+    {
+        return Err(refusal(
+            "moved_session_codec_mismatch",
+            "Setup's codec differs from the offline move manifest",
+        ));
+    }
     let file = std::fs::File::open(&args.pages).map_err(|error| {
         refusal(
             "pages_unreadable",
             format!("{}: {error}", args.pages.display()),
         )
     })?;
-    let pages = parse_pages(std::io::BufReader::new(file), codec)?;
+    let pages = parse_pages(std::io::BufReader::new(file), codec, record.message_count)?;
     check_checkpoint(&record, &pages)?;
     Ok(Checked {
         record,
@@ -424,10 +438,13 @@ pub fn run(args: &Args, holders: &dyn HolderCheck) -> Result<Value, RunError> {
         .map_err(|reason| RunError::Refused(refusal("store_unreadable", reason)))?;
     let mut handler = crate::McHandler::new();
     handler.store.set(Arc::new(store)).ok();
-    handler.provider_runner = Arc::new(PagesRunner::new(
-        std::mem::take(&mut checked.pages.served),
-        checked.setup.runner_describe.clone(),
-    ));
+    handler.provider_runner = Arc::new(
+        PagesRunner::new(
+            std::mem::take(&mut checked.pages.served),
+            checked.setup.runner_describe.clone(),
+        )
+        .with_move_record(&checked.record),
+    );
     // The engine pass is synchronous work inside async functions; a runtime of
     // its own on its own thread keeps it apart from the caller's.
     let outcome = std::thread::scope(|scope| {
