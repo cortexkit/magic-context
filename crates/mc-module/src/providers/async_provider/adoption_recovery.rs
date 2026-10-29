@@ -107,7 +107,7 @@ impl McHandler {
                 .map(|entry| entry.read())
                 .transpose()?;
             if let (Some(prior), Some(applied)) = (prior.as_ref(), applied.as_ref()) {
-                if served_digest(&prior)? == served_digest(entry)? {
+                if served_digest(prior)? == served_digest(entry)? {
                     unchanged.insert(entry.mid.clone());
                     rendered.extend(cut_runtime::render_retained_rows(
                         &held,

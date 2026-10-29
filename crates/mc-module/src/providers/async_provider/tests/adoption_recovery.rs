@@ -159,12 +159,13 @@ async fn adoption_recovery_unchanged_first_request_and_horizon() {
     assert_eq!(artifacts(&child.namespace()), artifacts(&old_namespace));
     assert!(!artifacts(&child.namespace()).is_empty());
     assert!(child.entries.keys().all(|ordinal| *ordinal >= 6));
-    let reads = rig.runner.reads.lock().unwrap();
-    assert_eq!(reads[0]["from_ordinal"], 6);
-    assert!(reads.iter().all(|read| read["lineage_id"] == "recovered"
-        && read["from_ordinal"].as_u64().unwrap() >= 6
-        && read["max_bytes"] == 1_048_576));
-    drop(reads);
+    {
+        let reads = rig.runner.reads.lock().unwrap();
+        assert_eq!(reads[0]["from_ordinal"], 6);
+        assert!(reads.iter().all(|read| read["lineage_id"] == "recovered"
+            && read["from_ordinal"].as_u64().unwrap() >= 6
+            && read["max_bytes"] == 1_048_576));
+    }
     assert_eq!(
         child.standalone_move.as_ref().unwrap().bound_drops,
         parent.standalone_move.as_ref().unwrap().bound_drops
