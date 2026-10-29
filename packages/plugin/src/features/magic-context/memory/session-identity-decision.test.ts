@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
@@ -518,6 +518,178 @@ function sessionTools(directory: string, session: string, connectionFile: string
 }
 
 describe("OpenCode session decision integration", () => {
+    test("review witness: a tool-first move cannot replace the owner of a held fallback prefix", async () => {
+        const a = folder("review-fallback-a");
+        const b = folder("review-fallback-b");
+        rememberPinnedProjectIdentity(a, "pj-REVIEW-A");
+        rememberPinnedProjectIdentity(b, "pj-REVIEW-B");
+        const db = hostDatabase();
+        const session = "review-fallback-move";
+        const alpha = insertMemory(db, {
+            projectPath: "pj-REVIEW-A",
+            category: "USER_DIRECTIVES",
+            content: "review fallback alpha directive",
+        });
+        const model = { providerID: "anthropic", modelID: "claude-sonnet-5-5" };
+        const deps = {
+            ...hostDeps(db, session, a, join(temp.dir, "absent-subc.json")),
+            sessionDirectoryBySession: new Map<string, string>(),
+            liveModelBySession: new Map([[session, model]]),
+            client: {
+                session: {
+                    get: async () => {
+                        throw new Error("host unavailable");
+                    },
+                },
+            } as unknown as PluginContext["client"],
+        };
+        const transform = createTransform(deps);
+        const first = { messages: messages(session) };
+        await transform({}, first);
+        expect(rendered(first)).toContain(alpha.content);
+        expect(row(db, session)).toBeUndefined();
+        const head = JSON.stringify(first.messages.slice(0, 2));
+
+        const { tools, context } = sessionTools(b, session, deps.subcConnectionFile);
+        await tools.ctx_memory!.execute(
+            { action: "write", category: "USER_DIRECTIVES", content: "review move write" },
+            context,
+        );
+        deps.sessionDirectoryBySession.set(session, b);
+        deps.contextUsageMap.set(session, {
+            usage: { percentage: 66, inputTokens: 66000 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        });
+        const held = {
+            messages: [
+                ...messages(session),
+                {
+                    info: {
+                        id: "review-signed-step",
+                        role: "assistant",
+                        sessionID: session,
+                        ...model,
+                        tokens: { input: 0, output: 1600, reasoning: 1600 },
+                    },
+                    parts: [
+                        { type: "reasoning", text: "signed thinking" },
+                        {
+                            type: "tool",
+                            tool: "read",
+                            callID: "review-call",
+                            state: { status: "completed", output: "contents" },
+                        },
+                    ],
+                },
+            ],
+        };
+        await transform({}, held);
+        expect(JSON.stringify(held.messages.slice(0, 2))).toBe(head);
+        const read = await tools.ctx_memory!.execute({ action: "get", ids: [alpha.id] }, context);
+        const writes = getMemoriesByProject(db, "pj-REVIEW-A").map((memory) => memory.content);
+        expect({ read, writes, owner: row(db, session) }).toEqual({
+            read: expect.stringContaining(alpha.content),
+            writes: expect.arrayContaining(["review move write"]),
+            owner: "pj-REVIEW-A",
+        });
+    });
+
+    test("review witness: a restarted held prefix repairs a stale recorded owner before tools run", async () => {
+        const a = folder("review-stale-a");
+        const b = folder("review-stale-b");
+        rememberPinnedProjectIdentity(a, "pj-REVIEW-STALE-A");
+        rememberPinnedProjectIdentity(b, "pj-REVIEW-STALE-B");
+        const db = hostDatabase();
+        const session = "review-stale-owner";
+        const alpha = insertMemory(db, {
+            projectPath: "pj-REVIEW-STALE-A",
+            category: "USER_DIRECTIVES",
+            content: "review persisted alpha directive",
+        });
+        const model = { providerID: "anthropic", modelID: "claude-sonnet-5-5" };
+        const firstDeps = {
+            ...hostDeps(db, session, a, join(temp.dir, "absent-subc.json")),
+            liveModelBySession: new Map([[session, model]]),
+        };
+        const first = { messages: messages(session) };
+        await createTransform(firstDeps)({}, first);
+        // Older transforms recorded the moved owner while replaying the old project's message prefix.
+        recordSessionProjectIdentity(db, session, "pj-REVIEW-STALE-B");
+        __resetSessionIdentityDecisionsForTests();
+        const deps = {
+            ...hostDeps(db, session, b, firstDeps.subcConnectionFile),
+            liveModelBySession: new Map([[session, model]]),
+        };
+        deps.contextUsageMap.set(session, {
+            usage: { percentage: 66, inputTokens: 66000 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        });
+        const held = {
+            messages: [
+                ...messages(session),
+                {
+                    info: {
+                        id: "review-resumed-step",
+                        role: "assistant",
+                        sessionID: session,
+                        ...model,
+                        tokens: { input: 0, output: 1600, reasoning: 1600 },
+                    },
+                    parts: [
+                        { type: "reasoning", text: "signed thinking" },
+                        {
+                            type: "tool",
+                            tool: "read",
+                            callID: "review-resumed-call",
+                            state: { status: "completed", output: "contents" },
+                        },
+                    ],
+                },
+            ],
+        };
+        await createTransform(deps)({}, held);
+        expect(JSON.stringify(held.messages.slice(0, 2))).toBe(
+            JSON.stringify(first.messages.slice(0, 2)),
+        );
+        const { tools, context } = sessionTools(b, session, deps.subcConnectionFile);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [alpha.id] }, context),
+        ).toContain(alpha.content);
+    });
+
+    test("review witness: a warm ordinary defer adds no session owner reads", async () => {
+        const directory = folder("review-hot-path");
+        rememberPinnedProjectIdentity(directory, "pj-REVIEW-HOT");
+        const db = hostDatabase();
+        const session = "review-hot-path";
+        const deps = hostDeps(db, session, directory, join(temp.dir, "absent-subc.json"));
+        const transform = createTransform(deps);
+        const first = { messages: messages(session) };
+        await transform({}, first);
+        const prepare = db.prepare.bind(db);
+        const ownerReads: string[] = [];
+        const spy = spyOn(db, "prepare").mockImplementation(((sql: string) => {
+            if (
+                sql ===
+                "SELECT project_path FROM session_projects WHERE session_id = ? AND harness = ?"
+            )
+                ownerReads.push(sql);
+            return prepare(sql);
+        }) as typeof db.prepare);
+        try {
+            const next = { messages: messages(session) };
+            await transform({}, next);
+            expect(JSON.stringify(next.messages.slice(0, 2))).toBe(
+                JSON.stringify(first.messages.slice(0, 2)),
+            );
+            expect(ownerReads).toHaveLength(0);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
     test("a 250 ms session.created, transform and tools agree after caching git", async () => {
         const directory = folder("slow");
         const fake = await fakeEndpoint(directory);
