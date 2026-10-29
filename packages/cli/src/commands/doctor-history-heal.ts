@@ -22,7 +22,7 @@ import {
     openExistingContextDatabase,
     openExistingDatabase,
 } from "../lib/database-access";
-import { assertHealWriteContract } from "./doctor-history-heal-contract";
+import { assertHealWriteContract, healKeyPredicate } from "./doctor-history-heal-contract";
 import {
     canonical,
     digest,
@@ -33,7 +33,6 @@ import {
     planHealSession,
     quote,
     type Rewrite,
-    type Row,
     readHealMeta,
 } from "./doctor-history-heal-plan";
 import { probeHostProcessesUsing } from "./doctor-opencode2-cache";
@@ -112,10 +111,7 @@ function metadata(db: Database, session: HealSession): void {
         queueM0Mutation(db, { sessionId: session.id, mutationType: "recomp_boundary_change" });
 }
 export function applyHealRewrites(db: Database, rewrites: Rewrite[]): void {
-    const where = (key: Row) =>
-        Object.keys(key)
-            .map((k) => `${quote(k)} IS ?`)
-            .join(" AND ");
+    const where = healKeyPredicate;
     // Map ordinals are unique keys, so shift their whole changed set without transient collisions.
     for (const r of rewrites.filter((r) => r.table === "message_fts_rowid_map" || r.after === null))
         db.prepare(`DELETE FROM ${quote(r.table)} WHERE ${where(r.key)}`).run(

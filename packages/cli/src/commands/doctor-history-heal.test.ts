@@ -27,6 +27,7 @@ import {
     type HistoryHealDeps,
     runHistoryHealCli,
 } from "./doctor-history-heal";
+import { healKeyPredicate } from "./doctor-history-heal-contract";
 import {
     canonical,
     digest,
@@ -1015,4 +1016,18 @@ describe("history heal authorization and crash states", () => {
             [],
         );
     });
+});
+
+it("uses the FTS rowid index for authorized key predicates", () => {
+    seedIndex();
+    const details = db
+        .prepare(
+            `EXPLAIN QUERY PLAN SELECT * FROM message_history_fts WHERE ${healKeyPredicate({ rowid: 8 })}`,
+        )
+        .all(8) as { detail: string }[];
+    expect(
+        details.some(
+            (row) => row.detail.includes("VIRTUAL TABLE INDEX") && row.detail.includes(":="),
+        ),
+    ).toBe(true);
 });

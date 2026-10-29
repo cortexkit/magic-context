@@ -60,13 +60,15 @@ function matches(actual: Row, expected: Row): boolean {
         canonical(expected)
     );
 }
+export function healKeyPredicate(key: Row): string {
+    // All authorized keys are non-null. FTS5 needs equality, not IS, to use its rowid index.
+    return Object.keys(key)
+        .map((k) => `${quote(k)} = ?`)
+        .join(" AND ");
+}
 function lookup(db: Database, r: Rewrite): Row | undefined {
     return db
-        .prepare(
-            `SELECT * FROM ${quote(r.table)} WHERE ${Object.keys(r.key)
-                .map((k) => `${quote(k)} IS ?`)
-                .join(" AND ")}`,
-        )
+        .prepare(`SELECT * FROM ${quote(r.table)} WHERE ${healKeyPredicate(r.key)}`)
         .get(...Object.values(r.key)) as Row | undefined;
 }
 function info(row: Row): Row {
