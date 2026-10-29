@@ -27,21 +27,26 @@ export function createTestDb(path = ":memory:"): Database {
 		// In-memory fixtures cannot be opened by a read-only worker connection.
 		// This explicit fixture loader exercises owner publication; file-backed
 		// hydration tests use the real worker and measure its transport separately.
-		__setPiTagSnapshotWorkerForTests(db, (request, cached) => ({
-			result: loadPiTagSnapshotCandidate(async (candidate) => {
-				for (const row of getTagsBySession(db, request.sessionId))
-					candidate.appendTag(
-						request.projection === "pass" ? projectPiPassTag(row) : row,
-					);
-				candidate.end("tags");
-				for (const row of db
-					.prepare(
-						`SELECT ${PI_FALLBACK_ROW_COLUMNS} FROM tags WHERE session_id = ? AND ${PI_FALLBACK_ROW_PREDICATE} ORDER BY tag_number, id`,
-					)
-					.all(request.sessionId))
-					candidate.appendFallback(row as PiFallbackTagRow);
-				candidate.end("fallback");
-			}, cached).then((candidate) => ({
+		__setPiTagSnapshotWorkerForTests(db, (request, cached, cachedFallback) => ({
+			result: loadPiTagSnapshotCandidate(
+				async (candidate) => {
+					for (const row of getTagsBySession(db, request.sessionId))
+						candidate.appendTag(
+							request.projection === "pass" ? projectPiPassTag(row) : row,
+						);
+					candidate.end("tags");
+					for (const row of db
+						.prepare(
+							`SELECT ${PI_FALLBACK_ROW_COLUMNS} FROM tags WHERE session_id = ? AND ${PI_FALLBACK_ROW_PREDICATE} ORDER BY tag_number, id`,
+						)
+						.all(request.sessionId))
+						candidate.appendFallback(row as PiFallbackTagRow);
+					candidate.end("fallback");
+				},
+				cached,
+				undefined,
+				cachedFallback,
+			).then((candidate) => ({
 				candidate,
 				generation: db
 					.prepare(

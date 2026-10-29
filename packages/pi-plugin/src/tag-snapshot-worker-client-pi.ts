@@ -103,8 +103,13 @@ export function createPiHydrationPacketConsumer(
 	request: PiHydrationRequest,
 	cached: readonly PiPassTag[] = [],
 	byteLimit?: number,
+	cachedFallback: readonly PiFallbackTagRow[] = [],
 ) {
-	const assembly = createPiTagSnapshotCandidate(cached, byteLimit);
+	const assembly = createPiTagSnapshotCandidate(
+		cached,
+		byteLimit,
+		cachedFallback,
+	);
 	let sequence = 0;
 	let generation: PiHydrationGeneration | undefined;
 	let busy = false;
@@ -299,6 +304,7 @@ export function startPiTagSnapshotWorker(
 	request: PiHydrationRequest,
 	options: {
 		cached?: readonly PiPassTag[];
+		cachedFallback?: readonly PiFallbackTagRow[];
 		byteLimit?: number;
 		deadlineMs?: number;
 		entry?: URL;
@@ -318,6 +324,7 @@ export function startPiTagSnapshotWorker(
 		request,
 		options.cached,
 		options.byteLimit,
+		options.cachedFallback,
 	);
 	const worker = inRootAsyncContext(
 		() => new Worker(entry, { workerData: request }),

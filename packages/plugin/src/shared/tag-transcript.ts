@@ -127,6 +127,8 @@ export interface TagTranscriptResult {
     targets: Map<number, TagTarget>;
 }
 
+type PersistedDropTag = Pick<TagEntry, "tagNumber" | "messageId" | "type" | "toolOwnerMessageId">;
+
 /**
  * Bind durable drops to a saved request without tagging it again. Recovery must
  * not allocate identities, inject prefixes, or write accounting while the store
@@ -134,7 +136,7 @@ export interface TagTranscriptResult {
  */
 export function buildPersistedDropTargets(
     transcript: Transcript,
-    tags: readonly TagEntry[],
+    tags: readonly PersistedDropTag[],
     options: { allowReasoningPrefixRewrite?: boolean } = {},
 ): Map<number, TagTarget> {
     const targets = new Map<number, TagTarget>();
@@ -149,7 +151,7 @@ export function buildPersistedDropTargets(
     const byNumber = new Map(tags.map((tag) => [tag.tagNumber, tag]));
     const aggregates = new Map<
         string,
-        { tag?: TagEntry; occurrences: ToolOccurrence[]; reasoning: boolean }
+        { tag?: PersistedDropTag; occurrences: ToolOccurrence[]; reasoning: boolean }
     >();
     const pending = new Map<string, string[]>();
     const resolved = new Map<string, string>();
@@ -1109,7 +1111,7 @@ function tagTextPart(args: TagTextPartArgs): void {
     // (e.g. legacy session created before this code shipped). For new
     // sessions stripTagPrefix is a no-op on the very first pass.
     const sourceContent = stripTagPrefix(text);
-    if (sourceContent.trim().length > 0 && !args.textIdentitySourceCache?.has(tagId)) {
+    if (sourceContent.trim().length > 0) {
         saveSourceContent(args.db, args.sessionId, tagId, sourceContent);
         args.textIdentitySourceCache?.set(tagId, sourceContent);
     }

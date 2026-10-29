@@ -274,15 +274,13 @@ export function createPiTagSnapshotReader(db: Database) {
 				throw lastFailure;
 			watch.run(sessionId);
 			const token = stamps(sessionId, ++jobId);
-			const previous = cache.get(sessionId);
-			if (projection === "pass" && previous && previous.projection !== "pass") {
-				// Release the full historical rows before assembling their narrower
-				// replacement; a prior diagnostic full read must not pin that payload.
-				previous.tags = previous.tags.map((tag) =>
-					projectPiPassTag(tag as SnapshotTag),
-				);
-				previous.projection = "pass";
+			const cached = cache.get(sessionId);
+			if (cached && cached.projection !== projection) {
+				// A purpose switch needs a newly admitted candidate. Release the old
+				// cache before allocating it, and never advertise the new mode early.
+				cache.delete(sessionId);
 			}
+			const previous = cache.get(sessionId);
 			const legacyFallbackOnly =
 				previous &&
 				previous.foreignRevision === token.foreignRevision &&
@@ -292,12 +290,15 @@ export function createPiTagSnapshotReader(db: Database) {
 			const path = getSqliteDatabasePath(db);
 			const factory =
 				workerFactories.get(db) ??
-				((request, cached) => {
+				((request, cached, cachedFallback) => {
 					if (!path)
 						throw new PiTagHydrationError(
 							"read-only hydration requires a file-backed database",
 						);
-					return startPiTagSnapshotWorker({ ...request, path }, { cached });
+					return startPiTagSnapshotWorker(
+						{ ...request, path },
+						{ cached, cachedFallback },
+					);
 				});
 			const worker = factory(
 				{
@@ -309,6 +310,7 @@ export function createPiTagSnapshotReader(db: Database) {
 					projection,
 				},
 				previous?.tags ?? [],
+				previous?.fallback ?? [],
 			);
 			const destination: OwnerJob = {
 				sessionId,
@@ -396,9 +398,24 @@ export function createPiTagSnapshotReader(db: Database) {
 					cache.set(sessionId, snapshot);
 				})
 				.catch((error) => {
-					const retryable =
+					const releaseCachedAllocations =
+						previous &&
+						!legacyFallbackOnly &&
+						cache.get(sessionId) === previous &&
 						error instanceof PiTagHydrationError &&
-						(error.code === "stale" || error.code === "cancelled");
+						error.message.includes("candidate memory limit exceeded");
+					if (releaseCachedAllocations) cache.delete(sessionId);
+					// A changed candidate may fit alone but not beside the invalidated
+					// cache. Retry cold within the same waiter's original deadline.
+					const failure = releaseCachedAllocations
+						? new PiTagHydrationError(
+								"candidate memory limit exceeded with cached allocations; retrying without cache",
+								"stale",
+							)
+						: error;
+					const retryable =
+						failure instanceof PiTagHydrationError &&
+						(failure.code === "stale" || failure.code === "cancelled");
 					if (retryable) destination.retryable = true;
 					// Cancelling an old session is not a connection failure. Do not
 					// replay its cancellation as the next session's startup error.
@@ -409,10 +426,10 @@ export function createPiTagSnapshotReader(db: Database) {
 					) {
 						// Back off only the failed session; another session needs its own read.
 						failedSession = sessionId;
-						lastFailure = error;
+						lastFailure = failure;
 						failedUntil = performance.now() + (retryable ? 0 : 500);
 					}
-					throw error;
+					throw failure;
 				});
 			// Observe cancellation immediately without making a failed pass wait
 			// for a native worker to exit. Release still gates the next worker and
@@ -593,7 +610,17 @@ export function createPiTagSnapshotReader(db: Database) {
 		// The full API remains full when a pass keeps only metadata for history.
 		// Runtime attribution uses the narrow projection, not this escape hatch.
 		if (snapshot.projection === "pass") {
+			const before = stamps(sessionId, 0);
 			const tags = getTagsBySession(db, sessionId);
+			const after = stamps(sessionId, 0);
+			if (
+				!samePiTagSnapshotToken(before, after) ||
+				before.totalRevision !== after.totalRevision
+			)
+				throw new PiTagHydrationError(
+					"full snapshot generation changed",
+					"stale",
+				);
 			return borrowed ? tags.map((tag) => Object.freeze(tag)) : tags;
 		}
 		// Heuristics can edit their working entries; never expose the cached objects.
@@ -639,7 +666,7 @@ export function createPiTagSnapshotReader(db: Database) {
 export type PiSnapshotTag = ReturnType<typeof getTagsBySession>[number];
 type SnapshotTag = PiSnapshotTag;
 
-/** Historical fields used by attribution, token protection and served-number publication. */
+/** Historical fields used by attribution, protection, saved-drop replay and served numbers. */
 export type PiTagMetadata = Pick<
 	SnapshotTag,
 	| "id"
@@ -650,10 +677,11 @@ export type PiTagMetadata = Pick<
 	| "toolOwnerMessageId"
 	| "tokenCount"
 	| "toolName"
+	| "dropMode"
 >;
 export type PiPassTag = PiTagMetadata & Partial<SnapshotTag>;
 
-/** Active heuristics need full rows; history needs identity and accounting, not replay payload fields. */
+/** Keep full active heuristic rows and only historical attribution, protection and replay fields. */
 export function projectPiPassTag(tag: SnapshotTag): PiPassTag {
 	if (tag.status === "active") return tag;
 	return Object.freeze({
@@ -665,6 +693,7 @@ export function projectPiPassTag(tag: SnapshotTag): PiPassTag {
 		toolOwnerMessageId: tag.toolOwnerMessageId,
 		tokenCount: tag.tokenCount,
 		toolName: tag.toolName,
+		dropMode: tag.dropMode,
 	});
 }
 
@@ -796,6 +825,7 @@ function passTagBytes(row: PiPassTag): number {
 export function createPiTagSnapshotCandidate(
 	cached: readonly PiPassTag[] = [],
 	byteLimit = 128 * 1024 * 1024,
+	cachedFallback: readonly PiFallbackTagRow[] = [],
 ) {
 	const tags: PiPassTag[] = [];
 	const active: SnapshotTag[] = [];
@@ -806,8 +836,16 @@ export function createPiTagSnapshotCandidate(
 	for (const row of cached)
 		reusedBytes += passTagBytes(row) + 8 + (isActive(row) ? 8 : 0);
 	if (cached.length) reusedBytes += 128;
-	let allocatedBytes = 192;
+	for (const row of cachedFallback)
+		reusedBytes += candidateRowBytes(row, 192) + 8;
+	if (cachedFallback.length) reusedBytes += 64;
+	let allocatedBytes =
+		192 + (cachedFallback.length ? 64 + cachedFallback.length * 48 : 0);
 	let estimatedBytes = reusedBytes + allocatedBytes;
+	const fallbackCache =
+		cachedFallback.length && estimatedBytes <= byteLimit
+			? new Map(cachedFallback.map((row) => [row.id, row]))
+			: undefined;
 	let oldIndex = 0;
 	let keys: (keyof PiPassTag)[] | undefined;
 	let tagsEnded = false;
@@ -862,8 +900,16 @@ export function createPiTagSnapshotCandidate(
 		appendFallback(row: PiFallbackTagRow) {
 			if (failed || fallbackEnded)
 				reject("fallback packet after end or failure");
-			admit(candidateRowBytes(row, 192) + 8);
-			fallback.push(Object.freeze(row));
+			const old = fallbackCache?.get(row.id);
+			const rowKeys = Object.keys(row) as (keyof PiFallbackTagRow)[];
+			const selected =
+				old &&
+				Object.keys(old).length === rowKeys.length &&
+				rowKeys.every((key) => Object.is(old[key], row[key]))
+					? old
+					: row;
+			admit((selected === old ? 0 : candidateRowBytes(row, 192)) + 8);
+			fallback.push(Object.freeze(selected));
 		},
 		end(stream: "tags" | "fallback") {
 			if (failed) reject("end after failure");
@@ -878,6 +924,7 @@ export function createPiTagSnapshotCandidate(
 		finish(): PiTagSnapshotCandidate {
 			if (failed || !tagsEnded || !fallbackEnded)
 				throw new Error("Pi tag hydration: incomplete candidate");
+			if (estimatedBytes > byteLimit) reject("candidate memory limit exceeded");
 			return {
 				tags,
 				active,
@@ -899,8 +946,13 @@ export async function loadPiTagSnapshotCandidate(
 	loader: PiTagSnapshotCandidateLoader,
 	cached: readonly PiPassTag[] = [],
 	byteLimit?: number,
+	cachedFallback: readonly PiFallbackTagRow[] = [],
 ): Promise<PiTagSnapshotCandidate> {
-	const assembly = createPiTagSnapshotCandidate(cached, byteLimit);
+	const assembly = createPiTagSnapshotCandidate(
+		cached,
+		byteLimit,
+		cachedFallback,
+	);
 	await loader(assembly);
 	return assembly.finish();
 }
@@ -1022,7 +1074,7 @@ export function getPiTagSnapshot(db: Database, sessionId: string) {
 	return reader(sessionId);
 }
 
-/** Internal read-only projection. Changed rows get new objects; unchanged rows retain identity. */
+/** Full read-only diagnostic view; pass-mode caches reconstruct it with a fenced table read. */
 export function getPiTagSnapshotView(db: Database, sessionId: string) {
 	return createPiTagSnapshotReader(db)(sessionId, true);
 }
@@ -1034,15 +1086,11 @@ export function getPiPassTagSnapshotView(
 ): readonly PiPassTag[] {
 	createPiTagSnapshotReader(db);
 	const snapshot = entryReaders.get(db)?.(sessionId);
-	if (snapshot && snapshot.projection !== "pass") {
-		snapshot.tags = snapshot.tags.map((tag) =>
-			projectPiPassTag(tag as SnapshotTag),
-		);
-		snapshot.projection = "pass";
-	}
-	return (
-		snapshot?.tags ?? getTagsBySession(db, sessionId).map(projectPiPassTag)
-	);
+	if (snapshot?.projection === "pass") return snapshot.tags;
+	const full =
+		(snapshot?.tags as SnapshotTag[] | undefined) ??
+		getTagsBySession(db, sessionId);
+	return full.map(projectPiPassTag);
 }
 
 /**
@@ -1101,6 +1149,7 @@ interface OwnerJob {
 type PiSnapshotWorkerFactory = (
 	request: PiHydrationRequest,
 	cached: readonly PiPassTag[],
+	cachedFallback: readonly PiFallbackTagRow[],
 ) => {
 	result: Promise<{
 		candidate: PiTagSnapshotCandidate;

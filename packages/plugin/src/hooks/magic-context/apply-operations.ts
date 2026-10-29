@@ -287,7 +287,10 @@ export function convertLegacyToolSkeletons(
     db: ContextDatabase,
     sessionId: string,
     targets: ReadonlyMap<number, TagTarget>,
-    options: { keepFullDrop?: (callId: string | null) => boolean } = {},
+    options: {
+        keepFullDrop?: (callId: string | null) => boolean;
+        prepareRemovals?: (rows: readonly { tagNumber: number; callId: string | null }[]) => void;
+    } = {},
 ): Map<number, ConvertedToolDropMode> {
     const prepared = prepareLegacyToolSkeletonConversions(db, sessionId, targets, options);
     prepared.persist(db);
@@ -299,7 +302,10 @@ export function prepareLegacyToolSkeletonConversions(
     db: ContextDatabase,
     sessionId: string,
     targets: ReadonlyMap<number, TagTarget>,
-    options: { keepFullDrop?: (callId: string | null) => boolean } = {},
+    options: {
+        keepFullDrop?: (callId: string | null) => boolean;
+        prepareRemovals?: (rows: readonly { tagNumber: number; callId: string | null }[]) => void;
+    } = {},
 ) {
     // Only calls on the wire can change. Point lookups use the session/tag
     // unique index instead of reading every historical dropped tool twice.
@@ -324,6 +330,9 @@ export function prepareLegacyToolSkeletonConversions(
         });
     };
     const rows = readRows(db);
+    // Hosts may batch the same authorizations requested by cannotRemove().
+    // Per-target checks still decide the conversion and remain the failure fallback.
+    options.prepareRemovals?.(rows);
     const converted = new Map<number, ConvertedToolDropMode>();
     for (const row of rows) {
         const target = targets.get(row.tagNumber);
@@ -704,7 +713,7 @@ export function applyFlushedStatuses(
     sessionId: string,
     db: ContextDatabase,
     targets: Map<number, TagTarget>,
-    preloadedTags?: TagEntry[],
+    preloadedTags?: readonly Pick<TagEntry, "tagNumber" | "type" | "status" | "dropMode">[],
 ): boolean {
     let didMutateMessage = false;
     // Rows without a target in the visible output cannot change that output.
