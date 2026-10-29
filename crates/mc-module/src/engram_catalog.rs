@@ -79,6 +79,10 @@ struct Entry {
     path: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     writer_interaction: Option<WriterInteraction>,
+    /// Tables of a page-db entry that Engram blanks in each capture, so a restored
+    /// database has them empty. Only tables whose loss costs nothing lasting go here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exclude_tables: Option<&'static [&'static str]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
 }
@@ -97,6 +101,7 @@ const fn file(entry_id: &'static str, class: Class, path: &'static str) -> Entry
         mechanism: Mechanism::Filetree,
         path,
         writer_interaction: None,
+        exclude_tables: None,
         reason: None,
     }
 }
@@ -108,9 +113,19 @@ const fn excluded(entry_id: &'static str, path: &'static str, reason: &'static s
         mechanism: Mechanism::Filetree,
         path,
         writer_interaction: None,
+        exclude_tables: None,
         reason: Some(reason),
     }
 }
+
+/// The last-good request tables in `context.db`. They hold a copy of the last
+/// request each session sent, kept only as the fallback for a busy database, and
+/// they are rewritten on most turns, so they dominate the backup's churn. A
+/// restored database with both empty loses nothing lasting: the next healthy pass
+/// captures a fresh copy, and until then a busy moment in that session is refused
+/// instead of replayed. A restore rewinds the session anyway, so an old copy would
+/// rarely match. No kept table has a foreign key into either one.
+const CONTEXT_DB_EXCLUDED_TABLES: &[&str] = &["lkg_slots", "lkg_slot_chunks"];
 
 /// Every declared path, in the order the descriptor lists them. The entry IDs of
 /// the four original entries (`context-db`, `module-store`, `embedding-models`,
@@ -124,6 +139,7 @@ const ENTRIES: &[Entry] = &[
         mechanism: Mechanism::PageDb,
         path: "context.db",
         writer_interaction: Some(WriterInteraction::ReadTransactionLive),
+        exclude_tables: Some(CONTEXT_DB_EXCLUDED_TABLES),
         reason: None,
     },
     Entry {
@@ -132,6 +148,7 @@ const ENTRIES: &[Entry] = &[
         mechanism: Mechanism::WholeDb,
         path: "store.db",
         writer_interaction: Some(WriterInteraction::BackupApiLive),
+        exclude_tables: None,
         reason: None,
     },
     file(
@@ -371,6 +388,11 @@ mod tests {
         assert_eq!(context_db["class"], "portable");
         assert_eq!(context_db["mechanism"], "page-db");
         assert_eq!(context_db["writer_interaction"], "read-transaction-live");
+        assert_eq!(
+            context_db["exclude_tables"],
+            serde_json::json!(["lkg_slots", "lkg_slot_chunks"]),
+            "only the last-good request tables may be left out of the backup"
+        );
     }
 
     #[test]
@@ -443,6 +465,20 @@ mod tests {
                     entry.get("writer_interaction").is_none(),
                     "{id}: writer_interaction is for live databases only"
                 );
+            }
+            if let Some(tables) = entry.get("exclude_tables") {
+                assert_eq!(
+                    mechanism, "page-db",
+                    "{id}: exclude_tables is for page-db only"
+                );
+                let tables = tables.as_array().expect("exclude_tables is an array");
+                assert!(!tables.is_empty(), "{id}: exclude_tables must name a table");
+                for table in tables {
+                    assert!(
+                        table.as_str().is_some_and(|name| !name.is_empty()),
+                        "{id}: exclude_tables names must be non-empty strings"
+                    );
+                }
             }
         }
     }

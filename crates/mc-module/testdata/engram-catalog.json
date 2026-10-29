@@ -7,7 +7,11 @@
       "class": "portable",
       "mechanism": "page-db",
       "path": "context.db",
-      "writer_interaction": "read-transaction-live"
+      "writer_interaction": "read-transaction-live",
+      "exclude_tables": [
+        "lkg_slots",
+        "lkg_slot_chunks"
+      ]
     },
     {
       "entry_id": "magic-context/module-store",
