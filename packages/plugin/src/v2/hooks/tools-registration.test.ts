@@ -1,10 +1,11 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parsePluginConfig } from "../../config";
+import { readGitCheckoutMetadata } from "../../features/magic-context/memory/git-common-dir";
 import {
     __resetProjectIdentityForTests,
     __setProjectIdentityTestHooks,
@@ -25,6 +26,10 @@ import {
     closeDatabase,
     openDatabase,
 } from "../../features/magic-context/storage";
+import {
+    readSessionMeta,
+    updateSessionMeta,
+} from "../../features/magic-context/storage-meta-session";
 import { createTagger } from "../../features/magic-context/tagger";
 import * as autoEmbed from "../../hooks/magic-context/auto-embed-session";
 import { createTransform } from "../../hooks/magic-context/transform";
@@ -297,6 +302,92 @@ test("v2 tools and auto-embedding follow the served owner through a held move an
     expect((await memory.execute({ action: "get", ids: [beta.id] }, call)).content).toContain(
         beta.content,
     );
+});
+
+test("served-owner review: v2 linked-worktree tools cannot leave a legacy fallback block's scope", async () => {
+    const a = join(dir, "legacy-a"),
+        b = join(dir, "root-b"),
+        linked = join(dir, "linked-b");
+    mkdirSync(a);
+    mkdirSync(join(b, ".git", "worktrees", "linked"), { recursive: true });
+    mkdirSync(linked);
+    writeFileSync(join(linked, ".git"), `gitdir: ${join(b, ".git", "worktrees", "linked")}\n`);
+    writeFileSync(join(b, ".git", "worktrees", "linked", "commondir"), "../..\n");
+    rememberPinnedProjectIdentity(a, "pj-V2-LEGACY-A");
+    rememberPinnedProjectIdentity(b, "pj-V2-LEGACY-B", readGitCheckoutMetadata(b)!.gitCommonDir);
+    const sessionID = "v2-legacy-fallback";
+    const alpha = insertMemory(db, {
+        projectPath: "pj-V2-LEGACY-A",
+        category: "USER_DIRECTIVES",
+        content: "v2 legacy alpha directive",
+    });
+    const first = {
+        messages: [
+            {
+                info: { id: "legacy-user", role: "user", sessionID },
+                parts: [{ type: "text", text: "continue" }],
+            },
+        ],
+    };
+    await createTransform({
+        db,
+        tagger: createTagger(),
+        scheduler: { shouldExecute: () => "defer" as const },
+        contextUsageMap: new Map(),
+        historyRefreshSessions: new Set<string>(),
+        pendingMaterializationSessions: new Set<string>(),
+        lastHeuristicsTurnId: new Map<string, string>(),
+        clearReasoningAge: 50,
+        protectedTokens: 0,
+        historianRunnable: false,
+        directory: a,
+        sessionDirectoryBySession: new Map<string, string>(),
+        client: {
+            session: {
+                get: async () => {
+                    throw new Error("host unavailable");
+                },
+            },
+        } as never,
+        memoryConfig: { enabled: true, injectionBudgetTokens: 500, autoPromote: false },
+    })({}, first);
+    expect(JSON.stringify(first.messages.slice(0, 2))).toContain(alpha.content);
+    expect(getRecordedSessionProjectIdentity(db, sessionID)).toBeUndefined();
+    updateSessionMeta(db, sessionID, { cachedM0ProjectIdentity: null });
+    const cached = readSessionMeta(db, sessionID).cachedM0Bytes;
+    __resetSessionIdentityDecisionsForTests();
+    const registered: RegisteredTool[] = [];
+    await registerTools(
+        hostContext(registered),
+        db,
+        parsePluginConfig({}),
+        undefined,
+        async () => {},
+        async () => linked,
+    );
+    const memory = registered.find((tool) => tool.name === "ctx_memory")!;
+    const call = { sessionID, messageID: "legacy-user", agent: "build", progress: () => {} };
+    const read = await memory.execute({ action: "get", ids: [alpha.id] }, call);
+    expect(
+        (
+            await memory.execute(
+                { action: "write", category: "USER_DIRECTIVES", content: "v2 legacy write" },
+                call,
+            )
+        ).content,
+    ).toContain("Saved memory");
+    expect(readSessionMeta(db, sessionID).cachedM0Bytes).toEqual(cached);
+    expect({
+        read: read.content,
+        writes: getMemoriesByProject(db, "pj-V2-LEGACY-A").map((memory) => memory.content),
+        pendingWrites: getMemoriesByProject(db, "pj-V2-LEGACY-B").map((memory) => memory.content),
+        owner: getRecordedSessionProjectIdentity(db, sessionID),
+    }).toEqual({
+        read: expect.stringContaining(alpha.content),
+        writes: expect.arrayContaining(["v2 legacy write"]),
+        pendingWrites: [],
+        owner: "pj-V2-LEGACY-A",
+    });
 });
 
 /** Exercise the host-registered tool, not only its standalone factory. */
