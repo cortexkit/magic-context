@@ -1074,7 +1074,9 @@ export function getPiTagSnapshot(db: Database, sessionId: string) {
 	return reader(sessionId);
 }
 
-/** Full read-only diagnostic view; pass-mode caches reconstruct it with a fenced table read. */
+/** Full read-only diagnostic rows. Pass-mode reconstruction rejects a read if
+ * the session's tag revision or durable version changes during the table read.
+ */
 export function getPiTagSnapshotView(db: Database, sessionId: string) {
 	return createPiTagSnapshotReader(db)(sessionId, true);
 }

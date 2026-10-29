@@ -593,8 +593,8 @@ test("provider differential edges retain identity signed holds stale reads and r
 					: [],
 			);
 		};
-		// A priced first rewrite may retire old thinking before it is served.
-		// A warm hold must preserve every opaque block actually sent by the prior step.
+		// The first prefix rebuild may remove old thinking before a request is sent.
+		// A warm hold preserves all thinking blocks and signatures sent by the prior step.
 		expect(signedParts(precedingSignedBody).length).toBeGreaterThan(0);
 		expect(signedParts(held.body)).toEqual(signedParts(precedingSignedBody));
 		const fitEnvelope = readPiLkgFitEnvelope(

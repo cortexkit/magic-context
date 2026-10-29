@@ -623,7 +623,8 @@ function attributionProjection(
 		if (numbers.has(tag.tagNumber)) return true;
 		const owner = messageIdForTag(tag);
 		if (owner !== null && owners.has(owner)) return true;
-		// Orphan uniqueness is all-status and session-wide for each visible call.
+		// Keep ownerless tool tags from every status in the session for each visible
+		// call; attribution must still reject multiple matching ownerless rows.
 		return (
 			tag.type === "tool" &&
 			tag.toolOwnerMessageId === null &&

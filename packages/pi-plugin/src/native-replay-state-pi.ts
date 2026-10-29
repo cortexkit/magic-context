@@ -233,7 +233,7 @@ export function preparePiToolRemovalChecks(args: {
 		requested.push(row.callId);
 	}
 	// A bare call ID can repeat under another owner. Such arcs retain per-call
-	// authorization; the batch adapter must not select a different owner's envelope.
+	// authorization; the batch must not use authorization associated with another owner.
 	if (requested.length) args.prepare(requested);
 }
 
