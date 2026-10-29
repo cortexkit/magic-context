@@ -19,7 +19,21 @@ import {
 	peekProjectEmbeddings,
 	resetEmbeddingCacheForTests,
 } from "@magic-context/core/features/magic-context/memory/embedding-cache";
+import * as localPooling from "@magic-context/core/features/magic-context/memory/local-embedding-pooling";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
+import {
+	backfillMessageFtsRowidMapBatch,
+	recordMessageFtsRowid,
+} from "@magic-context/core/features/magic-context/message-fts-rowid-map";
+import { getAutoEmbeddingSessionCoverage } from "@magic-context/core/features/magic-context/project-embedding-registry";
+import { recordSessionProjectIdentity } from "@magic-context/core/features/magic-context/session-project-storage";
+import { maybeAutoEmbedSessionBackfill } from "@magic-context/core/hooks/magic-context/auto-embed-session";
+import {
+	autoEmbedAttemptedBySession,
+	autoEmbedRetryAfterBySession,
+	clearEmbedSessionState,
+	embedRunStateBySession,
+} from "@magic-context/core/hooks/magic-context/embed-session-state";
 import * as logger from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
@@ -143,6 +157,135 @@ describe("ensureProjectRegisteredFromPiDirectory", () => {
 			}
 		}
 	});
+	it("completes session backfill after cached Pi registration requests pooling preflight", async () => {
+		const db = createTestDb();
+		backfillMessageFtsRowidMapBatch(db);
+		const directory = createTestTempDir("pi-pooling-bootstrap-").dir;
+		const home = createTestTempDir("pi-pooling-home-").dir;
+		const previous = {
+			HOME: process.env.HOME,
+			XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+		};
+		process.env.HOME = home;
+		process.env.XDG_CONFIG_HOME = path.join(home, ".config");
+		const model = "pi-pooling-preflight-fixture";
+		const sessionId = "pi-pooling-backfill";
+		localPooling.__setLocalEmbeddingPoolingForTests(
+			model,
+			localPooling.UNRESOLVED_LOCAL_EMBEDDING_POOLING,
+		);
+		const preflight = spyOn(
+			localPooling,
+			"preflightLocalEmbeddingPooling",
+		).mockImplementation(async (requestedModel) => {
+			const metadata: localPooling.LocalEmbeddingPoolingMetadata = {
+				status: "ready",
+				pooling: "mean",
+				normalize: true,
+				declared: true,
+				reason: "fixture pooling metadata",
+			};
+			localPooling.__setLocalEmbeddingPoolingForTests(requestedModel, metadata);
+			return metadata;
+		});
+		const logs: string[] = [];
+		const logSpy = spyOn(logger, "log").mockImplementation((...args) => {
+			logs.push(args.join(" "));
+		});
+		_resetProjectEmbeddingRegistryForTests();
+		_setTestProviderFactoryForProject(() => ({
+			modelId: "fixture-provider",
+			initialize: async () => true,
+			isLoaded: () => true,
+			dispose: async () => {},
+			embed: async () => new Float32Array(1024).fill(1),
+			embedBatch: async (texts) =>
+				texts.map(() => new Float32Array(1024).fill(1)),
+		}));
+		try {
+			const configDir = path.join(home, ".config", "cortexkit");
+			await fs.mkdir(configDir, { recursive: true });
+			await fs.writeFile(
+				path.join(configDir, "magic-context.json"),
+				JSON.stringify({
+					embedding: { provider: "local", model },
+					memory: { enabled: false, git_commit_indexing: { enabled: false } },
+				}),
+			);
+			const projectIdentity = resolveProjectIdentity(directory);
+			await ensureProjectRegisteredFromPiDirectory(directory, db);
+			expect(preflight).not.toHaveBeenCalled();
+			expect(localPooling.getCachedLocalEmbeddingPooling(model)?.status).toBe(
+				"unresolved",
+			);
+			recordSessionProjectIdentity(db, sessionId, projectIdentity);
+			appendCompartments(db, sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 1,
+					startMessageId: "u1",
+					endMessageId: "u1",
+					title: "History",
+					content: "History",
+					p1: "History",
+				},
+			]);
+			const row = db
+				.prepare(
+					"INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, 1, 'u1', 'user', 'Backfill the existing conversation history.')",
+				)
+				.run(sessionId);
+			recordMessageFtsRowid(db, sessionId, 1, row.lastInsertRowid);
+			const requestBackfill = () =>
+				maybeAutoEmbedSessionBackfill(
+					{
+						db,
+						projectIdentity,
+						ensureRegistered: () =>
+							ensureProjectRegisteredFromPiDirectory(directory, db, {
+								preflightLocalPooling: true,
+							}),
+					},
+					sessionId,
+				);
+			requestBackfill();
+			const deadline = performance.now() + 5_000;
+			while (
+				embedRunStateBySession.has(sessionId) &&
+				performance.now() < deadline
+			)
+				await Bun.sleep(5);
+			expect(embedRunStateBySession.has(sessionId)).toBe(false);
+			expect(preflight).toHaveBeenCalledTimes(1);
+			expect(preflight).toHaveBeenCalledWith(model);
+			expect(
+				await getAutoEmbeddingSessionCoverage(db, projectIdentity, sessionId),
+			).toMatchObject({ enabled: true, total: 1, embedded: 1 });
+			expect(autoEmbedAttemptedBySession.has(sessionId)).toBe(true);
+			expect(autoEmbedRetryAfterBySession.has(sessionId)).toBe(false);
+			expect(
+				logs.some((line) =>
+					line.includes(`session backfill complete session=${sessionId}`),
+				),
+			).toBe(true);
+			requestBackfill();
+			expect(embedRunStateBySession.has(sessionId)).toBe(false);
+		} finally {
+			clearEmbedSessionState(sessionId);
+			preflight.mockRestore();
+			logSpy.mockRestore();
+			unregisterPiProjectEmbeddings(db);
+			_resetProjectEmbeddingRegistryForTests();
+			localPooling.__resetLocalEmbeddingPoolingForTests();
+			closeQuietly(db);
+			for (const [key, value] of Object.entries(previous)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
 	it("preserves the embedding cache across consecutive identical registrations", async () => {
 		const db = createTestDb();
 		const oldHome = process.env.HOME;
