@@ -13000,7 +13000,8 @@ mod tests {
         // The SDK version is truthful deployment metadata, not a wire-shape change.
         // Normalize only /manifest/provenance/wire_crate_version to the old SDK
         // so the measured HELLO fingerprint tracks intentional manifest changes
-        // independently from dependency upgrades, including the ENGRAM consumes edge.
+        // independently from dependency upgrades, including the ENGRAM consumes
+        // edge and the tool-provider/v1 discovery claim.
         hello
             .manifest
             .provenance
@@ -13008,10 +13009,10 @@ mod tests {
             .unwrap()
             .wire_crate_version = Some("0.32.8".into());
         let current = serde_json::to_vec(&hello).unwrap();
-        assert_eq!(current.len(), 13_515);
+        assert_eq!(current.len(), 13_663);
         assert_eq!(
             format!("{:x}", Sha256::digest(&current)),
-            "ee69f131ecb1d1622c24503f3812c328349664afa1983215f7817308794ee338"
+            "127b5161fb88f974c94449a6031c03f92bbbb50160bc9ee32cb81fae937162fe"
         );
     }
 
