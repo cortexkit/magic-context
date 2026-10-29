@@ -1,3 +1,4 @@
+import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     __resetNotificationStateForTests,
     drainNotifications,
@@ -3742,6 +3743,7 @@ describe("historian prompt sized to the producer window", () => {
         );
         const db = openDatabase();
         const projectPath = resolveProjectIdentity("/tmp");
+        recordSessionProjectIdentity(db, sessionId, projectPath);
         const memoryCount = 400;
         for (let index = 0; index < memoryCount; index += 1) {
             insertMemory(db, {
@@ -3817,6 +3819,7 @@ describe("historian prompt sized to the producer window", () => {
         );
         const db = openDatabase();
         const projectPath = resolveProjectIdentity("/tmp");
+        recordSessionProjectIdentity(db, sessionId, projectPath);
         const memoryCount = 400;
         for (let index = 0; index < memoryCount; index += 1) {
             insertMemory(db, {

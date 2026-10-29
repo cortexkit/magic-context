@@ -5,7 +5,7 @@ import {
     isDreamerRunnable,
     isSmartNoteSurfaceAvailable,
 } from "../config/agent-disable";
-import { resolveProjectIdentityForSession } from "../features/magic-context/memory/project-identity";
+import { resolveSessionProjectIdentity } from "../features/magic-context/memory/session-identity-decision";
 import { getProtectionWindowForSession } from "../features/magic-context/protection-window";
 import {
     getDatabasePersistenceError,
@@ -126,12 +126,14 @@ export function createToolRegistry(args: {
         log(`[magic-context] embedding registration skipped: ${getErrorMessage(error)}`);
     });
 
-    // Tools resolve project per-call from `toolContext.directory` because
-    // OpenCode's top-level `ctx.directory` reflects the launch dir, not the
-    // session's actual working directory (e.g. when launched via
-    // `opencode -s <id>` from outside the project).
-    const resolveProjectPath = (directory: string) =>
-        resolveProjectIdentityForSession(directory, pluginConfig.allow_home_project);
+    // A directory lookup can disagree with the decision used by project-memory,
+    // especially when a linked worktree cannot persist the registry's pin.
+    const resolveProjectPath = (directory: string, sessionId: string) =>
+        resolveSessionProjectIdentity(sessionId, directory, {
+            db,
+            allowHomeProject: pluginConfig.allow_home_project,
+            connectionFile: pluginConfig.subc?.connection_file,
+        });
 
     // When memory is off the <project-memory> block is never injected, so an
     // agent's memory writes would never resurface. Omit ctx_memory entirely

@@ -34,6 +34,7 @@ import { scheduleClearAndReindex } from "../../features/magic-context/message-in
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import { backfillSessionActivity } from "../../features/magic-context/session-activity";
+import { getRecordedSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     getOrCreateSessionMeta,
     getOverflowState,
@@ -826,6 +827,7 @@ export async function registerContext(context: V2Context) {
         storeStorageNotice(sessionID, message, "refusal");
     };
     const hiddenChildHook = new HiddenChildHook();
+    const sessionDirectories = new Map<string, string>();
     await context.session.hook("http.request", (draft) => hiddenChildHook.cacheRequest(draft));
     const tools =
         db && isDatabasePersisted(db)
@@ -835,6 +837,10 @@ export async function registerContext(context: V2Context) {
                   config,
                   (id) => hiddenChildHook.owns(id),
                   embeddings.ensureRegistered,
+                  async (sessionID) => {
+                      await cacheV2SessionDirectory(context.session, sessionID, sessionDirectories);
+                      return sessionDirectories.get(sessionID) ?? directory;
+                  },
               )
             : undefined;
     const usage: TransformDeps["contextUsageMap"] = new Map();
@@ -1071,11 +1077,13 @@ export async function registerContext(context: V2Context) {
     const channel1: NonNullable<TransformDeps["channel1StateBySession"]> = new Map();
     const variants = new Map<string, string | undefined>();
     const agents = new Map<string, string>();
-    const sessionDirectories = new Map<string, string>();
     const sessionProjectDirectory = (sessionID: string) =>
         sessionDirectories.get(sessionID) ?? directory;
     const prepareSessionIdentity = async (sessionID: string) => {
         await cacheV2SessionDirectory(context.session, sessionID, sessionDirectories);
+        const recorded = db ? getRecordedSessionProjectIdentity(db, sessionID) : undefined;
+        if (recorded && !sessionDirectories.has(sessionID))
+            return { directory: sessionProjectDirectory(sessionID), identity: recorded };
         return awaitSessionIdentityDecision(sessionID, sessionProjectDirectory(sessionID), {
             db,
             allowHomeProject: config.allow_home_project,
@@ -1083,7 +1091,9 @@ export async function registerContext(context: V2Context) {
         });
     };
     const sessionProjectIdentity = (sessionID: string) =>
+        (db ? getRecordedSessionProjectIdentity(db, sessionID) : undefined) ??
         readSessionIdentityDecision(sessionID, sessionProjectDirectory(sessionID), {
+            db,
             allowHomeProject: config.allow_home_project,
         })?.identity;
     const historyRefreshSessions = new Set<string>();

@@ -422,11 +422,11 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 return `Error: Action '${args.action}' is not allowed in this context.`;
             }
 
-            // Resolve the session's actual project from `toolContext.directory`
-            // each call. OpenCode's top-level `ctx.directory` (the launch dir)
-            // can differ from the session's working directory when the user
-            // runs `opencode -s <id>` from outside the project.
-            const projectPath = deps.resolveProjectPath(toolContext.directory);
+            // Await the session's injection decision before reading or writing memories.
+            const projectPath = await deps.resolveProjectPath(
+                toolContext.directory,
+                toolContext.sessionID,
+            );
             if (!projectPath) {
                 return `Error: Could not resolve project identity for memory action: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
             }

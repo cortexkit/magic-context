@@ -16,6 +16,7 @@ import { computeHardCacheExpired } from "../../features/magic-context/scheduler"
 import { resolveSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
 import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
 import {
+    getRecordedSessionProjectIdentity,
     hasRecordedSessionProjectIdentity,
     recordSessionProjectIdentity,
 } from "../../features/magic-context/session-project-storage";
@@ -51,6 +52,7 @@ import {
     resetProtectedTailNoEligibleHead,
     resolveEpochFloorForPass,
 } from "../../features/magic-context/storage-meta-persisted";
+import { readSessionMeta } from "../../features/magic-context/storage-meta-session";
 import { isTagOwnerSummaryReady } from "../../features/magic-context/storage-tags";
 import type { CoordinateGeneration } from "../../features/magic-context/store-generation-rebase";
 import { rebaseSessionCoordinatesAsync } from "../../features/magic-context/store-generation-rebase";
@@ -1243,13 +1245,25 @@ export function createTransform(deps: TransformDeps) {
                 sessionDirectoryFellBack = true;
             }
         }
+        const recordedIdentity = sessionDirectoryFellBack
+            ? getRecordedSessionProjectIdentity(db, sessionId)
+            : undefined;
         if (sessionDirectory) {
             await awaitSessionIdentityDecision(sessionId, sessionDirectory, {
                 db,
                 allowHomeProject: deps.allowHomeProject,
                 connectionFile: deps.subcConnectionFile,
+                directoryIsFallback: sessionDirectoryFellBack,
             });
         }
+        const decidedProjectIdentity =
+            recordedIdentity ??
+            (sessionDirectory
+                ? readSessionIdentityDecision(sessionId, sessionDirectory, {
+                      db,
+                      allowHomeProject: deps.allowHomeProject,
+                  })?.identity
+                : undefined);
         // The launch directory can belong to a different project than the
         // session (`opencode -s <id>` started elsewhere). A pass that fell back
         // to it must not render that project's memories and docs into m[0]/m[1]:
@@ -1884,11 +1898,7 @@ export function createTransform(deps: TransformDeps) {
             contextUsageEarly,
             currentModelKeyForBoundary,
             historyContextLimit,
-            deps.memoryConfig?.enabled
-                ? readSessionIdentityDecision(sessionId, memoryProjectDirectory, {
-                      allowHomeProject: deps.allowHomeProject,
-                  })?.identity
-                : undefined,
+            deps.memoryConfig?.enabled ? decidedProjectIdentity : undefined,
         );
         const { historyBudgetTokens, projectPath: projectIdentity } = renderOptions;
         // Ceiling for the tiered emergency drop = contextLimit × executeThreshold%
@@ -2068,6 +2078,7 @@ export function createTransform(deps: TransformDeps) {
                     model: historianRun?.model ?? deps.historianModel,
                     fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
                     directory: compartmentDirectory,
+                    projectIdentity: decidedProjectIdentity,
                     fallbackModelId,
                     getNotificationParams: () => notificationParams,
                     experimentalUserMemories:
@@ -2177,17 +2188,8 @@ export function createTransform(deps: TransformDeps) {
         // notes/memories. Reuse the memory identity when memory is enabled
         // (identical value); otherwise read the same session decision.
         const sessionProjectIdentity =
-            projectIdentity ??
-            (sessionDirectory
-                ? readSessionIdentityDecision(sessionId, sessionDirectory, {
-                      allowHomeProject: deps.allowHomeProject,
-                  })?.identity
-                : deps.projectPath);
-        const sessionIdentityForBinding = sessionDirectory
-            ? readSessionIdentityDecision(sessionId, sessionDirectory, {
-                  allowHomeProject: deps.allowHomeProject,
-              })?.identity
-            : undefined;
+            projectIdentity ?? (sessionDirectory ? decidedProjectIdentity : deps.projectPath);
+        const sessionIdentityForBinding = decidedProjectIdentity;
         if (sessionDirectory) {
             maybeSendProjectIdentityWarning(deps, sessionId, sessionDirectory, notificationParams);
         }
@@ -2200,19 +2202,27 @@ export function createTransform(deps: TransformDeps) {
             sessionProjectIdentity;
         if (authorityProjectPath) {
         }
-        // Persist only host-resolved session bindings. The launch-directory
-        // fallback keeps transforms non-fatal, but storing it as ownership would
-        // let a transient SDK failure permanently mis-scope chunk backfills.
-        // Guarded to fire once per (session, identity) in this process so the
-        // hot path carries no per-pass DB write once the binding is recorded.
+        // Establish an initial owner before background work starts. A directory
+        // move is committed only with the served prefix below: signed-thinking
+        // holds must leave tools on the owner of the block still being replayed.
         if (
             sessionIdentityForBinding &&
             sessionDirectoryResolvedFromHost &&
-            recordedSessionProjectIdentity.get(sessionId) !== sessionIdentityForBinding
+            !getRecordedSessionProjectIdentity(db, sessionId)
         ) {
-            const change = recordSessionProjectIdentity(db, sessionId, sessionIdentityForBinding);
-            if (change?.previousProjectPath) deps.pendingMaterializationSessions?.add(sessionId);
-            recordedSessionProjectIdentity.set(sessionId, sessionIdentityForBinding);
+            const initialOwner = sessionMeta.cachedM0ProjectIdentity ?? sessionIdentityForBinding;
+            recordSessionProjectIdentity(db, sessionId, initialOwner);
+            recordedSessionProjectIdentity.set(sessionId, initialOwner);
+        }
+        // Queue the fold immediately, but leave ownership on the frozen block
+        // until a permitted rebuild can publish the new project's prefix.
+        if (
+            sessionIdentityForBinding &&
+            sessionDirectoryResolvedFromHost &&
+            getRecordedSessionProjectIdentity(db, sessionId) !== sessionIdentityForBinding &&
+            !deps.pendingMaterializationSessions?.has(sessionId)
+        ) {
+            deps.pendingMaterializationSessions?.add(sessionId);
         }
 
         // Historian trigger decision — relocated here from the message.updated
@@ -4036,9 +4046,24 @@ export function createTransform(deps: TransformDeps) {
         // request was really served: give it its served-capture id now.
         // Publish the prefix before releasing its saved-request capture. A
         // failed prefix write must leave the old record and certificate intact.
+        let publishedProjectIdentity: string | undefined;
         const publishServed = () => {
             if (postTransformResult.finalizeServedPrefix?.())
                 postTransformResult.bustedThisPass = true;
+            // The cached identity changes only when M0 is rebuilt, not when a
+            // thinking hold replays its bytes. Switch tool ownership in the same
+            // successful publication as the new project's block, never earlier.
+            if (
+                sessionIdentityForBinding &&
+                sessionDirectoryResolvedFromHost &&
+                recordedSessionProjectIdentity.get(sessionId) !== sessionIdentityForBinding &&
+                (!deps.memoryConfig?.enabled ||
+                    readSessionMeta(db, sessionId)?.cachedM0ProjectIdentity ===
+                        sessionIdentityForBinding)
+            ) {
+                recordSessionProjectIdentity(db, sessionId, sessionIdentityForBinding);
+                publishedProjectIdentity = sessionIdentityForBinding;
+            }
             return servedAtReturn
                 ? recordServedCapture(
                       db,
@@ -4053,6 +4078,8 @@ export function createTransform(deps: TransformDeps) {
             postTransformResult.prefixRecordWritable && !compactionOff
                 ? db.transaction(publishServed).immediate()
                 : publishServed();
+        if (publishedProjectIdentity)
+            recordedSessionProjectIdentity.set(sessionId, publishedProjectIdentity);
         if (servedAtReturn) {
             const { slot } = servedAtReturn;
             releaseWithheldServedCapture(sessionId, slot, servedCaptureId);

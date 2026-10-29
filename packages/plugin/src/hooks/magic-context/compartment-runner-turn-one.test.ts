@@ -18,6 +18,7 @@ import {
     insertMemory,
 } from "../../features/magic-context/memory/storage-memory";
 import { __turnTwoChildrenTest } from "../../features/magic-context/memory/turn-two-children";
+import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     closeDatabase,
     getHistorianFailureState,
@@ -294,6 +295,41 @@ describe("historian turn one on a dormant lane (production default)", () => {
         expect(
             db.prepare("SELECT publication_id, compartment_id FROM memory_activity_ledger").all(),
         ).toEqual([{ publication_id: publication!.publication_id, compartment_id: newRow.id }]);
+    });
+
+    it("uses the recorded session decision for the memory pool and promotion", async () => {
+        useTempDataHome("turn-one-session-identity-");
+        const sessionId = "ses-session-identity";
+        const directory = join(process.env.XDG_DATA_HOME!, "project");
+        mkdirSync(directory);
+        createOpenCodeSession(sessionId);
+        const db = openDatabase();
+        const fallback = resolveProjectIdentity(directory);
+        const projectPath = "pj-historian-session";
+        recordSessionProjectIdentity(db, sessionId, projectPath);
+        seedPriorCompartment(db, sessionId);
+        insertMemory(db, {
+            projectPath,
+            category: "NAMING",
+            content: "Only the session decision can see this memory.",
+            sourceType: "historian",
+        });
+        const { client, prompt } = historianClient(directory, () => REPLY_WITH_FACTS);
+        await runHistorian(db, sessionId, client, directory);
+        expect(sentPrompts(prompt)[0]).toContain("Only the session decision can see this memory.");
+        expect(
+            getMemoriesByProject(db, projectPath)
+                .map((memory) => memory.content)
+                .sort(),
+        ).toEqual([
+            "Only the session decision can see this memory.",
+            "Uploads are capped at 64 KiB.",
+            "Uploads go through the gateway.",
+        ]);
+        expect(getMemoriesByProject(db, fallback)).toHaveLength(0);
+        expect(db.prepare("SELECT DISTINCT project_path FROM memory_publications").all()).toEqual([
+            { project_path: projectPath },
+        ]);
     });
 
     it("records every fact as an authority_elsewhere candidate when the module owns memory", async () => {

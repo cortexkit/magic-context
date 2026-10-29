@@ -58,7 +58,10 @@ export interface CtxNoteToolDeps {
      * Optional — when undefined, smart-note creation is rejected with an
      * explanatory error.
      */
-    resolveProjectPath?: (directory: string) => string | undefined;
+    resolveProjectPath?: (
+        directory: string,
+        sessionId: string,
+    ) => string | undefined | Promise<string | undefined>;
 }
 
 /** Capture the live-tail message ordinal so a note can be traced back to the
@@ -287,11 +290,11 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 (await wakePlaneStatus()) === "present";
             const _surfaceCondition = wakePlaneActive ? undefined : args.surface_condition?.trim();
 
-            // Resolve the session's actual project from `toolContext.directory`
-            // each call. OpenCode's top-level `ctx.directory` (the launch dir)
-            // can differ from the session's working directory when the user
-            // runs `opencode -s <id>` from outside the project.
-            const projectIdentity = deps.resolveProjectPath?.(toolContext.directory);
+            // Use the same session decision as project-memory, including unpinned worktrees.
+            const projectIdentity = await deps.resolveProjectPath?.(
+                toolContext.directory,
+                toolContext.sessionID,
+            );
 
             if (projectIdentity && projectNeedsSingleStoreMigration(deps.db, projectIdentity)) {
                 return renderSingleStoreMigrationRequiredRefusal();

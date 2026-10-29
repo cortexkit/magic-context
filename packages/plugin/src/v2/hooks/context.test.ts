@@ -359,7 +359,7 @@ test("resumed v2 context awaits its decision before managed readers and renders 
     expect(JSON.stringify(next.messages)).toContain("registered session memory");
     expect(fake.calls).toEqual([{ method: "resolve", params: { canonicalRoot: directory } }]);
     expect(host.get).toHaveBeenCalledTimes(1);
-    expect(resolveProjectIdentityForSession(directory)).toBe(fallbackIdentity);
+    expect(resolveProjectIdentityForSession(directory)).toBe(projectId);
 });
 
 test("v2 sessions in one directory keep independent decisions without per-pass resolve", async () => {

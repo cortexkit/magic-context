@@ -132,16 +132,21 @@ export function recordSessionProjectIdentity(
 }
 
 /**
- * Whether a project binding has been stored for this session. Bindings are
- * stored only from a directory the host returned for the session. A session
- * without one has only ever been rendered with the directory OpenCode was
- * launched from, which the transform falls back to when the host gives none.
+ * Read the current harness's session owner, shared by memory injection, tools,
+ * and background work. A stored owner takes precedence over a launch-directory fallback.
  */
-export function hasRecordedSessionProjectIdentity(db: Database, sessionId: string): boolean {
+export function getRecordedSessionProjectIdentity(
+    db: Database,
+    sessionId: string,
+): string | undefined {
     const row = db
-        .prepare("SELECT 1 AS found FROM session_projects WHERE session_id = ? AND harness = ?")
-        .get(sessionId, getHarness()) as { found: number } | null;
-    return row?.found === 1;
+        .prepare("SELECT project_path FROM session_projects WHERE session_id = ? AND harness = ?")
+        .get(sessionId, getHarness()) as { project_path: string } | null;
+    return row?.project_path;
+}
+
+export function hasRecordedSessionProjectIdentity(db: Database, sessionId: string): boolean {
+    return getRecordedSessionProjectIdentity(db, sessionId) !== undefined;
 }
 
 /**

@@ -4,6 +4,10 @@ import { getHarness } from "../../../shared/harness";
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { getDefaultSubcConnectionFile } from "../../../shared/subc-connection-file";
+import {
+    getRecordedSessionProjectIdentity,
+    recordSessionProjectIdentity,
+} from "../session-project-storage";
 import { type EntorhinalResolveOptions, resolveEntorhinalProject } from "./entorhinal-resolve";
 import { readGitCheckoutMetadata } from "./git-common-dir";
 import {
@@ -26,11 +30,14 @@ export interface SessionIdentityDecision {
 export interface SessionIdentityDecisionOptions extends EntorhinalResolveOptions {
     allowHomeProject?: boolean;
     db?: Database | null;
+    /** A launch-directory fallback cannot establish that the host session moved. */
+    directoryIsFallback?: boolean;
 }
 
 interface Entry {
     directory: string;
     decision?: SessionIdentityDecision;
+    recordedIdentity?: string;
     promise: Promise<SessionIdentityDecision>;
 }
 
@@ -138,16 +145,28 @@ export function awaitSessionIdentityDecision(
     directory = path.resolve(directory);
     const existing = decisions.get(sessionId);
     if (existing) {
+        const recorded =
+            options.directoryIsFallback && options.db
+                ? getRecordedSessionProjectIdentity(options.db, sessionId)
+                : undefined;
+        if (recorded) return Promise.resolve({ directory: existing.directory, identity: recorded });
         if (existing.directory !== directory) {
             readSessionIdentityDecision(sessionId, directory, options);
             return decisions.get(sessionId)?.promise ?? existing.promise;
         }
+        readSessionIdentityDecision(sessionId, directory, options);
         return existing.promise;
     }
     const entry: Entry = {
         directory,
         promise: Promise.resolve().then(async () => {
-            const decision = await decide(sessionId, directory, options);
+            const recorded = options.db
+                ? getRecordedSessionProjectIdentity(options.db, sessionId)
+                : undefined;
+            entry.recordedIdentity = recorded;
+            const decision = recorded
+                ? { directory, identity: recorded }
+                : await decide(sessionId, directory, options);
             // A completed attempt may pin its own directory, but cannot replace
             // the session's decision for a newer directory.
             if (decisions.get(sessionId) === entry) entry.decision = decision;
@@ -156,6 +175,25 @@ export function awaitSessionIdentityDecision(
     };
     decisions.set(sessionId, entry);
     return entry.promise;
+}
+
+/** Tools and background work use the stored owner, even when only a launch directory is available. */
+export async function resolveSessionProjectIdentity(
+    sessionId: string,
+    directory: string,
+    options: SessionIdentityDecisionOptions = {},
+): Promise<string | undefined> {
+    const recorded = options.db
+        ? getRecordedSessionProjectIdentity(options.db, sessionId)
+        : undefined;
+    if (recorded !== undefined) return recorded;
+    const decision = await awaitSessionIdentityDecision(sessionId, directory, options);
+    // A transform may have recorded the owner while the first attempt was in flight.
+    const identity =
+        (options.db ? getRecordedSessionProjectIdentity(options.db, sessionId) : undefined) ??
+        decision.identity;
+    if (options.db) recordSessionProjectIdentity(options.db, sessionId, identity);
+    return identity;
 }
 
 /** Read the session value synchronously; a directory move reads sidecars without a registry call. */
@@ -176,7 +214,14 @@ export function readSessionIdentityDecision(
                   resolveProjectIdentityForSession(directory, options.allowHomeProject))
                 : resolveProjectIdentityForSession(directory, options.allowHomeProject),
         };
-        decisions.set(sessionId, { directory, decision, promise: Promise.resolve(decision) });
+        decisions.set(sessionId, {
+            directory,
+            decision,
+            recordedIdentity: options.db
+                ? getRecordedSessionProjectIdentity(options.db, sessionId)
+                : undefined,
+            promise: Promise.resolve(decision),
+        });
         const move = `${entry.directory}\0${directory}`;
         const seen = loggedMoves.get(sessionId) ?? new Set<string>();
         loggedMoves.set(sessionId, seen);
@@ -189,6 +234,16 @@ export function readSessionIdentityDecision(
         return decision;
     }
     const decision = entry.decision;
+    const recorded = options.db
+        ? getRecordedSessionProjectIdentity(options.db, sessionId)
+        : undefined;
+    if (decision && recorded !== undefined && recorded !== entry.recordedIdentity) {
+        // A durable decision can outlive this process's earlier fallback.
+        // An unchanged row must not undo a directory move awaiting persistence.
+        entry.recordedIdentity = recorded;
+        decision.identity = recorded;
+        return decision;
+    }
     if (
         decision &&
         !decision.identity?.startsWith("git:") &&

@@ -139,7 +139,10 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
             // each call. OpenCode's top-level `ctx.directory` (the launch dir)
             // can differ from the session's working directory when the user
             // runs `opencode -s <id>` from outside the project.
-            const projectPath = deps.resolveProjectPath(toolContext.directory);
+            const projectPath = await deps.resolveProjectPath(
+                toolContext.directory,
+                toolContext.sessionID,
+            );
             if (!projectPath) {
                 return `Error: Could not resolve project identity for search: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
             }

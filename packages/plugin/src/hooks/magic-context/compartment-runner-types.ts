@@ -194,6 +194,8 @@ export interface CompartmentRunnerDeps<
     fallbackModels?: readonly ModelInput[];
     language?: string;
     directory: string;
+    /** Session decision used by injection; an explicit undefined means no project. */
+    projectIdentity?: string;
     historyBudgetTokens?: number;
     fallbackModelId?: string;
     ensureProjectRegistered?: (directory: string, db: Database) => Promise<void>;

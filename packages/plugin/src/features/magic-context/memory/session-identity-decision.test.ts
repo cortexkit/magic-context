@@ -18,8 +18,11 @@ import {
     SERVER_PROOF_DOMAIN,
 } from "@cortexkit/subc-client";
 import vectors from "../../../../../../test-vectors/project-resolve-v1/resolve.json";
+import { parsePluginConfig } from "../../../config";
 import { createEventHandler } from "../../../hooks/magic-context/event-handler";
 import { createTransform } from "../../../hooks/magic-context/transform";
+import { createToolRegistry } from "../../../plugin/tool-registry";
+import type { PluginContext } from "../../../plugin/types";
 import { getHarness } from "../../../shared/harness";
 import { Database } from "../../../shared/sqlite";
 import { createTestTempDir } from "../../../shared/test-temp-dir";
@@ -49,7 +52,7 @@ import {
     awaitSessionIdentityDecision,
     readSessionIdentityDecision,
 } from "./session-identity-decision";
-import { insertMemory } from "./storage-memory";
+import { getMemoriesByProject, insertMemory } from "./storage-memory";
 
 function registeredReply(directory: string) {
     const reply = structuredClone(vectors[0].reply);
@@ -356,7 +359,7 @@ describe("session identity decisions", () => {
         expect(readSessionIdentityDecision("A", directory)?.identity).toBe(a.identity);
         await awaitSessionIdentityDecision("A", directory, options);
         expect(fake.calls).toHaveLength(2);
-        expect(resolveProjectIdentityForSession(directory)).toBe(a.identity);
+        expect(resolveProjectIdentityForSession(directory)).toBe(b.identity);
     });
 
     test.each([
@@ -497,8 +500,25 @@ function rendered(output: { messages: unknown[] }): string {
     return JSON.stringify(output.messages);
 }
 
+function sessionTools(directory: string, session: string, connectionFile: string) {
+    const tools = createToolRegistry({
+        ctx: { directory } as PluginContext,
+        pluginConfig: parsePluginConfig({ subc: { connection_file: connectionFile } }),
+    });
+    const context = {
+        sessionID: session,
+        messageID: "user-1",
+        agent: "build",
+        directory,
+        worktree: directory,
+        abort: new AbortController().signal,
+        metadata: () => {},
+    } as never;
+    return { tools, context };
+}
+
 describe("OpenCode session decision integration", () => {
-    test("a 250 ms session.created and first transform share pj while the directory cache holds git", async () => {
+    test("a 250 ms session.created, transform and tools agree after caching git", async () => {
         const directory = folder("slow");
         const fake = await fakeEndpoint(directory);
         // Leave half the end-to-end deadline for connection setup and scheduling under load.
@@ -506,7 +526,7 @@ describe("OpenCode session decision integration", () => {
         const db = hostDatabase();
         const session = "slow-created";
         const fallback = resolveProjectIdentityForSession(directory);
-        insertMemory(db, {
+        const registered = insertMemory(db, {
             projectPath: registeredProjectId,
             category: "USER_DIRECTIVES",
             content: "registered memory",
@@ -536,7 +556,108 @@ describe("OpenCode session decision integration", () => {
         expect(row(db, session)).toBe(registeredProjectId);
         expect(rendered(output)).toContain("registered memory");
         expect(rendered(output)).not.toContain("fallback memory");
-        expect(resolveProjectIdentityForSession(directory)).toBe(fallback);
+        expect(resolveProjectIdentityForSession(directory)).toBe(registeredProjectId);
+        const { tools, context } = sessionTools(directory, session, fake.connectionFile);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [registered.id] }, context),
+        ).toContain("registered memory");
+        expect(fake.calls).toHaveLength(1);
+    });
+
+    test.each([
+        false,
+        true,
+    ])("tool-first get and write use the shared pj decision (linked=%s)", async (linked) => {
+        const root = folder("tool-root");
+        const directory = linked ? folder("tool-linked", false) : root;
+        if (linked) {
+            const gitdir = join(root, ".git", "worktrees", "tool-linked");
+            mkdirSync(gitdir, { recursive: true });
+            writeFileSync(join(gitdir, "commondir"), "../..\n");
+            writeFileSync(join(directory, ".git"), `gitdir: ${gitdir}\n`);
+        }
+        const fallback = resolveProjectIdentityForSession(directory);
+        expect(fallback).toStartWith("git:");
+        const fake = await fakeEndpoint(directory);
+        const db = hostDatabase();
+        const session = `tool-first-${linked}`;
+        const existing = insertMemory(db, {
+            projectPath: registeredProjectId,
+            category: "USER_DIRECTIVES",
+            content: "tool-first registered memory",
+        });
+        const { tools, context } = sessionTools(directory, session, fake.connectionFile);
+        const [read, write] = await Promise.all([
+            tools.ctx_memory!.execute({ action: "get", ids: [existing.id] }, context),
+            tools.ctx_memory!.execute(
+                { action: "write", category: "USER_DIRECTIVES", content: "tool-written directive" },
+                context,
+            ),
+        ]);
+        expect(read).toContain("tool-first registered memory");
+        expect(write).toContain("Saved memory");
+        expect(await tools.ctx_search!.execute({ query: `#${existing.id}` }, context)).toContain(
+            "tool-first registered memory",
+        );
+        expect(row(db, session)).toBe(registeredProjectId);
+        expect(
+            getMemoriesByProject(db, registeredProjectId).map((memory) => memory.content),
+        ).toContain("tool-written directive");
+        expect(getMemoriesByProject(db, fallback!)).toHaveLength(0);
+        if (linked)
+            expect(readRememberedProjectIdentity(directory)?.identity).not.toBe(
+                registeredProjectId,
+            );
+        const output = { messages: messages(session) };
+        await createTransform(hostDeps(db, session, directory, fake.connectionFile))({}, output);
+        expect(rendered(output)).toContain("tool-written directive");
+        expect(rendered(output)).toContain("tool-first registered memory");
+        expect(fake.calls).toHaveLength(1);
+        // The stored session owner survives process-local decision eviction without a pin.
+        __resetSessionIdentityDecisionsForTests();
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [existing.id] }, context),
+        ).toContain("tool-first registered memory");
+    });
+
+    test("a tool and injection share the first Entorhinal timeout fallback", async () => {
+        const directory = folder("tool-timeout");
+        const fake = await fakeEndpoint(directory);
+        fake.delay = ENTORHINAL_RESOLVE_DEADLINE_MS * 2;
+        const db = hostDatabase();
+        const session = "tool-timeout";
+        const fallback = resolveProjectIdentityForSession(directory)!;
+        insertMemory(db, {
+            projectPath: fallback,
+            category: "USER_DIRECTIVES",
+            content: "first timeout fallback memory",
+        });
+        const { tools, context } = sessionTools(directory, session, fake.connectionFile);
+        const output = { messages: messages(session) };
+        await Promise.all([
+            tools.ctx_memory!.execute(
+                { action: "write", category: "USER_DIRECTIVES", content: "timeout directive" },
+                context,
+            ),
+            createTransform(hostDeps(db, session, directory, fake.connectionFile))({}, output),
+        ]);
+        expect(row(db, session)).toBe(fallback);
+        expect(rendered(output)).toContain("first timeout fallback memory");
+        expect(getMemoriesByProject(db, fallback).map((memory) => memory.content)).toContain(
+            "timeout directive",
+        );
+        expect(readSessionIdentityDecision(session, directory)?.identity).toBe(fallback);
+        expect(fake.calls).toHaveLength(1);
+        const visible = insertMemory(db, {
+            projectPath: fallback,
+            category: "USER_DIRECTIVES",
+            content: "timeout fallback memory",
+        });
+        const resumed = "timeout-resumed";
+        recordSessionProjectIdentity(db, resumed, fallback);
+        const next = { messages: messages(resumed) };
+        await createTransform(hostDeps(db, resumed, directory, fake.connectionFile))({}, next);
+        expect(rendered(next)).toContain(visible.content);
         expect(fake.calls).toHaveLength(1);
     });
 
@@ -559,6 +680,60 @@ describe("OpenCode session decision integration", () => {
         await transform({}, next);
         expect(fake.calls).toHaveLength(1);
         expect(rendered(next)).toContain("resumed registered memory");
+    });
+
+    test("a newer stored session decision replaces an in-process fallback for injection and tools", async () => {
+        const directory = folder("newer-recorded");
+        const fake = await fakeEndpoint(directory);
+        fake.up = false;
+        const db = hostDatabase();
+        const session = "newer-recorded";
+        expect(
+            (
+                await awaitSessionIdentityDecision(session, directory, {
+                    db,
+                    connectionFile: fake.connectionFile,
+                })
+            ).identity,
+        ).toStartWith("git:");
+        recordSessionProjectIdentity(db, session, registeredProjectId);
+        const memory = insertMemory(db, {
+            projectPath: registeredProjectId,
+            category: "USER_DIRECTIVES",
+            content: "newer stored decision memory",
+        });
+        const output = { messages: messages(session) };
+        await createTransform(hostDeps(db, session, directory, fake.connectionFile))({}, output);
+        expect(rendered(output)).toContain(memory.content);
+        const { tools, context } = sessionTools(directory, session, fake.connectionFile);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [memory.id] }, context),
+        ).toContain(memory.content);
+        expect(fake.calls).toHaveLength(1);
+    });
+
+    test("a recorded fallback initializes the decision for synchronous session consumers", async () => {
+        const directory = folder("recorded-fallback");
+        const db = hostDatabase();
+        const session = "recorded-fallback";
+        recordSessionProjectIdentity(db, session, registeredProjectId);
+        const observed: (string | undefined)[] = [];
+        const deps = {
+            ...hostDeps(db, session, directory, join(temp.dir, "absent-subc.json")),
+            sessionDirectoryBySession: new Map<string, string>(),
+            client: {
+                session: {
+                    get: async () => {
+                        throw new Error("host unavailable");
+                    },
+                },
+            } as unknown as PluginContext["client"],
+            maybeAutoEmbedSession: () =>
+                observed.push(readSessionIdentityDecision(session, directory)?.identity),
+        };
+        await createTransform(deps)({}, { messages: messages(session) });
+        expect(observed).toEqual([registeredProjectId]);
+        expect(row(db, session)).toBe(registeredProjectId);
     });
 
     test("a TS directory move renders the new pin and updates session_projects without resolve", async () => {
@@ -592,6 +767,92 @@ describe("OpenCode session decision integration", () => {
         expect(rendered(moved)).toContain("project beta memory");
         expect(rendered(moved)).not.toContain("project alpha memory");
         expect(fake.calls).toHaveLength(0);
+    });
+
+    test("a directory move keeps tools on the frozen block owner until the signed-thinking hold releases", async () => {
+        const a = folder("frozen-a"),
+            b = folder("frozen-b");
+        rememberPinnedProjectIdentity(a, "pj-FROZEN-A");
+        rememberPinnedProjectIdentity(b, "pj-FROZEN-B");
+        const db = hostDatabase();
+        const session = "frozen-move";
+        const alpha = insertMemory(db, {
+            projectPath: "pj-FROZEN-A",
+            category: "USER_DIRECTIVES",
+            content: "frozen project alpha memory",
+        });
+        const beta = insertMemory(db, {
+            projectPath: "pj-FROZEN-B",
+            category: "USER_DIRECTIVES",
+            content: "released project beta memory",
+        });
+        const model = { providerID: "anthropic", modelID: "claude-sonnet-5-5" };
+        const deps = {
+            ...hostDeps(db, session, a, join(temp.dir, "absent-subc.json")),
+            liveModelBySession: new Map([[session, model]]),
+        };
+        const transform = createTransform(deps);
+        const first = { messages: messages(session) };
+        await transform({}, first);
+        expect(rendered(first)).toContain(alpha.content);
+        const head = JSON.stringify(first.messages.slice(0, 2));
+        const raw = [
+            ...messages(session),
+            {
+                info: {
+                    id: "signed-step",
+                    role: "assistant",
+                    sessionID: session,
+                    ...model,
+                    tokens: { input: 0, output: 1600, reasoning: 1600 },
+                },
+                parts: [
+                    { type: "reasoning", text: "signed thinking" },
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "signed-call",
+                        state: { status: "completed", output: "project contents" },
+                    },
+                ],
+            },
+        ];
+        deps.contextUsageMap.set(session, {
+            usage: { percentage: 66, inputTokens: 66000 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        });
+        deps.sessionDirectoryBySession.set(session, b);
+        const held = { messages: structuredClone(raw) };
+        await transform({}, held);
+        expect(JSON.stringify(held.messages.slice(0, 2))).toBe(head);
+        expect(row(db, session)).toBe("pj-FROZEN-A");
+        const { tools, context } = sessionTools(b, session, deps.subcConnectionFile);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [alpha.id] }, context),
+        ).toContain(alpha.content);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [beta.id] }, context),
+        ).not.toContain(beta.content);
+        const released = {
+            messages: [
+                ...structuredClone(raw),
+                {
+                    info: { id: "next-user", role: "user", sessionID: session },
+                    parts: [{ type: "text", text: "continue in the new project" }],
+                },
+            ],
+        };
+        await transform({}, released);
+        expect(rendered(released)).toContain(beta.content);
+        expect(rendered(released)).not.toContain(alpha.content);
+        expect(row(db, session)).toBe("pj-FROZEN-B");
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [beta.id] }, context),
+        ).toContain(beta.content);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [alpha.id] }, context),
+        ).not.toContain(alpha.content);
     });
 });
 
