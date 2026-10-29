@@ -657,19 +657,17 @@ const REVIEW_UNHELD_CASES: [(&str, bool, bool); 6] = [
 
 /// Pin the intended unheld-session output with distance-based age reclaim.
 /// These snapshots retain current-task tool bodies; signed-prefix hold checks
-/// remain independent of this unheld policy golden. Re-pinned for the TypeScript pass
-/// decision rules. Cases 2, 3 and 5 first diverge from the earlier pins at steps 54, 58
-/// and 10: each is the third consecutive primary execute pass (71%, 70% and 79%, below
-/// the 85% force band) holding queued drops with no summary to wait for, which now
-/// rebuilds and applies them (invariant 3's bounded execute exception). Every later step
-/// follows from that rebuild. The subagent and unchanged primary cases never meet it.
+/// remain independent of this unheld policy golden. Queued tools now freeze the
+/// paired call shape TypeScript uses: small recent calls keep their real arguments
+/// and result placeholders, without relying on an automatic age sweep to supply
+/// the call shell. Those frozen bytes change all six subsequent serve histories.
 const REVIEW_UNHELD_GOLDEN: [&str; 6] = [
-    "379e07c15ef75bc0e0809bb4c4c9021b767fa988a0cf10d367635cb562e9c6d0",
-    "a06635735bfd78bd1ed09d54c39a0c0e32c645ec6d4e1e6269c828b8358c7bdb",
-    "0bc73213591876a39c00b3551741923697ff3eaa24fda6bb40a2e963ed690a53",
-    "b60dbc9cc8e1034196ae139173033ea5e5d28c2bf289a80112b2874ee1ee354f",
-    "e252f0b3697f7fc44ac5429fee0789a5f3f56b7462bec0cb6ad49468b2e22762",
-    "cdbcf904ff6d9304115ad9ed2593a1d7ee09e5633205c83cfe3f203600319d5c",
+    "c2d6b885738ee7fc8b2999a1f51e2a41f38e32171a650081af139966ade79b04",
+    "880141bfa84dda9728dea93cd8d2a83229eb2390d9a3092e54804287f6b20188",
+    "aa2d33d14b4cb9c1526fc51ec8c2fa0272fc5da4444682734d1517aa81ffb446",
+    "3bfc760238306de18f313b139b7cceedb978468c6de0652a81e519e8faa850f9",
+    "fa8f5517fbf9c2a71488d0e2681dbaae25e392123ad2103009d46097848812f0",
+    "f6442e8e17ab52bcc3c0d68578bd2d30720f19cf4a5603169f00aaf89fbc9d16",
 ];
 
 #[test]

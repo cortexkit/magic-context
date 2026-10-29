@@ -1707,6 +1707,28 @@ pub(crate) fn select_reductions_with_outcome(
             .get(decision.target_id.as_str())
             .is_some_and(|arc_id| protected_arcs.contains(arc_id))
     });
+    // TypeScript applies queued drops before loading the active heuristic tags.
+    // Keep those arcs out of automatic selection so an emergency full-drop cannot
+    // erase a queued drop's exact placeholder or count its bytes as reclaimable again.
+    let agent_drop_arcs = agent_decisions
+        .iter()
+        .filter_map(|decision| arc_by_block_id.get(decision.target_id.as_str()).copied())
+        .collect::<HashSet<_>>();
+    let mut post_agent_frozen = std::borrow::Cow::Borrowed(frozen_keys);
+    if !agent_decisions.is_empty() {
+        let frozen = post_agent_frozen.to_mut();
+        frozen.extend(
+            agent_decisions
+                .iter()
+                .map(|decision| decision.target_id.clone()),
+        );
+        frozen.extend(items.iter().filter_map(|item| {
+            item.arc_id
+                .as_deref()
+                .filter(|arc_id| agent_drop_arcs.contains(arc_id))
+                .map(|_| item.id.clone())
+        }));
+    }
     let gates = lane_gates(ctx, !agent_decisions.is_empty());
     let emergency_episode_rearmed = ctx.pass_class == PassClass::EmergencyForce
         && ctx.has_prior_drop
@@ -1731,20 +1753,33 @@ pub(crate) fn select_reductions_with_outcome(
         .iter()
         .map(|arc| (arc.arc_id.as_str(), *arc))
         .collect();
+    let heuristic_arcs = active_arcs
+        .iter()
+        .copied()
+        .filter(|arc| !agent_drop_arcs.contains(arc.arc_id.as_str()))
+        .collect::<Vec<_>>();
 
     // Per-arc reduction intents (arc_id → shape), assembled in TS precedence order.
     let mut arc_shapes: HashMap<String, ArcShape> = HashMap::new();
+    // A queued tool tag uses the same real-or-absent shape policy as TypeScript
+    // pending operations. A result-only drop without its kept call shell would
+    // be rendered as removal of the entire native tool part.
+    for arc_id in &agent_drop_arcs {
+        if arc_by_id.contains_key(arc_id) {
+            arc_shapes.insert((*arc_id).to_owned(), ArcShape::FullDrop);
+        }
+    }
     // Dedup precedes age selection, as in the TS heuristic pass. An older duplicate
     // removed here must not also enter the two-pass age batch.
     let dedup_arc_ids = if gates.dedup {
-        select_tool_dedup(&active_arcs, ctx)
+        select_tool_dedup(&heuristic_arcs, ctx)
             .into_iter()
             .filter(|id| !protected_tools.contains(id))
             .collect()
     } else {
         HashSet::new()
     };
-    let arcs_after_dedup: Vec<&ToolArc> = active_arcs
+    let arcs_after_dedup: Vec<&ToolArc> = heuristic_arcs
         .iter()
         .copied()
         .filter(|arc| !dedup_arc_ids.contains(&arc.arc_id))
@@ -1762,15 +1797,15 @@ pub(crate) fn select_reductions_with_outcome(
             // remain outside that population. Only active client tool arcs can be selected below.
             let emergency_arc_ids = if gates.emergency {
                 let all_active_floor_tokens =
-                    active_floor_tokens(items, frozen_keys, ctx.calibration);
+                    active_floor_tokens(items, &post_agent_frozen, ctx.calibration);
                 let reclaim_by_arc = emergency_reclaim_by_arc(
                     items,
-                    &active_arcs,
+                    &heuristic_arcs,
                     ctx,
                     &reasoning_adjacency_collapse_arcs,
                 );
                 select_emergency(
-                    &active_arcs,
+                    &heuristic_arcs,
                     &protected_tools,
                     ctx,
                     all_active_floor_tokens,
@@ -1811,7 +1846,7 @@ pub(crate) fn select_reductions_with_outcome(
             if gates.supersession {
                 // Count the exact selector output before overlap precedence removes members.
                 let mut intents =
-                    select_supersession(&active_arcs, &supersession_recent_message_ids);
+                    select_supersession(&heuristic_arcs, &supersession_recent_message_ids);
                 intents.retain(|id, intent| {
                     !protected_tools.contains(id)
                         && (!intent.edit_marker
@@ -1934,15 +1969,15 @@ pub(crate) fn select_reductions_with_outcome(
         expand_arc(arc, shape, frozen_keys, &mut out);
     }
 
-    // ctx_reduce agent drops stay block-granular, but pass-through carriers are absent
-    // from live_ids so Media and Opaque can never become reduction targets.
-    select_agent_drops(
-        ctx,
-        &live_ids,
-        frozen_keys,
-        &protected_tool_block_ids,
-        &mut out,
-    );
+    // Tool drops were expanded with their paired call above. Other queued ids
+    // remain block-granular; do not overwrite a kept tool shell with a raw drop.
+    out.extend(agent_decisions.into_iter().filter(|decision| {
+        !arc_by_block_id
+            .get(decision.target_id.as_str())
+            .is_some_and(|arc_id| {
+                agent_drop_arcs.contains(arc_id) && arc_by_id.contains_key(arc_id)
+            })
+    }));
 
     // Agent-directed ids can name either half of a tool arc, so apply the same whole-message
     // guard after their block-granular decisions have been added.
@@ -4866,6 +4901,61 @@ mod tests {
         ctx.agent_drop_ids = vec![result_block_id("c1")];
         let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
         assert!(out.is_empty(), "execute alone must hold queued drops");
+    }
+
+    #[test]
+    fn queued_tool_shapes_match_typescript_pending_operations() {
+        #[derive(serde::Deserialize)]
+        struct Vector {
+            tools: u64,
+            ordinal: u64,
+            mode: String,
+        }
+        let vectors: Vec<Vector> =
+            serde_json::from_str(include_str!("../testdata/queued-tool-shapes.json")).unwrap();
+        assert_eq!(
+            vectors.len(),
+            2,
+            "inside and outside the newest-tool window"
+        );
+        for vector in vectors {
+            let mut items = Vec::new();
+            for ordinal in 1..=vector.tools {
+                let mid = format!("queued-{ordinal}");
+                items.push(tool_call(
+                    &mid,
+                    ordinal,
+                    "read",
+                    serde_json::json!({"path":format!("file{ordinal}")}),
+                    10,
+                ));
+                items.push(tool_result(&mid, ordinal, "read", 10_000));
+            }
+            let mid = format!("queued-{}", vector.ordinal);
+            let mut ctx = base_ctx(PassClass::EmergencyForce);
+            ctx.pass_already_busting = true;
+            ctx.agent_drop_ids = vec![result_block_id(&mid)];
+            let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
+            assert_eq!(out.len(), 2, "queued tag expands to its paired blocks");
+            let call = out
+                .iter()
+                .find(|d| d.target_id == call_block_id(&mid))
+                .unwrap();
+            assert_eq!(
+                call.kind,
+                if vector.mode == "full" {
+                    "drop"
+                } else {
+                    vector.mode.as_str()
+                }
+            );
+            let result = out
+                .iter()
+                .find(|d| d.target_id == result_block_id(&mid))
+                .unwrap();
+            assert_eq!(result.kind, "drop");
+            assert_eq!(result.payload, "[dropped]");
+        }
     }
 
     #[test]

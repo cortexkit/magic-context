@@ -91,6 +91,9 @@ mod compose_review_differential;
 #[path = "tests/compose_review_head.rs"]
 mod compose_review_head;
 #[cfg(test)]
+#[path = "transform/execute_reclaim_observer.rs"]
+pub(crate) mod execute_reclaim_observer;
+#[cfg(test)]
 #[path = "tests/perf_audit_identity.rs"]
 mod perf_audit_identity;
 #[cfg(test)]
@@ -6135,6 +6138,8 @@ fn apply_once(
     });
     let subagent_execute_permitted = decision.rides.subagent_execute_permitted;
     let mut execute_reclaim_admitted = false;
+    #[cfg(test)]
+    let _ = execute_reclaim_observer::take(store as *const McStore as usize);
     // The bounded execute exception's verdict, when this pass asked for one.
     let mut execute_reclaim_decision = None;
     let tag_tokens_by_block: HashMap<&str, usize> = tag_rows
@@ -6384,12 +6389,23 @@ fn apply_once(
                 },
                 &selection_config,
             );
-            let verdict = decision.admit_execute_reclaim(queued_drop_reclaim_tokens(
+            let reclaimable_tokens = queued_drop_reclaim_tokens(
                 &tail_for_selection,
                 &probe.decisions,
                 &pending_drop_target_ids,
                 active_calibration,
-            ));
+            );
+            #[cfg(test)]
+            execute_reclaim_observer::record(
+                store as *const McStore as usize,
+                execute_reclaim_observer::Inputs {
+                    summary_can_come: decision.summary_can_come,
+                    signed_prefix_hold,
+                    reclaimable_tokens,
+                    usable_window: context_limit_tokens,
+                },
+            );
+            let verdict = decision.admit_execute_reclaim(reclaimable_tokens);
             execute_reclaim_decision = Some(verdict);
             if verdict.admitted {
                 tracing::info!(
@@ -27981,7 +27997,11 @@ pub(crate) mod tests {
                     item("a", 1, "raw"),
                     item("old", 3, &caveman_test_source("old")),
                     assistant_tool_call("aged", 4, "aged"),
-                    tool_result("aged-result", 5, "aged", &"x".repeat(20_000)),
+                    // Keep enough reclaimable tail below the 65k ceiling: at 96% the
+                    // emergency selector, not the force-band-disabled age sweep, must
+                    // reclaim this arc. A tiny tail leaves irreducible overhead above
+                    // the ceiling, which correctly preserves tools even at 95%.
+                    tool_result("aged-result", 5, "aged", &"x ".repeat(160_000)),
                     item("tail", 6, "tail"),
                     item("next-turn", 7, "next task step"),
                     item("third-turn", 8, "continue the next step"),

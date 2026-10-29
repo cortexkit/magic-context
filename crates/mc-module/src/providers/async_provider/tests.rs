@@ -2103,22 +2103,24 @@ async fn restored_lineage_reuses_history_embeddings_and_reanchors_only_surviving
         "restored history head must remain byte-identical"
     );
     assert!(after.tag_index.contains_key("§9063§"));
-    // m21's only part is that tool part, so the view either drops the part
-    // or removes the emptied message whole (`emptied_messages::shape`).
+    // The transferred drop keeps this small recent call's real arguments and
+    // replaces its result, just as TypeScript's queued-tool shape policy does.
     let dropped = restored.ranges.iter().any(|range| match range {
-        view::ViewRange::Keep { edits, .. } => edits
-            .iter()
-            .any(|edit| edit.mid == "m21" && edit.part == "0" && edit.drop),
-        view::ViewRange::Replace {
-            from: 21,
-            to: 22,
-            bytes,
-        } => bytes == "[]",
+        view::ViewRange::Keep { edits, .. } => edits.iter().any(|edit| {
+            edit.mid == "m21"
+                && edit.part == "0"
+                && !edit.drop
+                && edit.bytes.as_deref().is_some_and(|bytes| {
+                    let part: Value = serde_json::from_str(bytes).unwrap();
+                    part["state"]["input"] == json!({"path":"file21"})
+                        && part["state"]["output"] == "[dropped §9063§]"
+                })
+        }),
         _ => false,
     });
     assert!(
         dropped,
-        "the tool-part tag must remove the whole native pair, not a CK block numbered 0 or 1"
+        "the transferred tool tag must keep the paired call and exact result placeholder in its native part"
     );
     assert!(store.load_pending_agent_drops(&source).unwrap().is_empty());
     let target = after.namespace();
@@ -2304,13 +2306,11 @@ async fn anthropic_messages_session_publishes_part_edits_beside_signed_thinking(
         .filter(|edit| edit.ordinal == 21 || edit.ordinal == 22)
         .map(|edit| (edit.ordinal, edit.part.as_str(), edit.drop))
         .collect();
-    // At 90% the force band owns tool reclaim, so no age sweep turns the read arc into a
-    // skeleton first (the TypeScript `toolReclaimAdmitted` rule). The queued drop of its
-    // result removes the arc whole: the tool call leaves and the result keeps a
-    // placeholder, one of the two legal drop shapes.
+    // Queued drops use the newest-tool skeleton window independently of the age
+    // sweep: this small recent call keeps its real arguments beside the thinking.
     assert_eq!(
         near,
-        [(21, "1", false), (21, "2", true), (22, "0", false)],
+        [(21, "1", false), (22, "0", false)],
         "the dropped parts get their placeholders; the signed thinking part beside them is kept"
     );
     // The head insertion invalidates every later signature, but removing those
