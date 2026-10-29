@@ -491,7 +491,7 @@ fn meta(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutcome {
         })?;
         row["compartment_count"] = json!(count);
         row["newest_compartment_at_ms"] = json!(newest);
-        ctx.note_sql(super::context_states::STAMPED_MESSAGES);
+        ctx.note_sql(super::context_states::STAMPED_TAGS);
         let expired = || ctx.expired(started);
         match super::context_states::standalone_queued_stamps(conn, &target, &expired) {
             Ok(stamps) => row["queued_stamp_count"] = json!(stamps),
@@ -939,6 +939,10 @@ fn empty_as_null(value: Option<String>) -> Value {
         _ => Value::Null,
     }
 }
+
+#[cfg(test)]
+#[path = "session_data_large_tests.rs"]
+mod large_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1478,7 +1482,7 @@ mod tests {
             "{plan}"
         );
         assert!(!plan.contains("SCAN"), "{plan}");
-        let plan = explain(&db, super::super::context_states::STAMPED_MESSAGES);
+        let plan = explain(&db, super::super::context_states::STAMPED_TAGS);
         assert!(
             plan.contains("SEARCH pending_ops USING")
                 && plan.contains("idx_pending_ops_session_tag_id (session_id=?)"),
