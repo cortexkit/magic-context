@@ -171,6 +171,7 @@ import {
     type V2HiddenCompletionExecutor,
 } from "../hidden-completion";
 import { HiddenModelActivity } from "../hidden-model-activity";
+import { V2MessageTimesCache } from "../message-times";
 import { gaDatabasePath, type V2StoreReader, V2StoreReaderPool } from "../store-reader";
 import {
     clearSyntheticCandidates,
@@ -919,6 +920,7 @@ export async function registerContext(context: V2Context) {
     });
     let hiddenAgentsReady: Promise<void> | undefined;
     const readerPool = new V2StoreReaderPool();
+    const messageTimesCache = new V2MessageTimesCache();
     const openStoreReader = () =>
         readerPool.open(gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"));
     const createHiddenExecutor = async (database: NonNullable<typeof db>) => {
@@ -1420,6 +1422,7 @@ export async function registerContext(context: V2Context) {
                         ) {
                             nativeFoldReplay?.onEvent(event);
                             restoredRows.forget(sessionID);
+                            messageTimesCache.delete(sessionID);
                         }
                         if (
                             event.type === "session.error" ||
@@ -1467,6 +1470,7 @@ export async function registerContext(context: V2Context) {
                                 rawProviders.get(sessionID)?.();
                                 rawProviders.delete(sessionID);
                                 usage.delete(sessionID);
+                                messageTimesCache.delete(sessionID);
                                 hiddenSessionErrors.delete(sessionID);
                                 storageNoticeBySession.delete(sessionID);
                                 liveModels.delete(sessionID);
@@ -2012,23 +2016,11 @@ export async function registerContext(context: V2Context) {
         // The host's messages as this pass received them. A replay rebuilds the
         // transform input from these, never from a draft a failed pass reshaped.
         const hostMessagesAtEntry = [...draft.messages];
-        // Stored message times read during this pass, by id. They do not change
-        // while a pass runs, so the writer retries and the managed pass after
-        // them read each id from the store once.
-        const passTimes = new Map<string, { created?: number; completed?: number } | null>();
+        // Retries share one timing snapshot. Across passes, settled rows reuse
+        // their times only after a current membership and revision check.
+        const cachedTimes = messageTimesCache.pass(draft.sessionID);
         const readTimes = (reader: V2StoreReader, messages: readonly V2Message[]) => {
-            const ids = timeIds(messages);
-            const missing = ids.filter((id) => !passTimes.has(id));
-            if (missing.length > 0) {
-                const read = reader.messageTimes(draft.sessionID, missing);
-                for (const id of missing) passTimes.set(id, read.get(id) ?? null);
-            }
-            const times = new Map<string, { created?: number; completed?: number }>();
-            for (const id of ids) {
-                const time = passTimes.get(id);
-                if (time) times.set(id, time);
-            }
-            return times;
+            return cachedTimes(reader, timeIds(messages));
         };
         liveModels.set(draft.sessionID, {
             providerID: draft.model.providerID,
@@ -2883,6 +2875,7 @@ export async function registerContext(context: V2Context) {
     );
     return {
         async dispose() {
+            messageTimesCache.clear();
             usageController.abort();
             // OpenCode 2 runs this disposer before it removes this instance's hooks
             // (scope finalizers run in reverse registration order, and the disposer

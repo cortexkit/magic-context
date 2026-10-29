@@ -463,6 +463,14 @@ export function messageTimesQuery(count: number): string {
             FROM session_message WHERE +session_id = ? AND id IN (${Array.from({ length: count }, () => "?").join(",")})`;
 }
 
+export interface V2MessageTimeVersion {
+    id: string;
+    type: string;
+    seq: number;
+    created: number | null;
+    updated: number | null;
+}
+
 /** Opens an existing store read-only; missing/corrupt stores propagate errors, never an empty history. */
 export class V2StoreReader {
     private readonly db: Database;
@@ -838,6 +846,45 @@ export class V2StoreReader {
             ).get(sessionID, id, ...RAW_MESSAGE_TYPES) as RawRow | undefined;
             return row ? decode(row) : null;
         });
+    }
+
+    /** Check membership and row revisions without loading or parsing message data. */
+    messageTimeVersions(
+        sessionID: string,
+        ids: readonly string[],
+        span?: { first: number; last: number },
+    ): Map<string, V2MessageTimeVersion> {
+        const versions = new Map<string, V2MessageTimeVersion>();
+        // A dense retained window is cheaper to read in sequence order than as
+        // thousands of primary-key probes. Sparse anchor reads still use ids.
+        if (ids.length > 0 && span && span.last - span.first < ids.length * 2) {
+            const wanted = new Set(ids);
+            const rows =
+                this.prepare(`SELECT id, type, seq, time_created AS created, time_updated AS updated
+                FROM session_message WHERE session_id = ? AND seq >= ? AND seq <= ?`).all(
+                    sessionID,
+                    span.first,
+                    span.last,
+                ) as V2MessageTimeVersion[];
+            for (const row of rows) if (wanted.has(row.id)) versions.set(row.id, row);
+            for (const [id, version] of this.messageTimeVersions(
+                sessionID,
+                ids.filter((id) => !versions.has(id)),
+            ))
+                versions.set(id, version);
+            return versions;
+        }
+        for (let offset = 0; offset < ids.length; offset += 500) {
+            const batch = ids.slice(offset, offset + 500);
+            const rows =
+                this.prepare(`SELECT id, type, seq, time_created AS created, time_updated AS updated
+                FROM session_message WHERE +session_id = ? AND id IN (${batch.map(() => "?").join(",")})`).all(
+                    sessionID,
+                    ...batch,
+                ) as V2MessageTimeVersion[];
+            for (const row of rows) versions.set(row.id, row);
+        }
+        return versions;
     }
 
     messageTimes(

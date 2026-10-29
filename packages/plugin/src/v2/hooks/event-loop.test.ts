@@ -105,7 +105,7 @@ async function fixture(
     mkdirSync(join(dir, "opencode"));
     const hostDb = new Database(process.env.OPENCODE_DB);
     hostDb.exec(`
-        CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT);
+        CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT, time_updated INTEGER);
         CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT);
         INSERT INTO session_v2 VALUES ('${sessionID}', NULL, '${dir}');
     `);
@@ -185,7 +185,7 @@ async function fixture(
         // The completion appears after the pre-generation pass, just as on the host.
         hostDb
             .prepare(
-                "INSERT OR REPLACE INTO session_message VALUES (?, ?, 'assistant', 1, 1000, ?)",
+                "INSERT OR REPLACE INTO session_message(id, session_id, type, seq, time_created, data) VALUES (?, ?, 'assistant', 1, 1000, ?)",
             )
             .run(
                 "a1",

@@ -263,7 +263,16 @@ ORDER BY time_created, id`;
 // OpenCode 2 stores the role in `type`, not data.role. Its append order is seq;
 // alias it to the fold's ordering key so missing or nonmonotonic timestamps do
 // not skip turns or change the phase-peak calculation.
+// Separate the disjoint watermark branches so SQLite seeks on seq in both;
+// an OR restricts only session_id and walks the session on every sidebar poll.
 const V2_ASSISTANT_USAGE_ROWS_AFTER_SQL = `
+WITH newer AS (
+  SELECT id, seq, data FROM session_message
+  WHERE session_id = ? AND type = 'assistant' AND data IS NOT NULL AND seq > ?
+  UNION ALL
+  SELECT id, seq, data FROM session_message
+  WHERE session_id = ? AND type = 'assistant' AND data IS NOT NULL AND seq = ? AND id > ?
+)
 SELECT
   json_extract(data, '$.agent') AS agent,
   seq AS time_created,
@@ -272,11 +281,7 @@ SELECT
     + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
     + COALESCE(json_extract(data, '$.tokens.cache.write'), 0) AS prompt,
   COALESCE(json_extract(data, '$.tokens.output'), 0) AS output
-FROM session_message
-WHERE session_id = ?
-  AND type = 'assistant'
-  AND data IS NOT NULL
-  AND (seq > ? OR (seq = ? AND id > ?))
+FROM newer
 ORDER BY seq, id`;
 
 interface AssistantUsageDbRow {
@@ -301,7 +306,11 @@ export function readAssistantUsageRowsAfter(
                 ? V2_ASSISTANT_USAGE_ROWS_AFTER_SQL
                 : ASSISTANT_USAGE_ROWS_AFTER_SQL,
         )
-        .all(sessionId, afterTimeCreated, afterTimeCreated, afterId) as AssistantUsageDbRow[];
+        .all(
+            ...(generation === "v2"
+                ? [sessionId, afterTimeCreated, sessionId, afterTimeCreated, afterId]
+                : [sessionId, afterTimeCreated, afterTimeCreated, afterId]),
+        ) as AssistantUsageDbRow[];
     return rows.map((r) => ({
         agent: r.agent ?? null,
         timeCreated: Number(r.time_created ?? 0),

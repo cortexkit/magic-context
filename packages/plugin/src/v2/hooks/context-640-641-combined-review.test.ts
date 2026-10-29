@@ -27,7 +27,7 @@ test("combined review: v2 exhausted admission still fits replay against current 
     mkdirSync(join(dir, "opencode"));
     const store = new Database(process.env.OPENCODE_DB);
     store.exec(
-        "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT); CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL);",
+        "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT, time_updated INTEGER); CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL);",
     );
     store.close();
     const db = openDatabase(join(dir, "context.db"));
