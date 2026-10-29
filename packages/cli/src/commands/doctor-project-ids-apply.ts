@@ -8,7 +8,7 @@ import {
     statfsSync,
     statSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { readGitCheckoutMetadata } from "@magic-context/core/features/magic-context/memory/git-common-dir";
 import {
     isPinnedProjectIdentity,
@@ -102,7 +102,7 @@ function validatePlan(plan: ProjectIdPlan): void {
         if (
             !pair ||
             typeof pair.from !== "string" ||
-            !/^(git|dir):.+/.test(pair.from) ||
+            (!/^(git|dir):.+/.test(pair.from) && !isAbsolute(pair.from)) ||
             !isPinnedProjectIdentity(pair.to) ||
             sources.has(pair.from) ||
             !Array.isArray(pair.folders) ||

@@ -134,6 +134,34 @@ it("repairs root pin common-dir metadata when re-running apply on an already-app
     expect(backups()).toHaveLength(backupCount);
 });
 
+it("applies a registered raw absolute-path pair from the generated plan", async () => {
+    const directory = folder("raw-checkout");
+    folder("raw-checkout/.git");
+    db.prepare("INSERT INTO project_state(project_path) VALUES (?)").run(directory);
+    db.prepare(`INSERT INTO memories
+        (project_path, category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at)
+        VALUES (?, 'CONSTRAINTS', 'raw-path memory', 'raw-path-hash', 1, 1, 1, 1)`).run(directory);
+    const plan = await buildProjectIdPlan(db, dbPath, null, {
+        resolve: async () => ({
+            status: "resolved",
+            via: "root",
+            projectId: to,
+            canonicalRoot: directory,
+        }),
+    });
+    expect(plan.pairs.map(({ from, to }) => ({ from, to }))).toEqual([{ from: directory, to }]);
+    expect((await apply(plan)).code).toBe(0);
+    expect(db.prepare("SELECT project_path, content FROM memories").all()).toEqual([
+        { project_path: to, content: "raw-path memory" },
+    ]);
+    expect(mappings()).toEqual([{ old_project_path: directory, new_project_path: to }]);
+    expect(JSON.parse(readFileSync(sidecarPath(directory), "utf8"))).toEqual({
+        directory,
+        identity: to,
+        gitCommonDir: join(directory, ".git"),
+    });
+});
+
 const second = "dir:second";
 async function orderedPlan(): Promise<ProjectIdPlan> {
     db.prepare("INSERT INTO project_state(project_path) VALUES (?)").run(second);
