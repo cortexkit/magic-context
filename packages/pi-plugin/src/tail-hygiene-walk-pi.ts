@@ -1,5 +1,4 @@
 import { protectedToolTagNumbers } from "@magic-context/core/features/magic-context/reclaim-protection";
-import type { TagEntry } from "@magic-context/core/features/magic-context/types";
 import { estimateImageTokensFromDataUrl } from "@magic-context/core/hooks/magic-context/image-token-estimate";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { rememberCurrentToolOutputCount } from "@magic-context/core/hooks/magic-context/tail-hygiene-output-count";
@@ -19,6 +18,7 @@ import {
 } from "@magic-context/core/shared/tail-hygiene-json";
 import { providerVisiblePiPart } from "./provider-visible-parts-pi";
 import { isPiSystemEntry } from "./system-entry-pi";
+import type { PiTagMetadata } from "./tag-snapshot-pi";
 
 const TAG_PREFIX = /^§(\d+)§\s*/;
 const SYNTHETIC_TODO_PREFIX = "mc_synthetic_todo_";
@@ -54,7 +54,7 @@ export interface PiTailHygieneWalkInput {
 	messages: readonly unknown[];
 	/** Active request API, not the API recorded on an older assistant message. */
 	providerApi?: string;
-	tags: readonly TagEntry[];
+	tags: readonly PiTagMetadata[];
 	/** Reuse the same key object for one connection/session lifetime, with canonical immutable row snapshots only. */
 	tagCacheKey?: object;
 	/**
@@ -77,7 +77,7 @@ interface PiToolArc {
 	ownerIndex: number;
 	toolName: string | null;
 	sentinel: boolean;
-	tag?: TagEntry;
+	tag?: PiTagMetadata;
 	parts: Record<string, unknown>[];
 }
 
@@ -87,7 +87,7 @@ interface DraftPart {
 	content: string;
 	contentHash?: string;
 	tokens: number;
-	tag?: TagEntry;
+	tag?: PiTagMetadata;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -164,8 +164,8 @@ function partHash(kind: TailHygienePartKind, content: string): string {
 
 function parseVisibleTag(
 	content: string,
-	tagsByNumber: ReadonlyMap<number, TagEntry>,
-): TagEntry | undefined {
+	tagsByNumber: ReadonlyMap<number, PiTagMetadata>,
+): PiTagMetadata | undefined {
 	const match = content.trimStart().match(TAG_PREFIX);
 	if (!match) return undefined;
 	const tagNumber = Number(match[1]);
@@ -251,7 +251,7 @@ function imageContentAndTokens(part: Record<string, unknown>): {
 	};
 }
 
-function messageIdForTag(tag: TagEntry): string | null {
+function messageIdForTag(tag: PiTagMetadata): string | null {
 	if (tag.type === "tool") return tag.toolOwnerMessageId;
 	const positional = tag.messageId.match(/^(.*):(?:p|file)\d+$/);
 	if (positional) return positional[1] ?? null;
@@ -373,13 +373,13 @@ function collectToolArcs(input: PiTailHygieneWalkInput): {
 }
 
 interface PiTagAttribution {
-	tags: readonly TagEntry[];
-	messageTags: Map<string, TagEntry>;
-	tagsByNumber: Map<number, TagEntry>;
-	exactToolTags: Map<string, TagEntry>;
-	orphanTagsByCall: Map<string, TagEntry[]>;
+	tags: readonly PiTagMetadata[];
+	messageTags: Map<string, PiTagMetadata>;
+	tagsByNumber: Map<number, PiTagMetadata>;
+	exactToolTags: Map<string, PiTagMetadata>;
+	orphanTagsByCall: Map<string, PiTagMetadata[]>;
 	boundsByOwner: Map<string, { min: number; max: number }>;
-	rowsByOwner: Map<string, Set<TagEntry>>;
+	rowsByOwner: Map<string, Set<PiTagMetadata>>;
 	simple: boolean;
 }
 
@@ -391,8 +391,8 @@ function tagAttribution(input: PiTailHygieneWalkInput): PiTagAttribution {
 		? tagAttributions.get(input.tagCacheKey as object)
 		: undefined;
 	const wasSimple = cached?.simple === true;
-	const added: TagEntry[] = [];
-	const removed: TagEntry[] = [];
+	const added: PiTagMetadata[] = [];
+	const removed: PiTagMetadata[] = [];
 	if (cached) {
 		if (cached.tags === input.tags) return cached;
 		// Snapshot arrays have canonical tag-number order and stable unchanged
@@ -424,7 +424,7 @@ function tagAttribution(input: PiTailHygieneWalkInput): PiTagAttribution {
 	if (!cached) {
 		removed.length = 0;
 		added.length = 0;
-		added.push(...input.tags);
+		for (const tag of input.tags) added.push(tag);
 		cached = {
 			tags: input.tags,
 			messageTags: new Map(),
@@ -512,8 +512,8 @@ function attributeTags(
 	arcs: readonly PiToolArc[],
 	messageIds: readonly string[],
 ): {
-	messageTags: ReadonlyMap<string, TagEntry>;
-	tagsByNumber: ReadonlyMap<number, TagEntry>;
+	messageTags: ReadonlyMap<string, PiTagMetadata>;
+	tagsByNumber: ReadonlyMap<number, PiTagMetadata>;
 } {
 	const {
 		messageTags,
@@ -521,7 +521,10 @@ function attributeTags(
 		exactToolTags,
 		orphanTagsByCall,
 		boundsByOwner,
-	} = tagAttribution(input);
+	} = tagAttribution({
+		...input,
+		tags: attributionProjection(input, arcs, messageIds),
+	});
 	const messageIndexById = new Map<string, number>();
 	for (let index = 0; index < messageIds.length; index += 1) {
 		const id = input.stableId?.(input.messages[index], index);
@@ -585,6 +588,50 @@ function attributeTags(
 	return { messageTags, tagsByNumber };
 }
 
+/** Index only identities the rendered request can ask about, from the pinned pass rows. */
+function attributionProjection(
+	input: PiTailHygieneWalkInput,
+	arcs: readonly PiToolArc[],
+	messageIds: readonly string[],
+): readonly PiTagMetadata[] {
+	const owners = new Set(messageIds);
+	const calls = new Set<string>();
+	const numbers = new Set<number>();
+	for (const arc of arcs) {
+		owners.add(arc.ownerId);
+		calls.add(arc.callId);
+	}
+	const notePrefix = (text: string) => {
+		for (const candidate of [text, stripChannel1ReminderSpans(text)]) {
+			const match = candidate.trimStart().match(TAG_PREFIX);
+			if (match) numbers.add(Number(match[1]));
+		}
+	};
+	for (let index = 0; index < input.messages.length; index++) {
+		const id = input.stableId?.(input.messages[index], index);
+		if (id) owners.add(id);
+		const message = input.messages[index];
+		if (!isRecord(message)) continue;
+		if (typeof message.content === "string") notePrefix(message.content);
+		else if (Array.isArray(message.content)) {
+			for (const part of message.content)
+				if (isRecord(part) && typeof part.text === "string")
+					notePrefix(part.text);
+		}
+	}
+	return input.tags.filter((tag) => {
+		if (numbers.has(tag.tagNumber)) return true;
+		const owner = messageIdForTag(tag);
+		if (owner !== null && owners.has(owner)) return true;
+		// Orphan uniqueness is all-status and session-wide for each visible call.
+		return (
+			tag.type === "tool" &&
+			tag.toolOwnerMessageId === null &&
+			calls.has(tag.messageId)
+		);
+	});
+}
+
 const partJsonMemo = new TailHygieneJsonMemo();
 let excludedViews = new WeakMap<object, unknown>();
 
@@ -626,7 +673,7 @@ function finalizeParts(
 	newestMessagePartStart: number,
 	protectedToolTags?: ReadonlySet<number>,
 ): TailHygieneMeasurement {
-	const visibleTags = new Map<number, TagEntry>();
+	const visibleTags = new Map<number, PiTagMetadata>();
 	for (const part of drafts) {
 		if (part.kind !== "excluded" && part.tag)
 			visibleTags.set(part.tag.tagNumber, part.tag);

@@ -57,10 +57,7 @@ import {
 	decodePiContentDecision,
 	encodePiContentDecision,
 } from "@magic-context/core/features/magic-context/pi-content-decisions";
-import {
-	computeProtectionWindow,
-	getProtectionWindowForSession,
-} from "@magic-context/core/features/magic-context/protection-window";
+import { getProtectionWindowForSession } from "@magic-context/core/features/magic-context/protection-window";
 import {
 	protectedToolTagNumbers,
 	protectedToolTokenCount,
@@ -357,6 +354,7 @@ import {
 	preparePiToolRemovalMeasurements,
 } from "./native-replay-state-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
+import { protectedPiPassTagNumbers } from "./pass-tag-projection-pi";
 import { adaptPiAppendCompaction } from "./pi-append-compaction";
 import { PI_CONTEXT_BUDGET, PiContextDeadlineError } from "./pi-context-budget";
 import {
@@ -506,7 +504,9 @@ import {
 	cancelPiTagSnapshotSession,
 	ensurePiTagSnapshotReady,
 	getPiActiveTagSnapshotView,
+	getPiPassTagSnapshotView,
 	getPiTagSnapshotView,
+	type PiTagMetadata,
 	prewarmPiTagSnapshot,
 	readPiFallbackTagRows,
 } from "./tag-snapshot-pi";
@@ -995,6 +995,7 @@ interface PiTextIdentityPlan {
 	legacyReminderTagNumbers: Set<number>;
 	reusableMessageIds: Set<string>;
 	sourceCache: Map<number, string>;
+	reusableTextMessageIds: Set<string>;
 }
 
 function buildPiTextIdentityPlan(
@@ -1065,6 +1066,7 @@ function buildPiTextIdentityPlan(
 	}
 
 	const driftedMessageIds = new Set<string>();
+	const reusableTextMessageIds = new Set<string>();
 	const legacyReminderTagNumbers = new Set<number>();
 	for (const [messageId, currentSources] of currentSourcesByMessageId) {
 		const legacyRows = legacyRowsByMessageId.get(messageId) ?? [];
@@ -1098,6 +1100,8 @@ function buildPiTextIdentityPlan(
 				return legacyReminderMatches;
 			});
 		if (!vectorMatches) driftedMessageIds.add(messageId);
+		else if (!messageId.startsWith("pi-msg-"))
+			reusableTextMessageIds.add(messageId);
 	}
 
 	const reusableMessageIds = new Set<string>();
@@ -1109,6 +1113,7 @@ function buildPiTextIdentityPlan(
 		legacyReminderTagNumbers,
 		reusableMessageIds,
 		sourceCache,
+		reusableTextMessageIds,
 	};
 }
 
@@ -4439,6 +4444,7 @@ export function registerPiContextHandler(
 					options.db,
 					sessionId,
 					budget,
+					"pass",
 				);
 				if (hydration) await guardAwait(hydration);
 			}
@@ -6965,7 +6971,7 @@ export function registerPiContextHandler(
 				budget.failureReason = err.message;
 				if (sessionIdForError) {
 					try {
-						prewarmPiTagSnapshot(lkgOptions.db, sessionIdForError);
+						prewarmPiTagSnapshot(lkgOptions.db, sessionIdForError, "pass");
 					} catch {}
 				}
 				throw err;
@@ -8444,7 +8450,7 @@ interface RunPipelineArgs {
 
 interface PiChannelBaselineSnapshot {
 	tagCacheKey?: object;
-	tags: ReturnType<typeof getTagsBySession>;
+	tags: readonly PiTagMetadata[];
 	/** The rows of `tags` whose status is "active", in the same order. */
 	activeTags: readonly ReturnType<typeof getTagsBySession>[number][];
 	protectedTagNumbers: Set<number>;
@@ -9745,6 +9751,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					preserveTagOnlyAssistantText: true,
 					entryFingerprintByMessageId,
 					reuseMessageIds: textIdentityPlan.reusableMessageIds,
+					reuseTextMessageIds: textIdentityPlan.reusableTextMessageIds,
 					textIdentityDriftMessageIds: textIdentityPlan.driftedMessageIds,
 					textIdentitySourceCache: textIdentityPlan.sourceCache,
 					textTokenCache: tagTextTokenCache,
@@ -10326,9 +10333,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let routineCleanupApplied = false;
 	let heuristicsResult: PiHeuristicCleanupResult | null = null;
 	const tActiveTags = performance.now();
-	// Load the canonical tag set once after pending operations. Heuristics use its
-	// active projection; Channel-1 baseline construction reuses the full set.
-	const allTagsForPass = getPiTagSnapshotView(args.db, args.sessionId);
+	// Pin one canonical projection before heuristics change statuses. Historical
+	// rows retain only the identity/accounting used by protection and attribution.
+	const allTagsForPass = getPiPassTagSnapshotView(args.db, args.sessionId);
 	// Same rows as filtering allTagsForPass by status, kept current from changed
 	// rows instead of walking every tag the session ever had.
 	const activeTags = getPiActiveTagSnapshotView(
@@ -11534,11 +11541,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	);
 	protectionFloorResolution = resolveProtectionFloor();
 	const protectedTagNumbers = usesTokenProtection
-		? computeProtectionWindow(
+		? protectedPiPassTagNumbers(
 				allTagsForPass,
 				protectionFloorResolution.floor,
 				activeCalibration.toolsRatio,
-			).protectedTagNumbers
+			)
 		: newestActiveTagNumbersByCount(activeTags, args.protectedTags);
 	// A defer pass cannot consume queue rows, so preserve the snapshot loaded at
 	// pass start. Execute passes may remove only a subset (protected/incomplete

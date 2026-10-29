@@ -76,6 +76,8 @@ import type { Transcript, TranscriptMessage, TranscriptPart } from "./transcript
 export { TEXT_TAG_IDENTITY_MARKER };
 
 export interface TagTranscriptOptions {
+    /** Independently validated text sources; does not authorize tool accounting reuse. */
+    reuseTextMessageIds?: ReadonlySet<string>;
     /** Keep tag-only assistant slots inert when their original text must survive stripping. */
     preserveTagOnlyAssistantText?: boolean;
     /**
@@ -421,7 +423,10 @@ export function tagTranscript(
                     skipPrefixInjection,
                     preserveTagOnlyAssistantText: options.preserveTagOnlyAssistantText,
                     entryFingerprint: options.entryFingerprintByMessageId?.get(messageId) ?? null,
-                    reuseIdentity: reuseIdentity || contentDerivedTextIds !== undefined,
+                    reuseIdentity:
+                        reuseIdentity ||
+                        options.reuseTextMessageIds?.has(messageId) === true ||
+                        contentDerivedTextIds !== undefined,
                     timing,
                     textIdentitySourceCache: options.textIdentitySourceCache,
                     textTokenCache: options.textTokenCache,
@@ -512,6 +517,11 @@ export function tagTranscript(
                             timing,
                             options.toolTokenCache,
                             tokenCacheKey,
+                            {
+                                byteSize: existing.maxByteSize,
+                                tokenCount: existing.maxTokenCount,
+                                inputTokenCount: existing.inputTokenCount,
+                            },
                         );
                         text = accounting.text;
                         if (part.kind === "tool_result") {
@@ -627,6 +637,7 @@ export function tagTranscript(
                         timing,
                         options.toolTokenCache,
                         tokenCacheKey,
+                        tagger.getToolTagAccounting(sessionId, callId, messageId),
                     );
                     text = accounting.text;
                     const outputByteSize = part.kind === "tool_result" ? accounting.byteSize : 0;
@@ -784,12 +795,22 @@ function readAggregateToolAccounting(
     timing: TagTranscriptTiming | undefined,
     tokenCache?: Map<string, { text: string; tokenCount: number }>,
     tokenCacheKey?: string,
+    persisted?: { byteSize: number; tokenCount: number | null; inputTokenCount: number | null },
 ): AggregateToolAccounting {
     const text = part.getText() ?? "";
     const byteSize = getToolPartByteSize(part, text);
-    const metadata = part.getToolMetadata();
+    // Persisted tool-result accounting tracks the largest byte size seen. Skip
+    // output tokenization when that size has not grown and a count is stored;
+    // known input counts also need no BPE. Growth and missing counts still take
+    // the original counting path, even when the identity was not reusable.
+    const metadata = part.getToolMetadata({
+        skipInputTokenCount: persisted?.inputTokenCount != null,
+    });
     let tokenCount = 0;
-    if (part.kind === "tool_result") {
+    if (
+        part.kind === "tool_result" &&
+        (!persisted || persisted.tokenCount === null || byteSize > persisted.byteSize)
+    ) {
         const tokenStart = timing ? performance.now() : 0;
         tokenCount = getCachedToolPartTokenCount(part, text, tokenCache, tokenCacheKey);
         if (timing) timing.tokenCounting += performance.now() - tokenStart;
@@ -1088,7 +1109,7 @@ function tagTextPart(args: TagTextPartArgs): void {
     // (e.g. legacy session created before this code shipped). For new
     // sessions stripTagPrefix is a no-op on the very first pass.
     const sourceContent = stripTagPrefix(text);
-    if (sourceContent.trim().length > 0) {
+    if (sourceContent.trim().length > 0 && !args.textIdentitySourceCache?.has(tagId)) {
         saveSourceContent(args.db, args.sessionId, tagId, sourceContent);
         args.textIdentitySourceCache?.set(tagId, sourceContent);
     }

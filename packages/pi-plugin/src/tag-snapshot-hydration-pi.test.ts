@@ -281,7 +281,8 @@ it("candidate matches the independent synchronous process oracle including fallb
 			oracle.exited,
 		]);
 		expect({ exit, error }).toEqual({ exit: 0, error: "" });
-		const { estimatedBytes, ...candidate } = await assemble(db, []);
+		const { estimatedBytes, allocatedBytes, reusedBytes, ...candidate } =
+			await assemble(db, []);
 		expect(JSON.stringify(candidate)).toBe(output.trim());
 		expect(candidate.tags.map((row) => row.tagNumber)).toEqual([2, 5, 8, 11]);
 		expect(candidate.tags.at(-1)).toMatchObject({

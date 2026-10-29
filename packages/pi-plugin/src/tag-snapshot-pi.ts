@@ -211,10 +211,11 @@ export function createPiTagSnapshotReader(db: Database) {
 			revisionPresent: total.present,
 		};
 	};
-	const ready = (sessionId: string) => {
+	const ready = (sessionId: string, projection?: "pass") => {
 		assertOutsideTransaction();
 		const cached = cache.get(sessionId);
 		if (!cached?.fallback) return false;
+		if (cached.projection !== projection) return false;
 		const revision = revisionReaders.get(db)?.(sessionId);
 		if (!revision || cached.foreignRevision !== revision[1]) return false;
 		const stamp = versionStamp.get(sessionId, sessionId) as {
@@ -234,11 +235,12 @@ export function createPiTagSnapshotReader(db: Database) {
 	const load = (
 		sessionId: string,
 		kind: PiTagSnapshotLoadKind,
+		projection?: "pass",
 	): Promise<void> =>
 		inSnapshotRoot(async () => {
 			if (closed) throw new PiTagHydrationError("connection closed");
 			managed.add(sessionId);
-			if (ready(sessionId)) return;
+			if (ready(sessionId, projection)) return;
 			if (current) {
 				// A turn joining its prewarm owns that read from now on. Only an
 				// unclaimed background read may yield to another session's turn.
@@ -248,7 +250,7 @@ export function createPiTagSnapshotReader(db: Database) {
 					!current.preempted
 				) {
 					if (kind === "turn") current.kind = "turn";
-					return current.result;
+					if (current.projection === projection) return current.result;
 				}
 				if (
 					kind === "turn" &&
@@ -266,13 +268,21 @@ export function createPiTagSnapshotReader(db: Database) {
 						"session hydration cancelled while queued",
 						"cancelled",
 					);
-				return load(sessionId, kind);
+				return load(sessionId, kind, projection);
 			}
 			if (failedSession === sessionId && performance.now() < failedUntil)
 				throw lastFailure;
 			watch.run(sessionId);
 			const token = stamps(sessionId, ++jobId);
 			const previous = cache.get(sessionId);
+			if (projection === "pass" && previous && previous.projection !== "pass") {
+				// Release the full historical rows before assembling their narrower
+				// replacement; a prior diagnostic full read must not pin that payload.
+				previous.tags = previous.tags.map((tag) =>
+					projectPiPassTag(tag as SnapshotTag),
+				);
+				previous.projection = "pass";
+			}
 			const legacyFallbackOnly =
 				previous &&
 				previous.foreignRevision === token.foreignRevision &&
@@ -296,12 +306,14 @@ export function createPiTagSnapshotReader(db: Database) {
 					connectionEpoch: epoch,
 					sessionEpoch: token.sessionEpoch,
 					jobId: token.jobId,
+					projection,
 				},
 				previous?.tags ?? [],
 			);
 			const destination: OwnerJob = {
 				sessionId,
 				kind,
+				projection,
 				result: Promise.resolve(),
 				released: worker.released,
 				cancel: worker.cancel,
@@ -342,6 +354,7 @@ export function createPiTagSnapshotReader(db: Database) {
 							"stale",
 						);
 					const snapshot: SnapshotEntry = {
+						projection,
 						firstAllocationPending: live.revisionPresent
 							? undefined
 							: candidate.tags.length === 0 &&
@@ -513,7 +526,13 @@ export function createPiTagSnapshotReader(db: Database) {
 				const dirty = new Set(numbers);
 				const replacements = getTagsByNumbers(db, sessionId, numbers);
 				for (const tag of replacements) Object.freeze(tag);
-				snapshot.tags = mergeChangedRows(snapshot.tags, dirty, replacements);
+				snapshot.tags = mergeChangedRows(
+					snapshot.tags,
+					dirty,
+					snapshot.projection === "pass"
+						? replacements.map(projectPiPassTag)
+						: replacements,
+				);
 				// The active projection follows the same rows: only changed numbers
 				// can enter or leave it, so it is merged rather than refiltered.
 				snapshot.active = mergeChangedRows(
@@ -571,8 +590,15 @@ export function createPiTagSnapshotReader(db: Database) {
 				"managed snapshot read inside a transaction",
 			);
 		if (!snapshot) return getTagsBySession(db, sessionId);
+		// The full API remains full when a pass keeps only metadata for history.
+		// Runtime attribution uses the narrow projection, not this escape hatch.
+		if (snapshot.projection === "pass") {
+			const tags = getTagsBySession(db, sessionId);
+			return borrowed ? tags.map((tag) => Object.freeze(tag)) : tags;
+		}
 		// Heuristics can edit their working entries; never expose the cached objects.
-		return borrowed ? snapshot.tags : snapshot.tags.map((tag) => ({ ...tag }));
+		const full = snapshot.tags as SnapshotTag[];
+		return borrowed ? full : full.map((tag) => ({ ...tag }));
 	};
 	entryReaders.set(db, sync);
 	fallbackReaders.set(db, (sessionId) => {
@@ -613,6 +639,35 @@ export function createPiTagSnapshotReader(db: Database) {
 export type PiSnapshotTag = ReturnType<typeof getTagsBySession>[number];
 type SnapshotTag = PiSnapshotTag;
 
+/** Historical fields used by attribution, token protection and served-number publication. */
+export type PiTagMetadata = Pick<
+	SnapshotTag,
+	| "id"
+	| "tagNumber"
+	| "messageId"
+	| "type"
+	| "status"
+	| "toolOwnerMessageId"
+	| "tokenCount"
+	| "toolName"
+>;
+export type PiPassTag = PiTagMetadata & Partial<SnapshotTag>;
+
+/** Active heuristics need full rows; history needs identity and accounting, not replay payload fields. */
+export function projectPiPassTag(tag: SnapshotTag): PiPassTag {
+	if (tag.status === "active") return tag;
+	return Object.freeze({
+		id: tag.id,
+		tagNumber: tag.tagNumber,
+		messageId: tag.messageId,
+		type: tag.type,
+		status: tag.status,
+		toolOwnerMessageId: tag.toolOwnerMessageId,
+		tokenCount: tag.tokenCount,
+		toolName: tag.toolName,
+	});
+}
+
 /**
  * A tag row that names an unsettled Pi id: a message tag stored under a
  * `pi-msg-*` fallback message id, or a tool tag whose owner is one. Columns are
@@ -638,11 +693,12 @@ export const PI_FALLBACK_ROW_PREDICATE = `((type = 'message' AND message_id LIKE
 	OR (type = 'tool' AND tool_owner_message_id LIKE 'pi-msg-%'))`;
 
 interface SnapshotEntry {
+	projection?: "pass";
 	firstAllocationPending?: "empty" | "legacy";
 	legacyFallback?: boolean;
 	revision: string;
 	foreignRevision: string;
-	tags: SnapshotTag[];
+	tags: PiPassTag[];
 	/** `tags` rows whose status is "active", in the same order. */
 	active: SnapshotTag[];
 	/**
@@ -660,22 +716,26 @@ interface SnapshotEntry {
 	fallback?: PiFallbackTagRow[];
 }
 
-const isActive = (tag: SnapshotTag) => tag.status === "active";
+const isActive = (tag: PiPassTag): tag is SnapshotTag =>
+	tag.status === "active";
 
 function sameRow(
-	left: SnapshotTag,
-	right: SnapshotTag,
-	keys: readonly (keyof SnapshotTag)[],
+	left: PiPassTag,
+	right: PiPassTag,
+	keys: readonly (keyof PiPassTag)[],
 ): boolean {
+	if (Object.keys(left).length !== keys.length) return false;
 	for (const key of keys) if (!Object.is(left[key], right[key])) return false;
 	return true;
 }
 
 export interface PiTagSnapshotCandidate {
-	tags: SnapshotTag[];
+	tags: PiPassTag[];
 	active: SnapshotTag[];
 	fallback: PiFallbackTagRow[];
 	estimatedBytes: number;
+	allocatedBytes: number;
+	reusedBytes: number;
 }
 
 /**
@@ -721,21 +781,35 @@ function candidateRowBytes(row: object, overhead: number): number {
 	return bytes;
 }
 
+function passTagBytes(row: PiPassTag): number {
+	// Charge a 48-byte header plus 24 bytes per field slot: 384 bytes of base
+	// overhead for a full 14-field row. String/binary payloads are added separately.
+	// Narrow projections use the same per-slot cost.
+	return candidateRowBytes(row, 48 + 24 * Object.keys(row).length);
+}
+
 /**
  * Private streaming assembly: only finish exposes the arrays, after both
  * streams end. Work and identity reuse happen per row, never at publication.
  * The caller supplies scheduling between rows; this helper never reads SQLite.
  */
 export function createPiTagSnapshotCandidate(
-	cached: readonly SnapshotTag[] = [],
+	cached: readonly PiPassTag[] = [],
 	byteLimit = 128 * 1024 * 1024,
 ) {
-	const tags: SnapshotTag[] = [];
+	const tags: PiPassTag[] = [];
 	const active: SnapshotTag[] = [];
 	const fallback: PiFallbackTagRow[] = [];
-	let estimatedBytes = 192;
+	// The old snapshot stays alive during assembly. Count its rows once, then
+	// charge candidate references and genuinely new rows separately.
+	let reusedBytes = 0;
+	for (const row of cached)
+		reusedBytes += passTagBytes(row) + 8 + (isActive(row) ? 8 : 0);
+	if (cached.length) reusedBytes += 128;
+	let allocatedBytes = 192;
+	let estimatedBytes = reusedBytes + allocatedBytes;
 	let oldIndex = 0;
-	let keys: (keyof SnapshotTag)[] | undefined;
+	let keys: (keyof PiPassTag)[] | undefined;
 	let tagsEnded = false;
 	let fallbackEnded = false;
 	let failed = false;
@@ -743,15 +817,16 @@ export function createPiTagSnapshotCandidate(
 		failed = true;
 		throw new Error(`Pi tag hydration: ${reason}`);
 	};
-	const admit = (row: object, overhead: number) => {
-		estimatedBytes += candidateRowBytes(row, overhead);
+	const admit = (bytes: number) => {
+		allocatedBytes += bytes;
+		estimatedBytes = reusedBytes + allocatedBytes;
 		if (estimatedBytes > byteLimit) reject("candidate memory limit exceeded");
 	};
 	return {
 		get estimatedBytes() {
 			return estimatedBytes;
 		},
-		appendTag(row: SnapshotTag) {
+		appendTag(row: PiPassTag) {
 			if (failed || tagsEnded) reject("tag packet after end or failure");
 			const previous = tags.at(-1);
 			if (
@@ -761,8 +836,7 @@ export function createPiTagSnapshotCandidate(
 						(previous.id ?? 0) >= (row.id ?? 0)))
 			)
 				reject("noncanonical tag order");
-			admit(row, 384);
-			keys ??= Object.keys(row) as (keyof SnapshotTag)[];
+			keys = Object.keys(row) as (keyof PiPassTag)[];
 			while (oldIndex < cached.length) {
 				const old = cached[oldIndex];
 				if (
@@ -776,6 +850,11 @@ export function createPiTagSnapshotCandidate(
 			const old = cached[oldIndex];
 			const selected =
 				old && old.id === row.id && sameRow(old, row, keys) ? old : row;
+			admit(
+				(selected === old ? 0 : passTagBytes(row)) +
+					8 +
+					(isActive(selected) ? 8 : 0),
+			);
 			Object.freeze(selected);
 			tags.push(selected);
 			if (isActive(selected)) active.push(selected);
@@ -783,7 +862,7 @@ export function createPiTagSnapshotCandidate(
 		appendFallback(row: PiFallbackTagRow) {
 			if (failed || fallbackEnded)
 				reject("fallback packet after end or failure");
-			admit(row, 192);
+			admit(candidateRowBytes(row, 192) + 8);
 			fallback.push(Object.freeze(row));
 		},
 		end(stream: "tags" | "fallback") {
@@ -799,7 +878,14 @@ export function createPiTagSnapshotCandidate(
 		finish(): PiTagSnapshotCandidate {
 			if (failed || !tagsEnded || !fallbackEnded)
 				throw new Error("Pi tag hydration: incomplete candidate");
-			return { tags, active, fallback, estimatedBytes };
+			return {
+				tags,
+				active,
+				fallback,
+				estimatedBytes,
+				allocatedBytes,
+				reusedBytes,
+			};
 		},
 	};
 }
@@ -811,7 +897,7 @@ export type PiTagSnapshotCandidateLoader = (
 /** Internal injection seam for transport and deterministic candidate tests. */
 export async function loadPiTagSnapshotCandidate(
 	loader: PiTagSnapshotCandidateLoader,
-	cached: readonly SnapshotTag[] = [],
+	cached: readonly PiPassTag[] = [],
 	byteLimit?: number,
 ): Promise<PiTagSnapshotCandidate> {
 	const assembly = createPiTagSnapshotCandidate(cached, byteLimit);
@@ -825,7 +911,7 @@ export async function loadPiTagSnapshotCandidate(
  * canonical tag_number/id order, so one merge walk pairs them.
  */
 function reuseUnchangedRows(
-	cached: readonly SnapshotTag[],
+	cached: readonly PiPassTag[],
 	fresh: SnapshotTag[],
 ): SnapshotTag[] {
 	// Every row of both lists was built by the same toTagEntry, so they share
@@ -849,7 +935,7 @@ function reuseUnchangedRows(
 		}
 		const old = cached[index];
 		if (old && old.id === row.id && sameRow(old, row, keys))
-			fresh[position] = old;
+			fresh[position] = old as SnapshotTag;
 	}
 	return fresh;
 }
@@ -858,11 +944,11 @@ function reuseUnchangedRows(
  * Replace the rows of `dirty` tag numbers in canonical tag_number/id order.
  * Both inputs use that order, including duplicate tag numbers in legacy stores.
  */
-function mergeChangedRows(
-	rows: readonly SnapshotTag[],
+function mergeChangedRows<T extends PiPassTag>(
+	rows: readonly T[],
 	dirty: ReadonlySet<number>,
-	replacements: readonly SnapshotTag[],
-): SnapshotTag[] {
+	replacements: readonly T[],
+): T[] {
 	const highest = rows.at(-1)?.tagNumber ?? -1;
 	let appendOnly = true;
 	for (const number of dirty) {
@@ -875,7 +961,7 @@ function mergeChangedRows(
 	// historical prefix just to add a few new rows.
 	if (appendOnly) return [...rows, ...replacements];
 	const unchanged = rows.filter((tag) => !dirty.has(tag.tagNumber));
-	const merged: SnapshotTag[] = [];
+	const merged: T[] = [];
 	let index = 0;
 	for (const tag of unchanged) {
 		while (index < replacements.length) {
@@ -891,7 +977,10 @@ function mergeChangedRows(
 		}
 		merged.push(tag);
 	}
-	merged.push(...replacements.slice(index));
+	for (; index < replacements.length; index++) {
+		const row = replacements[index];
+		if (row) merged.push(row);
+	}
 	return merged;
 }
 
@@ -938,6 +1027,24 @@ export function getPiTagSnapshotView(db: Database, sessionId: string) {
 	return createPiTagSnapshotReader(db)(sessionId, true);
 }
 
+/** One immutable pass projection: full active rows plus narrow all-status history. */
+export function getPiPassTagSnapshotView(
+	db: Database,
+	sessionId: string,
+): readonly PiPassTag[] {
+	createPiTagSnapshotReader(db);
+	const snapshot = entryReaders.get(db)?.(sessionId);
+	if (snapshot && snapshot.projection !== "pass") {
+		snapshot.tags = snapshot.tags.map((tag) =>
+			projectPiPassTag(tag as SnapshotTag),
+		);
+		snapshot.projection = "pass";
+	}
+	return (
+		snapshot?.tags ?? getTagsBySession(db, sessionId).map(projectPiPassTag)
+	);
+}
+
 /**
  * Internal read-only projection of the rows whose status is "active", in tag
  * order: the same rows as filtering `getPiTagSnapshotView`, maintained from
@@ -950,7 +1057,7 @@ export function getPiTagSnapshotView(db: Database, sessionId: string) {
 export function getPiActiveTagSnapshotView(
 	db: Database,
 	sessionId: string,
-	passTags?: readonly SnapshotTag[],
+	passTags?: readonly PiPassTag[],
 ): SnapshotTag[] {
 	createPiTagSnapshotReader(db);
 	const snapshot = entryReaders.get(db)?.(sessionId);
@@ -981,6 +1088,7 @@ type PiTagSnapshotLoadKind = "prewarm" | "turn";
 interface OwnerJob {
 	sessionId: string;
 	kind: PiTagSnapshotLoadKind;
+	projection?: "pass";
 	/** A turn preempted this background read; its cancellation is not a failure. */
 	preempted?: boolean;
 	result: Promise<void>;
@@ -992,7 +1100,7 @@ interface OwnerJob {
 
 type PiSnapshotWorkerFactory = (
 	request: PiHydrationRequest,
-	cached: readonly PiSnapshotTag[],
+	cached: readonly PiPassTag[],
 ) => {
 	result: Promise<{
 		candidate: PiTagSnapshotCandidate;
@@ -1006,8 +1114,12 @@ let connectionEpoch = 0;
 const owners = new WeakMap<
 	Database,
 	{
-		ready: (sessionId: string) => boolean;
-		load: (sessionId: string, kind: PiTagSnapshotLoadKind) => Promise<void>;
+		ready: (sessionId: string, projection?: "pass") => boolean;
+		load: (
+			sessionId: string,
+			kind: PiTagSnapshotLoadKind,
+			projection?: "pass",
+		) => Promise<void>;
 		addNativeWaiter: (remaining: () => number) => () => void;
 		manage: (sessionId: string) => void;
 		cancel: (sessionId: string) => void;
@@ -1033,11 +1145,15 @@ export function __setPiTagSnapshotWorkerForTests(
 }
 
 /** Best-effort background hydration; a turn may claim it or preempt it for another session. */
-export function prewarmPiTagSnapshot(db: Database, sessionId: string): void {
+export function prewarmPiTagSnapshot(
+	db: Database,
+	sessionId: string,
+	projection?: "pass",
+): void {
 	createPiTagSnapshotReader(db);
 	void owners
 		.get(db)
-		?.load(sessionId, "prewarm")
+		?.load(sessionId, "prewarm", projection)
 		.catch(() => {});
 }
 
@@ -1071,7 +1187,7 @@ export function assertPiTagSnapshotReady(
 	createPiTagSnapshotReader(db);
 	const owner = owners.get(db);
 	owner?.manage(sessionId);
-	if (!owner?.ready(sessionId))
+	if (!owner?.ready(sessionId, "pass") && !owner?.ready(sessionId))
 		throw new PiTagHydrationError(
 			"tag snapshot is not ready; turn not sent, retry",
 		);
@@ -1085,13 +1201,14 @@ export function ensurePiTagSnapshotReady(
 	db: Database,
 	sessionId: string,
 	budget: PiContextBudget,
+	projection?: "pass",
 ): Promise<void> | void {
 	budget.assert();
 	createPiTagSnapshotReader(db);
 	const owner = owners.get(db);
 	if (!owner) throw new PiTagHydrationError("snapshot owner unavailable");
 	owner.manage(sessionId);
-	if (owner.ready(sessionId)) return;
+	if (owner.ready(sessionId, projection)) return;
 	let deadline = waitDeadlines.get(budget);
 	if (deadline === undefined) {
 		deadline = performance.now() + budget.hydrationAllowance();
@@ -1122,7 +1239,7 @@ export function ensurePiTagSnapshotReady(
 			try {
 				await budget.wait(
 					Promise.race([
-						owner.load(sessionId, "turn"),
+						owner.load(sessionId, "turn", projection),
 						new Promise<never>((_, reject) => {
 							timer = setTimeout(
 								() =>

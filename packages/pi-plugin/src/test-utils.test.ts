@@ -13,6 +13,7 @@ import {
 	PI_FALLBACK_ROW_COLUMNS,
 	PI_FALLBACK_ROW_PREDICATE,
 	type PiFallbackTagRow,
+	projectPiPassTag,
 } from "./tag-snapshot-pi";
 
 export type PiMessage = ContextEvent["messages"][number];
@@ -29,7 +30,9 @@ export function createTestDb(path = ":memory:"): Database {
 		__setPiTagSnapshotWorkerForTests(db, (request, cached) => ({
 			result: loadPiTagSnapshotCandidate(async (candidate) => {
 				for (const row of getTagsBySession(db, request.sessionId))
-					candidate.appendTag(row);
+					candidate.appendTag(
+						request.projection === "pass" ? projectPiPassTag(row) : row,
+					);
 				candidate.end("tags");
 				for (const row of db
 					.prepare(

@@ -1985,7 +1985,7 @@ async function startPiMagicContextRuntime(
 		{
 			db,
 			signalPendingMarker: signalPiDeferredCompactionMarkerDrain,
-			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId),
+			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId, "pass"),
 		},
 	);
 	pi.on("session_start", async (event, ctx) => {
@@ -2021,7 +2021,7 @@ async function startPiMagicContextRuntime(
 		await handlePiCloneSessionStart(event, ctx, {
 			db,
 			signalPendingMarker: signalPiDeferredCompactionMarkerDrain,
-			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId),
+			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId, "pass"),
 		});
 		const sessionId = resolveSessionId(ctx);
 		if (
@@ -2041,7 +2041,7 @@ async function startPiMagicContextRuntime(
 				modelKey: canonicalPiModelKey(model.provider, model.id),
 			});
 		}
-		if (sessionId) prewarmPiTagSnapshot(db, sessionId);
+		if (sessionId) prewarmPiTagSnapshot(db, sessionId, "pass");
 	});
 
 	pi.on("agent_start", (_event, ctx) => {
@@ -3248,7 +3248,7 @@ async function startPiMagicContextRuntime(
 				incomingSessionId &&
 				(_event as { reason?: unknown })?.reason !== "fork"
 			)
-				prewarmPiTagSnapshot(db, incomingSessionId);
+				prewarmPiTagSnapshot(db, incomingSessionId, "pass");
 			if (!outgoingSessionId || outgoingSessionId === readSessionId(ctx))
 				return;
 			clearPiSystemPromptSession(outgoingSessionId);
