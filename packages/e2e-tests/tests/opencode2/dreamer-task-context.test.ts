@@ -4,6 +4,7 @@ import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
+import { nextDueAtMs } from "../../../plugin/src/features/magic-context/dreamer/cron";
 import { CANONICAL_DREAM_TASKS } from "../../../plugin/src/features/magic-context/dreamer/task-registry";
 import {
     CURATE_SYSTEM_PROMPT,
@@ -50,11 +51,29 @@ function makeDue(db: Database, project: string, tasks: string[]): void {
     }
 }
 
+// Keep the next cron slot beyond the test's five-minute timeout. A user event
+// may run the tasks marked due by makeDue before the startup timer fires. A cron
+// slot inside that window would legitimately dispatch the same task again.
+function scheduleOutsideTestWindow(startedAt: number): string {
+    const nextSlot = new Date(startedAt + 12 * 60 * 60 * 1000);
+    return `${nextSlot.getMinutes()} ${nextSlot.getHours()} * * *`;
+}
+
+test("dream route cron stays outside the test window at every start hour", () => {
+    for (let hour = 23; hour >= 0; hour--) {
+        const startedAt = new Date(2026, 9, 28, hour, 59, 55).getTime();
+        const nextDue = nextDueAtMs(scheduleOutsideTestWindow(startedAt), startedAt)!;
+        expect(nextDue).toBeGreaterThan(startedAt + 300_000);
+        expect(nextDue).toBeLessThanOrEqual(startedAt + 12 * 60 * 60 * 1000);
+    }
+});
+
 // Exercise production ctx_* tools rather than replacements. The second location
 // simulates a project used in Oh My Pi (OMP): memories reference a fixture OMP
 // session and primer candidates carry harness=omp. With no OpenCode user session
 // there, scheduled model tasks must not borrow a parent from the first location.
 test("OpenCode 2 shapes all six dream routes and keeps timer work in its owning location", async () => {
+    const schedule = scheduleOutsideTestWindow(Date.now());
     const root = /\/magic-context\/[^/]+(?:\/.*)?$/.test(tmpdir())
         ? tmpdir() : join(tmpdir(), "magic-context", "issue-647");
     mkdirSync(root, { recursive: true });
@@ -71,7 +90,7 @@ test("OpenCode 2 shapes all six dream routes and keeps timer work in its owning 
             transform_mode: "ts", compaction: { enabled: false },
             memory: { auto_search: { enabled: false }, git_commit_indexing: { enabled: false } },
             dreamer: { tasks: Object.fromEntries(CANONICAL_DREAM_TASKS.map(task => [task, {
-                schedule: TASKS.includes(task) ? "0 0 * * *" : "",
+                schedule: TASKS.includes(task) ? schedule : "",
             }])) },
         },
     });
