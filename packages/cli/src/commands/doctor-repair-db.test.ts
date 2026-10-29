@@ -376,6 +376,95 @@ describe("doctor repair-db", () => {
         expect(output).toContain("Backup:");
     });
 
+    salvageIt(
+        "replays internal schema, statistics and sequence rows without losing user rows",
+        async () => {
+            const storageDir = tempStorage();
+            const dbPath = join(storageDir, "context.db");
+            seedCurrentDatabase(dbPath);
+            const source = new Database(dbPath);
+            source.exec("CREATE TABLE replay_rows(id INTEGER PRIMARY KEY, contents TEXT)");
+            source.prepare("INSERT INTO replay_rows VALUES (?, ?)").run(1, "sqlite_sequence");
+            source
+                .prepare("INSERT INTO replay_rows VALUES (?, ?)")
+                .run(2, "CREATE TABLE sqlite_stat1(tbl,idx,stat);\nINSERT INTO sqlite_master");
+            // The sequence high-water mark must survive even when no row has that id.
+            source.exec("UPDATE sqlite_sequence SET seq = 10000 WHERE name = 'dream_runs'");
+            source.exec("ANALYZE");
+            const userTables = [
+                "tags",
+                "compartments",
+                "memories",
+                "notes",
+                "dream_runs",
+                "replay_rows",
+            ];
+            const rowsBefore = userTables.map((table) =>
+                source.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+            );
+            const statsBefore = source
+                .prepare("SELECT * FROM sqlite_stat1 WHERE tbl = 'replay_rows'")
+                .all();
+            const ftsSchemaBefore = source
+                .prepare("SELECT sql FROM sqlite_master WHERE name = 'memories_fts'")
+                .get();
+            expect(ftsSchemaBefore).toMatchObject({
+                sql: expect.stringContaining("CREATE VIRTUAL TABLE"),
+            });
+            expect(statsBefore).toEqual([{ tbl: "replay_rows", idx: null, stat: "2" }]);
+            expect(
+                source.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'dream_runs'").get(),
+            ).toEqual({
+                seq: 10000,
+            });
+            source.close();
+            const originalDigest = digest(dbPath);
+            const prompts = new MockPrompts();
+
+            const code = await runRepairDb({ dbPath, storageDir, prompts });
+
+            expect({
+                code,
+                errors: prompts.messages.filter((message) => message.startsWith("error:")),
+            }).toEqual({
+                code: REPAIR_DB_EXIT.salvaged,
+                errors: [],
+            });
+            expect(prompts.messages.filter((message) => message.startsWith("confirm:"))).toEqual(
+                [],
+            );
+            expect(integrity(dbPath)).toEqual(["ok"]);
+            const recovered = new Database(dbPath);
+            expect(
+                userTables.map((table) =>
+                    recovered.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+                ),
+            ).toEqual(rowsBefore);
+            expect(
+                recovered.prepare("SELECT * FROM sqlite_stat1 WHERE tbl = 'replay_rows'").all(),
+            ).toEqual(statsBefore);
+            expect(
+                recovered
+                    .prepare("SELECT seq FROM sqlite_sequence WHERE name = 'dream_runs'")
+                    .get(),
+            ).toEqual({ seq: 10000 });
+            expect(
+                recovered
+                    .prepare("SELECT sql FROM sqlite_master WHERE name = 'memories_fts'")
+                    .get(),
+            ).toEqual(ftsSchemaBefore);
+            expect(recovered.prepare("SELECT count(*) AS count FROM memories_fts").get()).toEqual({
+                count: 26,
+            });
+            recovered.close();
+            const backup = readdirSync(storageDir).find((name) =>
+                /^context\.db\.corrupt-backup-[^.]+$/.test(name),
+            );
+            expect(backup).toBeDefined();
+            expect(digest(join(storageDir, backup!))).toBe(originalDigest);
+        },
+    );
+
     // Like the salvage test above, this test exercises a REAL `.recover` run
     // (here: one that must fail on the data), so it needs a capability-bearing
     // sqlite3 and is skipped the same way when the shell lacks it.
