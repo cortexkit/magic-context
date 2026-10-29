@@ -36,7 +36,7 @@ serde_json = { workspace = true }
 # lookarounds in those patterns); fancy-regex stays confined to mc-tokenizer.
 regex = "1"
 tokio = { workspace = true }
-# Native database/WAL notifications shared by all app subscriptions.
+# Native database and write-ahead log (WAL) notifications shared by all app subscriptions.
 notify = "8.2"
 # Already pinned by the transport graph; native SHA-256 avoids per-block Rust
 # debug-build overhead without changing the watch fingerprint's digest format.
