@@ -855,6 +855,7 @@ body {
 /* ── Multi-select bulk action bar ─────────────────────── */
 .bulk-action-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -885,6 +886,7 @@ body {
 .bulk-action-right {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
