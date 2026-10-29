@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { join } from "node:path";
 import { readAssistantUsageRowsAfter } from "../features/magic-context/work-metrics";
 import { Database } from "../shared/sqlite";
@@ -39,6 +39,9 @@ for (const nextCompleted of [undefined, 3000]) {
     test(`review witness: completed assistant refreshes after same-millisecond ${nextCompleted === undefined ? "restart" : "terminal correction"}`, () => {
         const f = fixture();
         const cache = new V2MessageTimesCache();
+        // A host write uses Date.now(). Read at that same clock value so this
+        // models a recent write, not an ancient revision against today's clock.
+        const clock = spyOn(Date, "now").mockReturnValue(5000);
         try {
             f.insert("a", "s", 1);
             expect(cache.pass("s")(f.reader, ["a"]).get("a")?.completed).toBe(2000);
@@ -59,6 +62,7 @@ for (const nextCompleted of [undefined, 3000]) {
                 completed: nextCompleted,
             });
         } finally {
+            clock.mockRestore();
             f.close();
         }
     });
