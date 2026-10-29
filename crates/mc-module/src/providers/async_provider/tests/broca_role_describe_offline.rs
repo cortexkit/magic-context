@@ -1,5 +1,25 @@
-use super::super::setup_checkpoint::broca_role_describe::{capture_logs, captures};
+use super::super::setup_checkpoint::broca_role_describe::{
+    capture_logs, captures as historical_captures,
+};
 use super::*;
+
+fn captures() -> Vec<(&'static str, bool, Value)> {
+    historical_captures()
+        .into_iter()
+        .map(|(name, writer, mut describe)| {
+            // Historical releases predate message_checkpoint. These positive
+            // offline fixtures model the same descriptions after that capability
+            // is added; the raw captures remain covered by Setup refusal tests.
+            if writer {
+                describe["capabilities"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!("message_checkpoint"));
+            }
+            (name, writer, describe)
+        })
+        .collect()
+}
 
 async fn prepare_capture(
     store: &Path,

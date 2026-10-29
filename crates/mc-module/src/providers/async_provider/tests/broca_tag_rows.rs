@@ -409,6 +409,7 @@ async fn broca_tag_rows_offline_first_pass_accepts_all_goldens() {
         let pages = crate::offline_first_pass::parse_pages(
             std::io::Cursor::new(page),
             crate::providers::codec::Codec::OwnedBroca,
+            0,
         )
         .unwrap();
         assert_eq!(pages.entries, 4);

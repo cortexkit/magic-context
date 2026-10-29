@@ -2634,6 +2634,16 @@ impl McHandler {
         }
         let reference = key.reference();
         let mut existing = load_head(store, &reference)?;
+        if existing
+            .as_ref()
+            .is_some_and(|state| !offline_first_pass::proof_version_matches(state))
+        {
+            return bytes(&moved_session::setup_refusal(
+                &request.request_id,
+                "offline_proof_version",
+                "Rerun `ck-mc offline first-pass` to prepare the retained interval before live adoption.",
+            ));
+        }
         // A crash inside the adoption import leaves the cut stage saved but the
         // Setup answer incomplete. Restart from the move record in a fresh
         // generation (a fresh namespace, so the empty head pass never sees the

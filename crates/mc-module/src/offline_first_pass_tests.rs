@@ -34,6 +34,7 @@ fn parse(lines: &[String]) -> Result<Pages, Refusal> {
     parse_pages(
         (lines.join("\n") + "\n").as_bytes(),
         crate::providers::codec::Codec::OpencodeAiSdk,
+        0,
     )
 }
 
@@ -55,6 +56,29 @@ fn chained_bare_pages_parse_with_their_lowest_tag() {
             .collect::<Vec<_>>(),
         vec![(0, 2), (3, 4), (5, 5)]
     );
+}
+
+#[test]
+fn moved_pages_start_at_the_message_checkpoint_not_zero() {
+    let codec = crate::providers::codec::Codec::OpencodeAiSdk;
+    let pages = parse_pages(
+        (page(17..20, Some(20)) + "\n" + &page(20..22, None)).as_bytes(),
+        codec,
+        17,
+    )
+    .unwrap();
+    assert_eq!(pages.entries, 5);
+    assert_eq!(pages.served[0].first, 17);
+    assert_eq!(pages.served[1].last, 21);
+    for range in [0..5, 18..22] {
+        assert_eq!(
+            parse_pages(page(range, None).as_bytes(), codec, 17)
+                .err()
+                .unwrap()
+                .code,
+            "pages_not_chained"
+        );
+    }
 }
 
 #[test]
@@ -136,7 +160,7 @@ fn rich_ui_stamp_offline_import_parser() {
         let codec = crate::providers::codec::Codec::OwnedBroca;
         // The CLI requires bare descriptor pages. The captured inline page
         // must still reach the existing missing-digest refusal, not a new one.
-        let error = parse_pages(page.to_string().as_bytes(), codec)
+        let error = parse_pages(page.to_string().as_bytes(), codec, 0)
             .err()
             .unwrap();
         assert_eq!(error.code, "served_digest_missing", "{name}");
@@ -148,7 +172,7 @@ fn rich_ui_stamp_offline_import_parser() {
                 row[key] = served[key].clone();
             }
         }
-        let pages = parse_pages(page.to_string().as_bytes(), codec).unwrap();
+        let pages = parse_pages(page.to_string().as_bytes(), codec, 0).unwrap();
         assert_eq!(pages.entries, 2, "{name}");
     }
 }
