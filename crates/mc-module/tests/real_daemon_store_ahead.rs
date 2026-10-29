@@ -159,7 +159,7 @@ async fn a_module_on_a_store_ahead_of_it_refuses_on_health_and_on_transform() {
     if !daemon_checkout::available(&workspace) {
         return;
     }
-    let subconscious = workspace.parent().unwrap().join("subconscious");
+    let subconscious = daemon_checkout::root(&workspace);
     let daemon_bin = ensure_binary(
         &subconscious,
         subconscious.join("target/debug/ck-subc"),

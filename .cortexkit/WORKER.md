@@ -9,13 +9,15 @@ Standing rules for every worker in this repository. A brief can tighten them but
 
 ## Gate before you deliver
 
-Filtered tests alone are never a gate. Before delivering, run, on Linux:
+Filtered tests alone are never a gate. Run the shared CI gate on Linux (`runon: "linux,16c,net"` for full):
 
-- **Rust:** `cargo fmt --all -- --check`, `cargo clippy -p <crate> --all-targets --locked -- -D warnings`, and the full test suite of every crate you touched (`cargo test -p <crate> --locked`). The slow campaign tests are excluded only where the brief says so.
-- **TypeScript:** the full suite of every package you touched, both typechecks, and the repo's pinned Biome (`./node_modules/.bin/biome`, never `bunx biome`).
-- **Pins:** if you changed anything a pin, golden, manifest count or lockfile covers, run that check too. The Preflight job in `.github/workflows/ci.yml` lists them.
+- **Cheap checks:** `bash scripts/gate.sh preflight` runs all pins, goldens, lockfiles, layout and shard contracts, compiled contracts, Rust format, package typechecks and the pinned Biome. It reports every independent failure.
+- **Delivery gate:** `bash scripts/gate.sh full` runs preflight and every locally available CI lane, including both slow-unit modes, Rust partitions, host E2E and raw replay. It reads CI's workflow matrices and invokes the same `scripts/ci/` commands. Budget 16 CPUs; supply Node 24, Bun, stable Rust with Clippy/rustfmt, nextest 0.9.138 and network access. The four Docker lanes are explicitly GitHub-CI-only until the build servers have a safe container engine; their single exclusion list is in `scripts/gate.ts`. Other missing tools fail rather than silently skip checks.
+- **Selection:** `bash scripts/gate.sh full --changed <base>` may omit runtime lanes for a public-prose-only diff; other changes conservatively retain the full graph. Preflight is never narrowed. Use `--plan` to inspect the exact lanes without running them. `<base>` means a real commit/ref supplied by the caller.
+- **Sizing:** `GATE_CPUS=4 bash scripts/gate.sh preflight` fits a `linux,4c,net` job. Full defaults to a 16-CPU budget and at most four concurrent lanes. Run `full --part unit`, `full --part native`, and `full --part host` in separate `linux,16c,net` jobs when a single job would exceed two hours; their union is full, and each still runs all preflight checks.
+- **Independent Smoke:** `bash scripts/gate.sh smoke` runs the same two-hostname HTTP diagnostic as the Smoke workflow. GitHub's artifact transport, cache/status services and scheduled upstream-HEAD drift remain CI-only; local full uses same-checkout producer outputs and the locked daemon revision.
 
-Put each command, its pass/fail counts and every failing test name in your report. If a failure isn't yours, show it fails the same way on your base commit.
+Put each command, elapsed time, pass/fail counts and every failing test name in your report. Gate logs/results are under `target/gate/`; copy evidence cited by a report into `.cortexkit/internal-docs/` before delivery. If a failure isn't yours, show it fails the same way on your base commit.
 
 ## Pre-approved, so don't ask
 

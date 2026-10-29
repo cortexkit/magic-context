@@ -1095,7 +1095,7 @@ fn workspace_root() -> PathBuf {
 }
 
 fn subconscious_root(workspace: &Path) -> PathBuf {
-    fs::canonicalize(workspace.parent().unwrap().join("subconscious")).unwrap()
+    fs::canonicalize(daemon_checkout::root(workspace)).unwrap()
 }
 
 fn unique_temp_dir(name: &str) -> PathBuf {
