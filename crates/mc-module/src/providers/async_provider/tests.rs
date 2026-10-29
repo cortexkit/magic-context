@@ -1410,7 +1410,7 @@ async fn fork_descent_preserves_only_verified_prefix_state() {
 }
 
 #[tokio::test]
-async fn ordinary_execute_with_only_drops_defers_but_m1_refresh_publishes() {
+async fn ordinary_execute_without_summary_rebuilds_for_drops_and_m1_refresh_publishes() {
     let dir = tempfile::tempdir().unwrap();
     let rig = Rig::new(dir.path()).await;
     rig.fill(40);
@@ -1420,14 +1420,20 @@ async fn ordinary_execute_with_only_drops_defers_but_m1_refresh_publishes() {
     let baseline = rig.newest().unwrap();
     rig.queue(&[163, 166, 169]).await;
     rig.notice(3, 75_000, Some(baseline)).await;
-    assert_eq!(
-        rig.newest(),
-        Some(baseline),
-        "ordinary Execute does not originate a bust for drops alone"
+    // Invariant 3's bounded execute exception, as in the TypeScript plugin: no summary
+    // can come and the queued work is worth at least 2% of the window, so the execute
+    // pass rebuilds instead of waiting, and the queued drops land on it.
+    let drained = rig.newest().unwrap();
+    assert!(
+        drained > baseline,
+        "an execute pass with no summary to wait for rebuilds and carries the queued drops"
     );
     let namespace = rig.state().namespace();
     let store = rig.h.store.get().unwrap();
-    assert_eq!(store.load_pending_agent_drops(&namespace).unwrap().len(), 3);
+    assert!(store
+        .load_pending_agent_drops(&namespace)
+        .unwrap()
+        .is_empty());
     let mut rows = store.load_compartments(&namespace).unwrap();
     rows.push(mc_store::StoredCompartment {
         sequence: 2,
@@ -1441,22 +1447,18 @@ async fn ordinary_execute_with_only_drops_defers_but_m1_refresh_publishes() {
         ..Default::default()
     });
     store.replace_compartments(&namespace, &rows).unwrap();
-    rig.notice(4, 1_000, Some(baseline)).await;
+    rig.notice(4, 1_000, Some(drained)).await;
     assert_eq!(
         rig.newest(),
-        Some(baseline),
+        Some(drained),
         "M1 delta remains queued below Execute"
     );
-    rig.notice(5, 75_000, Some(baseline)).await;
+    rig.notice(5, 75_000, Some(drained)).await;
     let version = rig.newest().unwrap();
     assert!(
-        version > baseline,
-        "ordinary Execute publishes an M1 refresh, carrying queued drops"
+        version > drained,
+        "ordinary Execute publishes an M1 refresh"
     );
-    assert!(store
-        .load_pending_agent_drops(&namespace)
-        .unwrap()
-        .is_empty());
     let _ = rig.render(&rig.get(version).await);
 }
 
@@ -2289,9 +2291,13 @@ async fn anthropic_messages_session_publishes_part_edits_beside_signed_thinking(
         .filter(|edit| edit.ordinal == 21 || edit.ordinal == 22)
         .map(|edit| (edit.ordinal, edit.part.as_str(), edit.drop))
         .collect();
+    // At 90% the force band owns tool reclaim, so no age sweep turns the read arc into a
+    // skeleton first (the TypeScript `toolReclaimAdmitted` rule). The queued drop of its
+    // result removes the arc whole: the tool call leaves and the result keeps a
+    // placeholder, one of the two legal drop shapes.
     assert_eq!(
         near,
-        [(21, "1", false), (22, "0", false)],
+        [(21, "1", false), (21, "2", true), (22, "0", false)],
         "the dropped parts get their placeholders; the signed thinking part beside them is kept"
     );
     // The head insertion invalidates every later signature, but removing those
@@ -2308,7 +2314,7 @@ async fn anthropic_messages_session_publishes_part_edits_beside_signed_thinking(
     let rendered = rig.render_anthropic(&view);
     let applied = rendered
         .iter()
-        .find(|message| message["content"][2]["id"] == "toolu_21")
+        .find(|message| message["content"][0]["signature"] == "EqQBsig21+/==")
         .expect("message 21 stays in the rendered request");
     assert_eq!(
         bytes(&applied["content"][0]).unwrap(),
@@ -2835,4 +2841,37 @@ async fn broca_async_lane_fires_session_model_without_historian_block() {
     assert_eq!(session_runner.connects().len(), 1);
     assert_eq!(session_runner.fixed_connects(), 0);
     session_runner.finish(&sent.run_id, "test response".into());
+}
+
+/// Review witness. Invariant 3's bounded execute exception applies only when no summary
+/// can come. The TypeScript reference holds queued drops while a historian run is in
+/// flight (`summaryCanCome` reads `compartmentRunning` and
+/// `sessionMeta.compartmentInProgress`), so the summary's own rebuild carries them and the
+/// session pays one rebuild. The async engine builds its producer context with
+/// `historian_active: false`, so a running historian never holds the drops here: the
+/// execute pass rebuilds for them and the summary's publication rebuilds again.
+#[tokio::test]
+async fn review_execute_pass_holds_drops_while_a_historian_run_is_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(dir.path()).await;
+    rig.fill(40);
+    rig.notice(1, 1_000, None).await;
+    rig.history(10, "stable baseline history");
+    rig.notice(2, 1_000, None).await;
+    let baseline = rig.newest().unwrap();
+    rig.queue(&[163, 166, 169]).await;
+    let namespace = rig.state().namespace();
+    let store = rig.h.store.get().unwrap();
+    let mut loaded = store.load(&namespace).unwrap();
+    loaded.meta.historian.state = mc_store::HistorianPhase::Firing;
+    store
+        .commit(&namespace, loaded.row_version, &loaded.core, &loaded.meta)
+        .unwrap();
+    rig.notice(3, 75_000, Some(baseline)).await;
+    assert_eq!(
+        rig.newest(),
+        Some(baseline),
+        "a summary can come, so the execute pass must not rebuild for queued drops"
+    );
+    assert_eq!(store.load_pending_agent_drops(&namespace).unwrap().len(), 3);
 }

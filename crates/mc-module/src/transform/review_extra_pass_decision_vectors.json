@@ -1,0 +1,495 @@
+{
+  "vectors": [
+    {
+      "name": "review-primary-idle-expiry-without-fold-spent-force-episode",
+      "note": "review witness",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": true,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "idleExpiry",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "cacheLoss",
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "review-primary-idle-expiry-without-fold-small-queue",
+      "note": "review witness",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 1
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "idleExpiry",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "cacheLoss",
+        "lanes": [
+          "queuedDrops"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "review-primary-defer-force-band-armed",
+      "note": "review witness",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "force",
+        "lanes": [
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "review-primary-execute-exactly-two-percent",
+      "note": "review witness",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 2560,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "primaryExecuteNoSummary",
+        "lanes": [
+          "queuedDrops"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "review-primary-execute-just-below-two-percent",
+      "note": "review witness",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 2559.9,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 1
+      }
+    },
+    {
+      "name": "review-primary-execute-zero-window-third-pass",
+      "note": "review witness",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 0,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 9000,
+          "heldPassesBefore": 2
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "primaryExecuteNoSummary",
+        "lanes": [
+          "queuedDrops"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "review-primary-execute-held-count-past-three-summary-pending",
+      "note": "review witness",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": true,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 3
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 4
+      }
+    },
+    {
+      "name": "review-primary-execute-nothing-eligible-resets-count",
+      "note": "review witness",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 2
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": false,
+        "origin": null,
+        "lanes": [],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "review-primary-absolute-emergency-armed-queued",
+      "note": "review witness",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 96,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 1000,
+          "heldPassesBefore": 2
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "force",
+        "lanes": [
+          "queuedDrops",
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "review-primary-first-render-spent-force-episode",
+      "note": "review witness",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "defer",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": true,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": false,
+        "cacheLoss": "firstRender",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "cacheLoss",
+        "lanes": [
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "review-primary-published-history-spent-force-episode",
+      "note": "review witness",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 88,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 0,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": true,
+        "executedFold": false,
+        "flush": false,
+        "publishedHistory": true,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": true,
+          "dedup": true,
+          "ageSweep": true,
+          "supersession": true
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "publishedHistory",
+        "lanes": [
+          "emergencyDrop",
+          "dedup"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "review-subagent-execute-flush-small-queue",
+      "note": "review witness",
+      "inputs": {
+        "preset": "worker",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 10,
+          "heldPassesBefore": 0
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": true,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "flush",
+        "lanes": [
+          "queuedDrops"
+        ],
+        "heldPassesAfter": 0
+      }
+    },
+    {
+      "name": "review-primary-execute-flush-held-two",
+      "note": "review witness",
+      "inputs": {
+        "preset": "head",
+        "compactionOff": false,
+        "scheduler": "execute",
+        "usagePercent": 70,
+        "forcePercent": 85,
+        "usableWindow": 128000,
+        "usageFromEstimate": false,
+        "historianInFlight": false,
+        "summaryPending": false,
+        "queuedDrops": {
+          "eligibleTokens": 10,
+          "heldPassesBefore": 2
+        },
+        "emergencyEpisodeSpent": false,
+        "executedFold": false,
+        "flush": true,
+        "publishedHistory": false,
+        "cacheLoss": "none",
+        "pendingWork": {
+          "emergencyDrop": false,
+          "dedup": false,
+          "ageSweep": false,
+          "supersession": false
+        }
+      },
+      "expected": {
+        "busts": true,
+        "origin": "flush",
+        "lanes": [
+          "queuedDrops"
+        ],
+        "heldPassesAfter": 0
+      }
+    }
+  ]
+}

@@ -134,6 +134,17 @@ export function estimateEmergencyDropReclaimTokens(tag: EmergencyDropTag): numbe
  *   would actually reclaim bytes (caller pre-filters on `canDrop()` so no
  *   phantom tag is counted as reclaimed).
  */
+/**
+ * A force-band LEVEL is not a new application EDGE. Once an emergency batch has
+ * acted in this pressure episode, fresh provider samples must not release one
+ * newly-unprotected tag per execute pass. Only the absolute 95% arm overrides the
+ * latch; the caller clears it after pressure exits or when another mutation has
+ * already priced the pass.
+ */
+export function emergencyEpisodeLatched(hasPriorDrop: boolean, usagePercentage: number): boolean {
+    return hasPriorDrop && !(usagePercentage >= 95);
+}
+
 export function planEmergencyDrop(input: {
     /** Evictable candidates: active tool tags with a working drop target. */
     tags: readonly EmergencyDropTag[];
@@ -198,13 +209,11 @@ export function planEmergencyDrop(input: {
         return noop("unknown-usage");
     }
 
-    // A force-band LEVEL is not a new application EDGE. Once an emergency batch
-    // has acted in this pressure episode, fresh provider samples must not release
-    // one newly-unprotected tag per execute pass. The caller clears the persisted
-    // latch only after pressure exits or when another mutation has already priced
-    // the pass, allowing the whole accumulated set to ride that independent bust.
+    // The caller clears the persisted latch only after pressure exits or when
+    // another mutation has already priced the pass, allowing the whole
+    // accumulated set to ride that independent bust.
     const absoluteEmergency = (input.usagePercentage ?? 0) >= 95;
-    if (hasPriorDrop && !absoluteEmergency) {
+    if (emergencyEpisodeLatched(hasPriorDrop, input.usagePercentage ?? 0)) {
         return noop(
             `pressure-episode-latched (prior sample ${priorInputSample}; awaiting exit or independent bust)`,
         );
