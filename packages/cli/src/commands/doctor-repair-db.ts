@@ -339,11 +339,18 @@ function runRecoverShell(
         closeSync(recoveredSeedFd);
         const dumpReadFd = openSync(dumpPath, "r");
         try {
-            const replayed = spawnSync(sqliteExecutable, [recoveredPath], {
-                stdio: [dumpReadFd, "ignore", "pipe"],
-                encoding: "utf8",
-                windowsHide: true,
-            });
+            // .recover enables writable_schema to restore internal tables and virtual
+            // table definitions. Defensive mode makes that pragma a no-op in some
+            // shells, so disable it only on the fresh, isolated replay database.
+            const replayed = spawnSync(
+                sqliteExecutable,
+                [recoveredPath, "-cmd", ".dbconfig defensive off"],
+                {
+                    stdio: [dumpReadFd, "ignore", "pipe"],
+                    encoding: "utf8",
+                    windowsHide: true,
+                },
+            );
             if (replayed.error || replayed.status !== 0) {
                 return {
                     ok: false,
