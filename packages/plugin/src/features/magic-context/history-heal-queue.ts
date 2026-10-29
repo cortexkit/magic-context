@@ -64,13 +64,14 @@ interface HealPublication {
     sessionId: string;
     work: HistoryHealRecomp;
     acknowledged: boolean;
+    open: boolean;
 }
 const publications = new AsyncLocalStorage<HealPublication>();
 
 /** Called inside the compartment publication transaction, so the queue and prose commit together. */
 export function acknowledgeHistoryHealPublication(db: Database, sessionId: string): boolean {
     const active = publications.getStore();
-    if (!active || active.db !== db || active.sessionId !== sessionId) return false;
+    if (!active?.open || active.db !== db || active.sessionId !== sessionId) return false;
     if (!db.inTransaction) throw new Error("history_heal_ack_outside_publication");
     const queue = getHistoryHealQueue(db, sessionId),
         head = queue[0];
@@ -96,21 +97,34 @@ export async function drainHistoryHealQueue(
 ): Promise<boolean> {
     let queue = getHistoryHealQueue(db, sessionId);
     while (queue.length) {
-        const active: HealPublication = { db, sessionId, work: queue[0], acknowledged: false };
+        const active: HealPublication = {
+            db,
+            sessionId,
+            work: queue[0],
+            acknowledged: false,
+            open: true,
+        };
         const changes = () =>
             (db.prepare("SELECT total_changes() AS count").get() as { count: number }).count;
         const before = changes();
-        if (!(await publications.run(active, () => publish(active.work)))) return false;
-        if (!active.acknowledged) {
-            // A no-database-work publisher can finish with a queue-only transaction. A real
-            // publication must acknowledge inside its own transaction, never after its commit.
-            if (changes() !== before)
-                throw new Error(
-                    "history_heal_ack_missing: publication did not atomically acknowledge its work",
+        try {
+            if (!(await publications.run(active, () => publish(active.work)))) return false;
+            if (!active.acknowledged) {
+                // A no-database-work publisher can finish with a queue-only transaction. A real
+                // publication must acknowledge inside its own transaction, never after its commit.
+                if (changes() !== before)
+                    throw new Error(
+                        "history_heal_ack_missing: publication did not atomically acknowledge its work",
+                    );
+                publications.run(active, () =>
+                    db
+                        .transaction(() => acknowledgeHistoryHealPublication(db, sessionId))
+                        .immediate(),
                 );
-            publications.run(active, () =>
-                db.transaction(() => acknowledgeHistoryHealPublication(db, sessionId)).immediate(),
-            );
+            }
+        } finally {
+            // Detached async descendants must not keep publication authority after the drain returns.
+            active.open = false;
         }
         queue = getHistoryHealQueue(db, sessionId);
     }

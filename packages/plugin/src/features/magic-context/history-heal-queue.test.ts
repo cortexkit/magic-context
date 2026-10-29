@@ -205,3 +205,45 @@ it("ordinary recomp publication cannot acknowledge a queue item it does not own"
     ).not.toBeNull();
     expect(getHistoryHealQueue(db, sessionId)).toEqual([work]);
 });
+
+it("late async descendants cannot acknowledge work after the drain scope closes", async () => {
+    setHistoryHealQueue(db, sessionId, [work]);
+    expect(acquireCompartmentLease(db, sessionId, "holder")).not.toBeNull();
+    let release: () => void = () => {
+        throw new Error("gate not initialized");
+    };
+    const gate = new Promise<void>((resolve) => {
+        release = resolve;
+    });
+    let detached: Promise<unknown> = Promise.resolve(null);
+    expect(
+        await drainHistoryHealQueue(db, sessionId, async () => {
+            detached = gate.then(() => {
+                saveRecompStagingPass(
+                    db,
+                    sessionId,
+                    1,
+                    [
+                        {
+                            sequence: 0,
+                            startMessage: 1,
+                            endMessage: 4,
+                            startMessageId: "m1",
+                            endMessageId: "m4",
+                            title: "ordinary",
+                            content: "prose",
+                        },
+                    ],
+                    [],
+                );
+                return promoteRecompStagingWithM0Mutation(db, sessionId, "holder", {
+                    preserveCachedM0M1: true,
+                });
+            });
+            return false;
+        }),
+    ).toBe(false);
+    release();
+    expect(await detached).not.toBeNull();
+    expect(getHistoryHealQueue(db, sessionId)).toEqual([work]);
+});
