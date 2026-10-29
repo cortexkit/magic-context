@@ -29,11 +29,12 @@ import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-pat
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { getWorkerShutdownStats } from "../../shared/worker-shutdown";
+import { V2MessageTimesCache } from "../message-times";
 import { registerContext } from "./context";
 import * as storageGate from "./storage-gate";
 import type { SessionContext, V2Context } from "./types";
 
-type Event = { type: string; data: { sessionID: string } };
+type Event = { type: string; data: { sessionID: string; assistantMessageID?: string } };
 const sessionID = "ses-event-usage";
 const succeeded: Event = { type: "session.execution.succeeded", data: { sessionID } };
 const deleted: Event = { type: "session.deleted", data: { sessionID: "ses-deleted" } };
@@ -232,6 +233,32 @@ async function fixture(
         },
     };
 }
+
+test("v2 step lifecycle events invalidate the affected message's times", async () => {
+    const cleared = spyOn(V2MessageTimesCache.prototype, "deleteMessage");
+    const f = await fixture(async function* (signal) {
+        for (const [type, assistantMessageID] of [
+            ["session.step.started", "start"],
+            ["session.step.ended", "end"],
+            ["session.step.failed", "failed"],
+        ] as const)
+            yield { type, data: { sessionID, assistantMessageID } };
+        yield { type: "session.step.ended", data: { sessionID } };
+        await aborted(signal);
+    });
+    try {
+        await f.start();
+        await until(() => cleared.mock.calls.length === 3);
+        expect(cleared.mock.calls).toEqual([
+            [sessionID, "start"],
+            [sessionID, "end"],
+            [sessionID, "failed"],
+        ]);
+    } finally {
+        cleared.mockRestore();
+        await f.cleanup();
+    }
+});
 
 test("v2 session.deleted removes summaries, raw history, tag revisions and every seeded row", async () => {
     const ready = Promise.withResolvers<void>();
