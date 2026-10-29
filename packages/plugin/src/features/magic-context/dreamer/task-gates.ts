@@ -1,13 +1,8 @@
 import { DREAM_TASK_PROMOTION_DEFAULTS } from "../../../config/schema/magic-context";
 import type { Database, Statement } from "../../../shared/sqlite";
 import { isKnownAutocommit } from "../../../shared/sqlite-helpers";
-import { getMemoriesByProject, hasMemoryClassifiedAtColumn } from "../memory/storage-memory";
-import {
-    computeCueContentHash,
-    getMuralCueState,
-    hasMuralCueColumns,
-    memoryNeedsCue,
-} from "../mural/storage-mural-cues";
+import { hasMemoryClassifiedAtColumn } from "../memory/storage-memory";
+import { hasMuralCueColumns } from "../mural/storage-mural-cues";
 import {
     getSmartNotesNeedingCompilation,
     getStaleCompiledSmartNotes,
@@ -190,168 +185,19 @@ function countBroadCycleCandidates(
     return row?.cnt ?? 0;
 }
 
-/**
- * Stored sha256 of the memory text, plus the edit markers observed with it.
- * SQLite cannot compute sha256, and hashing every live memory on each gate
- * pass would reread the pool. The count compares this stored hash with
- * mural_cue_hash. updated_at and normalized_hash only say when that stored
- * hash must be recomputed; a newer updated_at is not itself a stale cue.
- */
-const CUE_CONTENT_HASH_TABLE = "memory_cue_content_hash";
-const cueContentHashTables = new WeakMap<Database, boolean>();
-
-const LIVE_MEMORY_WHERE = `project_path = ?
-                AND status IN ('active','permanent')
-                AND (expires_at IS NULL OR expires_at > ?)`;
-
-function cueContentHashTableReady(db: Database): boolean {
-    const ready = cueContentHashTables.get(db);
-    if (ready !== undefined) return ready;
-    const present = db
-        .prepare("SELECT 1 AS one FROM sqlite_master WHERE type = 'table' AND name = ?")
-        .get(CUE_CONTENT_HASH_TABLE);
-    if (present) cueContentHashTables.set(db, true);
-    return present != null;
-}
-
-function ensureCueContentHashTable(db: Database): boolean {
-    if (cueContentHashTableReady(db)) return true;
-    try {
-        db.exec(
-            `CREATE TABLE IF NOT EXISTS memory_cue_content_hash (
-                memory_id INTEGER PRIMARY KEY,
-                content_sha256 TEXT NOT NULL,
-                observed_updated_at INTEGER NOT NULL,
-                observed_normalized_hash TEXT NOT NULL
-            )`,
-        );
-        cueContentHashTables.set(db, true);
-        return true;
-    } catch {
-        cueContentHashTables.delete(db);
-        // A read-only connection cannot create the cache. The caller hashes
-        // the live pool directly so the count still matches compress-cues.
-        return false;
-    }
-}
-
-interface StaleCueHashRow {
-    id: number;
-    content: string;
-    updated_at: number;
-    normalized_hash: string;
-}
-
-function staleCueHashRows(db: Database, projectPath: string, now: number): StaleCueHashRow[] {
-    return db
-        .prepare<[string, number], StaleCueHashRow>(
-            `SELECT id, content, updated_at, normalized_hash
-               FROM memories
-              WHERE ${LIVE_MEMORY_WHERE}
-                AND mural_cue IS NOT NULL
-                AND mural_cue_hash IS NOT NULL
-                AND NOT EXISTS (
-                    SELECT 1 FROM memory_cue_content_hash h
-                     WHERE h.memory_id = memories.id
-                       AND h.observed_updated_at = memories.updated_at
-                       AND h.observed_normalized_hash = memories.normalized_hash
-                )`,
-        )
-        .all(projectPath, now);
-}
-
-/**
- * Record sha256(content) for cue rows whose updated_at or normalized_hash moved.
- * A text edit records at least one of those markers. A write that leaves both
- * alone, such as moving the memory to another project id, did not change the
- * text. A content write that touches neither marker stays invisible until one
- * moves. Returns false when the connection cannot store the observation, so
- * the caller hashes the live pool in place.
- */
-function refreshStaleCueContentHashes(db: Database, projectPath: string, now: number): boolean {
-    if (!ensureCueContentHashTable(db)) return false;
-    let stale: StaleCueHashRow[];
-    try {
-        stale = staleCueHashRows(db, projectPath, now);
-    } catch {
-        cueContentHashTables.delete(db);
-        return false;
-    }
-    if (stale.length === 0) return true;
-    try {
-        const upsert = db.prepare(
-            `INSERT INTO memory_cue_content_hash
-                (memory_id, content_sha256, observed_updated_at, observed_normalized_hash)
-             VALUES (?, ?, ?, ?)
-             ON CONFLICT(memory_id) DO UPDATE SET
-                content_sha256 = excluded.content_sha256,
-                observed_updated_at = excluded.observed_updated_at,
-                observed_normalized_hash = excluded.observed_normalized_hash`,
-        );
-        db.transaction(() => {
-            for (const row of stale) {
-                upsert.run(
-                    row.id,
-                    computeCueContentHash(row.content),
-                    row.updated_at,
-                    row.normalized_hash,
-                );
-            }
-        }).immediate();
-        return true;
-    } catch {
-        cueContentHashTables.delete(db);
-        return false;
-    }
-}
-
-function countFromStoredCueHashes(db: Database, projectPath: string, now: number): number {
+function countCueCandidates(db: Database, projectPath: string): number {
+    if (!hasMuralCueColumns(db)) return countLiveMemories(db, projectPath);
     const row = db
         .prepare<[string, number], { cnt: number }>(
             `SELECT COUNT(*) AS cnt
                FROM memories
-              WHERE ${LIVE_MEMORY_WHERE}
-                AND (
-                    mural_cue IS NULL
-                    OR mural_cue_hash IS NULL
-                    OR NOT EXISTS (
-                        SELECT 1 FROM memory_cue_content_hash h
-                         WHERE h.memory_id = memories.id
-                           AND h.content_sha256 = memories.mural_cue_hash
-                           AND h.observed_updated_at = memories.updated_at
-                           AND h.observed_normalized_hash = memories.normalized_hash
-                    )
-                )`,
+              WHERE project_path = ?
+                AND status IN ('active','permanent')
+                AND (expires_at IS NULL OR expires_at > ?)
+                AND (mural_cue IS NULL OR mural_cue_hash IS NULL OR updated_at > mural_cue_at)`,
         )
-        .get(projectPath, now);
+        .get(projectPath, Date.now());
     return row?.cnt ?? 0;
-}
-
-/** Same missing-cue or sha256(content) mismatch compress-cues uses, when the hash cannot be stored. */
-function countCueCandidatesByContentHash(db: Database, projectPath: string): number {
-    const memories = getMemoriesByProject(db, projectPath, ["active", "permanent"]);
-    const cueState = getMuralCueState(
-        db,
-        memories.map((memory) => memory.id),
-    );
-    let pending = 0;
-    for (const memory of memories) {
-        if (memoryNeedsCue(cueState.get(memory.id), memory.content)) pending += 1;
-    }
-    return pending;
-}
-
-function countCueCandidates(db: Database, projectPath: string): number {
-    if (!hasMuralCueColumns(db)) return countLiveMemories(db, projectPath);
-    const now = Date.now();
-    // compress-cues selects a memory when its cue is missing or mural_cue_hash
-    // is not sha256(content). A newer updated_at is not that test: re-keying a
-    // project id, or any other write that leaves the text alone, would keep this
-    // gate due after the task finds nothing to compress.
-    if (refreshStaleCueContentHashes(db, projectPath, now)) {
-        return countFromStoredCueHashes(db, projectPath, now);
-    }
-    return countCueCandidatesByContentHash(db, projectPath);
 }
 
 function countStalePrimers(db: Database, projectPath: string): number {
@@ -529,10 +375,8 @@ export function identityHasProjectInput(db: Database, projectPath: string, now: 
 }
 
 /**
- * Read-only backlog probe for one task, except compress-cues may record
- * sha256(content) for rows whose edit markers moved. These probes never acquire
- * a lease, materialize a prompt cache, or invoke a model. They reuse the task
- * selection predicates.
+ * Read-only backlog probe for one task. These probes reuse the task selection
+ * predicates and never acquire a lease, materialize a prompt cache, or invoke a model.
  */
 export function getDreamTaskBacklog(
     db: Database,
@@ -745,10 +589,10 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
             return countActiveMemories(db, project) > 0;
 
         case "compress-cues":
-            // Same missing-cue / content-hash test the task uses. A live pool whose
-            // cues already match their text has nothing to compress, so it must not
-            // take the memory lease every cycle.
-            return countCueCandidates(db, project) > 0;
+            // Cheap pre-gate: only take the memory lease when a live pool exists. The
+            // executor's selectCandidates does the precise NULL/stale-hash cue
+            // partition and no-ops when everything is already compressed.
+            return countLiveMemories(db, project) > 0;
 
         case "classify-memories":
             // Classification scores the live project memory pool directly. It has

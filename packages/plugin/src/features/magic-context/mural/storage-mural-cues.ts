@@ -122,6 +122,75 @@ export function memoryNeedsCue(state: MuralCueState | undefined, currentContent:
  * next run. Cache-neutral: the mural is rendered on demand from these columns,
  * not injected as part of the m[0] baseline bytes.
  */
+export interface CurrentCueStamp {
+    id: number;
+    content: string;
+    cue: string;
+    hash: string;
+}
+
+/**
+ * Cues the scheduler still counts as due because updated_at is newer than
+ * mural_cue_at, but whose stored hash is already sha256 of the current text.
+ * The text did not change, so the cue does not need to be rewritten.
+ */
+export function timestampStaleCurrentCues(db: Database, projectPath: string): CurrentCueStamp[] {
+    if (!hasMuralCueColumns(db)) return [];
+    const rows = db
+        .prepare<
+            [string, number],
+            { id: number; content: string; mural_cue: string; mural_cue_hash: string }
+        >(
+            `SELECT id, content, mural_cue, mural_cue_hash
+               FROM memories
+              WHERE project_path = ?
+                AND status IN ('active','permanent')
+                AND (expires_at IS NULL OR expires_at > ?)
+                AND mural_cue IS NOT NULL
+                AND mural_cue_hash IS NOT NULL
+                AND updated_at > mural_cue_at`,
+        )
+        .all(projectPath, Date.now());
+    const stamps: CurrentCueStamp[] = [];
+    for (const row of rows) {
+        if (typeof row.mural_cue !== "string" || row.mural_cue.length === 0) continue;
+        if (row.mural_cue_hash !== computeCueContentHash(row.content)) continue;
+        stamps.push({
+            id: row.id,
+            content: row.content,
+            cue: row.mural_cue,
+            hash: row.mural_cue_hash,
+        });
+    }
+    return stamps;
+}
+
+/**
+ * Move mural_cue_at up to updated_at. The cue text and hash stay as they are.
+ * The content check refuses the stamp if the text changed after it was read.
+ */
+export function markCurrentCuesFresh(
+    db: Database,
+    projectPath: string,
+    stamps: readonly CurrentCueStamp[],
+): void {
+    if (stamps.length === 0 || !hasMuralCueColumns(db)) return;
+    withPrivilegedWriter(db, () => {
+        const update = db.prepare(
+            `UPDATE memories
+                SET mural_cue_at = updated_at
+              WHERE id = ?
+                AND project_path = ?
+                AND content = ?
+                AND mural_cue = ?
+                AND mural_cue_hash = ?`,
+        );
+        for (const stamp of stamps) {
+            update.run(stamp.id, projectPath, stamp.content, stamp.cue, stamp.hash);
+        }
+    });
+}
+
 export function setMuralCue(
     db: Database,
     projectPath: string,
