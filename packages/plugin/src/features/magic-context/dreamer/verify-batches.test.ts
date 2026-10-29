@@ -14,13 +14,7 @@ import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { acquireLease } from "./lease";
 import { createDreamTokenBudget, DreamTokenBudgetExceeded } from "./token-budget";
-import {
-    runVerify,
-    VERIFY_IN_FLIGHT_GRACE_MS,
-    VERIFY_RUN_SLICE_MS,
-    VERIFY_TOKENS_PER_MEMORY,
-    verifyBatchTokenBudget,
-} from "./verify";
+import { runVerify, VERIFY_TOKENS_PER_MEMORY, verifyBatchTokenBudget } from "./verify";
 import { parsePartialVerifyManifest, seedVerifyCandidates } from "./verify-prompt";
 
 const dirs: string[] = [];
@@ -237,7 +231,12 @@ test("fake provider emits five-memory progress and banks an interrupted verdict 
  * clock. A duration of Infinity is a runaway child that only stops when its
  * slice timer aborts it.
  */
-async function runOnFakeClock(count: number, durations: number[]) {
+async function runOnFakeClock(
+    count: number,
+    durations: number[],
+    timeoutMs = 20 * 60_000,
+    forceBroad = true,
+) {
     const f = fixture(count);
     const realNow = Date.now.bind(Date);
     const realSetTimeout = globalThis.setTimeout;
@@ -292,7 +291,8 @@ async function runOnFakeClock(count: number, durations: number[]) {
     try {
         const result = await runVerify({
             ...f.args,
-            deadline: start + 900_000,
+            deadline: start + timeoutMs,
+            forceBroad,
             hiddenCompletionExecutor: {
                 capabilities: { tools: true },
                 open: async () => {
@@ -309,7 +309,7 @@ async function runOnFakeClock(count: number, durations: number[]) {
                     text = "";
                     let aborted = false;
                     if (duration === Number.POSITIVE_INFINITY) {
-                        for (let step = 0; step < 100 && !aborted; step++)
+                        for (let step = 0; step <= timeoutMs / 10_000 && !aborted; step++)
                             aborted = advance(10_000);
                     } else {
                         aborted = advance(duration);
@@ -337,9 +337,8 @@ async function runOnFakeClock(count: number, durations: number[]) {
     }
 }
 
-test("verify lets a batch in flight at the run deadline finish and bank its verdicts", async () => {
-    // The second batch starts 200 s into the run and needs 90 s, so it is still
-    // running when the 240 s run deadline passes.
+test("verify banks ordinary batches unchanged across the former four-minute run window", async () => {
+    // The configured task deadline, not a separate four-minute window, limits this run.
     const run = await runOnFakeClock(10, [200_000, 90_000]);
     expect(run.opened).toEqual([0, 200_000]);
     expect(run.abortedAt).toEqual([]);
@@ -347,10 +346,31 @@ test("verify lets a batch in flight at the run deadline finish and bank its verd
     expect(run.result.stopReason).toBeUndefined();
 });
 
-test("verify does not start a batch once the run deadline has passed", async () => {
-    // The second batch ends exactly at the run deadline; plenty of in-flight
-    // grace remains, but that grace is only for batches already running.
-    const run = await runOnFakeClock(15, [120_000, VERIFY_RUN_SLICE_MS - 120_000]);
+for (const forceBroad of [false, true]) {
+    test(`${forceBroad ? "verify-broad" : "verify"} with a 20-minute deadline completes a first batch longer than four minutes`, async () => {
+        const run = await runOnFakeClock(10, [300_000, 120_000], 20 * 60_000, forceBroad);
+        expect(run.opened).toEqual([0, 300_000]);
+        expect(run.abortedAt).toEqual([]);
+        expect(run.result).toMatchObject({
+            verified: 10,
+            remaining: 0,
+            complete: true,
+            batches: 2,
+        });
+        expect(run.result.stopReason).toBeUndefined();
+    });
+}
+
+test("verify keeps starting short batches while the configured deadline allows", async () => {
+    const run = await runOnFakeClock(15, [120_000, 120_000, 120_000]);
+    expect(run.opened).toEqual([0, 120_000, 240_000]);
+    expect(run.abortedAt).toEqual([]);
+    expect(run.result).toMatchObject({ verified: 15, remaining: 0, complete: true, batches: 3 });
+});
+
+test("verify does not start a batch at the configured task deadline", async () => {
+    // Even when a batch just finished, the next batch must not start at the task deadline.
+    const run = await runOnFakeClock(15, [120_000, 240_000], 360_000);
     expect(run.opened).toEqual([0, 120_000]);
     expect(run.result).toMatchObject({
         verified: 10,
@@ -361,17 +381,30 @@ test("verify does not start a batch once the run deadline has passed", async () 
     });
 });
 
-test("verify still aborts a runaway batch at the hard stop after the run deadline", async () => {
+test("verify aborts a runaway final batch at the configured task deadline", async () => {
+    // The configured task deadline limits how long this runaway batch may run.
     const run = await runOnFakeClock(10, [200_000, Number.POSITIVE_INFINITY]);
-    const hardStop = VERIFY_RUN_SLICE_MS + VERIFY_IN_FLIGHT_GRACE_MS;
+    const deadline = 20 * 60_000;
     expect(run.opened).toEqual([0, 200_000]);
     // The runaway child moves the clock in 10 s steps, so the slice timer fires
-    // on the first step past the hard stop.
+    // on the first step past the task deadline.
     expect(run.abortedAt).toHaveLength(1);
-    expect(run.abortedAt[0]).toBeLessThanOrEqual(hardStop + 10_000);
+    expect(run.abortedAt[0]).toBe(deadline + 10_000);
     expect(run.result).toMatchObject({
         verified: 5,
         remaining: 5,
+        complete: false,
+        stopReason: "batch-timeout",
+    });
+});
+
+test("verify caps a runaway first batch at its fair share of a longer task timeout", async () => {
+    const run = await runOnFakeClock(10, [Number.POSITIVE_INFINITY]);
+    expect(run.opened).toEqual([0]);
+    expect(run.abortedAt).toEqual([610_000]);
+    expect(run.result).toMatchObject({
+        verified: 0,
+        remaining: 10,
         complete: false,
         stopReason: "batch-timeout",
     });
@@ -531,7 +564,7 @@ test("a failing fake provider exhausts one 500k envelope without retrying and ba
     }
 });
 
-test("verify run slice is shared across batches, not renewed after progress", async () => {
+test("verify task deadline is shared across batches, not renewed after progress", async () => {
     const f = fixture(25);
     let clock = Date.now();
     const now = spyOn(Date, "now").mockImplementation(() => clock);
@@ -541,7 +574,8 @@ test("verify run slice is shared across batches, not renewed after progress", as
         const result = await runVerify({
             ...f.args,
             onProgress: () => {
-                clock += 240_000;
+                // Progress must not renew the configured task deadline.
+                clock = f.args.deadline + 1;
             },
             hiddenCompletionExecutor: {
                 capabilities: { tools: true },

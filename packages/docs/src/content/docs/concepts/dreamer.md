@@ -44,6 +44,8 @@ The dreamer has these tasks, each independently scheduled:
 
 Each task has its own schedule, an optional per-task model override (falling back to the dreamer-level model), and a timeout (default: 20 minutes). `map-memories`, `verify`, `verify-broad`, `curate`, `classify-memories`, `retrospective`, and the primer tasks share the per-project memory lease so they never collide; the others run independently. `verify-broad` records its open cycle and resumes from the remaining backlog after a timeout or partial run. `compress-cues` is gated by `mural.enabled`, writes cues per memory, and resumes from missing or stale cues; the mural image itself is rendered on demand at a context fold, not by a scheduled `render-mural` task.
 
+`verify` and `verify-broad` use their configured `timeout_minutes` as the run deadline in OpenCode, Pi, and Oh My Pi. Each batch gets the larger of four minutes or an equal share of the time remaining across the batches left, always capped by the time remaining. A new batch needs at least 30 seconds left to start.
+
 Configure all of this under `dreamer.tasks` in `magic-context.jsonc`, or visually in the dashboard config editor.
 
 ## Privacy: retrospective learning
