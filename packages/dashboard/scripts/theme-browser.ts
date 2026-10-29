@@ -227,6 +227,32 @@ const preload = (theme: string | null, showUpdate: boolean) => `(() => {
       if (cmd === 'read_pi_config') return { path: '/Users/dev/.pi/config.json', exists: false, content: null, source: 'pi', error: null };
       if (cmd.startsWith('get_session_cache_events')) return cacheEvents[args.sessionId] || [];
       if (cmd.startsWith('plugin:')) return null;
+      if (cmd === 'get_memories') {
+        const all = responses.get_memories || [];
+        const rows = all.filter((row) => {
+          if (args && args.category && row.category !== args.category) return false;
+          if (args && args.status) return row.status === args.status;
+          if (args && args.excludeArchived && row.status === 'archived') return false;
+          return true;
+        });
+        const offset = args && typeof args.offset === 'number' ? args.offset : 0;
+        const limit = args && typeof args.limit === 'number' ? args.limit : rows.length;
+        return rows.slice(offset, offset + limit);
+      }
+      if (cmd === 'get_memory_stats') {
+        const all = responses.get_memories || [];
+        const rows = all.filter((row) => {
+          if (args && args.status) return row.status === args.status;
+          if (args && args.includeArchived) return true;
+          return row.status !== 'archived';
+        });
+        const counts = new Map();
+        for (const row of rows) counts.set(row.category, (counts.get(row.category) || 0) + 1);
+        return {
+          ...responses.get_memory_stats,
+          categories: [...counts.entries()].map(([category, count]) => ({ category, count })),
+        };
+      }
       return cmd in responses ? responses[cmd] : [];
     }
   };

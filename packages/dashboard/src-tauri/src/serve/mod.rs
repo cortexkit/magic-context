@@ -24,7 +24,10 @@ const DEFAULT_HOST: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
 const SUBPROCESS_CONCURRENCY_LIMIT: usize = 2;
 
-const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+// `blob:` is the memory-mural image. A data URL of a full-size mural can exceed
+// the webview URL limit, so the page paints a blob URL with an image/png type.
+// `data:` remains allowed for that fallback. This is not a file-scope widening.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' blob: data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServeOptions {
