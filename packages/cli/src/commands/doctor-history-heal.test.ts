@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { buildCompactionMarkerRows } from "@magic-context/core/features/magic-context/compaction-marker";
 import { getHistoryHealQueue } from "@magic-context/core/features/magic-context/history-heal-queue";
 import {
@@ -109,7 +110,7 @@ function seedIndex() {
     }
 }
 beforeEach(() => {
-    const scratch = resolve("../../target/scratch");
+    const scratch = join(tmpdir(), "magic-context", "history-heal-fix-review");
     mkdirSync(scratch, { recursive: true });
     root = realpathSync(createTestTempDirFromPath(join(scratch, "history-heal-test-")));
     dbPath = join(root, "fixture-context.sqlite");
@@ -1030,4 +1031,264 @@ it("uses the FTS rowid index for authorized key predicates", () => {
             (row) => row.detail.includes("VIRTUAL TABLE INDEX") && row.detail.includes(":="),
         ),
     ).toBe(true);
+});
+
+describe("independent fix-round review", () => {
+    for (const stage of ["host delete", "context rewrite", "metadata write"] as const) {
+        it(`rolls back and resumes after interruption at ${stage}`, () => {
+            marker(2, 1);
+            db.exec("UPDATE compartments SET start_message=4,end_message=7 WHERE sequence=1");
+            const p = plan();
+            const store = stage === "host delete" ? host : db;
+            const operation =
+                stage === "host delete"
+                    ? "DELETE ON part"
+                    : stage === "context rewrite"
+                      ? "UPDATE ON compartments"
+                      : "INSERT ON m0_mutation_log";
+            store.exec(
+                `CREATE TRIGGER review_abort BEFORE ${operation} BEGIN SELECT RAISE(ABORT,'interrupted ${stage}'); END`,
+            );
+            expect(() => apply(p)).toThrow(`interrupted ${stage}`);
+            expect(digest(inventory(host, id, true))).toBe(p.sessions[0].before.host);
+            expect(digest(inventory(db, id), readHealMeta(db, id))).toBe(
+                p.sessions[0].before.context,
+            );
+            (stage === "host delete" ? host : db).exec("DROP TRIGGER review_abort");
+            expect(apply(p)).toBe(0);
+            expect(digest(inventory(db, id), readHealMeta(db, id))).toBe(
+                p.sessions[0].after.context,
+            );
+            expect(digest(inventory(host, id, true))).toBe(p.sessions[0].after.host);
+        });
+    }
+
+    it("refuses a holder discovered after snapshotting without retaining a backup or writing", () => {
+        marker(2, 1);
+        const p = plan();
+        close();
+        let probes = 0;
+        try {
+            expect(() =>
+                applyHistoryHealPlan(p, false, {
+                    ...deps,
+                    probe: () =>
+                        ++probes === 4 ? { status: "in_use", pids: [12345] } : { status: "free" },
+                }),
+            ).toThrow("holders");
+        } finally {
+            reopen();
+        }
+        expect(readdirSync(root).filter((n) => n.startsWith("history-heal-backup-"))).toEqual([]);
+        expect(digest(inventory(host, id, true))).toBe(p.sessions[0].before.host);
+    });
+
+    it("does not mix snapshots across a writer that starts and stops between holder probes", () => {
+        marker(2, 1);
+        db.prepare(
+            "INSERT INTO notes(content,session_id,created_at,updated_at) VALUES ('generation 0','other-session',1,1)",
+        ).run();
+        host.prepare("INSERT INTO session VALUES ('other-session','generation 0')").run();
+        const p = plan();
+        const prepare = Database.prototype.prepare;
+        let writerRan = false;
+        const intercepted = spyOn(Database.prototype, "prepare").mockImplementation(function (
+            this: Database,
+            sql: string,
+        ) {
+            const statement = prepare.call(this, sql);
+            if (sql !== "VACUUM main INTO ?") return statement;
+            const run = statement.run.bind(statement);
+            statement.run = (...args: Parameters<typeof statement.run>) => {
+                const result = run(...args);
+                if (!writerRan) {
+                    writerRan = true;
+                    const writerContext = new Database(dbPath);
+                    const writerHost = new Database(hostPath);
+                    try {
+                        // The only real pair states are (0,0), (1,0), then (1,1).
+                        writerContext.exec(
+                            "UPDATE notes SET content='generation 1' WHERE session_id='other-session'",
+                        );
+                        writerHost.exec(
+                            "UPDATE session SET title='generation 1' WHERE id='other-session'",
+                        );
+                    } finally {
+                        writerHost.close();
+                        writerContext.close();
+                    }
+                }
+                return result;
+            };
+            return statement;
+        });
+        let applyError: unknown;
+        try {
+            apply(p);
+        } catch (error) {
+            applyError = error;
+        } finally {
+            intercepted.mockRestore();
+        }
+        const backup = readdirSync(root).find((n) => n.startsWith("history-heal-backup-"));
+        if (!backup) {
+            expect(applyError).toBeDefined();
+            return;
+        }
+        const savedContext = new Database(join(root, backup, "context.db"), { readonly: true });
+        const savedHost = new Database(join(root, backup, "opencode.db"), { readonly: true });
+        try {
+            const contextGeneration = savedContext
+                .prepare("SELECT content FROM notes WHERE session_id='other-session'")
+                .get();
+            const hostGeneration = savedHost
+                .prepare("SELECT title FROM session WHERE id='other-session'")
+                .get();
+            expect([contextGeneration, hostGeneration]).not.toEqual([
+                { content: "generation 0" },
+                { title: "generation 1" },
+            ]);
+        } finally {
+            savedHost.close();
+            savedContext.close();
+        }
+    });
+
+    it("resumes after an actual failed context commit following the host commit", () => {
+        marker(2, 1);
+        db.exec("UPDATE compartments SET start_message=4,end_message=7 WHERE sequence=1");
+        const p = plan();
+        const exec = Database.prototype.exec;
+        let commits = 0;
+        const intercepted = spyOn(Database.prototype, "exec").mockImplementation(function (
+            this: Database,
+            sql: string,
+        ) {
+            if (sql === "COMMIT" && ++commits === 2) throw new Error("interrupted context commit");
+            return exec.call(this, sql);
+        });
+        try {
+            expect(() => apply(p)).toThrow("interrupted context commit");
+        } finally {
+            intercepted.mockRestore();
+        }
+        expect(commits).toBe(2);
+        expect(digest(inventory(host, id, true))).toBe(p.sessions[0].after.host);
+        expect(digest(inventory(db, id), readHealMeta(db, id))).toBe(p.sessions[0].before.context);
+        expect(apply(p)).toBe(0);
+        expect(digest(inventory(db, id), readHealMeta(db, id))).toBe(p.sessions[0].after.context);
+        expect(apply(p)).toBe(0);
+    });
+
+    it("rejects a new unresolved rebase at apply and at the writer-lock check", () => {
+        db.exec("UPDATE compartments SET start_message=4,end_message=7 WHERE sequence=1");
+        const p = plan();
+        db.exec("UPDATE compartments SET rebase_status='unresolved' WHERE sequence=1");
+        expect(() => apply(p)).toThrow("stale_plan");
+        db.exec("UPDATE compartments SET rebase_status='ok' WHERE sequence=1");
+        close();
+        let probes = 0;
+        try {
+            expect(() =>
+                applyHistoryHealPlan(p, false, {
+                    ...deps,
+                    probe: () => {
+                        if (++probes === 4) {
+                            const writer = new Database(dbPath);
+                            try {
+                                writer.exec(
+                                    "UPDATE compartments SET rebase_status='unresolved' WHERE sequence=1",
+                                );
+                            } finally {
+                                writer.close();
+                            }
+                        }
+                        return { status: "free" };
+                    },
+                }),
+            ).toThrow("stale_plan");
+        } finally {
+            reopen();
+        }
+        expect(probes).toBe(5);
+        expect(
+            db
+                .prepare(
+                    "SELECT start_message,end_message,rebase_status FROM compartments WHERE sequence=1",
+                )
+                .get(),
+        ).toEqual({ start_message: 4, end_message: 7, rebase_status: "unresolved" });
+    });
+
+    it("rejects a changed host on resume even when no additional marker is created", () => {
+        marker(2, 1);
+        db.exec("UPDATE compartments SET start_message=4,end_message=7 WHERE sequence=1");
+        const p = plan();
+        host.transaction(() =>
+            applyHealRewrites(
+                host,
+                p.sessions[0].rewrites.filter((r) => r.store === "host"),
+            ),
+        )();
+        host.exec("UPDATE part SET data='changed raw part' WHERE id='part12'");
+        expect(() => apply(p)).toThrow(/stale_plan|rewrite_contract/);
+        expect(digest(inventory(db, id), readHealMeta(db, id))).toBe(p.sessions[0].before.context);
+    });
+
+    it("rejects an omitted pending resume row even with a matching edited after-hash", () => {
+        marker(2, 1);
+        seedIndex();
+        db.exec("UPDATE compartments SET start_message=4,end_message=7 WHERE sequence=1");
+        const p = plan();
+        const s = p.sessions[0];
+        host.transaction(() =>
+            applyHealRewrites(
+                host,
+                s.rewrites.filter((r) => r.store === "host"),
+            ),
+        )();
+        const omitted = s.rewrites.findIndex((r) => r.table === "message_history_source");
+        expect(omitted).toBeGreaterThanOrEqual(0);
+        s.rewrites.splice(omitted, 1);
+        db.exec("BEGIN");
+        try {
+            applyHealRewrites(
+                db,
+                s.rewrites.filter((r) => r.store === "context"),
+            );
+            queueM0Mutation(db, { sessionId: id, mutationType: "recomp_boundary_change" });
+            s.after.context = digest(inventory(db, id), readHealMeta(db, id));
+        } finally {
+            db.exec("ROLLBACK");
+        }
+        expect(() => apply(p)).toThrow("plan_mismatch");
+    });
+
+    it("matches IS for non-null and empty keys and rejects null keys before execution", () => {
+        db.exec(
+            "CREATE TABLE review_keys(id TEXT, n INTEGER); INSERT INTO review_keys VALUES (NULL,1),('',2),('x',3)",
+        );
+        for (const key of [{ id: "" }, { id: "x" }, { n: 1 }, { id: "", n: 2 }]) {
+            const old = Object.keys(key)
+                .map((k) => `"${k}" IS ?`)
+                .join(" AND ");
+            expect(
+                db
+                    .prepare(`SELECT * FROM review_keys WHERE ${healKeyPredicate(key)}`)
+                    .all(...Object.values(key)),
+            ).toEqual(
+                db.prepare(`SELECT * FROM review_keys WHERE ${old}`).all(...Object.values(key)),
+            );
+        }
+        const p = plan();
+        p.sessions[0].rewrites.push({
+            store: "context",
+            table: "message_history_source",
+            key: { session_id: id, message_id: null },
+            before: { message_ordinal: 1 },
+            after: { message_ordinal: 2 },
+            reason: "null key",
+        });
+        expect(() => apply(p)).toThrow("Invalid text key");
+    });
 });

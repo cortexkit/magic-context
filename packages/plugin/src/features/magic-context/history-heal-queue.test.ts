@@ -247,3 +247,114 @@ it("late async descendants cannot acknowledge work after the drain scope closes"
     expect(await detached).not.toBeNull();
     expect(getHistoryHealQueue(db, sessionId)).toEqual([work]);
 });
+
+it("publication authority cannot acknowledge another session during a live drain", async () => {
+    const other = "other-session";
+    getOrCreateSessionMeta(db, other);
+    setHistoryHealQueue(db, sessionId, [work]);
+    setHistoryHealQueue(db, other, [work]);
+    expect(acquireCompartmentLease(db, other, "other-holder")).not.toBeNull();
+    expect(
+        await drainHistoryHealQueue(db, sessionId, async () => {
+            saveRecompStagingPass(
+                db,
+                other,
+                1,
+                [
+                    {
+                        sequence: 0,
+                        startMessage: 1,
+                        endMessage: 4,
+                        startMessageId: "m1",
+                        endMessageId: "m4",
+                        title: "ordinary",
+                        content: "other prose",
+                    },
+                ],
+                [],
+            );
+            expect(promoteRecompStagingWithM0Mutation(db, other, "other-holder")).not.toBeNull();
+            return false;
+        }),
+    ).toBe(false);
+    expect(getHistoryHealQueue(db, other)).toEqual([work]);
+    expect(getHistoryHealQueue(db, sessionId)).toEqual([work]);
+});
+
+it("a replaced queue head rolls back a racing historian publication", async () => {
+    setHistoryHealQueue(db, sessionId, [work]);
+    expect(acquireCompartmentLease(db, sessionId, "holder")).not.toBeNull();
+    const replacement = { start: 5, end: 8, sequence: 1, gapStart: 7, gapEnd: 7 };
+    await expect(
+        drainHistoryHealQueue(db, sessionId, async () => {
+            saveRecompStagingPass(
+                db,
+                sessionId,
+                1,
+                [
+                    {
+                        sequence: 0,
+                        startMessage: 1,
+                        endMessage: 4,
+                        startMessageId: "m1",
+                        endMessageId: "m4",
+                        title: "racing",
+                        content: "must roll back",
+                    },
+                ],
+                [],
+            );
+            setHistoryHealQueue(db, sessionId, [replacement]);
+            return promoteRecompStagingWithM0Mutation(db, sessionId, "holder") !== null;
+        }),
+    ).rejects.toThrow("history_heal_queue_changed");
+    expect(getHistoryHealQueue(db, sessionId)).toEqual([replacement]);
+    expect(getM0MutationsBySession(db, sessionId)).toEqual([]);
+    expect(db.prepare("SELECT * FROM compartments WHERE session_id=?").all(sessionId)).toEqual([]);
+});
+
+it("a failed drain revokes detached publication authority while the next drain is open", async () => {
+    setHistoryHealQueue(db, sessionId, [work]);
+    expect(acquireCompartmentLease(db, sessionId, "holder")).not.toBeNull();
+    let release: () => void = () => {
+        throw new Error("gate not initialized");
+    };
+    const gate = new Promise<void>((resolve) => {
+        release = resolve;
+    });
+    let detached: Promise<unknown> = Promise.resolve(null);
+    await expect(
+        drainHistoryHealQueue(db, sessionId, async () => {
+            detached = gate.then(() => {
+                saveRecompStagingPass(
+                    db,
+                    sessionId,
+                    1,
+                    [
+                        {
+                            sequence: 0,
+                            startMessage: 1,
+                            endMessage: 4,
+                            startMessageId: "m1",
+                            endMessageId: "m4",
+                            title: "late",
+                            content: "ordinary prose",
+                        },
+                    ],
+                    [],
+                );
+                return promoteRecompStagingWithM0Mutation(db, sessionId, "holder");
+            });
+            throw new Error("failed publisher");
+        }),
+    ).rejects.toThrow("failed publisher");
+    expect(
+        await drainHistoryHealQueue(db, sessionId, async () => {
+            release();
+            expect(await detached).not.toBeNull();
+            expect(getHistoryHealQueue(db, sessionId)).toEqual([work]);
+            return false;
+        }),
+    ).toBe(false);
+    expect(getHistoryHealQueue(db, sessionId)).toEqual([work]);
+});
