@@ -1545,7 +1545,10 @@ mod tests {
         }
         let cache = cache.read().unwrap();
         assert_eq!(cache.entries.len(), MAX_CACHED_DETAILS);
-        assert!(cache.fresh(&last).is_some(), "the newest session was evicted");
+        assert!(
+            cache.fresh(&last).is_some(),
+            "the newest session was evicted"
+        );
         assert!(cache.fresh(&dir.path().join("s0.jsonl")).is_none());
     }
 
