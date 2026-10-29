@@ -1094,6 +1094,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "regex",
+ "ring",
  "rusqlite",
  "serde",
  "serde_jcs",

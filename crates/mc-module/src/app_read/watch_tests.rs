@@ -64,11 +64,73 @@ async fn native_writes_wake_for_each_event_kind_and_plain_reads_stay_identical()
         "DELETE FROM pending_ops WHERE session_id='s'",
     ] {
         apply_sql(&dir.path().join("context.db"), sql);
+        if sql.starts_with("UPDATE tags SET byte_size") || sql.starts_with("UPDATE pending_ops SET queued_at") {
+            let store = Arc::clone(ctx.store.as_ref().unwrap());
+            hub.check_slow(Arc::clone(&store), false, true);
+            hub.refresh(store);
+        }
         let notice = next(&mut sub).await;
         assert_eq!(notice["kind"], "changes", "{sql}");
         assert_eq!(notice["sessions"], json!([session()]), "{sql}");
         assert!(notice.get("rows").is_none());
     }
+}
+
+#[tokio::test]
+async fn slow_baseline_closes_admission_window_and_catches_each_payload_edit() {
+    let (dir, ctx, hub) = setup();
+    apply_sql(&dir.path().join("context.db"), "INSERT INTO tags(session_id,tag_number,message_id,type,status,tool_name,byte_size) VALUES('s',1,'call','tool','dropped','bash',10); INSERT INTO pending_ops(session_id,tag_id,operation,queued_at,harness) VALUES('s','1','drop',10,'opencode')");
+    let mut sub = hub
+        .subscribe("direct".into(), (1, 1), request(None), &ctx)
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(next(&mut sub).await["kind"], "resync");
+    // An edit after the initial notice but before the first hash has no cheap
+    // version signal. Baseline completion must still invalidate that window.
+    apply_sql(
+        &dir.path().join("context.db"),
+        "UPDATE tags SET drop_mode='full' WHERE session_id='s'",
+    );
+    let store = Arc::clone(ctx.store.as_ref().unwrap());
+    hub.check_slow(Arc::clone(&store), true, true);
+    hub.refresh(Arc::clone(&store));
+    assert_eq!(next(&mut sub).await["kind"], "changes");
+    for assignment in [
+        "drop_mode='skeleton_real'",
+        "byte_size=123",
+        "token_count=44",
+        "tool_name='read'",
+        "input_byte_size=77",
+        "input_token_count=33",
+    ] {
+        apply_sql(
+            &dir.path().join("context.db"),
+            &format!("UPDATE tags SET {assignment} WHERE session_id='s'"),
+        );
+        hub.check_slow(Arc::clone(&store), false, true);
+        hub.refresh(Arc::clone(&store));
+        assert_eq!(next(&mut sub).await["kind"], "changes", "{assignment}");
+    }
+    apply_sql(
+        &dir.path().join("context.db"),
+        "UPDATE pending_ops SET queued_at=88 WHERE session_id='s'",
+    );
+    hub.check_slow(Arc::clone(&store), false, true);
+    hub.refresh(Arc::clone(&store));
+    assert_eq!(next(&mut sub).await["kind"], "changes");
+    hub.check_slow(Arc::clone(&store), false, true);
+    hub.refresh(store);
+    assert!(
+        sub.rx.try_recv().is_err(),
+        "identical slow checks are silent"
+    );
+}
+
+#[test]
+fn slow_check_interval_is_bounded_by_measured_cost() {
+    assert_eq!(slow_interval_ms(0.5), 10_000);
+    assert_eq!(slow_interval_ms(99.9), 10_000);
+    assert_eq!(slow_interval_ms(250.0), 25_000);
+    assert_eq!(slow_interval_ms(333.333), 33_334);
 }
 
 #[tokio::test]

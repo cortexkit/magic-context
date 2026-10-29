@@ -12,7 +12,8 @@ use subc_client_rs::HandlerOutcome;
 use tokio::sync::{mpsc, Notify};
 
 pub(crate) const METHOD: &str = "context.watch";
-const DEBOUNCE: Duration = Duration::from_millis(100);
+const DEBOUNCE: Duration = Duration::from_secs(1);
+const SLOW_MIN_MS: i64 = 10_000;
 const PER_CALLER: usize = 8;
 // The SDK has 64 in-flight request slots; subscriptions must leave room for reads.
 const TOTAL: usize = 32;
@@ -122,6 +123,8 @@ struct State {
     subscribers: BTreeMap<u64, Subscriber>,
     snapshots: BTreeMap<Key, Snapshot>,
     history: VecDeque<Change>,
+    slow: BTreeMap<Key, SlowState>,
+    slow_dirty: BTreeSet<Key>,
 }
 
 pub(crate) struct Hub {
@@ -206,6 +209,8 @@ impl Hub {
             .flat_map(|s| s.sessions.keys().cloned())
             .collect();
         state.snapshots.retain(|k, _| active.contains(k));
+        state.slow.retain(|k, _| active.contains(k));
+        state.slow_dirty.retain(|k| active.contains(k));
         self.active
             .store(!active.is_empty(), std::sync::atomic::Ordering::Release);
     }
@@ -302,6 +307,12 @@ impl Hub {
         ))
         .expect("empty watch queue");
         for (k, snapshot) in snapshots {
+            state.slow.entry(k.clone()).or_insert_with(|| SlowState {
+                digest: None,
+                next_ms: 0,
+                hash_ms: 0.0,
+                admission_fast: Some(snapshot.digest.clone()),
+            });
             state.snapshots.entry(k).or_insert(snapshot);
         }
         state.next_id += 1;
@@ -354,6 +365,13 @@ struct Snapshot {
     deadline: Option<i64>,
 }
 
+struct SlowState {
+    digest: Option<Vec<u8>>,
+    next_ms: i64,
+    hash_ms: f64,
+    admission_fast: Option<Vec<u8>>,
+}
+
 fn read_snapshots<'a>(
     ctx: &AppReadContext,
     sessions: impl Iterator<Item = &'a locator::SessionRef>,
@@ -386,43 +404,44 @@ fn read_snapshots<'a>(
             digest.update(version);
             digest.update(meta);
             digest.update([u8::from(expired)]);
-            // Legacy tag counters do not move on size/name/render-mode edits,
-            // and queue counters do not move on in-place timestamp edits. Hash
-            // only the indexed drop/queue ranges, never transcript bodies.
-            if matches!(target.source, locator::SessionSource::Standalone) {
-                for sql in [
-                    "SELECT tag_number,message_id,type,tool_owner_message_id,tool_name,byte_size,token_count,input_byte_size,input_token_count,drop_mode FROM tags INDEXED BY idx_tags_dropped_session_tag_number WHERE session_id=?1 AND status='dropped' ORDER BY tag_number",
-                    super::context_states::STAMPED_TAGS,
-                    "SELECT tag_id,operation,queued_at FROM pending_ops WHERE session_id=?1 ORDER BY tag_id,id",
-                ] {
-                    hash_rows(context, sql, target.context_session_id(), &mut digest)?;
-                }
-            } else {
-                hash_rows(store, "SELECT target_id,queued_at FROM pending_agent_drops WHERE session_id=?1 ORDER BY id", target.context_session_id(), &mut digest)?;
-            }
             snapshots.insert(key(session), Snapshot { digest: digest.finalize().to_vec(), deadline: expiry.filter(|at| *at > ctx.now_ms()) });
         }
         Ok(Ok(snapshots))
     })?
 }
 
-fn hash_rows(
+fn hash_json(
     conn: &rusqlite::Connection,
     sql: &str,
     session: &str,
-    digest: &mut sha2::Sha256,
+    digest: &mut ring::digest::Context,
 ) -> rusqlite::Result<()> {
-    use sha2::Digest;
-    let mut statement = conn.prepare(sql)?;
-    let mut rows = statement.query([session])?;
-    while let Some(row) = rows.next()? {
-        for i in 0..row.as_ref().column_count() {
-            let value = format!("{:?}", row.get_ref(i)?);
-            digest.update(value.len().to_le_bytes());
-            digest.update(value);
-        }
-    }
+    let value: String = conn.query_row(sql, [session], |r| r.get(0))?;
+    digest.update(&(value.len() as u64).to_le_bytes());
+    digest.update(value.as_bytes());
     Ok(())
+}
+
+fn slow_digest(
+    ctx: &AppReadContext,
+    session: &locator::SessionRef,
+) -> Result<Vec<u8>, HandlerOutcome> {
+    ctx.with_reads(|context, store| {
+        let target = match locator::locate(context, store, session) { Ok(target) => target, Err(error) => return Ok(Err(error)) };
+        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+        if matches!(target.source, locator::SessionSource::Standalone) {
+            // SQLite builds the canonical scalar in C. Do not allocate and
+            // Debug-format every column of every historical dropped row in Rust.
+            for sql in [
+                "SELECT json_group_array(json_array(tag_number,message_id,type,tool_owner_message_id,tool_name,byte_size,token_count,input_byte_size,input_token_count,drop_mode)) FROM (SELECT * FROM tags INDEXED BY idx_tags_dropped_session_tag_number WHERE session_id=?1 AND status='dropped' ORDER BY tag_number)",
+                "SELECT json_group_array(json_array(tag_number,message_id,type,tool_owner_message_id,tool_name,byte_size,token_count,input_byte_size,input_token_count,drop_mode)) FROM (SELECT * FROM tags WHERE session_id=?1 AND status='active' AND type IN ('message','file','tool') AND tag_number IN (SELECT tag_id FROM pending_ops WHERE session_id=?1 AND operation='drop') ORDER BY tag_number)",
+                "SELECT json_group_array(json_array(id,tag_id,operation,queued_at)) FROM (SELECT id,tag_id,operation,queued_at FROM pending_ops WHERE session_id=?1 ORDER BY tag_id,id)",
+            ] { hash_json(context, sql, target.context_session_id(), &mut digest)?; }
+        } else {
+            hash_json(store, "SELECT json_group_array(json_array(id,target_id,queued_at)) FROM (SELECT id,target_id,queued_at FROM pending_agent_drops WHERE session_id=?1 ORDER BY id)", target.context_session_id(), &mut digest)?;
+        }
+        Ok(Ok(digest.finish().as_ref().to_vec()))
+    })?
 }
 
 impl Hub {
@@ -505,14 +524,15 @@ impl Hub {
                 let Some(hub) = weak.upgrade() else {
                     break;
                 };
-                let deadline = hub
-                    .state
-                    .lock()
-                    .expect("watch state")
-                    .snapshots
-                    .values()
-                    .filter_map(|s| s.deadline)
-                    .min();
+                let deadline = {
+                    let state = hub.state.lock().expect("watch state");
+                    state
+                        .snapshots
+                        .values()
+                        .filter_map(|s| s.deadline)
+                        .chain(state.slow.values().map(|s| s.next_ms))
+                        .min()
+                };
                 drop(hub);
                 if let Some(at) = deadline {
                     let delay =
@@ -521,6 +541,20 @@ impl Hub {
                 } else {
                     wake.notified().await;
                 }
+                // Establish new baselines off the admission/reply path, before
+                // the first coalesced wake can publish their confirmation.
+                let baseline_hub = Weak::clone(&weak);
+                let baseline_store = Arc::clone(&store);
+                if tokio::task::spawn_blocking(move || {
+                    if let Some(hub) = baseline_hub.upgrade() {
+                        hub.check_slow(baseline_store, true, false);
+                    }
+                })
+                .await
+                .is_err()
+                {
+                    break;
+                }
                 // A fixed window, rather than trailing-edge debounce, guarantees
                 // progress even when database events arrive continuously.
                 tokio::time::sleep(DEBOUNCE).await;
@@ -528,7 +562,8 @@ impl Hub {
                 let store = Arc::clone(&store);
                 if tokio::task::spawn_blocking(move || {
                     if let Some(hub) = weak.upgrade() {
-                        hub.refresh(store);
+                        hub.refresh(Arc::clone(&store));
+                        hub.check_slow(store, false, false);
                     }
                 })
                 .await
@@ -565,9 +600,70 @@ impl Hub {
         }
     }
 
+    fn check_slow(&self, store: Arc<mc_store::McStore>, baselines_only: bool, force: bool) {
+        let now = crate::now_ms();
+        let sessions: BTreeMap<_, _> = {
+            let state = self.state.lock().expect("watch state");
+            state
+                .subscribers
+                .values()
+                .flat_map(|s| s.sessions.iter())
+                .filter(|(k, _)| {
+                    state.slow.get(*k).is_some_and(|s| {
+                        (force || s.next_ms <= now) && (!baselines_only || s.digest.is_none())
+                    })
+                })
+                .map(|(k, s)| (k.clone(), s.clone()))
+                .collect()
+        };
+        for (k, session) in sessions {
+            let start = std::time::Instant::now();
+            let mut ctx = AppReadContext::from_parts(
+                Some(Arc::clone(&store)),
+                Arc::default(),
+                Vec::new(),
+                crate::now_ms(),
+            );
+            // This work is not admission. Legacy drop-mode conversion, growing
+            // output/input sizes, cold token backfill, and direct name/queued-at
+            // edits need a full hash because the frozen schema has no counter
+            // for them. Check every max(10 seconds, 100 * last hash duration),
+            // then deliver differences on the next one-second coalesced wake.
+            ctx.budget = Duration::from_secs(30);
+            let result = slow_digest(&ctx, &session);
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let mut state = self.state.lock().expect("watch state");
+            let Some(slow) = state.slow.get_mut(&k) else {
+                continue;
+            };
+            slow.hash_ms = elapsed_ms;
+            slow.next_ms = crate::now_ms().saturating_add(slow_interval_ms(slow.hash_ms));
+            match result {
+                Ok(digest) => {
+                    let confirm_admission = slow.admission_fast.take().is_some();
+                    let changed = slow.digest.as_ref().is_some_and(|old| old != &digest);
+                    slow.digest = Some(digest);
+                    // The reply-time fast snapshot cannot exclude a payload-only
+                    // edit before this first baseline. Confirm once after the
+                    // baseline; clients then read at/after that boundary. Future
+                    // baseline differences also invalidate, closing both windows.
+                    if confirm_admission || changed {
+                        state.slow_dirty.insert(k);
+                        self.wake.notify_one();
+                    }
+                }
+                Err(_) => {
+                    self.rescan
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    self.wake.notify_one();
+                }
+            }
+        }
+    }
+
     fn publish(&self, snapshots: BTreeMap<Key, Snapshot>, resync: bool) {
         let mut state = self.state.lock().expect("watch state");
-        let changed: BTreeSet<_> = snapshots
+        let mut changed: BTreeSet<_> = snapshots
             .iter()
             .filter(|(k, s)| {
                 state
@@ -577,6 +673,7 @@ impl Hub {
             })
             .map(|(k, _)| k.clone())
             .collect();
+        changed.append(&mut state.slow_dirty);
         for (k, snapshot) in snapshots {
             if let std::collections::btree_map::Entry::Occupied(mut entry) =
                 state.snapshots.entry(k)
@@ -633,6 +730,10 @@ impl Hub {
         drop(state);
         self.prune();
     }
+}
+
+fn slow_interval_ms(hash_ms: f64) -> i64 {
+    SLOW_MIN_MS.max((hash_ms * 100.0).ceil() as i64)
 }
 
 fn observer_error(error: notify::Error) -> HandlerOutcome {
@@ -759,3 +860,7 @@ mod tests;
 #[cfg(test)]
 #[path = "watch_transport_tests.rs"]
 mod transport_tests;
+
+#[cfg(test)]
+#[path = "../context_watch_cost_bench.rs"]
+mod cost_bench;
