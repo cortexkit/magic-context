@@ -113,13 +113,15 @@ impl ToolRoute for Route {
                 })?)
             }
             HandlerOutcome::Error { code, message } => {
-                ObservedFrame::Error(ErrorBody::new(code, message))
+                ObservedFrame::Error(crate::compatible_wire(ErrorBody::new(code, message)).unwrap())
             }
             HandlerOutcome::ErrorWithDetail {
                 code,
                 message,
                 detail,
-            } => ObservedFrame::Error(ErrorBody::new(code, message).with_detail(detail)),
+            } => ObservedFrame::Error(
+                crate::compatible_wire(ErrorBody::new(code, message).with_detail(detail)).unwrap(),
+            ),
             HandlerOutcome::Streamed => ObservedFrame::StreamEnd,
         };
         Ok(Exchange {

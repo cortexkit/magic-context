@@ -191,7 +191,7 @@ impl McStore {
         check_commit_fence: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<()>,
         apply: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<T>,
     ) -> Result<CurateEdit<T>, McStoreError> {
-        self.context_write(&["memories", "memory_history", "memory_journal", "memory_decision_receipts", "memory_verifications", "memory_embeddings", "memory_successor_links", "memory_mutation_log"], |tx| {
+        self.context_write(&["memories", "memory_history", "memory_journal", "memory_decision_receipts", "memory_verifications", "memory_embeddings", "memory_successor_links", "memory_mutation_log", "memory_placement", "memory_ops", "memory_outbox", "memory_sync_state"], |tx| {
             check_commit_fence(tx)?;
             if !crate::memory_lifecycle::authority::module_owns_memory(tx, project)? { return Err(rusqlite::Error::InvalidQuery); }
             let replay = tx.query_row("SELECT 1 FROM memory_decision_receipts WHERE decision_key=?1 AND project_path=?2", params![decision_key, project], |_| Ok(())).optional()?.is_some();

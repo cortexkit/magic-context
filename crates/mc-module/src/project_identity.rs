@@ -996,12 +996,22 @@ mod tests {
 
     /// `(input, identity)` pairs printed by the host's `resolveProjectIdentity` for paths that
     /// do not exist, which is its `dir:` fallback of the resolved path.
+    #[cfg(not(windows))]
     const DIRECTORY_GOLDEN: &[(&str, &str)] = &[
         ("/work/api", "dir:e02ef1f35c06"),
         ("/work/api/", "dir:e02ef1f35c06"),
         ("/work/./x/../api", "dir:e02ef1f35c06"),
         ("/tmp/n\u{e4}me dir", "dir:93e3ea277593"),
         ("/", "dir:6666cd76f969"),
+    ];
+
+    #[cfg(windows)]
+    const DIRECTORY_GOLDEN: &[(&str, &str)] = &[
+        (r"C:\work\api", "dir:7f55d5fe53ba"),
+        (r"C:\work\api\", "dir:7f55d5fe53ba"),
+        (r"C:\work\.\x\..\api", "dir:7f55d5fe53ba"),
+        (r"C:\tmp\näme dir", "dir:ae8c0f4fb42c"),
+        (r"C:\", "dir:2f158c4731d7"),
     ];
 
     /// The root commit the host's `resolveProjectIdentityForSession` resolves for the fixed
@@ -1033,7 +1043,10 @@ mod tests {
             .env("GIT_COMMITTER_EMAIL", "golden@example.invalid")
             .env("GIT_AUTHOR_DATE", "2001-01-01T00:00:00Z")
             .env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00Z")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
             .env("GIT_CONFIG_NOSYSTEM", "1")
             // Config injected through the environment (a shell or agent tool setting
             // core.hooksPath this way) would otherwise change the golden commit.
@@ -1048,6 +1061,7 @@ mod tests {
     /// A fixed repository (fixed author, dates and content) has a fixed root commit, so the
     /// host's answer for it is a golden value too. Every spelling of a place inside the
     /// checkout (a worktree, a subdirectory, a trailing slash, a symlink) resolves to it.
+    #[cfg(unix)]
     #[test]
     fn a_checkout_resolves_to_the_hosts_root_commit_identity_from_every_spelling() {
         let dir = tempfile::tempdir().unwrap();
@@ -1301,11 +1315,14 @@ mod tests {
 
     #[test]
     fn directory_keys_follow_the_hosts_spelling_rules() {
-        assert_eq!(project_directory_key(Path::new("/work/api/")), "/work/api");
-        assert_eq!(
-            project_directory_key(Path::new("/work/./x/../api")),
-            "/work/api"
-        );
+        #[cfg(not(windows))]
+        {
+            assert_eq!(project_directory_key(Path::new("/work/api/")), "/work/api");
+            assert_eq!(
+                project_directory_key(Path::new("/work/./x/../api")),
+                "/work/api"
+            );
+        }
         assert_eq!(
             project_directory_key(Path::new("C:\\Users\\Me\\Repo\\")),
             "c:/users/me/repo"
@@ -1336,7 +1353,10 @@ mod pin_tests {
         let mut child = Command::new("git")
             .args(args)
             .current_dir(cwd)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_COUNT", "0")
             .stdin(Stdio::piped())
@@ -1372,6 +1392,17 @@ mod pin_tests {
     }
 
     fn relocate(value: &mut Value, root: &Path) {
+        #[cfg(windows)]
+        let native_root = root.to_str().unwrap().replace('\\', "/");
+        // Windows sidecar records contain case-folded directory keys, not the
+        // filesystem's original mixed-case spelling.
+        #[cfg(windows)]
+        let root_binding = native_root
+            .strip_prefix("//?/")
+            .unwrap_or(&native_root)
+            .to_lowercase();
+        #[cfg(windows)]
+        let root = Path::new(&root_binding);
         match value {
             Value::String(string) => *string = string.replace("<fixture>", root.to_str().unwrap()),
             Value::Array(values) => values.iter_mut().for_each(|value| relocate(value, root)),
@@ -1742,6 +1773,7 @@ mod pin_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn common_dir_follows_symlinks_without_git_probes() {
         let temp = tempfile::tempdir().unwrap();
@@ -1761,6 +1793,7 @@ mod pin_tests {
         assert_eq!(GIT_PROBES.with(|probes| probes.get()), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn root_pin_requires_equal_canonical_spellings_and_preserves_existing_pins() {
         let temp = tempfile::tempdir().unwrap();

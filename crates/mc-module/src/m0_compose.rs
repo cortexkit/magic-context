@@ -8,6 +8,8 @@
 //! cache depends on. The expiry cutoff (`now_ms`) is passed in (frozen at the HARD by the
 //! caller, never read here from a live clock) so a later defer replays identical bytes.
 
+pub(crate) mod selection;
+
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
@@ -404,6 +406,7 @@ fn render_m0_retry(
                 covered_system_messages: inputs.covered_system_messages,
                 compartments: inputs.compartments,
                 memories: inputs.memories,
+                workspace_memory_block: inputs.workspace_memory_block,
                 source_name_by_id: inputs.source_name_by_id,
                 history_budget_tokens: inputs.history_budget_tokens,
                 decay_pressure_multiplier,
@@ -444,12 +447,22 @@ fn render_m0_retry(
     m0_bytes
 }
 
-/// The four domain reads m0 is composed from.
+/// The domain reads m0 is composed from.
 ///
 /// The module reads them through its store. The single-store migration engine implements
 /// them twice more, over the old `store.db` tables and over `context.db`, so its render
 /// check composes both sides with this same composer.
 pub trait M0Source {
+    /// Migration render-check sources have no placement table. A marker source
+    /// returns recorded owners instead of consulting live placement.
+    fn load_memory_placements(
+        &self,
+        _session_id: &str,
+        _now_ms: i64,
+        _snapshot: &mc_store::MemoryRenderSnapshot,
+    ) -> Result<selection::PlacementSnapshot, McStoreError> {
+        Ok(selection::PlacementSnapshot::default())
+    }
     fn load_compartments(&self, session_id: &str) -> Result<Vec<StoredCompartment>, McStoreError>;
     /// Compartment rows plus the rescored importance to render with. Sources
     /// without score tables keep this default: original scores at watermark zero.
@@ -476,6 +489,23 @@ pub trait M0Source {
 }
 
 impl M0Source for McStore {
+    fn load_memory_placements(
+        &self,
+        session_id: &str,
+        now_ms: i64,
+        _snapshot: &mc_store::MemoryRenderSnapshot,
+    ) -> Result<selection::PlacementSnapshot, McStoreError> {
+        let pin = self.load_meta(session_id)?.meta.memory_context;
+        Ok(selection::PlacementSnapshot {
+            workspace_id: pin
+                .as_ref()
+                .and_then(|pin| pin["workspace_id"].as_str())
+                .map(str::to_owned),
+            rows: self.load_workspace_memory_rows(now_ms)?,
+            pin,
+            replay_owners: None,
+        })
+    }
     fn load_compartment_score_snapshot(
         &self,
         session_id: &str,
@@ -573,7 +603,7 @@ pub(crate) fn compose_m0_with_score_snapshot<S: M0Source + ?Sized>(
     let memory_start = std::time::Instant::now();
     // --- memories: rows and watermarks share one SQLite snapshot ---
     let membership = store.resolve_workspace_membership(inputs.project_path)?;
-    let snapshot = if inputs.memory_enabled {
+    let mut snapshot = if inputs.memory_enabled {
         store.load_memory_render_snapshot(
             inputs.project_path,
             membership.as_ref(),
@@ -587,18 +617,44 @@ pub(crate) fn compose_m0_with_score_snapshot<S: M0Source + ?Sized>(
             fragment_watermark: 0,
         }
     };
+    let placements = if inputs.memory_enabled {
+        store.load_memory_placements(inputs.session_id, inputs.now_ms, &snapshot)?
+    } else {
+        selection::PlacementSnapshot::default()
+    };
+    let (candidates, owners) = selection::visible_rows(&snapshot.memories, &placements);
     let source_name_by_module_id = membership
         .as_ref()
         .map(|value| workspace_source_names(&snapshot.memories, value))
         .unwrap_or_else(HashMap::new);
-    let selected_memories = trim_memories_to_budget(
-        snapshot.memories.clone(),
-        membership.as_ref(),
-        &source_name_by_module_id,
-        inputs.memory_budget_tokens,
-        estimate_tokens,
-    );
+    let selected_memories = if placements.replay_owners.is_some() {
+        // A marker probe must not re-apply current floors or selection policy to
+        // the saved rows. That would turn a background edit into a HARD trigger.
+        candidates
+    } else {
+        selection::select(
+            candidates,
+            &owners,
+            placements.workspace_id.as_deref(),
+            membership.as_ref(),
+            &source_name_by_module_id,
+            inputs.memory_budget_tokens,
+            estimate_tokens,
+        )
+    };
     let rendered_memories = selected_memories.clone();
+    let project_memories: Vec<_> = rendered_memories
+        .iter()
+        .filter(|row| !owners.contains_key(&row.id))
+        .cloned()
+        .collect();
+    let workspace_memories: Vec<_> = rendered_memories
+        .iter()
+        .filter(|row| owners.contains_key(&row.id))
+        .cloned()
+        .collect();
+    // Workspace rows can originate outside the legacy project/union pool.
+    snapshot.memories = rendered_memories.clone();
     let source_name_by_id = membership
         .as_ref()
         .map(|value| workspace_source_names(&rendered_memories, value))
@@ -657,13 +713,17 @@ pub(crate) fn compose_m0_with_score_snapshot<S: M0Source + ?Sized>(
         .then(|| resolved_mural(inputs.mural))
         .flatten();
     timings.mural_ms += mural_start.elapsed().as_secs_f64() * 1000.0;
+    let workspace_memory_block = placements.workspace_id.as_deref().map(|workspace| {
+        crate::memory_render::render_workspace_memory_block(&workspace_memories, workspace)
+    });
     let mut m0_bytes = render_m0_retry(
         &M0Inputs {
             project_docs: &docs.rendered_block,
             user_profile: &user_profile,
             covered_system_messages: inputs.covered_system_messages,
             compartments: &decay_compartments,
-            memories: &rendered_memories,
+            memories: &project_memories,
+            workspace_memory_block: workspace_memory_block.as_deref(),
             source_name_by_id: &source_name_by_id,
             history_budget_tokens: inputs.history_budget_tokens,
             decay_pressure_multiplier: 1.0,
@@ -684,6 +744,9 @@ pub(crate) fn compose_m0_with_score_snapshot<S: M0Source + ?Sized>(
                 &rendered_memories,
                 &user_profile,
             );
+            for shown in &mut projection.rows {
+                shown.owner = owners.get(&shown.memory.id).cloned();
+            }
             projection.bind_m0(&m0_bytes);
             projection
         },
@@ -1170,6 +1233,7 @@ mod tests {
                 compartments: &decay_compartments,
                 memories: &[],
                 source_name_by_id: &HashMap::new(),
+                workspace_memory_block: None,
                 history_budget_tokens: inputs.history_budget_tokens,
                 decay_pressure_multiplier: 1.0,
             },
@@ -1216,6 +1280,7 @@ mod tests {
             compartments: &compartments,
             memories: &[],
             source_name_by_id: &source_names,
+            workspace_memory_block: None,
             history_budget_tokens: 300.0,
             decay_pressure_multiplier: 1.0,
         };
@@ -1250,6 +1315,7 @@ mod tests {
             compartments: &compartments,
             memories: &[],
             source_name_by_id: &source_names,
+            workspace_memory_block: None,
             history_budget_tokens: 0.0,
             decay_pressure_multiplier: 1.0,
         };
@@ -1275,6 +1341,7 @@ mod tests {
             compartments: &compartments,
             memories: &[],
             source_name_by_id: &source_names,
+            workspace_memory_block: None,
             history_budget_tokens: 300.0,
             decay_pressure_multiplier: 1.0,
         };
@@ -1332,6 +1399,7 @@ mod tests {
             compartments: &compartments,
             memories: &[],
             source_name_by_id: &source_names,
+            workspace_memory_block: None,
             history_budget_tokens: fixture.budget,
             decay_pressure_multiplier: 1.0,
         };

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Section-inventory protocol version serialized in move manifests.
 pub const INVENTORY_VERSION: u32 = 9;
-pub const CONTEXT_SCHEMA_VERSION: u32 = 103;
+pub const CONTEXT_SCHEMA_VERSION: u32 = 104;
 pub const STORE_SCHEMA_VERSION: u32 = 75;
 pub const GLOBAL_USER_PROFILE_PROJECT_PATH: &str = "__global__";
 
@@ -1056,6 +1056,87 @@ pub const TABLES: &[TableInventory] = &[
         RowSelector::None,
         &["segid", "term"],
         &["segid", "term", "pgno"],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_placement",
+        NotSession,
+        RowSelector::None,
+        &["memory_id"],
+        &[
+            "memory_id",
+            "level",
+            "owner_kind",
+            "owner_id",
+            "origin_profile_name",
+            "origin_profile_version",
+            "origin_profile_digest",
+            "origin_category",
+            "applies_to_json",
+            "written_at"
+        ],
+        &[],
+        None,
+        None
+    ),
+    // Allocators, pending sends and device receipts must never move to another host.
+    table!(
+        Context,
+        "memory_ops",
+        LocalReset,
+        RowSelector::None,
+        &["account", "device", "local_id"],
+        &[
+            "account",
+            "device",
+            "local_id",
+            "memory_id",
+            "op_digest",
+            "canonical",
+            "kind",
+            "created_at"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_outbox",
+        LocalReset,
+        RowSelector::None,
+        &["account", "device", "local_id"],
+        &[
+            "account",
+            "device",
+            "local_id",
+            "pending_seq",
+            "appended_seq",
+            "last_error"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_sync_state",
+        LocalReset,
+        RowSelector::None,
+        &["device"],
+        &[
+            "device",
+            "account",
+            "enrollment_state",
+            "next_local_id",
+            "hlc_wall_ms",
+            "hlc_logical",
+            "drainer_holder",
+            "drainer_until"
+        ],
         &[],
         None,
         None
@@ -3977,6 +4058,35 @@ mod tests {
             "mc_project_state",
         ] {
             assert!(entry(Store::Module, dropped).is_none());
+        }
+    }
+
+    #[test]
+    fn memory_placement_is_project_scoped_and_sync_records_never_enter_session_capture() {
+        let (_dir, mut context, _module) = fresh_stores();
+        let placement = entry(Store::Context, "memory_placement").unwrap();
+        assert_eq!(placement.class, Class::NotSession);
+        assert_eq!(placement.rows, RowSelector::None);
+        assert_eq!(placement.session_column(), None);
+        let sync_tables = ["memory_ops", "memory_outbox", "memory_sync_state"];
+        for table in sync_tables {
+            let definition = entry(Store::Context, table).unwrap();
+            assert_eq!(definition.class, Class::LocalReset, "{table}");
+            assert_eq!(definition.rows, RowSelector::None, "{table}");
+            assert!(definition.shipped_columns().is_empty(), "{table}");
+        }
+        let mut before = Vec::new();
+        crate::move_snapshot::capture_half(&mut context, Store::Context, "s", &mut before).unwrap();
+        context.execute_batch("INSERT INTO memory_placement(memory_id,level,owner_kind,owner_id,written_at) VALUES (1,'project','project','p',1);
+            INSERT INTO memory_ops VALUES ('account','device',1,1,'digest',X'00ff','Create',1);
+            INSERT INTO memory_outbox VALUES ('account','device',1,2,NULL,NULL);
+            INSERT INTO memory_sync_state VALUES ('device','account','enrolled',2,1,0,'holder',10);").unwrap();
+        let mut after = Vec::new();
+        crate::move_snapshot::capture_half(&mut context, Store::Context, "s", &mut after).unwrap();
+        assert_eq!(before, after);
+        for table in std::iter::once("memory_placement").chain(sync_tables) {
+            assert!(!crate::move_snapshot::ship_tables(Store::Context)
+                .any(|definition| definition.table == table));
         }
     }
 

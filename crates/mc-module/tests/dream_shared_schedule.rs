@@ -92,8 +92,14 @@ impl TaskExecutor for Recorder {
     fn operational_tasks(&self) -> &[TaskName] {
         &[TASK]
     }
-    fn gate(&mut self, _: TaskName, _: &StoreScope, _: &ScheduleState) -> Result<bool, String> {
-        Ok(true)
+    async fn gate(
+        &mut self,
+        _: TaskName,
+        _: &StoreScope,
+        _: &ScheduleState,
+        _: &str,
+    ) -> Result<mc_store::dream_scheduler::GateDecision, String> {
+        Ok(true.into())
     }
     async fn run(&mut self, _: &TaskContext) -> RunOutcome {
         let started = wall_ms();

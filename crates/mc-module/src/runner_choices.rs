@@ -17,6 +17,10 @@ use serde_json::{json, Value};
 
 use crate::historian_runner::{ResolvedRunner, RunnerSource};
 
+/// Routing's complete decision, including runner auth, model limits and explanation.
+/// Kept separate from the legacy harness choice until model work uses routing.
+pub type RoutedChoice = cortexkit_role_routing::select::SelectAnswer;
+
 /// Sessions remembered at once. The oldest recorded session is forgotten first.
 pub const RUNNER_CHOICE_SESSION_CAP: usize = 256;
 /// Sessions listed in the health metrics, newest first.

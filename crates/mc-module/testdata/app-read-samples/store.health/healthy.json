@@ -10,10 +10,10 @@
     "row": {
       "databases": [
         {
-          "bytes": 1413120,
+          "bytes": 1445888,
           "freelist_count": 0,
           "name": "context_db",
-          "page_count": 345,
+          "page_count": 353,
           "page_size": 4096,
           "path": "<context_db>",
           "rows": [
@@ -330,7 +330,22 @@
             {
               "method": "max_rowid",
               "rows": 0,
+              "table": "memory_ops"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_outbox"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
               "table": "memory_pending_facts"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_placement"
             },
             {
               "method": "max_rowid",
@@ -346,6 +361,11 @@
               "method": "max_rowid",
               "rows": 0,
               "table": "memory_successor_links"
+            },
+            {
+              "method": "max_rowid",
+              "rows": 0,
+              "table": "memory_sync_state"
             },
             {
               "method": "max_rowid",
@@ -579,7 +599,7 @@
             },
             {
               "method": "max_rowid",
-              "rows": 103,
+              "rows": 104,
               "table": "schema_migrations"
             },
             {
@@ -708,7 +728,7 @@
               "table": "workspaces"
             }
           ],
-          "schema_version": 103,
+          "schema_version": 104,
           "shm_bytes": 32768,
           "wal_bytes": 0
         },

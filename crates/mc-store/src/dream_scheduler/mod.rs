@@ -8,6 +8,7 @@ pub mod budget;
 pub mod cron;
 mod leases;
 pub mod schedules;
+pub mod targets;
 
 use crate::parity_schema_manifest::*;
 use rusqlite::{Connection, TransactionBehavior};
@@ -21,6 +22,32 @@ pub enum Error {
     Json(serde_json::Error),
 }
 type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateDecision {
+    Run,
+    Skip { code: String },
+}
+
+impl From<bool> for GateDecision {
+    fn from(run: bool) -> Self {
+        if run {
+            Self::Run
+        } else {
+            Self::Skip {
+                code: "inputs_unchanged".into(),
+            }
+        }
+    }
+}
+
+struct PreparedClaim {
+    lease: DreamLease,
+    bypass: bool,
+    state: ScheduleState,
+    prior: Option<ScheduleState>,
+    slot: i64,
+}
 impl From<rusqlite::Error> for Error {
     fn from(value: rusqlite::Error) -> Self {
         Self::Storage(value)
@@ -74,7 +101,8 @@ impl SqliteDreamScheduler {
         tx.execute_batch("PRAGMA application_id=1296254035;
             CREATE TABLE IF NOT EXISTS dream_schedules(project TEXT NOT NULL, task TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(project,task));
             CREATE TABLE IF NOT EXISTS dream_leases(domain TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS dream_runs(project TEXT NOT NULL, invocation TEXT NOT NULL, token TEXT NOT NULL UNIQUE, state TEXT NOT NULL, PRIMARY KEY(project,invocation));")?;
+            CREATE TABLE IF NOT EXISTS dream_runs(project TEXT NOT NULL, invocation TEXT NOT NULL, token TEXT NOT NULL UNIQUE, state TEXT NOT NULL, PRIMARY KEY(project,invocation));
+            CREATE TABLE IF NOT EXISTS dream_targets(project TEXT PRIMARY KEY, workdir TEXT NOT NULL, project_id TEXT, seen_at INTEGER NOT NULL);")?;
         tx.commit()?;
         Ok(Self {
             db: Some(Mutex::new(db)),
@@ -279,9 +307,8 @@ impl SqliteDreamScheduler {
         self.claim_task_checked(request, task, manual, |state| Ok(gate(state)))
     }
 
-    /// A failed gate read is an error, not a skip. The callback runs after lease
-    /// acquisition with no connection mutex or SQLite transaction held. It should
-    /// perform local reads only; the runner owns all model/network execution.
+    /// A failed gate read is an error, not a skip. No SQLite lock is held while
+    /// evaluating the gate, including the asynchronous project-context read.
     pub fn claim_task_checked(
         &self,
         request: &DreamClaimRequest,
@@ -290,6 +317,52 @@ impl SqliteDreamScheduler {
         gate: impl FnOnce(&ScheduleState) -> Result<bool>,
     ) -> CapabilityResult<DreamLease> {
         capability((|| {
+            let prepared = self.prepare_claim(request, task, manual)?;
+            let result = if prepared.bypass {
+                Ok(GateDecision::Run)
+            } else {
+                // The compatibility callback has no named skip reason. New
+                // executors use the asynchronous API's explicit skip code.
+                gate(&prepared.state).map(|run| {
+                    if run {
+                        GateDecision::Run
+                    } else {
+                        GateDecision::Skip {
+                            code: String::new(),
+                        }
+                    }
+                })
+            };
+            self.resolve_gate(request, task, prepared, result)
+        })())
+    }
+
+    pub async fn claim_task_checked_async<F: std::future::Future<Output = Result<GateDecision>>>(
+        &self,
+        request: &DreamClaimRequest,
+        task: TaskName,
+        manual: Option<&TaskConfig>,
+        gate: impl FnOnce(ScheduleState, DreamLease) -> F,
+    ) -> CapabilityResult<DreamLease> {
+        let prepared = match self.prepare_claim(request, task, manual) {
+            Ok(value) => value,
+            Err(error) => return capability(Err(error)),
+        };
+        let result = if prepared.bypass {
+            Ok(GateDecision::Run)
+        } else {
+            gate(prepared.state.clone(), prepared.lease.clone()).await
+        };
+        capability(self.resolve_gate(request, task, prepared, result))
+    }
+
+    fn prepare_claim(
+        &self,
+        request: &DreamClaimRequest,
+        task: TaskName,
+        manual: Option<&TaskConfig>,
+    ) -> Result<PreparedClaim> {
+        (|| {
             let mut prior = self.read(|db| {
                 validate_scope(&request.scope)?;
                 if request.invocation.0.trim().is_empty()
@@ -357,46 +430,61 @@ impl SqliteDreamScheduler {
                 }
                 Ok((lease, existing))
             })?;
-            if existing || request.manual_force {
-                return Ok(lease);
-            }
-            let gate_result = gate(&state);
-            match gate_result {
-                Ok(true) => Ok(lease),
-                Ok(false) => {
-                    let mut skipped = state.clone();
-                    schedules::advance(
-                        &mut skipped,
-                        &RunOutcome::new(RunStatus::Skipped),
-                        request.now_ms,
-                        request.now_ms,
-                        slot,
-                    )?;
-                    let result = self.write(|db| {
-                        let run = leases::owned(db, &lease, request.now_ms, false)?;
-                        if schedules::read(db, &request.scope.project.0, task)? != prior {
-                            return Err(Error::Refused("schedule_changed"));
-                        }
-                        schedules::write(db, &request.scope.project.0, task, &skipped)?;
-                        leases::release(db, &run)?;
-                        db.execute(
-                            "DELETE FROM dream_runs WHERE project=?1 AND invocation=?2",
-                            rusqlite::params![request.scope.project.0, request.invocation.0],
-                        )?;
-                        Ok(())
-                    });
-                    if result.is_err() {
-                        let _ = self.abandon_claim(&lease);
+            Ok(PreparedClaim {
+                lease,
+                bypass: existing || request.manual_force,
+                state,
+                prior,
+                slot,
+            })
+        })()
+    }
+
+    fn resolve_gate(
+        &self,
+        request: &DreamClaimRequest,
+        task: TaskName,
+        prepared: PreparedClaim,
+        gate_result: Result<GateDecision>,
+    ) -> Result<DreamLease> {
+        let PreparedClaim {
+            lease,
+            state,
+            prior,
+            slot,
+            ..
+        } = prepared;
+        match gate_result {
+            Ok(GateDecision::Run) => Ok(lease),
+            Ok(GateDecision::Skip { code }) => {
+                let mut skipped = state.clone();
+                let mut outcome = RunOutcome::new(RunStatus::Skipped);
+                outcome.last_skip_code = (!code.is_empty()).then_some(code);
+                schedules::advance(&mut skipped, &outcome, request.now_ms, request.now_ms, slot)?;
+                let result = self.write(|db| {
+                    let run = leases::owned(db, &lease, request.now_ms, false)?;
+                    if schedules::read(db, &request.scope.project.0, task)? != prior {
+                        return Err(Error::Refused("schedule_changed"));
                     }
-                    result?;
-                    Err(Error::Refused("gate_closed"))
+                    schedules::write(db, &request.scope.project.0, task, &skipped)?;
+                    leases::release(db, &run)?;
+                    db.execute(
+                        "DELETE FROM dream_runs WHERE project=?1 AND invocation=?2",
+                        rusqlite::params![request.scope.project.0, request.invocation.0],
+                    )?;
+                    Ok(())
+                });
+                if result.is_err() {
+                    let _ = self.abandon_claim(&lease);
                 }
-                Err(error) => {
-                    self.abandon_claim(&lease)?;
-                    Err(error)
-                }
+                result?;
+                Err(Error::Refused("gate_closed"))
             }
-        })())
+            Err(error) => {
+                self.abandon_claim(&lease)?;
+                Err(error)
+            }
+        }
     }
 
     /// Release a cancelled run without advancing its schedule. A delayed caller

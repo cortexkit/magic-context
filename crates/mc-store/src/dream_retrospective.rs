@@ -131,6 +131,7 @@ impl McStore {
         apply_memories: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<()>,
     ) -> Result<bool, McStoreError> {
         self.context_write(&[
+            "memory_placement", "memory_ops", "memory_outbox", "memory_sync_state",
             "memories", "memory_history", "memory_decision_receipts", "memory_journal",
             "memory_embeddings", "user_memory_candidates", "retrospective_processed_windows", "task_schedule_state",
         ], |tx| {

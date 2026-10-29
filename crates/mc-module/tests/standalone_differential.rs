@@ -160,7 +160,7 @@ async fn main() {{
         }}).into_iter().collect();
         let prefix = memory_render::render_m0(&memory_render::M0Inputs {{
             project_docs: "", user_profile: &[], covered_system_messages: &[], compartments: &[],
-            memories: &memories, source_name_by_id: &Default::default(), history_budget_tokens: 1000.0,
+            memories: &memories, source_name_by_id: &Default::default(), {workspace_memory_block}history_budget_tokens: 1000.0,
             decay_pressure_multiplier: 1.0,
         }}, |text| text.len() / 4);
         println!("{{}}", json!({{"identity": identity, "error": error, "prefix": prefix}}));
@@ -168,6 +168,11 @@ async fn main() {{
     }}
 }}
 "#,
+        workspace_memory_block = if revision.is_some() {
+            ""
+        } else {
+            "workspace_memory_block: None, "
+        },
         entorhinal = if revision.is_some() {
             ""
         } else {

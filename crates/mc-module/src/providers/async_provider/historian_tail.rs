@@ -354,14 +354,9 @@ mod tests {
                 json!({"no_fire":format!("{reason:?}")})
             }
             AssembleHistorianFiringOutcome::Fire(firing) => {
-                let request = firing.as_fire_request(
-                    store,
-                    &parsed.session_id,
-                    "/proj",
-                    "runner",
-                    "proj",
-                    None,
-                );
+                let request = firing
+                    .as_fire_request(store, &parsed.session_id, "/proj", "runner", "proj", None)
+                    .unwrap();
                 json!({"system":request.system,"prompt":request.prompt,"raw_chunk_messages":request.raw_chunk_messages,
                     "range":[firing.chunk.chunk.start_index,firing.chunk.chunk.end_index,firing.chunk.chunk.end_index.saturating_add(1)],
                     "fingerprint":request.chunk_fingerprint,"identities":request.selected_range_identities})

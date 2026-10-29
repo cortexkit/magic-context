@@ -455,6 +455,66 @@ pub fn read_memory_render_snapshot(
     })
 }
 
+/// Non-project placements joined to live, render-eligible rows. Legacy sources do
+/// not have placement tables and must not probe them during migration checks.
+pub fn read_workspace_memory_rows(
+    conn: &Connection,
+    tables: &DomainTables,
+    now_ms: i64,
+) -> rusqlite::Result<Vec<(StoredMemory, crate::memory_levels::Placement)>> {
+    if tables.memories != "memories" {
+        return Ok(Vec::new());
+    }
+    let mut statement = conn.prepare(
+        "SELECT m.id,m.project_path,m.category,m.content,m.importance,m.status,m.expires_at,
+                m.superseded_by_memory_id,m.updated_at,m.last_seen_at,m.verified_at,
+                p.level,p.owner_kind,p.owner_id,p.origin_profile_name,p.origin_profile_version,
+                p.origin_profile_digest,p.origin_category
+           FROM memory_placement p JOIN memories m ON m.id=p.memory_id
+          WHERE p.level <> 'project' AND m.status IN ('active','permanent')
+            AND (m.expires_at IS NULL OR m.expires_at > ?1)
+          ORDER BY COALESCE(m.importance,50) DESC,m.id ASC",
+    )?;
+    let rows = statement
+        .query_map([now_ms], |row| {
+            let name: Option<String> = row.get(14)?;
+            let version: Option<String> = row.get(15)?;
+            let digest: Option<String> = row.get(16)?;
+            Ok((
+                StoredMemory {
+                    id: row.get(0)?,
+                    project_path: row.get(1)?,
+                    category: row.get(2)?,
+                    content: row.get(3)?,
+                    importance: row.get(4)?,
+                    status: row.get(5)?,
+                    expires_at: row.get(6)?,
+                    superseded_by_memory_id: row.get(7)?,
+                    updated_at: row.get(8)?,
+                    last_seen_at: row.get(9)?,
+                    verified_at: row.get(10)?,
+                },
+                crate::memory_levels::Placement {
+                    level: row.get(11)?,
+                    owner: crate::memory_levels::Owner {
+                        kind: row.get(12)?,
+                        id: row.get(13)?,
+                    },
+                    origin_profile: name.zip(version).zip(digest).map(
+                        |((name, version), digest)| crate::memory_levels::OriginProfile {
+                            name,
+                            version,
+                            digest,
+                        },
+                    ),
+                    origin_category: row.get(17)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// Active user-memory contents, in render order.
 pub fn read_active_user_memories(
     conn: &Connection,

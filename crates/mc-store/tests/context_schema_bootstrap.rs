@@ -223,6 +223,22 @@ fn caller_cannot_select_a_different_fence() {
 }
 
 #[test]
+fn current_host_rejects_caller_selected_older_fence() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("context.db");
+    install(&path);
+    let before = fs::read(&path).unwrap();
+    let mut previous = request(&path);
+    previous.expected_schema_version = BOOTSTRAP_VERSION - 1;
+    assert!(
+        matches!(BOOTSTRAP.bootstrap(&previous), CapabilityResult::Unavailable { reason }
+        if reason.code == "schema_version_mismatch")
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(install(&path).schema_version, BOOTSTRAP_VERSION);
+}
+
+#[test]
 fn current_database_is_idempotent_and_keeps_data() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("context.db");

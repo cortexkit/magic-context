@@ -102,6 +102,7 @@ struct AppliedMutationReceipt<'a> {
 #[derive(Default)]
 pub struct MemoryActions {
     refusals: HashMap<String, usize>,
+    memory_writer: mc_store::memory_levels::MemoryWriter,
 }
 
 fn text(row: &Value, key: &str) -> String {
@@ -215,6 +216,39 @@ fn inactive(id: i64, action: &str) -> String {
 }
 
 impl MemoryActions {
+    pub fn with_memory_writer(writer: mc_store::memory_levels::MemoryWriter) -> Self {
+        Self {
+            memory_writer: writer,
+            ..Default::default()
+        }
+    }
+
+    fn created(
+        &self,
+        tx: &Connection,
+        ctx: &MemoryActionContext<'_>,
+        id: i64,
+        kind: mc_store::memory_levels::CreateKind,
+        owner: Option<&mc_store::memory_levels::Owner>,
+    ) -> rusqlite::Result<()> {
+        self.memory_writer.created(
+            tx,
+            id,
+            if ctx.role == MemoryRole::Dreamer {
+                mc_store::memory_levels::Actor::Dreamer
+            } else {
+                mc_store::memory_levels::Actor::MainAgent
+            },
+            kind,
+            if ctx.role == MemoryRole::Dreamer {
+                None
+            } else {
+                Some(ctx.session_id)
+            },
+            owner,
+            ctx.now_ms,
+        )
+    }
     /// Recover arguments from `{reduced:true, summary:"<JSON arguments>"}` once.
     /// Models sometimes copy this display-only form from compacted tool history;
     /// its JSON must not supply a trusted role, project, session or workspace policy.
@@ -401,7 +435,15 @@ impl MemoryActions {
                 tx.execute("UPDATE memories SET seen_count=seen_count+1,last_seen_at=?1,updated_at=?1 WHERE id=?2",params![ctx.now_ms,id])?;
                 id
             } else {
-                insert_memory(tx, ctx, category, content)?
+                let id = insert_memory(tx, ctx, category, content)?;
+                self.created(
+                    tx,
+                    ctx,
+                    id,
+                    mc_store::memory_levels::CreateKind::Create,
+                    None,
+                )?;
+                id
             };
             let reply = if matching.is_some() {
                 format!("Memory already exists [ID: {id}] in {category} (seen count incremented).")
@@ -588,12 +630,26 @@ impl MemoryActions {
                 }
             }
             "merge" => {
+                let owner = mc_store::memory_levels::merge_owner(
+                    tx,
+                    &ids,
+                    ctx.project_path,
+                    &self.memory_writer,
+                )?;
                 let id = if let Some(id) = duplicate {
                     id
                 } else {
                     tx.execute("INSERT INTO memories(project_path,category,content,normalized_hash,importance,source_session_id,source_type,first_seen_at,created_at,updated_at,last_seen_at) VALUES(?1,?2,?3,?4,50,?5,?6,?7,?7,?7,?7)",
                         params![ctx.project_path,category,content,hash,ctx.session_id,if dreamer {"dreamer"} else {"agent"},ctx.now_ms])?;
-                    tx.last_insert_rowid()
+                    let id = tx.last_insert_rowid();
+                    self.created(
+                        tx,
+                        ctx,
+                        id,
+                        mc_store::memory_levels::CreateKind::MergeSurvivor,
+                        owner.as_ref(),
+                    )?;
+                    id
                 };
                 let target = load(tx, id)?.unwrap();
                 if target["content"] != content || target["normalized_hash"] != hash {
@@ -1134,6 +1190,192 @@ fn format_rows(rows: &[Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn placement_actions() -> (
+        MemoryActions,
+        std::sync::Arc<std::sync::Mutex<Vec<mc_store::memory_levels::CreateEvent>>>,
+    ) {
+        use mc_store::memory_levels::*;
+        let authority = RunAuthority::from_session_pin(&json!({"profile":{"name":"@cortexkit/memory-swe","version":"1.0.0","digest":"swe-digest","state":"resolved"},"project_id":"project-id","snapshot_digest":"session-pin-digest","category_ids":{"NAMING":"swe:naming","KNOWN_ISSUES":"swe:constraints"}}), "session-a").unwrap();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let writer = MemoryWriter {
+            authority: Some(authority),
+            hook: Some(std::sync::Arc::new(move |_, event| {
+                captured.lock().unwrap().push(event.clone());
+                Ok(())
+            })),
+            ordinals: vec![8],
+            ..Default::default()
+        };
+        (MemoryActions::with_memory_writer(writer), events)
+    }
+
+    fn assert_placement_event(
+        conn: &Connection,
+        event: &mc_store::memory_levels::CreateEvent,
+        kind: mc_store::memory_levels::CreateKind,
+        dreamer: bool,
+    ) {
+        use mc_store::memory_levels::*;
+        assert_eq!(event.kind, kind);
+        assert_eq!(
+            event.actor,
+            if dreamer {
+                Actor::Dreamer
+            } else {
+                Actor::MainAgent
+            }
+        );
+        assert_eq!(
+            event.session_id.as_deref(),
+            if dreamer { None } else { Some("session-a") }
+        );
+        assert_eq!(event.ordinals, vec![8]);
+        assert_eq!(
+            event.owner,
+            Some(Owner {
+                kind: "project".into(),
+                id: "project-id".into()
+            })
+        );
+        assert_eq!(event.writer_project_id.as_deref(), Some("project-id"));
+        assert_eq!(event.snapshot_digest.as_deref(), Some("session-pin-digest"));
+        assert_eq!(
+            event.origin_profile.as_ref().unwrap().name,
+            "@cortexkit/memory-swe"
+        );
+        let placement = read_placement(conn, event.memory_id).unwrap().unwrap();
+        assert_eq!(placement.owner, event.owner.clone().unwrap());
+        assert_eq!(placement.origin_category, event.effective_category_id);
+    }
+
+    #[test]
+    fn action_write_placement_and_hook() {
+        let mut conn = database();
+        let (mut actions, events) = placement_actions();
+        let reply = run(
+            &mut actions,
+            &mut conn,
+            "placed-write",
+            MemoryRole::Primary,
+            json!({"action":"write","category":"NAMING","content":"use snake case"}),
+        );
+        assert!(reply.starts_with("Saved memory"), "{reply}");
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_placement_event(
+            &conn,
+            &events[0],
+            mc_store::memory_levels::CreateKind::Create,
+            false,
+        );
+        assert_eq!(
+            events[0].effective_category_id.as_deref(),
+            Some("swe:naming")
+        );
+    }
+
+    #[test]
+    fn action_canonical_merge_placement_and_hook() {
+        let mut conn = database();
+        let (mut actions, events) = placement_actions();
+        for (key, content) in [("a", "snake case"), ("b", "short names")] {
+            run(
+                &mut actions,
+                &mut conn,
+                key,
+                MemoryRole::Primary,
+                json!({"action":"write","category":"NAMING","content":content}),
+            );
+        }
+        events.lock().unwrap().clear();
+        let reply = run(
+            &mut actions,
+            &mut conn,
+            "merged",
+            MemoryRole::Primary,
+            json!({"action":"merge","ids":[1,2],"content":"snake case and short names"}),
+        );
+        assert!(reply.starts_with("Merged memories"), "{reply}");
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_placement_event(
+            &conn,
+            &events[0],
+            mc_store::memory_levels::CreateKind::MergeSurvivor,
+            false,
+        );
+        assert_eq!(
+            events[0].effective_category_id.as_deref(),
+            Some("swe:naming")
+        );
+    }
+
+    #[test]
+    fn dreamer_create_uses_run_authority_and_known_issues_mapping() {
+        let mut conn = database();
+        let (mut actions, events) = placement_actions();
+        run(
+            &mut actions,
+            &mut conn,
+            "dream",
+            MemoryRole::Dreamer,
+            json!({"action":"write","category":"KNOWN_ISSUES","content":"race on shutdown"}),
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_placement_event(
+            &conn,
+            &events[0],
+            mc_store::memory_levels::CreateKind::Create,
+            true,
+        );
+        assert_eq!(
+            events[0].effective_category_id.as_deref(),
+            Some("swe:constraints")
+        );
+        let mut no_authority = MemoryActions::default();
+        run(
+            &mut no_authority,
+            &mut conn,
+            "dream-unbound",
+            MemoryRole::Dreamer,
+            json!({"action":"write","category":"KNOWN_ISSUES","content":"unbound create"}),
+        );
+        assert!(mc_store::memory_levels::read_placement(&conn, 2)
+            .unwrap()
+            .is_none());
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM memories"), 2);
+    }
+
+    #[test]
+    fn unmapped_profile_category_stays_null() {
+        let mut conn = database();
+        let (mut actions, events) = placement_actions();
+        actions
+            .memory_writer
+            .authority
+            .as_mut()
+            .unwrap()
+            .category_ids
+            .clear();
+        run(
+            &mut actions,
+            &mut conn,
+            "unmapped",
+            MemoryRole::Primary,
+            json!({"action":"write","category":"NAMING","content":"no profile mapping"}),
+        );
+        assert_eq!(events.lock().unwrap()[0].effective_category_id, None);
+        assert_eq!(
+            mc_store::memory_levels::read_placement(&conn, 1)
+                .unwrap()
+                .unwrap()
+                .origin_category,
+            None
+        );
+    }
 
     const NOW: i64 = 1_700_000_000_000;
     fn database() -> Connection {

@@ -91,7 +91,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let route_targets =
         RouteTargetConfig::for_configured_runners(mc_module::config::user_configured_runners());
     let smart_notes_enabled = mc_module::config::user_smart_notes_enabled();
-    let result = subc_client_rs::serve_with(
+    let dream_wire = std::sync::Arc::new(
+        mc_module::dream_dispatch::routed::wire::ProductionWire::new(
+            connection_file.clone(),
+            module_id.clone(),
+        ),
+    );
+    let (handle, serving) = subc_client_rs::serve_with_handle(
         &connection_file,
         manifest_with_route_targets_and_smart_notes(
             &module_id,
@@ -104,11 +110,21 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 route_targets,
                 module_id,
             )
+            .with_dream_wire(dream_wire.clone())
             .with_startup_smart_notes_enabled(smart_notes_enabled)
             .with_log_directory(logger.logs_dir().to_path_buf()),
         ),
     )
-    .await;
+    .await?;
+    let serving = tokio::spawn(serving);
+    if let Err(refusal) = dream_wire.initialize(handle).await {
+        tracing::warn!(
+            code = refusal.code,
+            detail = refusal.detail,
+            "routed dreams unavailable; retaining legacy transports"
+        );
+    }
+    let result = serving.await?;
     mc_module::project_identity::shutdown_pin_writes();
     result?;
     Ok(())

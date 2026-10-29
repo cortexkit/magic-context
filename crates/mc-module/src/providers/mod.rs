@@ -14,6 +14,8 @@ pub(crate) use async_provider::reminder_echoes::origin as runner_origin;
 #[cfg(test)]
 pub(crate) use async_provider::serve_descriptors;
 #[cfg(test)]
+pub(crate) use async_provider::{render_published_history, render_published_history_with_memory};
+#[cfg(test)]
 mod describe_fixture_tests;
 
 pub mod codec;

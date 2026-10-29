@@ -1451,6 +1451,52 @@ CREATE INDEX idx_tags_session_message_nocase
 CREATE INDEX idx_tags_session_tool_owner
         ON tags(session_id, tool_owner_message_id);
 
+CREATE TABLE memory_placement (
+                    memory_id INTEGER PRIMARY KEY,
+                    level TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    origin_profile_name TEXT,
+                    origin_profile_version TEXT,
+                    origin_profile_digest TEXT,
+                    origin_category TEXT,
+                    applies_to_json TEXT,
+                    written_at INTEGER NOT NULL
+                );
+
+CREATE TABLE memory_ops (
+                    account TEXT NOT NULL,
+                    device TEXT NOT NULL,
+                    local_id INTEGER NOT NULL,
+                    memory_id INTEGER NOT NULL,
+                    op_digest TEXT NOT NULL,
+                    canonical BLOB NOT NULL,
+                    kind TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (account, device, local_id)
+                );
+
+CREATE TABLE memory_outbox (
+                    account TEXT NOT NULL,
+                    device TEXT NOT NULL,
+                    local_id INTEGER NOT NULL,
+                    pending_seq INTEGER,
+                    appended_seq INTEGER,
+                    last_error TEXT,
+                    PRIMARY KEY (account, device, local_id)
+                );
+
+CREATE TABLE memory_sync_state (
+                    device TEXT PRIMARY KEY NOT NULL,
+                    account TEXT,
+                    enrollment_state TEXT NOT NULL,
+                    next_local_id INTEGER NOT NULL,
+                    hlc_wall_ms INTEGER NOT NULL,
+                    hlc_logical INTEGER NOT NULL,
+                    drainer_holder TEXT,
+                    drainer_until INTEGER
+                );
+
 CREATE TABLE schema_migrations (
 			version INTEGER PRIMARY KEY,
 			description TEXT NOT NULL,
@@ -1978,7 +2024,8 @@ INSERT INTO schema_migrations (version, description, applied_at) VALUES
 (100, 'durable served thinking prefix and held release request', :applied_at),
 (101, 'indexed trimmed-source tag retirement', :applied_at),
 (102, 'bind served capture markers to the digest of their certified bytes', :applied_at),
-(103, 'isolate session render payloads and chunk growing replay metadata', :applied_at);
+(103, 'isolate session render payloads and chunk growing replay metadata', :applied_at),
+(104, 'project memory placement and device-local memory sync records', :applied_at);
 
 INSERT INTO "message_fts_rowid_map_backfill_state" ("completed", "id", "updated_at", "watermark_rowid") VALUES
 (1, 1, 0, 0);

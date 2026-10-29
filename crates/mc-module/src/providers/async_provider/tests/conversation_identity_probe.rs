@@ -3,17 +3,21 @@
 //! compaction-provider's own probe against the async provider and pin the
 //! sites that look a conversation up from a route.
 use super::*;
+#[cfg(unix)]
 use cortexkit_role_compaction_provider::conformance::{
     conversation_state_ignores_project_root, StateProbe, CASE_NAME,
 };
+#[cfg(unix)]
 use std::collections::BTreeSet;
 
+#[cfg(unix)]
 const PARAMS: &str = r#"{"serializer_profile":"opencode-aisdk"}"#;
 
 /// The attested session-runner module the probe's runner id stands for. The
 /// provider admits only real session-runner modules, so the probe's two
 /// runners are two of those; the id still reaches the provider only as the
 /// route's daemon-stamped principal.
+#[cfg(unix)]
 fn attested_module(probe_runner: &str) -> Result<&'static str, String> {
     match probe_runner {
         "runner-a" => Ok(crate::route_targets::DEFAULT_RUNNER_MODULE_ID),
@@ -24,6 +28,7 @@ fn attested_module(probe_runner: &str) -> Result<&'static str, String> {
 
 /// Make `/var/probe-project` and `/private/var/probe-project` spell one
 /// folder under `base`, as they do on macOS: `var` links to `private/var`.
+#[cfg(unix)]
 fn folder_aliases(base: &Path) {
     std::fs::create_dir_all(base.join("private/var/probe-project")).unwrap();
     std::os::unix::fs::symlink("private/var", base.join("var")).unwrap();
@@ -31,10 +36,12 @@ fn folder_aliases(base: &Path) {
 
 /// The probe's absolute folder spelling, placed under `base` without
 /// resolving it, so each spelling reaches the provider as a distinct string.
+#[cfg(unix)]
 fn spelled(base: &Path, folder: &str) -> PathBuf {
     base.join(folder.trim_start_matches('/'))
 }
 
+#[cfg(unix)]
 fn setup_params(harness: &str, session: &str, request_id: &str) -> Value {
     json!({
         "session": session,
@@ -51,6 +58,7 @@ fn setup_params(harness: &str, session: &str, request_id: &str) -> Value {
 
 /// Bind a route under `module`'s attested principal, with `project_root` as
 /// its folder and a generic shared-route harness and session.
+#[cfg(unix)]
 fn bind_runner_route(rig: &Rig, channel: u16, module: &str, project_root: &Path, session: &str) {
     let mut binding = rig.h.facade_binding(7).unwrap();
     binding.principal = Some(subc_protocol::Principal::Reserved {
@@ -62,12 +70,14 @@ fn bind_runner_route(rig: &Rig, channel: u16, module: &str, project_root: &Path,
     rig.h.bind_route(channel, binding);
 }
 
+#[cfg(unix)]
 struct Adapter {
     base: PathBuf,
     rig: Rig,
     channel: u16,
 }
 
+#[cfg(unix)]
 impl Adapter {
     async fn new(base: &Path) -> Self {
         folder_aliases(base);
@@ -104,6 +114,7 @@ impl Adapter {
     }
 }
 
+#[cfg(unix)]
 impl StateProbe for Adapter {
     fn setup_and_state_marker(
         &mut self,

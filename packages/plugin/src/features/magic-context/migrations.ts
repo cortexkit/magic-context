@@ -3298,6 +3298,58 @@ export const MIGRATIONS: Migration[] = [
         description: "isolate session render payloads and chunk growing replay metadata",
         up: splitSessionMetaPayloads,
     },
+    {
+        version: 104,
+        description: "project memory placement and device-local memory sync records",
+        up(db: Database): void {
+            // Placement deliberately has no foreign key: unchanged memory writers
+            // must still be able to delete a memory without deleting its sidecar.
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS memory_placement (
+                    memory_id INTEGER PRIMARY KEY,
+                    level TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    origin_profile_name TEXT,
+                    origin_profile_version TEXT,
+                    origin_profile_digest TEXT,
+                    origin_category TEXT,
+                    applies_to_json TEXT,
+                    written_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS memory_ops (
+                    account TEXT NOT NULL,
+                    device TEXT NOT NULL,
+                    local_id INTEGER NOT NULL,
+                    memory_id INTEGER NOT NULL,
+                    op_digest TEXT NOT NULL,
+                    canonical BLOB NOT NULL,
+                    kind TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (account, device, local_id)
+                );
+                CREATE TABLE IF NOT EXISTS memory_outbox (
+                    account TEXT NOT NULL,
+                    device TEXT NOT NULL,
+                    local_id INTEGER NOT NULL,
+                    pending_seq INTEGER,
+                    appended_seq INTEGER,
+                    last_error TEXT,
+                    PRIMARY KEY (account, device, local_id)
+                );
+                CREATE TABLE IF NOT EXISTS memory_sync_state (
+                    device TEXT PRIMARY KEY NOT NULL,
+                    account TEXT,
+                    enrollment_state TEXT NOT NULL,
+                    next_local_id INTEGER NOT NULL,
+                    hlc_wall_ms INTEGER NOT NULL,
+                    hlc_logical INTEGER NOT NULL,
+                    drainer_holder TEXT,
+                    drainer_until INTEGER
+                );
+            `);
+        },
+    },
 ];
 
 /**

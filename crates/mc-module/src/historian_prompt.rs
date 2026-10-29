@@ -96,19 +96,9 @@ pub struct ReferenceBlocks {
     pub session_references: String,
 }
 
-/// The historian SYSTEM prompt constant, sent role-scoped via the producer's `system`
-/// field and never concatenated into the user prompt. The .txt is a vendored copy of
-/// the TypeScript plugin's generated historian prompt, kept byte-identical so both
-/// implementations drive the model with the same role guidance; the generator script
-/// in gen/ re-vendors it and its --check mode fails on drift.
-pub const HISTORIAN_SYSTEM_PROMPT: &str = include_str!("../testdata/historian-system-prompt.txt");
-
-/// These options mirror TypeScript so both implementations generate the same instructions.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ContentLanguageDirectiveOptions {
-    pub preserve_user_quotes: bool,
-    pub retrospective: bool,
-}
+pub use crate::persona_host::LanguageOptions as ContentLanguageDirectiveOptions;
+/// Role-scoped system guidance has one live source in the embedded persona.
+pub use crate::persona_host::HISTORIAN_SYSTEM_PROMPT;
 
 /// Build the content-language instruction used by hidden prose-producing agents.
 ///
@@ -118,24 +108,8 @@ pub fn build_content_language_directive(
     language: Option<&str>,
     options: ContentLanguageDirectiveOptions,
 ) -> String {
-    let Some(target) = crate::content_language::resolve_language_name(language) else {
-        return String::new();
-    };
-
-    let mut directive = format!(
-        "## Output language\n\nWrite human-readable prose you author in: {target}.\n\nDo not translate or rename structural tokens. Copy required output schemas exactly:\n- XML tag names, XML attribute names, JSON keys, tool names, tool-call argument keys, enum values, booleans/null, and required sentinel strings stay in English exactly as shown.\n- Keep code identifiers, file paths, commands, config keys, CLI flags, URLs, commit hashes, model/provider IDs, stack traces, diagnostics, and transcript role markers such as U:, A:, and TC: verbatim.\n- Localize only free-text prose values/content: summaries, memory text, explanations, titles, observations, and answers — unless the prompt says to preserve original wording.\n\nThese literal values must remain English when used:\nPROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING;\ncausal_incident, trajectory_correction;\nfeature, design, docs, release, investigation, bug, refactor, infra;\nmemory, observation; true, false; No relevant memories found.\n\nPreserve the required output shape. Do not add commentary outside the requested XML/JSON/tool output."
-    );
-    if options.preserve_user_quotes {
-        directive.push_str(&format!(
-            "\n\nPreserve U: lines and directly quoted user text in their original source language; write the surrounding summary prose in {target}."
-        ));
-    }
-    if options.retrospective {
-        directive.push_str(&format!(
-            "\n\nWrite the lesson text in {target}; paraphrase source text and never quote the user."
-        ));
-    }
-    directive
+    crate::persona_host::render_language_directive(language, options)
+        .expect("compiled language persona must render with its typed context")
 }
 
 /// Append content-language guidance to a role-scoped hidden-agent system prompt.
@@ -144,6 +118,19 @@ pub fn with_content_language_directive<'a>(
     language: Option<&str>,
     options: ContentLanguageDirectiveOptions,
 ) -> Cow<'a, str> {
+    if system_prompt == HISTORIAN_SYSTEM_PROMPT {
+        let context = crate::persona_host::SummaryContext {
+            language: crate::persona_host::LanguageContext::new(language, options),
+            ..Default::default()
+        };
+        let rendered = crate::persona_host::render_embedded_summary(&context)
+            .expect("compiled summary persona must render with its typed context");
+        return if rendered.text == system_prompt {
+            Cow::Borrowed(system_prompt)
+        } else {
+            Cow::Owned(rendered.text)
+        };
+    }
     let directive = build_content_language_directive(language, options);
     if directive.is_empty() {
         Cow::Borrowed(system_prompt)
@@ -198,6 +185,17 @@ pub struct CompartmentPromptInputs<'a> {
     /// historian to skip `<user_observations>`. True leaves the prompt unchanged.
     pub user_observations_requested: bool,
     pub extraction_free: bool,
+}
+
+/// Disable historian extraction and admission, not the rendering of existing memories.
+/// Sessions without a stored memory-profile context, and the Entorhinal-not-answering
+/// fallback, keep extraction and admission enabled when the project configuration allows them.
+pub(crate) fn memory_enabled(configured: bool, context: Option<&serde_json::Value>) -> bool {
+    configured
+        && !matches!(
+            context.and_then(|context| context["profile"]["state"].as_str()),
+            Some("unresolved" | "conflict" | "blocked" | "unavailable")
+        )
 }
 
 pub fn reference_seeds() -> &'static [ReferenceSeed] {
@@ -608,6 +606,29 @@ pub fn build_compartment_agent_prompt(inputs: &CompartmentPromptInputs<'_>) -> S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn memory_enabled_preserves_fallbacks_and_disables_degraded_profiles() {
+        assert!(super::memory_enabled(true, None));
+        assert!(!super::memory_enabled(false, None));
+        for state in [
+            "resolved",
+            "entorhinal_not_answering",
+            "unresolved",
+            "conflict",
+            "blocked",
+            "unavailable",
+        ] {
+            let context = serde_json::json!({"profile": {"state": state}});
+            let enabled = matches!(state, "resolved" | "entorhinal_not_answering");
+            assert_eq!(
+                super::memory_enabled(true, Some(&context)),
+                enabled,
+                "{state}"
+            );
+            assert!(!super::memory_enabled(false, Some(&context)), "{state}");
+        }
+    }
+
     use super::*;
     use std::collections::HashSet;
 

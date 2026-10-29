@@ -14,10 +14,22 @@ import {
 } from "./storage-session-collections";
 import { deleteSessionMetaWithPayloads } from "./storage-session-payloads";
 
+// Run only through migration 103 so the payload-preservation checks keep testing
+// the original v102-to-v103 upgrade even after newer migrations are added.
+function runThrough103(db: Database) {
+    const index = MIGRATIONS.findIndex((migration) => migration.version > 103);
+    const later = index < 0 ? [] : MIGRATIONS.splice(index);
+    try {
+        runMigrations(db);
+    } finally {
+        MIGRATIONS.push(...later);
+    }
+}
+
 function current() {
     const db = new Database(":memory:");
     initializeDatabase(db);
-    runMigrations(db);
+    runThrough103(db);
     return db;
 }
 
@@ -70,9 +82,9 @@ describe("migration 103 session render payload isolation", () => {
                 v: 102,
             });
             expect(enforceSchemaFence(db, ":old:", 102)).toBe(true);
-            runMigrations(db);
-            expect(LATEST_SUPPORTED_VERSION).toBe(103);
-            expect(LATEST_MIGRATION_VERSION).toBe(103);
+            runThrough103(db);
+            expect(LATEST_SUPPORTED_VERSION).toBeGreaterThanOrEqual(103);
+            expect(LATEST_MIGRATION_VERSION).toBeGreaterThanOrEqual(103);
             expect(MIGRATIONS.filter((m) => m.version === 103)).toHaveLength(1);
             expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({
                 v: 103,
@@ -136,7 +148,7 @@ describe("migration 103 session render payload isolation", () => {
             db.exec(
                 "CREATE TRIGGER reject_103 BEFORE INSERT ON schema_migrations WHEN NEW.version=103 BEGIN SELECT RAISE(ABORT,'reject migration'); END",
             );
-            expect(() => runMigrations(db)).toThrow("reject migration");
+            expect(() => runThrough103(db)).toThrow("reject migration");
             expect(
                 db
                     .prepare(
@@ -155,7 +167,7 @@ describe("migration 103 session render payload isolation", () => {
                 v: 102,
             });
             db.exec("DROP TRIGGER reject_103");
-            runMigrations(db);
+            runThrough103(db);
             expect(getOrCreateSessionMeta(db, "rollback").cachedM0Bytes).toEqual(m0);
             expect(readSessionMetaCollection(db, "rollback", "trailing_blank_decisions")).toBe(raw);
         } finally {
@@ -171,7 +183,7 @@ describe("migration 103 session render payload isolation", () => {
             db.prepare(
                 "INSERT INTO session_meta(session_id,trailing_blank_decisions,memory_block_cache) VALUES ('blob',?,NULL),('text',?,'')",
             ).run(blob, raw);
-            runMigrations(db);
+            runThrough103(db);
             expect(readSessionMetaCollection(db, "blob", "trailing_blank_decisions")).toEqual(blob);
             expect(readSessionMetaCollection(db, "text", "trailing_blank_decisions")).toBe(raw);
             expect(

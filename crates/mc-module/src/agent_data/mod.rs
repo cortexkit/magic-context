@@ -289,9 +289,7 @@ fn save(path: &Path, value: &impl Serialize) -> Result<(), ErrorBody> {
         true,
     )
     .map_err(storage)?;
-    File::open(path.parent().expect("journal parent"))
-        .and_then(|dir| dir.sync_all())
-        .map_err(storage)
+    private_permissions::sync_directory(path.parent().expect("journal parent")).map_err(storage)
 }
 fn internal_cut(cut: &str, session: &str, phase: &str) -> String {
     mc_store::move_snapshot::digest(format!("{cut}\n{session}\n{phase}").as_bytes())[..32].into()

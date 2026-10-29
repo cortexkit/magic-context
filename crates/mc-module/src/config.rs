@@ -2533,7 +2533,8 @@ mod config_file_location_tests {
 
     #[test]
     fn a_relative_or_empty_xdg_config_home_is_ignored_like_the_host_ignores_it() {
-        let home = PathBuf::from("/home/someone");
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
         let expected = home
             .join(".config")
             .join("cortexkit")
@@ -2545,9 +2546,10 @@ mod config_file_location_tests {
                 "XDG_CONFIG_HOME={xdg:?}"
             );
         }
+        let xdg = root.path().join("xdg");
         assert_eq!(
-            user_config_path_from(Some("/etc/xdg".into()), Some(home)),
-            PathBuf::from("/etc/xdg/cortexkit/magic-context.jsonc")
+            user_config_path_from(Some(xdg.clone().into()), Some(home)),
+            xdg.join("cortexkit").join("magic-context.jsonc")
         );
     }
     /// With `HOME` empty (or unset, as it usually is on Windows) the paths must still be

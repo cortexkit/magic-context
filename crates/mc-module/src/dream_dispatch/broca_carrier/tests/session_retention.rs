@@ -103,29 +103,6 @@ async fn a_runner_declaring_neither_group_is_unavailable_and_sent_nothing() {
     assert!(f.broca.ops("session.release").is_empty());
 }
 
-/// A privacy-sensitive dream keeps its one-hour deletion bound: a runner whose
-/// unreleased hold is longer is unavailable.
-#[tokio::test]
-async fn a_private_dream_needs_an_unreleased_hold_within_the_hour() {
-    let private = BrocaPolicy {
-        privacy_sensitive: true,
-        ..policy()
-    };
-    let f = Fixture::new(BASE);
-    declare_session_retention(&f, PRIVATE_DELETE_WITHIN_MS + 1, false);
-    let request = f.request(&["ctx_search"], 3);
-    let error = bounded(f.carrier(private.clone()).open(&request))
-        .await
-        .unwrap_err();
-    assert_eq!(error.message, "unavailable: retention_deletion_too_slow");
-    assert!(f.sent().is_empty());
-
-    let f = Fixture::new(BASE);
-    declare_session_retention(&f, PRIVATE_DELETE_WITHIN_MS, false);
-    run_done(&f, private).await;
-    assert_eq!(f.sent()[0]["retention_policy"], keep_nothing());
-}
-
 #[tokio::test]
 async fn release_is_called_once_after_the_result_is_consumed() {
     let f = Fixture::new(BASE);

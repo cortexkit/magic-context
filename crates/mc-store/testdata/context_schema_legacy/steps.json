@@ -186,5 +186,12 @@
       "ALTER TABLE session_meta DROP COLUMN processed_image_stripped_ids",
       "ALTER TABLE session_meta DROP COLUMN memory_block_ids"
     ]
+  },
+  {
+    "version": 104,
+    "description": "project memory placement and device-local memory sync records",
+    "sql": [
+      "\n                CREATE TABLE IF NOT EXISTS memory_placement (\n                    memory_id INTEGER PRIMARY KEY,\n                    level TEXT NOT NULL,\n                    owner_kind TEXT NOT NULL,\n                    owner_id TEXT NOT NULL,\n                    origin_profile_name TEXT,\n                    origin_profile_version TEXT,\n                    origin_profile_digest TEXT,\n                    origin_category TEXT,\n                    applies_to_json TEXT,\n                    written_at INTEGER NOT NULL\n                );\n                CREATE TABLE IF NOT EXISTS memory_ops (\n                    account TEXT NOT NULL,\n                    device TEXT NOT NULL,\n                    local_id INTEGER NOT NULL,\n                    memory_id INTEGER NOT NULL,\n                    op_digest TEXT NOT NULL,\n                    canonical BLOB NOT NULL,\n                    kind TEXT NOT NULL,\n                    created_at INTEGER NOT NULL,\n                    PRIMARY KEY (account, device, local_id)\n                );\n                CREATE TABLE IF NOT EXISTS memory_outbox (\n                    account TEXT NOT NULL,\n                    device TEXT NOT NULL,\n                    local_id INTEGER NOT NULL,\n                    pending_seq INTEGER,\n                    appended_seq INTEGER,\n                    last_error TEXT,\n                    PRIMARY KEY (account, device, local_id)\n                );\n                CREATE TABLE IF NOT EXISTS memory_sync_state (\n                    device TEXT PRIMARY KEY NOT NULL,\n                    account TEXT,\n                    enrollment_state TEXT NOT NULL,\n                    next_local_id INTEGER NOT NULL,\n                    hlc_wall_ms INTEGER NOT NULL,\n                    hlc_logical INTEGER NOT NULL,\n                    drainer_holder TEXT,\n                    drainer_until INTEGER\n                );\n            "
+    ]
   }
 ]

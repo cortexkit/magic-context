@@ -78,6 +78,10 @@ impl FacadeMutationTxn<'_> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShownMemory {
     pub memory: StoredMemory,
+    /// Workspace ownership captured when the HARD selected this row. Missing
+    /// ownership is the legacy project interpretation, not a workspace default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<crate::memory_levels::Owner>,
     pub revision: i64,
     /// Image-only cues are abbreviations, not a complete text-search result.
     pub representation: String,
@@ -138,6 +142,7 @@ impl AppliedProjection {
                 .iter()
                 .map(|memory| ShownMemory {
                     memory: memory.clone(),
+                    owner: None,
                     revision: snapshot.revisions.get(&memory.id).copied().unwrap_or(1),
                     representation: "text".into(),
                 })

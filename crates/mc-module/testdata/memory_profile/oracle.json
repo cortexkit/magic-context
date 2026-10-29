@@ -1,0 +1,174 @@
+[
+  {
+    "document": "historian/system",
+    "variant": "xml",
+    "path": "resolved-swe/rendered/historian/system.xml.md",
+    "sha256": "0cf129e9a32080f07a7850752de8f1d1725c80093fbb8252c058aeec9d0cff2b"
+  },
+  {
+    "document": "historian/system",
+    "variant": "combined",
+    "path": "resolved-swe/rendered/historian/system.combined.md",
+    "sha256": "41bc806b33da42dae92108bafb86f79495e5655453ae029fb98a50772f435041"
+  },
+  {
+    "document": "dreamer/base:review-user-memories/system",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/base-review-user-memories/system.md",
+    "sha256": "74dc06af928e410a27d20ad2158b4fbe5468a24b22d9479d9b5e4877594fde20"
+  },
+  {
+    "document": "dreamer/base:review-user-memories/user",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/base-review-user-memories/user.md",
+    "sha256": "4f16ac1a30afb3ba84adba716f6a24beff3bde8791cc6a4de4b9da86e413150e"
+  },
+  {
+    "document": "main-agent/system.memory-guidance.full",
+    "variant": null,
+    "path": "resolved-swe/rendered/main-agent/system.memory-guidance.full.md",
+    "sha256": "0ab29f08e4209db8e4553c6c72a274f73270b5f16a0ec93fc8c8aa4fadcba0f7"
+  },
+  {
+    "document": "main-agent/system.memory-guidance.light",
+    "variant": null,
+    "path": "resolved-swe/rendered/main-agent/system.memory-guidance.light.md",
+    "sha256": "3737b4265dde69e091f8f5c4ced90f44232d896be040327b1efec5b58c6131ca"
+  },
+  {
+    "document": "main-agent/system.memory-mural-guidance",
+    "variant": null,
+    "path": "resolved-swe/rendered/main-agent/system.memory-mural-guidance.md",
+    "sha256": "152351b25b15ed2c4ef63f983781900f8911ef8666649d09cd37ee94ade30463"
+  },
+  {
+    "document": "dreamer/swe:map-memories/system",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-map-memories/system.md",
+    "sha256": "9f308b01e1655569c479fff63eb2593d561463c732f204c2845c334cd08e8e9d"
+  },
+  {
+    "document": "dreamer/swe:map-memories/user",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-map-memories/user.md",
+    "sha256": "850f6ca11b13f7a210d66fdd75eaa2d0dfd824486026b5decf7a435d8f119564"
+  },
+  {
+    "document": "dreamer/swe:verify/system",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-verify/system.md",
+    "sha256": "f5b53d755c34aff4cf47797354fd5d89b29dcb80df463f67dc73c9104690eebc"
+  },
+  {
+    "document": "dreamer/swe:verify/user.diff-evidence",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-verify/user.diff-evidence.md",
+    "sha256": "b656fd9ffa57171a89b72d24d7a40a1a70106a719f574a5e8c501cd46ea99c59"
+  },
+  {
+    "document": "dreamer/swe:verify-broad/user",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-verify-broad/user.md",
+    "sha256": "63a5ad7e1583acca84393d6bc0907a90ac8f8d6cb898679c298804eead5cc014"
+  },
+  {
+    "document": "dreamer/swe:curate/system",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-curate/system.md",
+    "sha256": "31cb8223887fd5fedb6968cb5d49cde5841f59235a85349ecba80fe487036eb3"
+  },
+  {
+    "document": "dreamer/swe:curate/user",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-curate/user.md",
+    "sha256": "3253420e9c7db60380b0017cd4ed32e2fdaef9b2cdecddfbca6e594d811657a7"
+  },
+  {
+    "document": "dreamer/swe:compress-cues/system",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-compress-cues/system.md",
+    "sha256": "b3169cfae83d07a312b8d59fa402ec02b873c75182a71ccea325fef944ed56f0"
+  },
+  {
+    "document": "dreamer/swe:compress-cues/user",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-compress-cues/user.md",
+    "sha256": "99bc3204803fde4fe9f08f6af2109715b31652c851608cef667d8a9fff3495f9"
+  },
+  {
+    "document": "dreamer/swe:classify-memories/system",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-classify-memories/system.md",
+    "sha256": "d77bb7ae795284222f2d5cac74ef3ddeec11338bad3958a64787d03bb4690787"
+  },
+  {
+    "document": "dreamer/swe:classify-memories/user",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-classify-memories/user.md",
+    "sha256": "149030833ff28b830191dce52b9574e8ef4c25a1ae43b656b03e848ef95190e8"
+  },
+  {
+    "document": "dreamer/swe:reflect-patterns/gate.system",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-reflect-patterns/gate.system.md",
+    "sha256": "071b13b154610b1267176fd25b0e9cb76cb0aaa238491e28f1b16c0379f71286"
+  },
+  {
+    "document": "dreamer/swe:reflect-patterns/gate.user",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-reflect-patterns/gate.user.md",
+    "sha256": "5572b96b9e2f6906d0bb349b48655bbd083f34ad6d5e573ed10ab19b299ad4f4"
+  },
+  {
+    "document": "dreamer/swe:reflect-patterns/system",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-reflect-patterns/system.md",
+    "sha256": "9a782ab6e155049529a018e2b6f0bf65cf38f42e28f42b45e43e08ffe7527da3"
+  },
+  {
+    "document": "dreamer/swe:reflect-patterns/user",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-reflect-patterns/user.md",
+    "sha256": "e05c3e61f7ac12e32f66bcc34696b7b22d64a45a147c4341413071d229885e9c"
+  },
+  {
+    "document": "dreamer/swe:maintain-docs/system",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-maintain-docs/system.md",
+    "sha256": "bd1d9424cbdbf5546fec67189d741885a37f0c3160a76d4a61ea83ef7e41ed5b"
+  },
+  {
+    "document": "dreamer/swe:maintain-docs/user",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-maintain-docs/user.md",
+    "sha256": "a8291de05a507d9b4457a813d77760f9ebb1016b71c470e960e2f1051174c2ae"
+  },
+  {
+    "document": "dreamer/swe:refresh-primers/system",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-refresh-primers/system.md",
+    "sha256": "3278e03aee13925c6ba4b772e59e5b31d725e1ad9c1a45867156c1c84b4befb9"
+  },
+  {
+    "document": "dreamer/swe:refresh-primers/user.raw",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-refresh-primers/user.raw.md",
+    "sha256": "26882094d452f14cc3fa6fc67b0eaaf7300daa7117a173f310b47e53f6be4c32"
+  },
+  {
+    "document": "dreamer/swe:refresh-primers/user.closed-book",
+    "variant": null,
+    "path": "resolved-swe/rendered/dreamer/swe-refresh-primers/user.closed-book.md",
+    "sha256": "ef5dddb250b6b1b0528e933ef69c25c2a3852e99166fda09990437df7435f9d1"
+  },
+  {
+    "frame": "main-agent/ctx_memory.description.full",
+    "path": "resolved-swe/rendered/mc/main-agent/ctx_memory.description.full.md",
+    "sha256": "1dd69f56626326a80062a8a8940cec5e0d5726704e6ea35e421fde03912909be"
+  },
+  {
+    "frame": "main-agent/ctx_memory.description.light",
+    "path": "resolved-swe/rendered/mc/main-agent/ctx_memory.description.light.md",
+    "sha256": "0b1a33144f13291752ecca66d7db7b9dab507029286c6d27447af47ce6663ee9"
+  }
+]

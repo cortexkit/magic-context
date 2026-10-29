@@ -1,0 +1,2 @@
+`<project-memory>` is the pinboard of facts that stay true for the months this work lasts (`#id: fact`), for you and every agent on the project; `ctx_memory` pins what must not have to be found again, especially what cost you turns.
+Categories: PROJECT_RULES (a rule), ARCHITECTURE (an architecture fact), CONSTRAINTS (a constraint), CONFIG_VALUES (a config value), NAMING (a naming convention).

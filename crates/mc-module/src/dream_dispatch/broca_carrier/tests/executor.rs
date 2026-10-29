@@ -373,7 +373,10 @@ async fn broca_map_reads_the_repository_and_its_mapping_lands() {
         item["params"]["tools"],
         json!(DreamRole::MemoryMapper.tools())
     );
-    assert_eq!(item["params"]["root"], json!(run.store_project() + "/repo"));
+    assert_eq!(
+        std::path::Path::new(item["params"]["root"].as_str().unwrap()),
+        std::path::Path::new(&run.store_project()).join("repo")
+    );
     // The reads really hit the fixture checkout.
     let results = run.broca.state().results.clone();
     assert_eq!(results[0].1["files"], json!(["src/cache.rs"]));

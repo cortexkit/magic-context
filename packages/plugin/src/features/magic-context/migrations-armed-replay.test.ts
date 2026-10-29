@@ -934,6 +934,19 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
             }
             populateModuleOwnedRows(db, version, state);
             return;
+        case 104:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            for (const table of [
+                "memory_placement",
+                "memory_ops",
+                "memory_outbox",
+                "memory_sync_state",
+            ]) {
+                expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
+                expect(db.prepare(`PRAGMA foreign_key_list(${table})`).all()).toEqual([]);
+            }
+            populateModuleOwnedRows(db, version, state);
+            return;
         case 100:
             if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
             // Fresh initialization already has the latest indexes. Remove them so

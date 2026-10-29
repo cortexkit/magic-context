@@ -31,6 +31,10 @@ use crate::compute_normalized_memory_hash;
 /// The `context.db` tables an admission may write, for the module's per-table schema
 /// fence. A caller passes these to its write transaction.
 pub const ADMISSION_TABLES: &[&str] = &[
+    "memory_placement",
+    "memory_ops",
+    "memory_outbox",
+    "memory_sync_state",
     "memories",
     "memory_embedding_watermarks",
     "memory_decision_receipts",
@@ -117,6 +121,8 @@ pub struct ClassificationAnchor<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct AdmissionRequest<'a> {
+    /// Internal only; the served tool schema does not expose levels before cutover.
+    pub requested_level: Option<&'a str>,
     /// The decision key the receipt is recorded under. Reusing a key returns the recorded
     /// receipt instead of applying again.
     pub key: &'a str,
@@ -154,6 +160,7 @@ impl<'a> AdmissionRequest<'a> {
         now_ms: i64,
     ) -> Self {
         AdmissionRequest {
+            requested_level: None,
             key,
             operation,
             project_path,
@@ -300,6 +307,21 @@ pub fn apply_memory_admission_tx(
     conn: &Connection,
     request: &AdmissionRequest<'_>,
 ) -> rusqlite::Result<ApplierReceipt> {
+    apply_memory_admission_with_writer_tx(
+        conn,
+        request,
+        &Default::default(),
+        crate::memory_levels::CreateKind::Create,
+    )
+}
+
+pub fn apply_memory_admission_with_writer_tx(
+    conn: &Connection,
+    request: &AdmissionRequest<'_>,
+    writer: &crate::memory_levels::MemoryWriter,
+    kind: crate::memory_levels::CreateKind,
+) -> rusqlite::Result<ApplierReceipt> {
+    crate::memory_levels::requested_level(request.requested_level.unwrap_or("project"))?;
     if let Some(existing) = read_receipt(conn, request.key)? {
         return Ok(existing);
     }
@@ -460,7 +482,21 @@ pub fn apply_memory_admission_tx(
                     request.metadata_json,
                 ],
             )?;
-            conn.last_insert_rowid()
+            let id = conn.last_insert_rowid();
+            writer.created(
+                conn,
+                id,
+                writer.actor.unwrap_or(if agent {
+                    crate::memory_levels::Actor::MainAgent
+                } else {
+                    crate::memory_levels::Actor::Historian
+                }),
+                kind,
+                request.source_session_id,
+                None,
+                request.now_ms,
+            )?;
+            id
         }
     };
     if let Some(target) = target {

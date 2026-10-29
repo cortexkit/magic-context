@@ -840,6 +840,33 @@ impl AssembledHistorianFiring {
         harness: &'a str,
         project_slug: &'a str,
         content_language: Option<&'a str>,
+    ) -> Result<HistorianFireRequest<'a>, crate::historian_producer::HistorianProducerError> {
+        let system =
+            crate::persona_host::render_session_summary(store, session_id, content_language)
+                .map_err(|error| crate::persona_host::summary_refusal(session_id, error))?;
+        Ok(self.as_fire_request_with_system(
+            store,
+            session_id,
+            project_path,
+            harness,
+            project_slug,
+            content_language,
+            std::borrow::Cow::Owned(system.text),
+        ))
+    }
+
+    /// Routed summaries already froze their system bytes; request construction
+    /// must not reread or rerender a pin after that freeze.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn as_fire_request_with_system<'a>(
+        &'a self,
+        store: &'a McStore,
+        session_id: &'a str,
+        project_path: &'a str,
+        harness: &'a str,
+        project_slug: &'a str,
+        content_language: Option<&'a str>,
+        system: std::borrow::Cow<'a, str>,
     ) -> HistorianFireRequest<'a> {
         HistorianFireRequest {
             rust_background_enabled: false,
@@ -851,11 +878,7 @@ impl AssembledHistorianFiring {
             // The role-scoped historian system prompt. The assembler builds the USER
             // prompt (chunk + references); content-language guidance belongs only on this
             // producer request, never on the transform-served prompt surface.
-            system: crate::historian_prompt::with_content_language_directive(
-                crate::historian_prompt::HISTORIAN_SYSTEM_PROMPT,
-                content_language,
-                crate::historian_prompt::ContentLanguageDirectiveOptions::default(),
-            ),
+            system,
             content_language,
             prompt: &self.prompt,
             model_chain: &self.model_chain,
@@ -1170,6 +1193,7 @@ pub fn assemble_historian_firing(
         config,
         now_ms,
         false,
+        false,
     )
 }
 
@@ -1189,9 +1213,56 @@ pub(crate) fn assemble_provider_historian_firing(
         config,
         now_ms,
         true,
+        false,
     )
 }
 
+/// Assemble a summary that routing will place. It has no model chain: the
+/// chunk is sized from the configured historian window with the default
+/// calibration, and the select that follows asks routing for a route whose
+/// window fits the assembled prompt.
+pub(crate) fn assemble_routed_historian_firing(
+    store: &McStore,
+    messages: &[CkIngressMessage],
+    live: &[FlatBlock],
+    block_identities_by_mid: &BTreeMap<String, Vec<BlockIdentity>>,
+    config: HistorianAssemblerConfig,
+    now_ms: i64,
+) -> Result<AssembleHistorianFiringOutcome, mc_store::McStoreError> {
+    assemble_historian_firing_inner(
+        store,
+        messages,
+        live,
+        block_identities_by_mid,
+        config,
+        now_ms,
+        false,
+        true,
+    )
+}
+
+/// The provider-bounded form of [`assemble_routed_historian_firing`].
+pub(crate) fn assemble_routed_provider_historian_firing(
+    store: &McStore,
+    messages: &[CkIngressMessage],
+    live: &[FlatBlock],
+    block_identities_by_mid: &BTreeMap<String, Vec<BlockIdentity>>,
+    config: HistorianAssemblerConfig,
+    now_ms: i64,
+) -> Result<AssembleHistorianFiringOutcome, mc_store::McStoreError> {
+    assemble_historian_firing_inner(
+        store,
+        messages,
+        live,
+        block_identities_by_mid,
+        config,
+        now_ms,
+        true,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Each flag selects a distinct caller's sizing rule.
 fn assemble_historian_firing_inner(
     store: &McStore,
     messages: &[CkIngressMessage],
@@ -1200,12 +1271,13 @@ fn assemble_historian_firing_inner(
     config: HistorianAssemblerConfig,
     now_ms: i64,
     bounded_context: bool,
+    routed: bool,
 ) -> Result<AssembleHistorianFiringOutcome, mc_store::McStoreError> {
     let producer_key = config.model_chain.first().map(String::as_str);
     let seed = crate::decision_calibration::DecisionCalibration::for_model(producer_key);
     let source_ratio = seed.prose_ratio.max(seed.tools_ratio);
     let source_budget = producer_source_local_budget(config.token_budget, producer_key);
-    if config.model_chain.is_empty() {
+    if config.model_chain.is_empty() && !routed {
         return Ok(AssembleHistorianFiringOutcome::NoFire(
             HistorianNoFireReason::NoModels,
         ));
@@ -2308,6 +2380,76 @@ mod tests {
     use serde::Deserialize;
     use serde_json::json;
     use sha2::Digest;
+
+    #[test]
+    fn malformed_profile_pin_refuses_firing_without_panicking_and_retries() {
+        let (root, store) = store_for_tests();
+        let session = format!("malformed-pin-{}", root.path().display());
+        let messages = vec![
+            msg(
+                "u1",
+                1,
+                "user",
+                vec![text(
+                    "Keep the public API stable while changing the implementation.",
+                )],
+            ),
+            msg(
+                "a1",
+                2,
+                "assistant",
+                vec![text(
+                    "The implementation preserves the API and validates the migration.",
+                )],
+            ),
+            msg("tail", 3, "user", vec![text("protected tail")]),
+        ];
+        let firing = assemble_for_chain(&messages, &["fixture-model"], BTreeMap::new(), 100_000);
+        let loaded = store.load_meta(&session).unwrap();
+        let mut meta = loaded.meta;
+        meta.memory_context = Some(json!({"profile": "malformed"}));
+        store
+            .commit_meta(&session, loaded.row_version, &meta)
+            .unwrap();
+        let logs = crate::persona_host::capture_profile_logs(|| {
+            for _ in 0..2 {
+                let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    firing.as_fire_request(&store, &session, "/proj", "runner", "proj", None)
+                }));
+                let error = attempt
+                    .expect("a malformed pin must refuse, not panic")
+                    .err()
+                    .expect("malformed pin must refuse the firing");
+                assert!(matches!(
+                    error,
+                    crate::historian_producer::HistorianProducerError::Subc(_)
+                ));
+                assert!(error.to_string().contains("mc_persona_invalid"), "{error}");
+            }
+        });
+        assert_eq!(
+            logs.matches("mc_persona_invalid: summary persona refused")
+                .count(),
+            1,
+            "{logs}"
+        );
+        let loaded = store.load_meta(&session).unwrap();
+        assert!(loaded.meta.historian.last_failure.is_none());
+        assert!(loaded.meta.historian.failure_backoff_at_ms.is_none());
+        assert!(loaded.meta.summary_persona.is_none());
+        let mut meta = loaded.meta;
+        meta.memory_context = None;
+        store
+            .commit_meta(&session, loaded.row_version, &meta)
+            .unwrap();
+        let retried = firing
+            .as_fire_request(&store, &session, "/proj", "runner", "proj", None)
+            .unwrap();
+        assert_eq!(
+            retried.system,
+            crate::historian_prompt::HISTORIAN_SYSTEM_PROMPT
+        );
+    }
 
     #[test]
     fn historian_keeps_long_room_posts_and_peer_replies_whole() {

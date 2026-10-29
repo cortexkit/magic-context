@@ -474,6 +474,7 @@ fn move_refuses_each_case_by_name_without_writing() {
 }
 
 /// The real holder check sees another process that holds `context.db` open.
+#[cfg(unix)]
 #[test]
 fn move_refuses_while_another_process_holds_a_store() {
     let dir = tempfile::tempdir().unwrap();
@@ -502,6 +503,23 @@ fn move_refuses_while_another_process_holds_a_store() {
     assert!(record(&paths).is_none());
     // With the holder gone the same check passes.
     check_holders(&paths, &Lsof).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn open_file_holder_check_is_explicitly_unsupported_on_windows() {
+    assert!(Lsof.holders(&[]).unwrap().is_empty());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.db");
+    assert!(Lsof
+        .holders(std::slice::from_ref(&path))
+        .unwrap()
+        .is_empty());
+    std::fs::write(&path, b"fixture").unwrap();
+    assert_eq!(
+        Lsof.holders(&[path]).unwrap_err(),
+        "open-file enumeration is unsupported on Windows"
+    );
 }
 
 fn part(id: &str, kind: &str) -> PartRow {

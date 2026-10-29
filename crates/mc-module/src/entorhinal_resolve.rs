@@ -47,9 +47,9 @@ pub struct EntorhinalResolver {
     connection_file: Option<PathBuf>,
 }
 
-type ConsumerSlot = tokio::sync::Mutex<Option<SubcConsumer>>;
+pub(crate) type ConsumerSlot = tokio::sync::Mutex<Option<SubcConsumer>>;
 
-fn consumer_slot(path: &Path) -> Arc<ConsumerSlot> {
+pub(crate) fn consumer_slot(path: &Path) -> Arc<ConsumerSlot> {
     static CONSUMERS: OnceLock<Mutex<HashMap<PathBuf, Arc<ConsumerSlot>>>> = OnceLock::new();
     CONSUMERS
         .get_or_init(Mutex::default)
@@ -62,7 +62,7 @@ fn consumer_slot(path: &Path) -> Arc<ConsumerSlot> {
 
 // A cancelled or failed attempt must not put a potentially broken consumer back
 // in the process cache. Closing asynchronously also covers the outer resolve deadline.
-struct ConsumerLease(Option<SubcConsumer>);
+pub(crate) struct ConsumerLease(pub(crate) Option<SubcConsumer>);
 
 impl Drop for ConsumerLease {
     fn drop(&mut self) {
@@ -75,6 +75,17 @@ impl Drop for ConsumerLease {
 }
 
 impl EntorhinalResolver {
+    /// Resolve a background run's folder without deriving or persisting an identity.
+    pub(crate) async fn registered_project(&self, directory: &Path) -> Option<String> {
+        match self
+            .attempt(directory, "magic-context", "mc-project-lookup")
+            .await
+        {
+            ResolveAnswer::Registered { project_id, .. } => Some(project_id),
+            _ => None,
+        }
+    }
+
     pub fn new(connection_file: Option<PathBuf>) -> Self {
         Self { connection_file }
     }
@@ -219,7 +230,7 @@ pub(crate) fn decode_reply(bytes: &[u8]) -> ResolveAnswer {
         Ok(reply)
             if matches!(
                 reply.via.as_str(),
-                "root" | "walk" | "containment" | "worktree"
+                "root" | "walk" | "containment" | "alias" | "worktree"
             ) && is_project_pin(&reply.project_id) =>
         {
             ResolveAnswer::Registered {
@@ -416,9 +427,9 @@ mod tests {
                             {
                                 assert_eq!(target, route_target());
                                 assert_eq!(identity.session, "instance");
-                                let bind = serde_json::to_value(&identity).unwrap().to_string();
-                                assert!(bind.contains(project.to_str().unwrap()));
-                                assert!(bind.contains("test-harness"));
+                                let bind = serde_json::to_value(&identity).unwrap();
+                                assert_eq!(bind["project_root"].as_str(), project.to_str());
+                                assert_eq!(bind["harness"].as_str(), Some("test-harness"));
                                 (
                                     FrameType::Response,
                                     serde_json::to_vec(&ClientControlResponse::RouteOpen {

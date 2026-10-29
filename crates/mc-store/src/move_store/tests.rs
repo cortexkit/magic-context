@@ -851,20 +851,11 @@ fn context_fragment_collision_query_detects_foreign_id_without_reserving_or_writ
 }
 
 #[test]
-fn capture_inventory_drift_refuses_before_writing_and_files_are_private() {
-    use std::os::unix::fs::PermissionsExt;
+fn capture_inventory_drift_refuses_before_writing() {
     let dir = tempfile::tempdir().unwrap();
     let store = seeded(dir.path(), 1, 10);
     let file = dir.path().join("capture");
     let mut mover = capture(&store, "cut", &file);
-    assert_eq!(
-        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-    assert_eq!(
-        std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
-        0o700
-    );
     store
         .inner
         .with_conn(|conn| {
@@ -882,6 +873,35 @@ fn capture_inventory_drift_refuses_before_writing_and_files_are_private() {
         .record_capture("cut", "digest", &file, "receipt")
         .unwrap();
     mover.release_source("cut", false).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_files_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let store = seeded(dir.path(), 1, 10);
+    let file = dir.path().join("capture");
+    let _mover = capture(&store, "cut", &file);
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn capture_files_are_writable() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = seeded(dir.path(), 1, 10);
+    let file = dir.path().join("capture");
+    let _mover = capture(&store, "cut", &file);
+    assert!(!std::fs::metadata(&file).unwrap().permissions().readonly());
+    drop(std::fs::OpenOptions::new().write(true).open(&file).unwrap());
 }
 #[test]
 fn startup_pending_replay_skips_draining_frozen_and_staged_sessions() {

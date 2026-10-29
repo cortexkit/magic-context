@@ -12,9 +12,13 @@ use super::context::{
     ChildEvent, ChildObserver, ControlError, TaskContext, TaskToolRouter, ToolError, ToolResult,
 };
 use super::curate_host::{CurateError, CurateHost};
-use super::dispatcher::TaskExecutor;
+use super::dispatcher::{GateDecision, TaskExecutor};
+use super::due_inputs::{self, ProjectProfiles};
 use super::primer_host::{PrimerCarrier, PrimerHost};
 use super::retrospective_host::{HostError, RetrospectiveHost};
+use super::routed::carrier::{RoutedCarrier, RoutedCarrierParts, RoutedParks, ROUTE_WAITING};
+use super::routed::scope::EntorhinalProjectId;
+use super::routed::wire::DreamWire;
 use super::session_reader;
 use super::verify_host::VerifyHost;
 use crate::dream_runner::{
@@ -27,6 +31,8 @@ use mc_store::parity_schema_manifest::StoreScope;
 use mc_store::McStore;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Makes one Broca port per task run. A port carries the llm-runner ops of the
@@ -77,17 +83,29 @@ pub enum Transport<B: BrocaPorts> {
         routes: Arc<BrocaToolRoute>,
         module_id: String,
     },
+    /// Place every child through routing, under the run's own project scope,
+    /// on the runner routing names (see `routed::carrier`).
+    Routed {
+        wire: Arc<dyn DreamWire>,
+        routes: Arc<BrocaToolRoute>,
+        module_id: String,
+        /// Entorhinal's answer for the run's folder, resolved before the run.
+        project_id: EntorhinalProjectId,
+        parks: Arc<RoutedParks>,
+    },
 }
 
 /// The carrier of one task run.
 pub enum TaskCarrier<P: BrocaPort> {
     Broca(Box<BrocaCarrier<P>>),
+    Routed(Box<RoutedCarrier>),
 }
 
 impl<P: BrocaPort> DreamCarrier for TaskCarrier<P> {
     async fn open(&mut self, request: &ChildRequest) -> Result<String, CarrierError> {
         match self {
             Self::Broca(c) => c.open(request).await,
+            Self::Routed(c) => c.open(request).await,
         }
     }
     async fn complete(
@@ -97,11 +115,13 @@ impl<P: BrocaPort> DreamCarrier for TaskCarrier<P> {
     ) -> Result<Completion, CarrierError> {
         match self {
             Self::Broca(c) => c.complete(child, request).await,
+            Self::Routed(c) => c.complete(child, request).await,
         }
     }
     async fn close(&mut self, child: &str, settled: bool) -> Result<(), CarrierError> {
         match self {
             Self::Broca(c) => c.close(child, settled).await,
+            Self::Routed(c) => c.close(child, settled).await,
         }
     }
 }
@@ -218,6 +238,13 @@ pub struct DreamExecutor<B: BrocaPorts> {
     pub published: Vec<TaskName>,
     /// Host identity used by classification's shareability check.
     pub sensitive: SensitiveContext,
+    /// Set by a routed child that parked on a timed refusal during the current
+    /// task run, to the reset time routing named.
+    parked: Arc<AtomicU64>,
+    project_context: Option<Arc<dyn ProjectProfiles>>,
+    project_directory: Option<PathBuf>,
+    project_harness: String,
+    captured: Option<(String, Value, mc_store::memory_levels::RunAuthority)>,
 }
 
 impl<B: BrocaPorts> DreamExecutor<B> {
@@ -243,7 +270,47 @@ impl<B: BrocaPorts> DreamExecutor<B> {
                 home: std::env::var("HOME").unwrap_or_default(),
                 username: std::env::var("USER").unwrap_or_default(),
             },
+            parked: Arc::default(),
+            project_context: None,
+            project_directory: None,
+            project_harness: String::new(),
+            captured: None,
         }
+    }
+
+    pub(crate) fn with_project_context(
+        mut self,
+        source: Arc<dyn ProjectProfiles>,
+        directory: PathBuf,
+        harness: &str,
+    ) -> Self {
+        self.project_context = Some(source);
+        self.project_directory = Some(directory);
+        self.project_harness = harness.to_owned();
+        self
+    }
+
+    async fn capture_run(
+        &self,
+        task: TaskName,
+        scope: &StoreScope,
+    ) -> Result<(Value, mc_store::memory_levels::RunAuthority), String> {
+        let root = self
+            .project_directory
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new(&scope.project.0));
+        let pin = match &self.project_context {
+            Some(source) => source.read(&root.to_string_lossy()).await,
+            None => due_inputs::unavailable_context(),
+        };
+        let inputs = due_inputs::capture(
+            &self.store,
+            &scope.project.0,
+            root,
+            &self.project_harness,
+            task,
+        )?;
+        Ok((inputs.watermark(), due_inputs::authority(&pin)))
     }
 
     fn carrier(
@@ -269,6 +336,28 @@ impl<B: BrocaPorts> DreamExecutor<B> {
                     privacy_sensitive: false,
                 },
             ))),
+            Transport::Routed {
+                wire,
+                routes,
+                module_id,
+                project_id,
+                parks,
+            } => TaskCarrier::Routed(Box::new(RoutedCarrier::new(RoutedCarrierParts {
+                wire: wire.clone(),
+                routes: routes.clone(),
+                context: context.clone(),
+                router,
+                observer: Arc::new(Discard),
+                scheduler: self.scheduler.clone(),
+                policy: BrocaPolicy {
+                    module_id: module_id.clone(),
+                    require_hard_cap: false,
+                    privacy_sensitive: false,
+                },
+                project_id: project_id.clone(),
+                parks: parks.clone(),
+                parked: self.parked.clone(),
+            }))),
         }
     }
 
@@ -333,20 +422,98 @@ impl<B: BrocaPorts> TaskExecutor for DreamExecutor<B> {
         &self.published
     }
 
-    /// Each host loads its own snapshot and does nothing when it finds no work,
-    /// so a due slot always runs; the activity gates stay with the hosts.
-    fn gate(&mut self, _: TaskName, _: &StoreScope, _: &ScheduleState) -> Result<bool, String> {
-        Ok(true)
+    async fn gate(
+        &mut self,
+        task: TaskName,
+        scope: &StoreScope,
+        state: &ScheduleState,
+        invocation: &str,
+    ) -> Result<GateDecision, String> {
+        self.captured = None;
+        let (watermark, authority) = self.capture_run(task, scope).await?;
+        if due_inputs::memory_kind(task)
+            && matches!(
+                authority.state.as_str(),
+                "unresolved" | "conflict" | "blocked" | "unavailable"
+            )
+        {
+            return Ok(GateDecision::Skip {
+                code: authority.state,
+            });
+        }
+        let inputs: due_inputs::Inputs =
+            serde_json::from_value(watermark.clone()).map_err(|error| error.to_string())?;
+        if !inputs.due(task, state) {
+            return Ok(GateDecision::Skip {
+                code: "inputs_unchanged".into(),
+            });
+        }
+        self.captured = Some((invocation.to_owned(), watermark, authority));
+        Ok(GateDecision::Run)
     }
 
     async fn run(&mut self, context: &TaskContext) -> RunOutcome {
+        if self.project_harness.is_empty() {
+            self.project_harness = context.config.harness.clone();
+        }
+        if self
+            .captured
+            .as_ref()
+            .is_none_or(|(invocation, _, _)| *invocation != context.task_lease.invocation.0)
+        {
+            // Forced runs bypass the gate, but capture exactly the same authority
+            // and inputs at run start. They never consult the unchanged predicate.
+            let (watermark, authority) = match self.capture_run(context.task, &context.scope).await
+            {
+                Ok(captured) => captured,
+                Err(error) => return failed(error),
+            };
+            self.captured = Some((
+                context.task_lease.invocation.0.clone(),
+                watermark,
+                authority,
+            ));
+            if context.task == TaskName::Curate {
+                if let Err(error) = due_inputs::expire_on_curate(&self.store, context) {
+                    return failed(error);
+                }
+            }
+        }
+        self.parked.store(0, Ordering::Release);
+        let mut outcome = self.run_host(context).await;
+        outcome.inputs_watermark = self.captured.take().map(|(_, watermark, _)| watermark);
+        let parked = self.parked.load(Ordering::Acquire);
+        if parked > 0 {
+            // Routing asked the task to wait: give the slot back without
+            // recording an attempt, so the next tick after the reset retries it.
+            return failed(format!(
+                "{}{ROUTE_WAITING}: until {parked}",
+                super::dispatcher::ABANDON_PREFIX
+            ));
+        }
+        outcome
+    }
+}
+
+impl<B: BrocaPorts> DreamExecutor<B> {
+    async fn run_host(&mut self, context: &TaskContext) -> RunOutcome {
         let context = shared(context);
         match context.task {
             TaskName::Classify | TaskName::Map => {
                 let carrier = self.carrier(&context, Arc::new(NoTools));
                 let mut host = ClassifyHost::new(carrier, self.store.clone(), context);
                 match host.run(&self.sensitive).await {
-                    Ok(_) => RunOutcome::new(RunStatus::Completed),
+                    Ok(outcome) => {
+                        if matches!(outcome, super::classify_host::Outcome::Map(_)) {
+                            if let Some((_, watermark, _)) = &mut self.captured {
+                                due_inputs::Inputs::map_attempts(
+                                    watermark,
+                                    host.map_attempted_ids(),
+                                );
+                            }
+                        }
+                        RunOutcome::new(RunStatus::Completed)
+                    }
                     Err(error) => task_error(error),
                 }
             }
@@ -377,16 +544,23 @@ impl<B: BrocaPorts> TaskExecutor for DreamExecutor<B> {
             TaskName::Curate => {
                 let calls = Arc::new(Mutex::new(HashMap::new()));
                 let store = self.store.clone();
-                let mut host = CurateHost::new(store, context.clone(), |router| {
-                    let recording = Arc::new(RecordingRouter {
-                        inner: router,
-                        calls: calls.clone(),
-                    });
-                    RecordedCarrier {
-                        inner: self.carrier(&context, recording),
-                        calls: calls.clone(),
-                    }
-                });
+                let mut host = CurateHost::new_with_authority(
+                    store,
+                    context.clone(),
+                    |router| {
+                        let recording = Arc::new(RecordingRouter {
+                            inner: router,
+                            calls: calls.clone(),
+                        });
+                        RecordedCarrier {
+                            inner: self.carrier(&context, recording),
+                            calls: calls.clone(),
+                        }
+                    },
+                    self.captured
+                        .as_ref()
+                        .map(|(_, _, authority)| authority.clone()),
+                );
                 match host.run().await {
                     Ok(_) => RunOutcome::new(RunStatus::Completed),
                     Err(CurateError::Run(failure)) => task_error(TaskError::Runner(failure)),
@@ -401,7 +575,12 @@ impl<B: BrocaPorts> TaskExecutor for DreamExecutor<B> {
                     context.now_ms(),
                 );
                 let carrier = self.carrier(&context, Arc::new(NoTools));
-                let mut host = RetrospectiveHost::new(carrier, self.store.clone(), context);
+                let mut host = RetrospectiveHost::new(carrier, self.store.clone(), context)
+                    .with_authority(
+                        self.captured
+                            .as_ref()
+                            .map(|(_, _, authority)| authority.clone()),
+                    );
                 match host.run_retrospective(&reader, &options, collection).await {
                     Ok(_) => RunOutcome::new(RunStatus::Completed),
                     Err(error) => host_error(error),
@@ -436,7 +615,12 @@ impl<B: BrocaPorts> TaskExecutor for DreamExecutor<B> {
                 // test as against the threshold rounded up.
                 .map_or(3, |t| t.max(0.0).ceil() as usize);
                 let carrier = self.carrier(&context, Arc::new(NoTools));
-                let mut host = RetrospectiveHost::new(carrier, self.store.clone(), context);
+                let mut host = RetrospectiveHost::new(carrier, self.store.clone(), context)
+                    .with_authority(
+                        self.captured
+                            .as_ref()
+                            .map(|(_, _, authority)| authority.clone()),
+                    );
                 match host.run_user_review(threshold).await {
                     Ok(_) => RunOutcome::new(RunStatus::Completed),
                     Err(error) => host_error(error),

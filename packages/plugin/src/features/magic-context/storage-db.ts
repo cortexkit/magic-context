@@ -182,7 +182,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastUnconfirmedMigrationHolders = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 103;
+export const LATEST_SUPPORTED_VERSION = 104;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -2621,6 +2621,53 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     if (version === 0 || version >= 98) installCompartmentRescoreSchema(db);
     if (version === 0 || version >= 99) installMemoryLifecycleSchema(db);
     if (version === 0 || version >= 101) installTrimSourceIndexes(db);
+    if (version === 0 || version >= 104) {
+        // Older stores create these sidecars only inside their migration transaction.
+        db.exec(`
+                CREATE TABLE IF NOT EXISTS memory_placement (
+                    memory_id INTEGER PRIMARY KEY,
+                    level TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    origin_profile_name TEXT,
+                    origin_profile_version TEXT,
+                    origin_profile_digest TEXT,
+                    origin_category TEXT,
+                    applies_to_json TEXT,
+                    written_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS memory_ops (
+                    account TEXT NOT NULL,
+                    device TEXT NOT NULL,
+                    local_id INTEGER NOT NULL,
+                    memory_id INTEGER NOT NULL,
+                    op_digest TEXT NOT NULL,
+                    canonical BLOB NOT NULL,
+                    kind TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (account, device, local_id)
+                );
+                CREATE TABLE IF NOT EXISTS memory_outbox (
+                    account TEXT NOT NULL,
+                    device TEXT NOT NULL,
+                    local_id INTEGER NOT NULL,
+                    pending_seq INTEGER,
+                    appended_seq INTEGER,
+                    last_error TEXT,
+                    PRIMARY KEY (account, device, local_id)
+                );
+                CREATE TABLE IF NOT EXISTS memory_sync_state (
+                    device TEXT PRIMARY KEY NOT NULL,
+                    account TEXT,
+                    enrollment_state TEXT NOT NULL,
+                    next_local_id INTEGER NOT NULL,
+                    hlc_wall_ms INTEGER NOT NULL,
+                    hlc_logical INTEGER NOT NULL,
+                    drainer_holder TEXT,
+                    drainer_until INTEGER
+                );
+            `);
+    }
     // A TEMP trigger on this connection that bumps a per-session revision row
     // whenever this connection rewrites a tag's identity or reasoning count;
     // other connections' tag caches compare that row after each foreign commit

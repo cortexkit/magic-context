@@ -340,68 +340,29 @@ impl Tools<'_> {
     }
 }
 
-pub const SYSTEM_PROMPT: &str = r#"You are a memory-pool curator for the magic-context system. You run during a scheduled dream window to keep a project's cross-session memory store lean and well-formed.
+pub fn system_prompt() -> Result<&'static str, String> {
+    crate::persona_host::dream::system(crate::persona_host::dream::Kind::Curate)
+        .map_err(|error| format!("mc_persona_invalid: {error}"))
+}
 
-## Memory operations
-- The scoped category snapshot arrives in the first message. Do not list or get it again; track mutation deltas.
-- `action="merge", ids=[N,M,...], content="...", category="..."` — consolidate duplicates into one canonical memory
-- `action="update", ids=[N], content="...", superseded_by=M` — rewrite content; name where removed detail survives when cutting more than half
-- `action="write", category="...", content="..."` — create a memory (SPLITS ONLY — never mint new facts)
-- `action="archive", ids=[N], superseded_by=M, reason="..."` — consolidate a redundant memory into the named active same-category survivor
-
-## Rules
-1. **Assume the pool is accurate.** A separate verify task checks memories against code. You handle QUALITY only — duplicates, wording, low-value entries — never correctness, and you do NOT read the codebase.
-2. **Work methodically.** Choose your own batch size.
-3. **Be conservative with archives.** Use the task's archive criteria.
-4. **Present-tense operational language.** "X uses Y" not "X was changed to use Y."
-5. **One rule/fact per memory.**
-6. **Never mint new facts** — that is the historian's job. `write` is for splitting a compound memory only.
-
-## Memory taxonomy (5 categories)
-
-Project memory uses exactly 5 categories. Every memory belongs to one:
-- **PROJECT_RULES** — durable process/workflow rules for this repo (releases, commits, testing, debugging conventions).
-- **ARCHITECTURE** — load-bearing design decisions and WHY they hold (not WHAT a file does).
-- **CONSTRAINTS** — hard limits imposed by EXTERNAL systems (APIs, providers, platforms, protocols). Not our own code's behavior.
-- **CONFIG_VALUES** — stable configuration keys/values and conventions. Not transient measurements (test counts, sizes, versions).
-- **NAMING** — naming conventions and canonical names. Not inventories.
-
-**Legacy categories during transition:** older memories may still carry pre-v2 category names. When you touch one, map it to its 5-category home with `action="update"` (or `merge`): WORKFLOW_RULES→PROJECT_RULES, ARCHITECTURE_DECISIONS→ARCHITECTURE, CONFIG_DEFAULTS→CONFIG_VALUES, ENVIRONMENT→CONFIG_VALUES (paths) or CONSTRAINTS, KNOWN_ISSUES→CONSTRAINTS only if it's an external-system limit. USER_DIRECTIVES / USER_PREFERENCES are NOT project categories. Do not compare project memories with the global user profile or use it to justify an archive."#;
-
-pub fn build_prompt(project: &str, category: &str, chunk: &Chunk) -> String {
+pub fn build_prompt(project: &str, category: &str, chunk: &Chunk) -> Result<String, String> {
     let candidates = if chunk.cross_chunk_candidates.is_empty() {
         "(none)".into()
     } else {
         chunk.cross_chunk_candidates.join("\n")
     };
     let snapshot = render_memories(&chunk.memories);
-    format!(
-        r#"## Task: Curate Project Memory Pool (hygiene)
-
-**Project:** {project}
-
-This run covers the whole of the `{category}` category (the other categories run in later windows).
-
-The memories below are assumed ACCURATE (a separate verify task keeps them true). Your job is pool QUALITY: remove duplicates, tighten wording, and consolidate redundant entries that waste the ~6000-token injection budget. Explain each action in one line first. Do NOT mint new facts (that is the historian's job).
-
-Work ALL THREE phases below in order (A → B → C) over this category. Do NOT stop after consolidating — a run that only merges and never improves or archives is incomplete.
-
-### Phase A — Consolidate duplicates
-Group by category, then merge near-identical / superset-subset / same-fact-different-angle clusters into one canonical memory with `ctx_memory(action="merge", ids=[...], content="...", category="...")`. Preserve every unique detail; terse present tense; paths/keys verbatim. Every id in a merge MUST share the same category — the system rejects cross-category merges. If two similar memories sit in different categories they are NOT duplicates; do not archive either as a consolidation. One fact per memory.
-
-### Phase B — Improve wording
-Rewrite narrative/historical → operational present tense ("X uses Y because Z", not "we switched to Y"); drop session-local context and commit hashes (unless the hash is the point); add specifics where vague. A rewrite that removes more than half the content must name the active same-category memory preserving that detail with `superseded_by`. `write` is for SPLITS ONLY (update the original down to its first fact, write the second) — a healthy run is net-neutral or net-shrinking, never net-adds facts.
-
-### Phase C — Archive only into a surviving project memory
-Archive a redundant memory only when a better ACTIVE memory in the same project and category preserves its information; name that survivor with `superseded_by`. A bare "redundant" verdict is deletion and will be refused. Leave standalone low-value or stale entries unchanged for a human to review. The global user profile describes the operator and is never a substitute for project knowledge, so it cannot justify an archive.
-KEEP (overrides archive): constraint/rule language (must/never/always) · explains WHY (because/so that/to prevent) · EXTERNAL-system limit (CONSTRAINTS: archive only if word-for-word duplicated) · path/config WITH context · retrieval_count>0 · priority/philosophy.
-
-### Cross-chunk duplicate candidates (normalized content matches)
-{candidates}
-
-### Category snapshot (do not re-enumerate)
-{snapshot}"#
+    crate::persona_host::dream::task(
+        crate::persona_host::dream::Kind::Curate,
+        &crate::persona_host::dream::Input {
+            project,
+            category,
+            candidates: &candidates,
+            memories: &snapshot,
+            ..Default::default()
+        },
     )
+    .map_err(|error| format!("mc_persona_invalid: {error}"))
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -566,8 +527,17 @@ pub async fn run(
             attempts: Vec::new(),
         };
     };
+    let system = match system_prompt() {
+        Ok(system) => system,
+        Err(error) => {
+            return RunResult {
+                result: Err(Failure::Validation(error)),
+                attempts: Vec::new(),
+            }
+        }
+    };
     let system = crate::historian_prompt::with_content_language_directive(
-        SYSTEM_PROMPT,
+        system,
         context.language,
         Default::default(),
     );
@@ -595,7 +565,15 @@ pub async fn run(
                 attempts,
             };
         }
-        let prompt = build_prompt(context.project_path, plan.category, chunk);
+        let prompt = match build_prompt(context.project_path, plan.category, chunk) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                return RunResult {
+                    result: Err(Failure::Validation(error)),
+                    attempts,
+                }
+            }
+        };
         let result = run_dream_task(
             activated,
             config,
@@ -826,7 +804,11 @@ mod tests {
             harness: "opencode",
             project_path: "project-a",
             parent_session_id: "session-a",
-            directory: Path::new("/fixture"),
+            directory: Path::new(if cfg!(windows) {
+                r"C:\fixture"
+            } else {
+                "/fixture"
+            }),
             timeout: Duration::from_secs(60),
             token_budget: Some(5000),
             language: Some("tr"),
@@ -993,7 +975,14 @@ mod tests {
             assert_eq!(request.allowed_tools, &["ctx_memory"]);
             assert_eq!(request.max_steps, 150);
             assert_eq!(request.parent_session_id, "session-a");
-            assert_eq!(request.directory, Path::new("/fixture"));
+            assert_eq!(
+                request.directory,
+                Path::new(if cfg!(windows) {
+                    r"C:\fixture"
+                } else {
+                    "/fixture"
+                })
+            );
             assert_eq!(request.model.as_ref().unwrap().model, "synapse/curator");
             assert_eq!(request.temperature, None);
             assert_eq!(request.token_budget, Some(5000));
@@ -1626,18 +1615,18 @@ mod tests {
                     json!({
                         "ids":chunk.memories.iter().map(|m|m.id).collect::<Vec<_>>(),
                         "candidates":chunk.cross_chunk_candidates,
-                        "sha":sha(&build_prompt("/repo","PROJECT_RULES",chunk)),
+                        "sha":sha(&build_prompt("/repo","PROJECT_RULES",chunk).unwrap()),
                     })
                 })
                 .collect();
             assert_eq!(json!(actual), case["chunks"]);
         }
         assert_eq!(
-            sha(SYSTEM_PROMPT),
+            sha(system_prompt().unwrap()),
             "31cb8223887fd5fedb6968cb5d49cde5841f59235a85349ecba80fe487036eb3"
         );
         let localized = crate::historian_prompt::with_content_language_directive(
-            SYSTEM_PROMPT,
+            system_prompt().unwrap(),
             Some("tr"),
             Default::default(),
         );

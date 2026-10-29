@@ -136,6 +136,8 @@ struct Run {
 #[derive(Default)]
 struct State {
     describe: Value,
+    /// Capability discovery may choose a file provider other than AFT.
+    file_provider: Option<String>,
     /// Answer every op bare instead of inside `{"result": ...}`, as a runner
     /// off the pinned llm-runner reply shape would.
     bare_replies: bool,
@@ -324,7 +326,7 @@ impl FakeBroca {
                 .flatten()
                 .map(|tool| tool.as_str().unwrap().to_string())
                 .collect();
-            if item["provider"] == FILE_TOOL_PROVIDER {
+            if item["provider"] == s.file_provider.as_deref().unwrap_or(FILE_TOOL_PROVIDER) {
                 let root = item["params"]["root"].as_str().unwrap_or_default();
                 files = Some((std::path::PathBuf::from(root), tools.clone()));
             }
@@ -1685,6 +1687,8 @@ async fn broca_child_conformance_cap_cases_hold_through_the_carrier() {
 }
 
 mod executor;
+
+mod routed;
 
 mod session_runner;
 

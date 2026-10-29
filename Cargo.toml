@@ -28,10 +28,10 @@ cortexkit-log = { version = "=0.3.5", features = ["store-paths"] }
 
 # Published subc wire/SDK crates use crates.io. subc-core is unpublished; this
 # revision matches the version in the pre-migration lockfile.
-subc-protocol = "=0.32.8"
-subc-control = "=0.32.2"
-subc-transport = "=0.13.0"
-subc-client-rs = "=0.30.5"
+subc-protocol = "=0.33.1"
+subc-control = "=0.33.2"
+subc-transport = "=0.14.0"
+subc-client-rs = "=0.32.3"
 subc-os = "=0.1.17"
 subc-core = { git = "https://github.com/cortexkit/subconscious", rev = "e235db9df19bb70f1cdef877cde7ed465a2543f0" }
 
@@ -51,14 +51,14 @@ sha2 = { version = "0.10", features = ["compress"] }
 # crates.io releases must resolve from the registry rather than the Git checkout.
 [patch."https://github.com/cortexkit/subconscious"]
 subc-cgroup = { version = "=0.1.5" }
-subc-control = { version = "=0.32.2" }
-subc-daemon = { version = "=0.36.19" }
+subc-control = { version = "=0.32.7" }
+subc-daemon = { version = "=0.36.35" }
 subc-jobobject = { version = "=0.2.2" }
 subc-jsonc = { version = "=0.1.2" }
 subc-os = { version = "=0.1.17" }
-subc-protocol = { version = "=0.32.8" }
+subc-protocol = { version = "=0.32.12" }
 subc-transport = { version = "=0.13.0" }
-subc-presence = { version = "=0.1.0" }
+subc-presence = { version = "=0.1.2" }
 subc-uptime = { version = "=0.1.1" }
 
 # Keep test safety checks while reducing CPU-heavy differential runtime.

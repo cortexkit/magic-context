@@ -92,12 +92,49 @@ fn principal_name(principal: &Principal) -> String {
         Principal::Unverified => "unverified".into(),
     }
 }
-fn wire_error(body: subc_protocol::ErrorBody) -> HandlerOutcome {
+fn wire_error(body: impl serde::Serialize) -> HandlerOutcome {
+    let body: subc_protocol::ErrorBody = match crate::compatible_wire(body) {
+        Ok(body) => body,
+        Err(error) => return wire_record_incompatible(BridgeRecord::ErrorBody, error),
+    };
     HandlerOutcome::ErrorWithDetail {
         code: body.code,
         message: body.message,
         detail: body.detail.unwrap_or(Value::Null),
     }
+}
+
+enum BridgeRecord {
+    ErrorBody,
+    ScopeStamp,
+}
+
+fn wire_record_incompatible(record: BridgeRecord, error: serde_json::Error) -> HandlerOutcome {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ERROR_BODY_REPORTED: AtomicBool = AtomicBool::new(false);
+    static SCOPE_STAMP_REPORTED: AtomicBool = AtomicBool::new(false);
+    let (record, reported) = match record {
+        BridgeRecord::ErrorBody => ("error_body", &ERROR_BODY_REPORTED),
+        BridgeRecord::ScopeStamp => ("scope_stamp", &SCOPE_STAMP_REPORTED),
+    };
+    if !reported.swap(true, Ordering::Relaxed) {
+        tracing::error!(record, %error, "wire_record_incompatible: user command record refused");
+    }
+    HandlerOutcome::ErrorWithDetail {
+        code: "internal_error".into(),
+        message: "wire_record_incompatible".into(),
+        detail: json!({"code": "wire_record_incompatible", "record": record}),
+    }
+}
+
+pub(super) fn command_scope_admitted(
+    scope: Option<impl serde::Serialize>,
+) -> Result<bool, HandlerOutcome> {
+    let command_scope = scope
+        .map(crate::compatible_wire)
+        .transpose()
+        .map_err(|error| wire_record_incompatible(BridgeRecord::ScopeStamp, error))?;
+    Ok(command::admitted(command_scope.as_ref()))
 }
 fn refused(code: &str, name: &str) -> HandlerOutcome {
     HandlerOutcome::ErrorWithDetail {
@@ -184,8 +221,10 @@ impl McHandler {
             Ok(binding) => binding,
             Err(_) => return refused("user_command_not_admitted", op),
         };
-        if !command::admitted(binding.scope.as_ref()) {
-            return refused(errors::USER_COMMAND_NOT_ADMITTED, op);
+        match command_scope_admitted(binding.scope.as_ref()) {
+            Ok(true) => {}
+            Ok(false) => return refused(errors::USER_COMMAND_NOT_ADMITTED, op),
+            Err(error) => return error,
         }
         if binding
             .scope
@@ -665,5 +704,111 @@ impl McHandler {
             Ok(()) => outcome,
             Err(error) => error,
         }
+    }
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct Unserializable;
+    impl serde::Serialize for Unserializable {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("unsupported wire shape"))
+        }
+    }
+
+    fn assert_incompatible(outcome: HandlerOutcome, record: &str) {
+        match outcome {
+            HandlerOutcome::ErrorWithDetail {
+                code,
+                message,
+                detail,
+            } => {
+                assert_eq!(code, "internal_error");
+                assert_eq!(message, "wire_record_incompatible");
+                assert_eq!(
+                    detail,
+                    json!({"code":"wire_record_incompatible", "record":record})
+                );
+            }
+            other => panic!("expected a named bridge refusal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn incompatible_error_records_are_refused_without_panicking() {
+        assert_incompatible(
+            wire_error(json!({"code":17,"message":"changed shape"})),
+            "error_body",
+        );
+        assert_incompatible(wire_error(Unserializable), "error_body");
+    }
+
+    #[test]
+    fn conversion_failures_log_once_per_record_type() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "providers::async_provider::user_commands::bridge_tests::isolated_conversion_failure_logs"])
+            .env("MC_WIRE_BRIDGE_LOG_CHILD", "1").output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn isolated_conversion_failure_logs() {
+        if std::env::var_os("MC_WIRE_BRIDGE_LOG_CHILD").is_none() {
+            return;
+        }
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(move || Capture(writer.clone()))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let mut scope = serde_json::to_value(subc_protocol::scope::ScopeStamp::new(
+            Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+            "test-scope",
+            1,
+            ScopeKind::Head,
+        ))
+        .unwrap();
+        scope["attributes"] = json!({"future_constraint":true});
+        for _ in 0..2 {
+            assert_incompatible(wire_error(Unserializable), "error_body");
+            assert_incompatible(
+                command_scope_admitted(Some(&scope)).unwrap_err(),
+                "scope_stamp",
+            );
+        }
+        let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            output
+                .matches("wire_record_incompatible: user command record refused")
+                .count(),
+            2,
+            "{output}"
+        );
+        assert!(output.contains("record=\"scope_stamp\""), "{output}");
+        assert!(output.contains("record=\"error_body\""), "{output}");
     }
 }

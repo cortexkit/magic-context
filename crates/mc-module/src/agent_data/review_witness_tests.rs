@@ -101,9 +101,9 @@ fn manifest_before_participant(
         crate::prompt_surface::disable_smart_notes_in_tools(&mut tools, PromptSurfacePreset::Full);
     }
     // Without agent-data, model tools and provider roles still use optional
-    // project lookup, model catalog, bus bootstrap and non-served Synapse retrieval. Pin routes independently
+    // project lookup, memory sync, model catalog, bus bootstrap and non-served Synapse retrieval. Pin routes independently
     // so a disabled participant route cannot change both manifests.
-    let mut targets = vec!["thalamus".to_string()];
+    let mut targets = vec!["engram".to_string(), "thalamus".to_string()];
     for id in [
         config.runner_module_id(),
         Some(config.provider_runner_module_id()),

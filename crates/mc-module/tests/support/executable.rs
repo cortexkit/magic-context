@@ -17,7 +17,19 @@ struct ExecutableKey {
     identifier: String,
 }
 
+#[cfg(not(windows))]
 const FALLBACK_EXECUTABLE_ROOT: &str = "/tmp/magic-context-exec";
+
+fn fallback_executable_root() -> PathBuf {
+    #[cfg(windows)]
+    {
+        std::env::temp_dir().join("magic-context-exec")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from(FALLBACK_EXECUTABLE_ROOT)
+    }
+}
 
 fn executable_root() -> PathBuf {
     let tmp_dir = std::env::var_os("TMPDIR")
@@ -35,14 +47,19 @@ pub fn executable_root_for_tmpdir(
     resolved_tmp_dir: Option<&Path>,
 ) -> PathBuf {
     let (Some(tmp_dir), Some(resolved_tmp_dir)) = (tmp_dir, resolved_tmp_dir) else {
-        return PathBuf::from(FALLBACK_EXECUTABLE_ROOT);
+        return fallback_executable_root();
     };
+
+    #[cfg(windows)]
+    if !tmp_dir.is_absolute() || !resolved_tmp_dir.is_absolute() {
+        return fallback_executable_root();
+    }
 
     if [Path::new("/var/folders"), Path::new("/private/var/folders")]
         .iter()
         .any(|prefix| resolved_tmp_dir == *prefix || resolved_tmp_dir.starts_with(prefix))
     {
-        PathBuf::from(FALLBACK_EXECUTABLE_ROOT)
+        fallback_executable_root()
     } else {
         tmp_dir.join("magic-context-exec")
     }
@@ -66,6 +83,15 @@ pub fn stage_executable(source: &Path, name: &str, identifier: &str) -> io::Resu
             "staged executable name must be a single path component",
         ));
     }
+
+    #[cfg(windows)]
+    let executable_name = if name.to_ascii_lowercase().ends_with(".exe") {
+        format!("{}.exe", &name[..name.len() - 4])
+    } else {
+        format!("{name}.exe")
+    };
+    #[cfg(windows)]
+    let name = executable_name.as_str();
 
     let bytes = fs::read(source)?;
     let digest = format!("{:x}", Sha256::digest(&bytes));

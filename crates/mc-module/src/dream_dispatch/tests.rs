@@ -44,11 +44,17 @@ impl TaskExecutor for Effects {
     fn operational_tasks(&self) -> &[TaskName] {
         &[TaskName::Classify]
     }
-    fn gate(&mut self, _: TaskName, _: &StoreScope, _: &ScheduleState) -> Result<bool, String> {
+    async fn gate(
+        &mut self,
+        _: TaskName,
+        _: &StoreScope,
+        _: &ScheduleState,
+        _: &str,
+    ) -> Result<super::dispatcher::GateDecision, String> {
         if self.gate_error {
             Err("fixture read failed".into())
         } else {
-            Ok(self.gate)
+            Ok(self.gate.into())
         }
     }
     async fn run(&mut self, context: &TaskContext) -> RunOutcome {
@@ -377,8 +383,14 @@ async fn rust_dispatch_domain_blocks_foreign_fixture_holder_until_completion() {
         fn operational_tasks(&self) -> &[TaskName] {
             self.0.operational_tasks()
         }
-        fn gate(&mut self, _: TaskName, _: &StoreScope, _: &ScheduleState) -> Result<bool, String> {
-            Ok(true)
+        async fn gate(
+            &mut self,
+            _: TaskName,
+            _: &StoreScope,
+            _: &ScheduleState,
+            _: &str,
+        ) -> Result<super::dispatcher::GateDecision, String> {
+            Ok(true.into())
         }
         async fn run(&mut self, context: &TaskContext) -> RunOutcome {
             assert!(self
@@ -708,8 +720,14 @@ async fn budget_cancellation_deadline_and_failed_heartbeat_stop_run_control() {
         fn operational_tasks(&self) -> &[TaskName] {
             &[TaskName::Classify]
         }
-        fn gate(&mut self, _: TaskName, _: &StoreScope, _: &ScheduleState) -> Result<bool, String> {
-            Ok(true)
+        async fn gate(
+            &mut self,
+            _: TaskName,
+            _: &StoreScope,
+            _: &ScheduleState,
+            _: &str,
+        ) -> Result<super::dispatcher::GateDecision, String> {
+            Ok(true.into())
         }
         async fn run(&mut self, context: &TaskContext) -> RunOutcome {
             match self.mode {

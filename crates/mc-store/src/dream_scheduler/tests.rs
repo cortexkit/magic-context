@@ -279,7 +279,14 @@ fn oracle_cron_dst() {
                 "--nocapture",
             ])
             .env("DREAM_DST_CHILD", "1")
-            .env("TZ", "America/New_York")
+            .env(
+                "TZ",
+                if cfg!(windows) {
+                    "EST5EDT,M3.2.0/2,M11.1.0/2"
+                } else {
+                    "America/New_York"
+                },
+            )
             .output()
             .unwrap();
         assert!(

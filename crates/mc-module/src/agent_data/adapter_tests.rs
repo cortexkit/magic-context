@@ -19,6 +19,18 @@ const RUNNER: &str = "broca";
 /// The route an observed session's runner binds it on.
 const RUNNER_CHANNEL: u16 = 41;
 const CHANNEL: u16 = 44;
+
+#[cfg(windows)]
+#[test]
+fn journal_save_round_trips_and_replaces_existing_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("journal.json");
+    save(&path, &vec!["first"]).unwrap();
+    assert_eq!(load::<Vec<String>>(&path).unwrap(), ["first"]);
+    save(&path, &vec!["replacement"]).unwrap();
+    assert_eq!(load::<Vec<String>>(&path).unwrap(), ["replacement"]);
+}
+
 #[derive(Default)]
 struct FakeState {
     streams: BTreeMap<String, Vec<u8>>,
@@ -876,7 +888,7 @@ async fn every_durable_write_boundary_recovers_after_restart_and_retry() {
     }
 }
 #[tokio::test]
-async fn project_memories_remain_machine_owned_and_snapshot_files_are_private() {
+async fn project_memories_remain_machine_owned_and_snapshot_files_have_platform_permissions() {
     let src = tempfile::tempdir().unwrap();
     let dst = tempfile::tempdir().unwrap();
     let door = Arc::new(FakeDoor::default());
@@ -919,27 +931,33 @@ async fn project_memories_remain_machine_owned_and_snapshot_files_are_private() 
         )
         .unwrap();
     assert_eq!(note, "portable note");
-    fn private(path: &Path) {
+    fn assert_platform_permissions(path: &Path) {
+        let meta = std::fs::metadata(path).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let meta = std::fs::metadata(path).unwrap();
             assert_eq!(meta.permissions().mode() & 0o077, 0, "{}", path.display());
-            if meta.is_dir() {
-                for entry in std::fs::read_dir(path).unwrap() {
-                    private(&entry.unwrap().path());
-                }
+        }
+        #[cfg(windows)]
+        if meta.is_file() {
+            // Writability is independent of the inherited Windows ACL's privacy.
+            assert!(!meta.permissions().readonly(), "{}", path.display());
+            drop(std::fs::OpenOptions::new().write(true).open(path).unwrap());
+        }
+        if meta.is_dir() {
+            for entry in std::fs::read_dir(path).unwrap() {
+                assert_platform_permissions(&entry.unwrap().path());
             }
         }
     }
-    private(
+    assert_platform_permissions(
         &s.agent_data
             .as_ref()
             .expect("test coordinator")
             .root()
             .unwrap(),
     );
-    private(
+    assert_platform_permissions(
         &d.agent_data
             .as_ref()
             .expect("test coordinator")

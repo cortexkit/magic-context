@@ -26,13 +26,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     append_compartments_tx, current_time_ms, insert_compartment_tx, insert_historian_events_tx,
-    insert_historian_primer_tx, promote_facts_tx, session_harness_tx, FactCandidate,
-    HistorianEventCandidate, HistorianPrimerCandidate, HistorianUserMemoryCandidate, McStore,
-    McStoreError, PromotedRef, StoredCompartment,
+    insert_historian_primer_tx, session_harness_tx, FactCandidate, HistorianEventCandidate,
+    HistorianPrimerCandidate, HistorianUserMemoryCandidate, McStore, McStoreError, PromotedRef,
+    StoredCompartment,
 };
 
 /// The `context.db` tables a pending write may touch, for the module's per-table fence.
 pub(crate) const HISTORY_TABLES: &[&str] = &[
+    "memory_placement",
+    "memory_ops",
+    "memory_outbox",
+    "memory_sync_state",
     "compartment_events",
     "compartments",
     "memories",
@@ -355,6 +359,7 @@ fn apply_fold_tx(
     tx: &rusqlite::Connection,
     session_id: &str,
     fold: &FoldWrite,
+    writer: &crate::memory_levels::MemoryWriter,
 ) -> rusqlite::Result<Vec<PromotedRef>> {
     let harness = match &fold.harness {
         Some(harness) => harness.clone(),
@@ -368,7 +373,13 @@ fn apply_fold_tx(
     }
     publish_dormant_candidates_tx(tx, session_id, fold)?;
     let promoted = if fold.promote_facts {
-        promote_facts_tx(tx, &fold.project_path, &fold.facts, fold.published_at_ms)?
+        crate::promote_facts_with_writers_tx(
+            tx,
+            &fold.project_path,
+            &fold.facts,
+            fold.published_at_ms,
+            &vec![writer.clone(); fold.facts.len()],
+        )?
     } else {
         Vec::new()
     };
@@ -444,13 +455,23 @@ fn apply_lineage_copy_tx(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn apply_pending_tx(
     tx: &rusqlite::Connection,
     session_id: &str,
     write: &PendingContextWrite,
 ) -> rusqlite::Result<Vec<PromotedRef>> {
+    apply_pending_with_writer_tx(tx, session_id, write, &Default::default())
+}
+
+fn apply_pending_with_writer_tx(
+    tx: &rusqlite::Connection,
+    session_id: &str,
+    write: &PendingContextWrite,
+    writer: &crate::memory_levels::MemoryWriter,
+) -> rusqlite::Result<Vec<PromotedRef>> {
     match write {
-        PendingContextWrite::Fold(fold) => apply_fold_tx(tx, session_id, fold),
+        PendingContextWrite::Fold(fold) => apply_fold_tx(tx, session_id, fold, writer),
         PendingContextWrite::ReplaceCompartments {
             compartments,
             now_ms,
@@ -587,7 +608,17 @@ impl McStore {
                 "memory_activity_ledger",
             ]);
         }
-        let promoted = self.context_write(&tables, |tx| apply_pending_tx(tx, session_id, write))?;
+        let mut writer = self.session_memory_writer(Some(session_id))?;
+        if let PendingContextWrite::Fold(fold) = write {
+            writer.ordinals = fold
+                .compartments
+                .iter()
+                .flat_map(|c| c.start_message..=c.end_message)
+                .collect();
+        }
+        let promoted = self.context_write(&tables, |tx| {
+            apply_pending_with_writer_tx(tx, session_id, write, &writer)
+        })?;
         self.inner.with_conn_fenced(|tx| {
             tx.execute(
                 "DELETE FROM mc_single_store_pending_publish
@@ -626,6 +657,12 @@ impl McStore {
                 "memory_activity_ledger",
             ]);
         }
+        let mut writer = self.session_memory_writer(Some(session_id))?;
+        writer.ordinals = fold
+            .compartments
+            .iter()
+            .flat_map(|c| c.start_message..=c.end_message)
+            .collect();
         // Lock store.db before context.db, and keep both locks until the context
         // commit. A revert cannot move its store-side epoch during the append.
         let mut failure = None;
@@ -659,7 +696,7 @@ impl McStore {
                 if generation != fence.generation {
                     return Ok(ActivatedFoldOutcome::Discarded("compartment set changed after firing".into()));
                 }
-                apply_fold_tx(tx, session_id, fold).map(ActivatedFoldOutcome::Applied)
+                apply_fold_tx(tx, session_id, fold, &writer).map(ActivatedFoldOutcome::Applied)
             });
             let outcome = match outcome {
                 Ok(outcome) => outcome,
@@ -950,8 +987,8 @@ mod tests {
         });
         store.with_context_conn_for_test(|conn| {
             mark_ts_owned(conn);
-            apply_fold_tx(conn, "ses", &write)?;
-            apply_fold_tx(conn, "ses", &write)?;
+            apply_fold_tx(conn, "ses", &write, &Default::default())?;
+            apply_fold_tx(conn, "ses", &write, &Default::default())?;
             assert_eq!(lifecycle_counts(conn), [1,2,1,0]);
             let facts = conn.prepare("SELECT content,anchor_known,state,fact_attempts,reason,reserved_stage_key,compartment_id
                 FROM memory_pending_facts ORDER BY fact_index")?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<i64>>(6)?)))?.collect::<Result<Vec<_>,_>>()?;
@@ -1018,7 +1055,7 @@ mod tests {
             .unwrap();
         store
             .with_context_conn_for_test(|conn| {
-                apply_fold_tx(conn, "ses", &write)?;
+                apply_fold_tx(conn, "ses", &write, &Default::default())?;
                 Ok(())
             })
             .unwrap();
@@ -1026,7 +1063,7 @@ mod tests {
             .with_context_conn_for_test(|conn| {
                 let harness = session_harness_tx(conn, "ses")?;
                 upsert_compartments_tx(conn, "ses", &write.compartments, &harness)?;
-                promote_facts_tx(
+                crate::promote_facts_tx(
                     conn,
                     &write.project_path,
                     &write.facts,

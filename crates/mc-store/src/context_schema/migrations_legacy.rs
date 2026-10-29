@@ -1,4 +1,4 @@
-//! Historical context.db upgrades for starting versions 87 through 103.
+//! Historical context.db upgrades for starting versions 87 through the bootstrap head.
 //!
 //! Starting versions 0 through 86 require identity repairs, embedding rebuilds,
 //! authority-trigger repairs, and host-evidence harness relabeling that this runner

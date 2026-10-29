@@ -18,17 +18,46 @@ fn write(path: &Path, text: &str) {
 fn expand(text: &str, root: &Path) -> String {
     text.replace("$ROOT", &root.to_string_lossy())
 }
-fn normalize(value: &Value, root: &Path) -> Value {
+fn expand_json(text: &str, root: &Path) -> String {
+    let encoded = serde_json::to_string(&root.to_string_lossy()).unwrap();
+    text.replace("$ROOT", &encoded[1..encoded.len() - 1])
+}
+fn normalize_roots(value: &Value, root: &Path) -> Value {
     match value {
         Value::String(s) => json!(s.replace(root.to_string_lossy().as_ref(), "$ROOT")),
-        Value::Array(array) => Value::Array(array.iter().map(|v| normalize(v, root)).collect()),
+        Value::Array(array) => {
+            Value::Array(array.iter().map(|v| normalize_roots(v, root)).collect())
+        }
         Value::Object(object) => Value::Object(
             object
                 .iter()
-                .map(|(k, v)| (k.clone(), normalize(v, root)))
+                .map(|(k, v)| (k.clone(), normalize_roots(v, root)))
                 .collect(),
         ),
         _ => value.clone(),
+    }
+}
+fn normalize(value: &Value, root: &Path) -> Value {
+    #[cfg(windows)]
+    {
+        let mut value = normalize_roots(value, root);
+        // This field compares path meaning; backslashes in arbitrary config
+        // strings (including prompts and model names) must remain untouched.
+        match value.pointer_mut("/subc/connection_file") {
+            Some(Value::String(path))
+                if path.as_str() == "$ROOT"
+                    || path.starts_with("$ROOT/")
+                    || path.starts_with("$ROOT\\") =>
+            {
+                *path = path.replace('\\', "/");
+            }
+            _ => {}
+        }
+        value
+    }
+    #[cfg(not(windows))]
+    {
+        normalize_roots(value, root)
     }
 }
 fn check(row: &Value) {
@@ -97,10 +126,13 @@ fn check(row: &Value) {
         ),
     ] {
         if let Some(value) = row.get(field) {
-            write(&path, &expand(&serde_json::to_string(value).unwrap(), root));
+            write(
+                &path,
+                &expand_json(&serde_json::to_string(value).unwrap(), root),
+            );
         }
         if let Some(text) = row.get(text_field).and_then(Value::as_str) {
-            write(&path, &expand(text, root));
+            write(&path, &expand_json(text, root));
         }
     }
     if let Some(value) = row.get("override").and_then(Value::as_str) {
@@ -196,6 +228,43 @@ fn check(row: &Value) {
             "resolved secrets must not appear in warnings"
         );
     }
+}
+
+#[test]
+fn json_root_expansion_escapes_backslashes_and_quotes() {
+    let root = Path::new(r#"C:\fixtures\quoted"name"#);
+    let text = r#"{"subc":{"connection_file":"$ROOT/connection.json"}}"#;
+    let expanded: Value = serde_json::from_str(&expand_json(text, root)).unwrap();
+    assert_eq!(
+        expanded["subc"]["connection_file"],
+        json!(format!("{}/connection.json", root.to_string_lossy()))
+    );
+}
+
+#[test]
+fn normalization_preserves_non_path_backslashes() {
+    let root = Path::new(r"C:\fixture");
+    let value = json!({
+        "subc": {"connection_file": r"C:\fixture\home\daemon/connection.json"},
+        "prompt": r"C:\fixture\prompt\literal",
+        "model": "quoted\\\"\\nsecret",
+        "other": {"subc": {"connection_file": r"C:\fixture\must\keep"}}
+    });
+    let normalized = normalize(&value, root);
+    assert_eq!(normalized["prompt"], json!(r"$ROOT\prompt\literal"));
+    assert_eq!(normalized["model"], value["model"]);
+    assert_eq!(
+        normalized["other"]["subc"]["connection_file"],
+        json!(r"$ROOT\must\keep")
+    );
+    assert_eq!(
+        normalized["subc"]["connection_file"],
+        json!(if cfg!(windows) {
+            "$ROOT/home/daemon/connection.json"
+        } else {
+            r"$ROOT\home\daemon/connection.json"
+        })
+    );
 }
 
 #[test]

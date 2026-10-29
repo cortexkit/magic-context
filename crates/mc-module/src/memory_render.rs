@@ -160,6 +160,19 @@ pub fn render_memory_block(
     lines.join("\n")
 }
 
+/// Workspace ownership belongs on the block, never on a project's source label.
+pub fn render_workspace_memory_block(memories: &[StoredMemory], workspace: &str) -> String {
+    let block = render_memory_block(memories, "workspace-memory", &Default::default());
+    block.replacen(
+        "<workspace-memory>",
+        &format!(
+            "<workspace-memory workspace=\"{}\">",
+            escape_xml_attr(workspace)
+        ),
+        1,
+    )
+}
+
 /// Render the `<user-profile>` baseline block: one `- <content>` line per user memory
 /// (already budget-trimmed by the caller). Empty set → empty string.
 pub fn render_user_profile_block(profile_lines: &[String], wrapper: &str) -> String {
@@ -210,6 +223,9 @@ pub struct M0Inputs<'a> {
     pub compartments: &'a [DecayRenderCompartment],
     /// The project memories (selected + ordered + trimmed) for the `<project-memory>` block.
     pub memories: &'a [StoredMemory],
+    /// Pre-rendered workspace memories, emitted immediately before project memories.
+    /// Missing or empty blocks leave the legacy framing unchanged.
+    pub workspace_memory_block: Option<&'a str>,
     /// Map from memory id to its source project name, for memories that come from OTHER
     /// projects sharing a workspace with this one (empty when every memory is the
     /// current project's own).
@@ -257,6 +273,12 @@ pub(crate) fn render_m0_with_history(inputs: &M0Inputs, session_history: &str) -
         format!("<session-history>\n{session_history}\n</session-history>")
     });
 
+    if let Some(workspace_block) = inputs
+        .workspace_memory_block
+        .filter(|block| !block.is_empty())
+    {
+        sections.push(workspace_block.to_string());
+    }
     let memories_block =
         render_memory_block(inputs.memories, "project-memory", inputs.source_name_by_id);
     if !memories_block.is_empty() {
@@ -428,6 +450,7 @@ mod tests {
                 compartments: &[],
                 memories: &[],
                 source_name_by_id: &Default::default(),
+                workspace_memory_block: None,
                 history_budget_tokens: 0.0,
                 decay_pressure_multiplier: 1.0,
             },
@@ -561,6 +584,7 @@ mod tests {
             compartments: &comps,
             memories: &[mem(1, "ARCHITECTURE", "m1", Some(80))],
             source_name_by_id: &Default::default(),
+            workspace_memory_block: None,
             history_budget_tokens: 60_000.0,
             decay_pressure_multiplier: 1.0,
         };
@@ -575,6 +599,43 @@ mod tests {
             "sub-block order: {m0}"
         );
         assert!(m0.contains("## 1-9 · T\nHIST"), "history rendered: {m0}");
+    }
+
+    #[test]
+    fn m0_workspace_block_slot_preserves_legacy_framing() {
+        let history = "<session-history>\nhistory\n</session-history>";
+        let project = "<project-memory>\n<ARCHITECTURE>\n#1: project claim\n</ARCHITECTURE>\n</project-memory>";
+        let workspace = "<workspace-memory workspace=\"ws\">\n<CONSTRAINTS>\n#2: workspace claim\n</CONSTRAINTS>\n</workspace-memory>";
+        let memories = [mem(1, "ARCHITECTURE", "project claim", Some(50))];
+        let mut inputs = M0Inputs {
+            project_docs: "",
+            user_profile: &[],
+            covered_system_messages: &[],
+            compartments: &[],
+            memories: &memories,
+            workspace_memory_block: None,
+            source_name_by_id: &Default::default(),
+            history_budget_tokens: 60_000.0,
+            decay_pressure_multiplier: 1.0,
+        };
+        let legacy = format!("{history}\n\n{project}");
+        assert_eq!(render_m0_with_history(&inputs, "history"), legacy);
+        inputs.workspace_memory_block = Some("");
+        assert_eq!(render_m0_with_history(&inputs, "history"), legacy);
+        inputs.workspace_memory_block = Some(workspace);
+        assert_eq!(
+            render_m0_with_history(&inputs, "history"),
+            format!("{history}\n\n{workspace}\n\n{project}")
+        );
+        inputs.memories = &[];
+        assert_eq!(
+            render_m0_with_history(&inputs, "history"),
+            format!("{history}\n\n{workspace}")
+        );
+        for empty in [None, Some("")] {
+            inputs.workspace_memory_block = empty;
+            assert_eq!(render_m0_with_history(&inputs, "history"), history);
+        }
     }
 
     #[test]
@@ -599,6 +660,7 @@ mod tests {
             compartments: &[],
             memories: &[],
             source_name_by_id: &Default::default(),
+            workspace_memory_block: None,
             history_budget_tokens: 60_000.0,
             decay_pressure_multiplier: 1.0,
         };

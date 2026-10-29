@@ -976,6 +976,18 @@ pub struct HistorianProducer {
     /// When set, every route opens to this session's own runner instead of the
     /// configured runner module. The child session remains its own bind identity.
     session_runner: Option<SessionRunnerRoute>,
+    /// When set, every route opens to the runner module routing answered, under
+    /// the conversation's scope. Takes precedence over `session_runner`.
+    routed_runner: Option<RoutedRunnerTarget>,
+}
+
+/// The runner module a `route.select` answer named and the scope the answer
+/// was given under. Child routes open under that same scope, so the runner
+/// sees the same project and session routing placed the work for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutedRunnerTarget {
+    pub module_id: String,
+    pub scope: subc_protocol::scope::ScopeSelector,
 }
 
 impl HistorianProducer {
@@ -1137,7 +1149,18 @@ impl HistorianProducer {
             session_retention: None,
             released: None,
             session_runner: None,
+            routed_runner: None,
         })
+    }
+
+    /// Connect a producer whose routes go to the runner module routing selected.
+    pub async fn connect_to_routed_runner(
+        config: HistorianProducerConfig,
+        target: RoutedRunnerTarget,
+    ) -> Result<Self, HistorianProducerError> {
+        let mut producer = Self::connect(config).await?;
+        producer.routed_runner = Some(target);
+        Ok(producer)
     }
 
     /// Connect a producer whose routes go to a runner-lane conversation's own runner.
@@ -1535,9 +1558,10 @@ impl HistorianProducer {
             .session_id
             .clone()
             .ok_or(HistorianProducerError::MissingSession)?;
-        let target = match &self.session_runner {
-            Some(route) => route.target(),
-            None => self
+        let target = match (&self.routed_runner, &self.session_runner) {
+            (Some(routed), _) => crate::route_targets::routed_module_target(&routed.module_id),
+            (None, Some(route)) => route.target(),
+            (None, None) => self
                 .config
                 .route_targets
                 .target(RegisteredRoute::HistorianRunner)
@@ -1553,8 +1577,13 @@ impl HistorianProducer {
             consumer_identity: consumer_identity_from_launch(),
             consumer_capabilities: None,
             admission_facts: None,
-            // Historian routes carry no session scope; they run under the module's own identity.
-            scope: None,
+            // A routed summary runs under the conversation's scope, the same stamp
+            // routing selected under. Other historian routes carry no scope and
+            // run under the module's own identity.
+            scope: self
+                .routed_runner
+                .as_ref()
+                .map(|routed| routed.scope.clone()),
             // The historian runner is an llm-runner management surface.
             role_versions: Some(crate::session_resolver::llm_runner_role_versions()),
         };

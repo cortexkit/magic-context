@@ -1,6 +1,11 @@
 //! Off-thread classify/map execution over a fresh project snapshot.
 
-use std::{collections::HashSet, path::PathBuf, process::Command, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashSet},
+    path::PathBuf,
+    process::Command,
+    sync::Arc,
+};
 
 use mc_store::{
     dream_scheduler::schedules::TaskName, ClassificationUpdate, MappingUpdate, McStore,
@@ -28,6 +33,7 @@ pub struct ClassifyHost<C: DreamCarrier> {
     tracked: HashSet<String>,
     root: Option<PathBuf>,
     attempts: Vec<Attempt>,
+    map_attempted: BTreeSet<i64>,
 }
 
 impl<C> ClassifyHost<C>
@@ -42,11 +48,16 @@ where
             tracked: HashSet::new(),
             root: None,
             attempts: Vec::new(),
+            map_attempted: BTreeSet::new(),
         }
     }
 
     pub fn attempts(&self) -> &[Attempt] {
         &self.attempts
+    }
+
+    pub fn map_attempted_ids(&self) -> &BTreeSet<i64> {
+        &self.map_attempted
     }
 
     /// Dispatch classify-memories or map-memories using the captured task name.
@@ -233,6 +244,9 @@ where
     }
     fn record_attempts(&mut self, _task: &str, attempts: &[Attempt]) {
         self.attempts.extend_from_slice(attempts);
+    }
+    fn record_map_attempted(&mut self, ids: &[i64]) {
+        self.map_attempted.extend(ids);
     }
     fn commit_classifications(
         &mut self,

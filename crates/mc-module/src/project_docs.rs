@@ -257,24 +257,21 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinked_doc_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
         let secret = dir.path().join("secret.txt");
         write_doc(dir.path(), "secret.txt", "TOP SECRET");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&secret, dir.path().join("ARCHITECTURE.md")).unwrap();
         // a symlinked ARCHITECTURE.md must NOT be read (exfil guard); STRUCTURE.md still renders
         write_doc(dir.path(), "STRUCTURE.md", "real struct");
         let docs = read_project_docs_canonical(dir.path().to_str().unwrap());
-        #[cfg(unix)]
-        {
-            assert!(
-                !docs.rendered_block.contains("TOP SECRET"),
-                "symlink exfil blocked"
-            );
-            assert!(docs.rendered_block.contains("real struct"));
-        }
+        assert!(
+            !docs.rendered_block.contains("TOP SECRET"),
+            "symlink exfil blocked"
+        );
+        assert!(docs.rendered_block.contains("real struct"));
     }
 
     #[test]

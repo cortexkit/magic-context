@@ -13,6 +13,7 @@
 
 use super::context::{ChildEvent, ChildObserver, TaskContext, TaskToolRouter, ToolError};
 use super::domain_control::available;
+use super::entropy::secret;
 use crate::child_retention::{self, child_policy, ChildRetention, ReleaseOutcome, RetentionMember};
 use crate::dream_runner::{CarrierError, ChildRequest, Completion, DreamCarrier, Usage};
 use crate::historian_runner::{HistorianRunnerKind, RunnerSource};
@@ -27,7 +28,6 @@ use mc_store::dream_scheduler::budget::{BudgetAction, TokenBudget};
 use mc_store::dream_scheduler::SqliteDreamScheduler;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -65,15 +65,6 @@ fn error(message: impl Into<String>) -> CarrierError {
     }
 }
 
-fn secret() -> Result<String, CarrierError> {
-    let mut bytes = [0_u8; 32];
-    // Without OS entropy the session id would be guessable; refuse instead.
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut bytes))
-        .map_err(|e| error(e.to_string()))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-}
-
 /// A failed llm-runner op. `outcome_unknown` means the request may have reached
 /// the runner and taken effect while its reply was lost.
 #[derive(Debug, Clone, PartialEq)]
@@ -105,6 +96,17 @@ pub trait BrocaPort {
     /// uses it to reject child requests scoped to a different parent while keeping
     /// each child route bound to its own session.
     fn session_runner_parent(&self) -> Option<&str> {
+        None
+    }
+    /// Whether routing chose this port's runner, and the child request's model
+    /// is routing's answer. Such a child needs no user-configured Broca runner.
+    fn routed(&self) -> bool {
+        false
+    }
+    /// The session name to bind the child to, when the port's owner names it (a
+    /// routed dream run names its session after its project and run). `None`
+    /// lets the carrier mint one.
+    fn session_name(&self) -> Option<String> {
         None
     }
 }
@@ -345,7 +347,11 @@ impl McHandler {
         request: &Value,
     ) -> Option<HandlerOutcome> {
         let binding = self.facade_binding(channel).ok()?;
-        if !binding.session.starts_with(SESSION_PREFIX) {
+        if !binding.session.starts_with(SESSION_PREFIX)
+            && !binding
+                .session
+                .starts_with(super::routed::scope::SESSION_PREFIX)
+        {
             return None;
         }
         let name = request.get("name").and_then(Value::as_str);
@@ -477,6 +483,7 @@ impl<P: BrocaPort> BrocaCarrier<P> {
         // that host, so a port to it needs no configured Broca runner.
         let session_parent = self.port.session_runner_parent();
         if session_parent.is_none()
+            && !self.port.routed()
             && (request.runner.kind != HistorianRunnerKind::Broca
                 || request.runner.source != RunnerSource::Configured)
         {
@@ -1092,7 +1099,10 @@ impl<P: BrocaPort> DreamCarrier for BrocaCarrier<P> {
             return Err(error("prior_cleanup_required"));
         }
         let (provider, name, budget) = self.admit(request)?;
-        let session = format!("{SESSION_PREFIX}{}", secret()?);
+        let session = match self.port.session_name() {
+            Some(session) => session,
+            None => format!("{SESSION_PREFIX}{}", secret()?),
+        };
         let allowed = request
             .allowed_tools
             .iter()

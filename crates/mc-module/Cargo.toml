@@ -24,6 +24,9 @@ cortexkit-store-types = { workspace = true }
 cortexkit-store = { workspace = true }
 cortexkit-lease = { workspace = true }
 cortexkit-log = { workspace = true }
+cortexkit-persona = "=0.1.0"
+cortexkit-agent-identity = "=0.1.0"
+cortexkit-project-identity = "=0.1.3"
 tracing = "0.1"
 subc-protocol = { workspace = true }
 subc-control = { workspace = true }
@@ -35,8 +38,10 @@ serde_json = { workspace = true }
 # Provider context-overflow error patterns (scheduler unit). Plain regex (no
 # lookarounds in those patterns); fancy-regex stays confined to mc-tokenizer.
 regex = "1"
+semver = "1"
 tokio = { workspace = true }
 sha2 = { workspace = true }
+getrandom = "=0.2.17"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The single-store writer opens the host's context.db directly (src/host_store.rs).
 # Same pin as the workspace uses everywhere else so the Connection/Transaction types
@@ -48,6 +53,7 @@ cortexkit-role-agent-data = "0.2.4"
 # Runner-owned tags and context-ceiling details for async compaction.
 cortexkit-role-llm-runner = "=0.7.12"
 cortexkit-role-compaction-provider = "=0.7.6"
+cortexkit-role-routing = "=0.3.1"
 # RFC 8785 (JCS) canonical JSON for tool.catalog's answer bytes and digests: the
 # same canonicaliser the role crate uses, so floats and non-ASCII keys in a
 # caller's composition hash exactly as the runner hashes them.
@@ -98,7 +104,7 @@ cortexkit-role-llm-runner = { version = "=0.7.12", features = ["test-vectors"] }
 cpu-time = "1"
 subc-core = { workspace = true }
 # Embedded real-daemon coverage of HELLO_ACK/open versus the first plan fetch.
-subc-daemon = "=0.36.19"
+subc-daemon = "=0.36.35"
 # Enable the store's seed helpers for mc-module's compose tests (populate memories +
 # mutations). The feature is gated so the writers never reach production builds.
 mc-store = { workspace = true, features = ["test-support"] }
@@ -124,3 +130,4 @@ cortexkit-role-llm-runner-conformance = "=0.15.14"
 # every spelling of its project folder, and another runner reaches other state
 # (src/providers/async_provider/tests/conversation_identity_probe.rs).
 cortexkit-role-compaction-provider = { version = "=0.7.6", features = ["conformance"] }
+cortexkit-role-routing-conformance = "=0.1.0"

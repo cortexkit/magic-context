@@ -77,9 +77,17 @@ fn thread_cpu_clock_records_work_and_stays_opt_in() {
     assert!(start("inactive").is_none());
     begin_pass();
     let span = start("hash");
+    let cpu_start = ThreadTime::now().as_duration();
+    let wall_start = Instant::now();
     let mut value = 1_u64;
-    for i in 0..100_000 {
-        value = std::hint::black_box(value.wrapping_mul(31).wrapping_add(i));
+    loop {
+        for i in 0..100_000 {
+            value = std::hint::black_box(value.wrapping_mul(31).wrapping_add(i));
+        }
+        if ThreadTime::now().as_duration() > cpu_start {
+            break;
+        }
+        assert!(wall_start.elapsed() < std::time::Duration::from_secs(5));
     }
     finish(span);
     let costs = end_pass();

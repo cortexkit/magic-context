@@ -100,10 +100,14 @@ fn pending_history(rig: &Rig) {
 async fn person_admission_refuses_run_flow_and_unscoped_invokes() {
     let dir = tempfile::tempdir().unwrap();
     let rig = ready(dir.path()).await;
-    assert!(user_command::admitted(Some(&stamp())));
+    assert!(user_command::admitted(Some(
+        &crate::compatible_wire(stamp()).unwrap()
+    )));
     let flow = stamp().with_attributes(ScopeAttributes::new().with_flow_id(Some("flow".into())));
     // The role's own admission still refuses a flow scope...
-    assert!(!user_command::admitted(Some(&flow)));
+    assert!(!user_command::admitted(Some(
+        &crate::compatible_wire(&flow).unwrap()
+    )));
     // ...but a flow-scoped route never reaches it: the dispatcher's flow fence
     // refuses every method but the flow ops first.
     attest(&rig, Some(flow));
@@ -467,4 +471,67 @@ async fn interrupted_failed_receipts_expire_without_resetting_their_age() {
     let saved = saved_receipts(&rig);
     assert!(!saved.contains_key(&oldest));
     assert_eq!(saved.len(), 1);
+}
+
+#[tokio::test]
+async fn attributed_scope_bridge_preserves_metadata_and_refuses_future_constraints() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = ready(dir.path()).await;
+    let scoped = stamp()
+        .with_project_id(Some("pj-wire-bridge".into()))
+        .with_workdir(Some(dir.path().to_string_lossy().into_owned()))
+        .with_attributes(ScopeAttributes::new().with_on_behalf_of_agent(Some("agent-7".into())));
+    let role_scope = crate::compatible_wire(&scoped).unwrap();
+    assert!(user_command::admitted(Some(&role_scope)));
+    assert_eq!(role_scope.project_id, scoped.project_id);
+    assert_eq!(role_scope.workdir, scoped.workdir);
+    assert_eq!(
+        serde_json::to_value(&role_scope).unwrap(),
+        serde_json::to_value(&scoped).unwrap()
+    );
+    attest(&rig, Some(scoped.clone()));
+    assert_eq!(
+        response(invoke(&rig, "attributed", "ctx-status", "").await)["state"],
+        "done"
+    );
+
+    let mut project_scope = scoped.clone();
+    project_scope.kind = ScopeKind::Ephemeral;
+    attest(&rig, Some(project_scope));
+    assert_eq!(
+        refusal(invoke(&rig, "project-only", "ctx-status", "").await).0,
+        "no_person"
+    );
+
+    // An added authority constraint in a later SDK must fail closed, not panic.
+    let mut future = serde_json::to_value(scoped).unwrap();
+    future["attributes"]["future_constraint"] = json!(true);
+    let (code, detail) =
+        refusal(super::super::user_commands::command_scope_admitted(Some(future)).unwrap_err());
+    assert_eq!(code, "internal_error");
+    assert_eq!(
+        detail,
+        json!({"code":"wire_record_incompatible", "record":"scope_stamp"})
+    );
+}
+
+#[test]
+fn scope_bridge_refuses_fields_the_older_stamp_decoder_would_drop() {
+    let mut future = serde_json::to_value(
+        stamp()
+            .with_project_id(Some("pj-wire-bridge".into()))
+            .with_workdir(Some("/throwaway-project".into())),
+    )
+    .unwrap();
+    future["future_constraint"] = json!(true);
+    let older_scope = serde_json::from_value(future.clone()).unwrap();
+    assert!(user_command::admitted(Some(&older_scope)));
+    let older_wire = serde_json::to_value(older_scope).unwrap();
+    assert_eq!(older_wire["project_id"], "pj-wire-bridge");
+    assert_eq!(older_wire["workdir"], "/throwaway-project");
+    assert!(older_wire.get("future_constraint").is_none());
+    let (code, detail) =
+        refusal(super::super::user_commands::command_scope_admitted(Some(future)).unwrap_err());
+    assert_eq!(code, "internal_error");
+    assert_eq!(detail["code"], "wire_record_incompatible");
 }

@@ -999,6 +999,8 @@ pub fn local_write(conn: &mut Connection, request: &Value, now: i64) -> Result<V
     let result = FacadeMutationTxn {
         tx: &tx,
         automated: true,
+        // History edits only update existing ids, so their placement stays unchanged.
+        memory_writer: None,
     }
     .audited_memory_write(&request, now, MemoryWriter::Local)?;
     tx.commit().map_err(storage)?;
@@ -1157,6 +1159,8 @@ impl crate::McStore {
                         FacadeMutationTxn {
                             tx,
                             automated: true,
+                            // Restore and edit only update existing ids; neither creates a memory.
+                            memory_writer: None,
                         }
                         .audited_memory_write(&request, now, MemoryWriter::Module)
                         .map_err(sql_error)

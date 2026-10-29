@@ -159,6 +159,10 @@ pub struct ScheduleState {
     pub retry_count: u32,
     pub task_state_json: Option<String>,
     pub retrospective_watermark_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs_watermark: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_skip_code: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +178,8 @@ pub struct RunOutcome {
     pub error: Option<String>,
     pub task_state_json: Option<String>,
     pub retrospective_watermark_ms: Option<Option<i64>>,
+    pub inputs_watermark: Option<serde_json::Value>,
+    pub last_skip_code: Option<String>,
 }
 
 impl RunOutcome {
@@ -184,6 +190,8 @@ impl RunOutcome {
             error: None,
             task_state_json: None,
             retrospective_watermark_ms: None,
+            inputs_watermark: None,
+            last_skip_code: None,
         }
     }
 }
@@ -225,6 +233,8 @@ pub(super) fn seeded(config: &TaskConfig, candidate: Option<i64>) -> ScheduleSta
         retry_count: 0,
         task_state_json: None,
         retrospective_watermark_ms: None,
+        inputs_watermark: None,
+        last_skip_code: None,
     }
 }
 
@@ -283,8 +293,12 @@ pub(super) fn advance(
         state.retry_count = 0;
     }
     if outcome.status == RunStatus::Completed {
-        state.last_run_at = Some(started)
+        state.last_run_at = Some(started);
+        if let Some(watermark) = &outcome.inputs_watermark {
+            state.inputs_watermark = Some(watermark.clone());
+        }
     }
+    state.last_skip_code = outcome.last_skip_code.clone();
     state.last_status = Some(outcome.status);
     state.last_error = outcome.error.clone();
     // Skip outcomes do not publish executor cursors, even if a caller supplies one.

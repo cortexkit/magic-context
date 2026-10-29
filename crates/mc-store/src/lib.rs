@@ -42,6 +42,7 @@ mod async_compaction;
 mod cut_head;
 pub use cut_head::NamespaceHead;
 pub mod memory_history;
+pub mod memory_levels;
 pub mod memory_lifecycle;
 pub mod memory_projection;
 pub mod move_context;
@@ -4393,11 +4394,62 @@ fn historian_owner_dead(pid: i64) -> bool {
                     && String::from_utf8_lossy(&output.stderr).contains("No such process")
             })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let Ok(pid) = u32::try_from(pid) else {
+            return false;
+        };
+        if pid == 0 {
+            return false;
+        }
+        // Do not let a tasklist.exe in the project's directory impersonate the probe.
+        let Some(system_root) = std::env::var_os("SystemRoot").map(PathBuf::from) else {
+            return false;
+        };
+        if !system_root.is_absolute() {
+            return false;
+        }
+        // A complete CSV process table proves absence without depending on the
+        // localized "no matching tasks" message. Failed or malformed probes
+        // remain inconclusive and must not reclaim a live owner's lease.
+        std::process::Command::new(system_root.join("System32").join("tasklist.exe"))
+            .args(["/FO", "CSV", "/NH"])
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && output.stderr.is_empty()
+                    && windows_process_table_proves_absent(pid, &output.stdout)
+            })
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false
     }
+}
+
+#[cfg(windows)]
+fn windows_process_table_proves_absent(pid: u32, bytes: &[u8]) -> bool {
+    let mut saw_process = false;
+    for line in String::from_utf8_lossy(bytes).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if !line.starts_with('"') || !line.ends_with('"') {
+            return false;
+        }
+        let mut fields = line.split("\",\"");
+        let _image = fields.next();
+        let Some(Ok(listed_pid)) = fields.next().map(str::parse::<u32>) else {
+            return false;
+        };
+        if fields.count() < 3 || listed_pid == pid {
+            return false;
+        }
+        saw_process = true;
+    }
+    saw_process
 }
 
 fn historian_lease_held(
@@ -5039,6 +5091,9 @@ pub struct SessionCacheTtlPolicy {
 /// The non-CoreState durable blob: bootstrap + epoch-detection + coverage watermark.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModuleMeta {
+    /// Resolved memory-profile context captured at session bind; never read by renderers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_context: Option<serde_json::Value>,
     /// The memory view stored with the baseline/delta text blocks and mural image.
     /// A SOFT delta refresh adds only immutable operations from the owning session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5474,6 +5529,32 @@ pub struct ModuleMeta {
     /// consistent state.
     #[serde(default)]
     pub shadow_acked_watermarks: Value,
+    /// The summarizer's system prompt, rendered once per conversation and sent
+    /// verbatim on every later summary so the provider's cached prefix stays the
+    /// same even if a persona file changes. A native recomp resets this meta to its
+    /// default, which re-renders it. Never read by the m0/m1 renderers. Boxed so
+    /// the absent common case adds one pointer to every in-memory meta copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_persona: Option<Box<FrozenSummaryPersona>>,
+}
+
+/// A rendered summary persona and the generation and routing settings frozen
+/// with it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrozenSummaryPersona {
+    /// SHA-256 over the rendered bytes, as `persona/v1` defines a persona digest.
+    pub render_digest: String,
+    /// SHA-256 over the render digest and every frozen setting below, so two
+    /// freezes with equal bytes but a different temperature or demand differ.
+    pub identity: String,
+    /// The exact system text sent on every summary of this conversation.
+    pub bytes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    pub consumer: String,
+    pub iq: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eq: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6988,6 +7069,10 @@ impl std::error::Error for FacadeMemoryMutationError {}
 /// The `context.db` tables a facade command may write: memories and notes, plus every
 /// table the memory applier writes when a command admits a memory.
 const FACADE_COMMAND_TABLES: &[&str] = &[
+    "memory_placement",
+    "memory_ops",
+    "memory_outbox",
+    "memory_sync_state",
     "memories",
     "notes",
     "memory_embedding_watermarks",
@@ -7008,6 +7093,7 @@ const FACADE_COMMAND_TABLES: &[&str] = &[
 pub struct FacadeMutationTxn<'a> {
     tx: &'a rusqlite::Connection,
     automated: bool,
+    memory_writer: Option<memory_levels::MemoryWriter>,
 }
 
 /// Compose an automated memory mutation with its caller's accounting writes in an
@@ -7025,6 +7111,7 @@ pub fn with_automated_memory_mutation_tx<T>(
         &FacadeMutationTxn {
             tx: conn,
             automated: false,
+            memory_writer: None,
         }
         .automated(),
     )?;
@@ -7035,12 +7122,24 @@ pub fn with_automated_memory_mutation_tx<T>(
 }
 
 impl<'a> FacadeMutationTxn<'a> {
+    pub fn with_memory_writer(&self, writer: memory_levels::MemoryWriter) -> FacadeMutationTxn<'_> {
+        FacadeMutationTxn {
+            tx: self.tx,
+            automated: self.automated,
+            memory_writer: Some(writer),
+        }
+    }
+
+    fn memory_writer(&self) -> memory_levels::MemoryWriter {
+        self.memory_writer.clone().unwrap_or_default()
+    }
     /// Automated curation validates targets and saves their prior versions for undo,
     /// but does not enqueue a prompt update or record an agent fragment.
     pub fn automated(&self) -> FacadeMutationTxn<'_> {
         FacadeMutationTxn {
             tx: self.tx,
             automated: true,
+            memory_writer: None,
         }
     }
 
@@ -7117,7 +7216,12 @@ impl<'a> FacadeMutationTxn<'a> {
         &self,
         request: &memory_lifecycle::applier::AdmissionRequest<'_>,
     ) -> Result<memory_lifecycle::applier::ApplierReceipt, String> {
-        admit_memory_tx(self.tx, request).map_err(|error| error.to_string())
+        let mut writer = self.memory_writer();
+        if let Some(anchor) = request.classification_anchor {
+            writer.ordinals = vec![anchor.save_ordinal];
+        }
+        admit_memory_tx(self.tx, request, &writer, memory_levels::CreateKind::Create)
+            .map_err(|error| error.to_string())
     }
 
     pub fn update_memory_content(
@@ -7259,6 +7363,26 @@ impl<'a> FacadeMutationTxn<'a> {
         source_session_id: Option<&str>,
         now_ms: i64,
     ) -> Result<(StoredMemoryFull, Vec<i64>), FacadeMemoryMutationError> {
+        self.merge_memories_canonical_with_category(
+            project_path,
+            ids,
+            merged_content,
+            source_session_id,
+            now_ms,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_memories_canonical_with_category(
+        &self,
+        project_path: &str,
+        ids: &[i64],
+        merged_content: &str,
+        source_session_id: Option<&str>,
+        now_ms: i64,
+        category_override: Option<&str>,
+    ) -> Result<(StoredMemoryFull, Vec<i64>), FacadeMemoryMutationError> {
         if ids.len() < 2 {
             return Err(FacadeMemoryMutationError::InvalidMerge);
         }
@@ -7283,6 +7407,9 @@ impl<'a> FacadeMutationTxn<'a> {
         }
 
         let category = rows[0].category.clone();
+        let mut writer = self.memory_writer();
+        writer.merge_owner = memory_levels::merge_owner(self.tx, ids, project_path, &writer)
+            .map_err(FacadeMemoryMutationError::storage)?;
         let normalized_hash = compute_normalized_memory_hash(merged_content);
         let matching = self
             .tx
@@ -7303,19 +7430,23 @@ impl<'a> FacadeMutationTxn<'a> {
         let target_id = if let Some(id) = matching {
             id
         } else {
-            self.insert_memory(InsertMemoryInput {
-                project_path,
-                route_project_root: None,
-                category: &category,
-                content: merged_content,
-                source_session_id,
-                source_type: Some(if self.automated { "dreamer" } else { "agent" }),
-                importance: Some(50),
-                expires_at: None,
-                metadata_json: None,
-                now_ms,
-            })
-            .map_err(FacadeMemoryMutationError::Storage)?
+            // Defer placement and the create hook until the survivor has its final
+            // category and merge aggregates, so the event describes the stored row.
+            let facade = self.with_memory_writer(Default::default());
+            facade
+                .insert_memory(InsertMemoryInput {
+                    project_path,
+                    route_project_root: None,
+                    category: &category,
+                    content: merged_content,
+                    source_session_id,
+                    source_type: Some(if self.automated { "dreamer" } else { "agent" }),
+                    importance: Some(50),
+                    expires_at: None,
+                    metadata_json: None,
+                    now_ms,
+                })
+                .map_err(FacadeMemoryMutationError::Storage)?
         };
         let source_ids = ids
             .iter()
@@ -7359,6 +7490,36 @@ impl<'a> FacadeMutationTxn<'a> {
             merged = load_memory_full_tx(self.tx, target_id)
                 .map_err(FacadeMemoryMutationError::storage)?
                 .ok_or(FacadeMemoryMutationError::Unavailable { id: target_id })?;
+        }
+        if let Some(category) = category_override.filter(|c| *c != merged.category) {
+            merged = self.update_memory_content(
+                project_path,
+                target_id,
+                merged_content,
+                Some(category),
+                now_ms,
+            )?;
+        }
+        if created_canonical {
+            writer
+                .created(
+                    self.tx,
+                    target_id,
+                    if self.automated {
+                        memory_levels::Actor::Dreamer
+                    } else {
+                        memory_levels::Actor::MainAgent
+                    },
+                    memory_levels::CreateKind::MergeSurvivor,
+                    if self.automated {
+                        None
+                    } else {
+                        source_session_id
+                    },
+                    None,
+                    now_ms,
+                )
+                .map_err(FacadeMemoryMutationError::storage)?;
         }
         Ok((merged, source_ids))
     }
@@ -7844,6 +8005,7 @@ impl<'a> FacadeMutationTxn<'a> {
 /// the module's lifetime, plus the installed [`ContextDomain`] for the rows in `context.db`.
 pub struct McStore {
     inner: Arc<SqliteStore>,
+    memory_create_hook: std::sync::RwLock<Option<memory_levels::CreateHook>>,
     move_path: Option<std::path::PathBuf>,
     native_snapshot_fallbacks: Mutex<HashMap<String, cache_codec::NativeSnapshotRejection>>,
     // Distinguishes independent stores in the process-local tag baseline cache. Production
@@ -8565,6 +8727,7 @@ impl McStore {
         }
         let store = McStore {
             inner: Arc::new(inner),
+            memory_create_hook: Default::default(),
             move_path: match &descriptor.backend {
                 cortexkit_store_types::StorageBackend::Sqlite { path } => {
                     Some(std::path::PathBuf::from(path))
@@ -8788,6 +8951,11 @@ impl McStore {
             }
         }
 
+        let memory_writer = if tool == "ctx_memory" && matches!(action, "write" | "merge") {
+            Some(self.session_memory_writer(Some(identity_scope))?)
+        } else {
+            None
+        };
         let response = self.context_write(FACADE_COMMAND_TABLES, |tx| {
             let audited = matches!(action, "update" | "archive" | "merge")
                 && matches!(tool, "ctx_memory" | "memory.curate");
@@ -8801,6 +8969,7 @@ impl McStore {
             let response = mutation(&FacadeMutationTxn {
                 tx,
                 automated: false,
+                memory_writer,
             })
             .map_err(|error| {
                 rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error)))
@@ -14211,8 +14380,14 @@ impl McStore {
         project_path: &str,
         facts: &[FactCandidate],
     ) -> Result<Vec<PromotedRef>, McStoreError> {
-        let promoted = self.context_write(&["memories", "memory_embedding_watermarks"], |tx| {
-            promote_facts_tx(tx, project_path, facts, current_time_ms())
+        let writers = facts
+            .iter()
+            .map(|fact| self.session_memory_writer(fact.source_session_id.as_deref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut tables = vec!["memories", "memory_embedding_watermarks"];
+        tables.extend(memory_levels::CREATE_TABLES);
+        let promoted = self.context_write(&tables, |tx| {
+            promote_facts_with_writers_tx(tx, project_path, facts, current_time_ms(), &writers)
         })?;
         Ok(promoted)
     }
@@ -14307,8 +14482,13 @@ impl McStore {
         &self,
         request: &memory_lifecycle::applier::AdmissionRequest<'_>,
     ) -> Result<memory_lifecycle::applier::ApplierReceipt, McStoreError> {
+        let mut writer = self.session_memory_writer(request.source_session_id)?;
+        writer.ordinals = request
+            .classification_anchor
+            .map(|a| vec![a.save_ordinal])
+            .unwrap_or_default();
         self.context_write(memory_lifecycle::applier::ADMISSION_TABLES, |tx| {
-            admit_memory_tx(tx, request)
+            admit_memory_tx(tx, request, &writer, memory_levels::CreateKind::Create)
         })
     }
 
@@ -14511,6 +14691,11 @@ impl McStore {
                 }
                 source_rows.push(source);
             }
+
+            let ids = std::iter::once(target_id)
+                .chain(source_rows.iter().map(|row| row.id))
+                .collect::<Vec<_>>();
+            memory_levels::merge_owner(tx, &ids, project_path, &Default::default())?;
 
             let normalized_hash = compute_normalized_memory_hash(merged_content);
             let duplicate_id = tx
@@ -15808,6 +15993,22 @@ impl McStore {
                 &single_store_schema::CONTEXT_TABLES,
                 project_path,
                 membership,
+                now_ms,
+            )
+        })
+    }
+
+    /// Read non-project placements separately, leaving the legacy render snapshot
+    /// and its revision and mutation-cursor watermarks unchanged. Unplaced rows
+    /// retain their project semantics.
+    pub fn load_workspace_memory_rows(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<(StoredMemory, memory_levels::Placement)>, McStoreError> {
+        self.context_read(|conn| {
+            single_store_schema::read_workspace_memory_rows(
+                conn,
+                &single_store_schema::CONTEXT_TABLES,
                 now_ms,
             )
         })
@@ -17722,8 +17923,12 @@ fn admission_for_insert<'a>(
 fn admit_memory_tx(
     tx: &rusqlite::Connection,
     request: &memory_lifecycle::applier::AdmissionRequest<'_>,
+    writer: &memory_levels::MemoryWriter,
+    kind: memory_levels::CreateKind,
 ) -> rusqlite::Result<memory_lifecycle::applier::ApplierReceipt> {
-    let receipt = memory_lifecycle::applier::apply_memory_admission_tx(tx, request)?;
+    let receipt = memory_lifecycle::applier::apply_memory_admission_with_writer_tx(
+        tx, request, writer, kind,
+    )?;
     if receipt.inserted == Some(true) {
         if let Some(id) = receipt.applied_memory_id() {
             raise_embedding_watermark_tx(tx, request.project_path, id, request.now_ms)?;
@@ -17732,11 +17937,22 @@ fn admit_memory_tx(
     Ok(receipt)
 }
 
+#[cfg(test)]
 fn promote_facts_tx(
     tx: &rusqlite::Connection,
     project_path: &str,
     facts: &[FactCandidate],
     now_ms: i64,
+) -> rusqlite::Result<Vec<PromotedRef>> {
+    promote_facts_with_writers_tx(tx, project_path, facts, now_ms, &[])
+}
+
+fn promote_facts_with_writers_tx(
+    tx: &rusqlite::Connection,
+    project_path: &str,
+    facts: &[FactCandidate],
+    now_ms: i64,
+    writers: &[memory_levels::MemoryWriter],
 ) -> rusqlite::Result<Vec<PromotedRef>> {
     // The module writes no memory for a project whose memories the TypeScript host owns.
     // The rest of the fold (compartments, facts, events) still publishes.
@@ -17773,7 +17989,7 @@ fn promote_facts_tx(
         })?;
     let mut promoted = Vec::new();
 
-    for fact in facts {
+    for (index, fact) in facts.iter().enumerate() {
         if fact.category.trim().is_empty() || fact.content.trim().is_empty() {
             continue;
         }
@@ -17804,6 +18020,17 @@ fn promote_facts_tx(
             ],
         )?;
         let memory_id = tx.last_insert_rowid();
+        if let Some(writer) = writers.get(index) {
+            writer.created(
+                tx,
+                memory_id,
+                memory_levels::Actor::Historian,
+                memory_levels::CreateKind::Create,
+                fact.source_session_id.as_deref(),
+                None,
+                now_ms,
+            )?;
+        }
         active_content.insert(fact.content.clone());
         promoted.push(PromotedRef {
             memory_id,
@@ -27174,6 +27401,34 @@ mod tests {
             .context_read(|conn| historian_lease_held(conn, "ses", "ts-wrapup"))
             .unwrap());
         assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_owner_liveness_protects_live_and_unknown_pids() {
+        assert!(!historian_owner_dead(i64::from(std::process::id())));
+        assert!(historian_owner_dead(i64::from(i32::MAX)));
+        assert!(!historian_owner_dead(0));
+        assert!(!historian_owner_dead(-1));
+        assert!(!historian_owner_dead(i64::MAX));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_owner_liveness_requires_a_complete_process_table() {
+        let table = b"\"System\",\"4\",\"Services\",\"0\",\"8 K\"\r\n\"worker.exe\",\"100\",\"Console\",\"1\",\"12 K\"\r\n";
+        assert!(windows_process_table_proves_absent(200, table));
+        assert!(!windows_process_table_proves_absent(100, table));
+        assert!(!windows_process_table_proves_absent(200, b""));
+        assert!(!windows_process_table_proves_absent(200, b"Access denied"));
+        assert!(!windows_process_table_proves_absent(
+            200,
+            b"\"worker.exe\",\"invalid\",\"Console\",\"1\",\"12 K\""
+        ));
+        assert!(!windows_process_table_proves_absent(
+            200,
+            b"\"worker.exe\",\"100\""
+        ));
     }
 
     #[test]

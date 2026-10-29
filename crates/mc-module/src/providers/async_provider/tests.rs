@@ -866,6 +866,73 @@ fn independent_digest(view: &view::CompactionView) -> String {
     format!("{:x}", hash.finalize())
 }
 
+pub(crate) async fn render_published_history(rows: &[mc_store::StoredCompartment]) -> String {
+    render_published_history_with_memory(rows, &[], None).await
+}
+
+pub(crate) async fn render_published_history_with_memory(
+    rows: &[mc_store::StoredCompartment],
+    memories: &[mc_store::StoredMemory],
+    pin: Option<Value>,
+) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::configured(
+        dir.path(),
+        "thalamus-harness",
+        "runner",
+        "s",
+        "opencode",
+        json!({"serializer_profile":"opencode-aisdk"}),
+        |handler| {
+            let store = handler.store.get().unwrap();
+            let key = Key::new(&handler.facade_binding(7).unwrap(), "s", "opencode").unwrap();
+            for memory in memories {
+                store
+                    .insert_memory(mc_store::InsertMemoryInput {
+                        project_path: dir.path().to_str().unwrap(),
+                        route_project_root: None,
+                        category: &memory.category,
+                        content: &memory.content,
+                        source_session_id: Some("s"),
+                        source_type: Some("test"),
+                        importance: memory.importance,
+                        expires_at: None,
+                        metadata_json: None,
+                        now_ms: 1,
+                    })
+                    .unwrap();
+            }
+            if let Some(pin) = pin {
+                crate::memory_profile::persist_session_pin(
+                    store,
+                    &key.engine_key(),
+                    &decode(&pin).unwrap(),
+                )
+                .unwrap();
+            }
+        },
+    )
+    .await;
+    rig.fill(40);
+    rig.notice(1, 1_000, None).await;
+    let mut history = rows.to_vec();
+    assert_eq!(history.len(), 1, "one published summary per fixture firing");
+    // Use the replay fixture's source identities while retaining every byte of
+    // the published summary; the original producer used a different transcript.
+    history[0].start_message = 0;
+    history[0].end_message = 20;
+    history[0].end_message_id = "m20#0".into();
+    let store = rig.h.store.get().unwrap();
+    let namespace = rig.state().namespace();
+    store.replace_compartments(&namespace, &history).unwrap();
+    store.arm_soft_refresh(&namespace).unwrap();
+    rig.notice(2, 1_000, None).await;
+    let view = rig.get(rig.newest().expect("summary publication")).await;
+    String::from_utf8(rig.render(&view))
+        .unwrap()
+        .replace(dir.path().to_str().unwrap(), "<serve-dir>")
+}
+
 #[tokio::test]
 async fn defer_never_publishes_and_runner_tags_are_not_allocated() {
     let dir = tempfile::tempdir().unwrap();
@@ -2753,4 +2820,311 @@ async fn broca_async_lane_fires_session_model_without_historian_block() {
     assert_eq!(session_runner.connects().len(), 1);
     assert_eq!(session_runner.fixed_connects(), 0);
     session_runner.finish(&sent.run_id, "test response".into());
+}
+fn profile_pin_setup(session: &str, lineage: &str) -> Value {
+    json!({"session":session,"harness":"claude-code","request_id":"profile-pin","model":"fixture","context_window":100_000,"composition":{"render_tags":true},"params":{"serializer_profile":"anthropic-messages"},"lineage_id":lineage,"now":1})
+}
+
+#[tokio::test]
+async fn memory_profile_first_setup_persists_and_repeated_setup_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::open(
+        dir.path(),
+        "thalamus",
+        "claude-code",
+        json!({"serializer_profile":"anthropic-messages"}),
+    )
+    .await;
+    let store = rig.h.store.get().unwrap();
+    let key = rig.state().key.engine_key();
+    let first = store.load_meta(&key).unwrap();
+    let pin = first
+        .meta
+        .memory_context
+        .clone()
+        .expect("first accepted Setup pins the session");
+    assert_eq!(pin["profile"]["state"], "entorhinal_not_answering");
+    assert!(pin["snapshot_digest"].is_null());
+    assert!(store.load_meta("s").unwrap().row_version.is_none());
+    let answer = rig
+        .op("compaction.setup", profile_pin_setup("s", "L"))
+        .await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    let second = store.load_meta(&key).unwrap();
+    assert_eq!(second.row_version, first.row_version);
+    assert_eq!(second.meta.memory_context, Some(pin));
+}
+
+#[tokio::test(start_paused = true)]
+async fn memory_profile_lineage_reset_holds_pin_without_provider_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::open(
+        dir.path(),
+        "thalamus",
+        "claude-code",
+        json!({"serializer_profile":"anthropic-messages"}),
+    )
+    .await;
+    let store = rig.h.store.get().unwrap();
+    let key = rig.state().key.engine_key();
+    let first = store.load_meta(&key).unwrap();
+    let generation = rig.state().generation;
+    let connection_file = dir.path().join("unanswered-connection.json");
+    std::fs::write(&connection_file, b"{}").unwrap();
+    let slot = crate::entorhinal_resolve::consumer_slot(&connection_file);
+    let _held = slot.lock().await;
+    *rig.h
+        .provider_store
+        .async_runtime
+        .connection_file
+        .lock()
+        .unwrap() = Some(connection_file);
+    let start = tokio::time::Instant::now();
+    let answer = rig
+        .op("compaction.setup", profile_pin_setup("s", "new-lineage"))
+        .await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    assert!(rig.state().generation > generation);
+    assert_eq!(
+        tokio::time::Instant::now() - start,
+        Duration::ZERO,
+        "an Entorhinal read would wait for its deadline on the held slot"
+    );
+    assert_eq!(
+        store.load_meta(&key).unwrap().meta.memory_context,
+        first.meta.memory_context
+    );
+    assert_eq!(
+        store.load_meta(&key).unwrap().row_version,
+        first.row_version
+    );
+}
+
+#[tokio::test]
+async fn memory_profile_two_runners_with_same_session_have_separate_pins() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::open(
+        dir.path(),
+        "thalamus",
+        "claude-code",
+        json!({"serializer_profile":"anthropic-messages"}),
+    )
+    .await;
+    let store = rig.h.store.get().unwrap();
+    let first_key = rig.state().key.engine_key();
+    rig.bind_provider(8, "broca", "runner", "s");
+    let answer = response(
+        rig.h
+            .dispatch_value(
+                8,
+                json!({"method":"compaction.setup","params":profile_pin_setup("s", "L")}),
+            )
+            .await,
+    );
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    let second_key = Key {
+        runner: "broca".into(),
+        harness: "claude-code".into(),
+        session: "s".into(),
+    }
+    .engine_key();
+    assert_ne!(first_key, second_key);
+    assert!(store
+        .load_meta(&first_key)
+        .unwrap()
+        .meta
+        .memory_context
+        .is_some());
+    assert!(store
+        .load_meta(&second_key)
+        .unwrap()
+        .meta
+        .memory_context
+        .is_some());
+    assert!(store.load_meta("s").unwrap().row_version.is_none());
+}
+
+#[tokio::test]
+async fn memory_profile_generation_cleanup_leaves_stable_pin() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::open(
+        dir.path(),
+        "thalamus",
+        "claude-code",
+        json!({"serializer_profile":"anthropic-messages"}),
+    )
+    .await;
+    let state = rig.state();
+    let store = rig.h.store.get().unwrap();
+    let key = state.key.engine_key();
+    let first = store.load_meta(&key).unwrap();
+    let namespace = state.namespace();
+    let meta = store.load_meta(&namespace).unwrap();
+    store
+        .commit_meta(&namespace, meta.row_version, &meta.meta)
+        .unwrap();
+    store
+        .discard_staged_namespace(&namespace, &state.project().to_string_lossy())
+        .unwrap();
+    assert!(store.load_meta(&namespace).unwrap().row_version.is_none());
+    let after = store.load_meta(&key).unwrap();
+    assert_eq!(after.row_version, first.row_version);
+    assert!(after.meta.memory_context.is_some());
+    assert_eq!(after.meta.memory_context, first.meta.memory_context);
+}
+
+#[tokio::test(start_paused = true)]
+async fn memory_profile_setup_timeout_pins_degraded_without_exceeding_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let connection_file = dir.path().join("unanswered-connection.json");
+    std::fs::write(&connection_file, b"{}").unwrap();
+    let slot = crate::entorhinal_resolve::consumer_slot(&connection_file);
+    let _held = slot.lock().await;
+    let start = tokio::time::Instant::now();
+    let (rig, answer) = Rig::try_setup_with_model(
+        dir.path(),
+        "thalamus",
+        ("runner", "s"),
+        ("claude-code", "s"),
+        "fixture",
+        json!({"serializer_profile":"anthropic-messages"}),
+        |handler| {
+            *handler
+                .provider_store
+                .async_runtime
+                .connection_file
+                .lock()
+                .unwrap() = Some(connection_file);
+        },
+    )
+    .await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    let elapsed = tokio::time::Instant::now() - start;
+    assert!(
+        elapsed >= Duration::from_millis(500) && elapsed < Duration::from_secs(1),
+        "{elapsed:?}"
+    );
+    let pin = rig
+        .h
+        .store
+        .get()
+        .unwrap()
+        .load_meta(&rig.state().key.engine_key())
+        .unwrap()
+        .meta
+        .memory_context
+        .unwrap();
+    assert_eq!(pin["profile"]["state"], "entorhinal_not_answering");
+    assert!(pin["snapshot_digest"].is_null());
+}
+
+fn assert_profile_setup_unbound(rig: &Rig, harness: &str, session: &str) {
+    let key = Key {
+        runner: rig.module.clone(),
+        harness: harness.into(),
+        session: session.into(),
+    }
+    .engine_key();
+    assert!(
+        rig.h
+            .store
+            .get()
+            .unwrap()
+            .load_meta(&key)
+            .unwrap()
+            .meta
+            .memory_context
+            .is_none(),
+        "refused Setup must not persist a memory-profile pin"
+    );
+}
+
+#[tokio::test]
+async fn memory_profile_refused_setups_never_persist() {
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let rig = Rig::new(dir.path()).await;
+        rig.bind_shared_setup_route();
+        let _publisher = pause_bus_for_attach(&rig);
+        rig.h.provider_store.async_runtime.bus_link.set(
+            super::super::async_bus::LinkState::CkbusUnreachable,
+            1,
+            Some("fixture unavailable".into()),
+        );
+        let answer = rig
+            .op(
+                "compaction.setup",
+                setup_request("unavailable", "bus-refusal"),
+            )
+            .await;
+        assert_eq!(answer["provider_code"], "bus_not_ready", "{answer}");
+        assert_profile_setup_unbound(&rig, "opencode", "unavailable");
+    }
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (rig, answer) = moved_session::moved_rig(dir.path(), false).await;
+        assert_eq!(
+            answer["code"],
+            crate::offline_move::STANDALONE_SESSION_NOT_MIGRATED
+        );
+        assert_profile_setup_unbound(
+            &rig,
+            "opencode",
+            &crate::offline_move::tests::fixture_session(),
+        );
+    }
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let rig = Rig::new(dir.path()).await;
+        let store = rig.h.store.get().unwrap();
+        let key = rig.state().key.engine_key();
+        let mut old = store.load_meta(&key).unwrap();
+        old.meta.memory_context = None;
+        let version = store.commit_meta(&key, old.row_version, &old.meta).unwrap();
+        let mut request = setup_request("s", "plan-refusal");
+        request["composition"] = json!({});
+        let answer = rig
+            .h
+            .dispatch_value(7, json!({"method":"compaction.setup","params":request}))
+            .await;
+        assert!(
+            matches!(
+                answer,
+                HandlerOutcome::Error { .. } | HandlerOutcome::ErrorWithDetail { .. }
+            ),
+            "{answer:?}"
+        );
+        assert_eq!(store.load_meta(&key).unwrap().row_version, Some(version));
+        assert_profile_setup_unbound(&rig, "opencode", "s");
+    }
+    {
+        use crate::offline_move::{self, tests as fixture};
+        let dir = tempfile::tempdir().unwrap();
+        let session = fixture::fixture_session();
+        let paths = fixture::write_stores(dir.path());
+        offline_move::run(&paths, &session, false, &fixture::NoHolders, None).unwrap();
+        let (rig, answer) = Rig::try_setup_with_model(
+            dir.path(),
+            "thalamus-harness",
+            ("runner", &session),
+            ("opencode", &session),
+            "fixture",
+            json!({"serializer_profile":"opencode-aisdk"}),
+            |handler| {
+                handler.provider_runner = Arc::new(Runner {
+                    module: "thalamus-harness".into(),
+                    lineage: Mutex::new("L".into()),
+                    withholds_tag_checkpoint: std::sync::atomic::AtomicBool::new(true),
+                    ..Default::default()
+                });
+            },
+        )
+        .await;
+        assert_eq!(
+            answer["code"],
+            contract::errors::refuse_codes::TAG_CHECKPOINT_UNSUPPORTED,
+            "{answer}"
+        );
+        assert_profile_setup_unbound(&rig, "opencode", &session);
+    }
 }

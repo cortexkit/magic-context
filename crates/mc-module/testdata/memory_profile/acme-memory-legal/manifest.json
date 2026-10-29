@@ -1,0 +1,46 @@
+{
+  "schema": "ck-package/v1",
+  "name": "@acme/memory-legal",
+  "version": "1.0.0",
+  "kind": "memory-profile",
+  "summary": "Memory profile for a small legal practice: standing rules for handling matters.",
+  "license": "MIT",
+  "source": "https://example.com/acme/memory-legal",
+  "requires": {
+    "capabilities": [],
+    "packages": { "@cortexkit/memory-base": "^1.0.0" }
+  },
+  "body": {
+    "schema": "mc/memory-profile@1",
+    "abstract": false,
+    "extends": "@cortexkit/memory-base",
+    "serves": ["@acme/domain-legal"],
+    "default_for": ["@acme/domain-legal"],
+    "categories": [
+      {
+        "id": "acme.legal:matter-rules",
+        "tag": "MATTER_RULES",
+        "stream": "fact",
+        "description": "standing rules for how this practice handles a matter: filing, review, deadlines, client contact.",
+        "test": "Would a new associate need this rule to handle the next matter correctly?",
+        "definition_file": "prompts/categories/matter-rules.historian.md",
+        "routing_question": "Is this a standing rule for handling matters?",
+        "default_level": "workspace",
+        "allowed_levels": ["project", "workspace"],
+        "visibility": "own-profile",
+        "decay_class": "stable",
+        "sensitive": false,
+        "render_order": 0,
+        "fact_shape": "assertion",
+        "guidance_hint": "a matter-handling rule",
+        "guidance_hint_light": "a matter rule"
+      }
+    ],
+    "retention": { "category_ttl_ms": { "acme.legal:matter-rules": null } },
+    "prompts": {
+      "historian/system": {
+        "sections": [{ "id": "persona", "override": true, "file": "prompts/historian/persona.md" }]
+      }
+    }
+  }
+}

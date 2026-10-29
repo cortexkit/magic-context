@@ -289,7 +289,11 @@ pub fn plan_classify(active: &[Memory]) -> ClassifyPlan {
     }
 }
 
-pub fn build_classify_prompt(project: &str, memories: &[Memory], anchors: &[Memory]) -> String {
+pub fn build_classify_prompt(
+    project: &str,
+    memories: &[Memory],
+    anchors: &[Memory],
+) -> Result<String, String> {
     let anchors = if anchors.is_empty() {
         String::new()
     } else {
@@ -310,7 +314,16 @@ pub fn build_classify_prompt(project: &str, memories: &[Memory], anchors: &[Memo
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    format!("## Task: Classify Project Memories\n\n**Project:** {project}\n\nScore EVERY memory in the pool below. Emit one <classify> manifest covering every id.\n\n{anchors}### Memory pool to classify\n{pool}")
+    crate::persona_host::dream::task(
+        crate::persona_host::dream::Kind::Classify,
+        &crate::persona_host::dream::Input {
+            project,
+            anchors: &anchors,
+            memories: &pool,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| format!("mc_persona_invalid: {error}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,7 +375,7 @@ pub fn select_map_inputs(active: &[Memory], mut exists: impl FnMut(&str) -> bool
     inputs
 }
 
-pub fn build_map_prompt(project: &str, inputs: &[MapInput]) -> String {
+pub fn build_map_prompt(project: &str, inputs: &[MapInput]) -> Result<String, String> {
     let list = inputs
         .iter()
         .map(|m| {
@@ -378,7 +391,15 @@ pub fn build_map_prompt(project: &str, inputs: &[MapInput]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    format!("## Map these memories to their backing files\n\nProject: {project}\n\nFor each memory below, find the repo file(s) it makes a claim about, or mark it file-independent. Behavioral process/workflow directives stay file-independent even when they name files. When \"Likely files\" are listed, those paths are named in the memory and confirmed to exist — START there only for code claims: confirm each actually backs the claim (a quick read/outline), drop any that don't, add others only if genuinely needed. Search from scratch only when no likely files are given. Then output ONE <mappings> manifest covering every id.\n\n<memories>\n{list}\n</memories>")
+    crate::persona_host::dream::task(
+        crate::persona_host::dream::Kind::Map,
+        &crate::persona_host::dream::Input {
+            project,
+            memories: &list,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| format!("mc_persona_invalid: {error}"))
 }
 
 pub fn directive_shaped_rule(category: &str, content: &str) -> bool {
@@ -574,6 +595,7 @@ pub trait TaskHost: DreamCarrier {
     fn normalize_files(&self, files: &[String]) -> Result<Vec<String>, String>;
     fn budget_finalized(&self) -> bool;
     fn record_attempts(&mut self, task: &str, attempts: &[dream_runner::Attempt]);
+    fn record_map_attempted(&mut self, _ids: &[i64]) {}
     fn commit_classifications(
         &mut self,
         rows: &[ClassificationUpdate],
@@ -626,13 +648,15 @@ pub async fn run_classify(
         if remaining == 0 {
             break;
         }
-        let prompt = build_classify_prompt(context.project, chunk, &anchors);
+        let prompt = build_classify_prompt(context.project, chunk, &anchors)
+            .map_err(|error| TaskError::Runner(dream_runner::Failure::Validation(error)))?;
         let ids: Vec<_> = chunk.iter().map(|m| m.id).collect();
         let request = request(
             context,
             CLASSIFY_TASK,
             DreamRole::Classifier,
-            CLASSIFY_SYSTEM_PROMPT,
+            classify_system_prompt()
+                .map_err(|error| TaskError::Runner(dream_runner::Failure::Validation(error)))?,
             &prompt,
             (remaining / (chunks.len() - i) as u64).max(1),
         );
@@ -733,15 +757,18 @@ pub async fn run_map(
         }
         let (batch, retry) = batches[i].clone();
         let ids: Vec<_> = batch.iter().map(|m| m.id).collect();
-        let prompt = build_map_prompt(context.project, &batch);
+        let prompt = build_map_prompt(context.project, &batch)
+            .map_err(|error| TaskError::Runner(dream_runner::Failure::Validation(error)))?;
         let request = request(
             context,
             MAP_TASK,
             DreamRole::MemoryMapper,
-            MAP_MEMORIES_SYSTEM_PROMPT,
+            map_system_prompt()
+                .map_err(|error| TaskError::Runner(dream_runner::Failure::Validation(error)))?,
             &prompt,
             map_batch_slice_ms(remaining, batches.len() - i),
         );
+        host.record_map_attempted(&ids);
         let run = dream_runner::run_dream_task(
             activated,
             context.route_config,
@@ -811,63 +838,14 @@ pub async fn run_map(
 // Hashes identify the full source files; tests separately pin the prompt bytes.
 // Source-file SHA256: classify 2eb7678db84542110e3d607a579bdac499f19472b9a7df8abd610b072783ed50;
 // map 4232865ee46a6811380cc45fbe3764355607e216e9df4910d1b224ec7e4ba01c.
-pub const CLASSIFY_SYSTEM_PROMPT: &str = r####"You are a memory classifier for the magic-context system. You classify project memories by metadata only. You do NOT rewrite, merge, archive, verify, or create memories, and you do NOT read code — you judge each memory from its own text.
-
-### How to score importance (1-100)
-Importance decides which memories survive when the injected memory block is over budget: high scores stay in context, low scores drop first. So the score is only useful if it **discriminates** — if most memories land in the same band, you have not classified them, you have just labelled them.
-
-Use judgment, not a formula. Blend:
-- **Durability / decay-rate value:** Will this fact still matter weeks from now, across sessions?
-- **Operational impact:** Would missing this fact cause wrong code, wasted time, broken workflows, or violated constraints?
-
-Most memories are ordinary working facts — they belong in the middle, not the top. Reserve the high band for the genuinely load-bearing handful a teammate would be sunk without; push routine observations, one-off details, and now-obvious facts down. A "real, true fact" is not automatically important — truth is not importance.
-
-Rough anchors (not quotas — spread naturally within them): transient/obvious observations 1-30, ordinary helpful project facts 40-65, load-bearing rules/architecture/constraints 70-100. A constraint that is a genuine must/never/always rule the project actively depends on floors around 60; but not every memory in a category is load-bearing — a niche, dated, or narrowly-scoped external quirk can sit lower even if it is a "constraint". Score the fact, not the label. If you assigned most of the pool to one band, re-read and differentiate.
-
-One hard floor: an operating rule whose VIOLATION causes a public-facing or irreversible mistake — posting under the wrong identity, committing/pushing without approval, leaking private content, running destructive commands — scores at least 80. These rules only work if they are always in view; a mid-band score silently drops them from context exactly when the pool grows, and the violation happens. Judge by consequence-of-forgetting, not by how mundane the rule text reads.
-
-### Scope
-- `project` — only meaningful inside this repository/product (default when uncertain).
-- `ecosystem` — useful to sibling projects in the same stack, harness, provider, or company ecosystem.
-- `universe` — broadly true outside this codebase (protocol/platform/API facts), still written as a concise memory.
-
-### Shareability
-Shareability is about EXPOSURE, not scope: **would a teammate working on THIS SAME project benefit from seeing this memory, and is it free of anything personal, local, or sensitive?** If yes, set `shareable="true"`. This is the COMMON case — most project knowledge is exactly what you'd hand a new teammate: architecture, design rules, conventions, constraints, file locations, hard-won gotchas. Mark those shareable even though they are specific to this repo's internals.
-
-Keep `shareable="false"` only for what is tied to the USER or their machine rather than the project: personal/absolute paths, usernames, local or private endpoints (e.g. localhost), credentials/secrets/tokens, customer data, machine-specific config, and personal working-style preferences. A fact's scope does NOT decide shareability. The host also fails closed and forces secret/credential/personal-path text to private regardless.
-
-Output ONE XML manifest at the very end and NOTHING else — no narration, no per-memory commentary, no reasoning:
-<classify>
-<memory id="N" importance="75" scope="project" shareable="true"/>
-<memory id="M" importance="20" scope="universe" shareable="false"/>
-</classify>
-
-Rules:
-- Every memory in the pool below MUST appear exactly once.
-- importance is an integer 1-100; scope is one of project|ecosystem|universe; shareable is true|false."####;
-pub const MAP_MEMORIES_SYSTEM_PROMPT: &str = r####"You are a memory mapper for the magic-context system. You map project memories to the repository files that back them.
-
-A memory's BACKING FILES are the file(s) whose code the memory makes a claim about — the files you would open to check whether the memory is accurate. You do NOT judge accuracy, rewrite, or remove anything. You only LOCATE backing files.
-
-Tools (read-only): read, grep, glob. Request line ranges rather than full files; use offset/limit for longer files. Each memory may come with "Likely files" already named in it and confirmed to exist — confirm those FIRST (cheap) instead of searching. Use search/grep to FIND code only when no likely files are given. Do not guess — confirm a file exists and genuinely backs the memory before listing it. Keep reads minimal: you do not need to read a whole file to confirm it backs a one-line claim.
-
-For each memory decide ONE of:
-- Backing files found → the COMPLETE set of repo-relative paths whose code the memory is about.
-- File-independent → the memory describes EXTERNAL behavior (a provider / API / platform / protocol limit, e.g. "Anthropic returns 400 on empty content"), or a pure process / workflow / philosophy rule, with NO specific local file that backs it. A BEHAVIORAL claim (when to act, how to work, who decides, or tool-usage discipline) is file-independent even when it cites file paths or commands as examples: a named file is not the file backing the rule.
-
-Output ONE XML manifest at the very end and NOTHING else — no narration, no per-memory commentary, no reasoning:
-<mappings>
-<memory id="N" files="path/a.ts,path/b.ts"/>
-<memory id="M" independent="true"/>
-</mappings>
-
-Rules:
-- Every input memory id MUST appear exactly once.
-- files: repo-relative, comma-separated, no spaces inside a path. Only files that actually exist and genuinely back the memory.
-- A BACKING FILE is CODE that implements or handles the claim — not a file that merely mentions it. A path named inside a process directive is an action target or example, not evidence that the file backs the directive. A markdown doc (.md), a PARITY/notes file, or a test that only DESCRIBES an external fact is NOT a backing file. If the only place a memory's fact appears is prose/docs/a test (no code implements or handles it), mark it independent="true".
-- Many CONSTRAINTS are HYBRID: "external system does X, and OUR code handles it here." Map those to the HANDLING code (you can verify the handling, even though you can't verify the external behavior). Only mark independent when there is NO local code that implements or handles the fact.
-- Prefer the most specific file(s); do not pad with tangential files. Most memories map to one file; some to a few.
-- When you genuinely cannot find any local backing and it is not clearly external, still emit the memory with independent="true" (do not drop it)."####;
+pub fn classify_system_prompt() -> Result<&'static str, String> {
+    crate::persona_host::dream::system(crate::persona_host::dream::Kind::Classify)
+        .map_err(|error| format!("mc_persona_invalid: {error}"))
+}
+pub fn map_system_prompt() -> Result<&'static str, String> {
+    crate::persona_host::dream::system(crate::persona_host::dream::Kind::Map)
+        .map_err(|error| format!("mc_persona_invalid: {error}"))
+}
 
 // Recorded inputs and outputs from the TypeScript functions at the revision
 // below. The TS test setup supplies memory snapshots, captures metadata writes,
@@ -2925,16 +2903,16 @@ mod tests {
         let memories = memories(&v["memories"]);
         let inputs: Vec<MapInput> = serde_json::from_value(v["inputs"].clone()).unwrap();
         assert_eq!(
-            build_classify_prompt("/repo", &memories, &memories[1..]),
+            build_classify_prompt("/repo", &memories, &memories[1..]).unwrap(),
             v["classify"]
         );
-        assert_eq!(build_map_prompt("/repo", &inputs), v["map"]);
+        assert_eq!(build_map_prompt("/repo", &inputs).unwrap(), v["map"]);
         assert_eq!(
-            format!("{:x}", Sha256::digest(CLASSIFY_SYSTEM_PROMPT)),
+            format!("{:x}", Sha256::digest(classify_system_prompt().unwrap())),
             "b288cfd1baad087ec20f23b44f747fbe1bad93807e91b0b1c6de8f2df0dddadb"
         );
         assert_eq!(
-            format!("{:x}", Sha256::digest(MAP_MEMORIES_SYSTEM_PROMPT)),
+            format!("{:x}", Sha256::digest(map_system_prompt().unwrap())),
             "8c8c800f26411aedea708128875967244b8a940f82d8125a3ba15f35e5f817f1"
         );
     }
@@ -3175,7 +3153,7 @@ mod tests {
             trusted_config: trusted,
             harness: "pi",
             parent_session_id: "parent",
-            directory: Path::new("/repo"),
+            directory: Path::new(if cfg!(windows) { r"C:\repo" } else { "/repo" }),
             project: "/repo",
             deadline_ms: deadline,
             token_budget: Some(1000),
@@ -3235,9 +3213,9 @@ mod tests {
                 assert_eq!(
                     req.system,
                     if map {
-                        MAP_MEMORIES_SYSTEM_PROMPT
+                        map_system_prompt().unwrap()
                     } else {
-                        CLASSIFY_SYSTEM_PROMPT
+                        classify_system_prompt().unwrap()
                     }
                 );
             }

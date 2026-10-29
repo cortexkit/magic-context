@@ -1,0 +1,13 @@
+{
+  "document": null,
+  "domain": "@example/software",
+  "members_digest": "ce30499fa826fda299973158dc2a3a8520250d2d04797d92263f3cab31c96d6c",
+  "project_id": "served-project",
+  "stamp": {
+    "generation": 4,
+    "incarnation": "0123456789abcdef",
+    "logPosition": 0
+  },
+  "via": "root",
+  "workspace_id": "served-workspace"
+}

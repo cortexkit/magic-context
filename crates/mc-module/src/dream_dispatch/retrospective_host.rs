@@ -44,6 +44,7 @@ pub struct RetrospectiveHost<C: DreamCarrier> {
     store: Arc<McStore>,
     context: Arc<TaskContext>,
     attempts: Vec<Attempt>,
+    authority: Option<mc_store::memory_levels::RunAuthority>,
 }
 
 impl<C: DreamCarrier> RetrospectiveHost<C> {
@@ -53,11 +54,20 @@ impl<C: DreamCarrier> RetrospectiveHost<C> {
             store,
             context,
             attempts: Vec::new(),
+            authority: None,
         }
     }
 
     pub fn attempts(&self) -> &[Attempt] {
         &self.attempts
+    }
+
+    pub fn with_authority(
+        mut self,
+        authority: Option<mc_store::memory_levels::RunAuthority>,
+    ) -> Self {
+        self.authority = authority;
+        self
     }
 
     /// Reads the authoritative context checkpoint, then runs gate/deepen without
@@ -198,7 +208,9 @@ impl<C: DreamCarrier> RetrospectiveHost<C> {
             &commit,
             |tx| self.check_commit_fence(tx),
             |tx| {
-                let mut actions = MemoryActions::default();
+                let mut actions = MemoryActions::with_memory_writer(
+                    self.store.run_memory_writer(self.authority.clone()),
+                );
                 for (index, row) in batch.memory_writes.iter().enumerate() {
                     let key = format!(
                         "dream:retrospective:{project}:{}:{index}",
@@ -297,8 +309,9 @@ impl<C: DreamCarrier> RetrospectiveHost<C> {
         let batch = self
             .model(
                 DreamRole::Reviewer,
-                REVIEW_SYSTEM,
-                &review_prompt(&snapshot, threshold),
+                review_system().map_err(|error| HostError::Model(Failure::Validation(error)))?,
+                &review_prompt(&snapshot, threshold)
+                    .map_err(|error| HostError::Model(Failure::Validation(error)))?,
                 |c| plan::plan_user_review(&lease, now, threshold, &rows, &c.text),
             )
             .await?;
@@ -436,9 +449,12 @@ Return only XML in this exact shape:
     )
 }
 
-const REVIEW_SYSTEM: &str = "You are a user-profile reviewer for the magic-context system. You run during a scheduled dream window to decide which recurring behavioral observations about the human user are real, persistent patterns worth keeping in their global user profile.\n\nYou do NOT call any tools and you do NOT touch project memories — you read the candidate observations the host gives you and return a JSON verdict. Distill durable patterns; never transcribe a single moment. Phrase promoted or updated memories as concise, present-tense verb-first statements without a subject (for example, \"Prefers concise explanations\" or \"Expects changes to be tested\"). Output only the JSON the task asks for, with no surrounding prose.";
+fn review_system() -> Result<&'static str, String> {
+    crate::persona_host::dream::system(crate::persona_host::dream::Kind::ReviewUser)
+        .map_err(|error| format!("mc_persona_invalid: {error}"))
+}
 
-fn review_prompt(snapshot: &durable::ReviewSnapshot, threshold: usize) -> String {
+fn review_prompt(snapshot: &durable::ReviewSnapshot, threshold: usize) -> Result<String, String> {
     let candidates = snapshot
         .candidates
         .iter()
@@ -459,25 +475,21 @@ fn review_prompt(snapshot: &durable::ReviewSnapshot, threshold: usize) -> String
         .map(|p| format!("- Memory #{}: {:?}", p.id, p.content))
         .collect::<Vec<_>>()
         .join("\n");
-    format!(
-        r#"## Task: Review User Memory Candidates
-
-You are reviewing behavioral observations about a human user to decide which patterns are real and persistent.
-
-### Current Stable User Memories
-{profiles}
-
-### Candidate Observations (from recent historian runs)
-{candidates}
-
-Look for recurring patterns across independent sessions. A candidate must appear in at least {threshold} semantically similar variants before promotion. Only promote universal user traits, never project-specific preferences, framework choices, one-off moods or task-local frustrations. Merge equivalent traits and update existing memories when appropriate. Phrase promoted and updated memories as concise, present-tense verb-first statements without a subject.
-
-Return only valid JSON:
-{{"promote":[{{"content":"Clean universal observation text","candidate_ids":[1,3,7]}}],"update_existing":[{{"memory_id":5,"content":"Updated text","candidate_ids":[2]}}],"dismiss_existing":[{{"memory_id":3,"reason":"No longer supported"}}],"consume_candidate_ids":[1,2,3,7]}}
-
-Return empty arrays if no promotions are warranted. Always consume ALL reviewed candidates, including rejected or already covered observations, so they do not accumulate indefinitely."#
+    crate::persona_host::dream::task(
+        crate::persona_host::dream::Kind::ReviewUser,
+        &crate::persona_host::dream::Input {
+            profiles: &profiles,
+            candidates: &candidates,
+            threshold,
+            ..Default::default()
+        },
     )
+    .map_err(|error| format!("mc_persona_invalid: {error}"))
 }
+
+#[cfg(test)]
+#[path = "../persona_host/dream/builder_oracle.rs"]
+mod builder_oracle;
 
 #[cfg(test)]
 mod tests {
@@ -729,6 +741,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dream_host_create_placement_and_hook_uses_run_authority() {
+        use mc_store::memory_levels::*;
+        let f = Fixture::new(TaskName::Retrospective);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        f.store
+            .set_memory_create_hook(Some(std::sync::Arc::new(move |_, event| {
+                captured.lock().unwrap().push(event.clone());
+                Ok(())
+            })));
+        let authority = RunAuthority {
+            project_id: Some("run-project".into()),
+            profile: Some(OriginProfile {
+                name: "@cortexkit/memory-swe".into(),
+                version: "1.0.0".into(),
+                digest: "run-profile".into(),
+            }),
+            state: "resolved".into(),
+            snapshot_digest: Some("run-snapshot".into()),
+            category_ids: std::collections::BTreeMap::from([(
+                "PROJECT_RULES".into(),
+                "swe:project-rules".into(),
+            )]),
+        };
+        let mut host = f.host(f.carrier()).with_authority(Some(authority));
+        let result = host
+            .run_retrospective(&FixtureReader, &ScanOptions::default(), true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.memory_written, 1);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.actor, Actor::Dreamer);
+        assert_eq!(event.kind, CreateKind::Create);
+        assert_eq!(event.session_id, None);
+        assert_eq!(event.ordinals, Vec::<i64>::new());
+        assert_eq!(
+            event.owner,
+            Some(Owner {
+                kind: "project".into(),
+                id: "run-project".into()
+            })
+        );
+        assert_eq!(event.writer_project_id.as_deref(), Some("run-project"));
+        assert_eq!(
+            event.origin_profile.as_ref().unwrap().name,
+            "@cortexkit/memory-swe"
+        );
+        assert_eq!(
+            event.effective_category_id.as_deref(),
+            Some("swe:project-rules")
+        );
+        assert_eq!(event.snapshot_digest.as_deref(), Some("run-snapshot"));
+        let conn = rusqlite::Connection::open(&f.context_path).unwrap();
+        assert_eq!(
+            read_placement(&conn, event.memory_id)
+                .unwrap()
+                .unwrap()
+                .owner,
+            event.owner.clone().unwrap()
+        );
+    }
+
+    #[tokio::test]
     async fn dream_retrospective_effects_and_watermark_commit_together() {
         let f = Fixture::new(TaskName::Retrospective);
         let mut host = f.host(f.carrier());
@@ -739,6 +817,9 @@ mod tests {
             .unwrap();
         assert_eq!(result.memory_written, 1);
         assert_eq!(result.observations_inserted, 2);
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM memory_placement"), 0);
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM memory_ops"), 0);
+        assert_eq!(f.scalar("SELECT COUNT(*) FROM memory_outbox"), 0);
         assert_eq!(
             f.scalar("SELECT retrospective_watermark_ms FROM task_schedule_state"),
             300

@@ -1,0 +1,91 @@
+{
+  "schema": "mc/memory-op@1",
+  "op_id": {
+    "device": "device-a-incarnation-1",
+    "local_id": "42"
+  },
+  "hlc": {
+    "wall_ms": "1792108800000",
+    "logical": "0"
+  },
+  "account": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "kind": "create",
+  "memory_id": {
+    "device": "device-a-incarnation-1",
+    "local_id": "42"
+  },
+  "level": "project",
+  "owner_key": {
+    "kind": "project",
+    "id": "pj-example"
+  },
+  "category": "PROJECT_RULES",
+  "origin_profile": {
+    "name": "@cortexkit/memory-swe",
+    "version": "1.0.0",
+    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "provenance": {
+    "session_id": "session-example",
+    "ordinals": [
+      [
+        12,
+        14
+      ]
+    ],
+    "evidence": [],
+    "actor": "historian",
+    "authority_snapshot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "batch_id": null,
+    "legacy_origin": null
+  },
+  "revision": {
+    "parents": [],
+    "result": {
+      "device": "device-a-incarnation-1",
+      "local_id": "42"
+    }
+  },
+  "curation": null,
+  "delivery": "A",
+  "payload": {
+    "snapshot": {
+      "content": "Run the release check before publishing this project.",
+      "importance": 80,
+      "load_mode": "always",
+      "applies_to": {
+        "subject": "project release process",
+        "project_ids": [
+          "pj-example"
+        ],
+        "reason": "Explicit user instruction for this project"
+      },
+      "audience": {
+        "principal": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "source_project_ids": [
+          "pj-example"
+        ],
+        "project_ids": [
+          "pj-example"
+        ]
+      },
+      "shareable": false,
+      "valid_from": null,
+      "valid_to": null,
+      "expires_at": null,
+      "event_condition": null,
+      "overrides": [],
+      "superseded_by": null,
+      "verification": {
+        "status": "unverified",
+        "evidence": [],
+        "content_revision": {
+          "device": "device-a-incarnation-1",
+          "local_id": "42"
+        }
+      },
+      "mural_cue": null,
+      "lineage": []
+    }
+  }
+}

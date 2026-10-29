@@ -51,7 +51,13 @@ pub mod config;
 mod dream_claim;
 pub mod dream_dispatch;
 pub mod dream_tasks;
+pub mod historian_routed;
 mod memory_actions;
+mod memory_context;
+mod memory_profile;
+mod memory_sync;
+mod model_work;
+pub mod persona_host;
 
 /// Names reserved for scoped, non-tool management requests. These are not facade
 /// tools: adding them to the model-visible catalog would invalidate cached prefixes.
@@ -1855,6 +1861,9 @@ pub struct McHandler {
     retrieval_reranker: Option<Arc<dyn retrieval::hybrid::RerankClient>>,
     config: Arc<Mutex<ConfigCache>>,
     historian_runner_refusals: Arc<HistorianRunnerRefusalCache>,
+    /// Routing engines for routed summaries, one per session, kept for the
+    /// module's lifetime so unacknowledged reports survive their firing.
+    summary_engines: Arc<historian_routed::SummaryEngines>,
     /// Live Broca dream children, keyed by the Broca session each one runs in.
     /// A memory tool the runner dispatches on such a session reaches the task's
     /// router only through this record, never the foreground facade.
@@ -1867,6 +1876,7 @@ pub struct McHandler {
     /// Project identities of route roots whose session the host has not recorded.
     project_identities: Arc<project_identity::ProjectIdentityResolver>,
     entorhinal: entorhinal_resolve::EntorhinalResolver,
+    memory_sync: Arc<memory_sync::Service>,
     binding_projects: Mutex<HashMap<u16, BindingProject>>,
     active_project_roots: Mutex<HashMap<String, PathBuf>>,
     /// Route roots inside a git checkout whose identity git could not give, with the
@@ -1983,6 +1993,13 @@ pub trait HistorianProducerFactory: Send + Sync {
             ),
         ))
     }
+
+    /// Routing for summaries. A factory that returns one places every summary
+    /// through routing and never reads a model chain or runner setting; `None`
+    /// keeps the chain-walking drive for factories that predate routing.
+    fn summary_routing(&self) -> Option<Arc<dyn historian_routed::SummaryRouting>> {
+        None
+    }
 }
 
 /// The route a runner-lane conversation's background model calls take, or `None`
@@ -1999,6 +2016,7 @@ pub(crate) fn session_runner_route(
 struct RealHistorianProducerFactory {
     connection_file: PathBuf,
     route_targets: RouteTargetConfig,
+    summary_routing: Arc<historian_routed::SubcSummaryRouting>,
 }
 
 fn session_runner_historian_config(
@@ -2053,6 +2071,10 @@ impl HistorianProducerFactory for RealHistorianProducerFactory {
             )
             .await?,
         ))
+    }
+
+    fn summary_routing(&self) -> Option<Arc<dyn historian_routed::SummaryRouting>> {
+        Some(self.summary_routing.clone())
     }
 }
 
@@ -2452,8 +2474,18 @@ struct HistorianFiringTask {
     /// never on the configured runner, whatever `runner` says.
     session_runner: Option<SessionRunnerRoute>,
     runner_identity: session_resolver::RunnerBindIdentity,
+    /// The conversation's daemon scope stamp; routed summaries select and send
+    /// under it.
+    /// Boxed so the absent case keeps the task small.
+    scope: Option<Box<subc_protocol::scope::ScopeStamp>>,
+    /// Frozen at preparation; a later readiness change cannot change this firing's path.
+    routing: Option<Arc<dyn historian_routed::SummaryRouting>>,
+    /// Context pressure drove this firing, so a routed summary must not wait on
+    /// a quota reset.
+    pressure: bool,
     model_chain_generation: u64,
     runner_refusal_cache: Arc<HistorianRunnerRefusalCache>,
+    summary_engines: Arc<historian_routed::SummaryEngines>,
     live_guard: SessionSetGuard,
     connect_failure_commit_hook: ConnectFailureCommitHook,
     publication_fence: Option<Arc<dyn historian::HistorianPublicationFence>>,
@@ -2587,6 +2619,12 @@ fn retrieval_merge_messages(
 }
 
 impl McHandler {
+    /// Use the daemon-backed dream wire that owns this process's scope authority.
+    pub fn with_dream_wire(self, wire: Arc<dyn dream_dispatch::routed::wire::DreamWire>) -> Self {
+        self.dream_runs.use_wire(wire);
+        self
+    }
+
     pub fn new() -> Self {
         Self::new_with_connection_file(None)
     }
@@ -2633,6 +2671,10 @@ impl McHandler {
         });
         let producer_factory: Arc<dyn HistorianProducerFactory> = match connection_file.clone() {
             Some(path) => Arc::new(RealHistorianProducerFactory {
+                summary_routing: Arc::new(historian_routed::SubcSummaryRouting::new(
+                    path.clone(),
+                    route_targets.clone(),
+                )),
                 connection_file: path,
                 route_targets: route_targets.clone(),
             }),
@@ -2675,6 +2717,7 @@ impl McHandler {
         McHandler {
             agent_data,
             app_channels: Mutex::default(),
+            memory_sync: memory_sync::Service::new(connection_file.clone(), module_id.clone()),
             move_visibility,
             registered_module_id: module_id,
             store,
@@ -2685,6 +2728,7 @@ impl McHandler {
             retrieval_reranker,
             config: Arc::new(Mutex::new(ConfigCache::default())),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
+            summary_engines: Arc::default(),
             broca_dream_tools: Arc::new(dream_dispatch::broca_carrier::BrocaToolRoute::default()),
             dream_runs,
             runner_choices: Arc::new(Mutex::new(runner_choices::RunnerChoiceLog::default())),
@@ -2786,11 +2830,21 @@ impl McHandler {
         let store = Arc::clone(&self.store);
         let coordinator = Arc::clone(&self.store_open);
         let prime_serving_wal = true;
+        let dreams = self.dream_handles();
+        let memory_sync = Arc::clone(&self.memory_sync);
         tokio::spawn(async move {
             let _guard = StoreOpenWaiterGuard {
                 coordinator: Arc::clone(&coordinator),
             };
-            Self::run_store_open(store, coordinator, descriptor, prime_serving_wal).await;
+            Self::run_store_open(
+                store,
+                coordinator,
+                descriptor,
+                prime_serving_wal,
+                dreams,
+                memory_sync,
+            )
+            .await;
         });
     }
 
@@ -2799,6 +2853,8 @@ impl McHandler {
         coordinator: Arc<StoreOpenCoordinator>,
         descriptor: StorageDescriptor,
         prime_serving_wal: bool,
+        _dreams: dream_dispatch::tick::DreamHandles,
+        memory_sync: Arc<memory_sync::Service>,
     ) {
         #[cfg(test)]
         {
@@ -2823,8 +2879,12 @@ impl McHandler {
                     );
                     return;
                 }
-                let _ = store_slot.set(Arc::new(opened));
+                let opened = Arc::new(opened);
+                memory_sync.install(&opened);
+                let _ = store_slot.set(opened);
                 coordinator.set_phase(STORE_OPENED);
+                #[cfg(not(test))]
+                _dreams.ensure_timer();
                 return;
             }
             Err(error) if store_open_error_is_live_lease(&error) => error,
@@ -2892,8 +2952,12 @@ impl McHandler {
                         Self::abandon_lease_wait_on_shutdown(&coordinator, started.elapsed());
                         return;
                     }
-                    let _ = store_slot.set(Arc::new(opened));
+                    let opened = Arc::new(opened);
+                    memory_sync.install(&opened);
+                    let _ = store_slot.set(opened);
                     coordinator.set_phase(STORE_OPENED);
+                    #[cfg(not(test))]
+                    _dreams.ensure_timer();
                     tracing::info!(
                         "mc-module: storage lease released; store opened after {:.2}s",
                         started.elapsed().as_secs_f64()
@@ -3115,6 +3179,7 @@ impl McHandler {
             retrieval_reranker: None,
             config: Arc::new(Mutex::new(ConfigCache::default())),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
+            summary_engines: Arc::default(),
             broca_dream_tools: Arc::new(dream_dispatch::broca_carrier::BrocaToolRoute::default()),
             dream_runs: Arc::new(dream_dispatch::tick::DreamRuns::new(
                 None,
@@ -3123,6 +3188,7 @@ impl McHandler {
             runner_choices: Arc::new(Mutex::new(runner_choices::RunnerChoiceLog::default())),
             project_identities: Arc::new(project_identity::ProjectIdentityResolver::new()),
             entorhinal: entorhinal_resolve::EntorhinalResolver::new(None),
+            memory_sync: memory_sync::Service::new(None, DEFAULT_MODULE_ID.into()),
             binding_projects: Mutex::default(),
             active_project_roots: Mutex::default(),
             memory_paused_routes: Arc::default(),
@@ -3779,6 +3845,10 @@ impl McHandler {
         let Ok(loaded) = store.load_meta(&parsed.session_id) else {
             return Some("recovery_load_failed");
         };
+        let memory_enabled = historian_prompt::memory_enabled(
+            config.memory_enabled,
+            loaded.meta.memory_context.as_ref(),
+        );
         let phase = loaded.meta.historian.state.clone();
         if phase == HistorianPhase::Idle {
             return Some("recovered");
@@ -3913,7 +3983,7 @@ impl McHandler {
                                 validate_options: historian_validate::ValidateOptions {
                                     sequence_offset: prior_compartments.len() as u64 + 1,
                                     in_emergency: false,
-                                    memory_enabled: config.memory_enabled,
+                                    memory_enabled,
                                     auto_promote: config.auto_promote,
                                     user_memory_collection_enabled: config
                                         .user_memory_collection_enabled,
@@ -4312,10 +4382,21 @@ impl McHandler {
             .reason
             .expect("a true historian trigger carries its firing rule");
         let trigger_reason = Some(trigger_rule.as_str().to_string());
+        // A routed summary asks routing where to run; it never reads the host's chain.
+        let routing = historian_routed::active_routing(
+            self.producer_factory.summary_routing(),
+            binding.scope.as_ref(),
+        );
+        let routed = routing.is_some();
+        let model_chain = if routed {
+            Some(&[][..])
+        } else {
+            parsed.historian_model_chain.as_deref()
+        };
         // The host is the only resolver of the historian's model chain and sends it with
         // every transform. A request without one is refused by name rather than filled
         // in from this module's own reading of the config file.
-        let Some(model_chain) = parsed.historian_model_chain.as_deref() else {
+        let Some(model_chain) = model_chain else {
             tracing::warn!(
                 "mc-module: historian for {} not fired: the transform request carried no historian_model_chain",
                 parsed.session_id
@@ -4339,8 +4420,12 @@ impl McHandler {
             );
             return PreparedHistorianAction::Complete(diagnostics);
         };
-        let model_chain_generation = self.historian_runner_refusals.activate_chain(model_chain);
-        if model_chain.is_empty() {
+        let model_chain_generation = if routed {
+            0
+        } else {
+            self.historian_runner_refusals.activate_chain(model_chain)
+        };
+        if model_chain.is_empty() && !routed {
             let diagnostics = historian_no_fire_diagnostics(NoFireDiagnosticsInput {
                 no_fire: "no_models".into(),
                 detail_kind: "no_models",
@@ -4360,9 +4445,10 @@ impl McHandler {
             );
             return PreparedHistorianAction::Complete(diagnostics);
         }
-        if self
-            .historian_runner_refusals
-            .all_models_durably_refused(model_chain_generation, model_chain)
+        if !routed
+            && self
+                .historian_runner_refusals
+                .all_models_durably_refused(model_chain_generation, model_chain)
         {
             let failures = self
                 .historian_runner_refusals
@@ -4469,10 +4555,11 @@ impl McHandler {
             .cloned()
             .collect();
         let project_slug = project_slug(&binding.project_root);
-        let assembler = if publication_fence.is_some() {
-            historian_chunk::assemble_provider_historian_firing
-        } else {
-            assemble_historian_firing
+        let assembler = match (publication_fence.is_some(), routed) {
+            (true, false) => historian_chunk::assemble_provider_historian_firing,
+            (false, false) => assemble_historian_firing,
+            (true, true) => historian_chunk::assemble_routed_provider_historian_firing,
+            (false, true) => historian_chunk::assemble_routed_historian_firing,
         };
         let assembler_config = HistorianAssemblerConfig {
             expand_tools: cfg.historian_expand_tools.clone(),
@@ -4490,7 +4577,10 @@ impl McHandler {
                 .historian_max_output_tokens
                 .unwrap_or(historian_producer::HISTORIAN_MAX_OUTPUT_TOKENS),
             boundary,
-            memory_enabled: cfg.memory_enabled,
+            memory_enabled: historian_prompt::memory_enabled(
+                cfg.memory_enabled,
+                loaded.meta.memory_context.as_ref(),
+            ),
             auto_promote: cfg.auto_promote,
             user_memory_collection_enabled: cfg.user_memory_collection_enabled,
             user_observations_requested: cfg.user_observations_requested,
@@ -4641,8 +4731,15 @@ impl McHandler {
                 runner: self.record_historian_runner(&parsed.session_id, &cfg, &binding.harness),
                 session_runner,
                 runner_identity: runner_bind_identity(binding),
+                scope: binding.scope.clone().map(Box::new),
+                routing,
+                // The force band is context pressure; an armed emergency recovery
+                // means the provider is refusing turns for size.
+                pressure: trigger_rule == boundary::TriggerReason::ForceBand
+                    || parsed.emergency_recovery_armed,
                 model_chain_generation,
                 runner_refusal_cache: Arc::clone(&self.historian_runner_refusals),
+                summary_engines: Arc::clone(&self.summary_engines),
                 live_guard,
                 connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
                 // Organic pressure firings assemble and publish in one continuous drive
@@ -4701,20 +4798,36 @@ impl McHandler {
         let cfg = self.effective_config(&binding.project_root);
         // Wrapup runs on the host's chain from the session's last transform, the same
         // chain the autonomous historian uses; the module has no chain of its own.
-        let Some(model_chain) = parsed.historian_model_chain.clone() else {
+        // A routed wrapup asks routing where to run, like any other summary.
+        let routing = historian_routed::active_routing(
+            self.producer_factory.summary_routing(),
+            binding.scope.as_ref(),
+        );
+        let routed = routing.is_some();
+        let model_chain = if routed {
+            Some(Vec::new())
+        } else {
+            parsed.historian_model_chain.clone()
+        };
+        let Some(model_chain) = model_chain else {
             tracing::warn!(
                 "mc-module: wrapup for {} refused: the session's transform carried no historian_model_chain",
                 parsed.session_id
             );
             return PreparedWrapupAction::Failed(WRAPUP_MODEL_CHAIN_MISSING.to_string());
         };
-        let model_chain_generation = self.historian_runner_refusals.activate_chain(&model_chain);
-        if model_chain.is_empty() {
+        let model_chain_generation = if routed {
+            0
+        } else {
+            self.historian_runner_refusals.activate_chain(&model_chain)
+        };
+        if model_chain.is_empty() && !routed {
             return PreparedWrapupAction::Failed("no historian models are configured".to_string());
         }
-        if self
-            .historian_runner_refusals
-            .all_models_durably_refused(model_chain_generation, &model_chain)
+        if !routed
+            && self
+                .historian_runner_refusals
+                .all_models_durably_refused(model_chain_generation, &model_chain)
         {
             let failures = self
                 .historian_runner_refusals
@@ -4745,7 +4858,10 @@ impl McHandler {
                 .historian_max_output_tokens
                 .unwrap_or(historian_producer::HISTORIAN_MAX_OUTPUT_TOKENS),
             boundary: boundary.clone(),
-            memory_enabled: cfg.memory_enabled,
+            memory_enabled: historian_prompt::memory_enabled(
+                cfg.memory_enabled,
+                loaded.meta.memory_context.as_ref(),
+            ),
             auto_promote: cfg.auto_promote,
             user_memory_collection_enabled: cfg.user_memory_collection_enabled,
             user_observations_requested: cfg.user_observations_requested,
@@ -4774,10 +4890,11 @@ impl McHandler {
                     true,
                 )
             });
-        let assembler = if publication_fence.is_some() {
-            historian_chunk::assemble_provider_historian_firing
-        } else {
-            assemble_historian_firing
+        let assembler = match (publication_fence.is_some(), routed) {
+            (true, false) => historian_chunk::assemble_provider_historian_firing,
+            (false, false) => assemble_historian_firing,
+            (true, true) => historian_chunk::assemble_routed_provider_historian_firing,
+            (false, true) => historian_chunk::assemble_routed_historian_firing,
         };
         let assemble = assembler(
             &store,
@@ -4837,8 +4954,13 @@ impl McHandler {
             // harness, and session when binding child routes.
             session_runner,
             runner_identity: runner_bind_identity(binding),
+            scope: binding.scope.clone().map(Box::new),
+            routing,
+            // A wrapup is requested by the user, not forced by context pressure.
+            pressure: false,
             model_chain_generation,
             runner_refusal_cache: Arc::clone(&self.historian_runner_refusals),
+            summary_engines: Arc::clone(&self.summary_engines),
             live_guard,
             connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
             publication_fence,
@@ -4909,10 +5031,85 @@ impl McHandler {
         }
     }
 
+    /// Run a firing that routing places. Returned boxed: the routed drive nests
+    /// the whole firing drive inside the routing engine, and kept inline in the
+    /// executor that state would enlarge every firing's poll frame, routed or not.
+    fn execute_routed_firing_task(
+        routing: Arc<dyn historian_routed::SummaryRouting>,
+        task: HistorianFiringTask,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        historian::HistorianDriveOutcome,
+                        historian::HistorianDriveError,
+                    >,
+                > + Send,
+        >,
+    > {
+        Box::pin(async move {
+            let HistorianFiringTask {
+                rust_background_enabled,
+                store,
+                session_id,
+                harness,
+                language,
+                historian_temperature,
+                historian_await_timeout,
+                project_path,
+                project_slug,
+                project_root,
+                firing,
+                runner_identity,
+                scope,
+                pressure,
+                summary_engines,
+                live_guard,
+                publication_fence,
+                provider_completion,
+                ..
+            } = task;
+            let _guard = live_guard;
+            let result = historian_routed::run_routed_summary(historian_routed::RoutedSummary {
+                routing: routing.as_ref(),
+                engines: &summary_engines,
+                scope: scope.as_deref(),
+                identity: &runner_identity,
+                store: &store,
+                session_id: &session_id,
+                project_path: &project_path,
+                project_root: &project_root,
+                harness: &harness,
+                project_slug: &project_slug,
+                language: language.as_deref(),
+                firing: &firing,
+                fallback_temperature: historian_temperature,
+                await_timeout: historian_await_timeout,
+                rust_background_enabled,
+                publication_fence: publication_fence.as_deref(),
+                pressure,
+            })
+            .await;
+            if let Ok(loaded) = store.load(&session_id) {
+                DISPATCH_HEALTH.record_historian_outcome(
+                    historian_status_summary(&loaded.meta.historian),
+                    loaded.meta.historian.recent_decisions.len(),
+                );
+            }
+            if let Some(completion) = provider_completion {
+                completion.record(&store, &session_id, &result);
+            }
+            result
+        })
+    }
+
     async fn execute_historian_firing_task(
         factory: Arc<dyn HistorianProducerFactory>,
         task: HistorianFiringTask,
     ) -> Result<historian::HistorianDriveOutcome, historian::HistorianDriveError> {
+        if let Some(routing) = task.routing.clone() {
+            return Self::execute_routed_firing_task(routing, task).await;
+        }
         let HistorianFiringTask {
             rust_background_enabled,
             store,
@@ -4929,8 +5126,12 @@ impl McHandler {
             runner,
             session_runner,
             runner_identity,
+            scope: _,
+            routing: _,
+            pressure: _,
             model_chain_generation,
             runner_refusal_cache,
+            summary_engines: _,
             live_guard,
             connect_failure_commit_hook,
             publication_fence,
@@ -5008,14 +5209,16 @@ impl McHandler {
         };
         let result = match connected {
             Ok(mut producer) => {
-                let mut request = firing.as_fire_request(
-                    &store,
-                    &session_id,
-                    &project_path,
-                    &harness,
-                    &project_slug,
-                    language.as_deref(),
-                );
+                let mut request = firing
+                    .as_fire_request(
+                        &store,
+                        &session_id,
+                        &project_path,
+                        &harness,
+                        &project_slug,
+                        language.as_deref(),
+                    )
+                    .map_err(historian::HistorianDriveError::Producer)?;
                 request.temperature = historian_temperature;
                 request.rust_background_enabled = rust_background_enabled;
                 request.await_timeout = historian_await_timeout;
@@ -5871,9 +6074,24 @@ impl McHandler {
                 loaded.core.boundary_id
             )
         };
+        let profile_summary = loaded
+            .meta
+            .memory_context
+            .as_ref()
+            .filter(|context| !historian_prompt::memory_enabled(true, Some(context)))
+            .map(|context| {
+                format!(
+                    ", memory profile {} (domain {}, pin {}, candidates {})",
+                    context["profile"]["state"].as_str().unwrap_or_default(),
+                    context["domain"],
+                    context["profile"]["pin"],
+                    context["profile"]["candidates"],
+                )
+            })
+            .unwrap_or_default();
         let summary = sanitize_status_text(
             &format!(
-                "session {short_session} (last active {age}): {} {}, coverage ordinal {coverage}, boundary {boundary}{raw_passthrough_summary}, {} pending {} ({} unserved, {} provider drops applied), {} {}, pending m1 delta {}, last historian: {historian}, {publish_health}, surface {surface}",
+                "session {short_session} (last active {age}){profile_summary}: {} {}, coverage ordinal {coverage}, boundary {boundary}{raw_passthrough_summary}, {} pending {} ({} unserved, {} provider drops applied), {} {}, pending m1 delta {}, last historian: {historian}, {publish_health}, surface {surface}",
                 compartment_count,
                 plural_word(compartment_count, "compartment"),
                 pending_drop_count,
@@ -5956,6 +6174,11 @@ impl McHandler {
             "pass_trace": pass_trace,
             "runtime_store_error": self.runtime_store_error_value(&session_id),
             "single_store": store.context_domain_status(),
+            "memory_sync": self.memory_sync.status(store),
+            "memory_profile": loaded.meta.memory_context.as_ref().map(|context| json!({
+                "domain": context["domain"],
+                "profile": context["profile"],
+            })),
             "publish_timing": store.load_publish_timing(&session_id).ok().flatten(),
             "tail_identity_re_adopt_count": loaded.meta.tail_identity_re_adopt_count,
             "fake_compaction": {
@@ -7706,6 +7929,28 @@ impl McHandler {
             });
         }
 
+        let connection_file = self
+            .provider_store
+            .async_runtime
+            .connection_file
+            .lock()
+            .expect("connection file mutex")
+            .clone();
+        memory_profile::bind_session(
+            self.store.get().expect("proven facade store"),
+            connection_file,
+            subc_protocol::BindIdentity::new(
+                binding.project_root.clone(),
+                &binding.harness,
+                &binding.session,
+            ),
+            &conversation_key,
+            binding
+                .scope
+                .as_ref()
+                .and_then(|scope| scope.attributes.agent_id.as_deref()),
+        )
+        .await;
         Ok(FacadeScope {
             memory_project_path,
             route_project_root,
@@ -8269,26 +8514,16 @@ impl McHandler {
                             let automated_tx = agent_tx.automated();
                             let tx = if automated { &automated_tx } else { agent_tx };
                             if automated { tx.check_memory_revisions(&expected_revisions)?; }
-                            let (mut memory, superseded_ids) = tx
-                                .merge_memories_canonical(
+                            let (memory, superseded_ids) = tx
+                                .merge_memories_canonical_with_category(
                                     memory_project,
                                     &ids,
                                     content,
                                     Some(conversation_key),
                                     now_ms(),
+                                    category,
                                 )
                                 .map_err(|error| request_context.render_mutation_error(error))?;
-                            if category.is_some_and(|category| category != memory.category) {
-                                memory = tx
-                                    .update_memory_content(
-                                        memory_project,
-                                        memory.id,
-                                        content,
-                                        category,
-                                        now_ms(),
-                                    )
-                                    .map_err(|error| request_context.render_mutation_error(error))?;
-                            }
                             let rendered_inputs = ids.clone();
                             let mut lines = superseded_ids.iter().map(|id| format!("  <superseded id=\"{id}\" by=\"{}\"/>",memory.id)).collect::<Vec<_>>();
                             let shown = shown_projection.as_ref().is_some_and(|shown| shown.shows_text(memory.id,&memory.content));
@@ -9216,7 +9451,45 @@ impl ModuleHandler for McHandler {
                 }
             }
         }
+        if self.module_knows_transform_session(&req.identity.session, &req.identity.project_root) {
+            if let Ok(store) = self.store_for_request().await {
+                let connection_file = self
+                    .provider_store
+                    .async_runtime
+                    .connection_file
+                    .lock()
+                    .expect("connection file mutex")
+                    .clone();
+                memory_profile::bind_session(
+                    &store,
+                    connection_file,
+                    req.identity.clone(),
+                    &req.identity.session,
+                    req.scope
+                        .as_ref()
+                        .and_then(|scope| scope.attributes.agent_id.as_deref()),
+                )
+                .await;
+            }
+        }
         subc_client_rs::BindDecision::accept()
+    }
+
+    async fn on_bound(&self, handle: &RouteHandle) {
+        let Ok(binding) = self.facade_binding(handle.channel) else {
+            return;
+        };
+        if let (Some(routing), Some(stamp)) = (
+            self.producer_factory.summary_routing(),
+            binding.scope.as_ref(),
+        ) {
+            routing
+                .observe_scope(&historian_routed::SummaryScope {
+                    stamp: stamp.clone(),
+                    identity: runner_bind_identity(&binding),
+                })
+                .await;
+        }
     }
 
     /// Drop the route's binding on teardown so a reused channel can't resolve a stale
@@ -12391,6 +12664,22 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
     manifest_with_route_targets(module_id, &RouteTargetConfig::default())
 }
 
+/// Temporary bridge for cortexkit-role-tool-provider 0.10.0's subc-protocol 0.32
+/// dependency. Remove the bridge and its conformance adapters when that role crate
+/// moves to subc-protocol 0.33. Refuse incompatible or lossy record conversions.
+pub(crate) fn compatible_wire<T: serde::de::DeserializeOwned + serde::Serialize>(
+    value: impl serde::Serialize,
+) -> Result<T, serde_json::Error> {
+    let source = serde_json::to_value(value)?;
+    let converted: T = serde_json::from_value(source.clone())?;
+    if serde_json::to_value(&converted)? != source {
+        return Err(<serde_json::Error as serde::de::Error>::custom(
+            "wire record changed during conversion",
+        ));
+    }
+    Ok(converted)
+}
+
 pub fn manifest_with_route_targets(
     module_id: &str,
     resolved_routes: &RouteTargetConfig,
@@ -12505,6 +12794,38 @@ pub fn manifest_with_route_targets_and_smart_notes(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hello_bytes_match_the_base_sdk_with_optional_manifest_members_unset() {
+        let mut hello = subc_protocol::ModuleHelloBody {
+            manifest: super::manifest(super::DEFAULT_MODULE_ID),
+            protocol_ver: subc_protocol::PROTOCOL_VERSION,
+            control_ops: Some(vec!["health.check".into()]),
+            launch_nonce: Some("compatibility-test-nonce".into()),
+        };
+        use sha2::{Digest, Sha256};
+        let production = serde_json::to_value(&hello).unwrap();
+        assert_eq!(
+            production["manifest"]["provenance"],
+            serde_json::json!({"wire_crate_version": "0.33.1"})
+        );
+        // The SDK version is truthful deployment metadata, not a wire-shape change.
+        // Normalize only /manifest/provenance/wire_crate_version to the old SDK
+        // so the measured HELLO fingerprint tracks intentional manifest changes
+        // independently from dependency upgrades, including the ENGRAM consumes edge.
+        hello
+            .manifest
+            .provenance
+            .as_mut()
+            .unwrap()
+            .wire_crate_version = Some("0.32.8".into());
+        let current = serde_json::to_vec(&hello).unwrap();
+        assert_eq!(current.len(), 13_515);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&current)),
+            "ee69f131ecb1d1622c24503f3812c328349664afa1983215f7817308794ee338"
+        );
+    }
+
     include!("tests/tool_attachment_memory_review.rs");
     include!("tests/subagent_invocations_read.rs");
     use super::*;
@@ -12577,6 +12898,11 @@ mod tests {
     mod scripted_historian_pairs;
 
     mod i4_roots {
+        const RECORDED_PROJECT: &str = if cfg!(windows) {
+            r"C:\recorded\project"
+        } else {
+            "/recorded/project"
+        };
         use super::*;
         use crate::background::{self, ConfigInput, DreamCarrier, DreamRequest, DreamRole};
         use crate::config_parity::{
@@ -12624,7 +12950,7 @@ mod tests {
                 resolver: resolver.clone(),
                 request: ConfigResolveRequest {
                     user_config_path: String::new(),
-                    project_root: "/recorded/project".into(),
+                    project_root: RECORDED_PROJECT.into(),
                     generation: Generation(1),
                 },
             };
@@ -12666,7 +12992,7 @@ mod tests {
                 self.calls.push("open");
                 assert_eq!(request.runner.kind, HistorianRunnerKind::Broca);
                 assert_eq!(request.temperature, None);
-                assert_eq!(request.directory, Path::new("/recorded/project"));
+                assert_eq!(request.directory, Path::new(RECORDED_PROJECT));
                 self.models
                     .push(request.model.as_ref().unwrap().model.clone());
                 Ok(format!("child-{}", self.models.len()))
@@ -12724,7 +13050,7 @@ mod tests {
                                 role,
                                 harness: "opencode",
                                 parent_session_id: "ses",
-                                directory: Path::new("/recorded/project"),
+                                directory: Path::new(RECORDED_PROJECT),
                                 system: "recorded system",
                                 prompt: "recorded input",
                                 timeout: Duration::from_secs(1),
@@ -13041,7 +13367,7 @@ mod tests {
                         role: DreamRole::Curate,
                         harness: "opencode",
                         parent_session_id: "ses",
-                        directory: Path::new("/recorded/project"),
+                        directory: Path::new(RECORDED_PROJECT),
                         system: "recorded memory-task system",
                         prompt: "recorded memory-task input",
                         timeout: Duration::from_secs(1),
@@ -15722,6 +16048,8 @@ mod tests {
 
     #[path = "background_run_limits.rs"]
     mod background_run_limits;
+    #[path = "summary_routing.rs"]
+    pub(crate) mod summary_routing;
 
     #[derive(Default)]
     struct ProducerState {
@@ -19642,6 +19970,195 @@ mod tests {
             .is_empty());
     }
 
+    fn historian_profile_context(state: &str) -> memory_profile::MemoryContext {
+        let mut context = memory_profile::resolve(
+            &memory_context::ContextAnswer::NotAnswering,
+            &memory_context::ContextAnswer::NotAnswering,
+            &[],
+        );
+        context.profile.state = state.into();
+        if matches!(state, "unresolved" | "conflict" | "blocked" | "unavailable") {
+            context.domain = Some("@acme/domain-legal".into());
+            context.profile.name = None;
+            context.profile.version = None;
+            context.profile.digest = None;
+            context.profile.resolution = None;
+            context.category_ids = None;
+        }
+        if matches!(state, "blocked" | "unavailable") {
+            context.profile.pin = Some(json!({
+                "name": "@acme/memory-legal", "version": "1.0.0",
+                "manifest_sha256": "missing-manifest",
+                "status": {"state": "revoked", "blocked": state == "blocked"},
+            }));
+        }
+        if state == "conflict" {
+            context.profile.candidates =
+                vec!["@acme/memory-legal".into(), "@acme/memory-other".into()];
+        }
+        context
+    }
+
+    async fn assert_profile_fake_fact(state: &str, degraded: bool, wrapup: bool) {
+        let producer = Arc::new(ProducerState::default());
+        *producer.fact_each_run.lock().unwrap() = Some("unsolicited historian fact".into());
+        let mut config = default_test_config();
+        config.historian_runner = Some(HistorianRunnerKind::Broca);
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), config.clone());
+        let context = historian_profile_context(state);
+        memory_profile::persist_session_pin(&store, "ses", &context).unwrap();
+        let existing = insert_memory(
+            &store,
+            project.to_str().unwrap(),
+            "PROJECT_RULES",
+            "existing memory remains visible",
+            1,
+        );
+        let parsed: TransformRequest =
+            serde_json::from_value(request(wrapup_messages(240, 800))).unwrap();
+        let projection = crate::ck_wire::project_messages(&parsed.messages).unwrap();
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        meta.block_identity_by_mid
+            .extend(projection.identity_by_mid.clone());
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        let mut route = binding(project.to_str().unwrap(), "ses");
+        route.config = config;
+        let task = if wrapup {
+            let messages = wrapup_boundary_messages(&parsed, &projection, &handler.boundary_tokens);
+            let plan =
+                boundary::resolve_wrapup_boundary(&messages.messages, None, 10, 200_000.0, 65.0);
+            match handler.prepare_wrapup_fire(
+                store.clone(),
+                &parsed,
+                &route,
+                &projection,
+                &plan.boundary,
+                WrapupPrepareContext {
+                    now: now_ms(),
+                    project_path: project.to_string_lossy().into_owned(),
+                    allow_unknown_module_retry: false,
+                    publication_fence: None,
+                },
+            ) {
+                PreparedWrapupAction::FireReady(task) => *task,
+                _ => panic!("{state}: expected wrapup firing"),
+            }
+        } else {
+            let mut timings = HistorianTriggerTimings::default();
+            match handler.prepare_historian_fire(
+                store.clone(),
+                &parsed,
+                &route,
+                project.to_str().unwrap(),
+                &projection,
+                HistorianPrepareContext {
+                    rust_background_enabled: Some(true),
+                    now: now_ms(),
+                    publication_fence: None,
+                    async_coverage: None,
+                    reclaim_ride_available: false,
+                    runner_lane: false,
+                    timings: &mut timings,
+                },
+            ) {
+                PreparedHistorianAction::FireReady(prepared) => prepared.task,
+                _ => panic!("{state}: expected historian firing"),
+            }
+        };
+        McHandler::execute_historian_firing_task(handler.producer_factory.clone(), task)
+            .await
+            .unwrap();
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        for prompt in producer.prompts.lock().unwrap().iter() {
+            assert_eq!(
+                prompt.contains("<fact_extraction>disabled</fact_extraction>"),
+                degraded,
+                "{state}"
+            );
+            assert!(
+                !prompt.contains("<extraction>disabled</extraction>"),
+                "{state}"
+            );
+        }
+        let compartments = store.load_compartments("ses").unwrap();
+        assert!(
+            !compartments.is_empty(),
+            "{state}: summary must still publish"
+        );
+        let memories = store
+            .load_active_memories(project.to_str().unwrap(), 0)
+            .unwrap();
+        assert_eq!(
+            memories
+                .iter()
+                .filter(|memory| memory.content.starts_with("unsolicited historian fact "))
+                .count(),
+            usize::from(!degraded),
+            "{state}: unsolicited fact admission"
+        );
+        assert!(memories.iter().any(|memory| memory.id == existing));
+        assert_eq!(memories.len(), 1 + usize::from(!degraded), "{state}");
+        let served = crate::providers::render_published_history_with_memory(
+            &compartments,
+            &memories,
+            Some(serde_json::to_value(&context).unwrap()),
+        )
+        .await;
+        assert!(
+            served.contains("existing memory remains visible"),
+            "{state}: {served}"
+        );
+        assert!(served.contains("autonomous summary"), "{state}: {served}");
+        let status = tool_body(
+            handler.handle_session_status_value(7, &json!({"v": 1, "session_id": "ses"})),
+        );
+        assert_eq!(status["memory_profile"]["domain"], json!(context.domain));
+        assert_eq!(
+            status["memory_profile"]["profile"],
+            serde_json::to_value(&context.profile).unwrap()
+        );
+        if degraded {
+            let summary = status["summary"].as_str().unwrap();
+            assert!(
+                summary.contains(state) && summary.contains("@acme/domain-legal"),
+                "{summary}"
+            );
+            if context.profile.pin.is_some() || !context.profile.candidates.is_empty() {
+                assert!(summary.contains("@acme/memory-legal"), "{summary}");
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unresolved_profile_rejects_fake_fact() {
+        assert_profile_fake_fact("unresolved", true, false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn other_degraded_profiles_reject_fake_fact() {
+        for state in ["conflict", "blocked", "unavailable"] {
+            assert_profile_fake_fact(state, true, false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn degraded_profile_wrapup_rejects_fake_fact() {
+        for state in ["unresolved", "conflict", "blocked", "unavailable"] {
+            assert_profile_fake_fact(state, true, true).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fallback_profiles_still_admit_historian_facts() {
+        for state in ["resolved", "entorhinal_not_answering"] {
+            assert_profile_fake_fact(state, false, false).await;
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn module_authority_rejects_mismatched_facade_project_vocabulary() {
         let producer = Arc::new(ProducerState::default());
@@ -22872,14 +23389,17 @@ mod tests {
             ) {
                 PreparedHistorianAction::FireReady(prepared) => {
                     let task = prepared.task;
-                    let firing_request = task.firing.as_fire_request(
-                        &store,
-                        &task.session_id,
-                        &task.project_path,
-                        &task.harness,
-                        &task.project_slug,
-                        task.language.as_deref(),
-                    );
+                    let firing_request = task
+                        .firing
+                        .as_fire_request(
+                            &store,
+                            &task.session_id,
+                            &task.project_path,
+                            &task.harness,
+                            &task.project_slug,
+                            task.language.as_deref(),
+                        )
+                        .unwrap();
                     (
                         firing_request.system.into_owned(),
                         task.firing.prompt.clone(),

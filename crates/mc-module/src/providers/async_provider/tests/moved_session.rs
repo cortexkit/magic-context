@@ -295,31 +295,34 @@ async fn moved_session_sets_up_from_the_import_and_carries_drops_onto_the_same_p
         vec![("standalone-chunk".into(), vec![0, 0, 128, 63])]
     );
 
-    // Every database this process holds open is a throwaway copy under the
-    // system temp directory, never a live store.
-    let open = std::process::Command::new("lsof")
-        .args(["-p", &std::process::id().to_string(), "-Fn"])
-        .output()
-        .expect("lsof is required for the isolation check");
-    let temp = std::env::temp_dir().canonicalize().unwrap();
-    let databases = String::from_utf8_lossy(&open.stdout)
-        .lines()
-        .filter_map(|line| line.strip_prefix('n'))
-        .filter(|name| name.contains(".db"))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    assert!(
-        databases
-            .iter()
-            .any(|name| name.starts_with(&*dir.path().canonicalize().unwrap().to_string_lossy())),
-        "lsof must see this test's stores: {databases:?}"
-    );
-    assert!(
-        databases
-            .iter()
-            .all(|name| std::path::Path::new(name).starts_with(&temp)),
-        "{databases:?}"
-    );
+    #[cfg(unix)]
+    {
+        // Unix's lsof verifies that every database this process holds open is
+        // a throwaway copy under the system temp directory, never a live store.
+        let open = std::process::Command::new("lsof")
+            .args(["-p", &std::process::id().to_string(), "-Fn"])
+            .output()
+            .expect("lsof is required for the isolation check");
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let databases = String::from_utf8_lossy(&open.stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix('n'))
+            .filter(|name| name.contains(".db"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert!(
+            databases.iter().any(
+                |name| name.starts_with(&*dir.path().canonicalize().unwrap().to_string_lossy())
+            ),
+            "lsof must see this test's stores: {databases:?}"
+        );
+        assert!(
+            databases
+                .iter()
+                .all(|name| std::path::Path::new(name).starts_with(&temp)),
+            "{databases:?}"
+        );
+    }
 
     // Setup again: the same checkpoint and cut, permanently.
     let again = rig

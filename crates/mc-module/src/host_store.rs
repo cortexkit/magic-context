@@ -42,9 +42,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::time::Instant;
 
-use mc_store::memory_lifecycle::applier::{
-    apply_memory_admission_tx, AdmissionOperation, AdmissionRequest,
-};
+use mc_store::memory_lifecycle::applier::{AdmissionOperation, AdmissionRequest};
 use mc_store::memory_lifecycle::authority::install_module_memory_authority_guard;
 use mc_store::memory_lifecycle::text::lifecycle_text_hash;
 use mc_store::private_permissions::{
@@ -97,6 +95,10 @@ pub const CONTEXT_BUSY_TIMEOUT_MS: u32 = 5_000;
 /// The module also writes one non-domain table, [`BRACKET_TABLE`], in every transaction,
 /// so that table is fingerprinted too.
 pub const DOMAIN_TABLES: &[&str] = &[
+    "memory_sync_state",
+    "memory_placement",
+    "memory_outbox",
+    "memory_ops",
     "compartment_history_versions",
     "compartment_events",
     "compartments",
@@ -334,6 +336,22 @@ fn counted<T>(result: Result<T, HostStoreError>) -> Result<T, HostStoreError> {
 /// then run `cargo test -p mc-module host_store::tests::domain_fingerprints` — the test
 /// prints the value it found for any table that drifted.
 pub const DOMAIN_TABLE_FINGERPRINTS: &[(&str, &str)] = &[
+    (
+        "memory_sync_state",
+        "98a4afad6f4f8feb32a919aa1ea3e7bcd212859dfa024eccf999d8ce5fda0993",
+    ),
+    (
+        "memory_placement",
+        "7c02d9d8646999934501c18aee3fbf0da3488d35b00b99b2792f44062b16c1b6",
+    ),
+    (
+        "memory_outbox",
+        "7e7e383e2b53e67f08e939cb524fd7368a954d1295a686ebe11cb15ee245d3e1",
+    ),
+    (
+        "memory_ops",
+        "e4232d019e6a6fae8fc7e6d8228383f416c75a211d304ea57b0abf56f7dab37f",
+    ),
     (
         "compartment_history_versions",
         "706ce735be1a9e8ba50ea089720ec9ab4bf1cf1e58506d6d3784d55b972ef524",
@@ -1227,6 +1245,7 @@ fn insert_compartment_events(
 fn insert_memories(
     tx: &Transaction<'_>,
     publish: &FoldPublish,
+    writer: &mc_store::memory_levels::MemoryWriter,
 ) -> Result<Vec<i64>, HostStoreError> {
     let mut ids = Vec::with_capacity(publish.memories.len());
     for memory in &publish.memories {
@@ -1250,7 +1269,12 @@ fn insert_memories(
         request.source_session_id = memory.source_session_id.as_deref();
         request.expires_at = memory.expires_at;
         request.metadata_json = memory.metadata_json.as_deref();
-        let receipt = apply_memory_admission_tx(tx, &request)?;
+        let receipt = mc_store::memory_lifecycle::applier::apply_memory_admission_with_writer_tx(
+            tx,
+            &request,
+            writer,
+            mc_store::memory_levels::CreateKind::Create,
+        )?;
         if receipt.inserted == Some(true) {
             if let Some(id) = receipt.applied_memory_id() {
                 ids.push(id);
@@ -1708,7 +1732,16 @@ impl HostStore {
         publish: &FoldPublish,
         observer: &mut dyn FnMut(ChunkCommitted),
     ) -> Result<PublishOutcome, HostStoreError> {
-        counted(self.publish_chunks(publish, observer))
+        counted(self.publish_chunks(publish, observer, &Default::default()))
+    }
+
+    /// The caller supplies the session's frozen pin and the store's transaction hook.
+    pub fn publish_fold_with_memory_writer(
+        &mut self,
+        publish: &FoldPublish,
+        writer: &mc_store::memory_levels::MemoryWriter,
+    ) -> Result<PublishOutcome, HostStoreError> {
+        counted(self.publish_chunks(publish, &mut |_| {}, writer))
     }
 
     /// The chunk loop behind [`HostStore::publish_fold_observed`].
@@ -1723,6 +1756,7 @@ impl HostStore {
         &mut self,
         publish: &FoldPublish,
         observer: &mut dyn FnMut(ChunkCommitted),
+        writer: &mc_store::memory_levels::MemoryWriter,
     ) -> Result<PublishOutcome, HostStoreError> {
         let budget = self.chunk_budget;
         let chunks = plan_chunks(publish, budget);
@@ -1749,7 +1783,7 @@ impl HostStore {
             let tables = chunk.tables();
             let (chunk_result, elapsed_us) =
                 with_privileged_transaction(&mut self.conn, &fence, &tables, |tx| {
-                    apply_chunk(tx, publish, &chunk, &outcome)
+                    apply_chunk(tx, publish, &chunk, &outcome, writer)
                 })?;
             outcome.chunk_rows.push(rows);
             outcome.chunk_durations_us.push(elapsed_us);
@@ -1790,6 +1824,7 @@ fn apply_chunk(
     publish: &FoldPublish,
     chunk: &Chunk<'_>,
     so_far: &PublishOutcome,
+    writer: &mc_store::memory_levels::MemoryWriter,
 ) -> Result<ChunkResult, HostStoreError> {
     let mut result = ChunkResult::default();
     match chunk {
@@ -1815,7 +1850,7 @@ fn apply_chunk(
                 user_memories: user_memories.to_vec(),
                 user_memory_collection_enabled: publish.user_memory_collection_enabled,
             };
-            result.memory_ids = insert_memories(tx, &slice)?;
+            result.memory_ids = insert_memories(tx, &slice, writer)?;
             insert_notes(tx, &slice)?;
             insert_primer_candidates(tx, &slice)?;
             insert_user_observations(tx, &slice)?;
@@ -1895,6 +1930,62 @@ pub fn resolve_context_db_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_admission_placement_and_hook() {
+        use mc_store::memory_levels::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_db(dir.path(), "placed.db");
+        let mut publish = sample_publish();
+        publish.memories.truncate(1);
+        publish.memories[0].category = "NAMING".into();
+        mark_managed(&path, &publish.project_path);
+        let mut host = HostStore::open(&path).unwrap();
+        let authority=RunAuthority::from_session_pin(&serde_json::json!({"project_id":"project-id","profile":{"name":"@cortexkit/memory-swe","version":"1.0.0","digest":"swe-digest","state":"resolved"},"snapshot_digest":"host-session-pin","category_ids":{"NAMING":"swe:naming"}}),&publish.session_id).unwrap();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let writer = MemoryWriter {
+            authority: Some(authority),
+            ordinals: vec![1, 2, 3, 4],
+            hook: Some(std::sync::Arc::new(move |_, event| {
+                captured.lock().unwrap().push(event.clone());
+                Ok(())
+            })),
+            ..Default::default()
+        };
+        let outcome = host
+            .publish_fold_with_memory_writer(&publish, &writer)
+            .unwrap();
+        assert_eq!(outcome.memory_ids.len(), 1);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.actor, Actor::Historian);
+        assert_eq!(event.kind, CreateKind::Create);
+        assert_eq!(event.session_id.as_deref(), Some("ses_fixture"));
+        assert_eq!(event.ordinals, vec![1, 2, 3, 4]);
+        assert_eq!(
+            event.owner,
+            Some(Owner {
+                kind: "project".into(),
+                id: "project-id".into()
+            })
+        );
+        assert_eq!(event.writer_project_id.as_deref(), Some("project-id"));
+        assert_eq!(
+            event.origin_profile.as_ref().unwrap().name,
+            "@cortexkit/memory-swe"
+        );
+        assert_eq!(event.effective_category_id.as_deref(), Some("swe:naming"));
+        assert_eq!(event.snapshot_digest.as_deref(), Some("host-session-pin"));
+        assert_eq!(
+            read_placement(&host.conn, event.memory_id)
+                .unwrap()
+                .unwrap()
+                .owner,
+            event.owner.clone().unwrap()
+        );
+    }
     use std::sync::mpsc;
 
     /// The committed `context.db` schema this binary is fingerprinted against.

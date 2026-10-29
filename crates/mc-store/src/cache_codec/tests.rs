@@ -1947,8 +1947,11 @@ mod source_scans {
         let mut hits = Vec::new();
         for path in source_files() {
             let rel = relative(&path);
+            // `tests.rs` files are only compiled under a `#[cfg(test)] mod tests;`
+            // declaration, so their seeding commits are test setup, not production code.
             if !rel.starts_with("crates/mc-module/src/")
                 || rel.ends_with("_tests.rs")
+                || rel.ends_with("/tests.rs")
                 || rel.contains("/tests/")
             {
                 continue;

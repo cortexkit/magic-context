@@ -5,7 +5,12 @@ mod executable_staging;
 fn staging_root_uses_tmpdir_only_when_resolved_outside_var_folders() {
     use std::path::{Path, PathBuf};
 
-    let fallback = Path::new("/tmp/magic-context-exec");
+    let fallback = if cfg!(windows) {
+        std::env::temp_dir().join("magic-context-exec")
+    } else {
+        PathBuf::from("/tmp/magic-context-exec")
+    };
+    assert!(fallback.is_absolute());
     assert_eq!(
         executable_staging::executable_root_for_tmpdir(None, None),
         fallback
@@ -24,17 +29,19 @@ fn staging_root_uses_tmpdir_only_when_resolved_outside_var_folders() {
         ),
         fallback
     );
+    let selected = if cfg!(windows) {
+        PathBuf::from(r"C:\worker\task-tmp")
+    } else {
+        PathBuf::from("/worker/task-tmp")
+    };
     assert_eq!(
-        executable_staging::executable_root_for_tmpdir(
-            Some(Path::new("/worker/task-tmp")),
-            Some(Path::new("/worker/task-tmp")),
-        ),
-        PathBuf::from("/worker/task-tmp/magic-context-exec")
+        executable_staging::executable_root_for_tmpdir(Some(&selected), Some(&selected),),
+        selected.join("magic-context-exec")
     );
 }
 
 #[test]
-fn staged_executable_is_content_named_private_and_reused() {
+fn staged_executable_is_content_named_and_reused_with_platform_permissions() {
     use sha2::{Digest, Sha256};
     use std::fs;
     #[cfg(target_os = "macos")]
@@ -77,6 +84,22 @@ fn staged_executable_is_content_named_private_and_reused() {
         Some("magic-context-exec")
     );
     assert!(!first.starts_with(scratch.path()));
+
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            first.extension().and_then(|name| name.to_str()),
+            Some("exe")
+        );
+        for name in ["ckdev-mc.exe", "ckdev-mc.EXE"] {
+            assert_eq!(
+                executable_staging::stage_executable(&first_source, name, "ck-mc").unwrap(),
+                first
+            );
+        }
+        assert!(!fs::metadata(&first).unwrap().permissions().readonly());
+        drop(fs::OpenOptions::new().write(true).open(&first).unwrap());
+    }
 
     #[cfg(not(target_os = "macos"))]
     let changed_source = {
@@ -246,6 +269,17 @@ fn spawn_recovers_when_a_writable_executable_handle_is_released() {
         .expect("bounded retry waits for the writer to close");
     assert!(child.wait().unwrap().success());
     release.join().unwrap();
+}
+
+#[test]
+fn spawn_wrapper_returns_success_after_one_attempt() {
+    let mut attempts = 0;
+    let result = executable_staging::retry_spawn(|| {
+        attempts += 1;
+        Ok(42)
+    });
+    assert_eq!(result.unwrap(), 42);
+    assert_eq!(attempts, 1);
 }
 
 #[test]
