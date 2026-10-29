@@ -30,18 +30,20 @@ pub fn get_memories(
     status: Option<String>,
     category: Option<String>,
     search: Option<String>,
+    exclude_archived: Option<bool>,
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<db::Memory>, String> {
     let path = state.get_db_path()?;
     let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
-    db::get_memories(
+    db::get_memories_filtered(
         &conn,
         project.as_deref(),
         workspace_id,
         status.as_deref(),
         category.as_deref(),
         search.as_deref(),
+        exclude_archived.unwrap_or(false),
         limit.unwrap_or(100),
         offset.unwrap_or(0),
     )
@@ -53,10 +55,23 @@ pub fn get_memory_stats(
     state: State<'_, AppState>,
     project: Option<String>,
     workspace_id: Option<i64>,
+    status: Option<String>,
+    search: Option<String>,
+    include_archived: Option<bool>,
 ) -> Result<db::MemoryStats, String> {
     let path = state.get_db_path()?;
     let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
-    db::get_memory_stats(&conn, project.as_deref(), workspace_id).map_err(|e| e.to_string())
+    db::get_memory_stats_scoped(
+        &conn,
+        db::MemoryStatsScope {
+            project: project.as_deref(),
+            workspace_id,
+            status: status.as_deref().filter(|value| !value.is_empty()),
+            search: search.as_deref().filter(|value| !value.trim().is_empty()),
+            include_archived: include_archived.unwrap_or(false),
+        },
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command(async)]

@@ -51,6 +51,8 @@ export async function getMemories(params?: {
   status?: string;
   category?: string;
   search?: string;
+  /** Omit archived rows when no exact status is set. Matches the default stats totals. */
+  excludeArchived?: boolean;
   limit?: number;
   offset?: number;
 }): Promise<Memory[]> {
@@ -60,6 +62,7 @@ export async function getMemories(params?: {
     status: params?.status ?? null,
     category: params?.category ?? null,
     search: params?.search ?? null,
+    excludeArchived: params?.excludeArchived ?? false,
     limit: params?.limit ?? 100,
     offset: params?.offset ?? 0,
   });
@@ -68,10 +71,17 @@ export async function getMemories(params?: {
 export async function getMemoryStats(params?: {
   project?: string;
   workspaceId?: number;
+  status?: string;
+  search?: string;
+  /** Category totals include archived rows. Ignored when `status` is set. */
+  includeArchived?: boolean;
 }): Promise<MemoryStats> {
   return invoke("get_memory_stats", {
     project: params?.project ?? null,
     workspaceId: params?.workspaceId ?? null,
+    status: params?.status ?? null,
+    search: params?.search ?? null,
+    includeArchived: params?.includeArchived ?? false,
   });
 }
 

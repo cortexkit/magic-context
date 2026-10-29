@@ -647,8 +647,7 @@ mod tests {
         let canonical_project = project.canonicalize().unwrap();
         let project_config = canonical_project.join(".cortexkit/magic-context.jsonc");
         std::fs::write(&project_config, "{}\n").unwrap();
-        std::fs::set_permissions(&project_config, std::fs::Permissions::from_mode(0o640))
-            .unwrap();
+        std::fs::set_permissions(&project_config, std::fs::Permissions::from_mode(0o640)).unwrap();
         write_project_config(canonical_project.to_str().unwrap(), "{}\n").expect("write");
         let mode = std::fs::metadata(&project_config)
             .unwrap()
