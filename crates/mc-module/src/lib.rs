@@ -12484,6 +12484,10 @@ pub fn manifest_with_route_targets_and_smart_notes(
     // project, whereas MC uses one machine-wide store with project-keyed rows.
     let mut capabilities = vec![
         cortexkit_role_compaction_provider::PROVIDES.to_string(),
+        // Core discovers tool providers from the daemon's module catalog by this
+        // claim, before it calls role.describe. Without it, core never composes
+        // Magic Context into a worker plan: no tools and no compaction.
+        cortexkit_role_tool_provider::PROVIDES.to_string(),
         MCP_CONVERSATION_BINDING_V1.to_string(),
         // basal reaches `subagent_invocations.read` over the calling flow's own
         // scoped route, which the daemon opens only to a module declaring this.
@@ -14573,6 +14577,7 @@ mod tests {
         );
         let mut expected_capabilities = vec![
             "compaction-provider/v1".to_string(),
+            "tool-provider/v1".to_string(),
             "mcp-conversation-binding/v1".to_string(),
             "flow-scopes/v1".to_string(),
         ];
