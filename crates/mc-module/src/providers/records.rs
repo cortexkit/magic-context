@@ -67,6 +67,12 @@ impl Key {
             sha256_hex(&serde_json::to_vec(self).expect("session key JSON"))
         )
     }
+
+    /// The engine namespace shared by facade tools and async compaction. A first
+    /// Setup uses generation zero, so notes written before Setup remain in scope.
+    pub(crate) fn async_namespace(&self, generation: u64) -> String {
+        format!("{}:async:{generation}", self.engine_key())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
