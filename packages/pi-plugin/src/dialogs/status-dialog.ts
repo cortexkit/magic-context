@@ -91,6 +91,10 @@ import packageJson from "../../package.json";
 import { resolveSessionId } from "../commands/pi-command-utils";
 import { getPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
 import { readHostSystemPrompt } from "../host-system-prompt";
+import {
+	hostToolSchemaBytes,
+	measureHostToolDefinitions,
+} from "../host-token-breakdown";
 import { resolvePiWindowGeometry } from "../pi-context-limit";
 import {
 	piPressureEvidenceLimit,
@@ -740,14 +744,7 @@ function readStatusHostBytes(
 		modelKey: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
 		modelBytes: safeStringify(ctx.model),
 		system: safeRead(() => readHostSystemPrompt(ctx), undefined),
-		tools: safeRead(
-			() =>
-				(pi.getAllTools?.() ?? []).map(
-					(tool) =>
-						`${tool.name ?? ""}\n${tool.description ?? ""}\n${safeStringify(tool.parameters)}`,
-				),
-			[],
-		),
+		tools: safeRead(() => hostToolSchemaBytes(pi.getAllTools?.() ?? []), []),
 	};
 }
 
@@ -758,22 +755,22 @@ export class PiStatusTokenCache {
 	private toolsKey: string | undefined;
 	private toolTokens = 0;
 
-	constructor(private readonly estimate = estimateTokens) {}
+	constructor(private readonly estimate?: (text: string) => number) {}
 
 	estimates(host: StatusHostBytes, fallbackSystemTokens: number) {
 		if (host.system !== undefined) {
 			const key = JSON.stringify([host.modelKey, host.system]);
 			if (this.systemKey !== key) {
-				this.systemTokens = this.estimate(host.system);
+				this.systemTokens = (this.estimate ?? estimateTokens)(host.system);
 				this.systemKey = key;
 			}
 		}
 		const key = JSON.stringify([host.modelKey, host.tools]);
 		if (this.toolsKey !== key) {
-			this.toolTokens = host.tools.reduce(
-				(sum, bytes) => sum + this.estimate(bytes),
-				0,
-			);
+			const estimate = this.estimate;
+			this.toolTokens = estimate
+				? host.tools.reduce((sum, bytes) => sum + estimate(bytes), 0)
+				: measureHostToolDefinitions(host.tools);
 			this.toolsKey = key;
 		}
 		return {

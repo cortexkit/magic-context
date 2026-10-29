@@ -73,6 +73,7 @@ import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import type { MarkerUpdateOutcome } from "./compaction-marker-manager";
 import { getActiveCompartmentRun, registerActiveCompartmentRun } from "./compartment-runner";
 import { createToolExecuteAfterHook } from "./hook-handlers";
+import { HOST_BREAKDOWN_KEY } from "./host-token-breakdown";
 import { injectM0M1 } from "./inject-compartments";
 import { captureSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
@@ -122,6 +123,53 @@ function userFlushSessions(sessionId: string): Set<string> {
 }
 
 const tempDirs: string[] = [];
+
+for (const generation of ["v1", "v2"] as const) {
+    it(`${generation} served pass schedules a persisted phone breakdown`, async () => {
+        useTempDataHome(`phone-breakdown-${generation}-`);
+        const db = openDatabase()!;
+        const sessionId = `phone-${generation}`;
+        recordToolDefinition(
+            "anthropic",
+            "opus",
+            undefined,
+            "read",
+            "Read a file",
+            { type: "object" },
+            sessionId,
+        );
+        const transform = createTransform({
+            db,
+            storeGeneration: generation,
+            tagger: createTagger(),
+            scheduler: createScheduler({ executeThresholdPercentage: 65 }),
+            liveModelBySession: new Map([
+                [sessionId, { providerID: "anthropic", modelID: "opus" }],
+            ]),
+            contextUsageMap: new Map(),
+            historyRefreshSessions: new Set(),
+            pendingMaterializationSessions: new Set(),
+            lastHeuristicsTurnId: new Map(),
+            protectedTokens: 0,
+        });
+        const messages: TestMessage[] = [
+            {
+                info: { id: "phone-u", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "A real user question to account for." }],
+            },
+        ];
+        await transform({}, { messages });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const row = db
+            .prepare("SELECT value FROM session_render_cache WHERE session_id=? AND cache_key=?")
+            .get(sessionId, HOST_BREAKDOWN_KEY) as { value: string };
+        const saved = JSON.parse(row.value);
+        expect(saved.version).toBe(1);
+        expect(saved.parts.history_raw).toBeGreaterThan(0);
+        expect(saved.parts.tool_definitions).toBeGreaterThan(0);
+        expect(saved.measured_at).toBeGreaterThan(0);
+    });
+}
 
 for (const generation of ["v1", "v2"] as const) {
     for (const configured of [true, false]) {

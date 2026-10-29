@@ -666,6 +666,19 @@ fn session_data_records() -> Vec<Record> {
                 "section": "token_breakdown",
             }),
         ),
+        // Host counts were saved before the provider response completed.
+        plain(
+            "token-breakdown-host-pass",
+            "session_data.read/token-breakdown-host-pass.json",
+            "session_data.read",
+            "INSERT INTO session_meta(session_id,harness,last_response_time,last_input_tokens,system_prompt_tokens,total_input_tokens,new_work_tokens) \
+             VALUES('host','opencode',1700000000200,649000,18000,649000,0); \
+             CREATE TABLE IF NOT EXISTS session_render_cache(session_id TEXT, cache_key TEXT, value BLOB, PRIMARY KEY(session_id,cache_key)) WITHOUT ROWID; \
+             INSERT INTO session_render_cache VALUES('host','host_token_breakdown', \
+             '{\"version\":1,\"measured_at\":1700000000000,\"tolerance\":{\"ratio\":0.01,\"tokens\":500},\"last_user_message_in_history_raw\":true,\"parts\":{\"tool_definitions\":27000,\"project_docs\":21000,\"user_profile\":3000,\"history_raw\":76000,\"tool_calls_results\":481000,\"last_user_message\":0}}');",
+            "",
+            json!({"session": opencode_session("host"), "section": "token_breakdown"}),
+        ),
         // No provider total was recorded, so the legacy estimate stands in.
         plain(
             "token-breakdown-estimate",
