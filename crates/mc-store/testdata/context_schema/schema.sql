@@ -259,7 +259,8 @@ CREATE TABLE memories (
       mural_cue TEXT,
       mural_cue_hash TEXT,
       mural_cue_at INTEGER,
-      mural_cue_rejection_count INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1, verify_result TEXT, verify_files_json TEXT, verify_commit TEXT,
+      mural_cue_rejection_count INTEGER NOT NULL DEFAULT 0,
+      safety_critical INTEGER CHECK (safety_critical IN (0, 1)), revision INTEGER NOT NULL DEFAULT 1, verify_result TEXT, verify_files_json TEXT, verify_commit TEXT,
       UNIQUE(project_path, category, normalized_hash)
     );
 
@@ -1978,7 +1979,8 @@ INSERT INTO schema_migrations (version, description, applied_at) VALUES
 (100, 'durable served thinking prefix and held release request', :applied_at),
 (101, 'indexed trimmed-source tag retirement', :applied_at),
 (102, 'bind served capture markers to the digest of their certified bytes', :applied_at),
-(103, 'isolate session render payloads and chunk growing replay metadata', :applied_at);
+(103, 'isolate session render payloads and chunk growing replay metadata', :applied_at),
+(104, 'nullable safety-critical memory assessment', :applied_at);
 
 INSERT INTO "message_fts_rowid_map_backfill_state" ("completed", "id", "updated_at", "watermark_rowid") VALUES
 (1, 1, 0, 0);

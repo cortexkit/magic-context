@@ -1439,6 +1439,18 @@
               },
               "value": false
             },
+            "turn_two": {
+              "type": "default",
+              "userOnly": true,
+              "inner": {
+                "type": "enum",
+                "values": [
+                  "allowlist",
+                  "off"
+                ]
+              },
+              "value": "allowlist"
+            },
             "disallowed_tools": {
               "type": "default",
               "inner": {

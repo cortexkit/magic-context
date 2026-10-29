@@ -19,12 +19,15 @@ import {
     getCompartments,
     replaceAllCompartments,
 } from "../../features/magic-context/compartment-storage";
+import { HISTORIAN_FORMAT_INSTRUCTION } from "../../features/magic-context/memory/turn-one-publication";
+import { authorizationFixture } from "../../features/magic-context/memory/turn-two-test-fixtures.test";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import type { PluginContext } from "../../plugin/types";
 import { __resetNotificationStateForTests } from "../../shared/rpc-notifications";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import { COMPARTMENT_AGENT_COMBINED_SYSTEM_PROMPT } from "./compartment-prompt";
 import { runCompartmentAgent } from "./compartment-runner";
 import { settleHistorianTurnTwoRuns } from "./historian-turn-two-step";
 import {
@@ -126,6 +129,20 @@ async function runEnabledHistorian(
     directory: string,
     reply: string,
 ): Promise<void> {
+    const authorization = authorizationFixture(
+        {
+            lane: "opencode-1",
+            carrier: "opencode-session",
+            provider: "test",
+            modelId: "fixture-historian",
+            variant: null,
+            temperature: null,
+            thinkingLevel: null,
+        },
+        COMPARTMENT_AGENT_COMBINED_SYSTEM_PROMPT,
+        [],
+        HISTORIAN_FORMAT_INSTRUCTION,
+    );
     const client = {
         session: {
             get: mock(async () => ({ data: { directory } })),
@@ -135,7 +152,7 @@ async function runEnabledHistorian(
                 data: [
                     {
                         info: { role: "assistant", time: { created: 1 } },
-                        parts: [{ type: "text", text: reply }],
+                        parts: [{ type: "text", text: authorization.turnOne(reply) }],
                     },
                 ],
             })),
@@ -155,6 +172,7 @@ async function runEnabledHistorian(
                 compartmentLeaseHolderId: holderId,
                 forceDrainQuota: true,
                 memoryLifecycleLane: "enabled",
+                memoryLifecycleValidatedProfiles: authorization.rows,
             }),
         );
     } finally {
@@ -190,6 +208,8 @@ ${compartmentXml(3, 4, "Earlier")}
 * [at_compartment=2 messages=3-4] Fact from the earlier compartment.
 * [at_compartment=1 messages=3] Fact citing lines outside the named compartment.
 * [at_compartment=2 messages=4-5] Fact citing lines across two compartments.
+* [at_compartment=2 messages=3,4] Fact citing separate earlier source ranges.
+* [at_compartment=1 messages=5,3] Fact whose second range is outside the named compartment.
 * [at_compartment=3 messages=7] Fact naming a compartment that was never emitted.
 </CONSTRAINTS>
 </facts>
@@ -226,10 +246,20 @@ ${compartmentXml(3, 4, "Earlier")}
                 compartment_id: null,
                 anchor_known: 0,
             },
+            {
+                content: "Fact citing separate earlier source ranges.",
+                compartment_id: earlier!.id,
+                anchor_known: 1,
+            },
+            {
+                content: "Fact whose second range is outside the named compartment.",
+                compartment_id: null,
+                anchor_known: 0,
+            },
             // "Fact naming a compartment that was never emitted" is not recorded: an
             // index past the published compartments is dropped (keepPublishedFact).
         ]);
-        // Each anchored candidate links exactly the printed lines it cited.
+        // Each citation range is one source block, even when it spans several printed lines.
         expect(
             db
                 .prepare(
@@ -240,8 +270,17 @@ ${compartmentXml(3, 4, "Earlier")}
                 .all(),
         ).toEqual([
             { content: "Fact from the later compartment.", start_ordinal: 5, end_ordinal: 5 },
-            { content: "Fact from the earlier compartment.", start_ordinal: 3, end_ordinal: 3 },
-            { content: "Fact from the earlier compartment.", start_ordinal: 4, end_ordinal: 4 },
+            { content: "Fact from the earlier compartment.", start_ordinal: 3, end_ordinal: 4 },
+            {
+                content: "Fact citing separate earlier source ranges.",
+                start_ordinal: 3,
+                end_ordinal: 3,
+            },
+            {
+                content: "Fact citing separate earlier source ranges.",
+                start_ordinal: 4,
+                end_ordinal: 4,
+            },
         ]);
     });
 

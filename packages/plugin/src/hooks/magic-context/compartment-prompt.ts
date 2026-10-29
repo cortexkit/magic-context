@@ -3,7 +3,18 @@ import { readEnabledProjectMemories } from "../../features/magic-context/memory-
 // The historian system prompt is generated from historian-prompt.source.md.
 // Edit that source and run scripts/build-historian-prompt.ts; never hand-edit
 // the generated constant.
-export { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "./historian-prompt.generated";
+import { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "./historian-prompt.generated";
+import { TWO_PASS_SYSTEM, TWO_PASS_TURN_ONE } from "./two-pass-prompts/prompts.generated";
+
+export {
+    COMPARTMENT_AGENT_SYSTEM_PROMPT,
+    TWO_PASS_SYSTEM as COMPARTMENT_AGENT_COMBINED_SYSTEM_PROMPT,
+};
+
+/** Both historian turns use the same combined system when turn two is enabled. */
+export function historianSystemPrompt(turnTwoEnabled: boolean): string {
+    return turnTwoEnabled ? TWO_PASS_SYSTEM : COMPARTMENT_AGENT_SYSTEM_PROMPT;
+}
 
 export const HISTORIAN_EDITOR_SYSTEM_PROMPT = `You are a historian editor for the magic-context system, refining a historian draft. The draft was produced by a first-pass historian and may contain noise — low-signal U: lines, redundant quotes across compartments, and weak preservation decisions.
 
@@ -106,12 +117,7 @@ Your only task is to produce the required historian XML compartments.`;
  * features/magic-context/memory/turn-one-publication.ts); every production lane is
  * still `dormant`, so production prompts do not carry this block yet.
  */
-export const HISTORIAN_FACT_ANCHOR_INSTRUCTION = `<fact_anchors>required</fact_anchors>
-There is no project-memory block in this run: emit every durable fact the slice establishes, without deduplicating against earlier memory.
-Prefix every <facts> bullet with its source anchor: \`* [at_compartment=N messages=A-B] Fact text\`.
-- N is the 1-based index of the compartment above that the fact came from (the same convention as events).
-- A-B is copied from the \`[A]\` or \`[A-B]\` prefixes of the <new_messages> lines that state the fact: A is the start of the first such line and B the end of the last. Write \`messages=A\` when the fact comes from one single-message line.
-- When you cannot name the source lines exactly, write \`* [at_compartment=unknown] Fact text\`. Never guess an anchor.`;
+export const HISTORIAN_FACT_ANCHOR_INSTRUCTION = TWO_PASS_TURN_ONE;
 
 export interface CompartmentPromptInputs {
     /** `<compartment_examples_from_other_projects>` block (3-seed floor), or "". */

@@ -17,6 +17,7 @@ const FIELDS: &[&str] = &[
     "importance",
     "scope",
     "shareable",
+    "safetyCritical",
     "sourceSessionId",
     "sourceType",
     "seenCount",
@@ -35,6 +36,7 @@ const FIELDS: &[&str] = &[
     "metadataJson",
 ];
 const NULLABLE: &[&str] = &[
+    "safetyCritical",
     "importance",
     "sourceSessionId",
     "sourceType",
@@ -46,6 +48,7 @@ const NULLABLE: &[&str] = &[
     "metadataJson",
 ];
 const NUMERIC: &[&str] = &[
+    "safetyCritical",
     "id",
     "revision",
     "importance",
@@ -195,6 +198,7 @@ pub fn normalize_snapshot(input: &Value, revision: Option<i64>) -> Option<Value>
         || !["active", "permanent", "archived"].contains(&out["status"].as_str()?)
         || !["project", "ecosystem", "universe"].contains(&out["scope"].as_str()?)
         || ![0, 1].contains(&out["shareable"].as_i64()?)
+        || (!out["safetyCritical"].is_null() && ![0, 1].contains(&out["safetyCritical"].as_i64()?))
     {
         return None;
     }
@@ -536,6 +540,9 @@ fn plan(
                 "supersededByMemoryId",
                 "mergedFrom",
                 "metadataJson",
+                "safetyCritical",
+                "sourceSessionId",
+                "sourceType",
             ]
             .iter()
             .any(|&field| current[field] != row["after"][field])
@@ -552,10 +559,10 @@ fn plan(
                     ],
                 ));
             }
-            if decision.as_ref().unwrap()["operation"]
+            let operation = decision.as_ref().unwrap()["operation"]
                 .as_str()
-                .unwrap_or("")
-                .contains("merge")
+                .unwrap_or("");
+            if (operation.contains("merge") || operation == "replaces")
                 && !current["supersededByMemoryId"].is_null()
             {
                 let link: Option<String> = conn.query_row("SELECT decision_key FROM memory_successor_links WHERE source_id=?1 AND successor_id=?2", params![id, current["supersededByMemoryId"].as_i64()], |row|row.get(0)).optional().map_err(storage)?;
@@ -598,8 +605,18 @@ fn plan(
                     "supersededByMemoryId",
                     "mergedFrom",
                     "metadataJson",
+                    "safetyCritical",
+                    "sourceSessionId",
+                    "sourceType",
                 ] {
                     target[field] = row["before"][field].clone();
+                }
+                if matches!(
+                    decision.as_ref().unwrap()["operation"].as_str(),
+                    Some("new" | "conflict")
+                ) {
+                    target["seenCount"] = row["before"]["seenCount"].clone();
+                    target["lastSeenAt"] = row["before"]["lastSeenAt"].clone();
                 }
             }
         } else {
@@ -739,6 +756,26 @@ fn apply_plan(
             return Err("Memory revision changed during apply".into());
         }
         conn.execute(
+            "UPDATE memories SET safety_critical=?1 WHERE id=?2",
+            params![target["safetyCritical"].as_i64(), target["id"].as_i64()],
+        )
+        .map_err(storage)?;
+        conn.execute(
+            "UPDATE memories SET source_session_id=?1,source_type=?2,seen_count=?3,last_seen_at=?4 WHERE id=?5",
+            params![target["sourceSessionId"].as_str(), target["sourceType"].as_str(), target["seenCount"].as_i64(), target["lastSeenAt"].as_i64(), target["id"].as_i64()],
+        ).map_err(storage)?;
+        if let Some(restored) = plan
+            .decision
+            .as_ref()
+            .and_then(|decision| decision["rows"].as_array())
+            .and_then(|rows| rows.iter().find(|row| row["memoryId"] == target["id"]))
+            .map(|row| &row["before"])
+            .filter(|before| !before.is_null())
+        {
+            // Evidence follows the restored text, but the revision number must never go backwards.
+            conn.execute("INSERT INTO memory_clause_evidence(memory_id,revision,clause_ordinal,text_hash,evidence_json) SELECT memory_id,?1,clause_ordinal,text_hash,evidence_json FROM memory_clause_evidence WHERE memory_id=?2 AND revision=?3", params![target["revision"].as_i64(), target["id"].as_i64(), restored["revision"].as_i64()]).map_err(storage)?;
+        }
+        conn.execute(
             "DELETE FROM memory_embeddings WHERE memory_id=?1",
             [target["id"].as_i64()],
         )
@@ -780,6 +817,11 @@ fn apply_plan(
     if let Some(decision) = &plan.decision {
         conn.execute(
             "DELETE FROM memory_successor_links WHERE decision_key=?1",
+            [decision["decisionKey"].as_str()],
+        )
+        .map_err(storage)?;
+        conn.execute(
+            "DELETE FROM memory_conflict_links WHERE decision_key=?1",
             [decision["decisionKey"].as_str()],
         )
         .map_err(storage)?;

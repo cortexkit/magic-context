@@ -500,7 +500,7 @@ fn assert_metadata_and_inventory(store: &McStore, version: u32) {
                 Ok(())
             })
             .unwrap();
-        assert_eq!(crate::move_inventory::INVENTORY_VERSION, 9);
+        assert_eq!(crate::move_inventory::INVENTORY_VERSION, 10);
         assert_eq!(
             crate::move_inventory::STORE_SCHEMA_VERSION,
             LATEST_MIGRATION_VERSION

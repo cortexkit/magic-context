@@ -182,7 +182,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastUnconfirmedMigrationHolders = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 103;
+export const LATEST_SUPPORTED_VERSION = 104;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1412,6 +1412,7 @@ export function initializeDatabase(
       mural_cue_hash TEXT,
       mural_cue_at INTEGER,
       mural_cue_rejection_count INTEGER NOT NULL DEFAULT 0,
+      safety_critical INTEGER CHECK (safety_critical IN (0, 1)),
       UNIQUE(project_path, category, normalized_hash)
     );
 

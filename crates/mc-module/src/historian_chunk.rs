@@ -832,6 +832,7 @@ pub struct AssembledHistorianFiring {
 }
 
 impl AssembledHistorianFiring {
+    #[allow(clippy::too_many_arguments)] // Session identity and its selected output contract travel together.
     pub fn as_fire_request<'a>(
         &'a self,
         store: &'a McStore,
@@ -840,6 +841,7 @@ impl AssembledHistorianFiring {
         harness: &'a str,
         project_slug: &'a str,
         content_language: Option<&'a str>,
+        turn_two_enabled: bool,
     ) -> HistorianFireRequest<'a> {
         HistorianFireRequest {
             rust_background_enabled: false,
@@ -852,7 +854,7 @@ impl AssembledHistorianFiring {
             // prompt (chunk + references); content-language guidance belongs only on this
             // producer request, never on the transform-served prompt surface.
             system: crate::historian_prompt::with_content_language_directive(
-                crate::historian_prompt::HISTORIAN_SYSTEM_PROMPT,
+                crate::historian_prompt::historian_system_prompt(turn_two_enabled),
                 content_language,
                 crate::historian_prompt::ContentLanguageDirectiveOptions::default(),
             ),
@@ -4312,6 +4314,37 @@ mod tests {
         match tiny_chunk_assemble(true) {
             AssembleHistorianFiringOutcome::Fire(_) => {}
             other => panic!("expected emergency fire despite tiny chunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assembled_firing_selects_contract_per_request_not_harness() {
+        use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+        let dir = tempfile::tempdir().unwrap();
+        let store = mc_store::McStore::open_for_test(&StorageDescriptor {
+            module_id: "magic-context-test".into(),
+            storage_namespace: "mc_cache".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: dir.path().join("store.db").to_string_lossy().into(),
+            },
+        })
+        .unwrap();
+        let AssembleHistorianFiringOutcome::Fire(firing) = tiny_chunk_assemble(true) else {
+            panic!("expected assembled firing");
+        };
+        for harness in ["opencode", "opencode2", "pi", "omp"] {
+            for enabled in [false, true] {
+                let request =
+                    firing.as_fire_request(&store, "ses", "/proj", harness, "proj", None, enabled);
+                let expected = if enabled {
+                    crate::historian_prompt::HISTORIAN_COMBINED_SYSTEM_PROMPT
+                } else {
+                    crate::historian_prompt::HISTORIAN_SYSTEM_PROMPT
+                };
+                assert_eq!(request.system.as_ref(), expected);
+                assert_eq!(request.prompt, firing.prompt);
+            }
         }
     }
 

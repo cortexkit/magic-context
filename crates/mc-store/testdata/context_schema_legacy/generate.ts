@@ -19,15 +19,15 @@ const root = fileURLToPath(new URL("../../../..", import.meta.url));
 const here = fileURLToPath(new URL(".", import.meta.url));
 const { Database } = await import(join(root, "packages/plugin/src/shared/sqlite.ts"));
 const { ensureColumn } = await import(join(root, "packages/plugin/src/features/magic-context/storage-schema-helpers.ts"));
-const { MIGRATIONS, runMigrations } = await import(join(root, "packages/plugin/src/features/magic-context/migrations.ts"));
+const { MIGRATIONS, runMigrations, LATEST_MIGRATION_VERSION } = await import(join(root, "packages/plugin/src/features/magic-context/migrations.ts"));
 const { splitLkgSlotPrefixes, splitReplayDecisions, LKG_SLOT_CHUNKS_DDL, LKG_SLOTS_DDL } = await import(join(root, "packages/plugin/src/features/magic-context/migration-v94-write-split.ts"));
-const { insertMemory } = await import(join(root, "packages/plugin/src/features/magic-context/memory/storage-memory.ts"));
+const { computeNormalizedHash } = await import(join(root, "packages/plugin/src/features/magic-context/memory/normalize-hash.ts"));
 const { addNote } = await import(join(root, "packages/plugin/src/features/magic-context/storage-notes.ts"));
 const { insertTag } = await import(join(root, "packages/plugin/src/features/magic-context/storage-tags.ts"));
 const { writeReplayDocument } = await import(join(root, "packages/plugin/src/features/magic-context/storage-replay-document.ts"));
 
-// Use the historical initializer from schema-version-87 commit ceeed793b5bf873d94768de20358bc84a44d3fad.
-// The current initializer preinstalls v93-102 schema before running migrations,
+// Use the schema-version-87 initializer saved in storage-db-v87.source.txt.
+// The current initializer preinstalls newer schema before running migrations,
 // so it would conceal missing historical upgrade steps in a differential test.
 const historicalSource = readFileSync(join(here, "storage-db-v87.source.txt"), "utf8");
 const historicalJs = new Bun.Transpiler({ loader: "ts", target: "bun" }).transformSync(
@@ -99,14 +99,18 @@ if (process.argv[3] === "--assets") {
     writeFileSync(join(here, "lkg_chunks.sql"), LKG_SLOT_CHUNKS_DDL);
     writeFileSync(join(here, "lkg_slots.sql"), LKG_SLOTS_DDL.replaceAll("lkg_slots", "lkg_slots_v94").trimEnd() + "\n");
     assetDb.close();
-    console.log(`Captured ${steps.length} real TypeScript migration SQL plans (88-103)`);
+    console.log(`Captured ${steps.length} real TypeScript migration SQL plans (88-${LATEST_MIGRATION_VERSION})`);
     process.exit(0);
 }
 
 function populate(db: Db): void {
     insertTag(db, "session-main", "message-user", "user", 80, 1);
     insertTag(db, "session-main", "message-assistant", "assistant", 160, 2);
-    insertMemory(db, { projectPath: "/fixture/project", category: "CONSTRAINTS", content: "Retain Unicode 東京 🧠 and the exact original bytes.", sourceType: "agent", sourceSessionId: "session-main" });
+    // The current reader requires columns added after v87; seed the historical
+    // memory layout directly so the migration, not fixture setup, adds them.
+    const memoryContent = "Retain Unicode 東京 🧠 and the exact original bytes.";
+    db.prepare(`INSERT INTO memories(project_path,category,content,normalized_hash,source_type,source_session_id,first_seen_at,created_at,updated_at,last_seen_at)
+        VALUES('/fixture/project','CONSTRAINTS',?,?,'agent','session-main',?,?,?,?)`).run(memoryContent, computeNormalizedHash(memoryContent), now, now, now, now);
     addNote(db, "session", { sessionId: "session-main", content: "Preserve this follow-up", anchorOrdinal: 2 });
     addNote(db, "smart", { sessionId: "session-main", projectPath: "/fixture/project", content: "Conditional follow-up", surfaceCondition: "After the build passes" });
     writeReplayDocument(db, "session-main", { version: 2, trailingBlank: { "message-assistant": "keep:3" }, piNative: { retained: "opaque" } });
@@ -161,7 +165,7 @@ function data(db: Db, startingVersion: number): unknown {
         });
 }
 
-for (let version = 87; version <= 103; version++) {
+for (let version = 87; version <= LATEST_MIGRATION_VERSION; version++) {
     const start = join(output, `v${version}.db`);
     copyFileSync(base, start);
     const fixture = new Database(start);
@@ -176,4 +180,4 @@ for (let version = 87; version <= 103; version++) {
     writeFileSync(join(output, `v${version}.json`), JSON.stringify({ now, snapshot: snapshot(reference), data: data(reference, version) }));
     reference.close();
 }
-console.log("TypeScript historical differential fixtures: 17 populated starting versions (87-103), 16 upgrade steps, fence 103");
+console.log(`TypeScript historical differential fixtures: ${LATEST_MIGRATION_VERSION - 86} populated starting versions (87-${LATEST_MIGRATION_VERSION}), fence ${LATEST_MIGRATION_VERSION}`);

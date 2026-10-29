@@ -1,0 +1,20 @@
+[
+  { "flag": null, "score": 0, "expected": 0 },
+  { "flag": null, "score": 1, "expected": 1 },
+  { "flag": null, "score": 79, "expected": 79 },
+  { "flag": null, "score": 80, "expected": 80 },
+  { "flag": null, "score": 81, "expected": 81 },
+  { "flag": null, "score": 100, "expected": 100 },
+  { "flag": false, "score": 0, "expected": 0 },
+  { "flag": false, "score": 1, "expected": 1 },
+  { "flag": false, "score": 79, "expected": 79 },
+  { "flag": false, "score": 80, "expected": 80 },
+  { "flag": false, "score": 81, "expected": 81 },
+  { "flag": false, "score": 100, "expected": 100 },
+  { "flag": true, "score": 0, "expected": 80 },
+  { "flag": true, "score": 1, "expected": 80 },
+  { "flag": true, "score": 79, "expected": 80 },
+  { "flag": true, "score": 80, "expected": 80 },
+  { "flag": true, "score": 81, "expected": 81 },
+  { "flag": true, "score": 100, "expected": 100 }
+]

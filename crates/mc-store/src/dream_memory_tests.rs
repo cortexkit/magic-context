@@ -37,6 +37,7 @@ fn classification(id: i64) -> ClassificationUpdate {
         importance: Some(80),
         scope: Some("ecosystem".into()),
         shareable: Some(true),
+        safety_critical: None,
     }
 }
 

@@ -1910,9 +1910,18 @@ fn issue682_combined_dry_run_then_real_run_preserves_two_rust_projects() {
         UPDATE mc_privilege_state SET note_caller_project = '';") .unwrap();
     store.execute("INSERT INTO mc_compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, importance, created_at) VALUES ('ses_second_rust', 0, 0, 9, 'second-start', 'second-end', 'second', 'second history', 50, 1000)", []).unwrap();
 
+    // The pre-single-store schema has no safety assessment; migration must leave
+    // those memories unassessed rather than manufacture a false classification.
+    let memories_expr: Vec<_> = MEMORY_COLUMNS
+        .iter()
+        .map(|column| match *column {
+            "safety_critical" => "NULL".to_string(),
+            other => format!("\"{other}\""),
+        })
+        .collect();
     let memories_sql = format!(
         "SELECT {} FROM mc_memories WHERE project_path = ?1",
-        column_list(MEMORY_COLUMNS)
+        memories_expr.join(",")
     );
     let notes_expr: Vec<_> = NOTE_COLUMNS
         .iter()

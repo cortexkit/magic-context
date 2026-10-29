@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "description": "Reviewed activation profiles for best_effort historian turn two. No profiles are activated: live validation and activation remain unproven. An empty entries array authorizes nothing. Unknown versions match nothing. This file is not a user or project configuration flag, and ck-mc never reads it.",
+  "matching": {
+    "required": "Every field in fieldTable must be present in an entry and in the corresponding requested or actual identity. Missing, empty or unknown lane, carrier or hash values match nothing.",
+    "nullable": "variant, temperature and thinkingLevel must be present; explicit null matches only null. Configured temperature and thinking level are recorded but are not evidence of effective values.",
+    "selection": "Before sending, match lane, carrier, provider, modelId, variant and every hash. Ignore temperature and thinkingLevel until the carrier reports them.",
+    "application": "Match all fields using the frozen actual identity from turn one, then require turn two and each check to report that same lane, carrier and inference tuple. Each check uses its own system, schema and tool hashes, not the historian hashes.",
+    "noLane": "Every ck-mc carrier and every harness outside opencode, opencode2, pi and omp matches nothing, even if the other fields equal an entry.",
+    "mode": "best_effort"
+  },
+  "hashContract": {
+    "algorithm": "sha256",
+    "encoding": "UTF-8",
+    "digest": "64 lowercase hexadecimal characters",
+    "implementation": "packages/plugin/src/features/magic-context/memory/lifecycle-text.ts#lifecycleTextHash",
+    "textBytes": "Hash the exact persisted text, with no trimming, newline conversion, Unicode normalization or JSON reserialization of text contracts.",
+    "toolBytes": "Hash canonical JSON of only the tool surface Magic Context hands the carrier: recursively sort object keys lexicographically, preserve array order and serialize without insignificant whitespace. Hash a tool-free child as the two UTF-8 bytes [].",
+    "toolSources": {
+      "opencode-2": "The tool-name list in the context-hook draft after Magic Context filters it; host-owned definition text is not part of this surface.",
+      "opencode-1": "The allowed-tool names and permission settings Magic Context registers for the agent, on both hidden-completion and opencode-session.",
+      "pi-historian-rpc": "The tool set fixed at child spawn, on both pi and omp.",
+      "checks": "The same per-carrier boundary for each check child; checks have no Magic Context callable tools. A host-required blocked-read surface, if handed to the carrier, is still part of this hash."
+    },
+    "excludedBytes": "Host-assembled bytes Magic Context cannot observe, including host-only tool-definition text, change no hash and open no validation epoch."
+  },
+  "fieldTable": [
+    { "key": "lane", "type": "opencode-1 | opencode-2 | pi | omp", "source": "Lane derived from the carrier's reported harness.", "rowField": "lane" },
+    { "key": "carrier", "type": "hidden-completion | opencode-session | pi-historian-rpc", "source": "Carrier literal reported by the transport; no runner inheritance or cross-carrier matching.", "rowField": "carrier" },
+    { "key": "provider", "type": "non-empty string", "source": "Requested provider route, then actual transport metadata.", "rowField": "provider" },
+    { "key": "modelId", "type": "non-empty string", "source": "Literal requested model route, then actual transport metadata; never a display name.", "rowField": "modelId" },
+    { "key": "variant", "type": "string | null", "source": "Model qualifier from requested profile and actual transport metadata; not the thinking level.", "rowField": "variant" },
+    { "key": "temperature", "type": "number | null", "source": "Effective temperature reported by the carrier, or explicit null if unknown. Configured temperature is only recorded.", "rowField": "temperature" },
+    { "key": "thinkingLevel", "type": "string | null", "source": "Effective thinking level reported by the carrier, or explicit null if unknown. Configured thinking level is only recorded.", "rowField": "thinkingLevel" },
+    { "key": "historianSystemHash", "type": "sha256", "byteSource": "The selected combined historian system rendering plus any language directive, exactly as persisted and handed to the carrier. Never the editor prompt.", "rowField": "systemHash", "rowKind": "historian" },
+    { "key": "combinedSchemaHash", "type": "sha256", "byteSource": "The persisted combined format-instruction text, byte-identical on turn one, turn two and recovery; not a newly serialized schema object.", "rowField": "schemaHash", "rowKind": "historian" },
+    { "key": "historianToolHash", "type": "sha256", "byteSource": "Canonical JSON of the historian tool surface at the carrier boundary named in hashContract.toolSources.", "rowField": "toolHash", "rowKind": "historian" },
+    { "key": "checkSystemHashes.disproof", "type": "sha256", "byteSource": "The complete persisted disproof check system text handed to the check child, including any appended check contract.", "rowField": "systemHash", "rowKind": "disproof" },
+    { "key": "checkSystemHashes.support", "type": "sha256", "byteSource": "The complete persisted support check system text handed to the check child, including any appended check contract.", "rowField": "systemHash", "rowKind": "support" },
+    { "key": "checkSystemHashes.kept-clause", "type": "sha256", "byteSource": "The complete persisted kept-clause check system text handed to the check child, including any appended check contract.", "rowField": "systemHash", "rowKind": "kept-clause" },
+    { "key": "checkSystemHashes.compatibility", "type": "sha256", "byteSource": "The complete persisted compatibility check system text handed to the check child, including any appended check contract.", "rowField": "systemHash", "rowKind": "compatibility" },
+    { "key": "checkSchemaHash", "type": "sha256", "byteSource": "The persisted check contract text handed to each check child, not the combined historian format instructions.", "rowField": "schemaHash", "rowKind": "each check" },
+    { "key": "checkToolHash", "type": "sha256", "byteSource": "Canonical JSON of the check tool surface at that carrier's boundary. All four check kinds use these identical tool bytes; a tool-free check hashes [].", "rowField": "toolHash", "rowKind": "each check" }
+  ],
+  "identityStorage": [
+    {
+      "keys": ["lane", "carrier"],
+      "source": "Carrier report, with lane derived from harness.",
+      "requested": "Turn-one memory_stage_attempts.request_json",
+      "actual": "Turn-one memory_stage_attempts.reported_profile_json; frozen when the reply arrives."
+    },
+    {
+      "keys": ["provider", "modelId", "variant"],
+      "source": "Requested profile; transport metadata for the actual identity.",
+      "requested": "Turn-one memory_stage_attempts.request_json",
+      "actual": "Turn-one memory_stage_attempts.reported_profile_json; never overwritten by a later completion."
+    },
+    {
+      "keys": ["temperature", "thinkingLevel"],
+      "source": "Carrier report only for matching; configured values are never matched.",
+      "requested": "Turn-one memory_stage_attempts.request_json records configured values only.",
+      "actual": "Turn-one memory_stage_attempts.reported_profile_json records effective values or explicit null."
+    },
+    {
+      "keys": ["historianSystemHash", "combinedSchemaHash", "historianToolHash", "checkSystemHashes.disproof", "checkSystemHashes.support", "checkSystemHashes.kept-clause", "checkSystemHashes.compatibility", "checkSchemaHash", "checkToolHash"],
+      "source": "Magic Context computes hashes from the exact bytes it persists and sends.",
+      "requested": "Turn-one memory_stage_attempts.request_json",
+      "actual": "Recomputed from persisted bytes at every comparison; each check completion carries its own systemHash. ReportedProfile rows use systemHash, schemaHash and toolHash."
+    }
+  ],
+  "rowExpansion": {
+    "sharedFields": ["lane", "carrier", "provider", "modelId", "variant", "temperature", "thinkingLevel"],
+    "historian": { "systemHash": "historianSystemHash", "schemaHash": "combinedSchemaHash", "toolHash": "historianToolHash" },
+    "checks": ["disproof", "support", "kept-clause", "compatibility"],
+    "eachCheck": { "systemHash": "checkSystemHashes.<kind>", "schemaHash": "checkSchemaHash", "toolHash": "checkToolHash" },
+    "description": "One full entry expands into five validated rows: one historian row and one row per check kind, all sharing the same lane, carrier and inference tuple. validatedProfiles remains a test-only row source."
+  },
+  "entries": []
+}

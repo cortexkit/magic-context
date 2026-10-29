@@ -247,6 +247,8 @@ async function runOneWrapupIteration(args: {
         fallbackModelId: ctx.fallbackModelId,
         language: ctx.language,
         historianTwoPass: ctx.historianTwoPass,
+        historianTurnTwo: ctx.historianTurnTwo,
+        historianTurnTwoIsEnabled: ctx.historianTurnTwoIsEnabled,
         historianExpandTools: ctx.historianExpandTools,
         memoryEnabled: ctx.memoryEnabled,
         autoPromote: ctx.autoPromote,

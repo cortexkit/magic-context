@@ -1905,6 +1905,7 @@ mod tests {
                     importance: None,
                     scope: Some("project".to_string()),
                     shareable: Some(true),
+                    safety_critical: None,
                 }],
                 101,
             )
@@ -1938,6 +1939,7 @@ mod tests {
                     importance: None,
                     scope: None,
                     shareable: Some(false),
+                    safety_critical: None,
                 }],
                 102,
             )

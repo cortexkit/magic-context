@@ -7,8 +7,8 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 /// Section-inventory protocol version serialized in move manifests.
-pub const INVENTORY_VERSION: u32 = 9;
-pub const CONTEXT_SCHEMA_VERSION: u32 = 103;
+pub const INVENTORY_VERSION: u32 = 10;
+pub const CONTEXT_SCHEMA_VERSION: u32 = 104;
 pub const STORE_SCHEMA_VERSION: u32 = 75;
 pub const GLOBAL_USER_PROFILE_PROJECT_PATH: &str = "__global__";
 
@@ -996,6 +996,7 @@ pub const TABLES: &[TableInventory] = &[
             "mural_cue_hash",
             "mural_cue_at",
             "mural_cue_rejection_count",
+            "safety_critical",
             "revision",
             "verify_result",
             "verify_files_json",

@@ -77,6 +77,7 @@ function createTestDb(dbPath = ":memory:"): Database {
             verification_status     TEXT    DEFAULT 'unverified',
             verified_at             INTEGER,
             classified_at           INTEGER,
+            safety_critical         INTEGER,
             superseded_by_memory_id INTEGER,
             merged_from             TEXT,
             metadata_json           TEXT,

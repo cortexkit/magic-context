@@ -1,0 +1,13 @@
+{
+    "version": 1,
+    "corpusRoot": "corpus-readonly",
+    "manifestPath": "manifest.json",
+    "manifestSHA256": "cec9878c9514691005ce7b9b637ec0a56b902ea0269a46019637a9bcc565b7c2",
+    "caseIds": [0, 8, 10, 12, 35],
+    "repeats": 1,
+    "grant": { "name": "apikey:deepseek", "kind": "api_key" },
+    "endpoint": "https://api.deepseek.com/chat/completions",
+    "maxSpendUSD": 2,
+    "peakUSDPerMillion": { "hit": 0.006, "miss": 0.3, "output": 1.2 },
+    "outputDir": ".cortexkit/internal-docs/investigations/two-pass-small-trial/paid-run-001"
+}

@@ -29,6 +29,13 @@ describe("MagicContextConfigSchema", () => {
     });
 
     describe("defaults", () => {
+        it("defaults memory-lifecycle turn two to allowlist without enabling editor polish", () => {
+            expect(MagicContextConfigSchema.parse({ historian: {} }).historian).toMatchObject({
+                turn_two: "allowlist",
+                two_pass: false,
+            });
+        });
+
         it("applies defaults for an empty config", () => {
             const result = MagicContextConfigSchema.parse({});
 
@@ -105,6 +112,30 @@ describe("MagicContextConfigSchema", () => {
     });
 
     describe("valid config", () => {
+        it("keeps turn_two and the two_pass editor-polish flag independent", () => {
+            for (const turn_two of ["allowlist", "off"] as const) {
+                for (const two_pass of [false, true]) {
+                    expect(
+                        MagicContextConfigSchema.parse({ historian: { turn_two, two_pass } })
+                            .historian,
+                    ).toMatchObject({ turn_two, two_pass });
+                }
+            }
+        });
+
+        it("rejects every malformed turn_two value rather than coercing it", () => {
+            for (const turn_two of [false, "Off", "none", 1, true, null, [], {}]) {
+                const result = MagicContextConfigSchema.safeParse({ historian: { turn_two } });
+                expect(result.success).toBe(false);
+                if (!result.success) {
+                    expect(result.error.issues.map((issue) => issue.path)).toContainEqual([
+                        "historian",
+                        "turn_two",
+                    ]);
+                }
+            }
+        });
+
         it("accepts the ck-mc historian.broca block with session.send variants", () => {
             const result = MagicContextConfigSchema.parse({
                 historian: {

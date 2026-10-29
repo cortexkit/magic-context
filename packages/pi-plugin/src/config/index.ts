@@ -340,7 +340,16 @@ function parsePiConfig(
 		return { config: parsed.data, warnings: preMigrationWarnings };
 	}
 
-	const defaults = MagicContextConfigSchema.parse({});
+	const invalidTurnTwo = parsed.error.issues.some(
+		(issue) =>
+			issue.path.length === 2 &&
+			issue.path[0] === "historian" &&
+			issue.path[1] === "turn_two",
+	);
+	// Even whole-config recovery must preserve the fail-closed switch after a malformed value.
+	const defaults = MagicContextConfigSchema.parse(
+		invalidTurnTwo ? { historian: { turn_two: "off" } } : {},
+	);
 	const errorPaths = new Set<string>();
 	// Per top-level key, the FULL error paths — so we can prune only the invalid
 	// nested leaf instead of the whole block (mirrors OpenCode config recovery).
@@ -387,6 +396,11 @@ function parsePiConfig(
 			};
 			const prunedLeaves: string[] = [];
 			for (const p of issuePaths) {
+				if (key === "historian" && p.length === 2 && p[1] === "turn_two") {
+					prunedBlock.turn_two = "off";
+					prunedLeaves.push("turn_two");
+					continue;
+				}
 				// Prune the DEEPEST invalid leaf (parity with OpenCode), so a
 				// 3-level path like memory.git_commit_indexing.since_days drops
 				// only `since_days` and keeps a sibling `enabled: false`.
@@ -402,8 +416,12 @@ function parsePiConfig(
 				recoveredFieldPaths.push(
 					...prunedLeaves.map((leaf) => `${key}.${leaf}`),
 				);
+				const fallback =
+					key === "historian" && prunedLeaves.includes("turn_two")
+						? 'using "off" for "historian.turn_two" and defaults for other invalid fields'
+						: "using defaults for those";
 				warnings.push(
-					`"${key}": invalid nested field(s) ${prunedLeaves.map((leaf) => `"${key}.${leaf}"`).join(", ")}, using defaults for those.`,
+					`"${key}": invalid nested field(s) ${prunedLeaves.map((leaf) => `"${key}.${leaf}"`).join(", ")}, ${fallback}.`,
 				);
 				continue;
 			}

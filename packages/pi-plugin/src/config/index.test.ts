@@ -15,6 +15,7 @@ import { buildDreamTaskRuntimeConfigs } from "@magic-context/core/features/magic
 import { resolveEpochFloorForPass } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { isConfigLoadUntrusted } from "@magic-context/core/plugin/embedding-bootstrap-helpers";
 import { Database } from "@magic-context/core/shared/sqlite";
+import configParityGolden from "../../../../crates/mc-module/testdata/config_parity/golden.json";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { loadPiConfig, loadPiConfigDetailed } from "./index";
 
@@ -90,6 +91,45 @@ afterEach(() => {
 });
 
 describe("loadPiConfig", () => {
+	it("loads malformed historian.turn_two as off and reports the error", () => {
+		const vectors = (
+			configParityGolden as { name: string; user?: unknown }[]
+		).filter((row) => row.name.startsWith("historian-turn-two-invalid-"));
+		expect(vectors).toHaveLength(4);
+		const cwd = makeTempRoot("mc-pi-turn-two-cwd-");
+		const home = makeTempRoot("mc-pi-turn-two-home-");
+		withHome(home);
+		for (const vector of vectors) {
+			writeUserConfig(home, JSON.stringify(vector.user));
+			const result = loadPiConfig({ cwd });
+			expect(result.config.historian).toMatchObject({
+				turn_two: "off",
+				two_pass: true,
+				opencode: { model: "provider/historian" },
+			});
+			expect(result.warnings.join("\n")).toContain('"historian.turn_two"');
+			expect(result.warnings.join("\n")).toContain('using "off"');
+		}
+	});
+
+	it("ignores project turn_two overrides while retaining project editor polish", () => {
+		const cwd = makeTempRoot("mc-pi-turn-two-cwd-");
+		const home = makeTempRoot("mc-pi-turn-two-home-");
+		withHome(home);
+		writeUserConfig(home, '{"historian":{"turn_two":"off","two_pass":false}}');
+		writeProjectConfig(
+			cwd,
+			'{"historian":{"turn_two":"allowlist","two_pass":true}}',
+		);
+		const result = loadPiConfig({ cwd });
+		expect(result.config.historian).toMatchObject({
+			turn_two: "off",
+			two_pass: true,
+		});
+		expect(result.warnings.join("\n")).toContain("historian.turn_two");
+		expect(result.warnings.join("\n")).toContain("from project config");
+	});
+
 	it("Pi config override wins over XDG and preserves project user-only restrictions", () => {
 		const cwd = makeTempRoot("mc-pi-override-cwd-");
 		const home = makeTempRoot("mc-pi-override-home-");
@@ -750,6 +790,7 @@ describe("loadPiConfig", () => {
 		expect(result.config.dreamer?.disable).toBe(true);
 		expect(result.config.historian).toEqual({
 			two_pass: false,
+			turn_two: "allowlist",
 			disallowed_tools: [],
 		});
 		expect(result.warnings.join("\n")).toContain(

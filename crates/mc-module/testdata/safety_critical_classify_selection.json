@@ -1,0 +1,28 @@
+{
+  "prompted": [1,2,3,4,5,6,7,8,9,10],
+  "scored_inputs": [
+    {"memory_id":1,"importance":40,"classified_at":2},
+    {"memory_id":2,"importance":95,"classified_at":1},
+    {"memory_id":3,"importance":50,"classified_at":null},
+    {"memory_id":4,"importance":50,"classified_at":null},
+    {"memory_id":5,"importance":50,"classified_at":null},
+    {"memory_id":6,"importance":50,"classified_at":null},
+    {"memory_id":7,"importance":50,"classified_at":null},
+    {"memory_id":8,"importance":50,"classified_at":null},
+    {"memory_id":9,"importance":50,"classified_at":null},
+    {"memory_id":10,"importance":50,"classified_at":null}
+  ],
+  "result": {"classified":10,"remaining":0,"complete":true,"stage":2,"chunks":1},
+  "rows": [
+    {"memory_id":1,"content_hash_at_prompt":"56c7dd18c802f5bae443b59d112a6452","safety_critical":true},
+    {"memory_id":2,"content_hash_at_prompt":"8646a4b31d256dbb5fb34db88fb66478","safety_critical":true},
+    {"memory_id":3,"content_hash_at_prompt":"6f97d47c4ade2f57cfd492dc668229c3","safety_critical":true},
+    {"memory_id":4,"content_hash_at_prompt":"bfd7106074ae9aaeedb12d555ac70c1d","importance":1,"scope":"universe","shareable":true,"safety_critical":false},
+    {"memory_id":5,"content_hash_at_prompt":"743a64b63fc2415d572e236bce0c1ccd","importance":1,"scope":"universe","shareable":true,"safety_critical":false},
+    {"memory_id":6,"content_hash_at_prompt":"c389697aab392f6ae0bbcd24f4d21d18","importance":1,"scope":"universe","shareable":true,"safety_critical":false},
+    {"memory_id":7,"content_hash_at_prompt":"4d921de55dd6309f8b1996fce54b0b32","importance":1,"scope":"universe","shareable":true,"safety_critical":false},
+    {"memory_id":8,"content_hash_at_prompt":"1e747ae66daf3f8c85f0c85a800510d3","importance":1,"scope":"universe","shareable":true,"safety_critical":false},
+    {"memory_id":9,"content_hash_at_prompt":"5f2fb1ad5d75be27b5969512b7cff3f6","importance":1,"scope":"universe","shareable":true,"safety_critical":false},
+    {"memory_id":10,"content_hash_at_prompt":"7e47eb311ea380f3453ed3da16ead5ee","importance":1,"scope":"universe","shareable":true,"safety_critical":false}
+  ]
+}

@@ -1,11 +1,21 @@
 /**
  * Runs historian turn two after turn one's publication committed, on the child
- * turn one ran in. Only an `enabled` lane reaches this (see `resolveTurnOneLane`).
+ * turn one ran in. Only a lane enabled by `selectTurnOneExecution` reaches this.
  */
 
+import { HISTORIAN_AGENT } from "../../agents/historian";
 import type { ReportedProfile } from "../../features/magic-context/memory/lifecycle-gates";
 import { lifecycleTextHash } from "../../features/magic-context/memory/lifecycle-text";
-import { runTurnTwo, type TurnTwoRunResult } from "../../features/magic-context/memory/turn-two";
+import { HISTORIAN_FORMAT_INSTRUCTION } from "../../features/magic-context/memory/turn-one-publication";
+import {
+    buildTurnOneAuthorizationRequest,
+    runTurnTwo,
+    type TurnTwoRunResult,
+} from "../../features/magic-context/memory/turn-two";
+import {
+    type TurnTwoTrialAuthorization,
+    turnTwoLaneForReport,
+} from "../../features/magic-context/memory/turn-two-allowlist";
 import {
     closeTurnTwoChild,
     registerTurnTwoChild,
@@ -17,18 +27,63 @@ import {
     embedTextForProject,
     getProjectEmbeddingSnapshot,
 } from "../../features/magic-context/project-embedding-registry";
+import { needsBlockedRead } from "../../shared/hidden-zen-read";
 import { sessionLog } from "../../shared/logger";
+import type { ModelInput } from "../../shared/model-resolution";
+import { toModelEntry } from "../../shared/resolve-fallbacks";
 import type { Database } from "../../shared/sqlite";
 import type { RetainedHistorianChild } from "./compartment-runner-types";
 import {
     createOpenCodeTurnTwoCarrier,
     createOpenCodeTurnTwoRecovery,
+    openCodeTurnTwoToolSurface,
 } from "./historian-turn-two-carrier";
 import { readSessionChunk } from "./read-session-chunk";
 
+/** Build identity from the same agent registration and context-hook surface the carriers use. */
+export function openCodeTurnOneAuthorization(input: {
+    harness: string;
+    carrier: string;
+    model?: ModelInput;
+    system: string;
+}) {
+    const entry = toModelEntry(input.model);
+    const route = entry?.model ?? "";
+    const slash = route.indexOf("/");
+    const provider = slash < 0 ? "" : route.slice(0, slash);
+    const lane = turnTwoLaneForReport(input);
+    const blocked = needsBlockedRead(HISTORIAN_AGENT, provider);
+    const toolSurface =
+        openCodeTurnTwoToolSurface({
+            ...input,
+            provider,
+            agent: HISTORIAN_AGENT,
+            observedToolSurface: blocked ? ["read"] : [],
+        }) ?? [];
+    return buildTurnOneAuthorizationRequest(
+        {
+            lane: lane!,
+            carrier: input.carrier as "hidden-completion" | "opencode-session",
+            provider,
+            modelId: slash < 0 ? route : route.slice(slash + 1),
+            variant: entry?.qualifier ?? null,
+            temperature: null,
+            thinkingLevel: null,
+        },
+        {
+            system: input.system,
+            formatInstruction: HISTORIAN_FORMAT_INSTRUCTION,
+            toolSurface,
+            checkToolSurface: toolSurface,
+        },
+    );
+}
+
 /** Reads a save's excerpt window from the session's raw source. */
 export const readTurnTwoExcerpt: TurnTwoExcerptReader = (sessionId, from, to) => {
-    const chunk = readSessionChunk(sessionId, Number.MAX_SAFE_INTEGER, from, to + 1);
+    const chunk = readSessionChunk(sessionId, Number.MAX_SAFE_INTEGER, from, to + 1, {
+        singleMessageLines: true,
+    });
     const blocks = (chunk.printedBlocks ?? []).filter(
         (block) => block.startOrdinal >= from && block.endOrdinal <= to,
     );
@@ -126,38 +181,96 @@ export async function runHistorianTurnTwo(args: {
     autoPromote: boolean;
     timeoutMs: number;
     validatedProfiles?: readonly ReportedProfile[];
+    trialAuthorization?: TurnTwoTrialAuthorization;
+    formatInstructions?: string;
+    beforeResolve?: () => Promise<boolean | void>;
     embedQuery?: TurnTwoQueryEmbedder;
 }): Promise<TurnTwoRunResult> {
     const log = (message: string) => sessionLog(args.sessionId, message);
+    const carrier = createOpenCodeTurnTwoCarrier({
+        child: args.child,
+        parentSessionId: args.sessionId,
+        harness: args.harness,
+        carrier: args.carrier,
+        turnOneText: args.child.turnOneText,
+        timeoutMs: args.timeoutMs,
+        formatInstructions: args.formatInstructions,
+    });
+    const recovery = createOpenCodeTurnTwoRecovery({
+        executor: args.child.executor,
+        carrier: args.carrier,
+        harness: args.harness,
+        directory: args.child.directory,
+        timeoutMs: args.timeoutMs,
+    });
+    if ((await args.beforeResolve?.()) === false)
+        return { status: "skipped", reason: "turn_two_off", childInFlight: false };
     const result = await runTurnTwo(args.db, {
         projectPath: args.projectPath,
         publicationId: args.publicationId,
         sessionId: args.sessionId,
-        // The runner retains turn one's child (and so reaches this step) only on an
-        // enabled lane, and a lane is enabled only when its carrier's provider
-        // enforces the response schema; hence `lane` and `enforcedJson` are fixed.
+        // Only an enabled lane retains turn one's child and reaches this step.
+        // The carrier requests the prompt contract, and replies are validated locally.
         lane: "enabled",
-        carrier: createOpenCodeTurnTwoCarrier({
-            child: args.child,
-            parentSessionId: args.sessionId,
-            harness: args.harness,
-            carrier: args.carrier,
-            enforcedJson: true,
-            turnOneText: args.child.turnOneText,
-            timeoutMs: args.timeoutMs,
-        }),
+        carrier: {
+            ...carrier,
+            send: async (...input) => {
+                if ((await args.beforeResolve?.()) === false)
+                    throw new Error("Turn two was revoked before send");
+                try {
+                    return await carrier.send(...input);
+                } finally {
+                    await args.beforeResolve?.();
+                }
+            },
+            check: async (...input) => {
+                if ((await args.beforeResolve?.()) === false)
+                    throw new Error("Turn two was revoked before check");
+                try {
+                    return await carrier.check(...input);
+                } finally {
+                    await args.beforeResolve?.();
+                }
+            },
+        },
         memoryEnabled: args.memoryEnabled,
         autoPromote: args.autoPromote,
-        validatedProfiles: args.validatedProfiles ?? [],
+        validatedProfiles: args.validatedProfiles,
+        trialAuthorization: args.trialAuthorization,
         embedQuery: args.embedQuery ?? projectEmbedder(args.projectPath),
         readExcerpt: readTurnTwoExcerpt,
-        recover: createOpenCodeTurnTwoRecovery({
-            executor: args.child.executor,
-            carrier: args.carrier,
-            harness: args.harness,
-            directory: args.child.directory,
-            timeoutMs: args.timeoutMs,
-        }),
+        recover: (record) => {
+            const recovered = recovery(record);
+            if (!recovered || recovered === "busy") return recovered;
+            return {
+                ...recovered,
+                check: async (...input) => {
+                    if ((await args.beforeResolve?.()) === false)
+                        throw new Error("Recovered stage was revoked before check");
+                    try {
+                        return await recovered.check(...input);
+                    } finally {
+                        await args.beforeResolve?.();
+                    }
+                },
+                reattach: async () => {
+                    try {
+                        return await recovered.reattach();
+                    } finally {
+                        await args.beforeResolve?.();
+                    }
+                },
+                reattachCheck: recovered.reattachCheck
+                    ? async (...input) => {
+                          try {
+                              return await recovered.reattachCheck!(...input);
+                          } finally {
+                              await args.beforeResolve?.();
+                          }
+                      }
+                    : undefined,
+            };
+        },
         log,
     });
     log(

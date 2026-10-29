@@ -29,10 +29,16 @@
 
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { realpathSync } from "node:fs";
-import { join, resolve as pathResolve } from 'node:path';
+import { createHash } from "node:crypto";
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve as pathResolve } from 'node:path';
 import { computeNormalizedHash } from "../../plugin/src/features/magic-context/memory/normalize-hash";
 import { resolveProjectIdentity } from "../../plugin/src/features/magic-context/memory/project-identity";
+import { runTurnTwo } from "../../plugin/src/features/magic-context/memory/turn-two";
+import { authorizationFixture } from "../../plugin/src/features/magic-context/memory/turn-two-test-fixtures.test";
+import { allocateTurnOneSend, commitTurnOnePublication } from "../../plugin/src/features/magic-context/memory/turn-one-publication";
+import type { Database as LifecycleDatabase } from "../../plugin/src/shared/sqlite";
+import { projectDirectoryKey } from "../../plugin/src/shared/project-directory-key";
 import {
     extractM0,
     extractM1,
@@ -156,7 +162,7 @@ function writeContextDb<T>(fn: (db: Database) => T): T {
 }
 
 /** Seed an active project-scoped memory directly. Returns its row id. */
-function seedMemory(content: string, category = "PROJECT_RULES"): number {
+function seedMemory(content: string, category = "PROJECT_RULES", identity = projectIdentity()): number {
     return writeContextDb((db) => {
         const now = Date.now();
         const info = db
@@ -167,7 +173,7 @@ function seedMemory(content: string, category = "PROJECT_RULES"): number {
                     first_seen_at, created_at, updated_at, last_seen_at, status
                 ) VALUES (?, ?, ?, ?, NULL, 'historian', 5, 0, ?, ?, ?, ?, 'active')`,
             )
-            .run(projectIdentity(), category, content, computeNormalizedHash(content), now, now, now, now);
+            .run(identity, category, content, computeNormalizedHash(content), now, now, now, now);
         return Number(info.lastInsertRowid);
     });
 }
@@ -466,6 +472,7 @@ function assertNoBusts(label: string): void {
 }
 
 forEachHost(import.meta.url, null, (host) => {
+    let reloadedIsolationRoot: string | undefined;
     beforeEach(async () => {
         h = await createScenarioHarness(host, {
             modelContextLimit: MODEL_LIMIT,
@@ -485,10 +492,159 @@ forEachHost(import.meta.url, null, (host) => {
     });
 
     afterEach(async () => {
-        await h.dispose();
+        try {
+            await h.dispose();
+        } finally {
+            // A reloaded host reuses isolation but no longer owns its directory cleanup.
+            if (reloadedIsolationRoot) rmSync(reloadedIsolationRoot, { recursive: true, force: true });
+            reloadedIsolationRoot = undefined;
+        }
     });
 
     describe("cache invariants — replay class", () => {
+    if (!RUST_MODE && (host === "opencode" || host === "opencode2")) {
+        it("authorized two-pass publication freezes historian changes through defer and SOFT until HARD", async () => {
+            const projectPath = host === "opencode2" ? "pj-k1-cache" : projectIdentity();
+            if (host === "opencode2") {
+                // Pin the isolated host to the same project as its seeded memories, independently
+                // of Git discovery or a project registry that may not exist on the test machine.
+                const directory = projectDirectoryKey(realpathSync(pathResolve(h.workdir)));
+                const sidecars = join(dirname(h.contextDbPath()), "project-identities");
+                mkdirSync(sidecars, { recursive: true });
+                writeFileSync(join(sidecars, `${createHash("sha256").update(directory).digest("hex")}.json`),
+                    JSON.stringify({ directory, identity: projectPath }));
+                // Tools cache directory identities at startup, separately from the context hook.
+                reloadedIsolationRoot = dirname(h.workdir);
+                await h.reloadPlugin();
+            }
+            const sessionId = await h.createSession();
+            // Reply events settle asynchronously; wait so pressure really selects the next execute pass.
+            const waitForUsage = (usage: MockUsage) => h.waitFor(() => writeContextDb((db) => {
+                const row = db.prepare("SELECT last_input_tokens FROM session_meta WHERE session_id=? AND harness=?")
+                    .get(sessionId, h.harnessId) as { last_input_tokens: number } | null;
+                return row?.last_input_tokens === usage.input_tokens + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+            }), { timeoutMs: 15_000, label: "K1 parent usage recorded before the next pass" });
+            const original = ["Old edit rule. Keep edit rule.", "Merge left rule. ", "Merge right rule.", "Old replacement rule."];
+            const ids = original.map((text) => seedMemory(text, "PROJECT_RULES", projectPath));
+            setDefer("K1 warmup");
+            await h.sendPrompt(sessionId, "K1 warmup.");
+            h.mock.setDefault({ text: "K1 pressure", usage: EXECUTE_USAGE });
+            await h.sendPrompt(sessionId, "K1 prepare baseline.");
+            await waitForUsage(EXECUTE_USAGE);
+            setDefer("K1 baseline");
+            await h.sendPrompt(sessionId, "K1 materialize baseline.");
+            await waitForUsage(DEFER_USAGE);
+            const baseline = mainAgentRequests(h.mock.requests()).at(-1)!.body;
+            const m0 = extractM0(baseline)!;
+            const m1 = extractM1(baseline);
+            for (const text of original) expect(m0).toContain(text);
+
+            const changed = ["Historian addition waits for HARD.", "New edit rule. Keep edit rule.", "Merge left rule. Updated merge rule.", "New replacement rule."];
+            const db = openTestDb(h.contextDbPath());
+            try {
+                // The e2e helper exposes Bun's type; lifecycle APIs use the shared SQLite interface.
+                const lifecycleDb = db as unknown as LifecycleDatabase;
+                const auth = authorizationFixture({
+                    lane: host === "opencode" ? "opencode-1" : "opencode-2",
+                    carrier: "hidden-completion", provider: "test", modelId: "cache-test",
+                    variant: null, temperature: null, thinkingLevel: null,
+                }, "Cache test historian system");
+                const send = allocateTurnOneSend(lifecycleDb, { projectPath, sessionId, harness: host,
+                    carrier: "hidden-completion", lane: "enabled", chunkStart: 1, chunkEnd: 4 });
+                auth.persist(lifecycleDb, send.stageKey);
+                // Persist the same anchored candidates an enabled turn-one publication owns.
+                db.transaction(() => commitTurnOnePublication(lifecycleDb, {
+                    send, projectPath, sessionId,
+                    compartments: [{ id: 1, startMessage: 1, endMessage: 4, replyStartMessage: 1, replyEndMessage: 4 }],
+                    blocks: changed.map((text, i) => ({ role: "user", startOrdinal: i + 1, endOrdinal: i + 1, parts: [text] })),
+                    candidateFacts: changed.map((content, i) => ({ category: "PROJECT_RULES", content,
+                        anchor: { compartmentIndex: 1, startOrdinal: i + 1, endOrdinal: i + 1 } })),
+                    honourAnchors: true,
+                }))();
+                const facts = db.prepare("SELECT id FROM memory_pending_facts WHERE publication_id=? ORDER BY fact_index").all(send.publicationId) as { id: number }[];
+                expect(facts).toHaveLength(4);
+                // The host may finish recording the preceding reply's usage while the background write runs.
+                const cacheState = () => (db.prepare("SELECT * FROM session_meta WHERE session_id=?").all(sessionId) as Record<string, unknown>[])
+                    .map(({ last_response_time: _responseClock, last_input_tokens: _inputTokens, last_context_percentage: _percentage, ...cache }) => cache);
+                const beforeCache = cacheState();
+                const beforeProject = db.prepare("SELECT * FROM project_state").all();
+                const beforeMutations = db.prepare("SELECT * FROM m0_mutation_log").all();
+                const decisions = [
+                    { fact_id: facts[0]!.id, check: "Audit fixture.", action: "new" },
+                    { fact_id: facts[1]!.id, check: "Audit fixture.", action: "edit", target_id: ids[0], revision: 1,
+                        replaced: [{ memory_id: ids[0], clause: 1, block: 2, excerpt: changed[1] }],
+                        kept: [{ memory_id: ids[0], clause: 2 }],
+                        added: [{ text: "New edit rule. ", block: 2, excerpt: changed[1] }], final_text: changed[1] },
+                    { fact_id: facts[2]!.id, check: "Audit fixture.", action: "merge", sources: [{ id: ids[1], revision: 1 }, { id: ids[2], revision: 1 }], survivor_id: ids[1],
+                        replaced: [{ memory_id: ids[2], clause: 1, block: 3, excerpt: changed[2] }],
+                        kept: [{ memory_id: ids[1], clause: 1 }],
+                        added: [{ text: "Updated merge rule.", block: 3, excerpt: changed[2] }], final_text: changed[2] },
+                    { fact_id: facts[3]!.id, check: "Audit fixture.", action: "replaces", target_id: ids[3], revision: 1,
+                        replaced: [{ memory_id: ids[3], clause: 1, block: 4, excerpt: changed[3] }], kept: [],
+                        added: [{ text: changed[3], block: 4, excerpt: changed[3] }], final_text: changed[3] },
+                ];
+                await runTurnTwo(lifecycleDb, { projectPath, sessionId, publicationId: send.publicationId,
+                    lane: "enabled", memoryEnabled: true, autoPromote: true, validatedProfiles: auth.rows,
+                    carrier: { harness: host, carrier: "hidden-completion", childSessionId: "cache-test-child",
+                        async send() { return { text: JSON.stringify({ result: { step: "turn_two", decisions } }), lengthCapped: false, profile: auth.profile }; },
+                        async check(request) { return { profile: auth.checkProfile(request.systemHash), usage: null,
+                            verdicts: (request.kind === "compatibility" ? request.pairs : request.operands).map(({ id }) => ({ id, verdict: request.kind === "support" || request.kind === "disproof" ? "yes" as const : "no" as const })) }; },
+                    },
+                });
+                expect(db.prepare("SELECT operation FROM memory_journal WHERE json_extract(receipt_json, '$.state')='applied' ORDER BY id").all()).toEqual(
+                    ["new", "edit", "merge", "replaces"].map((operation) => ({ operation })),
+                );
+                // Background decisions must neither rewrite cached bytes nor queue a rebuild.
+                expect(cacheState()).toEqual(beforeCache);
+                expect(db.prepare("SELECT * FROM project_state").all()).toEqual(beforeProject);
+                expect(db.prepare("SELECT * FROM m0_mutation_log").all()).toEqual(beforeMutations);
+                expect(db.prepare("SELECT * FROM memory_mutation_log").all()).toEqual([]);
+            } finally { db.close(); }
+
+            const start = mainAgentRequests(h.mock.requests()).length;
+            for (let i = 0; i < 2; i++) {
+                setDefer(`K1 defer ${i}`);
+                await h.sendPrompt(sessionId, `K1 defer ${i}.`);
+                const body = mainAgentRequests(h.mock.requests()).at(-1)!.body;
+                expect(extractM0(body)).toBe(m0);
+                expect(extractM1(body)).toBe(m1!);
+            }
+            expect(findBusts(mainAgentRequests(h.mock.requests()).slice(start)).length).toBe(0);
+
+            // The same session's ctx_memory save is the positive control for SOFT fragments.
+            const own = "Agent save still reaches the memory delta.";
+            await runMemoryTool(sessionId, { action: "write", category: "PROJECT_RULES", content: own }, "K1 save an agent rule.");
+            expect(writeContextDb((db) => db.prepare("SELECT content FROM memories WHERE project_path=? AND source_session_id=? AND content=?")
+                .all(projectPath, sessionId, own))).toEqual([{ content: own }]);
+            h.mock.setDefault({ text: "K1 soft pressure", usage: EXECUTE_USAGE });
+            await h.sendPrompt(sessionId, "K1 prepare SOFT.");
+            await waitForUsage(EXECUTE_USAGE);
+            setDefer("K1 soft");
+            await h.sendPrompt(sessionId, "K1 SOFT refresh.");
+            const soft = mainAgentRequests(h.mock.requests()).at(-1)!.body;
+            expect(extractM0(soft)).toBe(m0);
+            expect(extractM1(soft)).toContain(own);
+            for (const text of changed) expect(wireValueText(extractM1(soft))).not.toContain(text);
+            for (let i = 0; i < 2; i++) {
+                setDefer(`K1 soft replay ${i}`);
+                await h.sendPrompt(sessionId, `K1 replay SOFT ${i}.`);
+                const body = mainAgentRequests(h.mock.requests()).at(-1)!.body;
+                expect(extractM0(body)).toBe(m0);
+                expect(extractM1(body)).toBe(extractM1(soft)!);
+            }
+            expect(findBusts(mainAgentRequests(h.mock.requests()).slice(-2)).length).toBe(0);
+            h.mock.setDefault({ text: "K1 hard pressure", usage: EXECUTE_USAGE });
+            await h.sendPrompt(sessionId, "K1 prepare natural rebuild.");
+            await waitForUsage(EXECUTE_USAGE);
+            await expireCache(sessionId);
+            setDefer("K1 hard");
+            await h.sendPrompt(sessionId, "K1 expired cache rebuild.");
+            const hard = extractM0(mainAgentRequests(h.mock.requests()).at(-1)!.body)!;
+            for (const text of changed) expect(hard).toContain(text);
+            expect(hard).not.toContain(original[0]!);
+            expect(hard).not.toContain(original[3]!);
+        }, 220_000);
+    }
     describe("#given a low-pressure conversation (A1)", () => {
         describe("#when several pure-defer turns grow the tail", () => {
             it("#then the cached prefix never busts across defer passes", async () => {

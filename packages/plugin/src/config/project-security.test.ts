@@ -7,6 +7,15 @@ import {
 import { MagicContextConfigSchema } from "./schema/magic-context";
 
 describe("stripUnsafeProjectConfigFields", () => {
+    it("strips historian.turn_two from project config but leaves two_pass unchanged", () => {
+        for (const turn_two of ["allowlist", "off", false, "Off", "none", 1]) {
+            const raw = { historian: { turn_two, two_pass: true } };
+            const warnings = stripUnsafeProjectConfigFields(raw);
+            expect(raw.historian).toEqual({ two_pass: true });
+            expect(warnings.join("\n")).toContain("historian.turn_two");
+        }
+    });
+
     it("strips profile definitions from project config but leaves profile selection", () => {
         const raw: Record<string, unknown> = {
             profile: "work",

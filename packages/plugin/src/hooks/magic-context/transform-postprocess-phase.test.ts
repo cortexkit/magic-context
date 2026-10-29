@@ -614,18 +614,30 @@ for (const host of ["opencode", "opencode2"] as const) {
                 return JSON.stringify(messages);
             };
             try {
-                for (const [index, messageId] of visibleIds.entries())
-                    replayStorage.appendAutoSearchHintDecision(
-                        fixture.db,
-                        fixture.sessionId,
-                        index === 0
-                            ? {
-                                  messageId,
-                                  decision: "hint",
-                                  text: "\n\n<ctx-search-hint>stable cap-boundary hint</ctx-search-hint>",
-                              }
-                            : { messageId, decision: "no-hint", reason: "error" },
-                    );
+                // Seed historical decisions once instead of repeatedly parsing
+                // and rewriting a growing array. Replay and retirement are the
+                // behavior under test; the final append still uses the live API.
+                getOrCreateSessionMeta(fixture.db, fixture.sessionId);
+                patchSessionMeta(fixture.db, fixture.sessionId, {
+                    auto_search_hint_decisions: JSON.stringify(
+                        visibleIds.slice(0, -1).map((messageId, index) =>
+                            index === 0
+                                ? {
+                                      messageId,
+                                      decision: "hint",
+                                      text: "\n\n<ctx-search-hint>stable cap-boundary hint</ctx-search-hint>",
+                                  }
+                                : { messageId, decision: "no-hint", reason: "error" },
+                        ),
+                    ),
+                });
+                expect(
+                    replayStorage.appendAutoSearchHintDecision(fixture.db, fixture.sessionId, {
+                        messageId: visibleIds[count - 1]!,
+                        decision: "no-hint",
+                        reason: "error",
+                    }),
+                ).toMatchObject({ ok: true, kind: "appended" });
                 const first = await serve();
                 expect(first).toContain("stable cap-boundary hint");
                 const retired = replayStorage.flushAutoSearchHintDecisionRetirement(

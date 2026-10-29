@@ -3,13 +3,14 @@
  * candidate facts with existing project memory, and the strict parser for its
  * JSON reply.
  *
- * Turn two runs only on a lane whose carrier makes the provider enforce a response
- * schema, so a reply is either schema-valid JSON or an error. The parser therefore
+ * The schema is a prompt contract, not provider enforcement. The parser
  * never repairs or extracts JSON from prose: anything that is not exactly one JSON
  * object of the expected shape is an envelope failure, and every fact of that send
  * is retried (see `turn-two.ts`).
  */
-import { splitMemoryClauses } from "./lifecycle-text";
+
+import { TWO_PASS_TURN_TWO } from "../../../hooks/magic-context/two-pass-prompts/prompts.generated";
+import { lifecycleTextHash, splitMemoryClauses } from "./lifecycle-text";
 
 /** Known reply actions, including unsupported actions that are dropped rather than retried. */
 export const TURN_TWO_ACTIONS = [
@@ -45,6 +46,8 @@ export interface TurnTwoDecision {
     /** Position of the decision in the reply's `decisions` array. */
     ordinal: number;
     action: TurnTwoAction;
+    /** Audit text only; its contents never authorize or refuse an action. */
+    check: string;
     /** `covered`, `conflict`, `edit`, `replaces`, `retire`, `promote_rule`: the existing memory addressed. */
     targetId?: number;
     /** `covered`, `edit`, `replaces`: the revision of `targetId` the decision read. */
@@ -55,6 +58,12 @@ export interface TurnTwoDecision {
     survivorId?: number;
     /** `covered`: the clause ordinals of `targetId` that cover the fact. */
     clauses?: number[];
+    /**
+     * `new` only: true when the historian judged the fact an accepted decision
+     * that is not built yet, so publication stores it with a `Decided:` prefix.
+     * Absent means false. Any other action carrying this field is malformed.
+     */
+    decided?: boolean;
     /** `covered`: an optional quote of the fact's evidence. */
     excerpt?: string;
     removed?: TurnTwoCitedClause[];
@@ -70,14 +79,29 @@ export interface TurnTwoScore {
     proposedClass: string;
 }
 
+/** Prefix for a stored `new` memory the historian marked as an unbuilt decision. */
+export const DECIDED_PREFIX = "Decided: ";
+
+/**
+ * Apply the turn-two `decided` flag at publication: a `new` decision with
+ * `decided: true` stores the fact text with a `Decided: ` prefix, unless the
+ * text already starts with one. Absent or false stores the text unchanged.
+ */
+export function applyDecidedPrefix(content: string, decided?: boolean): string {
+    if (decided !== true) return content;
+    return content.startsWith(DECIDED_PREFIX) ? content : `${DECIDED_PREFIX}${content}`;
+}
+
 export type TurnTwoEnvelope =
     | {
           ok: true;
           /** Decisions keyed by fact id; a fact named twice maps to `"malformed"`. */
           decisions: Map<number, TurnTwoDecision | "malformed">;
           scores: TurnTwoScore[];
+          /** False when the wrapper is valid but a decision or score is refused. */
+          schemaValid: boolean;
       }
-    | { ok: false; reason: "length_capped" | "unparseable" | "schema_invalid" };
+    | { ok: false; reason: "length_capped" | "unparseable" | "schema_invalid" | "tool_activity" };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -135,9 +159,24 @@ function parseDecision(
     const action = raw.action;
     if (typeof action !== "string" || !TURN_TWO_ACTIONS.includes(action as TurnTwoAction))
         return null;
-    const decision: TurnTwoDecision = { factId, ordinal, action: action as TurnTwoAction };
+    if (typeof raw.check !== "string") return null;
+    // `decided` is a `new`-only field: any other action carrying it takes the
+    // existing invalid-decision path, as does a non-boolean value on `new`.
+    if (action !== "new" && "decided" in raw) return null;
+    const decision: TurnTwoDecision = {
+        factId,
+        ordinal,
+        action: action as TurnTwoAction,
+        check: raw.check,
+    };
     switch (decision.action) {
-        case "new":
+        case "new": {
+            if (raw.decided !== undefined) {
+                if (typeof raw.decided !== "boolean") return null;
+                decision.decided = raw.decided;
+            }
+            return decision;
+        }
         case "abstain":
             return decision;
         case "retire":
@@ -207,7 +246,12 @@ function parseDecision(
  * send. A decision that fails its own schema, or a fact named by two decisions,
  * marks only that fact malformed.
  */
-export function parseTurnTwoEnvelope(text: string, lengthCapped: boolean): TurnTwoEnvelope {
+export function parseTurnTwoEnvelope(
+    text: string,
+    lengthCapped: boolean,
+    toolActivity = false,
+): TurnTwoEnvelope {
+    if (toolActivity) return { ok: false, reason: "tool_activity" };
     if (lengthCapped) return { ok: false, reason: "length_capped" };
     let raw: unknown;
     try {
@@ -215,24 +259,43 @@ export function parseTurnTwoEnvelope(text: string, lengthCapped: boolean): TurnT
     } catch {
         return { ok: false, reason: "unparseable" };
     }
-    if (!isRecord(raw) || !Array.isArray(raw.decisions))
+    if (!isRecord(raw) || !isRecord(raw.result) || raw.result.step !== "turn_two")
         return { ok: false, reason: "schema_invalid" };
-    if (raw.scores !== undefined && !Array.isArray(raw.scores))
+    const result = raw.result;
+    if (!Array.isArray(result.decisions)) return { ok: false, reason: "schema_invalid" };
+    if (result.scores !== undefined && !Array.isArray(result.scores))
         return { ok: false, reason: "schema_invalid" };
+    let schemaValid = true;
     const decisions = new Map<number, TurnTwoDecision | "malformed">();
-    raw.decisions.forEach((entry, ordinal) => {
+    result.decisions.forEach((entry, ordinal) => {
         // A decision that names no fact cannot be attributed; the fact it was
         // meant for is then missing, which is the same malformed outcome.
-        if (!isRecord(entry) || !isInt(entry.fact_id)) return;
+        if (!isRecord(entry) || !isInt(entry.fact_id)) {
+            schemaValid = false;
+            return;
+        }
         const factId = entry.fact_id;
         if (decisions.has(factId)) {
             decisions.set(factId, "malformed");
+            schemaValid = false;
             return;
         }
-        decisions.set(factId, parseDecision(entry, factId, ordinal) ?? "malformed");
+        const decision = parseDecision(entry, factId, ordinal);
+        if (!decision || decision.action === "retire" || decision.action === "promote_rule")
+            schemaValid = false;
+        decisions.set(factId, decision ?? "malformed");
     });
-    const scores: TurnTwoScore[] = [];
-    for (const entry of (raw.scores as unknown[] | undefined) ?? []) {
+    const scores = new Map<number, TurnTwoScore>();
+    const seenScores = new Set<number>();
+    for (const entry of (result.scores as unknown[] | undefined) ?? []) {
+        if (isRecord(entry) && isInt(entry.item)) {
+            if (seenScores.has(entry.item)) {
+                schemaValid = false;
+                scores.delete(entry.item);
+                continue;
+            }
+            seenScores.add(entry.item);
+        }
         if (
             isRecord(entry) &&
             isInt(entry.item) &&
@@ -243,13 +306,14 @@ export function parseTurnTwoEnvelope(text: string, lengthCapped: boolean): TurnT
             entry.class.length > 0 &&
             entry.class.length <= 64
         )
-            scores.push({
+            scores.set(entry.item, {
                 item: entry.item,
                 importance: entry.importance,
                 proposedClass: entry.class,
             });
+        else schemaValid = false;
     }
-    return { ok: true, decisions, scores };
+    return { ok: true, decisions, scores: [...scores.values()], schemaValid };
 }
 
 export interface TurnTwoPromptBlock {
@@ -287,10 +351,10 @@ export interface TurnTwoPromptItem {
 
 /**
  * Rendered when the prompt size bound left facts or items out: this request does
- * not cover every pending candidate, and the rest are sent in a later request.
+ * not cover every pending candidate. Later eligible runs may retry the rest.
  */
 export function coverageNotice(facts: number, items: number): string {
-    return `Coverage: this request is partial. ${facts} pending fact(s) and ${items} agent memory item(s) were left out to fit the request size and will be sent in a later request; judge only what is listed here.`;
+    return `Coverage: this request is partial. ${facts} pending fact(s) and ${items} agent memory item(s) were left out to fit the request size. They remain eligible for a later run, but no later request is guaranteed; judge only what is listed here.`;
 }
 
 /** Rendered when the semantic lane could not rank neighbours for this send. */
@@ -305,10 +369,9 @@ function renderNeighbour(neighbour: TurnTwoPromptNeighbour): string {
 }
 
 /**
- * The turn-two prompt. Each fact is rendered under its own heading with its own
- * stored blocks and its source session, because ordinals of different sessions
- * collide: a cited block ordinal is resolved only within that fact's blocks.
- * Memories are never truncated.
+ * Shared evidence is printed once, with stable references under each fact.
+ * Citations still use the stored start ordinal and are checked only against that
+ * fact's linked blocks, never another fact's evidence. Memories are not truncated.
  */
 export function buildTurnTwoPrompt(input: {
     facts: readonly TurnTwoPromptFact[];
@@ -318,15 +381,15 @@ export function buildTurnTwoPrompt(input: {
     deferred?: { facts: number; items: number };
 }): string {
     const lines: string[] = [
-        "Turn two: reconcile each candidate fact with existing project memory.",
-        'Reply with exactly one JSON object: {"decisions":[...],"scores":[...]}.',
-        "One decision per fact_id. Actions: new, covered, conflict, edit, merge, replaces, abstain.",
-        "covered needs target_id, revision and clauses; conflict needs target_id; edit and replaces need target_id, revision, removed, replaced, kept, added and final_text; merge needs sources, survivor_id, removed, replaced, kept, added and final_text.",
-        "Every removed, replaced and added clause cites a block start ordinal of that fact's own blocks and an exact excerpt.",
+        TWO_PASS_TURN_TWO.replace("{{ALLOWED_FACT_IDS}}", () =>
+            JSON.stringify(input.facts.map((fact) => fact.factId)),
+        ),
     ];
     if (input.lexicalOnly) lines.push(LEXICAL_ONLY_NOTICE);
     if (input.deferred && (input.deferred.facts > 0 || input.deferred.items > 0))
         lines.push(coverageNotice(input.deferred.facts, input.deferred.items));
+    const sources = new Map<string, { session: string; block: TurnTwoPromptBlock }>();
+    const neighbours = new Map<string, TurnTwoPromptNeighbour>();
     for (const fact of input.facts) {
         lines.push(
             "",
@@ -335,16 +398,33 @@ export function buildTurnTwoPrompt(input: {
         );
         if (!fact.anchorKnown)
             lines.push("Source blocks: unknown (this fact cannot evidence an edit).");
-        for (const block of fact.blocks)
-            lines.push(
-                `[${block.startOrdinal === block.endOrdinal ? block.startOrdinal : `${block.startOrdinal}-${block.endOrdinal}`}] ${block.role}: ${block.parts.join(" / ")}`,
-            );
-        lines.push("Neighbours:");
+        const refs = fact.blocks.map((block) => {
+            const ref = `source:${lifecycleTextHash(JSON.stringify([fact.sourceSessionId, block.startOrdinal, block.endOrdinal, block.role, block.parts]))}`;
+            sources.set(ref, { session: fact.sourceSessionId, block });
+            return ref;
+        });
+        if (refs.length > 0) lines.push(`Source block refs: ${refs.join(", ")}`);
+        lines.push("Neighbour refs:");
         if (fact.neighbours.length === 0) lines.push("- none retrieved");
-        for (const neighbour of fact.neighbours) lines.push(renderNeighbour(neighbour));
+        for (const neighbour of fact.neighbours) {
+            const ref = `memory:${neighbour.id}@${neighbour.revision}`;
+            neighbours.set(ref, neighbour);
+            lines.push(ref);
+        }
+    }
+    if (sources.size > 0) lines.push("", "## Shared source blocks");
+    for (const [ref, { session, block }] of sources)
+        lines.push(
+            "",
+            `### ${ref} (session ${session})`,
+            `[${block.startOrdinal === block.endOrdinal ? block.startOrdinal : `${block.startOrdinal}-${block.endOrdinal}`}] ${block.role}: ${block.parts.join(" / ")}`,
+        );
+    if (neighbours.size > 0) lines.push("", "## Shared neighbouring memories");
+    for (const [ref, neighbour] of neighbours) {
+        lines.push("", `### ${ref}`, renderNeighbour(neighbour));
     }
     if (input.items.length > 0) {
-        lines.push("", "## Agent memories to score (importance 1-100 and a proposed decay class)");
+        lines.push("", "## Agent memories to score");
         for (const item of input.items)
             lines.push(
                 "",
@@ -355,4 +435,73 @@ export function buildTurnTwoPrompt(input: {
             );
     }
     return lines.join("\n");
+}
+
+/** Reserve 25% of the prompt cap for backlog when older retryable facts exist. */
+export const TURN_TWO_BACKLOG_SHARE = 0.25;
+
+/** Fit without truncation; backlog is a prefix in oldest-first selection order. */
+export function fitTurnTwoPrompt(input: {
+    facts: readonly TurnTwoPromptFact[];
+    items: readonly TurnTwoPromptItem[];
+    lexicalOnly: boolean;
+    maxLength: number;
+}) {
+    const backlog = input.facts.filter((fact) => fact.backlog);
+    const fresh = input.facts.filter((fact) => !fact.backlog);
+    const old: TurnTwoPromptFact[] = [];
+    const current: TurnTwoPromptFact[] = [];
+    const items: TurnTwoPromptItem[] = [];
+    const worstCase = { facts: input.facts.length, items: input.items.length };
+    const render = (facts: readonly TurnTwoPromptFact[], itemViews = items) =>
+        buildTurnTwoPrompt({
+            facts,
+            items: itemViews,
+            lexicalOnly: input.lexicalOnly,
+            deferred: worstCase,
+        });
+    const backlogLimit = Math.floor(input.maxLength * TURN_TWO_BACKLOG_SHARE);
+    // Keep the oldest backlog fact even when its evidence alone exceeds the
+    // reserved share or total cap: it cannot be split and must not starve.
+    for (const fact of backlog) {
+        old.push(fact);
+        if (old.length > 1 && render(old, []).length > backlogLimit) {
+            old.pop();
+            break;
+        }
+    }
+    const freshLimit = backlog.length > 0 ? input.maxLength - backlogLimit : input.maxLength;
+    for (const fact of fresh) {
+        current.push(fact);
+        if (
+            (backlog.length > 0 || current.length > 1) &&
+            (render(current, []).length > freshLimit ||
+                render([...current, ...old]).length > input.maxLength)
+        )
+            current.pop();
+    }
+    // Unused fresh capacity can serve more backlog, but never skip an older fact.
+    for (const fact of backlog.slice(old.length)) {
+        old.push(fact);
+        if (render([...current, ...old]).length > input.maxLength) {
+            old.pop();
+            break;
+        }
+    }
+    const facts = [...current, ...old];
+    for (const item of input.items) {
+        items.push(item);
+        if ((facts.length > 0 || items.length > 1) && render(facts).length > input.maxLength)
+            items.pop();
+    }
+    const deferred = {
+        facts: input.facts.length - facts.length,
+        items: input.items.length - items.length,
+    };
+    return {
+        facts,
+        items,
+        deferred,
+        prompt: buildTurnTwoPrompt({ facts, items, lexicalOnly: input.lexicalOnly, deferred }),
+    };
 }

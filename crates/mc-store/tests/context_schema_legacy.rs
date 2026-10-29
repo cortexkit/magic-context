@@ -145,15 +145,18 @@ fn compare(db: &Connection, version: u32, golden: &Value) {
 }
 
 #[test]
-fn populated_versions_87_through_103_match_typescript() {
-    for version in 87..=103 {
+fn populated_versions_87_through_current_match_typescript() {
+    for version in 87..=mc_store::context_schema::BOOTSTRAP_VERSION {
         let temp = throwaway();
         let path = copy_fixture(version, &temp);
         let golden = expected(version);
         let mut db = Connection::open(path).unwrap();
         db.pragma_update(None, "foreign_keys", true).unwrap();
         let report = upgrade(&mut db, golden["now"].as_i64().unwrap()).unwrap();
-        assert_eq!(report.schema_version, 103);
+        assert_eq!(
+            report.schema_version,
+            mc_store::context_schema::BOOTSTRAP_VERSION
+        );
         assert_eq!(
             report.schema_fingerprint.0,
             fingerprint(&schema_snapshot(&db).unwrap())
@@ -231,9 +234,9 @@ fn concurrent_startup_serializes_and_does_not_duplicate_migrations() {
 
 #[test]
 fn unsupported_upstream_versions_are_refused_byte_for_byte() {
-    for version in [0, 86, 104, 9999] {
+    for version in [0, 86, mc_store::context_schema::BOOTSTRAP_VERSION + 1, 9999] {
         let temp = throwaway();
-        let path = copy_fixture(102, &temp);
+        let path = copy_fixture(mc_store::context_schema::BOOTSTRAP_VERSION, &temp);
         let db = Connection::open(&path).unwrap();
         db.execute("DELETE FROM schema_migrations WHERE version<10000", [])
             .unwrap();
@@ -247,7 +250,7 @@ fn unsupported_upstream_versions_are_refused_byte_for_byte() {
         let before = fs::read(&path).unwrap();
         let mut db = Connection::open(&path).unwrap();
         assert!(
-            matches!(upgrade(&mut db, 1_800_000_000_000), Err(UpgradeError::UnsupportedVersion(found)) if found == version)
+            matches!(upgrade(&mut db, 1_800_000_000_000), Err(UpgradeError::UnsupportedVersion(found)) if found == i64::from(version))
         );
         drop(db);
         assert_eq!(fs::read(path).unwrap(), before);
@@ -257,13 +260,14 @@ fn unsupported_upstream_versions_are_refused_byte_for_byte() {
 #[test]
 fn current_store_is_read_only_even_while_a_writer_holds_the_lock() {
     let temp = throwaway();
-    let path = copy_fixture(103, &temp);
+    let current = mc_store::context_schema::BOOTSTRAP_VERSION;
+    let path = copy_fixture(current, &temp);
     let holder = Connection::open(&path).unwrap();
     holder.execute_batch("BEGIN IMMEDIATE").unwrap();
     let before = fs::read(&path).unwrap();
     let mut db = Connection::open(&path).unwrap();
     upgrade(&mut db, 1_800_000_000_000).unwrap();
-    compare(&db, 103, &expected(103));
+    compare(&db, current, &expected(current));
     assert_eq!(fs::read(path).unwrap(), before);
     holder.execute_batch("ROLLBACK").unwrap();
 }

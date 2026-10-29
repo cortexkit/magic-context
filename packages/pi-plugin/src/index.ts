@@ -654,6 +654,37 @@ function formatPiMarkerRehydrationLine(
 	);
 }
 
+/**
+ * The Pi live switch. The historian runner asks this after each provider reply, so
+ * it must answer from a fresh poll of the project's config reader: a reload of
+ * `historian.turn_two` to "off" then revokes a run whose reply is still pending,
+ * instead of applying decisions the user just turned off.
+ *
+ * `sampleEffective` returns the config the live reader holds after polling.
+ */
+export function piTurnTwoIsEnabled(
+	base: MagicContextConfig,
+	sampleEffective: () => MagicContextConfig,
+): boolean {
+	return (
+		historianRunConfig(base, sampleEffective()).historian?.turn_two !== "off"
+	);
+}
+
+/**
+ * The historian option that re-reads the switch after provider replies, so a
+ * reload of `historian.turn_two` to "off" revokes a run whose reply is still
+ * pending. `sampleEffective` re-polls the project's live config reader.
+ */
+export function piTurnTwoDeps(
+	base: MagicContextConfig,
+	sampleEffective: () => MagicContextConfig,
+): Pick<PiHistorianOptions, "turnTwoIsEnabled"> {
+	return {
+		turnTwoIsEnabled: () => piTurnTwoIsEnabled(base, sampleEffective),
+	};
+}
+
 export const __test = {
 	logPiConfigLoad,
 	formatPiMarkerRehydrationLine,
@@ -1108,6 +1139,12 @@ export function resolveHistorianFromConfig(
 		// historian round-trip's latency and token cost. Enable for
 		// long sessions where chunk dedupe matters more than speed.
 		twoPass: historian?.two_pass === true,
+		// The memory-lifecycle off switch. The historian block is optional, so a
+		// missing key takes "allowlist" here, the value the schema gives a
+		// configured block; the runner then matches only the shipped allowlist.
+		// Pi's context handler additionally re-reads the switch from fresh config
+		// for replies still in flight (see resolveContextOptionsForProject).
+		turnTwo: historian?.turn_two ?? "allowlist",
 		expandTools: historian?.expand_tools,
 		// Pi and OMP: explicit thinking level for historian subagent invocations.
 		// When set, passed as --thinking <level> to Pi subprocess.
@@ -1838,9 +1875,21 @@ async function startPiMagicContextRuntime(
 			PI_HARNESS_KIND,
 			activeModelRegistry,
 		);
+		// `sampled` came from a poll of this project's live config reader, so
+		// re-polling inside the callback answers with the file as it reads now.
+		// That is what lets a reload to "off" revoke a turn two whose reply is
+		// still pending, instead of applying it on the start-time value.
 		return {
 			...project.contextOptions,
-			historian,
+			historian: historian
+				? {
+						...historian,
+						...piTurnTwoDeps(
+							project.config,
+							() => liveReaderFor(dir, project.config).poll().effective,
+						),
+					}
+				: historian,
 			cacheTtlConfig: sampled.cache_ttl,
 			cacheTtlConfigured: sampled.cacheTtlConfigured,
 		};

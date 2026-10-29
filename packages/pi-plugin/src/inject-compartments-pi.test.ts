@@ -15,6 +15,12 @@ import {
 	insertMemory,
 } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
+	allocateTurnOneSend,
+	commitTurnOnePublication,
+} from "@magic-context/core/features/magic-context/memory/turn-one-publication";
+import { runTurnTwo } from "@magic-context/core/features/magic-context/memory/turn-two";
+import { authorizationFixture } from "@magic-context/core/features/magic-context/memory/turn-two-test-fixtures.test";
+import {
 	appendAutoSearchHintDecision,
 	flushAutoSearchHintDecisionRetirement,
 	getAutoSearchHintDecisions,
@@ -316,6 +322,312 @@ for (const prepared of [false, true]) {
 		}
 	});
 }
+
+it("Pi authorized two-pass publication freezes historian changes through defer and SOFT until HARD", async () => {
+	const db = createTestDb();
+	const cwd = createTestTempDirFromPath(join(tmpdir(), "pi-two-pass-cache-"));
+	try {
+		const state = {
+			...piState("pi-two-pass-cache", cwd),
+			injectDocs: false,
+			hardSignals: {
+				modelKey: "test/original",
+				systemHash: "",
+				cacheExpired: false,
+				lastResponseTime: 0,
+			},
+		};
+		const projectPath = state.projectIdentity;
+		const original = [
+			"Old edit rule. Keep edit rule.",
+			"Merge left rule. ",
+			"Merge right rule.",
+			"Old replacement rule.",
+		];
+		const ids = original.map(
+			(content) =>
+				insertMemory(db, { projectPath, category: "PROJECT_RULES", content })
+					.id,
+		);
+		const initial = [userMessage("baseline", 1)];
+		expect(
+			injectM0M1Pi(state, db, initial, undefined, true).m0Materialized,
+		).toBe(true);
+		const baseline = initial.slice(0, 2).map(textOf);
+		for (const text of original) expect(baseline[0]).toContain(text);
+		const auth = authorizationFixture(
+			{
+				lane: "pi",
+				carrier: "pi-historian-rpc",
+				provider: "test",
+				modelId: "cache-test",
+				variant: null,
+				temperature: null,
+				thinkingLevel: null,
+			},
+			"Cache test historian system",
+		);
+		const changed = [
+			"Historian addition waits for HARD.",
+			"New edit rule. Keep edit rule.",
+			"Merge left rule. Updated merge rule.",
+			"New replacement rule.",
+		];
+		const send = allocateTurnOneSend(db, {
+			projectPath,
+			sessionId: state.sessionId,
+			harness: "pi",
+			carrier: "pi-historian-rpc",
+			lane: "enabled",
+			chunkStart: 1,
+			chunkEnd: 4,
+		});
+		auth.persist(db, send.stageKey);
+		// The cache receives candidates through the enabled publication path, not direct memory writes.
+		db.transaction(() =>
+			commitTurnOnePublication(db, {
+				send,
+				projectPath,
+				sessionId: state.sessionId,
+				compartments: [
+					{
+						id: 1,
+						startMessage: 1,
+						endMessage: 4,
+						replyStartMessage: 1,
+						replyEndMessage: 4,
+					},
+				],
+				blocks: changed.map((text, i) => ({
+					role: "user",
+					startOrdinal: i + 1,
+					endOrdinal: i + 1,
+					parts: [text],
+				})),
+				candidateFacts: changed.map((content, i) => ({
+					category: "PROJECT_RULES",
+					content,
+					anchor: {
+						compartmentIndex: 1,
+						startOrdinal: i + 1,
+						endOrdinal: i + 1,
+					},
+				})),
+				honourAnchors: true,
+			}),
+		)();
+		const facts = db
+			.prepare(
+				"SELECT id FROM memory_pending_facts WHERE publication_id=? ORDER BY fact_index",
+			)
+			.all(send.publicationId) as { id: number }[];
+		expect(facts).toHaveLength(4);
+		const beforeCache = db
+			.prepare("SELECT * FROM session_meta WHERE session_id=?")
+			.all(state.sessionId);
+		const beforeProject = db.prepare("SELECT * FROM project_state").all();
+		const beforeMutations = db.prepare("SELECT * FROM m0_mutation_log").all();
+		await runTurnTwo(db, {
+			projectPath,
+			sessionId: state.sessionId,
+			publicationId: send.publicationId,
+			lane: "enabled",
+			memoryEnabled: true,
+			autoPromote: true,
+			validatedProfiles: auth.rows,
+			carrier: {
+				harness: "pi",
+				carrier: "pi-historian-rpc",
+				childSessionId: "cache-test-child",
+				async send() {
+					return {
+						text: JSON.stringify({
+							result: {
+								step: "turn_two",
+								decisions: [
+									{
+										fact_id: facts[0]?.id,
+										check: "Audit fixture.",
+										action: "new",
+									},
+									{
+										fact_id: facts[1]?.id,
+										check: "Audit fixture.",
+										action: "edit",
+										target_id: ids[0],
+										revision: 1,
+										replaced: [
+											{
+												memory_id: ids[0],
+												clause: 1,
+												block: 2,
+												excerpt: changed[1],
+											},
+										],
+										kept: [{ memory_id: ids[0], clause: 2 }],
+										added: [
+											{
+												text: "New edit rule. ",
+												block: 2,
+												excerpt: changed[1],
+											},
+										],
+										final_text: changed[1],
+									},
+									{
+										fact_id: facts[2]?.id,
+										check: "Audit fixture.",
+										action: "merge",
+										sources: [
+											{ id: ids[1], revision: 1 },
+											{ id: ids[2], revision: 1 },
+										],
+										survivor_id: ids[1],
+										replaced: [
+											{
+												memory_id: ids[2],
+												clause: 1,
+												block: 3,
+												excerpt: changed[2],
+											},
+										],
+										kept: [{ memory_id: ids[1], clause: 1 }],
+										added: [
+											{
+												text: "Updated merge rule.",
+												block: 3,
+												excerpt: changed[2],
+											},
+										],
+										final_text: changed[2],
+									},
+									{
+										fact_id: facts[3]?.id,
+										check: "Audit fixture.",
+										action: "replaces",
+										target_id: ids[3],
+										revision: 1,
+										replaced: [
+											{
+												memory_id: ids[3],
+												clause: 1,
+												block: 4,
+												excerpt: changed[3],
+											},
+										],
+										kept: [],
+										added: [
+											{ text: changed[3], block: 4, excerpt: changed[3] },
+										],
+										final_text: changed[3],
+									},
+								],
+							},
+						}),
+						lengthCapped: false,
+						profile: auth.profile,
+					};
+				},
+				async check(request) {
+					return {
+						profile: auth.checkProfile(request.systemHash),
+						usage: null,
+						verdicts: (request.kind === "compatibility"
+							? request.pairs
+							: request.operands
+						).map(({ id }) => ({
+							id,
+							verdict:
+								request.kind === "support" || request.kind === "disproof"
+									? ("yes" as const)
+									: ("no" as const),
+						})),
+					};
+				},
+			},
+		});
+		expect(
+			db
+				.prepare(
+					"SELECT operation FROM memory_journal WHERE json_extract(receipt_json, '$.state')='applied' ORDER BY id",
+				)
+				.all(),
+		).toEqual(
+			["new", "edit", "merge", "replaces"].map((operation) => ({ operation })),
+		);
+		// Applying background decisions must leave every scheduling marker and cached byte untouched.
+		expect(
+			db
+				.prepare("SELECT * FROM session_meta WHERE session_id=?")
+				.all(state.sessionId),
+		).toEqual(beforeCache);
+		expect(db.prepare("SELECT * FROM project_state").all()).toEqual(
+			beforeProject,
+		);
+		expect(db.prepare("SELECT * FROM m0_mutation_log").all()).toEqual(
+			beforeMutations,
+		);
+		expect(db.prepare("SELECT * FROM memory_mutation_log").all()).toEqual([]);
+		expect(mustMaterializePi(state, db).value).toBe(false);
+		for (const prepared of [false, true]) {
+			const replay = [userMessage("defer", 2)];
+			const input = prepared
+				? { ...state, preparedPrefix: prepareCachedM0M1PiReplay(state, db) }
+				: state;
+			expect(
+				injectM0M1Pi(input, db, replay, undefined, false).m0Materialized,
+			).toBe(false);
+			expect(replay.slice(0, 2).map(textOf)).toEqual(baseline);
+		}
+		// The same session's agent save is a positive control: SOFT still admits its fragment.
+		const own = "Agent save still reaches the memory delta.";
+		applyMemoryAdmission(db, {
+			key: "pi-two-pass-agent-save",
+			operation: "agent_save",
+			input: {
+				projectPath,
+				sourceSessionId: state.sessionId,
+				sourceType: "agent",
+				category: "PROJECT_RULES",
+				content: own,
+			},
+		});
+		const soft = [userMessage("soft", 3)];
+		expect(injectM0M1Pi(state, db, soft, undefined, true).m0Materialized).toBe(
+			false,
+		);
+		expect(textOf(soft[0])).toBe(baseline[0]);
+		expect(textOf(soft[1])).toContain(own);
+		for (const text of changed) expect(textOf(soft[1])).not.toContain(text);
+		for (const prepared of [false, true]) {
+			const replay = [userMessage("soft replay", 4)];
+			const input = prepared
+				? { ...state, preparedPrefix: prepareCachedM0M1PiReplay(state, db) }
+				: state;
+			expect(
+				injectM0M1Pi(input, db, replay, undefined, false).m0Materialized,
+			).toBe(false);
+			expect(replay.slice(0, 2).map(textOf)).toEqual(
+				soft.slice(0, 2).map(textOf),
+			);
+		}
+		const hardState = {
+			...state,
+			hardSignals: { ...state.hardSignals, modelKey: "test/changed" },
+		};
+		expect(mustMaterializePi(hardState, db).reason).toBe("model_change");
+		const hard = [userMessage("hard", 5)];
+		expect(
+			injectM0M1Pi(hardState, db, hard, undefined, true).m0Materialized,
+		).toBe(true);
+		for (const text of changed) expect(textOf(hard[0])).toContain(text);
+		expect(textOf(hard[0])).not.toContain(original[0]);
+		expect(textOf(hard[0])).not.toContain(original[3]);
+	} finally {
+		closeQuietly(db);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
 
 describe("Pi render-to-commit concurrency", () => {
 	for (const change of ["memory", "compartment"] as const) {

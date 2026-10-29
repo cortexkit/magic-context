@@ -7,7 +7,7 @@
       ],
       "content": "Architecture entry one describes the enduring component boundary more clearly."
     },
-    "key": "dc32e5ff-582c-4af0-839d-07ec81a40032",
+    "key": "aab1ef28-e598-4fbc-bb26-e6c11ba809e4",
     "before": {
       "memories": [
         {
@@ -40,6 +40,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -75,6 +76,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -110,6 +112,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -145,6 +148,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -180,6 +184,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -215,6 +220,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -250,6 +256,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -452,6 +459,7 @@
           "mural_cue_hash": null,
           "mural_cue_at": null,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 2,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -487,6 +495,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -522,6 +531,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -557,6 +567,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -592,6 +603,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -627,6 +639,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -662,6 +675,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -808,22 +822,22 @@
           "reason": "curate_update",
           "evidence_json": "[]",
           "source_ids_json": "[1]",
-          "decision_key": "dc32e5ff-582c-4af0-839d-07ec81a40032",
+          "decision_key": "aab1ef28-e598-4fbc-bb26-e6c11ba809e4",
           "after_text": "Architecture entry one describes the enduring component boundary more clearly.",
-          "before_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 1 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":1,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"7163a09f0fbda1b8eea85a22616fa81c\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}",
-          "after_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry one describes the enduring component boundary more clearly.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":1,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5939c77bee1b4808674a51f767bbb085\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}"
+          "before_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 1 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":1,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"7163a09f0fbda1b8eea85a22616fa81c\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}",
+          "after_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry one describes the enduring component boundary more clearly.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":1,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5939c77bee1b4808674a51f767bbb085\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}"
         }
       ],
       "memory_journal": [
         {
           "id": 1,
           "project_path": "project",
-          "decision_key": "dc32e5ff-582c-4af0-839d-07ec81a40032",
+          "decision_key": "aab1ef28-e598-4fbc-bb26-e6c11ba809e4",
           "operation": "curate_update",
           "receipt_json": "{\"state\":\"applied\",\"reason\":\"update\",\"memoryId\":1,\"adoptionClass\":\"deferred\",\"supersededIds\":[]}",
           "applied_at": 1000,
-          "before_json": "{\"appliedAt\":1000,\"decisionKey\":\"dc32e5ff-582c-4af0-839d-07ec81a40032\",\"evidence\":[],\"operation\":\"update\",\"projectPath\":\"project\",\"reason\":\"curate_update\",\"refusalReason\":null,\"restorable\":true,\"rows\":[{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry one describes the enduring component boundary more clearly.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":1,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5939c77bee1b4808674a51f767bbb085\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 1 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":1,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"7163a09f0fbda1b8eea85a22616fa81c\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":1,\"role\":\"target\"}],\"sourceIds\":[1],\"survivorId\":null,\"version\":1,\"writer\":\"curate\"}",
-          "after_json": "{\"appliedAt\":1000,\"decisionKey\":\"dc32e5ff-582c-4af0-839d-07ec81a40032\",\"evidence\":[],\"operation\":\"update\",\"projectPath\":\"project\",\"reason\":\"curate_update\",\"refusalReason\":null,\"restorable\":true,\"rows\":[{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry one describes the enduring component boundary more clearly.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":1,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5939c77bee1b4808674a51f767bbb085\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 1 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":1,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"7163a09f0fbda1b8eea85a22616fa81c\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":1,\"role\":\"target\"}],\"sourceIds\":[1],\"survivorId\":null,\"version\":1,\"writer\":\"curate\"}"
+          "before_json": "{\"appliedAt\":1000,\"decisionKey\":\"aab1ef28-e598-4fbc-bb26-e6c11ba809e4\",\"evidence\":[],\"operation\":\"update\",\"projectPath\":\"project\",\"reason\":\"curate_update\",\"refusalReason\":null,\"restorable\":true,\"rows\":[{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry one describes the enduring component boundary more clearly.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":1,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5939c77bee1b4808674a51f767bbb085\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 1 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":1,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"7163a09f0fbda1b8eea85a22616fa81c\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":1,\"role\":\"target\"}],\"sourceIds\":[1],\"survivorId\":null,\"version\":1,\"writer\":\"curate\"}",
+          "after_json": "{\"appliedAt\":1000,\"decisionKey\":\"aab1ef28-e598-4fbc-bb26-e6c11ba809e4\",\"evidence\":[],\"operation\":\"update\",\"projectPath\":\"project\",\"reason\":\"curate_update\",\"refusalReason\":null,\"restorable\":true,\"rows\":[{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry one describes the enduring component boundary more clearly.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":1,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5939c77bee1b4808674a51f767bbb085\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 1 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":1,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"7163a09f0fbda1b8eea85a22616fa81c\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":1,\"role\":\"target\"}],\"sourceIds\":[1],\"survivorId\":null,\"version\":1,\"writer\":\"curate\"}"
         }
       ],
       "memory_successor_links": [],
@@ -848,7 +862,7 @@
       "content": "The component boundary separates transport from durable storage.",
       "category": "ARCHITECTURE"
     },
-    "key": "2ba4f0b9-e332-426f-b199-d226749d30da",
+    "key": "2b6e67e8-e061-4421-99db-a80057caa659",
     "before": {
       "memories": [
         {
@@ -881,6 +895,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -916,6 +931,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -951,6 +967,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -986,6 +1003,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1021,6 +1039,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1056,6 +1075,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1091,6 +1111,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1293,6 +1314,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1328,6 +1350,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 2,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1363,6 +1386,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 2,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1398,6 +1422,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1433,6 +1458,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1468,6 +1494,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1503,6 +1530,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1538,6 +1566,7 @@
           "mural_cue_hash": null,
           "mural_cue_at": null,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": null,
           "verify_files_json": null,
@@ -1663,10 +1692,10 @@
           "reason": "curate_merge",
           "evidence_json": "[]",
           "source_ids_json": "[2,3]",
-          "decision_key": "2ba4f0b9-e332-426f-b199-d226749d30da",
+          "decision_key": "2b6e67e8-e061-4421-99db-a80057caa659",
           "after_text": "Architecture entry 2 describes the project's durable component boundary.",
-          "before_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 2 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":2,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5a9a1905555dbf1b54e5714fe2f4c236\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}",
-          "after_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 2 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":2,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5a9a1905555dbf1b54e5714fe2f4c236\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":8,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}"
+          "before_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 2 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":2,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5a9a1905555dbf1b54e5714fe2f4c236\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}",
+          "after_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 2 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":2,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5a9a1905555dbf1b54e5714fe2f4c236\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":8,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}"
         },
         {
           "id": 2,
@@ -1677,10 +1706,10 @@
           "reason": "curate_merge",
           "evidence_json": "[]",
           "source_ids_json": "[2,3]",
-          "decision_key": "2ba4f0b9-e332-426f-b199-d226749d30da",
+          "decision_key": "2b6e67e8-e061-4421-99db-a80057caa659",
           "after_text": "Architecture entry 3 describes the project's durable component boundary.",
-          "before_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 3 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":3,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"52fcadf70621cab27da81d6cad3c4fee\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}",
-          "after_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 3 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":3,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"52fcadf70621cab27da81d6cad3c4fee\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":8,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}"
+          "before_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 3 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":3,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"52fcadf70621cab27da81d6cad3c4fee\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}",
+          "after_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 3 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":3,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"52fcadf70621cab27da81d6cad3c4fee\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":8,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}"
         },
         {
           "id": 3,
@@ -1691,34 +1720,34 @@
           "reason": "curate_merge",
           "evidence_json": "[]",
           "source_ids_json": "[2,3]",
-          "decision_key": "2ba4f0b9-e332-426f-b199-d226749d30da",
+          "decision_key": "2b6e67e8-e061-4421-99db-a80057caa659",
           "after_text": "The component boundary separates transport from durable storage.",
           "before_json": "{\"snapshot\":null,\"version\":1}",
-          "after_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"The component boundary separates transport from durable storage.\",\"createdAt\":1000,\"expiresAt\":null,\"firstSeenAt\":1000,\"id\":8,\"importance\":50,\"lastRetrievedAt\":null,\"lastSeenAt\":1000,\"mergedFrom\":\"[2,3]\",\"metadataJson\":null,\"normalizedHash\":\"3e8457bbc1559a4020d29c1154d9a51c\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":2,\"shareable\":0,\"sourceSessionId\":\"session\",\"sourceType\":\"dreamer\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1000,\"verificationStatus\":\"unverified\",\"verifiedAt\":null},\"version\":1}"
+          "after_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"The component boundary separates transport from durable storage.\",\"createdAt\":1000,\"expiresAt\":null,\"firstSeenAt\":1000,\"id\":8,\"importance\":50,\"lastRetrievedAt\":null,\"lastSeenAt\":1000,\"mergedFrom\":\"[2,3]\",\"metadataJson\":null,\"normalizedHash\":\"3e8457bbc1559a4020d29c1154d9a51c\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":2,\"shareable\":0,\"sourceSessionId\":\"session\",\"sourceType\":\"dreamer\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1000,\"verificationStatus\":\"unverified\",\"verifiedAt\":null},\"version\":1}"
         }
       ],
       "memory_journal": [
         {
           "id": 1,
           "project_path": "project",
-          "decision_key": "2ba4f0b9-e332-426f-b199-d226749d30da",
+          "decision_key": "2b6e67e8-e061-4421-99db-a80057caa659",
           "operation": "curate_merge",
           "receipt_json": "{\"state\":\"applied\",\"reason\":\"merge\",\"memoryId\":8,\"adoptionClass\":\"deferred\",\"supersededIds\":[2,3]}",
           "applied_at": 1000,
-          "before_json": "{\"appliedAt\":1000,\"decisionKey\":\"2ba4f0b9-e332-426f-b199-d226749d30da\",\"evidence\":[],\"operation\":\"merge\",\"projectPath\":\"project\",\"reason\":\"curate_merge\",\"refusalReason\":null,\"restorable\":true,\"rows\":[{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 2 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":2,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5a9a1905555dbf1b54e5714fe2f4c236\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":8,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 2 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":2,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5a9a1905555dbf1b54e5714fe2f4c236\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":2,\"role\":\"source\"},{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 3 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":3,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"52fcadf70621cab27da81d6cad3c4fee\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":8,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 3 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":3,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"52fcadf70621cab27da81d6cad3c4fee\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":3,\"role\":\"source\"},{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"The component boundary separates transport from durable storage.\",\"createdAt\":1000,\"expiresAt\":null,\"firstSeenAt\":1000,\"id\":8,\"importance\":50,\"lastRetrievedAt\":null,\"lastSeenAt\":1000,\"mergedFrom\":\"[2,3]\",\"metadataJson\":null,\"normalizedHash\":\"3e8457bbc1559a4020d29c1154d9a51c\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":2,\"shareable\":0,\"sourceSessionId\":\"session\",\"sourceType\":\"dreamer\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1000,\"verificationStatus\":\"unverified\",\"verifiedAt\":null},\"afterRevision\":1,\"before\":null,\"beforeRevision\":null,\"completeness\":\"complete\",\"memoryId\":8,\"role\":\"survivor\"}],\"sourceIds\":[2,3],\"survivorId\":8,\"version\":1,\"writer\":\"curate\"}",
-          "after_json": "{\"appliedAt\":1000,\"decisionKey\":\"2ba4f0b9-e332-426f-b199-d226749d30da\",\"evidence\":[],\"operation\":\"merge\",\"projectPath\":\"project\",\"reason\":\"curate_merge\",\"refusalReason\":null,\"restorable\":true,\"rows\":[{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 2 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":2,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5a9a1905555dbf1b54e5714fe2f4c236\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":8,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 2 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":2,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5a9a1905555dbf1b54e5714fe2f4c236\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":2,\"role\":\"source\"},{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 3 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":3,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"52fcadf70621cab27da81d6cad3c4fee\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":8,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 3 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":3,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"52fcadf70621cab27da81d6cad3c4fee\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":3,\"role\":\"source\"},{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"The component boundary separates transport from durable storage.\",\"createdAt\":1000,\"expiresAt\":null,\"firstSeenAt\":1000,\"id\":8,\"importance\":50,\"lastRetrievedAt\":null,\"lastSeenAt\":1000,\"mergedFrom\":\"[2,3]\",\"metadataJson\":null,\"normalizedHash\":\"3e8457bbc1559a4020d29c1154d9a51c\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":2,\"shareable\":0,\"sourceSessionId\":\"session\",\"sourceType\":\"dreamer\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1000,\"verificationStatus\":\"unverified\",\"verifiedAt\":null},\"afterRevision\":1,\"before\":null,\"beforeRevision\":null,\"completeness\":\"complete\",\"memoryId\":8,\"role\":\"survivor\"}],\"sourceIds\":[2,3],\"survivorId\":8,\"version\":1,\"writer\":\"curate\"}"
+          "before_json": "{\"appliedAt\":1000,\"decisionKey\":\"2b6e67e8-e061-4421-99db-a80057caa659\",\"evidence\":[],\"operation\":\"merge\",\"projectPath\":\"project\",\"reason\":\"curate_merge\",\"refusalReason\":null,\"restorable\":true,\"rows\":[{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 2 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":2,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5a9a1905555dbf1b54e5714fe2f4c236\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":8,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 2 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":2,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5a9a1905555dbf1b54e5714fe2f4c236\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":2,\"role\":\"source\"},{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 3 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":3,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"52fcadf70621cab27da81d6cad3c4fee\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":8,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 3 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":3,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"52fcadf70621cab27da81d6cad3c4fee\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":3,\"role\":\"source\"},{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"The component boundary separates transport from durable storage.\",\"createdAt\":1000,\"expiresAt\":null,\"firstSeenAt\":1000,\"id\":8,\"importance\":50,\"lastRetrievedAt\":null,\"lastSeenAt\":1000,\"mergedFrom\":\"[2,3]\",\"metadataJson\":null,\"normalizedHash\":\"3e8457bbc1559a4020d29c1154d9a51c\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":2,\"shareable\":0,\"sourceSessionId\":\"session\",\"sourceType\":\"dreamer\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1000,\"verificationStatus\":\"unverified\",\"verifiedAt\":null},\"afterRevision\":1,\"before\":null,\"beforeRevision\":null,\"completeness\":\"complete\",\"memoryId\":8,\"role\":\"survivor\"}],\"sourceIds\":[2,3],\"survivorId\":8,\"version\":1,\"writer\":\"curate\"}",
+          "after_json": "{\"appliedAt\":1000,\"decisionKey\":\"2b6e67e8-e061-4421-99db-a80057caa659\",\"evidence\":[],\"operation\":\"merge\",\"projectPath\":\"project\",\"reason\":\"curate_merge\",\"refusalReason\":null,\"restorable\":true,\"rows\":[{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 2 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":2,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5a9a1905555dbf1b54e5714fe2f4c236\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":8,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 2 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":2,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"5a9a1905555dbf1b54e5714fe2f4c236\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":2,\"role\":\"source\"},{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 3 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":3,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"52fcadf70621cab27da81d6cad3c4fee\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":8,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 3 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":3,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"52fcadf70621cab27da81d6cad3c4fee\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":3,\"role\":\"source\"},{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"The component boundary separates transport from durable storage.\",\"createdAt\":1000,\"expiresAt\":null,\"firstSeenAt\":1000,\"id\":8,\"importance\":50,\"lastRetrievedAt\":null,\"lastSeenAt\":1000,\"mergedFrom\":\"[2,3]\",\"metadataJson\":null,\"normalizedHash\":\"3e8457bbc1559a4020d29c1154d9a51c\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":2,\"shareable\":0,\"sourceSessionId\":\"session\",\"sourceType\":\"dreamer\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1000,\"verificationStatus\":\"unverified\",\"verifiedAt\":null},\"afterRevision\":1,\"before\":null,\"beforeRevision\":null,\"completeness\":\"complete\",\"memoryId\":8,\"role\":\"survivor\"}],\"sourceIds\":[2,3],\"survivorId\":8,\"version\":1,\"writer\":\"curate\"}"
         }
       ],
       "memory_successor_links": [
         {
           "source_id": 2,
           "successor_id": 8,
-          "decision_key": "2ba4f0b9-e332-426f-b199-d226749d30da"
+          "decision_key": "2b6e67e8-e061-4421-99db-a80057caa659"
         },
         {
           "source_id": 3,
           "successor_id": 8,
-          "decision_key": "2ba4f0b9-e332-426f-b199-d226749d30da"
+          "decision_key": "2b6e67e8-e061-4421-99db-a80057caa659"
         }
       ],
       "memory_mutation_log": [],
@@ -1742,7 +1771,7 @@
       "superseded_by": 6,
       "reason": "Redundant boundary details survive in the active entry."
     },
-    "key": "301be6c2-d915-4d44-8d4b-376d5bfab834",
+    "key": "5d056ceb-43f5-4407-8a6e-cfac50214f2d",
     "before": {
       "memories": [
         {
@@ -1775,6 +1804,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1810,6 +1840,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1845,6 +1876,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1880,6 +1912,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1915,6 +1948,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1950,6 +1984,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -1985,6 +2020,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -2187,6 +2223,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -2222,6 +2259,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -2257,6 +2295,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -2292,6 +2331,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 2,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -2327,6 +2367,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 2,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -2362,6 +2403,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -2397,6 +2439,7 @@
           "mural_cue_hash": "old hash",
           "mural_cue_at": 1,
           "mural_cue_rejection_count": 0,
+          "safety_critical": null,
           "revision": 1,
           "verify_result": "verified",
           "verify_files_json": "[\"boundary.ts\"]",
@@ -2522,10 +2565,10 @@
           "reason": "Redundant boundary details survive in the active entry.",
           "evidence_json": "[]",
           "source_ids_json": "[4,5]",
-          "decision_key": "301be6c2-d915-4d44-8d4b-376d5bfab834",
+          "decision_key": "5d056ceb-43f5-4407-8a6e-cfac50214f2d",
           "after_text": "Architecture entry 4 describes the project's durable component boundary.",
-          "before_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 4 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":4,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"01eafe31aeecd83c64c65a85ea79e393\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}",
-          "after_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 4 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":4,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{\\\"archive_reason\\\":\\\"Redundant boundary details survive in the active entry.\\\"}\",\"normalizedHash\":\"01eafe31aeecd83c64c65a85ea79e393\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":6,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}"
+          "before_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 4 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":4,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"01eafe31aeecd83c64c65a85ea79e393\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}",
+          "after_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 4 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":4,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{\\\"archive_reason\\\":\\\"Redundant boundary details survive in the active entry.\\\"}\",\"normalizedHash\":\"01eafe31aeecd83c64c65a85ea79e393\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":6,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}"
         },
         {
           "id": 2,
@@ -2536,34 +2579,34 @@
           "reason": "Redundant boundary details survive in the active entry.",
           "evidence_json": "[]",
           "source_ids_json": "[4,5]",
-          "decision_key": "301be6c2-d915-4d44-8d4b-376d5bfab834",
+          "decision_key": "5d056ceb-43f5-4407-8a6e-cfac50214f2d",
           "after_text": "Architecture entry 5 describes the project's durable component boundary.",
-          "before_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 5 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":5,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"90cbdae71d2cdb995cec8d831fda2883\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}",
-          "after_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 5 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":5,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{\\\"archive_reason\\\":\\\"Redundant boundary details survive in the active entry.\\\"}\",\"normalizedHash\":\"90cbdae71d2cdb995cec8d831fda2883\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":6,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}"
+          "before_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 5 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":5,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"90cbdae71d2cdb995cec8d831fda2883\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}",
+          "after_json": "{\"snapshot\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 5 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":5,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{\\\"archive_reason\\\":\\\"Redundant boundary details survive in the active entry.\\\"}\",\"normalizedHash\":\"90cbdae71d2cdb995cec8d831fda2883\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":6,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"version\":1}"
         }
       ],
       "memory_journal": [
         {
           "id": 1,
           "project_path": "project",
-          "decision_key": "301be6c2-d915-4d44-8d4b-376d5bfab834",
+          "decision_key": "5d056ceb-43f5-4407-8a6e-cfac50214f2d",
           "operation": "curate_archive",
           "receipt_json": "{\"state\":\"applied\",\"reason\":\"archive\",\"memoryId\":4,\"adoptionClass\":\"deferred\",\"supersededIds\":[]}",
           "applied_at": 1000,
-          "before_json": "{\"appliedAt\":1000,\"decisionKey\":\"301be6c2-d915-4d44-8d4b-376d5bfab834\",\"evidence\":[],\"operation\":\"archive\",\"projectPath\":\"project\",\"reason\":\"Redundant boundary details survive in the active entry.\",\"refusalReason\":null,\"restorable\":true,\"rows\":[{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 4 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":4,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{\\\"archive_reason\\\":\\\"Redundant boundary details survive in the active entry.\\\"}\",\"normalizedHash\":\"01eafe31aeecd83c64c65a85ea79e393\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":6,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 4 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":4,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"01eafe31aeecd83c64c65a85ea79e393\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":4,\"role\":\"source\"},{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 5 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":5,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{\\\"archive_reason\\\":\\\"Redundant boundary details survive in the active entry.\\\"}\",\"normalizedHash\":\"90cbdae71d2cdb995cec8d831fda2883\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":6,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 5 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":5,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"90cbdae71d2cdb995cec8d831fda2883\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":5,\"role\":\"source\"}],\"sourceIds\":[4,5],\"survivorId\":null,\"version\":1,\"writer\":\"curate\"}",
-          "after_json": "{\"appliedAt\":1000,\"decisionKey\":\"301be6c2-d915-4d44-8d4b-376d5bfab834\",\"evidence\":[],\"operation\":\"archive\",\"projectPath\":\"project\",\"reason\":\"Redundant boundary details survive in the active entry.\",\"refusalReason\":null,\"restorable\":true,\"rows\":[{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 4 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":4,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{\\\"archive_reason\\\":\\\"Redundant boundary details survive in the active entry.\\\"}\",\"normalizedHash\":\"01eafe31aeecd83c64c65a85ea79e393\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":6,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 4 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":4,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"01eafe31aeecd83c64c65a85ea79e393\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":4,\"role\":\"source\"},{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 5 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":5,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{\\\"archive_reason\\\":\\\"Redundant boundary details survive in the active entry.\\\"}\",\"normalizedHash\":\"90cbdae71d2cdb995cec8d831fda2883\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":6,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 5 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":5,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"90cbdae71d2cdb995cec8d831fda2883\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":5,\"role\":\"source\"}],\"sourceIds\":[4,5],\"survivorId\":null,\"version\":1,\"writer\":\"curate\"}"
+          "before_json": "{\"appliedAt\":1000,\"decisionKey\":\"5d056ceb-43f5-4407-8a6e-cfac50214f2d\",\"evidence\":[],\"operation\":\"archive\",\"projectPath\":\"project\",\"reason\":\"Redundant boundary details survive in the active entry.\",\"refusalReason\":null,\"restorable\":true,\"rows\":[{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 4 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":4,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{\\\"archive_reason\\\":\\\"Redundant boundary details survive in the active entry.\\\"}\",\"normalizedHash\":\"01eafe31aeecd83c64c65a85ea79e393\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":6,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 4 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":4,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"01eafe31aeecd83c64c65a85ea79e393\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":4,\"role\":\"source\"},{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 5 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":5,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{\\\"archive_reason\\\":\\\"Redundant boundary details survive in the active entry.\\\"}\",\"normalizedHash\":\"90cbdae71d2cdb995cec8d831fda2883\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":6,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 5 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":5,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"90cbdae71d2cdb995cec8d831fda2883\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":5,\"role\":\"source\"}],\"sourceIds\":[4,5],\"survivorId\":null,\"version\":1,\"writer\":\"curate\"}",
+          "after_json": "{\"appliedAt\":1000,\"decisionKey\":\"5d056ceb-43f5-4407-8a6e-cfac50214f2d\",\"evidence\":[],\"operation\":\"archive\",\"projectPath\":\"project\",\"reason\":\"Redundant boundary details survive in the active entry.\",\"refusalReason\":null,\"restorable\":true,\"rows\":[{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 4 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":4,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{\\\"archive_reason\\\":\\\"Redundant boundary details survive in the active entry.\\\"}\",\"normalizedHash\":\"01eafe31aeecd83c64c65a85ea79e393\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":6,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 4 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":4,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"01eafe31aeecd83c64c65a85ea79e393\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":4,\"role\":\"source\"},{\"after\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 5 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":5,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{\\\"archive_reason\\\":\\\"Redundant boundary details survive in the active entry.\\\"}\",\"normalizedHash\":\"90cbdae71d2cdb995cec8d831fda2883\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":2,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":0,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"archived\",\"supersededByMemoryId\":6,\"updatedAt\":1000,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"afterRevision\":2,\"before\":{\"category\":\"ARCHITECTURE\",\"content\":\"Architecture entry 5 describes the project's durable component boundary.\",\"createdAt\":1,\"expiresAt\":null,\"firstSeenAt\":1,\"id\":5,\"importance\":null,\"lastRetrievedAt\":null,\"lastSeenAt\":1,\"mergedFrom\":null,\"metadataJson\":\"{}\",\"normalizedHash\":\"90cbdae71d2cdb995cec8d831fda2883\",\"projectPath\":\"project\",\"retrievalCount\":0,\"revision\":1,\"safetyCritical\":null,\"scope\":\"project\",\"seenCount\":1,\"shareable\":1,\"sourceSessionId\":\"source\",\"sourceType\":\"historian\",\"status\":\"active\",\"supersededByMemoryId\":null,\"updatedAt\":1,\"verificationStatus\":\"verified\",\"verifiedAt\":1},\"beforeRevision\":1,\"completeness\":\"complete\",\"memoryId\":5,\"role\":\"source\"}],\"sourceIds\":[4,5],\"survivorId\":null,\"version\":1,\"writer\":\"curate\"}"
         }
       ],
       "memory_successor_links": [
         {
           "source_id": 4,
           "successor_id": 6,
-          "decision_key": "301be6c2-d915-4d44-8d4b-376d5bfab834"
+          "decision_key": "5d056ceb-43f5-4407-8a6e-cfac50214f2d"
         },
         {
           "source_id": 5,
           "successor_id": 6,
-          "decision_key": "301be6c2-d915-4d44-8d4b-376d5bfab834"
+          "decision_key": "5d056ceb-43f5-4407-8a6e-cfac50214f2d"
         }
       ],
       "memory_mutation_log": [],

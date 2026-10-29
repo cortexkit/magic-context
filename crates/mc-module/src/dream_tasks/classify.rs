@@ -33,6 +33,7 @@ pub struct Memory {
     pub importance: Option<i32>,
     pub scope: Option<String>,
     pub shareable: bool,
+    pub safety_critical: Option<bool>,
     pub unclassified: bool,
     pub open_classification: bool,
     pub unmapped: bool,
@@ -50,6 +51,8 @@ pub struct Classification {
     pub scope: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shareable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_critical: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,7 +157,18 @@ pub fn parse_classify_manifest(text: &str) -> Result<Vec<Classification>, String
         }
         let shareable = attr(attrs, "shareable", "true|false|1|0", true)
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1");
-        if importance.is_none() && scope.is_none() && shareable.is_none() {
+        let safety_critical = attr(attrs, "safety_critical", r#"[^"]*"#, true)
+            .map(|value| match value.to_ascii_lowercase().as_str() {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                _ => Err(format!("classify manifest invalid safety_critical {value}")),
+            })
+            .transpose()?;
+        if importance.is_none()
+            && scope.is_none()
+            && shareable.is_none()
+            && safety_critical.is_none()
+        {
             return Err(format!(
                 "classify manifest entry {id} missing classification fields"
             ));
@@ -164,6 +178,7 @@ pub fn parse_classify_manifest(text: &str) -> Result<Vec<Classification>, String
             importance,
             scope,
             shareable,
+            safety_critical,
         });
     }
     if out.is_empty() && !body.trim().is_empty() {
@@ -269,11 +284,14 @@ pub fn plan_classify(active: &[Memory]) -> ClassifyPlan {
     let stage = if active.len() <= 100 { 2 } else { 3 };
     let ids = active
         .iter()
-        .filter(|m| m.unclassified && !m.open_classification)
+        .filter(|m| (m.unclassified && !m.open_classification) || m.safety_critical.is_none())
         .map(|m| m.id)
         .collect();
     let mut classified: Vec<_> = if stage == 3 {
-        active.iter().filter(|m| !m.unclassified).collect()
+        active
+            .iter()
+            .filter(|m| !m.unclassified && m.safety_critical.is_some())
+            .collect()
     } else {
         vec![]
     };
@@ -478,14 +496,24 @@ pub fn classification_updates(
             memories
                 .iter()
                 .find(|m| m.id == p.id)
-                .map(|m| ClassificationUpdate {
-                    memory_id: p.id,
-                    content_hash_at_prompt: m.normalized_hash.clone(),
-                    importance: p.importance,
-                    scope: p.scope.clone(),
-                    shareable: p
-                        .shareable
-                        .map(|v| v && !sensitive_text(&m.content, sensitive)),
+                .filter(|m| {
+                    (m.unclassified && !m.open_classification) || p.safety_critical.is_some()
+                })
+                .map(|m| {
+                    let safety_only = !m.unclassified || m.open_classification;
+                    ClassificationUpdate {
+                        memory_id: p.id,
+                        content_hash_at_prompt: m.normalized_hash.clone(),
+                        importance: if safety_only { None } else { p.importance },
+                        scope: if safety_only { None } else { p.scope.clone() },
+                        shareable: if safety_only {
+                            None
+                        } else {
+                            p.shareable
+                                .map(|v| v && !sensitive_text(&m.content, sensitive))
+                        },
+                        safety_critical: p.safety_critical,
+                    }
                 })
         })
         .collect()
@@ -838,13 +866,14 @@ Keep `shareable="false"` only for what is tied to the USER or their machine rath
 
 Output ONE XML manifest at the very end and NOTHING else — no narration, no per-memory commentary, no reasoning:
 <classify>
-<memory id="N" importance="75" scope="project" shareable="true"/>
-<memory id="M" importance="20" scope="universe" shareable="false"/>
+<memory id="N" importance="80" scope="project" shareable="true" safety_critical="true"/>
+<memory id="M" importance="20" scope="universe" shareable="false" safety_critical="false"/>
 </classify>
 
 Rules:
 - Every memory in the pool below MUST appear exactly once.
-- importance is an integer 1-100; scope is one of project|ecosystem|universe; shareable is true|false."####;
+- importance is an integer 1-100; scope is one of project|ecosystem|universe; shareable is true|false.
+- Set safety_critical to true for the operating rules covered by the hard floor above, false otherwise."####;
 pub const MAP_MEMORIES_SYSTEM_PROMPT: &str = r####"You are a memory mapper for the magic-context system. You map project memories to the repository files that back them.
 
 A memory's BACKING FILES are the file(s) whose code the memory makes a claim about — the files you would open to check whether the memory is accurate. You do NOT judge accuracy, rewrite, or remove anything. You only LOCATE backing files.
@@ -2829,6 +2858,7 @@ mod tests {
             importance: Some(50),
             scope: Some("project".into()),
             shareable: false,
+            safety_critical: Some(false),
             unclassified: true,
             open_classification: false,
             unmapped: true,
@@ -2844,7 +2874,13 @@ mod tests {
         }
     }
     fn memories(value: &Value) -> Vec<Memory> {
-        serde_json::from_value(value.clone()).unwrap()
+        let mut rows: Vec<Memory> = serde_json::from_value(value.clone()).unwrap();
+        // These fixture rows predate safety flags. Treat them as assessed ordinary memories
+        // so the historical cases keep testing classification rather than safety backfill.
+        for row in &mut rows {
+            row.safety_critical = Some(false);
+        }
+        rows
     }
     fn exists(path: &str) -> bool {
         matches!(path, "src/a.ts" | "src/b.rs" | "src/c.py" | "src/d.go")
@@ -2920,6 +2956,78 @@ mod tests {
         }
     }
     #[test]
+    fn safety_assessments_match_host_selection_and_preserve_scored_metadata() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../testdata/safety_critical_classify_selection.json"
+        ))
+        .unwrap();
+        let active: Vec<_> = fixture["scored_inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let id = row["memory_id"].as_i64().unwrap();
+                let mut m = memory(id);
+                m.content = if id <= 3 {
+                    format!("Never push without approval: rule {}.", id - 1)
+                } else {
+                    format!("Ordinary fact {}.", id - 1)
+                };
+                m.normalized_hash = mc_store::compute_normalized_memory_hash(&m.content);
+                m.importance = Some(row["importance"].as_i64().unwrap() as i32);
+                m.unclassified = row["classified_at"].is_null();
+                m.open_classification = id == 3;
+                m.safety_critical = None;
+                m
+            })
+            .collect();
+        assert_eq!(
+            serde_json::to_value(plan_classify(&active).ids).unwrap(),
+            fixture["prompted"]
+        );
+        let manifest = format!("<classify>{}</classify>", active.iter().map(|m|
+            format!(r#"<memory id="{}" importance="1" scope="universe" shareable="true" safety_critical="{}"/>"#, m.id, m.id <= 3)
+        ).collect::<String>());
+        let parsed = validate_classify_manifest(&manifest, &(1..=10).collect::<Vec<_>>()).unwrap();
+        let rows = classification_updates(&active, &parsed, &sensitivity());
+        let actual: Vec<_> = rows.iter().map(|row| {
+            let mut value = json!({"memory_id":row.memory_id,"content_hash_at_prompt":row.content_hash_at_prompt,
+                "safety_critical":row.safety_critical});
+            if let Some(v) = row.importance { value["importance"] = json!(v); }
+            if let Some(v) = &row.scope { value["scope"] = json!(v); }
+            if let Some(v) = row.shareable { value["shareable"] = json!(v); }
+            value
+        }).collect();
+        assert_eq!(json!(actual), fixture["rows"]);
+        assert!(parse_classify_manifest(
+            r#"<classify><memory id="1" importance="1" safety_critical="null"/></classify>"#
+        )
+        .is_err());
+        let missing =
+            parse_classify_manifest(r#"<classify><memory id="1" importance="1"/></classify>"#)
+                .unwrap();
+        assert!(classification_updates(&active, &missing, &sensitivity()).is_empty());
+        let assessed = parse_classify_manifest(
+            r#"<classify><memory id="1" safety_critical="false"/></classify>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            classification_updates(&active, &assessed, &sensitivity())[0].safety_critical,
+            Some(false)
+        );
+
+        let mut large: Vec<_> = (1..=120).map(memory).collect();
+        for m in &mut large {
+            m.unclassified = false;
+        }
+        large[0].safety_critical = None;
+        large[1].safety_critical = None;
+        let plan = plan_classify(&large);
+        assert_eq!(plan.ids, vec![1, 2]);
+        assert!(!plan.anchors.contains(&1) && !plan.anchors.contains(&2));
+        assert_eq!(plan.anchors.len(), 30);
+    }
+    #[test]
     fn prompts_match_pinned_ts_bytes() {
         let v = &vectors()["prompts"];
         let memories = memories(&v["memories"]);
@@ -2931,7 +3039,7 @@ mod tests {
         assert_eq!(build_map_prompt("/repo", &inputs), v["map"]);
         assert_eq!(
             format!("{:x}", Sha256::digest(CLASSIFY_SYSTEM_PROMPT)),
-            "b288cfd1baad087ec20f23b44f747fbe1bad93807e91b0b1c6de8f2df0dddadb"
+            "d77bb7ae795284222f2d5cac74ef3ddeec11338bad3958a64787d03bb4690787"
         );
         assert_eq!(
             format!("{:x}", Sha256::digest(MAP_MEMORIES_SYSTEM_PROMPT)),

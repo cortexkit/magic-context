@@ -361,6 +361,7 @@ mod tests {
                     "runner",
                     "proj",
                     None,
+                    false,
                 );
                 json!({"system":request.system,"prompt":request.prompt,"raw_chunk_messages":request.raw_chunk_messages,
                     "range":[firing.chunk.chunk.start_index,firing.chunk.chunk.end_index,firing.chunk.chunk.end_index.saturating_add(1)],

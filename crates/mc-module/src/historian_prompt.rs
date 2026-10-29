@@ -102,6 +102,17 @@ pub struct ReferenceBlocks {
 /// implementations drive the model with the same role guidance; the generator script
 /// in gen/ re-vendors it and its --check mode fails on drift.
 pub const HISTORIAN_SYSTEM_PROMPT: &str = include_str!("../testdata/historian-system-prompt.txt");
+pub const HISTORIAN_COMBINED_SYSTEM_PROMPT: &str =
+    include_str!("../testdata/historian-two-pass-system-prompt.txt");
+
+/// Select by this session's authorization decision, never its host or transport.
+pub fn historian_system_prompt(turn_two_enabled: bool) -> &'static str {
+    if turn_two_enabled {
+        HISTORIAN_COMBINED_SYSTEM_PROMPT
+    } else {
+        HISTORIAN_SYSTEM_PROMPT
+    }
+}
 
 /// These options mirror TypeScript so both implementations generate the same instructions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

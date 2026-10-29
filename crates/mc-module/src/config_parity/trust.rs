@@ -6,13 +6,14 @@ use serde_json::{json, Map, Value};
 
 const HARNESSES: [&str; 3] = ["opencode", "pi", "omp"];
 const HISTORIAN_HARNESSES: [&str; 4] = ["opencode", "pi", "omp", "broca"];
-const HISTORIAN: [&str; 6] = [
+const HISTORIAN: [&str; 7] = [
     "model",
     "fallback_models",
     "variant",
     "thinking_level",
     "runner",
     "host_runner",
+    "turn_two",
 ];
 
 fn strip(value: &mut Value, keys: &[&str], warnings: &mut Vec<Warning>) {

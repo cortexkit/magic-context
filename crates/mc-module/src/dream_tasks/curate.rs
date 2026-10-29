@@ -368,7 +368,12 @@ Project memory uses exactly 5 categories. Every memory belongs to one:
 
 **Legacy categories during transition:** older memories may still carry pre-v2 category names. When you touch one, map it to its 5-category home with `action="update"` (or `merge`): WORKFLOW_RULES→PROJECT_RULES, ARCHITECTURE_DECISIONS→ARCHITECTURE, CONFIG_DEFAULTS→CONFIG_VALUES, ENVIRONMENT→CONFIG_VALUES (paths) or CONSTRAINTS, KNOWN_ISSUES→CONSTRAINTS only if it's an external-system limit. USER_DIRECTIVES / USER_PREFERENCES are NOT project categories. Do not compare project memories with the global user profile or use it to justify an archive."#;
 
-pub fn build_prompt(project: &str, category: &str, chunk: &Chunk) -> String {
+pub fn build_prompt(
+    project: &str,
+    category: &str,
+    chunk: &Chunk,
+    injection_budget_tokens: f64,
+) -> String {
     let candidates = if chunk.cross_chunk_candidates.is_empty() {
         "(none)".into()
     } else {
@@ -382,7 +387,7 @@ pub fn build_prompt(project: &str, category: &str, chunk: &Chunk) -> String {
 
 This run covers the whole of the `{category}` category (the other categories run in later windows).
 
-The memories below are assumed ACCURATE (a separate verify task keeps them true). Your job is pool QUALITY: remove duplicates, tighten wording, and consolidate redundant entries that waste the ~6000-token injection budget. Explain each action in one line first. Do NOT mint new facts (that is the historian's job).
+The memories below are assumed ACCURATE (a separate verify task keeps them true). Your job is pool QUALITY: remove duplicates, tighten wording, and consolidate redundant entries that waste the {injection_budget_tokens}-token injection budget. Explain each action in one line first. Do NOT mint new facts (that is the historian's job).
 
 Work ALL THREE phases below in order (A → B → C) over this category. Do NOT stop after consolidating — a run that only merges and never improves or archives is incomplete.
 
@@ -595,7 +600,12 @@ pub async fn run(
                 attempts,
             };
         }
-        let prompt = build_prompt(context.project_path, plan.category, chunk);
+        let prompt = build_prompt(
+            context.project_path,
+            plan.category,
+            chunk,
+            config.memory_budget_tokens,
+        );
         let result = run_dream_task(
             activated,
             config,
@@ -1008,6 +1018,40 @@ mod tests {
                 .prompt
                 .contains(&format!("[{}] CONFIG_VALUES", 2 - i)));
             assert!(request.timeout <= Duration::from_secs(60));
+        }
+    }
+
+    #[tokio::test]
+    async fn curate_states_the_configured_injection_budget_and_pins_the_4000_default() {
+        let plan = plan("CONFIG_VALUES");
+        for configured in [None, Some(2750.0)] {
+            let mut config = McModuleConfig::default();
+            if let Some(budget) = configured {
+                config.memory_budget_tokens = budget;
+            }
+            let mut carrier = FakeCarrier {
+                replies: VecDeque::from([("No redundant memories found.".into(), Value::Null)]),
+                ..Default::default()
+            };
+            let result = run(
+                true,
+                &config,
+                &json!({"dreamer":{"opencode":{"tasks":{"curate":{"model":"synapse/curator"}}}}}),
+                &run_context(),
+                Some(&plan),
+                &mut carrier,
+            )
+            .await;
+            result.result.unwrap();
+            assert_eq!(carrier.requests.len(), 1);
+            let prompt = &carrier.requests[0].prompt;
+            let expected = configured.unwrap_or(4000.0);
+            assert!(prompt.contains(&format!("the {expected}-token injection budget")));
+            assert!(!prompt.contains("6000-token"));
+            assert!(
+                !prompt.contains("5000-token"),
+                "not the child output budget"
+            );
         }
     }
 
@@ -1592,9 +1636,9 @@ mod tests {
     }
 
     // The existing TypeScript curator splits snapshots and renders child prompts
-    // with task-prompts.ts. These outputs, recorded at revision
-    // 282d9c08bce490346583a3b8c145c402499f980f, require identical Rust batches and
-    // prompt bytes without copying the TS template into the expected values.
+    // with task-prompts.ts. The hashes pin its 4,000-token default and require
+    // identical Rust batches and prompt bytes without copying the TS template
+    // into the expected values.
     #[test]
     fn pinned_ts_chunks_and_prompt_bytes_match() {
         let mut memories = vec![
@@ -1608,16 +1652,16 @@ mod tests {
         memories[4].mapped_files.clear();
         let expected = json!([
             {"max":110,"chunks":[
-                {"ids":[1],"candidates":["IDs 1, 3"],"sha":"91338689456c22683c0b3b087310ab28d7f4e9f0272aa66a91db970e2d19951e"},
-                {"ids":[2],"candidates":[],"sha":"9c447fe2db459ea445addbb5c2b0850f8ac682f441dfe76d00fbb2f6b20233a9"},
-                {"ids":[3],"candidates":["IDs 1, 3"],"sha":"ac36528751bd5410b73f3fd126a673ecda091b5743dcf4e7e362252cdf633cab"},
-                {"ids":[4],"candidates":["IDs 4, 5"],"sha":"260bcb7569717dfc09d2d99da17e682784bb5e537116fe8090215a0b498e411c"},
-                {"ids":[5],"candidates":["IDs 4, 5"],"sha":"d5f4f419efe315e958da005e8916b6f832b9543ee02b691d8c0b21b9af526dd9"}]},
+                {"ids":[1],"candidates":["IDs 1, 3"],"sha":"1b68c3193bfb53b2b7940ad72b40ee3ad0719d68081f08032981b3b8cbedd3eb"},
+                {"ids":[2],"candidates":[],"sha":"954401b74314f6e41cd5649f3b9cced92b937150ed37e8747297edf626b8e298"},
+                {"ids":[3],"candidates":["IDs 1, 3"],"sha":"d58a7460e37704dc766ce95ca3479b1c8ee0583a94256cc3b7d06b4f54685ddf"},
+                {"ids":[4],"candidates":["IDs 4, 5"],"sha":"82fa62d224a6cd8aa8fb612cc9dac7af91116dff074e91e9b34abc546d7f0ebf"},
+                {"ids":[5],"candidates":["IDs 4, 5"],"sha":"9212a91032df21dcc69483a0d4f0fa6484553e179747f870bfde604b9c2adb2a"}]},
             {"max":280,"chunks":[
-                {"ids":[1,2],"candidates":["IDs 1, 3"],"sha":"58d06329d874dfa3a63fe2bb8cb9c6d4a42eb01ba82c28f8a330f5329ba16e1e"},
-                {"ids":[3,4],"candidates":["IDs 1, 3","IDs 4, 5"],"sha":"fe8ebfc60584853330507b920b36f3515517ac8dac37c308993f694d15e2787c"},
-                {"ids":[5],"candidates":["IDs 4, 5"],"sha":"d5f4f419efe315e958da005e8916b6f832b9543ee02b691d8c0b21b9af526dd9"}]},
-            {"max":10000,"chunks":[{"ids":[1,2,3,4,5],"candidates":[],"sha":"573ad11b93a4448969b0859ee9d87ba0e780f7c6e364876e075dffbcc4ef0deb"}]}
+                {"ids":[1,2],"candidates":["IDs 1, 3"],"sha":"5d012f519019e78d7a00363c273f75727cb5978cae3860014b00a9e8b60b4a27"},
+                {"ids":[3,4],"candidates":["IDs 1, 3","IDs 4, 5"],"sha":"6867610cbd7090d207ee6d4731eb3fc92ca59a040e03c9646d73ec185c0f4ab7"},
+                {"ids":[5],"candidates":["IDs 4, 5"],"sha":"9212a91032df21dcc69483a0d4f0fa6484553e179747f870bfde604b9c2adb2a"}]},
+            {"max":10000,"chunks":[{"ids":[1,2,3,4,5],"candidates":[],"sha":"13d97bb6cfc321199e8d1f218398757c4308fb76a46c406cd30547522d5d9371"}]}
         ]);
         for case in expected.as_array().unwrap() {
             let actual: Vec<_> = chunk_memories(&memories, case["max"].as_u64().unwrap() as usize)
@@ -1626,7 +1670,7 @@ mod tests {
                     json!({
                         "ids":chunk.memories.iter().map(|m|m.id).collect::<Vec<_>>(),
                         "candidates":chunk.cross_chunk_candidates,
-                        "sha":sha(&build_prompt("/repo","PROJECT_RULES",chunk)),
+                        "sha":sha(&build_prompt("/repo","PROJECT_RULES",chunk,McModuleConfig::default().memory_budget_tokens)),
                     })
                 })
                 .collect();

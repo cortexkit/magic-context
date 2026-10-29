@@ -53,7 +53,8 @@ describe("migration race tolerance", () => {
                 const migrations = await import(${JSON.stringify(`file://${pluginRoot}/src/features/magic-context/migrations.ts`)});
                 const db = new sqlite.Database(${JSON.stringify(path)});
                 db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL");
-                migrations.runMigrations(db);
+                // Async boot retries acquisition when a sibling is still migrating.
+                await migrations.runMigrationsWithRetry(db);
                 const version = db.prepare("SELECT MAX(version) AS version FROM schema_migrations WHERE version < ${FORK_MIGRATION_VERSION_FLOOR}").get().version;
                 const forkRow = db.prepare("SELECT 1 FROM schema_migrations WHERE version = ${FORK_MIGRATION_VERSION_FLOOR}").get();
                 const table = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_owner_backfill_state'").get());

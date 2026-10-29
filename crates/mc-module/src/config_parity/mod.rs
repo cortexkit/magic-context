@@ -598,6 +598,7 @@ fn validate(raw: &Value, tool_order: &[String], warnings: &mut Vec<Warning>) -> 
     profiles::migrate(&mut migrated, warnings);
     let (parsed, issues) = schema_parse(&schema()["config"], Some(&migrated), "");
     let recovered = !issues.is_empty();
+    let invalid_turn_two = issues.iter().any(|path| path == "historian.turn_two");
     let mut effective = if !recovered {
         parsed.unwrap()
     } else {
@@ -615,7 +616,12 @@ fn validate(raw: &Value, tool_order: &[String], warnings: &mut Vec<Warning>) -> 
             if nested {
                 let mut complete = true;
                 for path in paths {
-                    complete &= prune(&mut patched, &path);
+                    if path == "historian.turn_two" {
+                        // Removing the invalid leaf would re-enable the allowlist default.
+                        set_path(&mut patched, &path, json!("off"));
+                    } else {
+                        complete &= prune(&mut patched, &path);
+                    }
                 }
                 if !complete {
                     remove_path(&mut patched, &key);
@@ -623,7 +629,7 @@ fn validate(raw: &Value, tool_order: &[String], warnings: &mut Vec<Warning>) -> 
             } else {
                 remove_path(&mut patched, &key);
             }
-            warnings.push(Warning::new("invalid_leaf", "Invalid config value; valid siblings are retained and invalid leaves use defaults."));
+            warnings.push(Warning::new("invalid_leaf", "Invalid config value; valid siblings are retained. Invalid historian.turn_two uses off; other invalid leaves use defaults."));
         }
         tool_input = patched.get("protected_tools").cloned();
         profiles::migrate(&mut patched, warnings);
@@ -636,7 +642,12 @@ fn validate(raw: &Value, tool_order: &[String], warnings: &mut Vec<Warning>) -> 
                 "recovery_failed",
                 "Config recovery failed; using all defaults.",
             ));
-            schema_parse(&schema()["config"], Some(&json!({})), "")
+            let defaults = if invalid_turn_two {
+                json!({"historian": {"turn_two": "off"}})
+            } else {
+                json!({})
+            };
+            schema_parse(&schema()["config"], Some(&defaults), "")
                 .0
                 .unwrap()
         }

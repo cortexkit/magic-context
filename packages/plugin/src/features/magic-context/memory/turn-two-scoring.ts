@@ -174,11 +174,11 @@ export function recordItemScores(
                 )
                 .run(score.importance, score.proposedClass, Date.now(), score.item);
             if (won.changes !== 1) continue;
-            // Stamping `classified_at` keeps dreamer classify from re-scoring the row
-            // and overwriting the historian's importance.
+            // Historian scoring assesses importance, not safety. Classify can still
+            // assess a NULL safety flag without replacing this score.
             db.prepare(
-                "UPDATE memories SET importance=?,classified_at=? WHERE id=(SELECT memory_id FROM memory_classification_items WHERE enqueue_sequence=?) AND status!='archived'",
-            ).run(score.importance, Date.now(), score.item);
+                "UPDATE memories SET importance=CASE WHEN safety_critical=1 THEN MAX(80,?) ELSE ? END,classified_at=? WHERE id=(SELECT memory_id FROM memory_classification_items WHERE enqueue_sequence=?) AND status!='archived'",
+            ).run(score.importance, score.importance, Date.now(), score.item);
             recorded += 1;
         }
     }).immediate();

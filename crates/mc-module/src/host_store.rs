@@ -356,7 +356,7 @@ pub const DOMAIN_TABLE_FINGERPRINTS: &[(&str, &str)] = &[
     ),
     (
         "memories",
-        "b9b8c9026bcc2969b2dfd4d6455a31b98a05d9ea196ff26dbcaf4a5b4f63829b",
+        "d7c72f4690a622c30d15661b7845f58bca7400ddf2807ff5c22821f603f679c6",
     ),
     (
         "memory_agent_fragments",

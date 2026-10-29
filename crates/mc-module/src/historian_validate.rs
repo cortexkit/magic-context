@@ -154,6 +154,8 @@ pub struct FactCandidate {
     /// unanchored. See [`resolve_fact_anchor`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_range: Option<FactSourceRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_ranges: Vec<FactSourceRange>,
 }
 
 /// An inclusive raw-ordinal range a fact anchor cites.
@@ -192,26 +194,49 @@ pub fn resolve_fact_anchor(
     printed_blocks: &[(u64, u64)],
 ) -> Option<ResolvedFactAnchor> {
     let index = fact.origin_compartment_index?;
-    let range = fact.source_range?;
-    let slot = usize::try_from(index).ok()?.checked_sub(1)?;
-    let &(compartment_start, compartment_end) = compartments.get(slot)?;
-    if range.start > range.end || range.start < compartment_start || range.end > compartment_end {
+    let ranges = if fact.source_ranges.is_empty() {
+        vec![fact.source_range?]
+    } else {
+        fact.source_ranges.clone()
+    };
+    if ranges.len() > 3 {
         return None;
     }
-    let block_indexes: Vec<usize> = printed_blocks
-        .iter()
-        .enumerate()
-        .filter(|(_, &(start, end))| start >= range.start && end <= range.end)
-        .map(|(position, _)| position)
-        .collect();
-    let first = printed_blocks.get(*block_indexes.first()?)?;
-    let last = printed_blocks.get(*block_indexes.last()?)?;
-    if first.0 != range.start || last.1 != range.end {
-        return None;
+    let slot = usize::try_from(index).ok()?.checked_sub(1)?;
+    let &(compartment_start, compartment_end) = compartments.get(slot)?;
+    let mut all_indexes = Vec::new();
+    for range in ranges {
+        // Whole-chunk citations cannot distinguish a fact from unrelated evidence.
+        if compartments.first().map(|block| block.0) == Some(range.start)
+            && compartments.last().map(|block| block.1) == Some(range.end)
+        {
+            return None;
+        }
+        if range.start > range.end || range.start < compartment_start || range.end > compartment_end
+        {
+            return None;
+        }
+        let block_indexes: Vec<usize> = printed_blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, &(start, end))| start >= range.start && end <= range.end)
+            .map(|(position, _)| position)
+            .collect();
+        let first = printed_blocks.get(*block_indexes.first()?)?;
+        let last = printed_blocks.get(*block_indexes.last()?)?;
+        if first.0 != range.start || last.1 != range.end {
+            return None;
+        }
+        for index in block_indexes {
+            if all_indexes.contains(&index) {
+                return None;
+            }
+            all_indexes.push(index);
+        }
     }
     Some(ResolvedFactAnchor {
         compartment_index: index,
-        block_indexes,
+        block_indexes: all_indexes,
     })
 }
 
@@ -454,13 +479,15 @@ pub fn parse_compartment_output(
             continue;
         }
         for item in fact_items(block) {
-            let (origin_compartment_index, source_range, content) = split_fact_anchor_prefix(&item);
+            let (origin_compartment_index, source_range, source_ranges, content) =
+                split_fact_anchor_ranges(&item);
             if !content.is_empty() {
                 facts.push(FactCandidate {
                     category: category.to_string(),
                     content,
                     origin_compartment_index,
                     source_range,
+                    source_ranges,
                 });
             }
         }
@@ -1473,28 +1500,57 @@ fn split_anchor_prefix(text: &str) -> (Option<u64>, String) {
 /// 2^53, yields no anchor and no range. Mirrors `splitFactAnchorPrefix` in
 /// packages/plugin/src/hooks/magic-context/compartment-parser.ts.
 pub fn split_fact_anchor_prefix(text: &str) -> (Option<u64>, Option<FactSourceRange>, String) {
+    let (index, range, _, content) = split_fact_anchor_ranges(text);
+    (index, range, content)
+}
+
+fn split_fact_anchor_ranges(
+    text: &str,
+) -> (
+    Option<u64>,
+    Option<FactSourceRange>,
+    Vec<FactSourceRange>,
+    String,
+) {
     let Some(caps) = side_channel_anchor_regex().captures(text) else {
-        return (None, None, trim_fact_text(text).to_string());
+        return (None, None, Vec::new(), trim_fact_text(text).to_string());
     };
     let content = caps
-        .get(4)
+        .get(3)
         .map(|m| trim_fact_text(m.as_str()).to_string())
         .unwrap_or_default();
     let Some(anchor) = caps.get(1).and_then(|m| parse_anchor_ordinal(m.as_str())) else {
-        return (None, None, content);
+        return (None, None, Vec::new(), content);
     };
     let Some(start) = caps.get(2) else {
-        return (Some(anchor), None, content);
+        return (Some(anchor), None, Vec::new(), content);
     };
-    let start = parse_anchor_ordinal(start.as_str());
-    let end = match caps.get(3) {
-        Some(m) => parse_anchor_ordinal(m.as_str()),
-        None => start,
-    };
-    match (start, end) {
-        (Some(start), Some(end)) => (Some(anchor), Some(FactSourceRange { start, end }), content),
-        _ => (None, None, content),
+    let parts: Vec<_> = start.as_str().split(',').collect();
+    if parts.len() > 3 {
+        return (None, None, Vec::new(), content);
     }
+    let mut ranges = Vec::new();
+    for part in parts {
+        let endpoints: Vec<_> = part
+            .split('-')
+            .map(|value| value.trim_matches([' ', '\t']))
+            .collect();
+        let start = parse_anchor_ordinal(endpoints[0]);
+        let end = if endpoints.len() == 1 {
+            start
+        } else {
+            parse_anchor_ordinal(endpoints[1])
+        };
+        match (start, end) {
+            (Some(start), Some(end)) => ranges.push(FactSourceRange { start, end }),
+            _ => return (None, None, Vec::new(), content),
+        }
+    }
+    let first = ranges.first().copied();
+    if ranges.len() == 1 {
+        ranges.clear();
+    }
+    (Some(anchor), first, ranges, content)
 }
 
 /// Decode the five predefined XML entities in a single left-to-right pass, so
@@ -1731,7 +1787,7 @@ fn side_channel_anchor_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r#"^[ \t]*[\[(][ \t]*(?:at_compartment|origin_compartment)[ \t]*=[ \t]*"?([0-9]+|unknown)"?(?:[ \t]+messages[ \t]*=[ \t]*"?([0-9]+)(?:[ \t]*-[ \t]*([0-9]+))?"?)?[ \t]*[\])][ \t]*(?s:(.+))$"#,
+            r#"^[ \t]*[\[(][ \t]*(?:at_compartment|origin_compartment)[ \t]*=[ \t]*"?([0-9]+|unknown)"?(?:[ \t]+messages[ \t]*=[ \t]*"?([0-9]+(?:[ \t]*-[ \t]*[0-9]+)?(?:[ \t]*,[ \t]*[0-9]+(?:[ \t]*-[ \t]*[0-9]+)?)*)"?)?[ \t]*[\])][ \t]*(?s:(.+))$"#,
         )
         .unwrap()
     })
@@ -1740,6 +1796,37 @@ fn side_channel_anchor_regex() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multi_range_anchors_refuse_whole_chunks_and_fourth_ranges() {
+        let blocks = vec![(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)];
+        let fact = |text: &str| {
+            let (origin_compartment_index, source_range, source_ranges, content) =
+                split_fact_anchor_ranges(text);
+            FactCandidate {
+                category: "CONSTRAINTS".into(),
+                content,
+                origin_compartment_index,
+                source_range,
+                source_ranges,
+            }
+        };
+        let precise = fact("[at_compartment=1 messages=1-2,4,5] Fact.");
+        assert_eq!(precise.source_ranges.len(), 3);
+        assert_eq!(
+            resolve_fact_anchor(&precise, &[(1, 6)], &blocks)
+                .unwrap()
+                .block_indexes,
+            vec![0, 1, 3, 4]
+        );
+        let whole = fact("[at_compartment=1 messages=1-6] Fact.");
+        assert!(resolve_fact_anchor(&whole, &[(1, 6)], &blocks).is_none());
+        let fourth = fact("[at_compartment=1 messages=1,2,3,4] Fact.");
+        assert!(fourth.origin_compartment_index.is_none());
+        assert_eq!(fourth.content, "Fact.");
+        let unsafe_ordinal = fact("[at_compartment=1 messages=1,9007199254740992] Fact.");
+        assert!(unsafe_ordinal.origin_compartment_index.is_none());
+    }
 
     #[test]
     fn unknown_fact_categories_report_every_drop() {
@@ -2616,6 +2703,7 @@ full narrative
                 content: content.clone(),
                 origin_compartment_index,
                 source_range,
+                source_ranges: Vec::new(),
             };
             let blocks = case.blocks.as_ref().unwrap_or(&golden.blocks);
             let resolved =
@@ -2755,6 +2843,7 @@ full narrative
                 content: content.clone(),
                 origin_compartment_index,
                 source_range,
+                source_ranges: Vec::new(),
             };
             let resolved =
                 resolve_fact_anchor(&fact, &case.compartments, &case.blocks).map(|resolved| {

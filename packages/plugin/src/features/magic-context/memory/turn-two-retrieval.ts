@@ -1,20 +1,8 @@
-/**
- * Neighbour retrieval for turn two: which existing memories each candidate fact is
- * compared with. Two lanes feed one shortlist:
- * - lexical (FTS): its top `LEXICAL_SLOT_COUNT` hits are reserved first, so an exact
- *   wording match is never crowded out by semantic neighbours;
- * - semantic (stored embeddings under the project's current embedding model): fills
- *   the rest of the shortlist up to `NEIGHBOUR_SHORTLIST_CAP`.
- * Slots the semantic lane leaves empty (only some memories have embeddings yet) are
- * filled with the remaining lexical hits. When the semantic lane ranks nothing (no
- * stored embeddings under the current model, only ones from another model id, or
- * none of a usable length), the shortlist is lexical-only and the prompt says so,
- * because an empty semantic lane does not mean the fact has no neighbour.
- */
+/** Turn-two retrieval ranks relevant candidates, without filling empty slots with keyword noise. */
 import type { Database } from "../../../shared/sqlite";
 import { cosineSimilarity } from "./cosine-similarity";
 import { getProjectEmbeddings } from "./embedding-cache";
-import { LEXICAL_SLOT_COUNT, NEIGHBOUR_SHORTLIST_CAP } from "./lifecycle-constants";
+import { NEIGHBOUR_SHORTLIST_CAP } from "./lifecycle-constants";
 import { getMemoryById } from "./storage-memory";
 import { searchMemoriesFTS } from "./storage-memory-fts";
 import type { TurnTwoPromptNeighbour } from "./turn-two-envelope";
@@ -43,6 +31,44 @@ export interface TurnTwoNeighbourResult {
     lexicalOnly: boolean;
 }
 
+const STOP_WORDS = new Set(
+    "a an the is are was were be been to of for in on at with by from and or not no it its this that as must should always never use only project user agent when after before every all can do does into than then same both".split(
+        " ",
+    ),
+);
+export const TURN_TWO_NEIGHBOUR_LIMIT = 3;
+function terms(text: string): Set<string> {
+    return new Set(
+        (text.toLowerCase().match(/[a-z0-9_]+/g) ?? []).filter(
+            (word) => word.length > 2 && !STOP_WORDS.has(word),
+        ),
+    );
+}
+
+/** Require substantial shared subject matter; a lone generic keyword is not a neighbour. */
+export function rankTurnTwoNeighbours(
+    fact: string,
+    candidates: TurnTwoPromptNeighbour[],
+    semanticScores = new Map<number, number>(),
+): TurnTwoPromptNeighbour[] {
+    const query = terms(fact);
+    return candidates
+        .map((neighbour) => {
+            const words = terms(neighbour.content);
+            const shared = [...query].filter((word) => words.has(word));
+            const lexical = shared.length / Math.max(1, query.size);
+            const semantic = semanticScores.get(neighbour.id) ?? 0;
+            const relevant =
+                (shared.length >= Math.min(2, query.size) && lexical >= 0.35 && query.size > 0) ||
+                semantic >= 0.75;
+            return { neighbour, score: Math.max(lexical, semantic), relevant };
+        })
+        .filter((entry) => entry.relevant)
+        .sort((a, b) => b.score - a.score || a.neighbour.id - b.neighbour.id)
+        .slice(0, TURN_TWO_NEIGHBOUR_LIMIT)
+        .map((entry) => entry.neighbour);
+}
+
 export async function retrieveTurnTwoNeighbours(
     db: Database,
     projectPath: string,
@@ -53,6 +79,7 @@ export async function retrieveTurnTwoNeighbours(
         .filter((memory) => memory.status !== "archived")
         .map((memory) => memory.id);
     let semantic: number[] | null = null;
+    const semanticScores = new Map<number, number>();
     const query = embedQuery ? await embedQuery(factText).catch(() => null) : null;
     if (query) {
         const stored = getProjectEmbeddings(db, projectPath, query.modelId);
@@ -64,22 +91,27 @@ export async function retrieveTurnTwoNeighbours(
                     score: cosineSimilarity(query.vector, entry.embedding),
                 }))
                 .sort((a, b) => b.score - a.score || a.id - b.id)
-                .map((entry) => entry.id);
+                .map((entry) => {
+                    semanticScores.set(entry.id, entry.score);
+                    return entry.id;
+                });
         }
     }
     const ordered: number[] = [];
     const add = (id: number) => {
-        if (ordered.length < NEIGHBOUR_SHORTLIST_CAP && !ordered.includes(id)) ordered.push(id);
+        if (ordered.length < NEIGHBOUR_SHORTLIST_CAP * 2 && !ordered.includes(id)) ordered.push(id);
     };
-    for (const id of lexical.slice(0, LEXICAL_SLOT_COUNT)) add(id);
+    for (const id of lexical) add(id);
     for (const id of semantic ?? []) {
-        if (ordered.length >= NEIGHBOUR_SHORTLIST_CAP) break;
+        if (ordered.length >= NEIGHBOUR_SHORTLIST_CAP * 2) break;
         if (neighbourOf(db, id)?.id === id) add(id);
     }
-    for (const id of lexical.slice(LEXICAL_SLOT_COUNT)) add(id);
     const neighbours = ordered.flatMap((id) => {
         const neighbour = neighbourOf(db, id);
         return neighbour && getMemoryById(db, id)?.projectPath === projectPath ? [neighbour] : [];
     });
-    return { neighbours, lexicalOnly: semantic === null || semantic.length === 0 };
+    return {
+        neighbours: rankTurnTwoNeighbours(factText, neighbours, semanticScores),
+        lexicalOnly: semantic === null || semantic.length === 0,
+    };
 }

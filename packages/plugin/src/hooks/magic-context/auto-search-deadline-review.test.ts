@@ -256,6 +256,9 @@ test("review: a failed durable skip remains frozen after another turn skips", as
     const { db, path } = fixture();
     const writer = new Database(path);
     connections.push(writer);
+    // The lock is held until both failed saves have been observed. Waiting
+    // cannot make either write succeed; this test checks replay, not lock latency.
+    db.exec("PRAGMA busy_timeout=0");
     writer.exec("BEGIN IMMEDIATE");
     try {
         expect(await persistAutoSearchSkip(db, "rewound-session", "user-one")).toBe(false);

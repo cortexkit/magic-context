@@ -118,6 +118,8 @@ export const OMITTED_BY_DESIGN: Readonly<Record<string, string>> = {
   "historian.broca":
     "ck-mc's Broca-specific model chain; raw JSONC because the dashboard's model catalogs cover OpenCode, Pi, and OMP",
   "historian.two_pass": "advanced historian editor pass; raw JSONC",
+  "historian.turn_two":
+    "user-level off switch for the historian's second pass; it changes nothing until a model is validated for turn two, so it stays raw JSONC until then",
   "historian.disallowed_tools": "legacy compatibility option; raw JSONC",
   ...Object.fromEntries(
     TASKS.map((task) => [

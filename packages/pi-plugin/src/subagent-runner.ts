@@ -27,6 +27,7 @@ import {
 	TOKEN_BUDGET_FINALIZE_MESSAGE,
 	TOKEN_BUDGET_TOOL_REFUSAL,
 } from "@magic-context/core/features/magic-context/dreamer/token-budget";
+import { hasHistorianToolActivity } from "@magic-context/core/features/magic-context/memory/historian-wire";
 import { probeChildSpawnFence } from "@magic-context/core/features/magic-context/schema-fence-probe";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage";
 import type { SubagentKind } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
@@ -61,6 +62,11 @@ import {
 	SUBAGENT_OUTPUT_CEILING_ENV,
 } from "./historian-calibration-extension";
 import { neutralizeOmpMentions, restoreOmpMentions } from "./omp-mentions";
+import {
+	OMP_RETAINED_NO_TOOLS_ENV,
+	OmpRetainedRpc,
+	probeOmpRetainedRpc,
+} from "./omp-retained-rpc";
 import { type PiHarnessKind, resolvePiHarnessKind } from "./pi-harness-kind";
 import {
 	classifyZenFreeTierFailure,
@@ -960,6 +966,7 @@ export interface PiRpcHistorianChild {
 }
 
 export interface PiRpcHistorianRunner extends SubagentRunner {
+	prepareRetainedHistorian?(cwd?: string): Promise<boolean>;
 	readonly canRetainHistorian: boolean;
 	runRetainedHistorian(
 		options: SubagentRunOptions,
@@ -971,6 +978,7 @@ export interface PiRpcHistorianRunner extends SubagentRunner {
 }
 
 interface RetainedRpcCallbacks {
+	unavailableBeforePrompt?(): void;
 	stageKey?: string;
 	ready(child: PiRpcHistorianChild): void;
 	turn(result: SubagentRunResult): void;
@@ -991,6 +999,17 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 	private readonly platform: NodeJS.Platform;
 	private readonly extraArgs: readonly string[];
 	private readonly budgetGuardOverride: boolean | undefined;
+	private ompRpcVerified = false;
+	private ompRpcPreparation: Promise<boolean> | undefined;
+	private ompRpcFallbackLogged = false;
+	private logOmpRpcFallback(): void {
+		if (this.ompRpcFallbackLogged) return;
+		this.ompRpcFallbackLogged = true;
+		sessionLog(
+			"subagent",
+			"OMP retained historian RPC was not confirmed; using one-pass historian",
+		);
+	}
 	/** `undefined` means preserve Pi's normal extension discovery behavior. */
 	private readonly subagentExtensions: readonly string[] | undefined;
 	private readonly getHostToolNames:
@@ -1089,8 +1108,69 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 
 	get canRetainHistorian(): boolean {
 		return (
-			this.invocation.targetHarness === "pi" && this.budgetToolGuardAvailable
+			(this.invocation.targetHarness === "pi" ||
+				(this.invocation.targetHarness === "omp" && this.ompRpcVerified)) &&
+			this.budgetToolGuardAvailable
 		);
+	}
+
+	/** Probe only an eligible OMP retained path; ordinary print-mode discovery is unchanged. */
+	async prepareRetainedHistorian(cwd?: string): Promise<boolean> {
+		if (this.invocation.targetHarness === "pi")
+			return this.budgetToolGuardAvailable;
+		if (this.ompRpcPreparation) return this.ompRpcPreparation;
+		this.ompRpcPreparation = (async () => {
+			let supported = false;
+			let probeDirectory: string | undefined;
+			try {
+				if (
+					this.invocation.targetHarness === "omp" &&
+					this.budgetToolGuardAvailable &&
+					this.extraArgs.length === 0
+				) {
+					// The capability probe starts a real child, so it needs the same
+					// tool-boundary overlay as a historian run before negotiating RPC.
+					probeDirectory = mkdtempSync(join(tmpdir(), "mc-omp-rpc-probe-"));
+					const ompToolConfigPath = join(probeDirectory, "tool-boundary.yml");
+					writeFileSync(ompToolConfigPath, OMP_CHILD_TOOL_CONFIG, "utf8");
+					const args = buildArgs(
+						{ agent: "historian", systemPrompt: "", userMessage: "", cwd },
+						{
+							targetHarness: "omp",
+							rpc: true,
+							retainedOmp: true,
+							omitPositionalMessage: true,
+							ompToolConfigPath,
+						},
+					);
+					supported = await probeOmpRetainedRpc({
+						spawn: this.spawnImpl,
+						command: this.invocation.command,
+						args: [...this.invocation.prefixArgs, ...args],
+						cwd,
+						env: {
+							...process.env,
+							[MAGIC_CONTEXT_PI_SUBAGENT_ENV]: "1",
+							[OMP_RETAINED_NO_TOOLS_ENV]: "1",
+						},
+					});
+				}
+			} catch {
+				supported = false;
+			} finally {
+				if (probeDirectory) {
+					try {
+						rmSync(probeDirectory, { recursive: true, force: true });
+					} catch {
+						// Cleanup failure must not change the observed RPC capability.
+					}
+				}
+			}
+			this.ompRpcVerified = supported;
+			if (!supported) this.logOmpRpcFallback();
+			return supported;
+		})();
+		return this.ompRpcPreparation;
 	}
 
 	private get budgetToolGuardAvailable(): boolean {
@@ -1111,10 +1191,13 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 		result: SubagentRunResult;
 		child: PiRpcHistorianChild | null;
 	}> {
+		if (this.invocation.targetHarness === "omp")
+			await this.prepareRetainedHistorian(options.cwd);
 		if (!this.canRetainHistorian || options.tokenBudget === undefined) {
 			return { result: await this.run(options), child: null };
 		}
 		let child: PiRpcHistorianChild | null = null;
+		let unavailableBeforePrompt = false;
 		let first = true;
 		let receive: (result: SubagentRunResult) => void = () => {};
 		const initial = new Promise<SubagentRunResult>((resolve) => {
@@ -1130,6 +1213,11 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 			provider?.modelRef,
 			{
 				stageKey,
+				unavailableBeforePrompt: () => {
+					unavailableBeforePrompt = true;
+					this.ompRpcVerified = false;
+					this.logOmpRpcFallback();
+				},
 				ready: (handle) => {
 					child = handle;
 				},
@@ -1164,7 +1252,10 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 					});
 			},
 		);
-		return { result: await initial, child };
+		const result = await initial;
+		if (unavailableBeforePrompt)
+			return { result: await this.run(options), child: null };
+		return { result, child };
 	}
 
 	private async runWithExtensionRetry(
@@ -1466,9 +1557,13 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 		// pipe the prompt we must omit the positional argv to avoid duplication.
 		const promptBytes = Buffer.byteLength(options.userMessage, "utf8");
 		const budgetToolGuardAvailable = this.budgetToolGuardAvailable;
+		const retainedOmp =
+			retainedRpc !== undefined &&
+			this.invocation.targetHarness === "omp" &&
+			this.ompRpcVerified;
 		const rpcBudget =
 			options.tokenBudget !== undefined &&
-			this.invocation.targetHarness === "pi" &&
+			(this.invocation.targetHarness === "pi" || retainedOmp) &&
 			budgetToolGuardAvailable;
 		const deliverViaStdin =
 			!rpcBudget &&
@@ -1559,6 +1654,7 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 			ompToolConfigPath,
 			modelRef: modelRefOverride,
 			rpc: rpcBudget,
+			retainedOmp,
 		});
 
 		// The model spec is `provider/model` — Pi accepts that directly via
@@ -1567,6 +1663,11 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 
 		return new Promise<SubagentRunResult>((resolve) => {
 			let pendingTurn: ((result: SubagentRunResult) => void) | undefined;
+			let ompProtocol: OmpRetainedRpc | undefined;
+			let ompHandshakeTimer: ReturnType<typeof setTimeout> | undefined;
+			let pendingRpcDelivery: (() => void) | undefined;
+			let publishRetainedHandle = () => {};
+			let ompPromptWritten = false;
 			let rpcAlive = true;
 			let reaped: () => void = () => {};
 			const childReaped = new Promise<void>((done) => {
@@ -1594,6 +1695,33 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 			};
 			const settle = (result: SubagentRunResult) => {
 				if (settled) return;
+				if (zenChild) {
+					const classified = classifyZenFreeTierFailure(
+						result,
+						options.model,
+						options.agent,
+						this.invocation.targetHarness,
+					);
+					if (classified !== result && !classified.ok) {
+						sessionLog(
+							options.accountingSessionId ?? "subagent",
+							classified.error,
+						);
+					}
+					result = classified;
+					if (deferredZenStderr && !reportedZenStderr) {
+						emitProgress({
+							type: "stderr",
+							chunk:
+								result.meta?.failureClass === ZEN_FREE_TIER_FAILURE
+									? zenFreeTierMessage(
+											options.agent,
+											this.invocation.targetHarness,
+										)
+									: deferredZenStderr,
+						});
+					}
+				}
 				if (options.waitForExit && childCreated && !exitAcknowledged) {
 					pendingSettlement ??= result;
 					return;
@@ -1609,6 +1737,7 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 					};
 				}
 				settled = true;
+				if (ompHandshakeTimer) clearTimeout(ompHandshakeTimer);
 				if (zenChild) {
 					const classified = classifyZenFreeTierFailure(
 						result,
@@ -1650,6 +1779,8 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 				pendingTurn = undefined;
 				// Mapping emits decisions between tool turns. Preserve those turns on
 				// every settlement so a timeout cannot erase already located files.
+				// A Zen free-tier refusal has no located files, and its error message
+				// carries the provider's raw response body, so it is never kept.
 				if (
 					isMemoryMapper &&
 					result.meta?.failureClass !== ZEN_FREE_TIER_FAILURE
@@ -1769,6 +1900,7 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 										? options.cacheTail
 										: undefined,
 								MAGIC_CONTEXT_SUBAGENT_BUDGET_GUARD_FILE: budgetGuardFile,
+								[OMP_RETAINED_NO_TOOLS_ENV]: retainedOmp ? "1" : undefined,
 								MAGIC_CONTEXT_SUBAGENT_PROVENANCE_ONLY:
 									options.agent === "rescore" ||
 									/^(magic-context-)?historian(?:-recomp|-editor)?$/.test(
@@ -1851,13 +1983,57 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 						durationMs: Date.now() - startTime,
 					});
 				});
-				child.stdin.write(
-					`${JSON.stringify({
-						type: "prompt",
-						message: options.userMessage,
-						id: retainedRpc?.stageKey ?? "dreamer-initial",
-					})}\n`,
-				);
+				if (retainedOmp) {
+					ompProtocol = new OmpRetainedRpc({
+						write: (line) => {
+							child.stdin!.write(line);
+						},
+						ready: () => {
+							if (ompHandshakeTimer) clearTimeout(ompHandshakeTimer);
+							sessionLog(
+								options.accountingSessionId ?? "subagent",
+								`[omp-retained-rpc] ${JSON.stringify({ pid: child.pid, protocolVersion: 2, tools: ompProtocol!.tools })}`,
+							);
+							publishRetainedHandle();
+							ompPromptWritten = true;
+							ompProtocol!.prompt(
+								options.userMessage,
+								retainedRpc?.stageKey ?? "historian-initial",
+							);
+						},
+						unavailable: (reason) => {
+							if (ompHandshakeTimer) clearTimeout(ompHandshakeTimer);
+							// After any prompt write, delivery may be unknown; never replay it on another process.
+							if (!ompPromptWritten && !reason.includes("tool inventory"))
+								retainedRpc?.unavailableBeforePrompt?.();
+							terminateChild(child);
+							settle({
+								ok: false,
+								reason: "spawn_failed",
+								error: `OMP retained RPC refused: ${reason}`,
+								durationMs: Date.now() - startTime,
+							});
+						},
+						terminal: () => pendingRpcDelivery?.(),
+					});
+					ompHandshakeTimer = setTimeout(() => {
+						if (!ompPromptWritten) retainedRpc?.unavailableBeforePrompt?.();
+						terminateChild(child);
+						settle({
+							ok: false,
+							reason: "timeout",
+							error: "OMP retained RPC negotiation timed out",
+							durationMs: Date.now() - startTime,
+						});
+					}, 5000);
+				} else
+					child.stdin.write(
+						`${JSON.stringify({
+							type: "prompt",
+							message: options.userMessage,
+							id: retainedRpc?.stageKey ?? "dreamer-initial",
+						})}\n`,
+					);
 			} else if (deliverViaStdin && child.stdin) {
 				// A pipe failure (child exited early / was terminated mid-write)
 				// surfaces as an async "error" event on the stream, NOT via the
@@ -2043,8 +2219,9 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 			const accumulatedMessages: unknown[] = [];
 			accountingMessages = accumulatedMessages;
 			let rpcTurnDelivered = false;
+			let rpcToolActivity = false;
 			if (retainedRpc && rpcBudget) {
-				retainedRpc.ready({
+				const handle: PiRpcHistorianChild = {
 					id: `pi-rpc:${process.pid}:${child.pid ?? 0}:${randomUUID()}`,
 					get alive() {
 						return rpcAlive;
@@ -2055,6 +2232,7 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 								new Error("Pi RPC child unavailable or busy"),
 							);
 						rpcTurnDelivered = false;
+						pendingRpcDelivery = undefined;
 						sawAgentEnd = false;
 						preserveDrainedResult = false;
 						finalAssistantText = null;
@@ -2070,9 +2248,11 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 						return new Promise((receive) => {
 							pendingTurn = receive;
 							try {
-								child.stdin?.write(
-									`${JSON.stringify({ type: "prompt", message, id: stageKey })}\n`,
-								);
+								if (ompProtocol) ompProtocol.prompt(message, stageKey);
+								else
+									child.stdin?.write(
+										`${JSON.stringify({ type: "prompt", message, id: stageKey })}\n`,
+									);
 							} catch (error) {
 								terminateChild(child);
 								settle({
@@ -2094,7 +2274,10 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 						});
 						await childReaped;
 					},
-				});
+				};
+				if (retainedOmp)
+					publishRetainedHandle = () => retainedRpc.ready(handle);
+				else retainedRpc.ready(handle);
 			}
 			const captureFinalAssistant = (messages: unknown[]) => {
 				const result = extractFinalAssistant(messages);
@@ -2121,7 +2304,12 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 
 			rl.on("line", (line) => {
 				if (settled || line.length === 0) return;
-				const parsed = parsePiEventLine(line, this.invocation.targetHarness);
+				const decoded = ompProtocol?.accept(line);
+				if (ompProtocol && !decoded) return;
+				const parsed = parsePiEventLine(
+					decoded ? JSON.stringify(decoded) : line,
+					this.invocation.targetHarness,
+				);
 				if (!parsed.ok) {
 					// Non-JSON stdout noise from co-loaded extensions is
 					// skipped silently. A malformed JSON event line is
@@ -2133,6 +2321,8 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 					return;
 				}
 				const event = parsed.event;
+				if (retainedRpc && hasHistorianToolActivity(event))
+					rpcToolActivity = true;
 				observeTemperatureDecision(event);
 
 				if (typeof event !== "object" || event === null) return;
@@ -2482,58 +2672,73 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 					sawAgentEnd &&
 					!rpcTurnDelivered
 				) {
-					rpcTurnDelivered = true;
-					if (timeoutHandle) {
-						clearTimeout(timeoutHandle);
-						timeoutHandle = undefined;
-					}
-					const last = [...(agentEndMessages ?? accumulatedMessages)]
-						.reverse()
-						.find(
-							(message) => (message as { role?: string })?.role === "assistant",
-						) as
-						| { provider?: string; model?: string; usage?: unknown }
-						| undefined;
-					const meta = {
-						reportedProvider: last?.provider,
-						reportedModel: last?.model,
-						usage: last?.usage,
-					};
-					const result: SubagentRunResult =
-						finalAssistantText?.trim() &&
-						(finalStopReason === "stop" || finalStopReason === "length")
-							? {
-									ok: true,
-									assistantText: finalAssistantText.trim(),
-									durationMs: Date.now() - startTime,
-									meta: { ...meta, lengthCapped: finalStopReason === "length" },
-								}
-							: {
-									ok: false,
-									reason: "model_failed",
-									error:
-										finalErrorMessage ??
-										"Pi RPC turn has no usable assistant reply",
-									durationMs: Date.now() - startTime,
-									meta,
-								};
-					if (pendingTurn) {
-						const receive = pendingTurn;
-						pendingTurn = undefined;
-						receive(result);
-					} else {
-						// Record turn one's token usage at its reply; closing the retained
-						// process later is not a failure of that completed turn.
-						try {
-							recordAccounting(result, agentEndMessages ?? accumulatedMessages);
-						} catch (error) {
-							sessionLog(
-								options.accountingSessionId ?? "subagent",
-								`subagent accounting failed: ${String(error)}`,
-							);
+					const deliver = () => {
+						if (rpcTurnDelivered) return;
+						rpcTurnDelivered = true;
+						pendingRpcDelivery = undefined;
+						if (timeoutHandle) {
+							clearTimeout(timeoutHandle);
+							timeoutHandle = undefined;
 						}
-						retainedRpc.turn(result);
-					}
+						const last = [...(agentEndMessages ?? accumulatedMessages)]
+							.reverse()
+							.find(
+								(message) =>
+									(message as { role?: string })?.role === "assistant",
+							) as
+							| { provider?: string; model?: string; usage?: unknown }
+							| undefined;
+						const meta = {
+							toolActivity: rpcToolActivity,
+							reportedProvider: last?.provider,
+							reportedModel: last?.model,
+							usage: last?.usage,
+						};
+						const result: SubagentRunResult =
+							finalAssistantText?.trim() &&
+							(finalStopReason === "stop" || finalStopReason === "length")
+								? {
+										ok: true,
+										assistantText: finalAssistantText,
+										durationMs: Date.now() - startTime,
+										meta: {
+											...meta,
+											lengthCapped: finalStopReason === "length",
+										},
+									}
+								: {
+										ok: false,
+										reason: "model_failed",
+										error:
+											finalErrorMessage ??
+											"Pi RPC turn has no usable assistant reply",
+										durationMs: Date.now() - startTime,
+										meta,
+									};
+						if (pendingTurn) {
+							const receive = pendingTurn;
+							pendingTurn = undefined;
+							receive(result);
+						} else {
+							// Record turn one's token usage at its reply; closing the retained
+							// process later is not a failure of that completed turn.
+							try {
+								recordAccounting(
+									result,
+									agentEndMessages ?? accumulatedMessages,
+								);
+							} catch (error) {
+								sessionLog(
+									options.accountingSessionId ?? "subagent",
+									`subagent accounting failed: ${String(error)}`,
+								);
+							}
+							retainedRpc.turn(result);
+						}
+					};
+					if (retainedOmp && !ompProtocol?.promptComplete)
+						pendingRpcDelivery = deliver;
+					else deliver();
 				}
 				if (sawAgentEnd && !drainTimerStarted && !retainedRpc) {
 					drainTimerStarted = true;
@@ -3018,6 +3223,8 @@ export function buildArgs(
 		systemPromptPath?: string;
 		modelRef?: string;
 		rpc?: boolean;
+		/** New retained OMP children isolate extensions independently of the legacy print path. */
+		retainedOmp?: boolean;
 		historianCalibrationEntryPath?: string | null;
 		hostToolNames?: readonly string[];
 		ompToolConfigPath?: string;
@@ -3029,6 +3236,14 @@ export function buildArgs(
 	if (ompTarget && !ompToolConfigPath) {
 		throw new Error("OMP child requires a tool-boundary config overlay");
 	}
+	const retainedOmp = opts?.retainedOmp === true;
+	if (
+		retainedOmp &&
+		(!ompTarget ||
+			!opts?.rpc ||
+			STRICT_TOOL_ALLOWLIST.get(options.agent)?.length !== 0)
+	)
+		throw new Error("Retained OMP RPC requires an explicitly tool-free agent");
 	const args: string[] = [
 		...(opts?.rpc ? [] : ["--print"]),
 		"--mode",
@@ -3068,6 +3283,7 @@ export function buildArgs(
 		args.push("--config", ompToolConfigPath);
 	}
 	if (
+		retainedOmp ||
 		opts?.disableDiscoveredExtensions ||
 		opts?.subagentExtensions !== undefined
 	) {
@@ -3077,7 +3293,7 @@ export function buildArgs(
 		args.push("--no-extensions");
 	}
 
-	if (opts?.subagentExtensions !== undefined) {
+	if (!retainedOmp && opts?.subagentExtensions !== undefined) {
 		for (const extension of opts.subagentExtensions) {
 			args.push(
 				"--extension",

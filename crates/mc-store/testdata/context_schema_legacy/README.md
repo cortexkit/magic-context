@@ -3,13 +3,13 @@
 ## Coverage and integration
 
 `migrations_legacy::upgrade(&mut Connection, now_ms)` upgrades initialized stores
-at upstream versions **87–102** to fence **102**. The caller provides an already
+at upstream versions **87–104** to fence **104**. The caller provides an already
 opened connection; no host-store discovery or live-holder probing happens here.
 The supplied `integration.patch` exports the module from `mc_store::context_schema`.
 This module does not replace the fresh bootstrap provider or wire a startup endpoint.
 
 The TypeScript chain still accepts version **0** (no ledger) and runs migrations
-1–102. The serial follow-up must port starting versions **0–86**, including the
+1–104. The serial follow-up must port starting versions **0–86**, including the
 v87 host-evidence harness repair, earlier authority-trigger postconditions,
 identity repairs, embedding rebuilds, and legacy compartment data heals. Older
 versions are explicitly refused, rather than silently skipping those repairs.
@@ -20,7 +20,7 @@ Transactions match the TypeScript runner: **each step** and its ledger insert
 commit together. A failed step rolls back, but earlier steps remain committed.
 `BEGIN IMMEDIATE` and an in-lock version read serialize concurrent starters,
 preventing the ledger primary-key race. A current database takes no write lock.
-Upstream versions above 102 are refused before changing bytes; downstream rows
+Upstream versions above 104 are refused before changing bytes; downstream rows
 at or above the reserved fork floor of 10000 do not mask the upstream version.
 
 ## Independent comparison

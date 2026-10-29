@@ -19,6 +19,9 @@ import {
     toolResultMessage,
     userMessage,
 } from "../../../../pi-plugin/src/test-utils.test";
+import { classifySafetyFixture } from "../../features/magic-context/dreamer/safety-critical-classify.fixture";
+import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
+import { insertMemory } from "../../features/magic-context/memory/storage-memory";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import {
@@ -52,6 +55,7 @@ import type { MessageLike } from "./transform-operations";
 const seeds = [19, 773, 20261014, 0xdeadbeef];
 const passes = Number(process.env.REVIEW_PASSES ?? 80);
 const fixedClock = 1_800_000_000_000;
+const s02 = process.env.MC_S02_FULL_HOST === "1";
 const realNow = Date.now;
 type HostMessage = MessageLike & { info: MessageLike["info"] & Record<string, unknown> };
 let now = fixedClock;
@@ -65,7 +69,20 @@ const summaries: {
     counts?: Record<string, number>;
     pending: number;
     bodies: string[];
+    memory?: Array<{ bytes: string; fold: number | null }>;
 }[] = [];
+
+function seedSafetyPool(db: Parameters<typeof insertMemory>[0], projectPath: string) {
+    if (!s02) return;
+    for (let i = 0; i < 32; i++)
+        insertMemory(db, {
+            projectPath,
+            category: "PROJECT_RULES",
+            content: `Never push without approval: rule ${i}.`,
+            importance: 20 + i,
+        });
+    db.exec("UPDATE memories SET classified_at=7");
+}
 const capturedWires = new Map<string, string>();
 const contentWires = new Map<string, string>();
 function random(seed: number) {
@@ -155,6 +172,7 @@ async function openCode(host: "oc1" | "oc2", signed: boolean, seed: number, acti
     updateSessionMeta(db, sessionId, { cacheTtl: "5m", lastResponseTime: fixedClock });
     const model = { providerID: "anthropic", modelID: "claude-opus-5-5" };
     const project = "/nonexistent-system-delivery-review-project";
+    const memoryProject = s02 ? resolveProjectIdentityForSession(project) : project;
     const deps: TransformDeps = {
         db,
         // The stored provider-request digests cover strict signed-thinking
@@ -181,7 +199,7 @@ async function openCode(host: "oc1" | "oc2", signed: boolean, seed: number, acti
         hostPrepareRawOrdinals: async () => true,
         hostModelFallback: () => null,
         protectedTools: { read: 0 },
-        memoryConfig: { enabled: false, injectionBudgetTokens: 1000, autoPromote: false },
+        memoryConfig: { enabled: s02, injectionBudgetTokens: 1000, autoPromote: false },
         client: {
             session: { get: async () => ({ data: { directory: project } }) },
         } as unknown as TransformDeps["client"],
@@ -202,7 +220,7 @@ async function openCode(host: "oc1" | "oc2", signed: boolean, seed: number, acti
     const system = createSystemPromptHashHandler({
         db,
         dreamerEnabled: false,
-        memoryEnabled: false,
+        memoryEnabled: s02,
         resolveModel: () => model,
         historyRefreshSessions: deps.historyRefreshSessions,
         pendingMaterializationSessions: deps.pendingMaterializationSessions,
@@ -272,9 +290,12 @@ async function openCode(host: "oc1" | "oc2", signed: boolean, seed: number, acti
     let ackAt = -1;
     let acks = 0;
     const counts: Record<string, number> = {};
+    const memory: Array<{ bytes: string; fold: number | null }> = [];
+    seedSafetyPool(db, memoryProject);
     try {
         for (const e of eventsFor(seed)) {
             now = fixedClock + e.pass * 1000;
+            if (s02 && e.pass % 8 === 1) await classifySafetyFixture(db, memoryProject);
             if (e.pass > 0) {
                 if (e.tool) assistant(true);
                 if (active) {
@@ -336,6 +357,14 @@ async function openCode(host: "oc1" | "oc2", signed: boolean, seed: number, acti
                         prompt,
                     );
                 await transform({}, output as never);
+                if (s02) {
+                    if (e.pass === 0)
+                        expect(JSON.stringify(output.messages)).toContain("Never push");
+                    memory.push({
+                        bytes: digest(output.messages.slice(0, 2).map((m) => m.parts)),
+                        fold: getOrCreateSessionMeta(db, sessionId).cachedM0MaterializedAt,
+                    });
+                }
                 prepared = true;
                 if (e.order === "messages-first")
                     await system.handler(
@@ -415,6 +444,7 @@ async function openCode(host: "oc1" | "oc2", signed: boolean, seed: number, acti
             counts,
             pending: getPendingOps(db, sessionId).length,
             bodies,
+            ...(s02 ? { memory } : {}),
         });
     } finally {
         clearLkgMeasuredRequest(sessionId);
@@ -443,7 +473,7 @@ async function pi(signed: boolean, seed: number, active = false) {
         db,
         signedThinkingHold: signed && !active ? "on" : undefined,
         protectedTokens: 1000,
-        injection: { injectionBudgetTokens: 1000, memoryEnabled: false, injectDocs: false },
+        injection: { injectionBudgetTokens: 1000, memoryEnabled: s02, injectDocs: false },
         protectedTools: { read: 0 },
         heuristics: { keepReasoningTokens: 2000 },
         scheduler: { executeThresholdPercentage: 65 },
@@ -499,9 +529,15 @@ async function pi(signed: boolean, seed: number, active = false) {
     const errors: string[] = [];
     let ackAt = -1;
     let acks = 0;
+    const memory: Array<{ bytes: string; fold: number | null }> = [];
+    const project = s02
+        ? resolveProjectIdentityForSession("/nonexistent-system-delivery-review-project")
+        : "";
+    seedSafetyPool(db, project);
     try {
         for (const e of eventsFor(seed)) {
             now = fixedClock + e.pass * 1000;
+            if (s02 && e.pass % 8 === 1) await classifySafetyFixture(db, project);
             if (e.pass > 0) {
                 if (e.tool) assistant(true);
                 if (active) {
@@ -596,6 +632,14 @@ async function pi(signed: boolean, seed: number, active = false) {
                     { messages } as never,
                     ctx as never,
                 )) as { messages: PiMessage[] };
+                if (s02) {
+                    if (e.pass === 0)
+                        expect(JSON.stringify(served.messages)).toContain("Never push");
+                    memory.push({
+                        bytes: digest(served.messages.slice(0, 2).map((m) => m.content)),
+                        fold: getOrCreateSessionMeta(db, sessionId).cachedM0MaterializedAt,
+                    });
+                }
                 bodies.push(
                     digest(
                         {
@@ -659,6 +703,7 @@ async function pi(signed: boolean, seed: number, active = false) {
             acks,
             pending: getPendingOps(db, sessionId).length,
             bodies,
+            ...(s02 ? { memory } : {}),
         });
     } finally {
         piContext.clearContextHandlerSession(sessionId);
@@ -676,6 +721,7 @@ const modes = [
 for (const host of ["oc1", "oc2", "pi"] as const)
     for (const { signed, active, label } of modes)
         for (const seed of seeds) {
+            if (s02 && signed) continue;
             it(`independent randomized provider bytes ${host} ${label} seed=${seed}`, async () => {
                 Date.now = () => now;
                 try {
@@ -697,8 +743,8 @@ it("independent differential retains base content across the admitted-thinking-s
             process.env.REVIEW_WIRES_OUT,
             JSON.stringify(Object.fromEntries(capturedWires)),
         );
-    expect(summaries).toHaveLength(seeds.length * 9);
-    if (passes === 80 && !process.env.REVIEW_OUT) {
+    expect(summaries).toHaveLength(seeds.length * (s02 ? 3 : 9));
+    if (!s02 && passes === 80 && !process.env.REVIEW_OUT) {
         // Signed digests use the fixture's baseCommit with only its referencePatch
         // guard applied. The impossible-fixed-floor guard preserves tool results
         // instead of dropping them when no amount of reclaim can fit the turn.

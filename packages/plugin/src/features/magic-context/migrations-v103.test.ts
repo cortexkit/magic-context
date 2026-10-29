@@ -71,14 +71,15 @@ describe("migration 103 session render payload isolation", () => {
             });
             expect(enforceSchemaFence(db, ":old:", 102)).toBe(true);
             runMigrations(db);
-            expect(LATEST_SUPPORTED_VERSION).toBe(103);
-            expect(LATEST_MIGRATION_VERSION).toBe(103);
+            expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
+            expect(LATEST_MIGRATION_VERSION).toBe(104);
             expect(MIGRATIONS.filter((m) => m.version === 103)).toHaveLength(1);
             expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({
-                v: 103,
+                v: 104,
             });
             expect(enforceSchemaFence(db, ":old:", 102)).toBe(false);
-            expect(enforceSchemaFence(db, ":new:", 103)).toBe(true);
+            expect(enforceSchemaFence(db, ":previous:", 103)).toBe(false);
+            expect(enforceSchemaFence(db, ":new:", 104)).toBe(true);
             expect(shape(db)).toEqual(shape(fresh));
             const columns = (
                 db.prepare("PRAGMA table_info(session_meta)").all() as { name: string }[]

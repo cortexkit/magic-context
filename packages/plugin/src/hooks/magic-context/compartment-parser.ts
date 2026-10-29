@@ -35,6 +35,8 @@ export interface ParsedFactAnchor {
     /** The printed `[A]`/`[A-B]` range the fact cites; absent when none was written. */
     startOrdinal?: number;
     endOrdinal?: number;
+    /** Disjoint source ranges; single-range anchors retain the legacy fields only. */
+    ranges?: Array<{ startOrdinal: number; endOrdinal: number }>;
 }
 
 /**
@@ -117,7 +119,7 @@ const HISTORIAN_CATEGORIES: ReadonlySet<string> = new Set(V2_MEMORY_CATEGORIES);
 // character, so JavaScript and Rust classify the same input the same way.
 // Mirrors `side_channel_anchor_regex` in crates/mc-module/src/historian_validate.rs.
 const FACT_ANCHOR_PREFIX_REGEX =
-    /^[ \t]*[[(][ \t]*(?:at_compartment|origin_compartment)[ \t]*=[ \t]*"?([0-9]+|unknown)"?(?:[ \t]+messages[ \t]*=[ \t]*"?([0-9]+)(?:[ \t]*-[ \t]*([0-9]+))?"?)?[ \t]*[\])][ \t]*([\s\S]+)$/;
+    /^[ \t]*[[(][ \t]*(?:at_compartment|origin_compartment)[ \t]*=[ \t]*"?([0-9]+|unknown)"?(?:[ \t]+messages[ \t]*=[ \t]*"?([0-9]+(?:[ \t]*-[ \t]*[0-9]+)?(?:[ \t]*,[ \t]*[0-9]+(?:[ \t]*-[ \t]*[0-9]+)?)*)"?)?[ \t]*[\])][ \t]*([\s\S]+)$/;
 // Whitespace trimmed from fact text: Unicode White_Space without U+0085 (that is,
 // JavaScript's `trim` set without U+FEFF). U+0085 and U+FEFF stay ordinary text, as
 // in `is_fact_trim_char` in the Rust parser.
@@ -193,15 +195,25 @@ export function splitFactAnchorPrefix(text: string): {
 } {
     const match = text.match(FACT_ANCHOR_PREFIX_REGEX);
     if (!match) return { content: trimFactText(text) };
-    const content = trimFactText(match[4]);
+    const content = trimFactText(match[3]);
     // An index or range past 2^53 rejects the whole anchor, as in Rust.
     const compartmentIndex = parseOrdinal(match[1]);
     if (compartmentIndex === undefined) return { content };
     if (match[2] === undefined) return { content, anchor: { compartmentIndex } };
-    const startOrdinal = parseOrdinal(match[2]);
-    const endOrdinal = match[3] === undefined ? startOrdinal : parseOrdinal(match[3]);
-    if (startOrdinal === undefined || endOrdinal === undefined) return { content };
-    return { content, anchor: { compartmentIndex, startOrdinal, endOrdinal } };
+    const parts = match[2].split(",");
+    if (parts.length > 3) return { content };
+    const ranges: Array<{ startOrdinal: number; endOrdinal: number }> = [];
+    for (const part of parts) {
+        const [start, end] = part.trim().split(/[ \t]*-[ \t]*/);
+        const startOrdinal = parseOrdinal(start);
+        const endOrdinal = end === undefined ? startOrdinal : parseOrdinal(end);
+        if (startOrdinal === undefined || endOrdinal === undefined) return { content };
+        ranges.push({ startOrdinal, endOrdinal });
+    }
+    return {
+        content,
+        anchor: { compartmentIndex, ...ranges[0], ...(ranges.length > 1 ? { ranges } : {}) },
+    };
 }
 
 /** True when `inner` opens tier `digit` anywhere at or after `from`. */

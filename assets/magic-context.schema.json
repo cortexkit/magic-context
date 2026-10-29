@@ -1183,6 +1183,17 @@
           "x-mc-live-reload": true,
           "type": "boolean"
         },
+        "turn_two": {
+          "default": "allowlist",
+          "x-mc-user-only": true,
+          "description": "User-level config only. Control the second historian pass that can add, edit, merge or replace memories. \"allowlist\" permits it only for model and host profiles enabled in Magic Context's shipped validation allowlist; \"off\" disables it. Invalid values are reported and treated as \"off\", never as the default. Independent of two_pass, which remains the editor-polish pass; two_pass: true keeps memory-lifecycle turn two dormant. (default: \"allowlist\")",
+          "x-mc-live-reload": true,
+          "type": "string",
+          "enum": [
+            "allowlist",
+            "off"
+          ]
+        },
         "disallowed_tools": {
           "default": [],
           "description": "Legacy compatibility setting. Historians, recomp and editor passes always run with zero tools and locked permissions; this list no longer changes their tool surface. (default: [])",

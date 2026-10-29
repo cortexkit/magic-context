@@ -3298,6 +3298,19 @@ export const MIGRATIONS: Migration[] = [
         description: "isolate session render payloads and chunk growing replay metadata",
         up: splitSessionMetaPayloads,
     },
+    {
+        version: 104,
+        description: "nullable safety-critical memory assessment",
+        up(db: Database): void {
+            if (!tableExists(db, "memories")) return;
+            ensureColumn(
+                db,
+                "memories",
+                "safety_critical",
+                "INTEGER CHECK (safety_critical IN (0, 1))",
+            );
+        },
+    },
 ];
 
 /**

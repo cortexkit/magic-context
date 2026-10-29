@@ -17,16 +17,19 @@
  * Outcomes that consume an attempt (`fact_attempts` +1, `decided_pending` once it
  * reaches `MAX_STAGE2_ATTEMPTS`): a stage-2 transport failure, an unparseable,
  * length-capped or schema-invalid envelope (every fact of the send), a check
- * transport failure, an unvalidated reported profile for an edit, a CAS loss, and a
+ * transport failure, an identity mismatch for any action or score, a CAS loss, and a
  * carrier that reports on recovery that the send or child no longer exists.
- * Pre-send skips consume nothing: a dormant lane (one whose carrier has no
- * provider-enforced response schema), a carrier that cannot continue the child,
+ * Pre-send skips consume nothing: a dormant lane, a carrier that cannot continue the child,
  * `authority_elsewhere` (the Rust module, not this process, owns the project's
  * memory), and backlog facts beyond `RETRY_BACKLOG_PER_RUN`.
  */
 
+import { realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { sessionLog } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
+import { CHECK_SCHEMA_CONTRACT } from "./historian-schema";
 import {
     type ApplierReceipt,
     applyHistorianRevision,
@@ -38,6 +41,7 @@ import {
 import { RETRY_BACKLOG_PER_RUN } from "./lifecycle-constants";
 import {
     type AddedClause,
+    CHECK_SYSTEM_PROMPTS,
     type ChangedClause,
     CheckOutcomeUnknownError,
     type CheckReply,
@@ -46,11 +50,28 @@ import {
     type ReportedProfile,
     type RevisionDecision,
 } from "./lifecycle-gates";
-import { type EvidenceBlock, normalizeLifecycleText, splitMemoryClauses } from "./lifecycle-text";
+import {
+    type EvidenceBlock,
+    lifecycleTextHash,
+    normalizeLifecycleText,
+    splitMemoryClauses,
+} from "./lifecycle-text";
 import { getMemoryById } from "./storage-memory";
 import type { TurnOneLane } from "./turn-one-publication";
 import {
-    buildTurnTwoPrompt,
+    expandTurnTwoEntry,
+    isTurnTwoEntry,
+    lifecycleToolHash,
+    loadTurnTwoAllowlist,
+    matchesReportedProfile,
+    matchesTurnTwoEntry,
+    matchesTurnTwoSelection,
+    type TurnTwoEntry,
+    type TurnTwoTrialAuthorization,
+} from "./turn-two-allowlist";
+import {
+    applyDecidedPrefix,
+    fitTurnTwoPrompt,
     parseTurnTwoEnvelope,
     type TurnTwoDecision,
     type TurnTwoPromptFact,
@@ -97,11 +118,13 @@ export interface TurnTwoStageReply {
     /**
      * The profile the provider reported for this reply (provider, the model id it
      * actually answered with, variant, temperature, and the historian system hash).
-     * Null when the carrier could not tell; an edit, merge or replacement is
-     * then deferred (`retryable`, one attempt consumed) instead of applied.
+     * Null when the carrier could not tell; the entire stage is then deferred
+     * (`retryable`, one attempt consumed per fact) instead of applied.
      */
     profile: ReportedProfile | null;
     usage?: unknown;
+    /** Any tool call or result invalidates the send, even beside valid text. */
+    toolActivity?: boolean;
 }
 
 /**
@@ -145,8 +168,8 @@ export interface TurnTwoCarrier extends TurnTwoCheckCarrier {
     /** Carrier kind written on stage records, so recovery can find its carrier again. */
     readonly carrier: string;
     readonly harness: string;
-    /** True only when the provider enforces the turn-two response schema. */
-    readonly enforcedJson: boolean;
+    /** Accepted for older callers, but ignored: provider enforcement does not authorize a send. */
+    readonly enforcedJson?: boolean;
     /** The turn-one child this carrier continues; null when it cannot continue one. */
     readonly childSessionId: string | null;
     /**
@@ -216,11 +239,9 @@ export interface TurnTwoRunInput {
     carrier: TurnTwoCarrier;
     memoryEnabled: boolean;
     autoPromote: boolean;
-    /**
-     * Profiles a recorded replay validated. An edit, merge or replacement whose
-     * reported profile is not among them is deferred (`retryable`, one attempt).
-     */
-    validatedProfiles: readonly ReportedProfile[];
+    /** Test-only row source. Production loads the reviewed allowlist. */
+    validatedProfiles?: readonly ReportedProfile[];
+    trialAuthorization?: TurnTwoTrialAuthorization;
     embedQuery?: TurnTwoQueryEmbedder;
     readExcerpt?: TurnTwoExcerptReader;
     recover?: TurnTwoRecoveryResolver;
@@ -248,6 +269,166 @@ interface StageRequest {
     items: number[];
     lexicalOnly: boolean;
     prompt: string;
+}
+
+/** Persisted in turn one's request_json before dispatch; reports never supply these bytes. */
+export interface TurnOneAuthorizationRequest {
+    requestedIdentity: TurnTwoEntry;
+    system: string;
+    formatInstruction: string;
+    toolSurface: unknown;
+    checkToolSurface: unknown;
+}
+
+/** Build the requested identity from the exact bytes persisted before dispatch. */
+export function buildTurnOneAuthorizationRequest(
+    profile: Pick<
+        TurnTwoEntry,
+        "lane" | "carrier" | "provider" | "modelId" | "variant" | "temperature" | "thinkingLevel"
+    >,
+    bytes: Omit<TurnOneAuthorizationRequest, "requestedIdentity">,
+): TurnOneAuthorizationRequest {
+    return {
+        ...bytes,
+        requestedIdentity: {
+            ...profile,
+            historianSystemHash: lifecycleTextHash(bytes.system),
+            combinedSchemaHash: lifecycleTextHash(bytes.formatInstruction),
+            historianToolHash: lifecycleToolHash(bytes.toolSurface),
+            checkSystemHashes: Object.fromEntries(
+                Object.entries(CHECK_SYSTEM_PROMPTS).map(([kind, system]) => [
+                    kind,
+                    lifecycleTextHash(system),
+                ]),
+            ) as TurnTwoEntry["checkSystemHashes"],
+            checkSchemaHash: lifecycleTextHash(CHECK_SCHEMA_CONTRACT),
+            checkToolHash: lifecycleToolHash(bytes.checkToolSurface),
+        },
+    };
+}
+
+/** Set requested bytes once, while turn one is still dispatched. */
+export function persistTurnOneAuthorization(
+    db: Database,
+    stageKey: string,
+    request: TurnOneAuthorizationRequest,
+): void {
+    db.transaction(() => {
+        const row = db
+            .prepare(
+                "SELECT request_json FROM memory_stage_attempts WHERE stage_key=? AND stage='turn_one' AND state='dispatched'",
+            )
+            .get(stageKey) as { request_json: string } | null;
+        if (!row) throw new Error("Turn-one request is no longer writable");
+        const existing = JSON.parse(row.request_json) as Record<string, unknown>;
+        if (existing.requestedIdentity) throw new Error("Turn-one requested identity is immutable");
+        db.prepare("UPDATE memory_stage_attempts SET request_json=? WHERE stage_key=?").run(
+            JSON.stringify({ ...existing, ...request }),
+            stageKey,
+        );
+    }).immediate();
+}
+
+/** Freeze transport metadata once; retries cannot overwrite the answering identity. */
+export function freezeTurnOneProfile(
+    db: Database,
+    stageKey: string,
+    profile: ReportedProfile,
+): void {
+    const changed = db
+        .prepare(
+            "UPDATE memory_stage_attempts SET reported_profile_json=? WHERE stage_key=? AND stage='turn_one' AND reported_profile_json IS NULL",
+        )
+        .run(JSON.stringify(profile), stageKey).changes;
+    if (!changed) throw new Error("Turn-one actual identity is immutable");
+}
+
+export function trialRootMatches(db: Database, authorization: TurnTwoTrialAuthorization): boolean {
+    try {
+        const root = authorization.attestedRoot;
+        if (!isAbsolute(root) || resolve(root) !== root || realpathSync(root) !== root)
+            return false;
+        const task = relative(join(realpathSync(tmpdir()), "magic-context"), root);
+        if (!task || task.startsWith(`..${sep}`) || task === ".." || isAbsolute(task)) return false;
+        const file = (
+            db.prepare("PRAGMA database_list").all() as Array<{ name: string; file: string }>
+        ).find((row) => row.name === "main")?.file;
+        if (!file || realpathSync(file) !== resolve(file)) return false;
+        const stored = relative(root, resolve(file));
+        return !!stored && stored !== ".." && !stored.startsWith(`..${sep}`) && !isAbsolute(stored);
+    } catch {
+        return false;
+    }
+}
+
+function stageAuthorization(
+    db: Database,
+    stageKey: string,
+    context: Pick<TurnTwoRunInput, "validatedProfiles" | "trialAuthorization">,
+): { profile: ReportedProfile; profiles: ReportedProfile[] } | null {
+    const row = db
+        .prepare(
+            `SELECT t1.request_json,t1.reported_profile_json FROM memory_stage_attempts t1
+         JOIN memory_stage_attempts t2 ON t1.project_path=t2.project_path AND t1.publication_id=t2.publication_id
+         WHERE t2.stage_key=? AND t1.stage='turn_one' ORDER BY t1.run_attempt DESC LIMIT 1`,
+        )
+        .get(stageKey) as { request_json: string; reported_profile_json: string | null } | null;
+    if (!row?.reported_profile_json) return null;
+    try {
+        const request = JSON.parse(row.request_json) as TurnOneAuthorizationRequest;
+        const profile = JSON.parse(row.reported_profile_json) as ReportedProfile;
+        const requested = request.requestedIdentity;
+        if (
+            !requested ||
+            typeof request.system !== "string" ||
+            typeof request.formatInstruction !== "string"
+        )
+            return null;
+        const recomputed = buildTurnOneAuthorizationRequest(requested, request).requestedIdentity;
+        const actual = {
+            ...recomputed,
+            lane: profile.lane,
+            carrier: profile.carrier,
+            provider: profile.provider,
+            modelId: profile.modelId,
+            variant: profile.variant,
+            temperature: profile.temperature,
+            thinkingLevel: profile.thinkingLevel,
+        };
+        if (!isTurnTwoEntry(actual)) return null;
+        if (!matchesTurnTwoSelection(recomputed, requested)) return null;
+        // A transport report cannot replace persisted system, contract or tool bytes.
+        if (!matchesReportedProfile(profile, expandTurnTwoEntry(actual)[0])) return null;
+        const trial = context.trialAuthorization;
+        let profiles: ReportedProfile[];
+        if (trial) {
+            if (
+                !trialRootMatches(db, trial) ||
+                !matchesTurnTwoSelection(requested, trial.candidate) ||
+                !matchesTurnTwoEntry(actual, trial.candidate)
+            )
+                return null;
+            profiles = expandTurnTwoEntry(trial.candidate);
+        } else if (context.validatedProfiles !== undefined) {
+            const validated = context.validatedProfiles;
+            profiles = expandTurnTwoEntry(actual);
+            if (
+                !profiles.every((expected) =>
+                    validated.some((candidate) => matchesReportedProfile(expected, candidate)),
+                )
+            )
+                return null;
+        } else {
+            const entry = loadTurnTwoAllowlist().entries.find((candidate) =>
+                matchesTurnTwoEntry(actual, candidate),
+            );
+            if (!entry) return null;
+            profiles = expandTurnTwoEntry(entry);
+        }
+        return { profile, profiles };
+    } catch {
+        return null;
+    }
 }
 
 interface FactRow {
@@ -471,36 +652,15 @@ function reserveTurnTwo(
             for (const fact of facts)
                 if (reserve.run(stageKey, fact.id).changes === 1) available.push(fact);
             const availableItems = promptItems(db, items);
-            // Fit the batch to `TURN_TWO_PROMPT_MAX`: facts first (this publication's,
-            // then backlog), then items, each taken only while the prompt still fits.
-            // The first fact in that order is sent even when it alone exceeds the
-            // bound: nothing in a fact's rendering may be cut, so there is no smaller
-            // form to send. What is
-            // left out is released unreserved, consumes no attempt, and is named in the
-            // prompt's coverage notice.
-            const reserved: FactRow[] = [];
-            const itemViews: typeof availableItems = [];
-            const render = (deferred?: { facts: number; items: number }) =>
-                buildTurnTwoPrompt({
-                    facts: reserved.map((fact) => promptFacts.get(fact.id)!),
-                    items: itemViews,
-                    lexicalOnly,
-                    deferred,
-                });
-            const worstCase = { facts: available.length, items: availableItems.length };
-            for (const fact of available) {
-                reserved.push(fact);
-                if (reserved.length > 1 && render(worstCase).length > TURN_TWO_PROMPT_MAX)
-                    reserved.pop();
-            }
-            for (const item of availableItems) {
-                itemViews.push(item);
-                if (
-                    (reserved.length > 0 || itemViews.length > 1) &&
-                    render(worstCase).length > TURN_TWO_PROMPT_MAX
-                )
-                    itemViews.pop();
-            }
+            const fitted = fitTurnTwoPrompt({
+                facts: available.map((fact) => promptFacts.get(fact.id)!),
+                items: availableItems,
+                lexicalOnly,
+                maxLength: TURN_TWO_PROMPT_MAX,
+            });
+            const selectedIds = new Set(fitted.facts.map((fact) => fact.factId));
+            const reserved = available.filter((fact) => selectedIds.has(fact.id));
+            const itemViews = fitted.items;
             const release = db.prepare(
                 "UPDATE memory_pending_facts SET state='retryable',reserved_stage_key=NULL WHERE id=? AND reserved_stage_key=?",
             );
@@ -510,10 +670,7 @@ function reserveTurnTwo(
                 db.prepare("DELETE FROM memory_stage_attempts WHERE stage_key=?").run(stageKey);
                 return null;
             }
-            const deferred = {
-                facts: available.length - reserved.length,
-                items: availableItems.length - itemViews.length,
-            };
+            const deferred = fitted.deferred;
             const request: StageRequest = {
                 ...(input.carrier.baseline !== undefined
                     ? { baseline: input.carrier.baseline }
@@ -527,11 +684,11 @@ function reserveTurnTwo(
                 ),
                 items: itemViews.map((item) => item.item),
                 lexicalOnly,
-                prompt: render(deferred),
+                prompt: fitted.prompt,
             };
             if (deferred.facts > 0 || deferred.items > 0)
                 input.log?.(
-                    `turn two: prompt size bound left out ${deferred.facts} fact(s) and ${deferred.items} item(s) for a later request`,
+                    `turn two: prompt size bound left out ${deferred.facts} fact(s) and ${deferred.items} item(s); eligible for later runs, with no scheduled retry`,
                 );
             db.prepare("UPDATE memory_stage_attempts SET request_json=? WHERE stage_key=?").run(
                 JSON.stringify(request),
@@ -551,7 +708,11 @@ function recordStageReply(db: Database, stageKey: string, reply: TurnTwoStageRep
     db.prepare(
         "UPDATE memory_stage_attempts SET reply_json=?,reported_profile_json=?,usage_json=?,state='replied' WHERE stage_key=? AND state IN ('reserved','sending')",
     ).run(
-        JSON.stringify({ text: reply.text, lengthCapped: reply.lengthCapped }),
+        JSON.stringify({
+            text: reply.text,
+            lengthCapped: reply.lengthCapped,
+            toolActivity: reply.toolActivity,
+        }),
         JSON.stringify(reply.profile),
         JSON.stringify(reply.usage ?? null),
         stageKey,
@@ -562,8 +723,8 @@ interface ResolveContext {
     log?: (message: string) => void;
     memoryEnabled: boolean;
     autoPromote: boolean;
-    enforcedJson: boolean;
-    validatedProfiles: readonly ReportedProfile[];
+    validatedProfiles?: readonly ReportedProfile[];
+    trialAuthorization?: TurnTwoTrialAuthorization;
     checks: TurnTwoCheckCarrier;
     owner: { sessionId: string; harness: string };
 }
@@ -575,6 +736,41 @@ function stillReserved(db: Database, stageKey: string): number {
         )
         .get(stageKey) as { n: number };
     return row.n;
+}
+
+function reservationsIntact(db: Database, stageKey: string, request: StageRequest): boolean {
+    return Object.keys(request.factAttempts).every((id) => {
+        const row = db
+            .prepare("SELECT state,reserved_stage_key FROM memory_pending_facts WHERE id=?")
+            .get(Number(id)) as { state: string; reserved_stage_key: string | null } | null;
+        if (!row) return false;
+        if (row.reserved_stage_key === stageKey && row.state === "in_flight") return true;
+        // Only this stage's receipt can stand in for a reservation after a partial resolution.
+        return !!db
+            .prepare(
+                "SELECT 1 FROM memory_decision_receipts WHERE fact_id=? AND CASE WHEN json_valid(decision_key) THEN json_extract(decision_key,'$[5]') END=?",
+            )
+            .get(Number(id), stageKey);
+    });
+}
+
+/** The parser cannot know which facts or score items were actually sent. */
+export function parseTurnTwoStageEnvelope(
+    reply: Pick<TurnTwoStageReply, "text" | "lengthCapped" | "toolActivity">,
+    factIds: readonly number[],
+    items: readonly number[],
+) {
+    const envelope = parseTurnTwoEnvelope(reply.text, reply.lengthCapped, reply.toolActivity);
+    if (!envelope.ok) return envelope;
+    return {
+        ...envelope,
+        extraFactIds: [...envelope.decisions.keys()].filter((id) => !factIds.includes(id)),
+        schemaValid:
+            envelope.schemaValid &&
+            factIds.every((id) => envelope.decisions.has(id)) &&
+            [...envelope.decisions.keys()].every((id) => factIds.includes(id)) &&
+            envelope.scores.every((score) => items.includes(score.item)),
+    };
 }
 
 /**
@@ -598,16 +794,44 @@ async function resolveStage(
     } | null;
     const request = readStageRequest(db, stageKey);
     if (!row?.reply_json || !request) return true;
-    const reply = JSON.parse(row.reply_json) as { text: string; lengthCapped: boolean };
+    if (!reservationsIntact(db, stageKey, request)) {
+        revokeStage(db, stageKey);
+        return true;
+    }
+    const reply = JSON.parse(row.reply_json) as TurnTwoStageReply;
     const profile =
         (row.reported_profile_json
             ? (JSON.parse(row.reported_profile_json) as ReportedProfile | null)
             : null) ?? PLACEHOLDER_PROFILE;
-    const envelope = parseTurnTwoEnvelope(reply.text, reply.lengthCapped);
+    const authorization = stageAuthorization(db, stageKey, context);
+    // Identity is a stage guard, before parsing can terminally resolve even one fact.
+    if (!authorization || !matchesReportedProfile(profile, authorization.profile)) {
+        consumeStageAttempts(db, stageKey, "identity_mismatch", "identity_mismatch");
+        return true;
+    }
+    context = { ...context, validatedProfiles: authorization.profiles };
+    const envelope = parseTurnTwoStageEnvelope(
+        reply,
+        Object.keys(request.factAttempts).map(Number),
+        request.items,
+    );
+    db.prepare(
+        "UPDATE memory_stage_attempts SET reply_json=? WHERE stage_key=? AND state='replied'",
+    ).run(
+        JSON.stringify({
+            ...reply,
+            envelopeValid: envelope.ok,
+            schemaValid: envelope.ok && envelope.schemaValid,
+            extraFactIds: envelope.ok ? envelope.extraFactIds : [],
+        }),
+        stageKey,
+    );
     if (!envelope.ok) {
         consumeStageAttempts(db, stageKey, `envelope_${envelope.reason}`, "envelope_failed");
         return true;
     }
+    if (envelope.extraFactIds.length > 0)
+        context.log?.(`turn two: ignored extra fact ids: ${envelope.extraFactIds.join(", ")}`);
     const facts = db
         .prepare(
             "SELECT id,project_path,publication_id,category,content,anchor_known,fact_attempts,reserved_stage_key AS stageKey FROM memory_pending_facts WHERE state='in_flight' AND reserved_stage_key=? ORDER BY id",
@@ -623,7 +847,23 @@ async function resolveStage(
                 projectPath: fact.project_path,
                 factAttempts: attempts,
             });
-            await resolveFact(db, fact, attempts, decision, profile, context, stageKey);
+            const receipt = await resolveFact(
+                db,
+                fact,
+                attempts,
+                decision,
+                profile,
+                context,
+                stageKey,
+            );
+            if (receipt.reason === "unvalidated_profile") {
+                // Earlier facts keep their receipts; the failed check stops the remaining batch.
+                db.prepare(
+                    "UPDATE memory_pending_facts SET reason='identity_mismatch' WHERE id=?",
+                ).run(fact.id);
+                consumeStageAttempts(db, stageKey, "identity_mismatch", "identity_mismatch");
+                return true;
+            }
         } catch (error) {
             if (error instanceof CheckOutcomeUnknownError) return false;
             throw error;
@@ -638,6 +878,10 @@ async function resolveStage(
                 .get(stageKey)
         )
             return;
+        if (!reservationsIntact(db, stageKey, request)) {
+            revokeStage(db, stageKey);
+            return;
+        }
         recordItemScores(db, request.items, envelope.scores);
         if (stillReserved(db, stageKey) === 0)
             db.prepare(
@@ -729,7 +973,10 @@ async function resolveFact(
             return applyMemoryAdmission(db, {
                 key,
                 operation: "new",
-                input,
+                input: {
+                    ...input,
+                    content: applyDecidedPrefix(input.content, decision.decided),
+                },
                 memoryEnabled: context.memoryEnabled,
                 autoPromote: context.autoPromote,
                 factId: fact.id,
@@ -889,14 +1136,13 @@ async function resolveRevision(
     };
     const gate: GateContext = {
         enabled: true,
-        enforcedJson: context.enforcedJson,
         memoryEnabled: context.memoryEnabled,
         autoPromote: context.autoPromote,
         anchorKnown: fact.anchor_known === 1,
         blocks: factBlocks(db, fact.id).map(({ sessionId: _session, ...block }) => block),
         sources: [],
         historianProfile: profile,
-        validatedProfiles: [...context.validatedProfiles],
+        validatedProfiles: [...(context.validatedProfiles ?? [])],
     };
     return applyHistorianRevision(
         db,
@@ -974,7 +1220,8 @@ export async function recoverTurnTwoStages(
         projectPath: string;
         memoryEnabled: boolean;
         autoPromote: boolean;
-        validatedProfiles: readonly ReportedProfile[];
+        validatedProfiles?: readonly ReportedProfile[];
+        trialAuthorization?: TurnTwoTrialAuthorization;
         resolver: TurnTwoRecoveryResolver | undefined;
         log?: (message: string) => void;
         now?: () => number;
@@ -1033,10 +1280,8 @@ export async function recoverTurnTwoStages(
             const done = await resolveStage(db, record.stageKey, {
                 memoryEnabled: input.memoryEnabled,
                 autoPromote: input.autoPromote,
-                // A reply is only recorded by a run on an enabled lane, which requires a
-                // provider-enforced response schema.
-                enforcedJson: true,
                 validatedProfiles: input.validatedProfiles,
+                trialAuthorization: input.trialAuthorization,
                 checks: carrier ?? {
                     check: () => Promise.reject(new CheckOutcomeUnknownError("no carrier")),
                 },
@@ -1064,6 +1309,38 @@ export async function recoverTurnTwoStages(
     }
 }
 
+/** Revoke open stages without resolving a reply or charging a fact's send budget. */
+export async function sweepTurnTwoStages(
+    db: Database,
+    input: { projectPath: string; resolver?: TurnTwoRecoveryResolver },
+): Promise<void> {
+    for (const record of stageRecords(db, input.projectPath)) {
+        const carrier = input.resolver?.(record);
+        const released = revokeStage(db, record.stageKey);
+        if (released && carrier && carrier !== "busy") {
+            carrier.onRelease?.();
+            await carrier.close?.();
+        }
+    }
+}
+
+function revokeStage(db: Database, stageKey: string): boolean {
+    return db
+        .transaction(() => {
+            const changed = db
+                .prepare(
+                    "UPDATE memory_stage_attempts SET state='revoked' WHERE stage_key=? AND state IN ('reserved','sending','replied')",
+                )
+                .run(stageKey).changes;
+            if (!changed) return false;
+            db.prepare(
+                "UPDATE memory_pending_facts SET state='retryable',reason='turn_two_revoked',reserved_stage_key=NULL WHERE reserved_stage_key=? AND state='in_flight'",
+            ).run(stageKey);
+            return true;
+        })
+        .immediate();
+}
+
 /**
  * Run turn two for one publication on the retained turn-one child. The caller keeps
  * the child open until this returns and closes it only when `childInFlight` is false.
@@ -1074,7 +1351,7 @@ export async function runTurnTwo(db: Database, input: TurnTwoRunInput): Promise<
         reason,
         childInFlight: false,
     });
-    if (input.lane !== "enabled" || !input.carrier.enforcedJson) return skip("lane_dormant");
+    if (input.lane !== "enabled") return skip("lane_dormant");
     if (!input.memoryEnabled) return skip("memory_disabled");
     if (!tsOwnsMemory(db, input.projectPath)) {
         // The Rust module owns this project's memory, so this process may not apply
@@ -1086,12 +1363,15 @@ export async function runTurnTwo(db: Database, input: TurnTwoRunInput): Promise<
         return skip("authority_elsewhere");
     }
     if (!input.carrier.childSessionId) return skip("carrier_cannot_continue");
+    if (input.trialAuthorization && !trialRootMatches(db, input.trialAuthorization))
+        return skip("invalid_trial_authorization");
 
     await recoverTurnTwoStages(db, {
         projectPath: input.projectPath,
         memoryEnabled: input.memoryEnabled,
         autoPromote: input.autoPromote,
         validatedProfiles: input.validatedProfiles,
+        trialAuthorization: input.trialAuthorization,
         resolver: input.recover,
         log: input.log,
     });
@@ -1147,8 +1427,8 @@ export async function runTurnTwo(db: Database, input: TurnTwoRunInput): Promise<
     const done = await resolveStage(db, reserved.stageKey, {
         memoryEnabled: input.memoryEnabled,
         autoPromote: input.autoPromote,
-        enforcedJson: input.carrier.enforcedJson,
         validatedProfiles: input.validatedProfiles,
+        trialAuthorization: input.trialAuthorization,
         checks: input.carrier,
         owner: { sessionId: input.sessionId, harness: input.carrier.harness },
         log: input.log,

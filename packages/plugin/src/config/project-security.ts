@@ -34,6 +34,8 @@ const HISTORIAN_USER_ONLY_FIELDS = [
     // turning it ON would start spending the user's provider account on folds for
     // every project this process serves, not just its own.
     "host_runner",
+    // A repository must not enable memory-lifecycle writes or override the user's off switch.
+    "turn_two",
 ] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
 

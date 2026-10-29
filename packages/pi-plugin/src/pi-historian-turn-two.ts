@@ -1,3 +1,5 @@
+import { CHECK_SCHEMA_CONTRACT } from "@magic-context/core/features/magic-context/memory/historian-schema";
+import { hasHistorianToolActivity } from "@magic-context/core/features/magic-context/memory/historian-wire";
 import { resolveFactDecision } from "@magic-context/core/features/magic-context/memory/lifecycle-applier";
 import type { ReportedProfile } from "@magic-context/core/features/magic-context/memory/lifecycle-gates";
 import { lifecycleTextHash } from "@magic-context/core/features/magic-context/memory/lifecycle-text";
@@ -7,6 +9,7 @@ import {
 	type TurnTwoCarrier,
 	type TurnTwoRecoveryResolver,
 } from "@magic-context/core/features/magic-context/memory/turn-two";
+import { lifecycleToolHash } from "@magic-context/core/features/magic-context/memory/turn-two-allowlist";
 import {
 	closeTurnTwoChild,
 	registerTurnTwoChild,
@@ -15,12 +18,14 @@ import {
 import type { TurnTwoExcerptReader } from "@magic-context/core/features/magic-context/memory/turn-two-scoring";
 import { renderCheckInput } from "@magic-context/core/hooks/magic-context/historian-turn-two-carrier";
 import { sessionLog } from "@magic-context/core/shared/logger";
+import { toModelEntry } from "@magic-context/core/shared/resolve-fallbacks";
 import type { Database } from "@magic-context/core/shared/sqlite";
 import type {
 	SubagentRunner,
 	SubagentRunOptions,
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
+import { resolvePiHarnessKind } from "./pi-harness-kind";
 import type {
 	PiRpcHistorianChild,
 	PiRpcHistorianRunner,
@@ -239,33 +244,47 @@ export function recoverLostPiRpcStages(
 	return released;
 }
 
-function reportedProfile(
+export function reportedProfile(
 	result: SubagentRunResult,
 	options: SubagentRunOptions,
 	systemHash: string,
+	formatInstructions?: string,
+	harness = resolvePiHarnessKind(),
 ): ReportedProfile | null {
 	const provider = result.meta?.reportedProvider;
 	const modelId = result.meta?.reportedModel;
 	if (typeof provider !== "string" || typeof modelId !== "string") return null;
 	return {
+		lane: harness,
+		carrier: PI_RPC_CARRIER,
 		provider,
 		modelId,
-		variant: options.thinkingLevel ?? null,
-		temperature: options.temperature ?? null,
+		variant: toModelEntry(options.model)?.qualifier ?? null,
+		// RPC currently observes neither effective sampling nor effective thinking.
+		temperature: null,
+		thinkingLevel: null,
 		systemHash,
+		schemaHash:
+			formatInstructions === undefined
+				? null
+				: lifecycleTextHash(formatInstructions),
+		toolHash: lifecycleToolHash([]),
 	};
 }
 
-/** Tests can require JSON replies. Production Pi cannot enforce a reply schema, so it never enables this reconciliation carrier. */
+/** Continue the retained historian child; locally validate its best-effort replies. */
 export function createPiTurnTwoCarrier(args: {
 	child: PiRpcHistorianChild;
 	runner: PiRpcHistorianRunner;
 	options: SubagentRunOptions;
 	turnOneText: string;
-	enforcedJson: boolean;
+	enforcedJson?: boolean;
 	onStageKey?: (key: string) => void;
+	/** Persisted format instructions, shared byte-for-byte by both turns. */
+	formatInstructions?: string;
 }): PiTurnTwoCarrier {
 	const systemHash = lifecycleTextHash(args.options.systemPrompt);
+	const harness = resolvePiHarnessKind();
 	const cancellation = new AbortController();
 	const signal = args.options.signal
 		? AbortSignal.any([args.options.signal, cancellation.signal])
@@ -277,12 +296,11 @@ export function createPiTurnTwoCarrier(args: {
 			for (const child of checks) void child.close().catch(() => {});
 		},
 		carrier: PI_RPC_CARRIER,
-		harness: "pi",
-		enforcedJson: args.enforcedJson,
+		harness,
 		childSessionId: args.child.id,
 		baseline: lifecycleTextHash(args.turnOneText),
 		historianSystemHash: systemHash,
-		variant: args.options.thinkingLevel ?? null,
+		variant: toModelEntry(args.options.model)?.qualifier ?? null,
 		async send(prompt, key) {
 			signal.throwIfAborted();
 			args.onStageKey?.(key);
@@ -293,7 +311,14 @@ export function createPiTurnTwoCarrier(args: {
 			return {
 				text: result.assistantText,
 				lengthCapped: result.meta?.lengthCapped === true,
-				profile: reportedProfile(result, args.options, systemHash),
+				toolActivity: hasHistorianToolActivity(result.meta),
+				profile: reportedProfile(
+					result,
+					args.options,
+					systemHash,
+					args.formatInstructions,
+					harness,
+				),
 				usage: result.meta?.usage,
 			};
 		},
@@ -323,7 +348,13 @@ export function createPiTurnTwoCarrier(args: {
 				signal.throwIfAborted();
 				if (!result.ok)
 					throw new Error(`Pi check: ${result.reason}: ${result.error}`);
-				const profile = reportedProfile(result, options, request.systemHash);
+				const profile = reportedProfile(
+					result,
+					options,
+					lifecycleTextHash(request.system),
+					CHECK_SCHEMA_CONTRACT,
+					harness,
+				);
 				let verdicts = [];
 				try {
 					verdicts = JSON.parse(result.assistantText).verdicts;
@@ -331,16 +362,22 @@ export function createPiTurnTwoCarrier(args: {
 					/* Malformed output is a refusing verdict, not a transport retry. */
 				}
 				return {
+					toolActivity: hasHistorianToolActivity(result.meta),
 					verdicts:
 						Array.isArray(verdicts) && result.meta?.lengthCapped !== true
 							? verdicts
 							: [],
 					profile: profile ?? {
+						lane: harness,
+						carrier: PI_RPC_CARRIER,
 						provider: "",
 						modelId: "",
 						variant: null,
 						temperature: null,
-						systemHash: request.systemHash,
+						thinkingLevel: null,
+						systemHash: lifecycleTextHash(request.system),
+						schemaHash: lifecycleTextHash(CHECK_SCHEMA_CONTRACT),
+						toolHash: lifecycleToolHash([]),
 					},
 					usage: result.meta?.usage,
 				};
@@ -423,8 +460,11 @@ export function schedulePiHistorianTurnTwo(args: {
 	turnOneText: string;
 	memoryEnabled: boolean;
 	autoPromote: boolean;
-	validatedProfiles: readonly ReportedProfile[];
+	validatedProfiles?: readonly ReportedProfile[];
+	trialAuthorization?: import("@magic-context/core/features/magic-context/memory/turn-two-allowlist").TurnTwoTrialAuthorization;
+	formatInstructions?: string;
 	log: (message: string) => void;
+	beforeResolve?: () => Promise<boolean | void>;
 	readExcerpt?: TurnTwoExcerptReader;
 }): void {
 	liveChildren.set(args.child.id, args.child);
@@ -435,7 +475,6 @@ export function schedulePiHistorianTurnTwo(args: {
 	};
 	const carrier = createPiTurnTwoCarrier({
 		...args,
-		enforcedJson: true,
 		onStageKey: (key) => {
 			if (!renewStageLease(args.db, key, args.child.id))
 				throw new Error("Pi RPC stage released before send");
@@ -456,7 +495,7 @@ export function schedulePiHistorianTurnTwo(args: {
 	registerTurnTwoChild({
 		childSessionId: args.child.id,
 		parentSessionId: args.sessionId,
-		harness: "pi",
+		harness: carrier.harness,
 		handle: args.child,
 		active: true,
 		close: async () => {
@@ -470,11 +509,67 @@ export function schedulePiHistorianTurnTwo(args: {
 	const task = new Promise<void>((resolve) => setTimeout(resolve, 0)).then(
 		async () => {
 			try {
+				if ((await args.beforeResolve?.()) === false) {
+					await closeTurnTwoChild(args.child.id);
+					return;
+				}
+				const recovery = recoverLivePiRpcStage(args.db);
 				const result = await runTurnTwo(args.db, {
 					...args,
 					lane: "enabled",
-					carrier,
-					recover: recoverLivePiRpcStage(args.db),
+					carrier: {
+						...carrier,
+						send: async (...input) => {
+							if ((await args.beforeResolve?.()) === false)
+								throw new Error("Turn two was revoked before send");
+							try {
+								return await carrier.send(...input);
+							} finally {
+								await args.beforeResolve?.();
+							}
+						},
+						check: async (...input) => {
+							if ((await args.beforeResolve?.()) === false)
+								throw new Error("Turn two was revoked before check");
+							try {
+								return await carrier.check(...input);
+							} finally {
+								await args.beforeResolve?.();
+							}
+						},
+					},
+					recover: (record) => {
+						const recovered = recovery(record);
+						if (!recovered || recovered === "busy") return recovered;
+						return {
+							...recovered,
+							check: async (...input) => {
+								if ((await args.beforeResolve?.()) === false)
+									throw new Error("Recovered stage was revoked before check");
+								try {
+									return await recovered.check(...input);
+								} finally {
+									await args.beforeResolve?.();
+								}
+							},
+							reattach: async () => {
+								try {
+									return await recovered.reattach();
+								} finally {
+									await args.beforeResolve?.();
+								}
+							},
+							reattachCheck: recovered.reattachCheck
+								? async (...input) => {
+										try {
+											return await recovered.reattachCheck!(...input);
+										} finally {
+											await args.beforeResolve?.();
+										}
+									}
+								: undefined,
+						};
+					},
 				});
 				if (result.childInFlight) return;
 			} catch (error) {

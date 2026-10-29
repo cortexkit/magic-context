@@ -186,5 +186,12 @@
       "ALTER TABLE session_meta DROP COLUMN processed_image_stripped_ids",
       "ALTER TABLE session_meta DROP COLUMN memory_block_ids"
     ]
+  },
+  {
+    "version": 104,
+    "description": "nullable safety-critical memory assessment",
+    "sql": [
+      "ALTER TABLE memories ADD COLUMN safety_critical INTEGER CHECK (safety_critical IN (0, 1))"
+    ]
   }
 ]

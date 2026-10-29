@@ -7,7 +7,6 @@ import {
 	CHECK_SYSTEM_PROMPTS,
 	type CheckReply,
 	type CheckRequest,
-	type ReportedProfile,
 } from "@magic-context/core/features/magic-context/memory/lifecycle-gates";
 import { lifecycleTextHash } from "@magic-context/core/features/magic-context/memory/lifecycle-text";
 import {
@@ -23,6 +22,7 @@ import {
 	TURN_TWO_UNREACHABLE_MAX_AGE_MS,
 	TurnTwoOutcomeUnknownError,
 } from "@magic-context/core/features/magic-context/memory/turn-two";
+import { authorizationFixture } from "@magic-context/core/features/magic-context/memory/turn-two-test-fixtures.test";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import type { SubagentRunResult } from "@magic-context/core/shared/subagent-runner";
 import {
@@ -40,20 +40,21 @@ import type {
 import { createTestDb } from "./test-utils.test";
 
 const projectPath = "dir:/s8-ownership";
-const profile: ReportedProfile = {
-	provider: "test",
-	modelId: "model",
-	variant: null,
-	temperature: 0,
-	systemHash: lifecycleTextHash("historian system"),
-};
-const validatedProfiles = [
-	profile,
-	...Object.values(CHECK_SYSTEM_PROMPTS).map((system) => ({
-		...profile,
-		systemHash: lifecycleTextHash(system),
-	})),
-];
+const authorization = authorizationFixture(
+	{
+		lane: "pi",
+		carrier: "pi-historian-rpc",
+		provider: "test",
+		modelId: "model",
+		variant: null,
+		temperature: null,
+		thinkingLevel: null,
+	},
+	"historian system",
+	[],
+);
+const profile = authorization.profile;
+const validatedProfiles = authorization.rows;
 
 function publication(db: ReturnType<typeof createTestDb>) {
 	const send = allocateTurnOneSend(db, {
@@ -65,6 +66,7 @@ function publication(db: ReturnType<typeof createTestDb>) {
 		chunkStart: 1,
 		chunkEnd: 2,
 	});
+	authorization.persist(db, send.stageKey);
 	db.transaction(() =>
 		commitTurnOnePublication(db, {
 			send,
@@ -131,28 +133,32 @@ describe("historian resolving ownership", () => {
 						stageKey = key;
 						return {
 							text: JSON.stringify({
-								decisions: [
-									{
-										fact_id: 1,
-										action: "edit",
-										target_id: memory.id,
-										revision: 1,
-										removed: [],
-										replaced: [
-											{
-												memory_id: memory.id,
-												clause: 1,
-												block: 1,
-												excerpt: "New rule.",
-											},
-										],
-										kept: [{ memory_id: memory.id, clause: 2 }],
-										added: [
-											{ text: "New rule. ", block: 1, excerpt: "New rule." },
-										],
-										final_text: "New rule. Keep rule.",
-									},
-								],
+								result: {
+									step: "turn_two",
+									decisions: [
+										{
+											fact_id: 1,
+											check: "Audit fixture.",
+											action: "edit",
+											target_id: memory.id,
+											revision: 1,
+											removed: [],
+											replaced: [
+												{
+													memory_id: memory.id,
+													clause: 1,
+													block: 1,
+													excerpt: "New rule.",
+												},
+											],
+											kept: [{ memory_id: memory.id, clause: 2 }],
+											added: [
+												{ text: "New rule. ", block: 1, excerpt: "New rule." },
+											],
+											final_text: "New rule. Keep rule.",
+										},
+									],
+								},
 							}),
 							lengthCapped: false,
 							profile,
@@ -172,7 +178,7 @@ describe("historian resolving ownership", () => {
 										? "yes"
 										: "no",
 							})),
-							profile: { ...profile, systemHash: request.systemHash },
+							profile: authorization.checkProfile(request.systemHash),
 							usage: null,
 						};
 					},
@@ -314,26 +320,30 @@ describe("Pi UUID stage lease", () => {
 				durationMs: 1,
 				meta: { reportedProvider: "test", reportedModel: "model" },
 				assistantText: JSON.stringify({
-					decisions: [
-						{
-							fact_id: 1,
-							action: "edit",
-							target_id: memory.id,
-							revision: 1,
-							removed: [],
-							replaced: [
-								{
-									memory_id: memory.id,
-									clause: 1,
-									block: 1,
-									excerpt: "New rule.",
-								},
-							],
-							kept: [{ memory_id: memory.id, clause: 2 }],
-							added: [{ text: "New rule. ", block: 1, excerpt: "New rule." }],
-							final_text: "New rule. Keep rule.",
-						},
-					],
+					result: {
+						step: "turn_two",
+						decisions: [
+							{
+								fact_id: 1,
+								check: "Audit fixture.",
+								action: "edit",
+								target_id: memory.id,
+								revision: 1,
+								removed: [],
+								replaced: [
+									{
+										memory_id: memory.id,
+										clause: 1,
+										block: 1,
+										excerpt: "New rule.",
+									},
+								],
+								kept: [{ memory_id: memory.id, clause: 2 }],
+								added: [{ text: "New rule. ", block: 1, excerpt: "New rule." }],
+								final_text: "New rule. Keep rule.",
+							},
+						],
+					},
 				}),
 			}),
 		};
@@ -358,6 +368,7 @@ describe("Pi UUID stage lease", () => {
 			},
 		};
 		schedulePiHistorianTurnTwo({
+			formatInstructions: authorization.request.formatInstruction,
 			db,
 			projectPath,
 			sessionId: "ses-fence",
@@ -495,6 +506,7 @@ describe("Pi UUID stage lease", () => {
 			},
 		};
 		schedulePiHistorianTurnTwo({
+			formatInstructions: authorization.request.formatInstruction,
 			db,
 			projectPath,
 			sessionId: "ses-lease-visit",
