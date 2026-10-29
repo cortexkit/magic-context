@@ -77,7 +77,10 @@ async fn broca_role_describe_offline_cli_and_matching_first_notice() {
         );
         assert!(arm.state().offline_first_pass.is_some(), "{name}");
         assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok", "{name}");
-        assert!(arm.state().offline_first_pass.is_none(), "{name}");
+        assert!(
+            super::super::super::offline_first_pass::adopted(&arm.state()),
+            "{name}"
+        );
         assert_eq!(
             arm.state().generation,
             0,
@@ -109,7 +112,10 @@ async fn broca_role_describe_first_notice_decodes_every_capture() {
             config(),
         );
         assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok", "{name}");
-        assert!(arm.state().offline_first_pass.is_none(), "{name}");
+        assert!(
+            super::super::super::offline_first_pass::adopted(&arm.state()),
+            "{name}"
+        );
         assert_eq!(arm.state().generation, if writer { 0 } else { 1 }, "{name}");
         assert_eq!(arm.state().entries.len(), prep.served.len(), "{name}");
     }
@@ -206,12 +212,16 @@ async fn broca_role_describe_upgrade_discards_receipt_once_at_setup_or_notice() 
         );
         if at_setup {
             let answer = arm.setup(setup_request(&prep.session, "fixture")).await;
-            assert_eq!(answer["answer"], "ready", "{answer}");
-            assert!(arm.state().entries.is_empty());
-            assert!(arm.state().offline_first_pass.is_none());
+            assert_eq!(answer["code"], "moved_session_unprepared", "{answer}");
+            assert_eq!(arm.state().entries.len(), prep.served.len());
+            assert!(!super::super::super::offline_first_pass::adopted(
+                &arm.state()
+            ));
         }
         assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
-        assert!(arm.state().offline_first_pass.is_none());
+        assert!(super::super::super::offline_first_pass::adopted(
+            &arm.state()
+        ));
         assert_eq!(arm.state().generation, 1);
         assert_eq!(
             arm.state().entries.len(),

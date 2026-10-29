@@ -80,19 +80,49 @@ async fn setup(
 ) -> (Rig, Value, Vec<Vec<(String, Vec<String>)>>) {
     let session = fixture::fixture_session();
     let mut before = None;
-    let (rig, answer) = Rig::try_setup_with_model(
+    let (rig, mut answer) = Rig::try_setup_with_model(
         dir,
         MODULE,
         ("runner", &session),
         ("opencode", &session),
         "fixture",
-        params,
+        params.clone(),
         |h| {
             h.provider_runner = runner.clone();
             before = Some(snapshot(dir));
         },
     )
     .await;
+    if answer["code"] == "moved_session_unprepared" {
+        *runner.entries.lock().unwrap() =
+            super::super::moved_session::served_entries(&dir.join("opencode.db"), &session);
+        let record = offline_move::read_move_record(
+            &rusqlite::Connection::open(dir.join("context.db")).unwrap(),
+            &session,
+        )
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let origin = super::super::moved_session::newest_marker_checkpoint(
+            &dir.join("opencode.db"),
+            &session,
+        )
+        .unwrap()
+        .message_count
+        .unwrap();
+        runner
+            .entries
+            .lock()
+            .unwrap()
+            .retain(|entry| entry.ordinal >= origin);
+        // The published wire vector uses a different counted origin. Keep the
+        // served suffix contiguous at that certified origin for preparation.
+        for (index, entry) in runner.entries.lock().unwrap().iter_mut().enumerate() {
+            entry.ordinal = record.message_count + index as u64;
+        }
+        let request = json!({"session":session,"harness":"opencode","request_id":"setup","model":"fixture","context_window":100_000,"composition":{"render_tags":true},"params":params,"lineage_id":"L","now":1});
+        answer = super::super::moved_session::prepare_for_live(&rig.h, dir, request).await;
+    }
     if answer["answer"] == "ready" {
         *runner.setup_checkpoint.lock().unwrap() =
             serde_json::from_value::<SetupAnswer>(answer.clone())
@@ -400,7 +430,9 @@ async fn setup_head_uses_newest_marker_then_stored_checkpoint_and_refuses_neithe
     )
     .await;
     assert_eq!(first["answer"], "ready", "{first}");
-    assert_eq!(runner.heads.load(std::sync::atomic::Ordering::Relaxed), 1);
+    // Unprepared live Setup, offline Setup, then prepared live Setup each check
+    // the certified head once.
+    assert_eq!(runner.heads.load(std::sync::atomic::Ordering::Relaxed), 3);
     assert!(runner.setup_checkpoint.lock().unwrap().is_some());
     let conn = rusqlite::Connection::open(&paths.opencode_db).unwrap();
     conn.execute("INSERT INTO message(id,session_id,time_created,time_updated,data) VALUES('new-marker',?1,999999,999999,'{\"role\":\"user\"}')", [&fixture::fixture_session()]).unwrap();

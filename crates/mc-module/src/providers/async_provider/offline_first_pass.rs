@@ -9,37 +9,39 @@
 //! runs the engine's first pass and its commit. Nothing here writes engine
 //! state of its own.
 //!
-//! The last save of that run stores [`OfflineFirstPass`] on the record with an
-//! entry input proof over every held entry. The proof covers the entry's
+//! Before Setup's first save, [`OfflineFirstPass`] marks the record `preparing`.
+//! The proof commit marks it `prepared` and stores the published view as the
+//! live lineage's Setup answer. The proof covers every held entry's
 //! ordinal, the runner's served content digest, the digest of its whole served
 //! form, and each part's key, tag and served digest. Page boundaries are not
-//! part of it. The same save also persists the certificate, its input proof
-//! and the published view.
+//! part of it. The view row is written before this final record commit, but
+//! cannot be announced or adopted until the proof commit completes.
 //!
-//! While the marker is on the record, rides answer nothing and its views are
+//! While preparation is unadopted, `compaction.ride` answers nothing and views are
 //! not announced. The first live notice then checks it once
 //! (`settle_offline_first_pass`):
 //! - **adopt:** the transcript the runner serves now, and every other input of
-//!   the pass, match what was proven. The marker is cleared and the notice
+//!   the pass, match what was proven. The marker becomes `adopted` and the notice
 //!   continues on the stored state, so its certificate is used as on any
 //!   later notice;
 //! - **discard:** anything differs. The record is replaced by a fresh one, set
 //!   up by the same code a first Setup runs, in the next generation (an empty
 //!   engine namespace). The old record's held entries, published engine forms
 //!   and native edits are deleted in the same save. The notice then runs the
-//!   ordinary first pass.
+//!   ordinary first pass. The fresh record is also `adopted` and keeps the
+//!   prepared Setup answer the runner already holds.
 //!
-//! A live Setup that differs from the one the run was prepared under discards
-//! the same way (`setup_mismatch`, called from `async_setup`), and so does a
-//! live runner whose `role.describe` differs from the one the run read
-//! (`describe_mismatch`, at that Setup and again at the first notice).
+//! A moved session's first live Setup refuses if its preparation is missing,
+//! incomplete, or differs in Setup or runner `role.describe`. Once a notice
+//! commits adoption, later Setups and notices never consult the preparation
+//! gate, including after provider restarts or generation changes.
 use super::*;
 use crate::offline_move::MoveRecord;
 use std::path::PathBuf;
 
 /// Version 3 proves the retained interval starting at the move checkpoint,
 /// rather than requiring a zero-origin transcript.
-const MARKER_VERSION: u32 = 3;
+pub(super) const MARKER_VERSION: u32 = 3;
 /// The time the one verification read of an offline-prepared record may take.
 /// It reads the whole transcript once, so it gets far more than a notice's
 /// read budget; a runner that cannot serve it in time leaves the notice to be
@@ -51,11 +53,16 @@ const OFFLINE_READ_BUDGET: Duration = Duration::from_secs(24 * 3600);
 /// The route channel the offline run binds its Setup to.
 const OFFLINE_CHANNEL: u16 = 1;
 
-/// Stored on a record `ck-mc offline first-pass` prepared, until the first
-/// live notice adopts or discards it.
+/// Durable preparation and adoption provenance on the provider record.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OfflineFirstPass {
     pub version: u32,
+    #[serde(default)]
+    pub state: PreparationState,
+    /// A successful bind is replayed once per generation, not on every read:
+    /// replaying a retired queued drop would put it back in the pending queue.
+    #[serde(default)]
+    pub bound_generation: Option<u64>,
     /// Digest of the Setup request and route identity the run used; see
     /// [`setup_identity_digest`].
     pub setup: String,
@@ -73,6 +80,38 @@ pub(crate) struct OfflineFirstPass {
     /// adopted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof: Option<EntryInputProof>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PreparationState {
+    #[default]
+    Preparing,
+    Prepared,
+    Adopted,
+}
+
+pub(super) fn adopted(state: &State) -> bool {
+    state
+        .offline_first_pass
+        .as_ref()
+        .is_some_and(|offline| offline.state == PreparationState::Adopted)
+}
+
+pub(super) fn prepared(state: &State) -> bool {
+    !state.is_importing_stage()
+        && state.offline_first_pass.as_ref().is_some_and(|offline| {
+            offline.state == PreparationState::Prepared
+                && offline.proof.is_some()
+                && offline.inputs.is_some()
+        })
+}
+
+pub(super) fn unprepared() -> HandlerOutcome {
+    error(
+        "moved_session_unprepared",
+        "Run `ck-mc offline first-pass` before the moved session's first live adoption.",
+    )
 }
 
 /// A digest over the held entries `[origin, end)` of one lineage.
@@ -161,6 +200,9 @@ impl EntryInputProof {
 /// the offline command can replace them without reading entries before the move
 /// checkpoint.
 pub(super) fn proof_version_matches(state: &State) -> bool {
+    if adopted(state) {
+        return true;
+    }
     state.offline_first_pass.as_ref().is_none_or(|offline| {
         offline.version == MARKER_VERSION
             && offline.proof.as_ref().is_none_or(|proof| {
@@ -220,6 +262,9 @@ pub(crate) fn runner_describe_digest(describe: &Value) -> Result<String, Handler
 /// prepared against (or the record names none); `None` when it is, or when
 /// the record was not prepared offline.
 pub(super) fn describe_mismatch(state: &State, describe: &Value) -> Option<&'static str> {
+    if adopted(state) {
+        return None;
+    }
     let offline = state.offline_first_pass.as_ref()?;
     match (&offline.describe, runner_describe_digest(describe)) {
         (Some(prepared), Ok(live)) if *prepared == live => None,
@@ -235,6 +280,9 @@ pub(super) fn setup_mismatch(
     binding: &SessionBinding,
     request: &compact::setup::SetupRequest,
 ) -> Option<&'static str> {
+    if adopted(state) {
+        return None;
+    }
     let offline = state.offline_first_pass.as_ref()?;
     let Some(module) = super::records::attested_runner(binding) else {
         return Some("setup_differs");
@@ -589,6 +637,12 @@ impl McHandler {
         store: &McStore,
         headers: &BTreeMap<String, String>,
     ) -> Result<State, HandlerOutcome> {
+        if adopted(&state) {
+            return Ok(state);
+        }
+        if state.standalone_move.is_some() && !prepared(&state) {
+            return Err(unprepared());
+        }
         let Some(offline) = state.offline_first_pass.clone() else {
             return Ok(state);
         };
@@ -638,7 +692,9 @@ impl McHandler {
         };
         let reference = state.reference();
         let Some(reason) = reason else {
-            state.offline_first_pass = None;
+            if let Some(marker) = &mut state.offline_first_pass {
+                marker.state = PreparationState::Adopted;
+            }
             tracing::info!(session_ref = %reference, entries = offline.proof.as_ref().map_or(0, |proof| proof.count), "offline_first_pass_adopted");
             return Ok(state);
         };
@@ -669,11 +725,17 @@ impl McHandler {
             &state.setup,
             state.key.clone(),
             moved,
-            generation,
+            RecordStart {
+                generation,
+                preparation: None,
+            },
         )?;
-        if fresh.initial["initial"] != state.initial["initial"] {
-            tracing::warn!(session_ref = %reference, "offline_first_pass_discarded: the rebuilt setup view differs from the one the runner holds");
-        }
+        // The runner already holds the prepared Setup bytes. Reconciliation
+        // may publish a new view, but cannot rewrite that lineage's answer.
+        fresh.initial = state.initial.clone();
+        let mut adopted = offline;
+        adopted.state = PreparationState::Adopted;
+        fresh.offline_first_pass = Some(adopted);
         fresh.forget_discarded_rows();
         self.resident_cache().forget(&reference);
         fresh.save(store, &[])?;
@@ -729,6 +791,15 @@ impl McHandler {
             setup_identity_digest(request, &setup.runner_module).map_err(interrupted)?;
         let describe_digest =
             runner_describe_digest(&setup.runner_describe).map_err(interrupted)?;
+        let marker = OfflineFirstPass {
+            version: MARKER_VERSION,
+            state: PreparationState::Preparing,
+            bound_generation: None,
+            setup: setup_digest.clone(),
+            describe: Some(describe_digest.clone()),
+            inputs: None,
+            proof: None,
+        };
         if let Some(old) = load_head(store, &reference).map_err(interrupted)? {
             if proof_version_matches(&old) {
                 return self
@@ -765,7 +836,10 @@ impl McHandler {
                     request,
                     key.clone(),
                     moved,
-                    generation,
+                    RecordStart {
+                        generation,
+                        preparation: Some(marker.clone()),
+                    },
                 )
                 .map_err(interrupted)?;
             fresh.forget_discarded_rows();
@@ -776,11 +850,12 @@ impl McHandler {
                 .map_err(|e| OfflineError::Interrupted(e.to_string()))?;
         }
         let answer = self
-            .async_setup(
+            .async_setup_inner(
                 OFFLINE_CHANNEL,
                 &binding,
                 &serde_json::to_value(request)
                     .map_err(|e| OfflineError::Interrupted(e.to_string()))?,
+                Some(marker),
             )
             .await
             .map_err(interrupted)?;
@@ -805,16 +880,6 @@ impl McHandler {
             .checkout(store, &reference)
             .map_err(interrupted)?
             .ok_or_else(|| OfflineError::Interrupted("the record Setup made is gone".into()))?;
-        // The marker goes in before the pass: a run stopped before its last
-        // save leaves a record the live check discards rather than adopts.
-        state.offline_first_pass = Some(OfflineFirstPass {
-            version: MARKER_VERSION,
-            setup: setup_digest,
-            describe: Some(describe_digest),
-            inputs: None,
-            proof: None,
-        });
-        state.save(store, &[]).map_err(interrupted)?;
         let codec = codec::Codec::from_params(&Value::Object(state.setup.params.clone()))
             .map_err(interrupted)?;
         let origin = proof_origin(&state);
@@ -869,8 +934,14 @@ impl McHandler {
         state.ingest_read(store, codec).map_err(interrupted)?;
         self.advance_async_policy(&mut state, &notice, codec)
             .map_err(interrupted)?;
-        self.publish_async(0, &mut state, codec, false)
+        let view = self
+            .publish_async(0, &mut state, codec, false)
             .map_err(interrupted)?;
+        if view.is_none() && state.standalone_move.is_some() {
+            return Err(OfflineError::Interrupted(
+                "the pass produced no prepared view".into(),
+            ));
+        }
         state.engine_failed = false;
         let proof = EntryInputProof::of(&state.entries, &lineage, origin, None, codec)
             .map_err(interrupted)?
@@ -882,8 +953,43 @@ impl McHandler {
             })?;
         let inputs = self.offline_inputs_digest(&state).map_err(interrupted)?;
         if let Some(offline) = &mut state.offline_first_pass {
+            offline.state = PreparationState::Prepared;
             offline.inputs = Some(inputs);
             offline.proof = Some(proof.clone());
+        }
+        // Store the exact published view as the live lineage's Setup answer.
+        // Only this proof commit may replace the offline head insertion.
+        if let Some(view) = view {
+            let held = state
+                .entries
+                .iter()
+                .map(|(ordinal, entry)| (*ordinal, Arc::clone(entry)))
+                .collect();
+            let mut replacement = Vec::<Value>::new();
+            for range in &view.ranges {
+                match range {
+                    view::ViewRange::Replace { bytes, .. } => {
+                        replacement.extend(
+                            serde_json::from_str::<Vec<Value>>(bytes)
+                                .map_err(|e| OfflineError::Interrupted(e.to_string()))?,
+                        );
+                    }
+                    view::ViewRange::Keep { from, to, .. } if from < to => {
+                        replacement.extend(
+                            cut_runtime::render_retained_rows(&held, &view, *from, *to - 1)
+                                .map_err(interrupted)?,
+                        );
+                    }
+                    view::ViewRange::Keep { .. } => {}
+                    _ => {
+                        return Err(OfflineError::Interrupted(
+                            "unknown prepared view range".into(),
+                        ))
+                    }
+                }
+            }
+            state.initial["initial"]["range"] = json!({"from":origin,"to":proof.end});
+            state.initial["initial"]["replacement"] = json!(replacement);
         }
         // The commit point: the record, its certificate and its proof in one
         // save.
@@ -921,6 +1027,13 @@ impl McHandler {
                 "ck-mc already holds a live record for this session; its first pass is not offline work any more".into(),
             ));
         };
+        if offline.state == PreparationState::Adopted {
+            return Err(OfflineError::Refused(
+                "offline_already_adopted",
+                "a live notice already adopted this session; offline preparation cannot replace it"
+                    .into(),
+            ));
+        }
         let Some(proof) = offline.proof.clone() else {
             return Err(OfflineError::Refused(
                 "offline_run_incomplete",
