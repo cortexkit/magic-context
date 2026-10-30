@@ -587,7 +587,7 @@ test.skipIf(process.platform === "win32")(
             const rows = transcript.filter((row) => row.scenario === scenario);
             expect(rows[1].materialized).toBe(false);
             for (const phase of [2, 3]) {
-                expect(rows[phase].identity).toStartWith("git:");
+                expect(rows[phase].identity).toBe(rows[1].identity);
                 expect(rows[phase].pending).toBe(true);
                 expect(rows[phase].materialized).toBe(false);
                 expect(rows[phase].head).toBe(rows[1].head);
@@ -596,6 +596,7 @@ test.skipIf(process.platform === "win32")(
             expect(rows[4].materialized).toBe(true);
             expect(rows[4].pending).toBe(false);
             expect(rows[4].reason).toBe("project_change");
+            expect(rows[4].identity).toStartWith("git:");
             expect(rows[4].head).toContain("fold memory for git:");
             expect(rows[5].materialized).toBe(false);
             expect(rows[5].head).toBe(rows[4].head);

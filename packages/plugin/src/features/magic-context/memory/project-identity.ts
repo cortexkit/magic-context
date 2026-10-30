@@ -3,7 +3,8 @@
  *
  * Strategy:
  *   1. Exact-directory registered project pin → pinned pj- identity without probing git
- *   2. Git repo with commits → root commit hash (same across worktrees, clones, forks)
+ *   2. Linked worktree with a registered checkout pin → borrow that pj- identity
+ *      Otherwise, Git repo with commits → root commit hash (same across clones and forks)
  *   3. Git repo with an unborn HEAD → directory hash until the first commit
  *   4. Transient git failure → reuse durable identity or defer
  *   5. No git repo → fallback to directory hash via resolveProjectIdentity()
@@ -19,14 +20,22 @@ import { accessSync, constants, existsSync, realpathSync, statSync } from "node:
 import { homedir } from "node:os";
 import path from "node:path";
 import { log } from "../../../shared/logger";
-import { readGitCheckoutMetadata } from "./git-common-dir";
 import {
+    invalidateGitCheckoutMetadata,
+    readCachedGitCheckoutMetadata,
+    readGitCheckoutMetadata,
+} from "./git-common-dir";
+import {
+    __resetProjectIdentitySidecarCachesForTests,
     isPinnedProjectIdentity,
     projectDirectoryKey,
+    projectIdentityPinGeneration,
+    readBorrowedProjectIdentity,
+    readPinnedProjectIdentity,
     readRememberedGitIdentity,
-    readRememberedProjectIdentity,
     rememberGitIdentity,
     rememberPinnedProjectIdentity,
+    removeStaleWorktreeIdentity,
 } from "./project-identity-cache";
 import { isUnbornHeadOnDisk } from "./unborn-head";
 
@@ -39,6 +48,7 @@ const GIT_TIMEOUT_MS = 5_000;
 const TRANSIENT_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 const identityCache = new Map<string, string>();
 const linkedGitWorktreeCache = new Map<string, boolean>();
+const linkedIdentityDirectories = new Set<string>();
 const lastKnownGitIdentityCache = new Map<string, string>();
 // Cached `dir:` fallbacks for directories that have NO `.git` entry in their
 // ancestor chain. We only cache the no-`.git` case: once a `.git` appears we
@@ -60,6 +70,7 @@ const transientGitIdentityReuseLoggedDirectories = new Set<string>();
 interface SessionIdentityCacheEntry {
     identity: string | undefined;
     revalidateAt: number | null;
+    pinGeneration: number;
 }
 const sessionIdentityCache = new Map<string, SessionIdentityCacheEntry>();
 // Boot policy applies to identity lookups made outside the session path (historian, RPC, tools).
@@ -336,7 +347,7 @@ function classifyGitError(error: unknown, rawDirectory: string): ProjectIdentity
 /**
  * Strictly resolve the project identity for a filesystem directory.
  *
- * Returns an exact-directory `pj-` pin or `git:<root-commit-sha>` and never silently falls back.
+ * Returns an exact-directory or inherited worktree `pj-` pin, or `git:<root-commit-sha>`.
  * Failures are thrown as `ProjectIdentityError` with a stable `errorClass` so callers can
  * distinguish deterministic non-git directories from transient git/runtime failures.
  *
@@ -344,7 +355,7 @@ function classifyGitError(error: unknown, rawDirectory: string): ProjectIdentity
  * identities. Transient failures are never cached.
  * Exact-directory `pj-` pins retain precedence. For an unpinned directory, set `cache: false`
  * to bypass the git-identity cache and return a fresh result without updating caches or
- * durable identity pins.
+ * durable identity records (including stale-sidecar cleanup).
  */
 export function resolveProjectIdentityStrict(
     directory: string,
@@ -353,7 +364,7 @@ export function resolveProjectIdentityStrict(
 ): string {
     assertProjectAllowed(directory, allowHomeProject);
     const canonical = path.resolve(directory);
-    const pinned = pinForUsableDirectory(canonical, directory);
+    const pinned = pinForUsableDirectory(canonical, directory, options.cache !== false);
     if (pinned !== undefined) return pinned;
     const cached = options.cache === false ? undefined : identityCache.get(canonical);
     if (cached !== undefined) {
@@ -564,7 +575,11 @@ function assertProjectAllowed(directory: string, allowHomeProject: boolean): voi
     }
 }
 
-function pinForUsableDirectory(canonical: string, directory: string): string | undefined {
+function pinForUsableDirectory(
+    canonical: string,
+    directory: string,
+    cleanup = true,
+): string | undefined {
     try {
         assertDirectoryUsable(canonical, directory);
         accessSync(canonical, constants.R_OK | constants.X_OK);
@@ -573,8 +588,24 @@ function pinForUsableDirectory(canonical: string, directory: string): string | u
         // a remembered pin must not bypass the directory usability check.
         return undefined;
     }
-    const pinned = readRememberedProjectIdentity(canonical)?.identity;
-    return isPinnedProjectIdentity(pinned) ? pinned : undefined;
+    const pinned = readPinnedProjectIdentity(canonical);
+    return pinned
+        ? pinned
+        : readCachedGitCheckoutMetadata(canonical)?.linkedWorktree
+          ? borrowedProjectIdentity(canonical, cleanup)
+          : undefined;
+}
+
+export function borrowedProjectIdentity(directory: string, cleanup = true): string | undefined {
+    const metadata = readCachedGitCheckoutMetadata(directory);
+    const pin = metadata?.gitCommonDir
+        ? readBorrowedProjectIdentity(directory, metadata.gitCommonDir, metadata.linkedWorktree)
+        : undefined;
+    if (cleanup && pin && metadata?.linkedWorktree) {
+        removeStaleWorktreeIdentity(directory);
+        if (metadata.checkoutRoot !== directory) removeStaleWorktreeIdentity(metadata.checkoutRoot);
+    }
+    return pin;
 }
 
 export interface LiveProjectIdentityAnswer {
@@ -602,8 +633,19 @@ export function rememberResolvedProjectIdentity(
         // Use fresh topology: a cached non-worktree result must not authorize a pin after a checkout changes.
         const linked =
             metadata?.gitCommonDir === undefined ? hasGitDir(canonical) : metadata.linkedWorktree;
-        if (linked) return;
-        rememberPinnedProjectIdentity(canonical, answer.projectId, metadata?.gitCommonDir);
+        const registeredRoot =
+            linked &&
+            answer.via === "root" &&
+            answer.canonicalRoot !== null &&
+            projectDirectoryKey(realpathSync.native(answer.canonicalRoot)) ===
+                projectDirectoryKey(realpathSync.native(canonical));
+        if (linked && !registeredRoot) return;
+        rememberPinnedProjectIdentity(
+            canonical,
+            answer.projectId,
+            metadata?.gitCommonDir,
+            linked && registeredRoot ? "root" : undefined,
+        );
         if (metadata && answer.canonicalRoot !== null) {
             // A separately registered subfolder must not claim its containing checkout.
             const answerRoot = projectDirectoryKey(realpathSync.native(answer.canonicalRoot));
@@ -805,14 +847,32 @@ export function resolveProjectIdentityForSession(
     const resolvedDirectory = path.resolve(directory);
     const cacheKey = `${allowHomeProject ? "1" : "0"}\0${resolvedDirectory}`;
     const cached = sessionIdentityCache.get(cacheKey);
+    // Only known worktrees revalidate a borrow; ordinary warm sessions keep their no-I/O fast path.
+    if (cached && linkedIdentityDirectories.has(resolvedDirectory)) {
+        try {
+            assertProjectAllowed(directory, allowHomeProject);
+        } catch (error) {
+            if (
+                error instanceof ProjectIdentityError &&
+                error.errorClass === "home_project_disabled"
+            )
+                return undefined;
+            throw error;
+        }
+        const pinned = pinForUsableDirectory(resolvedDirectory, directory);
+        if (pinned) return pinned;
+    }
     if (
         cached &&
+        cached.pinGeneration === projectIdentityPinGeneration() &&
         (cached.revalidateAt === null || nowMs() < cached.revalidateAt) &&
         !(cached.identity?.startsWith("dir:") && hasGitDir(resolvedDirectory))
     ) {
         return cached.identity;
     }
     sessionIdentityCache.delete(cacheKey);
+    if (cached?.identity?.startsWith("dir:") && hasGitDir(resolvedDirectory))
+        invalidateGitCheckoutMetadata(resolvedDirectory);
 
     filesystemProbeObserverForTests?.();
     const canonicalDirectory = (() => {
@@ -851,13 +911,16 @@ export function resolveProjectIdentityForSession(
         }
     }
     if (identity !== undefined) pausedIdentityReasons.delete(resolvedDirectory);
+    if (readCachedGitCheckoutMetadata(resolvedDirectory)?.linkedWorktree)
+        linkedIdentityDirectories.add(resolvedDirectory);
 
-    // Successful git identities are immutable. Directory/home fallbacks are
+    // A published pin invalidates even a successful git lookup. Directory/home fallbacks are
     // revalidated after the same cooldown used for recoverable git failures so a
     // newly initialized repository or recovered checkout is observed without
     // probing the filesystem on every context pass. A cwd change uses a new key.
     sessionIdentityCache.set(cacheKey, {
         identity,
+        pinGeneration: projectIdentityPinGeneration(),
         revalidateAt:
             identity?.startsWith("git:") === true ? null : nowMs() + TRANSIENT_FAILURE_COOLDOWN_MS,
     });
@@ -913,7 +976,7 @@ export function isLinkedGitWorktree(directory: string): boolean {
     const cached = linkedGitWorktreeCache.get(resolvedDirectory);
     if (cached !== undefined) return cached;
 
-    const metadata = readGitCheckoutMetadata(resolvedDirectory);
+    const metadata = readCachedGitCheckoutMetadata(resolvedDirectory);
     const resolvedLinked =
         metadata?.gitCommonDir === undefined ? undefined : metadata.linkedWorktree;
     // If Git metadata exists but its topology cannot be resolved, fail closed:
@@ -951,12 +1014,17 @@ export function __clearProjectIdentityTransientCooldownForTests(directory?: stri
 }
 
 export function __clearProjectIdentityResolutionCacheForTests(directory?: string): void {
+    invalidateGitCheckoutMetadata(directory);
     if (directory === undefined) {
+        linkedGitWorktreeCache.clear();
+        linkedIdentityDirectories.clear();
         identityCache.clear();
         sessionIdentityCache.clear();
         return;
     }
     const resolvedDirectory = path.resolve(directory);
+    linkedGitWorktreeCache.delete(resolvedDirectory);
+    linkedIdentityDirectories.delete(resolvedDirectory);
     identityCache.delete(resolvedDirectory);
     for (const allowHome of ["0", "1"]) {
         sessionIdentityCache.delete(`${allowHome}\0${resolvedDirectory}`);
@@ -964,12 +1032,15 @@ export function __clearProjectIdentityResolutionCacheForTests(directory?: string
 }
 
 export function __resetProjectIdentityForTests(): void {
+    invalidateGitCheckoutMetadata();
+    __resetProjectIdentitySidecarCachesForTests();
     homeProjectPermission = false;
     homeProjectSkipLogged = false;
     pausedIdentityReasons.clear();
     pausedIdentityLogged.clear();
     identityCache.clear();
     linkedGitWorktreeCache.clear();
+    linkedIdentityDirectories.clear();
     lastKnownGitIdentityCache.clear();
     directoryFallbackCache.clear();
     transientFailureCooldown.clear();

@@ -94,6 +94,8 @@ export interface SessionMeta {
     cachedM0MuralDataUrl: string | null;
     cachedM0MuralHash: string | null;
     cachedM1Bytes: Buffer | null;
+    /** Committed visible-memory manifest count; null or absent means unknown, not zero. */
+    memoryBlockCount?: number | null;
     cachedM0ProjectMemoryEpoch: number | null;
     cachedM0WorkspaceFingerprint: string | null;
     cachedM0ProjectUserProfileVersion: number | null;
@@ -116,7 +118,7 @@ export interface SessionMeta {
     cachedM0SystemHash: string | null;
     cachedM0ToolSetHash: string | null;
     cachedM0ModelKey: string | null;
-    /** Pi-only HARD marker: project identity captured in the cached m[0] baseline. */
+    /** Served memory-block owner, persisted with cached M0. Null means a legacy unknown owner. */
     cachedM0ProjectIdentity: string | null;
     lastObservedModelKey: string | null;
     lastUsageContextLimit: number;

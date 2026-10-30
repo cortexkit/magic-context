@@ -51,6 +51,8 @@ import * as hostMedia from "../fold/host-media";
 import { gaDatabasePath } from "../store-reader";
 import { registerContext } from "./context";
 import * as manualDream from "./dream-manual";
+import * as dreamTimer from "./dream-timer";
+import * as dreamTrigger from "./dream-trigger";
 import * as storageGate from "./storage-gate";
 import type { SessionContext, V2Context } from "./types";
 
@@ -327,6 +329,7 @@ function draft(sessionID: string): SessionContext {
 
 test("resumed v2 context awaits its decision before managed readers and renders the session project", async () => {
     const launch = folder("launch");
+    rememberPinnedProjectIdentity(launch, "pj-LAUNCH");
     const directory = folder("resumed");
     const fake = await fakeEndpoint(directory);
     fake.hold = true;
@@ -359,14 +362,14 @@ test("resumed v2 context awaits its decision before managed readers and renders 
     expect(JSON.stringify(next.messages)).toContain("registered session memory");
     expect(fake.calls).toEqual([{ method: "resolve", params: { canonicalRoot: directory } }]);
     expect(host.get).toHaveBeenCalledTimes(1);
-    expect(resolveProjectIdentityForSession(directory)).toBe(fallbackIdentity);
+    expect(resolveProjectIdentityForSession(directory)).toBe(projectId);
 });
 
 test("v2 sessions in one directory keep independent decisions without per-pass resolve", async () => {
     const directory = folder("shared");
     const fake = await fakeEndpoint(directory);
-    const host = await harness(directory, directory, fake.connectionFile);
     fake.up = false;
+    const host = await harness(directory, directory, fake.connectionFile);
     await host.context(draft("ses-v2-A"));
     expect(host.row("ses-v2-A")).toBe(fallbackIdentity);
     fake.up = true;
@@ -374,7 +377,8 @@ test("v2 sessions in one directory keep independent decisions without per-pass r
     expect(host.row("ses-v2-B")).toBe(projectId);
     for (let i = 0; i < 3; i++) await host.context(draft("ses-v2-A"));
     expect(host.row("ses-v2-A")).toBe(fallbackIdentity);
-    expect(fake.calls).toHaveLength(2);
+    // One launch attempt and two independent session attempts; warm passes add none.
+    expect(fake.calls).toHaveLength(3);
 });
 
 test.each([
@@ -425,8 +429,10 @@ test("v2 observed move supersedes an initial pending decision", async () => {
     const directory = folder("destination");
     rememberPinnedProjectIdentity(directory, "pj-DESTINATION");
     const fake = await fakeEndpoint(before);
-    fake.hold = true;
+    fake.up = false;
     const host = await harness(before, directory, fake.connectionFile);
+    fake.up = true;
+    fake.hold = true;
     const called = new Promise<void>((resolve) => {
         fake.onResolve = resolve;
     });
@@ -460,7 +466,7 @@ test("v2 observed move supersedes an initial pending decision", async () => {
     expect(host.row(session)).toBe("pj-DESTINATION");
     await host.context(draft(session));
     expect(host.row(session)).toBe("pj-DESTINATION");
-    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls).toHaveLength(2);
 });
 
 test("a resolve slower than the Entorhinal deadline falls back without pinning pj", async () => {
@@ -481,6 +487,7 @@ test("a resolve slower than the Entorhinal deadline falls back without pinning p
 
 test("v2 compaction materializes the session decision instead of the launch directory cache", async () => {
     const launch = folder("launch");
+    rememberPinnedProjectIdentity(launch, "pj-LAUNCH");
     const directory = folder("folded-session");
     rememberPinnedProjectIdentity(directory, "pj-FOLD");
     const fake = await fakeEndpoint(directory);
@@ -502,6 +509,7 @@ test("v2 compaction materializes the session decision instead of the launch dire
 
 test("v2 manual dream prepares a resumed session decision before selecting its project", async () => {
     const launch = folder("launch");
+    rememberPinnedProjectIdentity(launch, "pj-LAUNCH");
     const directory = folder("manual-session");
     rememberPinnedProjectIdentity(directory, "pj-MANUAL");
     const fake = await fakeEndpoint(directory);
@@ -530,3 +538,56 @@ test("v2 manual dream prepares a resumed session decision before selecting its p
     });
     expect(fake.calls).toHaveLength(0);
 });
+
+for (const timeout of [false, true]) {
+    test(`v2 Dreamer shares the linked launch decision and never follows a resumed project (timeout=${timeout})`, async () => {
+        const root = folder("dream-main");
+        const launch = join(temp.dir, "dream-linked");
+        const gitdir = join(root, ".git", "worktrees", "dream-linked");
+        mkdirSync(launch);
+        mkdirSync(gitdir, { recursive: true });
+        writeFileSync(join(gitdir, "commondir"), "../..\n");
+        writeFileSync(join(launch, ".git"), `gitdir: ${gitdir}\n`);
+        expect(resolveProjectIdentityForSession(launch)).toBe(fallbackIdentity);
+        const fake = await fakeEndpoint(launch);
+        if (timeout) fake.delay = ENTORHINAL_RESOLVE_DEADLINE_MS + 1;
+        const timer = spyOn(dreamTimer, "registerV2DreamScheduleTimer").mockReturnValue({
+            dispose: async () => {},
+        });
+        const trigger = spyOn(dreamTrigger, "startDreamTrigger").mockReturnValue({
+            dispose: async () => {},
+        });
+        const expectedIdentity = timeout ? fallbackIdentity : projectId;
+        const host = await harness(launch, launch, fake.connectionFile, true);
+        expect(timer).toHaveBeenCalledTimes(1);
+        expect(timer.mock.calls[0][0]).toMatchObject({
+            directory: launch,
+            projectIdentity: expectedIdentity,
+        });
+        expect(trigger).toHaveBeenCalledTimes(1);
+        const triggeredProject = trigger.mock.calls[0][1].projectIdentity;
+        expect(triggeredProject()).toBe(expectedIdentity);
+
+        const session = `ses-v2-dream-launch-${timeout}`;
+        host.memory(expectedIdentity, "launch-scoped Dreamer memory");
+        const first = draft(session);
+        await host.context(first);
+        expect(host.row(session)).toBe(expectedIdentity);
+        expect(timer.mock.calls[0][0].projectIdentity).toBe(host.row(session));
+        expect(JSON.stringify(first.messages)).toContain("launch-scoped Dreamer memory");
+        expect(readRememberedProjectIdentity(launch)?.identity).not.toBe(projectId);
+        expect(fake.calls).toEqual([
+            { method: "resolve", params: { canonicalRoot: launch } },
+            { method: "resolve", params: { canonicalRoot: launch } },
+        ]);
+
+        const resumed = folder("dream-resumed");
+        rememberPinnedProjectIdentity(resumed, "pj-DREAM-RESUMED");
+        host.get.mockResolvedValue({ location: { directory: resumed } });
+        await host.context(draft(`ses-v2-dream-resumed-${timeout}`));
+        expect(host.row(`ses-v2-dream-resumed-${timeout}`)).toBe("pj-DREAM-RESUMED");
+        expect(triggeredProject()).toBe(expectedIdentity);
+        expect(timer).toHaveBeenCalledTimes(1);
+        expect(timer.mock.calls[0][0].projectIdentity).toBe(expectedIdentity);
+    });
+}

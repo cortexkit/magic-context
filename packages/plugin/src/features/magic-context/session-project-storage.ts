@@ -1,12 +1,89 @@
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getHarness, type HarnessId } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { isUserHomeDirectory } from "./memory/project-identity";
+import type { SessionMeta } from "./types";
 
 const SESSION_CHUNK_REPAIR_BATCH_SIZE = 100;
 
 const upsertSessionProjectStatements = new WeakMap<Database, PreparedStatement>();
 const repairSessionChunkProjectStatements = new WeakMap<Database, PreparedStatement>();
 const misScopedProjectChunkStatements = new WeakMap<Database, PreparedStatement>();
+const reconciledOwners = new WeakMap<
+    Database,
+    BoundedSessionMap<{
+        identity: string;
+        materializedAt: number | null;
+    }>
+>();
+
+type ServedProjectState = Pick<
+    SessionMeta,
+    "cachedM0Bytes" | "cachedM0ProjectIdentity" | "cachedM0MaterializedAt"
+>;
+
+/** The owner travels with the cached M0 bytes; null is a legacy, unknown owner. */
+export function getServedSessionProjectIdentity(
+    state: ServedProjectState | undefined,
+): string | undefined {
+    return state?.cachedM0Bytes != null ? (state.cachedM0ProjectIdentity ?? undefined) : undefined;
+}
+
+/** Repair attribution only when its read-only equality check disagrees with the served prefix. */
+export function reconcileServedSessionProjectIdentity(
+    db: Database,
+    sessionId: string,
+    state: ServedProjectState,
+    force = false,
+): string | undefined {
+    const key = `${getHarness()}\0${sessionId}`;
+    let owners = reconciledOwners.get(db);
+    const identity = getServedSessionProjectIdentity(state);
+    if (!identity) {
+        owners?.delete(key);
+        return undefined;
+    }
+    const nested = db.inTransaction;
+    const previous = owners?.get(key);
+    if (
+        !force &&
+        !nested &&
+        previous?.identity === identity &&
+        previous.materializedAt === state.cachedM0MaterializedAt
+    )
+        return identity;
+    if (getRecordedSessionProjectIdentity(db, sessionId) !== identity) {
+        db.transaction(() => {
+            if (getRecordedSessionProjectIdentity(db, sessionId) === identity) return;
+            const result = getUpsertSessionProjectStatement(db).run(
+                sessionId,
+                getHarness(),
+                identity,
+                Date.now(),
+            );
+            if (result.changes > 0)
+                getRepairSessionChunkProjectStatement(db).run(
+                    identity,
+                    sessionId,
+                    getHarness(),
+                    identity,
+                    SESSION_CHUNK_REPAIR_BATCH_SIZE,
+                );
+        }).immediate();
+    }
+    if (nested) return identity;
+    // Attribution API writes invalidate this memo. Tools force a reconciliation
+    // as well, so an older process cannot redirect a memory operation via this mirror.
+    if (!owners) {
+        owners = new BoundedSessionMap(100);
+        reconciledOwners.set(db, owners);
+    }
+    owners.set(key, {
+        identity,
+        materializedAt: state.cachedM0MaterializedAt,
+    });
+    return identity;
+}
 
 // Each branch starts at a project index instead of scanning every chunk.
 export const MIS_SCOPED_PROJECT_CHUNK_IDS_SQL = `
@@ -83,9 +160,9 @@ export interface SessionProjectIdentityChange {
 }
 
 /**
- * Persist the host session's current project binding. A host session can move
- * between projects, so a later observation deliberately replaces its earlier
- * project path.
+ * Persist the legacy project attribution used by chunk backfills. A cached M0
+ * carries its own served owner; newer directory decisions must not replace that
+ * owner until an admitted rebuild publishes their block.
  * Chunk backfills use this mapping as the project-scope authority: without it, a
  * project-wide drain cannot safely distinguish same-process sessions from other
  * projects and must not stamp arbitrary compartments with its own identity.
@@ -128,20 +205,27 @@ export function recordSessionProjectIdentity(
             SESSION_CHUNK_REPAIR_BATCH_SIZE,
         );
     }).immediate();
-    return previousProjectPath === projectPath ? undefined : { previousProjectPath, projectPath };
+    if (previousProjectPath === projectPath) return undefined;
+    reconciledOwners.get(db)?.delete(`${harness}\0${sessionId}`);
+    return { previousProjectPath, projectPath };
 }
 
 /**
- * Whether a project binding has been stored for this session. Bindings are
- * stored only from a directory the host returned for the session. A session
- * without one has only ever been rendered with the directory OpenCode was
- * launched from, which the transform falls back to when the host gives none.
+ * Read the current harness's legacy attribution. It can seed a decision before
+ * a prefix has a known owner, but it never overrides a cached prefix's owner.
  */
-export function hasRecordedSessionProjectIdentity(db: Database, sessionId: string): boolean {
+export function getRecordedSessionProjectIdentity(
+    db: Database,
+    sessionId: string,
+): string | undefined {
     const row = db
-        .prepare("SELECT 1 AS found FROM session_projects WHERE session_id = ? AND harness = ?")
-        .get(sessionId, getHarness()) as { found: number } | null;
-    return row?.found === 1;
+        .prepare("SELECT project_path FROM session_projects WHERE session_id = ? AND harness = ?")
+        .get(sessionId, getHarness()) as { project_path: string } | null;
+    return row?.project_path;
+}
+
+export function hasRecordedSessionProjectIdentity(db: Database, sessionId: string): boolean {
+    return getRecordedSessionProjectIdentity(db, sessionId) !== undefined;
 }
 
 /**

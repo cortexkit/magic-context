@@ -1,5 +1,5 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { loadPluginConfig } from "@magic-context/core/config";
 import {
     type EntorhinalResolveResult,
@@ -146,10 +146,13 @@ export async function buildProjectIdPlan(
             .all() as Array<{ identity: unknown }>) {
             if (
                 typeof row.identity === "string" &&
-                /^(git|dir):/.test(row.identity) &&
+                (/^(git|dir):/.test(row.identity) || isAbsolute(row.identity)) &&
                 !sources.has(row.identity)
             )
-                sources.set(row.identity, []);
+                sources.set(
+                    row.identity,
+                    isAbsolute(row.identity) ? [planFolder(row.identity)] : [],
+                );
         }
     }
     const connectionFile = deps.resolve

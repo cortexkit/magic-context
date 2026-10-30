@@ -34,6 +34,7 @@ export interface SessionMetaRow {
     cached_m0_mural_data_url: string | null;
     cached_m0_mural_hash: string | null;
     cached_m1_bytes: Buffer | Uint8Array | null;
+    memory_block_count?: number | null;
     cached_m0_project_memory_epoch: number | null;
     cached_m0_workspace_fingerprint: string | null;
     cached_m0_project_user_profile_version: number | null;
@@ -92,6 +93,7 @@ export const SESSION_META_SELECT_COLUMNS = [
     "cached_m0_mural_data_url",
     "cached_m0_mural_hash",
     "cached_m1_bytes",
+    "memory_block_count",
     "cached_m0_project_memory_epoch",
     "cached_m0_workspace_fingerprint",
     "cached_m0_project_user_profile_version",
@@ -275,6 +277,7 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         isStringOrNull(r.cached_m0_mural_data_url) &&
         isStringOrNull(r.cached_m0_mural_hash) &&
         isBlobOrNull(r.cached_m1_bytes) &&
+        (r.memory_block_count === undefined || isNumberOrNull(r.memory_block_count)) &&
         isNumberOrNull(r.cached_m0_project_memory_epoch) &&
         isStringOrNull(r.cached_m0_workspace_fingerprint) &&
         isNumberOrNull(r.cached_m0_project_user_profile_version) &&
@@ -334,6 +337,7 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         cachedM0MuralDataUrl: null,
         cachedM0MuralHash: null,
         cachedM1Bytes: null,
+        memoryBlockCount: 0,
         cachedM0ProjectMemoryEpoch: null,
         cachedM0WorkspaceFingerprint: null,
         cachedM0ProjectUserProfileVersion: null,
@@ -472,6 +476,7 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         cachedM0MuralDataUrl: stringOrNull(row.cached_m0_mural_data_url),
         cachedM0MuralHash: stringOrNull(row.cached_m0_mural_hash),
         cachedM1Bytes: toBufferOrNull(row.cached_m1_bytes),
+        memoryBlockCount: numOrNull(row.memory_block_count ?? null),
         cachedM0ProjectMemoryEpoch: numOrNull(row.cached_m0_project_memory_epoch),
         cachedM0WorkspaceFingerprint: stringOrNull(row.cached_m0_workspace_fingerprint),
         cachedM0ProjectUserProfileVersion: numOrNull(row.cached_m0_project_user_profile_version),
@@ -530,6 +535,8 @@ export function persistCachedM0(
     sessionId: string,
     payload: PersistCachedM0Payload,
 ): void {
+    // The project identity is the served block's owner, not a newer directory
+    // decision. Commit it in the same transaction as the bytes it identifies.
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
         writeSessionRenderCache(db, sessionId, "cached_m0_bytes", Buffer.from(payload.m0Bytes));

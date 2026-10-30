@@ -27,6 +27,7 @@ import {
 	directoryHasGitMetadata,
 	resolveProjectIdentityForSession,
 } from "@magic-context/core/features/magic-context/memory/project-identity";
+import { UnprovenCachedProjectOwnerError } from "@magic-context/core/features/magic-context/memory/session-identity-decision";
 import {
 	createUnifiedSearchDiagnostics,
 	formatSearchResults,
@@ -35,6 +36,7 @@ import {
 	unifiedSearch,
 } from "@magic-context/core/features/magic-context/search";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
+import { getNoteByIdInScope } from "@magic-context/core/features/magic-context/storage";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { CTX_SEARCH_DESCRIPTION } from "@magic-context/core/tools/ctx-search/constants";
 import {
@@ -118,7 +120,7 @@ export interface CtxSearchToolDeps {
 	resolveProjectIdentity?: (
 		directory: string,
 		ctx: ExtensionContext,
-	) => string | undefined;
+	) => string | undefined | Promise<string | undefined>;
 }
 
 export function createCtxSearchTool(
@@ -173,7 +175,17 @@ export function createCtxSearchTool(
 			}
 
 			const sessionId = ctx.sessionManager.getSessionId();
-			const projectIdentity = resolveProject(ctx.cwd, ctx);
+			let projectIdentity: string | undefined;
+			let ownerUnavailable = false;
+			let ownerNotice = "";
+			try {
+				projectIdentity = await resolveProject(ctx.cwd, ctx);
+			} catch (error) {
+				if (!(error instanceof UnprovenCachedProjectOwnerError)) throw error;
+				ownerUnavailable = true;
+				ownerNotice = `${error.refusal("ctx_search", "memory")}\n\n`;
+				projectIdentity = error.nonMemoryProjectIdentity;
+			}
 			if (!projectIdentity) {
 				return {
 					content: [
@@ -189,7 +201,8 @@ export function createCtxSearchTool(
 			await deps.ensureProjectRegistered?.(ctx.cwd, deps.db);
 			const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
 			const memoryEnabled =
-				snapshot?.features.memoryEnabled ?? deps.memoryEnabled;
+				!ownerUnavailable &&
+				(snapshot?.features.memoryEnabled ?? deps.memoryEnabled);
 			// Query embedding follows the provider alone; each lane applies its
 			// own feature gate, and history search ignores `memory.enabled`.
 			const embeddingEnabled = snapshot
@@ -276,7 +289,16 @@ export function createCtxSearchTool(
 					isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,
 					maxMessageOrdinal: messageOrdinalCutoff,
 					gitCommitsEnabled,
-					sources: normalizeSources(params.sources),
+					sources: ownerUnavailable
+						? (
+								normalizeSources(params.sources) ?? [
+									"message",
+									"git_commit",
+									"note",
+								]
+							).filter((source) => source !== "memory" && source !== "primer")
+						: normalizeSources(params.sources),
+					chunkPoolWarmOnly: ownerUnavailable ? true : undefined,
 					visibleMemoryIds,
 					diagnostics,
 					gitRepositoryAvailable: directoryHasGitMetadata(ctx.cwd),
@@ -301,7 +323,24 @@ export function createCtxSearchTool(
 					{
 						type: "text",
 						text:
-							formatSearchResults(query, results, sessionId, diagnostics) +
+							ownerNotice +
+							formatSearchResults(
+								query,
+								ownerUnavailable
+									? results.filter(
+											(result) =>
+												result.source !== "memory" &&
+												result.source !== "primer" &&
+												(result.source !== "note" ||
+													getNoteByIdInScope(deps.db, result.noteId, {
+														sessionId,
+														projectPath: undefined,
+													})?.type === "session"),
+										)
+									: results,
+								sessionId,
+								diagnostics,
+							) +
 							(rerankSkipped ? `\n${rerankSkipped}` : ""),
 					},
 				],

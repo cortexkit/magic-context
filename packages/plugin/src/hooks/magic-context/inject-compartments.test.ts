@@ -3518,7 +3518,7 @@ describe("m[0]/m[1] materialization", () => {
         expect(renderedText(secondMessages[0])).toBe(firstM0);
     });
 
-    it("project identity changes hard-materialize while legacy null adopts silently", () => {
+    it("known project changes hard-materialize while legacy null stays unknown without folding", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();
         const state = readStateFromMeta();
@@ -3532,31 +3532,34 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
         });
 
-        state.cachedM0ProjectIdentity = null;
-        db.prepare(
-            "UPDATE session_meta SET cached_m0_project_identity = NULL WHERE session_id = ?",
-        ).run(SESSION_ID);
-        const legacyNullDecision = injectM0M1({
-            db,
-            sessionId: SESSION_ID,
-            messages: [userMessage("m2", "legacy")],
-            state,
-            projectPath: PROJECT_PATH,
-            projectDirectory,
-        });
-        expect(legacyNullDecision.m0RematerializedThisPass).toBe(false);
-        expect(getOrCreateSessionMeta(db, SESSION_ID).cachedM0ProjectIdentity).toBe(PROJECT_PATH);
-
+        const changedMessages = [userMessage("m2", "changed")];
         const changedDecision = injectM0M1({
             db,
             sessionId: SESSION_ID,
-            messages: [userMessage("m3", "changed")],
+            messages: changedMessages,
             state,
             projectPath: "git:changed-project",
             projectDirectory,
         });
         expect(changedDecision.decision).toEqual({ value: true, reason: "project_change" });
         expect(changedDecision.m0RematerializedThisPass).toBe(true);
+
+        state.cachedM0ProjectIdentity = null;
+        db.prepare(
+            "UPDATE session_meta SET cached_m0_project_identity = NULL WHERE session_id = ?",
+        ).run(SESSION_ID);
+        const legacyMessages = [userMessage("m3", "legacy")];
+        const legacyNullDecision = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: legacyMessages,
+            state,
+            projectPath: "git:changed-project",
+            projectDirectory,
+        });
+        expect(legacyNullDecision.m0RematerializedThisPass).toBe(false);
+        expect(getOrCreateSessionMeta(db, SESSION_ID).cachedM0ProjectIdentity).toBeNull();
+        expect(renderedText(legacyMessages[0])).toBe(renderedText(changedMessages[0]));
     });
 
     it("SOFT /ctx-flush pass keeps m0 byte-identical, refreshes m1, and avoids first_render", () => {

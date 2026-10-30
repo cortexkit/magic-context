@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled, isSmartNoteSurfaceAvailable } from "../../config/agent-disable";
@@ -29,11 +30,16 @@ import {
     awaitSessionIdentityDecision,
     forgetSessionIdentityDecision,
     readSessionIdentityDecision,
+    recoverCachedSessionProjectOwner,
 } from "../../features/magic-context/memory/session-identity-decision";
 import { scheduleClearAndReindex } from "../../features/magic-context/message-index-async";
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import { backfillSessionActivity } from "../../features/magic-context/session-activity";
+import {
+    getServedSessionProjectIdentity,
+    reconcileServedSessionProjectIdentity,
+} from "../../features/magic-context/session-project-storage";
 import {
     getOrCreateSessionMeta,
     getOverflowState,
@@ -43,7 +49,7 @@ import {
     recordDetectedContextLimit,
     recordOverflowDetected,
 } from "../../features/magic-context/storage";
-import { clearSession } from "../../features/magic-context/storage-meta-session";
+import { clearSession, readSessionMeta } from "../../features/magic-context/storage-meta-session";
 import { clearCachedM0 } from "../../features/magic-context/storage-meta-shared";
 import { rebaseSessionCoordinatesAsync } from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
@@ -779,6 +785,15 @@ export async function registerContext(context: V2Context) {
     // Let slow healthy storage finish before fixing the tool list for this host.
     // Discovery yields to HTTP while setup waits, with a bounded degraded fallback.
     let db: ReturnType<typeof openDatabase> | undefined = await probeV2StorageAtBoot(storage);
+    const launchKey = `launch:${randomUUID()}`;
+    const launchDecision = await awaitSessionIdentityDecision(launchKey, directory, {
+        db,
+        allowHomeProject: config.allow_home_project,
+        connectionFile: config.subc?.connection_file,
+    });
+    forgetSessionIdentityDecision(launchKey);
+    // Scheduled work stays on the launch project, even when another session is resumed.
+    const launchProjectIdentity = launchDecision.identity;
     const storageOpenedAtBoot = db !== undefined;
     let legacyCleanupStarted = false;
     const cleanupLegacyOnce = async (database: NonNullable<typeof db>) => {
@@ -826,6 +841,7 @@ export async function registerContext(context: V2Context) {
         storeStorageNotice(sessionID, message, "refusal");
     };
     const hiddenChildHook = new HiddenChildHook();
+    const sessionDirectories = new Map<string, string>();
     await context.session.hook("http.request", (draft) => hiddenChildHook.cacheRequest(draft));
     const tools =
         db && isDatabasePersisted(db)
@@ -835,6 +851,10 @@ export async function registerContext(context: V2Context) {
                   config,
                   (id) => hiddenChildHook.owns(id),
                   embeddings.ensureRegistered,
+                  async (sessionID) => {
+                      await cacheV2SessionDirectory(context.session, sessionID, sessionDirectories);
+                      return sessionDirectories.get(sessionID) ?? directory;
+                  },
               )
             : undefined;
     const usage: TransformDeps["contextUsageMap"] = new Map();
@@ -930,8 +950,7 @@ export async function registerContext(context: V2Context) {
             },
             {
                 db: database,
-                projectIdentity:
-                    resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
+                projectIdentity: launchProjectIdentity ?? "",
                 directory,
                 hook: hiddenChildHook,
                 keepSubagents: config.keep_subagents === true,
@@ -954,11 +973,7 @@ export async function registerContext(context: V2Context) {
         dreamerRunConfig(config, liveConfigReader.poll().effective).dreamer?.disable === true;
     const startDreamer = (executor: HiddenCompletionExecutor) => {
         if (!dreamerAtBoot || dreamerDisabledNow()) return undefined;
-        const projectIdentity = resolveProjectIdentityForSession(
-            directory,
-            config.allow_home_project,
-        );
-        if (!projectIdentity) return undefined;
+        if (!launchProjectIdentity) return undefined;
         const cappedExecutor = withLiveDreamerOutputCap(
             executor,
             config,
@@ -975,8 +990,7 @@ export async function registerContext(context: V2Context) {
                 };
             },
             executor: cappedExecutor,
-            projectIdentity: () =>
-                resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
+            projectIdentity: () => launchProjectIdentity,
             projectMemoryEnabled: config.memory.enabled,
             language: config.language,
             mural: config.mural,
@@ -987,9 +1001,7 @@ export async function registerContext(context: V2Context) {
     };
     // Both stay undefined after a refused start until recoverHiddenWork wires them.
     let hiddenCompletionExecutor: V2HiddenCompletionExecutor | undefined =
-        db &&
-        isDatabasePersisted(db) &&
-        resolveProjectIdentityForSession(directory, config.allow_home_project)
+        db && isDatabasePersisted(db) && launchProjectIdentity
             ? await createHiddenExecutor(db)
             : undefined;
     let dreamTrigger = hiddenCompletionExecutor
@@ -1003,14 +1015,10 @@ export async function registerContext(context: V2Context) {
     // The shared timer samples the git indexing switch separately from dream tasks.
     let maintenanceTimer: ReturnType<typeof registerV2DreamScheduleTimer> | undefined;
     const startMaintenance = () => {
-        const timerProjectIdentity = resolveProjectIdentityForSession(
-            directory,
-            config.allow_home_project,
-        );
-        if (!timerProjectIdentity || maintenanceTimer) return;
+        if (!launchProjectIdentity || maintenanceTimer) return;
         maintenanceTimer = registerV2DreamScheduleTimer({
             directory,
-            projectIdentity: timerProjectIdentity,
+            projectIdentity: launchProjectIdentity,
             config,
             dreamer: dreamerAtBoot,
             liveConfig: () => liveConfigReader.poll().effective,
@@ -1031,7 +1039,7 @@ export async function registerContext(context: V2Context) {
      * so unlike tools they can start mid-session. Returns whether they are wired.
      */
     const recoverHiddenWork = (database: NonNullable<typeof db>): Promise<boolean> =>
-        !resolveProjectIdentityForSession(directory, config.allow_home_project)
+        !launchProjectIdentity
             ? Promise.resolve(false)
             : (hiddenWorkRecovery ??= (async () => {
                   try {
@@ -1071,21 +1079,38 @@ export async function registerContext(context: V2Context) {
     const channel1: NonNullable<TransformDeps["channel1StateBySession"]> = new Map();
     const variants = new Map<string, string | undefined>();
     const agents = new Map<string, string>();
-    const sessionDirectories = new Map<string, string>();
     const sessionProjectDirectory = (sessionID: string) =>
         sessionDirectories.get(sessionID) ?? directory;
     const prepareSessionIdentity = async (sessionID: string) => {
         await cacheV2SessionDirectory(context.session, sessionID, sessionDirectories);
+        const existing = readSessionIdentityDecision(sessionID, sessionDirectories.get(sessionID), {
+            allowHomeProject: config.allow_home_project,
+        });
+        if (existing) return existing;
+        const sessionMeta = db ? readSessionMeta(db, sessionID) : undefined;
+        if (db && sessionMeta) {
+            recoverCachedSessionProjectOwner(db, sessionID, sessionMeta);
+            reconcileServedSessionProjectIdentity(db, sessionID, sessionMeta);
+        }
         return awaitSessionIdentityDecision(sessionID, sessionProjectDirectory(sessionID), {
             db,
+            sessionMeta,
+            directoryIsFallback: !sessionDirectories.has(sessionID),
             allowHomeProject: config.allow_home_project,
             connectionFile: config.subc?.connection_file,
         });
     };
-    const sessionProjectIdentity = (sessionID: string) =>
-        readSessionIdentityDecision(sessionID, sessionProjectDirectory(sessionID), {
-            allowHomeProject: config.allow_home_project,
-        })?.identity;
+    const sessionProjectIdentity = (sessionID: string) => {
+        const state = db ? readSessionMeta(db, sessionID) : undefined;
+        if (db && state) recoverCachedSessionProjectOwner(db, sessionID, state);
+        return (
+            getServedSessionProjectIdentity(state) ??
+            readSessionIdentityDecision(sessionID, sessionProjectDirectory(sessionID), {
+                sessionMeta: state,
+                allowHomeProject: config.allow_home_project,
+            })?.identity
+        );
+    };
     const historyRefreshSessions = new Set<string>();
     registerSystemDateRefresh(historyRefreshSessions);
     const pendingMaterializationSessions = new Set<string>();
@@ -1528,7 +1553,14 @@ export async function registerContext(context: V2Context) {
             }) ||
             draft.model.limit?.context ||
             (state.lastObservedModelKey === modelKey ? state.lastUsageContextLimit : undefined);
-        const projectIdentity = sessionProjectIdentity(draft.sessionID);
+        const projectIdentity = readSessionIdentityDecision(
+            draft.sessionID,
+            sessionDirectories.get(draft.sessionID),
+            {
+                sessionMeta: state,
+                allowHomeProject: config.allow_home_project,
+            },
+        )?.identity;
         return materializeM0({
             ...createM0RenderOptions(
                 {
