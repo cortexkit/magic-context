@@ -135,6 +135,32 @@ mod tests {
         });
         assert!(serde_json::from_value::<BridgeConfig>(bridge).is_err());
     }
+
+    #[test]
+    fn union_recovery_prunes_unknown_model_leaves_without_losing_valid_siblings() {
+        let descriptor = json!({
+            "type": "union",
+            "options": [
+                {"type": "string"},
+                {"type": "object", "shape": {"model": {"type": "string"}},
+                    "catchall": {"type": "never"}}
+            ]
+        });
+        for leaf in ["unknown", "system_prompt"] {
+            let mut raw = json!({"entry": {"model": "provider/model"}});
+            raw["entry"][leaf] = json!("unrecognized");
+            let (_, issues) = schema_parse(&descriptor, raw.get("entry"), "entry");
+            assert_eq!(issues, vec![format!("entry.{leaf}")]);
+            assert!(prune(&mut raw, &issues[0]));
+            let (entry, remaining) = schema_parse(&descriptor, raw.get("entry"), "entry");
+            assert!(remaining.is_empty());
+            assert_eq!(entry, Some(json!({"model": "provider/model"})));
+        }
+        assert_eq!(
+            schema_parse(&descriptor, Some(&json!(false)), "entry").1,
+            vec!["entry"]
+        );
+    }
 }
 
 /// Host UI and transport choices (such as toast lifetime) are carried to the bridge,
@@ -794,11 +820,33 @@ pub(crate) fn schema_parse(
             }
         }
         "union" => {
+            let child_prefix = format!("{path}.");
+            let mut nested_issues = Vec::new();
+            let mut nested_depth = 0;
             for option in node["options"].as_array().unwrap() {
                 let (value, option_issues) = schema_parse(option, Some(input), path);
                 if option_issues.is_empty() {
                     return (value, vec![]);
                 }
+                // A matching object arm can identify a bad leaf even when the
+                // union also accepts strings. Preserve that detail so recovery
+                // removes only the bad leaf, as the TypeScript loader does.
+                let depth = option_issues
+                    .iter()
+                    .map(|issue| issue.split('.').count())
+                    .min()
+                    .unwrap_or(0);
+                if depth > nested_depth
+                    && option_issues.iter().all(|issue| {
+                        issue != path && (path.is_empty() || issue.starts_with(&child_prefix))
+                    })
+                {
+                    nested_depth = depth;
+                    nested_issues = option_issues;
+                }
+            }
+            if !nested_issues.is_empty() {
+                return (None, nested_issues);
             }
             false
         }

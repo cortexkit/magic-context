@@ -1114,7 +1114,7 @@ export class PiSubagentRunner implements PiRpcHistorianRunner {
 		);
 	}
 
-	/** Probe only an eligible OMP retained path; ordinary print-mode discovery is unchanged. */
+	/** Probe OMP RPC only with a budget guard and no extra args; normal print-mode launches are unchanged. */
 	async prepareRetainedHistorian(cwd?: string): Promise<boolean> {
 		if (this.invocation.targetHarness === "pi")
 			return this.budgetToolGuardAvailable;
