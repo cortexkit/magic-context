@@ -541,6 +541,26 @@ export function planCompactionMarker(
     };
 }
 
+/** Caller holds the host writer lock. Retirement requires a vanished target
+ * and no surviving marker-owned rows, including partial remnants. */
+export function isCompactionMarkerIntentAbsent(
+    marker: CompactionMarkerState,
+    targetEndMessageId: string | null,
+): boolean {
+    if (!targetEndMessageId) return false;
+    const db = getWritableOpenCodeDb();
+    // IDs are global. A conflicting row in another session also prevents retirement.
+    return !db
+        .prepare(`SELECT 1 FROM message WHERE id IN (?, ?)
+        UNION ALL SELECT 1 FROM part WHERE id IN (?, ?) LIMIT 1`)
+        .get(
+            targetEndMessageId,
+            marker.summaryMessageId,
+            marker.compactionPartId,
+            marker.summaryPartId,
+        );
+}
+
 /** Serialize recovery and intent staging with host writers, without changing host rows. */
 export function withCompactionMarkerPublicationLock<T>(operation: () => T): T {
     return runMarkerWriteTransaction(
@@ -1066,18 +1086,19 @@ export function listSessionCompactionMarkers(sessionId: string): SessionCompacti
  * never deleted even if it happened to share the boundary (defensive — a
  * foreign boundary newer than ours should always differ).
  *
- * Returns false (without throwing) when the DELETE transaction fails, e.g.
- * SQLITE_BUSY. The hygiene caller reports failure, but its transform trigger
- * only runs once per degraded episode, so a later-pass retry is not guaranteed.
+ * The optional ownership guard runs under the host writer lock, before any DELETE.
+ * Returns false (without throwing) when the transaction fails, e.g. SQLITE_BUSY.
  */
 export function removeForeignCompactionMarker(
     sessionId: string,
     marker: SessionCompactionMarkerRows,
     protectedSummaryMessageId: string | null,
+    shouldRemove?: () => boolean,
 ): boolean {
     try {
         const db = getWritableOpenCodeDb("removal");
         runMarkerRemovalTransaction(db, () => {
+            if (shouldRemove && !shouldRemove()) return;
             const deletePartsOfMessage = db.prepare(
                 "DELETE FROM part WHERE +session_id = ? AND message_id = ?",
             );

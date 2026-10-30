@@ -712,12 +712,11 @@ export function prepareCompartmentInjection(
     } else {
         // Degraded: the natural boundary message is not in the visible window.
         const degradedCount = noteDegradedRebuild(sessionId);
-        // Layer A (#263): on the FIRST degraded detection of an episode, run the
-        // fork-orphan marker hygiene pass. If a foreign marker outranks ours this
-        // removes it, so the next pass's window stops at our marker and we
-        // recover. Gated to the degraded trigger so steady state pays nothing.
-        if (degradedCount === 1) {
-            reconcileForkOrphanedCompactionMarkers(db, sessionId);
+        // Remove fork-orphan markers only on a pass already rebuilding.
+        // A cold defer must neither change host rows nor consume the opportunity
+        // for a later rebuilding pass to repair the degraded window.
+        if (isCacheBusting) {
+            reconcileForkOrphanedCompactionMarkers(db, sessionId, isCacheBusting);
         }
 
         let reAnchored = false;

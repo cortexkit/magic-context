@@ -25,6 +25,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as compactionMarker from "../../features/magic-context/compaction-marker";
 import {
     findBoundaryUserMessage,
     injectCompactionMarker,
@@ -51,6 +52,7 @@ import {
     closeCompactionMarkerConnection,
     MARKER_SUMMARY_TEXT,
     markerUpdateDefinitelyDidNotCut,
+    reconcileForkOrphanedCompactionMarkers,
     updateCompactionMarkerAfterPublication as updateOriginal,
 } from "./compaction-marker-manager";
 import {
@@ -1312,6 +1314,191 @@ describe("recoverable two-store marker publication", () => {
             closeQuietly(oc);
         }
     });
+
+    it("protects all pending publication rows during rebuilding orphan hygiene", async () => {
+        const { home, sid, oc, db } = fixture();
+        try {
+            expect((await applyDeferredCompactionMarker(db, sid, first, home)).kind).toBe(
+                "applied",
+            );
+            failFinalization(db);
+            expect((await applyDeferredCompactionMarker(db, sid, second, home)).kind).toBe(
+                "retryable-failure",
+            );
+            const before = hostRows(oc);
+            const pending = markerJson(db, sid);
+            expect(reconcileForkOrphanedCompactionMarkers(db, sid, true)).toEqual({
+                removed: 0,
+                failed: false,
+            });
+            expect(hostRows(oc)).toEqual(before);
+            expect(markerJson(db, sid)).toBe(pending);
+        } finally {
+            closeQuietly(oc);
+        }
+    });
+
+    it("rechecks newly staged ownership under the host removal lock", async () => {
+        const { home, sid, oc, db } = fixture();
+        expect((await applyDeferredCompactionMarker(db, sid, first, home)).kind).toBe("applied");
+        expect(await prepareCompactionMarkerCandidates(sid)).toBe(true);
+        failFinalization(db);
+        oc.exec("PRAGMA busy_timeout = 0");
+        let published = false;
+        let checkedUnderLock = false;
+        let expectedRows: ReturnType<typeof hostRows> | undefined;
+        let expectedIntent: string | undefined;
+        const originalScan = compactionMarker.listSessionCompactionMarkers;
+        const scan = spyOn(compactionMarker, "listSessionCompactionMarkers").mockImplementation(
+            (sessionId) => {
+                expect(applyDeferredOriginal(db, sid, second, home)).toMatchObject({
+                    kind: "retryable-failure",
+                    cut: "uncertain",
+                });
+                expectedRows = hostRows(oc);
+                expectedIntent = markerJson(db, sid);
+                published = true;
+                return originalScan(sessionId);
+            },
+        );
+        const originalPrepare = db.prepare.bind(db);
+        const read = spyOn(db, "prepare").mockImplementation((sql) => {
+            if (
+                published &&
+                String(sql) ===
+                    "SELECT compaction_marker_state FROM session_meta WHERE session_id = ?"
+            ) {
+                expect(() => oc.exec("BEGIN IMMEDIATE")).toThrow(/locked|busy/i);
+                checkedUnderLock = true;
+            }
+            return originalPrepare(sql);
+        });
+        try {
+            expect(reconcileForkOrphanedCompactionMarkers(db, sid, true)).toEqual({
+                removed: 0,
+                failed: false,
+            });
+            expect(published).toBe(true);
+            expect(checkedUnderLock).toBe(true);
+            expect(hostRows(oc)).toEqual(expectedRows);
+            expect(markerJson(db, sid)).toBe(expectedIntent);
+        } finally {
+            read.mockRestore();
+            scan.mockRestore();
+            closeQuietly(oc);
+        }
+    });
+
+    it("replaces an absent obsolete intent at the same ordinal", async () => {
+        const { home, sid, oc, db } = fixture();
+        try {
+            oc.exec(`CREATE TRIGGER interrupt_host BEFORE INSERT ON message
+                BEGIN SELECT RAISE(ABORT, 'interrupted before host commit'); END`);
+            expect((await applyDeferredCompactionMarker(db, sid, second, home)).kind).toBe(
+                "retryable-failure",
+            );
+            oc.exec("DROP TRIGGER interrupt_host");
+            oc.prepare("DELETE FROM message WHERE id = 'second'").run();
+            db.prepare(
+                "DELETE FROM compartments WHERE session_id = ? AND end_message_id = 'second'",
+            ).run(sid);
+            insertUserMessage(oc, "replacement", sid, 2_000);
+            appendCompartments(db, sid, [
+                {
+                    sequence: 1,
+                    startMessage: 11,
+                    endMessage: 20,
+                    startMessageId: "replacement",
+                    endMessageId: "replacement",
+                    title: "replacement",
+                    content: "replacement",
+                },
+            ]);
+            expect(
+                (
+                    await applyDeferredCompactionMarker(
+                        db,
+                        sid,
+                        { ...second, endMessageId: "replacement" },
+                        home,
+                    )
+                ).kind,
+            ).toBe("applied");
+            expect(getPersistedCompactionMarkerState(db, sid)?.targetEndMessageId).toBe(
+                "replacement",
+            );
+            expect(JSON.parse(markerJson(db, sid)).pending).toBeUndefined();
+            expect(pairCount(oc)).toBe(1);
+        } finally {
+            closeQuietly(oc);
+        }
+    });
+
+    it("rechecks intent after coverage validation before certifying an already-current marker", async () => {
+        const { home, sid, oc, db } = fixture();
+        expect((await applyDeferredCompactionMarker(db, sid, first, home)).kind).toBe("applied");
+        expect(await prepareCompactionMarkerCandidates(sid)).toBe(true);
+        failFinalization(db);
+        let staged = false;
+        let expectedRows: ReturnType<typeof hostRows> | undefined;
+        let expectedIntent: string | undefined;
+        const originalCompare = compactionMarker.compareOpenCodeMessagesByCanonicalOrder;
+        const compare = spyOn(
+            compactionMarker,
+            "compareOpenCodeMessagesByCanonicalOrder",
+        ).mockImplementation((sessionId, left, right) => {
+            if (!staged) {
+                staged = true;
+                expect(applyDeferredOriginal(db, sid, second, home)).toMatchObject({
+                    kind: "retryable-failure",
+                    cut: "uncertain",
+                });
+                expectedRows = hostRows(oc);
+                expectedIntent = markerJson(db, sid);
+            }
+            return originalCompare(sessionId, left, right);
+        });
+        try {
+            expect(applyDeferredOriginal(db, sid, first, home)).toMatchObject({
+                kind: "retryable-failure",
+                cut: "uncertain",
+            });
+            expect(staged).toBe(true);
+            expect(hostRows(oc)).toEqual(expectedRows);
+            expect(markerJson(db, sid)).toBe(expectedIntent);
+        } finally {
+            compare.mockRestore();
+            closeQuietly(oc);
+        }
+    });
+
+    for (const committed of [false, true])
+        it(`preserves a newer intent while its target or committed rows survive (committed=${committed})`, async () => {
+            const { home, sid, oc, db } = fixture();
+            try {
+                if (committed) failFinalization(db);
+                else
+                    oc.exec(`CREATE TRIGGER interrupt_host BEFORE INSERT ON message
+                BEGIN SELECT RAISE(ABORT, 'interrupted before host commit'); END`);
+                expect((await applyDeferredCompactionMarker(db, sid, second, home)).kind).toBe(
+                    "retryable-failure",
+                );
+                if (committed) {
+                    db.exec("DROP TRIGGER fail_finalization");
+                    oc.prepare("DELETE FROM message WHERE id = 'second'").run();
+                } else oc.exec("DROP TRIGGER interrupt_host");
+                const before = hostRows(oc);
+                const pending = markerJson(db, sid);
+                expect(await applyDeferredCompactionMarker(db, sid, first, home)).toMatchObject({
+                    kind: "retryable-failure",
+                    cut: "uncertain",
+                });
+                expect(hostRows(oc)).toEqual(before);
+                expect(markerJson(db, sid)).toBe(pending);
+            } finally {
+                closeQuietly(oc);
+            }
+        });
 
     it("adopts a post-commit state-write failure before advancing to the next fold, leaving one pair", async () => {
         const { home, sid, oc, db } = fixture();

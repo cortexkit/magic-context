@@ -4,6 +4,7 @@ import {
     findBoundaryUserMessage,
     type InjectCompactionMarkerArgs,
     inspectCompactionMarkerPublication,
+    isCompactionMarkerIntentAbsent,
     planCompactionMarker,
     replaceCompactionMarker,
     withCompactionMarkerPublicationLock,
@@ -32,7 +33,11 @@ function samePair(left: CompactionMarkerState, right: CompactionMarkerState): bo
     );
 }
 
-/** Called only while regenerating a model request, never by startup or a cached-request replay. */
+/**
+ * Consumes deferred marker requests when a response is rebuilding its cached prefix.
+ * Also used by incremental publication with deferral disabled and explicit full
+ * or partial recompilation.
+ */
 export function publishRecoverableCompactionMarker(
     db: Database,
     args: InjectCompactionMarkerArgs,
@@ -80,7 +85,11 @@ export function publishRecoverableCompactionMarker(
                     snapshot.pending &&
                     (snapshot.pending.boundaryOrdinal > args.endOrdinal ||
                         (snapshot.pending.boundaryOrdinal === args.endOrdinal &&
-                            snapshot.pending.targetEndMessageId !== args.endMessageId))
+                            snapshot.pending.targetEndMessageId !== args.endMessageId)) &&
+                    !isCompactionMarkerIntentAbsent(
+                        snapshot.pending,
+                        snapshot.pending.targetEndMessageId,
+                    )
                 )
                     throw new Error("a newer marker publication intent is pending");
                 const boundary = findBoundaryUserMessage(sessionId, args.endMessageId);
