@@ -591,7 +591,7 @@ export function applyV2PromptSurfaceTools(
 }
 
 /**
- * Measure the tool definitions this request is actually going to send.
+ * Measure the tool definitions visible to this session's context hook.
  *
  * OpenCode 1 measures the same thing through its `tool.definition` hook; OpenCode 2 has no such
  * hook, but the request draft carries the whole tool set, so the draft is the measurement seam.

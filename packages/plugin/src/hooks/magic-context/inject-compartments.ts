@@ -25,7 +25,10 @@ import type { Memory } from "../../features/magic-context/memory/types";
 import { resolveMuralWire } from "../../features/magic-context/mural/render-trigger";
 import type { MuralWireOptions } from "../../features/magic-context/mural/resolve-mural";
 import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
-import { describeRequestToolDefinitionChange } from "../../features/magic-context/request-tool-definitions";
+import {
+    describeRequestToolDefinitionChange,
+    needsRequestToolIdentityAdoption,
+} from "../../features/magic-context/request-tool-definitions";
 import {
     GLOBAL_USER_PROFILE_PROJECT_PATH,
     getMaxM0MutationId,
@@ -898,7 +901,7 @@ export interface M0SnapshotMarkers {
     // HARD-bust markers are captured from runtime signals at the injectM0M1
     // call site (NOT a pure DB read), so readCurrentM0SnapshotMarkers takes
     // them as inputs. The names-only tool-set hash is attribution; the optional
-    // definition hash comes only from OpenCode 2's session request.
+    // name/description identity comes only from OpenCode 2's context hook.
     systemHash: string;
     toolSetHash: string;
     toolDefinitionsHash?: string | null;
@@ -916,14 +919,14 @@ export interface M0SnapshotMarkers {
  * Runtime cache-eviction signals threaded into the materialization decision.
  * These are NOT derived from durable DB state like the content markers — they
  * come from the current flight (system-prompt hash, tool-set fingerprint,
- * provider/model key) plus the TTL idle window. Only the session request's
- * definition hash can trigger a tool change; the names-only hash is attribution.
+ * provider/model key) plus the TTL idle window. Only the session context's
+ * name/description identity can trigger a tool change; the names-only hash is attribution.
  */
 export interface M0HardSignals {
     systemHash: string;
     /** Empty or absent means the provider tool set is not observable this pass. */
     toolSetHash?: string;
-    /** OpenCode 2 only: ordered tool definitions from this session's outgoing request. */
+    /** OpenCode 2 only: sorted names/descriptions observed by this session's context hook. */
     toolDefinitionsHash?: string;
     modelKey: string;
     /** True when the provider cache TTL has elapsed since lastResponseTime. */
@@ -1895,7 +1898,10 @@ export function mustMaterialize(args: {
         const cachedDefinitionsHash = readCachedM0ToolDefinitionsHash(
             args.state.cachedM0UpgradeState,
         );
-        if (!cachedDefinitionsHash) {
+        if (
+            !cachedDefinitionsHash ||
+            needsRequestToolIdentityAdoption(cachedDefinitionsHash, liveDefinitionsHash)
+        ) {
             // Upgraded baselines cannot tell us what tools they served. Seed the
             // comparison without rebuilding or changing a single served byte.
             const previousIdentity = args.state.cachedM0UpgradeState;

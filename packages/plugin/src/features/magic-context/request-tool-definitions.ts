@@ -2,33 +2,40 @@ import { createHash } from "node:crypto";
 
 type Definitions = Record<string, { description: string; input: unknown }>;
 interface DefinitionIdentity {
+    scope?: string;
     hash: string;
     tools: Array<[string, string]>;
 }
 
+const IDENTITY_SCOPE = "names-descriptions-v1";
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 /**
- * Hash the request's definitions, not registrations or token measurements.
- * The running host exposes no callable provider-schema projector to plugins.
- * This is deliberately conservative: a schema change erased by the host's later
- * normalization can buy one unnecessary fold. Copying a pinned normalizer would
- * drift from the running host. Keep request order and raw schema serialization
- * so genuine tool changes cannot be hidden by canonicalization. Explicit field
- * projection ignores only draft-object field order, which the host also ignores.
+ * The cache policy observes only the context hook's set of tool names and
+ * descriptions. Schemas and tool ordering do not grant a rebuild opportunity:
+ * the host may normalize schemas, and registration order is not a tool change.
+ * Changes made by later context hooks are outside this observation window; that
+ * limit is intentionally accepted rather than guessing their final output.
  * Store per-tool digests beside the aggregate hash (never whole definitions), so
  * even after a restart the fold log can identify the first differing tool.
  */
 export function v2ToolDefinitionsHash(tools: Definitions): string {
-    const definitions = Object.entries(tools).map(([name, tool]) => ({
-        name,
-        description: tool.description,
-        input_schema: tool.input,
-    }));
+    const pairs = Object.entries(tools)
+        .map(([name, tool]) => [name, tool.description] as const)
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
     return JSON.stringify({
-        hash: sha(definitions),
-        tools: definitions.map((definition) => [definition.name, sha(definition)]),
+        scope: IDENTITY_SCOPE,
+        hash: sha(pairs),
+        tools: pairs.map(([name, description]) => [name, sha([name, description])]),
     } satisfies DefinitionIdentity);
+}
+
+/** A legacy raw-schema identity must be adopted, not paid for as a tool change. */
+export function needsRequestToolIdentityAdoption(previous: string, current: string): boolean {
+    return (
+        readIdentity(current).scope === IDENTITY_SCOPE &&
+        readIdentity(previous).scope !== IDENTITY_SCOPE
+    );
 }
 
 function readIdentity(value: string): DefinitionIdentity {

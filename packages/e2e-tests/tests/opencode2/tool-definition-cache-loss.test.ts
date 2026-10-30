@@ -195,7 +195,7 @@ test.each(["normalized_schema", "later_plugin"] as const)(
         writeFileSync(join(fixture.cwd, "ARCHITECTURE.md"), "# Before tool change\n".repeat(20));
         const host = await spawnOpencode2({
             existingIsolation: fixture,
-            ...(scenario === "later_plugin" ? { probePlugin: plugin } : { prePlugin: plugin }),
+            ...(scenario === "later_plugin" ? { probePlugin: plugin, additionalModelIDs: ["claude-opus-5-5"] } : { prePlugin: plugin }),
             providerID: "anthropic",
             defaultModelID: "claude-sonnet-5-5",
             modelContextLimit: 200_000,
@@ -239,10 +239,31 @@ test.each(["normalized_schema", "later_plugin"] as const)(
                 expect(wire(changed.messages)).not.toContain("New docs must ride a genuine tool bust");
                 expect(folds).toHaveLength(0);
             } else {
+                // The name/description policy accepts this ordering limit:
+                // a context plugin after Magic Context is invisible to its trigger.
+                // The waiting docs must stay frozen until a natural rebuild.
                 expect(toolBytesEqual).toBe(false);
-                expect(folds).toHaveLength(1);
-                expect(folds[0]).toContain("reason=tool_definitions");
-                expect(wire(changed.messages)).toContain("New docs must ride a genuine tool bust");
+                expect(folds).toHaveLength(0);
+                expect(wire(changed.messages)).not.toContain("New docs must ride a genuine tool bust");
+                const naturalStart = readPluginLog(host.env).length;
+                await client.session.switchModel({ sessionID: session.id,
+                    model: { providerID: "anthropic", id: "claude-opus-5-5" } });
+                const naturalTurn = async (text: string): Promise<Body> => {
+                    const before = host.mock.requests().length;
+                    await client.session.prompt({ sessionID: session.id, text });
+                    await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
+                    const requests = host.mock.requests().slice(before).filter(request => request.body.model === "claude-opus-5-5");
+                    expect(requests).toHaveLength(1);
+                    return requests[0]!.body as Body;
+                };
+                const rebuilt = await naturalTurn("A model switch supplies the next natural rebuild.");
+                expect(wire(rebuilt.messages)).toContain("New docs must ride a genuine tool bust");
+                const next = await naturalTurn("Keep the rebuilt prefix steady.");
+                expect(wire(next.messages.slice(0, rebuilt.messages.length))).toBe(wire(rebuilt.messages));
+                const naturalFolds = readPluginLog(host.env).slice(naturalStart).split("\n").filter(line =>
+                    line.includes(`[${session.id}]`) && line.includes("m[0] HARD fold decision:") && line.includes("executed=true"));
+                expect(naturalFolds).toHaveLength(1);
+                expect(naturalFolds[0]).toContain("reason=model_change");
             }
         } finally {
             db.close();
