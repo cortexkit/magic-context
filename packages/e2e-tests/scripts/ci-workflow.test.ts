@@ -10,6 +10,13 @@ const waitActionText = await Bun.file(resolve(root, ".github/actions/wait-ci-art
 type Step = { name?: string; run?: string; if?: string; uses?: string; with?: Record<string, string>; env?: Record<string, string> };
 type Job = { name: string; needs?: string[]; if?: string; "timeout-minutes"?: number; permissions?: Record<string, string>; steps: Step[]; strategy?: { "fail-fast": boolean; matrix: { shard?: number[]; mode?: string[]; version?: string[] } } };
 const workflow = Bun.YAML.parse(text) as { jobs: Record<string, Job> };
+// Inspect the commands CI actually invokes, not a second copy of their shell bodies.
+for (const job of Object.values(workflow.jobs)) {
+    for (const step of job.steps) {
+        const shared = step.run?.match(/^bash (scripts\/ci\/[\w-]+\.sh)(?: |$)/);
+        if (shared) step.run += `\n${await Bun.file(resolve(root, shared[1]!)).text()}`;
+    }
+}
 const releaseWorkflow = Bun.YAML.parse(releaseText) as { jobs: Record<string, Job> };
 const allWorkflowDocuments = await Promise.all(
     (await readdir(resolve(root, ".github/workflows")))
