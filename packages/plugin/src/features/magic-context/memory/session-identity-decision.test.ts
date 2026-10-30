@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
@@ -18,13 +18,17 @@ import {
     SERVER_PROOF_DOMAIN,
 } from "@cortexkit/subc-client";
 import vectors from "../../../../../../test-vectors/project-resolve-v1/resolve.json";
+import { parsePluginConfig } from "../../../config";
 import { createEventHandler } from "../../../hooks/magic-context/event-handler";
 import { createTransform } from "../../../hooks/magic-context/transform";
+import { createToolRegistry } from "../../../plugin/tool-registry";
+import type { PluginContext } from "../../../plugin/types";
 import { getHarness } from "../../../shared/harness";
 import { Database } from "../../../shared/sqlite";
 import { createTestTempDir } from "../../../shared/test-temp-dir";
 import { recordSessionProjectIdentity } from "../session-project-storage";
 import { closeDatabase, openDatabase } from "../storage";
+import { readSessionMeta, updateSessionMeta } from "../storage-meta-session";
 import { createTagger } from "../tagger";
 import { ENTORHINAL_RESOLVE_DEADLINE_MS } from "./entorhinal-resolve";
 import {
@@ -49,7 +53,7 @@ import {
     awaitSessionIdentityDecision,
     readSessionIdentityDecision,
 } from "./session-identity-decision";
-import { insertMemory } from "./storage-memory";
+import { getMemoriesByProject, insertMemory } from "./storage-memory";
 
 function registeredReply(directory: string) {
     const reply = structuredClone(vectors[0].reply);
@@ -356,7 +360,7 @@ describe("session identity decisions", () => {
         expect(readSessionIdentityDecision("A", directory)?.identity).toBe(a.identity);
         await awaitSessionIdentityDecision("A", directory, options);
         expect(fake.calls).toHaveLength(2);
-        expect(resolveProjectIdentityForSession(directory)).toBe(a.identity);
+        expect(resolveProjectIdentityForSession(directory)).toBe(b.identity);
     });
 
     test.each([
@@ -497,8 +501,569 @@ function rendered(output: { messages: unknown[] }): string {
     return JSON.stringify(output.messages);
 }
 
+function sessionTools(directory: string, session: string, connectionFile: string) {
+    const tools = createToolRegistry({
+        ctx: { directory } as PluginContext,
+        pluginConfig: parsePluginConfig({ subc: { connection_file: connectionFile } }),
+    });
+    const context = {
+        sessionID: session,
+        messageID: "user-1",
+        agent: "build",
+        directory,
+        worktree: directory,
+        abort: new AbortController().signal,
+        metadata: () => {},
+    } as never;
+    return { tools, context };
+}
+
 describe("OpenCode session decision integration", () => {
-    test("a 250 ms session.created and first transform share pj while the directory cache holds git", async () => {
+    test.each([
+        "missing row",
+        "stale row",
+        "pre-remap row",
+        "timeout fallback",
+    ])("served-owner review: a legacy held prefix retains tool visibility and write scope (%s)", async (legacyState) => {
+        const a = folder("legacy-review-a"),
+            b = folder("legacy-review-b");
+        const oldIdentity =
+            legacyState === "pre-remap row" ? resolveProjectIdentityForSession(a)! : "pj-LEGACY-A";
+        if (legacyState !== "pre-remap row") rememberPinnedProjectIdentity(a, oldIdentity);
+        if (legacyState !== "timeout fallback") rememberPinnedProjectIdentity(b, "pj-LEGACY-B");
+        const timeout = legacyState === "timeout fallback" ? await fakeEndpoint(b) : undefined;
+        if (timeout) timeout.delay = ENTORHINAL_RESOLVE_DEADLINE_MS * 2;
+        const db = hostDatabase();
+        const session = "legacy-review-held";
+        const alpha = insertMemory(db, {
+            projectPath: oldIdentity,
+            category: "USER_DIRECTIVES",
+            content: "legacy served alpha directive",
+        });
+        const model = { providerID: "anthropic", modelID: "claude-sonnet-5-5" };
+        const deps = {
+            ...hostDeps(
+                db,
+                session,
+                a,
+                timeout?.connectionFile ?? join(temp.dir, "absent-subc.json"),
+            ),
+            liveModelBySession: new Map([[session, model]]),
+        };
+        if (legacyState === "missing row" || timeout) {
+            deps.sessionDirectoryBySession.clear();
+            Object.assign(deps, {
+                client: {
+                    session: {
+                        get: async () => {
+                            throw new Error("host unavailable");
+                        },
+                    },
+                },
+            });
+        }
+        const first = { messages: messages(session) };
+        await createTransform(deps)({}, first);
+        expect(rendered(first)).toContain(alpha.content);
+        // Older cached memory blocks lacked a project-owner marker, even when attribution was missing or named a newer directory.
+        updateSessionMeta(db, session, { cachedM0ProjectIdentity: null });
+        if (legacyState === "stale row") recordSessionProjectIdentity(db, session, "pj-LEGACY-B");
+        if (legacyState === "pre-remap row") rememberPinnedProjectIdentity(a, "pj-LEGACY-REMAPPED");
+        __resetSessionIdentityDecisionsForTests();
+        const actualDirectory = legacyState === "pre-remap row" ? a : b;
+        const { tools, context } = sessionTools(actualDirectory, session, deps.subcConnectionFile);
+        const read = await tools.ctx_memory!.execute({ action: "get", ids: [alpha.id] }, context);
+        if (timeout) expect(timeout.calls).toHaveLength(1);
+        expect(
+            await tools.ctx_memory!.execute(
+                { action: "write", category: "USER_DIRECTIVES", content: "legacy held write" },
+                context,
+            ),
+        ).toContain("Saved memory");
+        expect(
+            getMemoriesByProject(db, row(db, session)!).map((memory) => memory.content),
+        ).toContain("legacy held write");
+        deps.sessionDirectoryBySession.set(session, actualDirectory);
+        deps.contextUsageMap.set(session, {
+            usage: { percentage: 66, inputTokens: 66000 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        });
+        const held = {
+            messages: [
+                ...messages(session),
+                {
+                    info: {
+                        id: "legacy-thinking",
+                        role: "assistant",
+                        sessionID: session,
+                        ...model,
+                        tokens: { input: 0, output: 1600, reasoning: 1600 },
+                    },
+                    parts: [
+                        { type: "reasoning", text: "signed thinking" },
+                        {
+                            type: "tool",
+                            tool: "read",
+                            callID: "legacy-call",
+                            state: { status: "completed", output: "contents" },
+                        },
+                    ],
+                },
+            ],
+        };
+        await createTransform(deps)({}, held);
+        expect(JSON.stringify(held.messages.slice(0, 2))).toBe(
+            JSON.stringify(first.messages.slice(0, 2)),
+        );
+        expect({
+            read,
+            writes: getMemoriesByProject(db, oldIdentity).map((memory) => memory.content),
+        }).toEqual({
+            read: expect.stringContaining(alpha.content),
+            writes: expect.arrayContaining(["legacy held write"]),
+        });
+    });
+
+    test("served-owner review: repeated read tools do not acquire the SQLite writer", async () => {
+        const directory = folder("review-read-locks");
+        rememberPinnedProjectIdentity(directory, "pj-READ-LOCK");
+        const db = hostDatabase();
+        const session = "review-read-locks";
+        const alpha = insertMemory(db, {
+            projectPath: "pj-READ-LOCK",
+            category: "USER_DIRECTIVES",
+            content: "read lock directive",
+        });
+        await createTransform(hostDeps(db, session, directory, join(temp.dir, "absent-subc.json")))(
+            {},
+            { messages: messages(session) },
+        );
+        const filename = (
+            db.prepare("PRAGMA database_list").all() as { name: string; file: string }[]
+        ).find((entry) => entry.name === "main")!.file;
+        const competingWriter = new Database(filename);
+        competingWriter.exec("PRAGMA busy_timeout = 0");
+        const transaction = db.transaction.bind(db);
+        const holdMilliseconds: number[] = [];
+        const transactionMilliseconds: number[] = [];
+        let writerBlocked = false;
+        const spy = spyOn(db, "transaction").mockImplementation(((
+            operation: (...args: unknown[]) => unknown,
+        ) => {
+            const wrapped = transaction((...args: unknown[]) => {
+                const start = performance.now();
+                if (holdMilliseconds.length === 0) {
+                    try {
+                        competingWriter.exec("BEGIN IMMEDIATE");
+                        competingWriter.exec("ROLLBACK");
+                    } catch (error) {
+                        writerBlocked = /locked|busy/i.test(String(error));
+                    }
+                }
+                try {
+                    return operation(...args);
+                } finally {
+                    holdMilliseconds.push(performance.now() - start);
+                }
+            });
+            const immediate = wrapped.immediate.bind(wrapped);
+            wrapped.immediate = (...args: unknown[]) => {
+                const start = performance.now();
+                try {
+                    return immediate(...args);
+                } finally {
+                    transactionMilliseconds.push(performance.now() - start);
+                }
+            };
+            return wrapped;
+        }) as typeof db.transaction);
+        const stamp = () =>
+            db
+                .prepare(
+                    "SELECT updated_at FROM session_projects WHERE session_id = ? AND harness = ?",
+                )
+                .get(session, getHarness());
+        db.prepare(
+            "UPDATE session_projects SET updated_at = 1 WHERE session_id = ? AND harness = ?",
+        ).run(session, getHarness());
+        const before = stamp();
+        try {
+            const { tools, context } = sessionTools(
+                directory,
+                session,
+                join(temp.dir, "absent-subc.json"),
+            );
+            for (let i = 0; i < 20; i++)
+                expect(
+                    await tools.ctx_memory!.execute({ action: "get", ids: [alpha.id] }, context),
+                ).toContain(alpha.content);
+            expect(stamp()).toEqual(before);
+            console.log(
+                "served-owner read burst",
+                JSON.stringify({
+                    calls: 20,
+                    transactions: holdMilliseconds.length,
+                    writerBlocked,
+                    holdMilliseconds,
+                    transactionMilliseconds,
+                }),
+            );
+            expect(holdMilliseconds).toHaveLength(0);
+        } finally {
+            spy.mockRestore();
+            competingWriter.close();
+        }
+    });
+
+    test("served-owner review: another session's attribution does not add writes to a warm defer", async () => {
+        const directory = folder("review-revision");
+        rememberPinnedProjectIdentity(directory, "pj-REVISION-A");
+        const db = hostDatabase();
+        const session = "review-revision";
+        const prepare = db.prepare.bind(db);
+        const observed: string[] = [];
+        const statementSpies: { mockRestore: () => void }[] = [];
+        const spy = spyOn(db, "prepare").mockImplementation(((sql: string) => {
+            const statement = prepare(sql);
+            if (sql.includes("session_projects")) {
+                for (const method of ["run", "get", "all"] as const) {
+                    const execute = statement[method].bind(statement);
+                    statementSpies.push(
+                        spyOn(statement, method).mockImplementation(((...args: unknown[]) => {
+                            if (args[0] === session) observed.push(`${method}: ${sql}`);
+                            return execute(...args);
+                        }) as never),
+                    );
+                }
+            }
+            return statement;
+        }) as typeof db.prepare);
+        try {
+            const model = { providerID: "anthropic", modelID: "claude-sonnet-5-5" };
+            const deps = {
+                ...hostDeps(db, session, directory, join(temp.dir, "absent-subc.json")),
+                liveModelBySession: new Map([[session, model]]),
+                client: {
+                    session: {
+                        get: async () => {
+                            throw new Error("host unavailable");
+                        },
+                    },
+                } as unknown as PluginContext["client"],
+            };
+            const transform = createTransform(deps);
+            const first = { messages: messages(session) };
+            await transform({}, first);
+            const warm = { messages: messages(session) };
+            observed.length = 0;
+            await transform({}, warm);
+            expect(observed).toEqual([]);
+            const thinking = [
+                ...messages(session),
+                {
+                    info: {
+                        id: "revision-thinking",
+                        role: "assistant",
+                        sessionID: session,
+                        ...model,
+                        tokens: { input: 0, output: 1600, reasoning: 1600 },
+                    },
+                    parts: [
+                        { type: "reasoning", text: "signed thinking" },
+                        {
+                            type: "tool",
+                            tool: "read",
+                            callID: "revision-call",
+                            state: { status: "completed", output: "contents" },
+                        },
+                    ],
+                },
+            ];
+            deps.contextUsageMap.set(session, {
+                usage: { percentage: 66, inputTokens: 66000 },
+                updatedAt: Date.now(),
+                hasUsageTokens: true,
+            });
+            const held = { messages: structuredClone(thinking) };
+            await transform({}, held);
+            expect(JSON.stringify(held.messages.slice(0, 2))).toBe(
+                JSON.stringify(first.messages.slice(0, 2)),
+            );
+            expect(observed).toEqual([]);
+            deps.sessionDirectoryBySession.clear();
+            const unresolved = { messages: structuredClone(thinking) };
+            await transform({}, unresolved);
+            expect(JSON.stringify(unresolved.messages.slice(0, 2))).toBe(
+                JSON.stringify(first.messages.slice(0, 2)),
+            );
+            expect(observed).toEqual([]);
+            deps.sessionDirectoryBySession.set(session, directory);
+            deps.contextUsageMap.clear();
+            recordSessionProjectIdentity(db, "unrelated-session", "pj-REVISION-B");
+            observed.length = 0;
+            const next = { messages: messages(session) };
+            await transform({}, next);
+            expect(JSON.stringify(next.messages.slice(0, 2))).toBe(
+                JSON.stringify(first.messages.slice(0, 2)),
+            );
+            expect(observed).toEqual([]);
+        } finally {
+            for (const statementSpy of statementSpies) statementSpy.mockRestore();
+            spy.mockRestore();
+        }
+    });
+
+    test("a tool decision before the first prefix is not replaced by a guessed launch directory", async () => {
+        const a = folder("first-prefix-launch"),
+            b = folder("first-prefix-tool");
+        rememberPinnedProjectIdentity(a, "pj-FIRST-LAUNCH");
+        rememberPinnedProjectIdentity(b, "pj-FIRST-TOOL");
+        const db = hostDatabase();
+        const session = "first-prefix-tool";
+        const connectionFile = join(temp.dir, "absent-subc.json");
+        insertMemory(db, {
+            projectPath: "pj-FIRST-LAUNCH",
+            category: "USER_DIRECTIVES",
+            content: "wrong first launch memory",
+        });
+        const beta = insertMemory(db, {
+            projectPath: "pj-FIRST-TOOL",
+            category: "USER_DIRECTIVES",
+            content: "first tool project memory",
+        });
+        const { tools, context } = sessionTools(b, session, connectionFile);
+        expect(
+            await tools.ctx_memory!.execute(
+                {
+                    action: "write",
+                    category: "USER_DIRECTIVES",
+                    content: "before first prefix write",
+                },
+                context,
+            ),
+        ).toContain("Saved memory");
+        const deps = {
+            ...hostDeps(db, session, a, connectionFile),
+            sessionDirectoryBySession: new Map<string, string>(),
+            client: {
+                session: {
+                    get: async () => {
+                        throw new Error("host unavailable");
+                    },
+                },
+            } as unknown as PluginContext["client"],
+        };
+        const output = { messages: messages(session) };
+        await createTransform(deps)({}, output);
+        expect(rendered(output)).toContain(beta.content);
+        expect(rendered(output)).toContain("before first prefix write");
+        expect(rendered(output)).not.toContain("wrong first launch memory");
+        expect(readSessionMeta(db, session).cachedM0ProjectIdentity).toBe("pj-FIRST-TOOL");
+    });
+
+    test("a legacy cached prefix recovers its exact HARD owner without rebuilding its bytes", async () => {
+        const directory = folder("legacy-owner");
+        rememberPinnedProjectIdentity(directory, "pj-LEGACY-OWNER");
+        const db = hostDatabase();
+        const session = "legacy-owner";
+        const alpha = insertMemory(db, {
+            projectPath: "pj-LEGACY-OWNER",
+            category: "USER_DIRECTIVES",
+            content: "legacy cached directive",
+        });
+        const deps = hostDeps(db, session, directory, join(temp.dir, "absent-subc.json"));
+        const first = { messages: messages(session) };
+        await createTransform(deps)({}, first);
+        const materializedAt = readSessionMeta(db, session).cachedM0MaterializedAt;
+        updateSessionMeta(db, session, { cachedM0ProjectIdentity: null });
+        __resetSessionIdentityDecisionsForTests();
+        const upgraded = { messages: messages(session) };
+        await createTransform(deps)({}, upgraded);
+        expect(JSON.stringify(upgraded.messages.slice(0, 2))).toBe(
+            JSON.stringify(first.messages.slice(0, 2)),
+        );
+        expect(readSessionMeta(db, session).cachedM0MaterializedAt).toBe(materializedAt);
+        expect(readSessionMeta(db, session).cachedM0ProjectIdentity).toBe("pj-LEGACY-OWNER");
+        const { tools, context } = sessionTools(directory, session, deps.subcConnectionFile);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [alpha.id] }, context),
+        ).toContain(alpha.content);
+    });
+
+    test("review witness: a tool-first move cannot replace the owner of a held fallback prefix", async () => {
+        const a = folder("review-fallback-a");
+        const b = folder("review-fallback-b");
+        rememberPinnedProjectIdentity(a, "pj-REVIEW-A");
+        rememberPinnedProjectIdentity(b, "pj-REVIEW-B");
+        const db = hostDatabase();
+        const session = "review-fallback-move";
+        const alpha = insertMemory(db, {
+            projectPath: "pj-REVIEW-A",
+            category: "USER_DIRECTIVES",
+            content: "review fallback alpha directive",
+        });
+        const model = { providerID: "anthropic", modelID: "claude-sonnet-5-5" };
+        const deps = {
+            ...hostDeps(db, session, a, join(temp.dir, "absent-subc.json")),
+            sessionDirectoryBySession: new Map<string, string>(),
+            liveModelBySession: new Map([[session, model]]),
+            client: {
+                session: {
+                    get: async () => {
+                        throw new Error("host unavailable");
+                    },
+                },
+            } as unknown as PluginContext["client"],
+        };
+        const transform = createTransform(deps);
+        const first = { messages: messages(session) };
+        await transform({}, first);
+        expect(rendered(first)).toContain(alpha.content);
+        expect(row(db, session)).toBeUndefined();
+        const head = JSON.stringify(first.messages.slice(0, 2));
+
+        const { tools, context } = sessionTools(b, session, deps.subcConnectionFile);
+        await tools.ctx_memory!.execute(
+            { action: "write", category: "USER_DIRECTIVES", content: "review move write" },
+            context,
+        );
+        deps.sessionDirectoryBySession.set(session, b);
+        deps.contextUsageMap.set(session, {
+            usage: { percentage: 66, inputTokens: 66000 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        });
+        const held = {
+            messages: [
+                ...messages(session),
+                {
+                    info: {
+                        id: "review-signed-step",
+                        role: "assistant",
+                        sessionID: session,
+                        ...model,
+                        tokens: { input: 0, output: 1600, reasoning: 1600 },
+                    },
+                    parts: [
+                        { type: "reasoning", text: "signed thinking" },
+                        {
+                            type: "tool",
+                            tool: "read",
+                            callID: "review-call",
+                            state: { status: "completed", output: "contents" },
+                        },
+                    ],
+                },
+            ],
+        };
+        await transform({}, held);
+        expect(JSON.stringify(held.messages.slice(0, 2))).toBe(head);
+        const read = await tools.ctx_memory!.execute({ action: "get", ids: [alpha.id] }, context);
+        const writes = getMemoriesByProject(db, "pj-REVIEW-A").map((memory) => memory.content);
+        expect({ read, writes, owner: row(db, session) }).toEqual({
+            read: expect.stringContaining(alpha.content),
+            writes: expect.arrayContaining(["review move write"]),
+            owner: "pj-REVIEW-A",
+        });
+    });
+
+    test("review witness: a restarted held prefix repairs a stale recorded owner before tools run", async () => {
+        const a = folder("review-stale-a");
+        const b = folder("review-stale-b");
+        rememberPinnedProjectIdentity(a, "pj-REVIEW-STALE-A");
+        rememberPinnedProjectIdentity(b, "pj-REVIEW-STALE-B");
+        const db = hostDatabase();
+        const session = "review-stale-owner";
+        const alpha = insertMemory(db, {
+            projectPath: "pj-REVIEW-STALE-A",
+            category: "USER_DIRECTIVES",
+            content: "review persisted alpha directive",
+        });
+        const model = { providerID: "anthropic", modelID: "claude-sonnet-5-5" };
+        const firstDeps = {
+            ...hostDeps(db, session, a, join(temp.dir, "absent-subc.json")),
+            liveModelBySession: new Map([[session, model]]),
+        };
+        const first = { messages: messages(session) };
+        await createTransform(firstDeps)({}, first);
+        // Older transforms recorded the moved owner while replaying the old project's message prefix.
+        recordSessionProjectIdentity(db, session, "pj-REVIEW-STALE-B");
+        __resetSessionIdentityDecisionsForTests();
+        const deps = {
+            ...hostDeps(db, session, b, firstDeps.subcConnectionFile),
+            liveModelBySession: new Map([[session, model]]),
+        };
+        deps.contextUsageMap.set(session, {
+            usage: { percentage: 66, inputTokens: 66000 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        });
+        const held = {
+            messages: [
+                ...messages(session),
+                {
+                    info: {
+                        id: "review-resumed-step",
+                        role: "assistant",
+                        sessionID: session,
+                        ...model,
+                        tokens: { input: 0, output: 1600, reasoning: 1600 },
+                    },
+                    parts: [
+                        { type: "reasoning", text: "signed thinking" },
+                        {
+                            type: "tool",
+                            tool: "read",
+                            callID: "review-resumed-call",
+                            state: { status: "completed", output: "contents" },
+                        },
+                    ],
+                },
+            ],
+        };
+        await createTransform(deps)({}, held);
+        expect(JSON.stringify(held.messages.slice(0, 2))).toBe(
+            JSON.stringify(first.messages.slice(0, 2)),
+        );
+        const { tools, context } = sessionTools(b, session, deps.subcConnectionFile);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [alpha.id] }, context),
+        ).toContain(alpha.content);
+    });
+
+    test("review witness: a warm ordinary defer adds no session owner reads", async () => {
+        const directory = folder("review-hot-path");
+        rememberPinnedProjectIdentity(directory, "pj-REVIEW-HOT");
+        const db = hostDatabase();
+        const session = "review-hot-path";
+        const deps = hostDeps(db, session, directory, join(temp.dir, "absent-subc.json"));
+        const transform = createTransform(deps);
+        const first = { messages: messages(session) };
+        await transform({}, first);
+        const prepare = db.prepare.bind(db);
+        const ownerReads: string[] = [];
+        const spy = spyOn(db, "prepare").mockImplementation(((sql: string) => {
+            if (
+                sql ===
+                "SELECT project_path FROM session_projects WHERE session_id = ? AND harness = ?"
+            )
+                ownerReads.push(sql);
+            return prepare(sql);
+        }) as typeof db.prepare);
+        try {
+            const next = { messages: messages(session) };
+            await transform({}, next);
+            expect(JSON.stringify(next.messages.slice(0, 2))).toBe(
+                JSON.stringify(first.messages.slice(0, 2)),
+            );
+            expect(ownerReads).toHaveLength(0);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    test("a 250 ms session.created, transform and tools agree after caching git", async () => {
         const directory = folder("slow");
         const fake = await fakeEndpoint(directory);
         // Leave half the end-to-end deadline for connection setup and scheduling under load.
@@ -506,7 +1071,7 @@ describe("OpenCode session decision integration", () => {
         const db = hostDatabase();
         const session = "slow-created";
         const fallback = resolveProjectIdentityForSession(directory);
-        insertMemory(db, {
+        const registered = insertMemory(db, {
             projectPath: registeredProjectId,
             category: "USER_DIRECTIVES",
             content: "registered memory",
@@ -536,7 +1101,108 @@ describe("OpenCode session decision integration", () => {
         expect(row(db, session)).toBe(registeredProjectId);
         expect(rendered(output)).toContain("registered memory");
         expect(rendered(output)).not.toContain("fallback memory");
-        expect(resolveProjectIdentityForSession(directory)).toBe(fallback);
+        expect(resolveProjectIdentityForSession(directory)).toBe(registeredProjectId);
+        const { tools, context } = sessionTools(directory, session, fake.connectionFile);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [registered.id] }, context),
+        ).toContain("registered memory");
+        expect(fake.calls).toHaveLength(1);
+    });
+
+    test.each([
+        false,
+        true,
+    ])("tool-first get and write use the shared pj decision (linked=%s)", async (linked) => {
+        const root = folder("tool-root");
+        const directory = linked ? folder("tool-linked", false) : root;
+        if (linked) {
+            const gitdir = join(root, ".git", "worktrees", "tool-linked");
+            mkdirSync(gitdir, { recursive: true });
+            writeFileSync(join(gitdir, "commondir"), "../..\n");
+            writeFileSync(join(directory, ".git"), `gitdir: ${gitdir}\n`);
+        }
+        const fallback = resolveProjectIdentityForSession(directory);
+        expect(fallback).toStartWith("git:");
+        const fake = await fakeEndpoint(directory);
+        const db = hostDatabase();
+        const session = `tool-first-${linked}`;
+        const existing = insertMemory(db, {
+            projectPath: registeredProjectId,
+            category: "USER_DIRECTIVES",
+            content: "tool-first registered memory",
+        });
+        const { tools, context } = sessionTools(directory, session, fake.connectionFile);
+        const [read, write] = await Promise.all([
+            tools.ctx_memory!.execute({ action: "get", ids: [existing.id] }, context),
+            tools.ctx_memory!.execute(
+                { action: "write", category: "USER_DIRECTIVES", content: "tool-written directive" },
+                context,
+            ),
+        ]);
+        expect(read).toContain("tool-first registered memory");
+        expect(write).toContain("Saved memory");
+        expect(await tools.ctx_search!.execute({ query: `#${existing.id}` }, context)).toContain(
+            "tool-first registered memory",
+        );
+        expect(row(db, session)).toBe(registeredProjectId);
+        expect(
+            getMemoriesByProject(db, registeredProjectId).map((memory) => memory.content),
+        ).toContain("tool-written directive");
+        expect(getMemoriesByProject(db, fallback!)).toHaveLength(0);
+        if (linked)
+            expect(readRememberedProjectIdentity(directory)?.identity).not.toBe(
+                registeredProjectId,
+            );
+        const output = { messages: messages(session) };
+        await createTransform(hostDeps(db, session, directory, fake.connectionFile))({}, output);
+        expect(rendered(output)).toContain("tool-written directive");
+        expect(rendered(output)).toContain("tool-first registered memory");
+        expect(fake.calls).toHaveLength(1);
+        // The stored session owner survives process-local decision eviction without a pin.
+        __resetSessionIdentityDecisionsForTests();
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [existing.id] }, context),
+        ).toContain("tool-first registered memory");
+    });
+
+    test("a tool and injection share the first Entorhinal timeout fallback", async () => {
+        const directory = folder("tool-timeout");
+        const fake = await fakeEndpoint(directory);
+        fake.delay = ENTORHINAL_RESOLVE_DEADLINE_MS * 2;
+        const db = hostDatabase();
+        const session = "tool-timeout";
+        const fallback = resolveProjectIdentityForSession(directory)!;
+        insertMemory(db, {
+            projectPath: fallback,
+            category: "USER_DIRECTIVES",
+            content: "first timeout fallback memory",
+        });
+        const { tools, context } = sessionTools(directory, session, fake.connectionFile);
+        const output = { messages: messages(session) };
+        await Promise.all([
+            tools.ctx_memory!.execute(
+                { action: "write", category: "USER_DIRECTIVES", content: "timeout directive" },
+                context,
+            ),
+            createTransform(hostDeps(db, session, directory, fake.connectionFile))({}, output),
+        ]);
+        expect(row(db, session)).toBe(fallback);
+        expect(rendered(output)).toContain("first timeout fallback memory");
+        expect(getMemoriesByProject(db, fallback).map((memory) => memory.content)).toContain(
+            "timeout directive",
+        );
+        expect(readSessionIdentityDecision(session, directory)?.identity).toBe(fallback);
+        expect(fake.calls).toHaveLength(1);
+        const visible = insertMemory(db, {
+            projectPath: fallback,
+            category: "USER_DIRECTIVES",
+            content: "timeout fallback memory",
+        });
+        const resumed = "timeout-resumed";
+        recordSessionProjectIdentity(db, resumed, fallback);
+        const next = { messages: messages(resumed) };
+        await createTransform(hostDeps(db, resumed, directory, fake.connectionFile))({}, next);
+        expect(rendered(next)).toContain(visible.content);
         expect(fake.calls).toHaveLength(1);
     });
 
@@ -559,6 +1225,60 @@ describe("OpenCode session decision integration", () => {
         await transform({}, next);
         expect(fake.calls).toHaveLength(1);
         expect(rendered(next)).toContain("resumed registered memory");
+    });
+
+    test("a newer stored session decision replaces an in-process fallback for injection and tools", async () => {
+        const directory = folder("newer-recorded");
+        const fake = await fakeEndpoint(directory);
+        fake.up = false;
+        const db = hostDatabase();
+        const session = "newer-recorded";
+        expect(
+            (
+                await awaitSessionIdentityDecision(session, directory, {
+                    db,
+                    connectionFile: fake.connectionFile,
+                })
+            ).identity,
+        ).toStartWith("git:");
+        recordSessionProjectIdentity(db, session, registeredProjectId);
+        const memory = insertMemory(db, {
+            projectPath: registeredProjectId,
+            category: "USER_DIRECTIVES",
+            content: "newer stored decision memory",
+        });
+        const output = { messages: messages(session) };
+        await createTransform(hostDeps(db, session, directory, fake.connectionFile))({}, output);
+        expect(rendered(output)).toContain(memory.content);
+        const { tools, context } = sessionTools(directory, session, fake.connectionFile);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [memory.id] }, context),
+        ).toContain(memory.content);
+        expect(fake.calls).toHaveLength(1);
+    });
+
+    test("a recorded fallback initializes the decision for synchronous session consumers", async () => {
+        const directory = folder("recorded-fallback");
+        const db = hostDatabase();
+        const session = "recorded-fallback";
+        recordSessionProjectIdentity(db, session, registeredProjectId);
+        const observed: (string | undefined)[] = [];
+        const deps = {
+            ...hostDeps(db, session, directory, join(temp.dir, "absent-subc.json")),
+            sessionDirectoryBySession: new Map<string, string>(),
+            client: {
+                session: {
+                    get: async () => {
+                        throw new Error("host unavailable");
+                    },
+                },
+            } as unknown as PluginContext["client"],
+            maybeAutoEmbedSession: () =>
+                observed.push(readSessionIdentityDecision(session, directory)?.identity),
+        };
+        await createTransform(deps)({}, { messages: messages(session) });
+        expect(observed).toEqual([registeredProjectId]);
+        expect(row(db, session)).toBe(registeredProjectId);
     });
 
     test("a TS directory move renders the new pin and updates session_projects without resolve", async () => {
@@ -592,6 +1312,92 @@ describe("OpenCode session decision integration", () => {
         expect(rendered(moved)).toContain("project beta memory");
         expect(rendered(moved)).not.toContain("project alpha memory");
         expect(fake.calls).toHaveLength(0);
+    });
+
+    test("a directory move keeps tools on the frozen block owner until the signed-thinking hold releases", async () => {
+        const a = folder("frozen-a"),
+            b = folder("frozen-b");
+        rememberPinnedProjectIdentity(a, "pj-FROZEN-A");
+        rememberPinnedProjectIdentity(b, "pj-FROZEN-B");
+        const db = hostDatabase();
+        const session = "frozen-move";
+        const alpha = insertMemory(db, {
+            projectPath: "pj-FROZEN-A",
+            category: "USER_DIRECTIVES",
+            content: "frozen project alpha memory",
+        });
+        const beta = insertMemory(db, {
+            projectPath: "pj-FROZEN-B",
+            category: "USER_DIRECTIVES",
+            content: "released project beta memory",
+        });
+        const model = { providerID: "anthropic", modelID: "claude-sonnet-5-5" };
+        const deps = {
+            ...hostDeps(db, session, a, join(temp.dir, "absent-subc.json")),
+            liveModelBySession: new Map([[session, model]]),
+        };
+        const transform = createTransform(deps);
+        const first = { messages: messages(session) };
+        await transform({}, first);
+        expect(rendered(first)).toContain(alpha.content);
+        const head = JSON.stringify(first.messages.slice(0, 2));
+        const raw = [
+            ...messages(session),
+            {
+                info: {
+                    id: "signed-step",
+                    role: "assistant",
+                    sessionID: session,
+                    ...model,
+                    tokens: { input: 0, output: 1600, reasoning: 1600 },
+                },
+                parts: [
+                    { type: "reasoning", text: "signed thinking" },
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "signed-call",
+                        state: { status: "completed", output: "project contents" },
+                    },
+                ],
+            },
+        ];
+        deps.contextUsageMap.set(session, {
+            usage: { percentage: 66, inputTokens: 66000 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        });
+        deps.sessionDirectoryBySession.set(session, b);
+        const held = { messages: structuredClone(raw) };
+        await transform({}, held);
+        expect(JSON.stringify(held.messages.slice(0, 2))).toBe(head);
+        expect(row(db, session)).toBe("pj-FROZEN-A");
+        const { tools, context } = sessionTools(b, session, deps.subcConnectionFile);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [alpha.id] }, context),
+        ).toContain(alpha.content);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [beta.id] }, context),
+        ).not.toContain(beta.content);
+        const released = {
+            messages: [
+                ...structuredClone(raw),
+                {
+                    info: { id: "next-user", role: "user", sessionID: session },
+                    parts: [{ type: "text", text: "continue in the new project" }],
+                },
+            ],
+        };
+        await transform({}, released);
+        expect(rendered(released)).toContain(beta.content);
+        expect(rendered(released)).not.toContain(alpha.content);
+        expect(row(db, session)).toBe("pj-FROZEN-B");
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [beta.id] }, context),
+        ).toContain(beta.content);
+        expect(
+            await tools.ctx_memory!.execute({ action: "get", ids: [alpha.id] }, context),
+        ).not.toContain(alpha.content);
     });
 });
 

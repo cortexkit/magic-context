@@ -19,6 +19,11 @@ export interface ProjectIdentityRecord {
 
 const ignoredImplicitRecords = new Set<string>();
 const conflictingCommonDirs = new Set<string>();
+const pinGenerations = new Map<string, number>();
+
+export function projectIdentityPinGeneration(directory: string): number {
+    return pinGenerations.get(projectDirectoryKey(directory)) ?? 0;
+}
 
 export function isPinnedProjectIdentity(identity: unknown): identity is string {
     return (
@@ -93,6 +98,8 @@ export function rememberPinnedProjectIdentity(
             identity,
             gitCommonDir,
         });
+        const key = projectDirectoryKey(directory);
+        pinGenerations.set(key, projectIdentityPinGeneration(directory) + 1);
     } catch {
         // A read-only sidecar store must not prevent use of the live identity for this session.
     }

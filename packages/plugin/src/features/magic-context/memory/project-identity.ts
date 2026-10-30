@@ -23,6 +23,7 @@ import { readGitCheckoutMetadata } from "./git-common-dir";
 import {
     isPinnedProjectIdentity,
     projectDirectoryKey,
+    projectIdentityPinGeneration,
     readRememberedGitIdentity,
     readRememberedProjectIdentity,
     rememberGitIdentity,
@@ -60,6 +61,7 @@ const transientGitIdentityReuseLoggedDirectories = new Set<string>();
 interface SessionIdentityCacheEntry {
     identity: string | undefined;
     revalidateAt: number | null;
+    pinGeneration: number;
 }
 const sessionIdentityCache = new Map<string, SessionIdentityCacheEntry>();
 // Boot policy applies to identity lookups made outside the session path (historian, RPC, tools).
@@ -807,6 +809,7 @@ export function resolveProjectIdentityForSession(
     const cached = sessionIdentityCache.get(cacheKey);
     if (
         cached &&
+        cached.pinGeneration === projectIdentityPinGeneration(resolvedDirectory) &&
         (cached.revalidateAt === null || nowMs() < cached.revalidateAt) &&
         !(cached.identity?.startsWith("dir:") && hasGitDir(resolvedDirectory))
     ) {
@@ -852,12 +855,13 @@ export function resolveProjectIdentityForSession(
     }
     if (identity !== undefined) pausedIdentityReasons.delete(resolvedDirectory);
 
-    // Successful git identities are immutable. Directory/home fallbacks are
+    // A published pin invalidates even a successful git lookup. Directory/home fallbacks are
     // revalidated after the same cooldown used for recoverable git failures so a
     // newly initialized repository or recovered checkout is observed without
     // probing the filesystem on every context pass. A cwd change uses a new key.
     sessionIdentityCache.set(cacheKey, {
         identity,
+        pinGeneration: projectIdentityPinGeneration(resolvedDirectory),
         revalidateAt:
             identity?.startsWith("git:") === true ? null : nowMs() + TRANSIENT_FAILURE_COOLDOWN_MS,
     });

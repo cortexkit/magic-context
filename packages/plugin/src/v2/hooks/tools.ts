@@ -1,7 +1,7 @@
 import { tool } from "@opencode-ai/plugin";
 import type { MagicContextPluginConfig } from "../../config";
 import { isCompactionEnabled, isDreamerRunnable } from "../../config/agent-disable";
-import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
+import { resolveSessionProjectIdentity } from "../../features/magic-context/memory/session-identity-decision";
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import { getObservedEpochFloor } from "../../features/magic-context/storage-meta-persisted";
 import { agentSaveClassificationAnchor } from "../../hooks/magic-context/agent-save-classification";
@@ -26,13 +26,22 @@ export async function registerTools(
     config: MagicContextPluginConfig,
     isInternalChild?: (sessionId: string) => boolean,
     ensureProjectRegistered = ensureProjectRegisteredFromOpenCodeDirectory,
+    sessionDirectory?: (sessionId: string) => Promise<string>,
 ) {
     const compaction = isCompactionEnabled(config);
     setCtxReduceRegisteredGlobally(compaction);
     const project = {
         db,
-        resolveProjectPath: (directory: string) =>
-            resolveProjectIdentityForSession(directory, config.allow_home_project),
+        resolveProjectPath: async (directory: string, sessionId: string) =>
+            resolveSessionProjectIdentity(
+                sessionId,
+                (await sessionDirectory?.(sessionId)) ?? directory,
+                {
+                    db,
+                    allowHomeProject: config.allow_home_project,
+                    connectionFile: config.subc?.connection_file,
+                },
+            ),
         ensureProjectRegistered,
     };
     const definitions = {

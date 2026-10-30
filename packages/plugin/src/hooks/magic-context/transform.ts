@@ -4,7 +4,10 @@ import { clearHostTokenBreakdownMemo } from "../../features/magic-context/host-t
 import { takeDubiousOwnershipProjectIdentityWarning } from "../../features/magic-context/memory/project-identity";
 import {
     awaitSessionIdentityDecision,
-    readSessionIdentityDecision,
+    backgroundSessionProjectIdentity,
+    hasSessionProjectAttribution,
+    permitsUnscopedHistoryEmbedding,
+    recoverCachedSessionProjectOwner,
 } from "../../features/magic-context/memory/session-identity-decision";
 import {
     type MessageReconciliationSource,
@@ -17,7 +20,8 @@ import { computeHardCacheExpired } from "../../features/magic-context/scheduler"
 import { resolveSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
 import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
 import {
-    hasRecordedSessionProjectIdentity,
+    getServedSessionProjectIdentity,
+    reconcileServedSessionProjectIdentity,
     recordSessionProjectIdentity,
 } from "../../features/magic-context/session-project-storage";
 import {
@@ -702,7 +706,10 @@ export interface TransformDeps {
         wordRules?: CavemanWordRules;
     };
     /** Fire-and-forget active-session embed backfill after transform returns. */
-    maybeAutoEmbedSession?: (sessionId: string) => void;
+    maybeAutoEmbedSession?: (
+        sessionId: string,
+        owner?: { projectIdentity: string | undefined },
+    ) => void;
     /**
      * Called once per pass, before the transform runs, with the session and the
      * host's input messages: the request these messages belong to is being built.
@@ -992,6 +999,8 @@ export function createTransform(deps: TransformDeps) {
         let sessionMeta: import("../../features/magic-context/types").SessionMeta | undefined;
         try {
             sessionMeta = getOrCreateSessionMeta(db, sessionId);
+            recoverCachedSessionProjectOwner(db, sessionId, sessionMeta);
+            reconcileServedSessionProjectIdentity(db, sessionId, sessionMeta);
             const ttlModel =
                 findNewestUserModel(messages) ??
                 deps.liveModelBySession?.get(sessionId) ??
@@ -1245,12 +1254,25 @@ export function createTransform(deps: TransformDeps) {
                 sessionDirectoryFellBack = true;
             }
         }
+        let servedProjectIdentity = getServedSessionProjectIdentity(sessionMeta);
+        let ownerEvidence = recoverCachedSessionProjectOwner(db, sessionId, sessionMeta);
+        let historyOnlyFrame =
+            sessionMeta.cachedM0Bytes !== null &&
+            permitsUnscopedHistoryEmbedding(sessionMeta, deps.memoryConfig?.enabled, ownerEvidence);
+        let projectOwnerUnavailable =
+            sessionMeta.cachedM0Bytes !== null &&
+            ownerEvidence.projectIdentity === undefined &&
+            !historyOnlyFrame;
+        let decidedProjectIdentity = sessionDirectoryFellBack ? servedProjectIdentity : undefined;
         if (sessionDirectory) {
-            await awaitSessionIdentityDecision(sessionId, sessionDirectory, {
+            const decision = await awaitSessionIdentityDecision(sessionId, sessionDirectory, {
                 db,
                 allowHomeProject: deps.allowHomeProject,
                 connectionFile: deps.subcConnectionFile,
+                directoryIsFallback: sessionDirectoryFellBack,
+                sessionMeta,
             });
+            decidedProjectIdentity ??= decision.identity;
         }
         // The launch directory can belong to a different project than the
         // session (`opencode -s <id>` started elsewhere). A pass that fell back
@@ -1258,10 +1280,8 @@ export function createTransform(deps: TransformDeps) {
         // a rebuild is persisted and replayed by every later pass. When a frozen
         // pair exists, this pass replays it byte-identically, as a defer pass
         // does, and leaves every rebuild signal pending for the next pass that
-        // resolves the directory. Two cases render with the launch directory,
-        // as they always have: a session with nothing frozen yet, and one the
-        // host has never resolved (no stored project binding), whose frozen
-        // pair was itself rendered with the launch directory.
+        // resolves the directory. Legacy prefixes with no known owner keep
+        // their shared decision and their existing rebuild-admission rules.
         const activeThinkingModel =
             findLastAssistantModel(messages) ?? deps.liveModelBySession?.get(sessionId);
         const thinkingRecovery = prepareLatestThinkingRecovery({
@@ -1280,16 +1300,11 @@ export function createTransform(deps: TransformDeps) {
         );
         const unresolvedDirectoryHold =
             sessionDirectoryFellBack &&
+            (servedProjectIdentity !== undefined ||
+                recordedSessionProjectIdentity.has(sessionId) ||
+                hasSessionProjectAttribution(sessionId)) &&
             sessionMeta.cachedM0Bytes != null &&
-            sessionMeta.cachedM1Bytes != null &&
-            (() => {
-                try {
-                    return hasRecordedSessionProjectIdentity(db, sessionId);
-                } catch {
-                    // Unknown: keep the frozen pair rather than risk a rebuild.
-                    return true;
-                }
-            })();
+            sessionMeta.cachedM1Bytes != null;
         // Whether this pass is held for recent heavy signed thinking is decided
         // once the execute threshold and the pass's usage are known (see
         // decideSignedThinkingHold below). Until then only the directory freeze
@@ -1298,10 +1313,11 @@ export function createTransform(deps: TransformDeps) {
         let freezeM0M1 = unresolvedDirectoryHold;
         const compartmentDirectory = sessionDirectory;
         const historianRunnable = deps.historianRunnable !== false;
-        const canRunCompartments =
+        let canRunCompartments =
             fullFeatureMode &&
             !compactionOff &&
             historianRunnable &&
+            !projectOwnerUnavailable &&
             (deps.client !== undefined || deps.hiddenCompletionExecutor !== undefined) &&
             compartmentDirectory.length > 0;
         const fallbackModelId = deps.getFallbackModelId?.(sessionId);
@@ -1318,6 +1334,34 @@ export function createTransform(deps: TransformDeps) {
                 sessionDecisionCalibration(db, sessionId).proseRatio,
             );
             sessionMeta = getOrCreateSessionMeta(db, sessionId);
+            ownerEvidence = recoverCachedSessionProjectOwner(db, sessionId, sessionMeta);
+            servedProjectIdentity = reconcileServedSessionProjectIdentity(
+                db,
+                sessionId,
+                sessionMeta,
+            );
+            projectOwnerUnavailable =
+                sessionMeta.cachedM0Bytes !== null &&
+                ownerEvidence.projectIdentity === undefined &&
+                !permitsUnscopedHistoryEmbedding(
+                    sessionMeta,
+                    deps.memoryConfig?.enabled,
+                    ownerEvidence,
+                );
+            historyOnlyFrame =
+                sessionMeta.cachedM0Bytes !== null &&
+                permitsUnscopedHistoryEmbedding(
+                    sessionMeta,
+                    deps.memoryConfig?.enabled,
+                    ownerEvidence,
+                );
+            canRunCompartments =
+                fullFeatureMode &&
+                !compactionOff &&
+                historianRunnable &&
+                !projectOwnerUnavailable &&
+                (deps.client !== undefined || deps.hiddenCompletionExecutor !== undefined) &&
+                compartmentDirectory.length > 0;
             logTransformTiming(sessionId, "tagOwners.prepare", tOwners);
         }
 
@@ -1886,13 +1930,20 @@ export function createTransform(deps: TransformDeps) {
             contextUsageEarly,
             currentModelKeyForBoundary,
             historyContextLimit,
-            deps.memoryConfig?.enabled
-                ? readSessionIdentityDecision(sessionId, memoryProjectDirectory, {
-                      allowHomeProject: deps.allowHomeProject,
-                  })?.identity
-                : undefined,
+            deps.memoryConfig?.enabled ? decidedProjectIdentity : undefined,
         );
         const { historyBudgetTokens, projectPath: projectIdentity } = renderOptions;
+        // A held pass serves the old block. An admitted move pass authorizes the
+        // historian to prepare the new block before its final publication.
+        const signedRebuildAuthorized =
+            !unresolvedDirectoryHold &&
+            signedThinkingPolicy.mayRebuildForFit &&
+            (thinkingFitRetries.has(sessionId) || !!recovery.rebuildReason);
+        const passProjectIdentity = projectOwnerUnavailable
+            ? undefined
+            : freezeM0M1 && !signedRebuildAuthorized
+              ? (servedProjectIdentity ?? decidedProjectIdentity)
+              : (projectIdentity ?? servedProjectIdentity ?? decidedProjectIdentity);
         // Ceiling for the tiered emergency drop = contextLimit × executeThreshold%
         // (the usable working ceiling, NOT scaled by history_budget_percentage).
         // Resolve the limit the same way resolveHistoryBudgetTokens does: prefer
@@ -2070,6 +2121,7 @@ export function createTransform(deps: TransformDeps) {
                     model: historianRun?.model ?? deps.historianModel,
                     fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
                     directory: compartmentDirectory,
+                    projectIdentity: passProjectIdentity,
                     fallbackModelId,
                     getNotificationParams: () => notificationParams,
                     experimentalUserMemories:
@@ -2081,7 +2133,7 @@ export function createTransform(deps: TransformDeps) {
                     historianExpandTools: historianRun?.expandTools ?? deps.historianExpandTools,
                     // Issue #44: gate historian-driven memory promotion so users
                     // who disable the feature actually see no memories created.
-                    memoryEnabled: deps.memoryConfig?.enabled,
+                    memoryEnabled: deps.memoryConfig?.enabled === true,
                     autoPromote: historianRun?.autoPromote ?? deps.memoryConfig?.autoPromote,
                     ensureProjectRegistered: deps.ensureProjectRegistered,
                     // Historian publication invalidates the injection cache AND
@@ -2171,25 +2223,11 @@ export function createTransform(deps: TransformDeps) {
                 notificationParams,
             );
         }
-        // Session-scoped project identity for note-nudge and auto-search, which
-        // must target the SESSION's project — not the launch cwd. `deps.projectPath`
-        // is resolved once at hook init from the launch directory; on
-        // `opencode -s <id>` started from a different repo it points at the wrong
-        // project, so note nudges and auto-search would query the launch project's
-        // notes/memories. Reuse the memory identity when memory is enabled
-        // (identical value); otherwise read the same session decision.
+        // Notes and automatic recall follow the owner this pass is authorized
+        // to serve, not a pending directory decision or the plugin launch cwd.
         const sessionProjectIdentity =
-            projectIdentity ??
-            (sessionDirectory
-                ? readSessionIdentityDecision(sessionId, sessionDirectory, {
-                      allowHomeProject: deps.allowHomeProject,
-                  })?.identity
-                : deps.projectPath);
-        const sessionIdentityForBinding = sessionDirectory
-            ? readSessionIdentityDecision(sessionId, sessionDirectory, {
-                  allowHomeProject: deps.allowHomeProject,
-              })?.identity
-            : undefined;
+            passProjectIdentity ?? (sessionDirectory ? undefined : deps.projectPath);
+        const sessionIdentityForBinding = decidedProjectIdentity;
         if (sessionDirectory) {
             maybeSendProjectIdentityWarning(deps, sessionId, sessionDirectory, notificationParams);
         }
@@ -2202,19 +2240,27 @@ export function createTransform(deps: TransformDeps) {
             sessionProjectIdentity;
         if (authorityProjectPath) {
         }
-        // Persist only host-resolved session bindings. The launch-directory
-        // fallback keeps transforms non-fatal, but storing it as ownership would
-        // let a transient SDK failure permanently mis-scope chunk backfills.
-        // Guarded to fire once per (session, identity) in this process so the
-        // hot path carries no per-pass DB write once the binding is recorded.
+        // Without a known served owner, including a legacy null marker, use the
+        // shared decision for attribution without guessing an owner for the bytes.
         if (
             sessionIdentityForBinding &&
             sessionDirectoryResolvedFromHost &&
+            servedProjectIdentity === undefined &&
             recordedSessionProjectIdentity.get(sessionId) !== sessionIdentityForBinding
         ) {
-            const change = recordSessionProjectIdentity(db, sessionId, sessionIdentityForBinding);
-            if (change?.previousProjectPath) deps.pendingMaterializationSessions?.add(sessionId);
+            recordSessionProjectIdentity(db, sessionId, sessionIdentityForBinding);
             recordedSessionProjectIdentity.set(sessionId, sessionIdentityForBinding);
+        }
+        // Queue the fold immediately, but leave ownership on the frozen block
+        // until a permitted rebuild can publish the new project's prefix.
+        if (
+            sessionIdentityForBinding &&
+            sessionDirectoryResolvedFromHost &&
+            servedProjectIdentity !== undefined &&
+            servedProjectIdentity !== sessionIdentityForBinding &&
+            !deps.pendingMaterializationSessions?.has(sessionId)
+        ) {
+            deps.pendingMaterializationSessions?.add(sessionId);
         }
 
         // Historian trigger decision — relocated here from the message.updated
@@ -2789,6 +2835,7 @@ export function createTransform(deps: TransformDeps) {
             canRunCompartments,
             fullFeatureMode,
             compactionOff,
+            projectOwnerUnavailable,
             historianRunnable,
             sessionMeta,
             contextUsage,
@@ -2816,7 +2863,8 @@ export function createTransform(deps: TransformDeps) {
             coveredInstructions: coveredHostInstructions,
             pendingCompartmentInjection,
             fallbackModelId,
-            projectPath: projectIdentity,
+            projectPath: passProjectIdentity,
+            projectIdentity: passProjectIdentity,
             injectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
             getNotificationParams: rawGetNotifParams
                 ? () => rawGetNotifParams(sessionId)
@@ -2837,7 +2885,7 @@ export function createTransform(deps: TransformDeps) {
             // Issue #44: forward memory gating so the normal historian path
             // (not just the recovery path above) honors memory.enabled and
             // memory.auto_promote.
-            memoryEnabled: deps.memoryConfig?.enabled,
+            memoryEnabled: deps.memoryConfig?.enabled === true,
             autoPromote: historianRun?.autoPromote ?? deps.memoryConfig?.autoPromote,
             ensureProjectRegistered: deps.ensureProjectRegistered,
             // See startRecoveryRun above for the full rationale —
@@ -3186,6 +3234,13 @@ export function createTransform(deps: TransformDeps) {
             // Session-scoped (not launch) identity so note-nudge + auto-search
             // target the resumed session's real project. See sessionProjectIdentity.
             projectPath: sessionProjectIdentity,
+            readProjectScope: () => {
+                const owner = getServedSessionProjectIdentity(sessionMeta);
+                return {
+                    projectIdentity: owner ?? decidedProjectIdentity,
+                    memoryUnavailable: sessionMeta.cachedM0Bytes !== null && owner === undefined,
+                };
+            },
             sessionDirectory,
             autoSearch: deps.autoSearch,
             // Only forward caveman config for primary sessions. Subagents should
@@ -4011,7 +4066,17 @@ export function createTransform(deps: TransformDeps) {
             `transform completed in ${elapsed}ms (${messages.length} messages, ${targets.size} targets, watermark: ${watermark})`,
         );
 
-        withoutSqliteTransformPass(() => deps.maybeAutoEmbedSession?.(sessionId));
+        withoutSqliteTransformPass(() =>
+            deps.maybeAutoEmbedSession?.(sessionId, {
+                projectIdentity: backgroundSessionProjectIdentity(
+                    db,
+                    sessionId,
+                    sessionMeta,
+                    deps.memoryConfig?.enabled,
+                    decidedProjectIdentity,
+                ),
+            }),
+        );
 
         const bindingRecovery = postTransformResult.thinkingBindingRecovery;
         if (bindingRecovery) {
@@ -4057,6 +4122,12 @@ export function createTransform(deps: TransformDeps) {
             postTransformResult.prefixRecordWritable && !compactionOff
                 ? db.transaction(publishServed).immediate()
                 : publishServed();
+        if (sessionDirectoryResolvedFromHost) {
+            // Materialization updated this same snapshot with the bytes and
+            // their owner. Mirror that owner only after publication succeeds.
+            const owner = reconcileServedSessionProjectIdentity(db, sessionId, sessionMeta);
+            if (owner) recordedSessionProjectIdentity.set(sessionId, owner);
+        }
         if (servedAtReturn) {
             const { slot } = servedAtReturn;
             releaseWithheldServedCapture(sessionId, slot, servedCaptureId);
