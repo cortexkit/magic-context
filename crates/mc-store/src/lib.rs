@@ -8451,6 +8451,14 @@ impl McStore {
         Self::open_with_private_permissions(descriptor, true)
     }
 
+    /// The fence epoch of the single-writer lease this store holds. A fenced
+    /// write is rejected when the database was claimed at a higher epoch, so an
+    /// offline tool compares this against the database's stored fence to prove
+    /// it opened under the same lease as the module that last wrote it.
+    pub fn lease_epoch(&self) -> u64 {
+        self.inner.epoch()
+    }
+
     /// Open with the real opener but only the migrations up to `ceiling`, which
     /// stands in for an older ck-mc build. A store at or below `ceiling` migrates
     /// normally; a store recorded at a newer version is refused, never downgraded.
