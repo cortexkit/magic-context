@@ -8,7 +8,9 @@ import { Database } from "bun:sqlite";
  * opened with the default `busy_timeout = 0` fails immediately with SQLITE_BUSY
  * the instant any other connection holds the write lock, which surfaces as
  * flaky "database is locked" failures under load rather than a real regression.
- * Setting a timeout makes the handle WAIT for the lock instead of failing.
+ * Setting a timeout makes a new writer wait for the lock. A deferred transaction
+ * that has already read cannot wait when upgrading a stale snapshot to a writer;
+ * replay writers must reserve the write lock before reading with writeTestDb.
  *
  * Every test that opens the context DB directly (reader or writer) must go
  * through this helper so the timeout can never be forgotten — a bare
@@ -21,4 +23,9 @@ export function openTestDb(
 	const db = new Database(path, options);
 	db.exec("PRAGMA busy_timeout=5000");
 	return db;
+}
+
+/** Lock out other writers before replay reads so their results stay valid for the write. */
+export function writeTestDb<T>(db: Database, write: () => T): T {
+	return db.transaction(write).immediate();
 }

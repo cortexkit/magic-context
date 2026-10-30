@@ -187,6 +187,7 @@ try {
 							arguments: JSON.stringify({
 								action: "write",
 								content: `Issue 554 note ${index}`,
+								note_ids: [],
 							}),
 						},
 					],

@@ -537,7 +537,7 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
         // (routine need-blind age-drops are gone; these are need-driven).
 
         // Phase 3: ctx_note write plus terminal todo trigger. The nudge is delayed to a fresh user turn and then replayed.
-        emitToolOnce(/^ctx_note$/, { action: "write", content: "Revisit the long-running OpenCode assertions after verification." });
+        emitToolOnce(/^ctx_note$/, { action: "write", content: "Revisit the long-running OpenCode assertions after verification.", note_ids: [] });
         await send(sessionId, "turn 7: write a deferred session note with ctx_note", "phase 3 after note write");
         expect(
             h.contextDb().prepare("SELECT COUNT(*) AS n FROM notes WHERE session_id = ?").get(sessionId) as { n: number },
@@ -713,6 +713,7 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
                 action: "write",
                 category: "PROJECT_RULES",
                 content: autoSearchMemory,
+                ids: [],
             });
             await send(sessionId, "turn 22b: save the zebra cache ritual memory", "phase 7 memory write");
             const mirroredMemory = h
@@ -730,7 +731,7 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
             seedMemory(autoSearchMemory);
         }
         const beforeAutoSearch = h.mock.requests().length;
-        emitToolOnce(/^ctx_note$/, { action: "read" });
+        emitToolOnce(/^ctx_note$/, { action: "read", content: "", note_ids: [] });
         await send(
             sessionId,
             "turn 23: zebra cache ritual question should surface vague recall from memory",

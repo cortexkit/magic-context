@@ -53,7 +53,7 @@ import {
     forEachHost,
     type ScenarioHarness,
 } from "../src/scenario-hosts";
-import { openTestDb } from "../src/test-db";
+import { openTestDb, writeTestDb } from "../src/test-db";
 import type { MockUsage } from "../src/mock-provider/server";
 
 const RUST_MODE = process.env.MC_E2E_MODE === "rust";
@@ -556,14 +556,14 @@ forEachHost(import.meta.url, null, (host) => {
                     carrier: "hidden-completion", lane: "enabled", chunkStart: 1, chunkEnd: 4 });
                 auth.persist(lifecycleDb, send.stageKey);
                 // Persist the same anchored candidates an enabled turn-one publication owns.
-                db.transaction(() => commitTurnOnePublication(lifecycleDb, {
+                writeTestDb(db, () => commitTurnOnePublication(lifecycleDb, {
                     send, projectPath, sessionId,
                     compartments: [{ id: 1, startMessage: 1, endMessage: 4, replyStartMessage: 1, replyEndMessage: 4 }],
                     blocks: changed.map((text, i) => ({ role: "user", startOrdinal: i + 1, endOrdinal: i + 1, parts: [text] })),
                     candidateFacts: changed.map((content, i) => ({ category: "PROJECT_RULES", content,
                         anchor: { compartmentIndex: 1, startOrdinal: i + 1, endOrdinal: i + 1 } })),
                     honourAnchors: true,
-                }))();
+                }));
                 const facts = db.prepare("SELECT id FROM memory_pending_facts WHERE publication_id=? ORDER BY fact_index").all(send.publicationId) as { id: number }[];
                 expect(facts).toHaveLength(4);
                 // The host may finish recording the preceding reply's usage while the background write runs.
@@ -902,7 +902,7 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                     const freshRule = "B10 fresh rule: always run the full gate before a release.";
                     await runMemoryTool(
                         sessionId,
-                        { action: "write", category: "PROJECT_RULES", content: freshRule },
+                        { action: "write", category: "PROJECT_RULES", content: freshRule, ids: [] },
                         "B10 Rust writer: save the release rule.",
                     );
 
@@ -998,7 +998,7 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                         await h.sendPrompt(sessionId, "B10 own Rust turn 1: materialize the baseline.");
                         await runMemoryTool(
                             sessionId,
-                            { action: "write", category: "PROJECT_RULES", content: ownRule },
+                            { action: "write", category: "PROJECT_RULES", content: ownRule, ids: [] },
                             "B10 own Rust turn: save the release-notes rule.",
                         );
                         setDefer("B10 own Rust after save");
@@ -1067,7 +1067,7 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                     const original = "B11 original rule: deploys go through the staging pipeline first.";
                     await runMemoryTool(
                         sessionId,
-                        { action: "write", category: "PROJECT_RULES", content: original },
+                        { action: "write", category: "PROJECT_RULES", content: original, ids: [] },
                         "B11 Rust writer: save the baseline rule.",
                     );
 
@@ -1083,7 +1083,7 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                         "B11 revised rule: deploys go straight to production with a feature flag.";
                     await runMemoryTool(
                         mutationSessionId,
-                        { action: "update", ids: [rustMemoryId], content: revised },
+                        { action: "update", ids: [rustMemoryId], category: "PROJECT_RULES", content: revised },
                         "B11 Rust turn 2: revise the deployment rule.",
                     );
                     const readerSessionId = await h.createSession();
@@ -1176,7 +1176,7 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                         "B12 delta rule: keep the cache prefix byte-identical across defer passes.";
                     await runMemoryTool(
                         sessionId,
-                        { action: "write", category: "PROJECT_RULES", content: deltaRule },
+                        { action: "write", category: "PROJECT_RULES", content: deltaRule, ids: [] },
                         "B12 Rust writer: save a delta rule.",
                     );
                     const readerSessionId = await h.createSession();
