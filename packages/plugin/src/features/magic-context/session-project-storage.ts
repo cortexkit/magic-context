@@ -9,13 +9,11 @@ const SESSION_CHUNK_REPAIR_BATCH_SIZE = 100;
 const upsertSessionProjectStatements = new WeakMap<Database, PreparedStatement>();
 const repairSessionChunkProjectStatements = new WeakMap<Database, PreparedStatement>();
 const misScopedProjectChunkStatements = new WeakMap<Database, PreparedStatement>();
-let recordedProjectRevision = 0;
 const reconciledOwners = new WeakMap<
     Database,
     BoundedSessionMap<{
         identity: string;
         materializedAt: number | null;
-        revision: number;
     }>
 >();
 
@@ -31,7 +29,7 @@ export function getServedSessionProjectIdentity(
     return state?.cachedM0Bytes != null ? (state.cachedM0ProjectIdentity ?? undefined) : undefined;
 }
 
-/** Repair the legacy attribution mirror without changing the served prefix or reading its old row. */
+/** Repair attribution only when its read-only equality check disagrees with the served prefix. */
 export function reconcileServedSessionProjectIdentity(
     db: Database,
     sessionId: string,
@@ -51,26 +49,28 @@ export function reconcileServedSessionProjectIdentity(
         !force &&
         !nested &&
         previous?.identity === identity &&
-        previous.materializedAt === state.cachedM0MaterializedAt &&
-        previous.revision === recordedProjectRevision
+        previous.materializedAt === state.cachedM0MaterializedAt
     )
         return identity;
-    db.transaction(() => {
-        const result = getUpsertSessionProjectStatement(db).run(
-            sessionId,
-            getHarness(),
-            identity,
-            Date.now(),
-        );
-        if (result.changes > 0)
-            getRepairSessionChunkProjectStatement(db).run(
-                identity,
+    if (getRecordedSessionProjectIdentity(db, sessionId) !== identity) {
+        db.transaction(() => {
+            if (getRecordedSessionProjectIdentity(db, sessionId) === identity) return;
+            const result = getUpsertSessionProjectStatement(db).run(
                 sessionId,
                 getHarness(),
                 identity,
-                SESSION_CHUNK_REPAIR_BATCH_SIZE,
+                Date.now(),
             );
-    }).immediate();
+            if (result.changes > 0)
+                getRepairSessionChunkProjectStatement(db).run(
+                    identity,
+                    sessionId,
+                    getHarness(),
+                    identity,
+                    SESSION_CHUNK_REPAIR_BATCH_SIZE,
+                );
+        }).immediate();
+    }
     if (nested) return identity;
     // Attribution API writes invalidate this memo. Tools force a reconciliation
     // as well, so an older process cannot redirect a memory operation via this mirror.
@@ -81,7 +81,6 @@ export function reconcileServedSessionProjectIdentity(
     owners.set(key, {
         identity,
         materializedAt: state.cachedM0MaterializedAt,
-        revision: recordedProjectRevision,
     });
     return identity;
 }
@@ -207,7 +206,7 @@ export function recordSessionProjectIdentity(
         );
     }).immediate();
     if (previousProjectPath === projectPath) return undefined;
-    recordedProjectRevision++;
+    reconciledOwners.get(db)?.delete(`${harness}\0${sessionId}`);
     return { previousProjectPath, projectPath };
 }
 

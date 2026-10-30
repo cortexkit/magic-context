@@ -36,13 +36,13 @@ import {
 } from "../../features/magic-context/memory/project-identity";
 import {
     awaitSessionIdentityDecision,
+    backgroundSessionProjectIdentity,
     forgetSessionIdentityDecision,
     readSessionIdentityDecision,
     type SessionIdentityDecision,
 } from "../../features/magic-context/memory/session-identity-decision";
 import { getEmbeddingCoverageStatus } from "../../features/magic-context/project-embedding-registry";
 import type { Scheduler } from "../../features/magic-context/scheduler";
-import { getServedSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     getDatabasePersistenceError,
     getSessionsWithPendingMarker,
@@ -561,19 +561,33 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const pauseEmbedDrain = (sessionId: string): string =>
         pauseEmbedHistoryDrain(embedHistoryDeps, sessionId);
 
-    const sessionProjectIdentityForBackground = (sessionId: string, directory: string) => {
+    const sessionProjectIdentityForBackground = (sessionId: string) => {
         const sessionMeta = readSessionMeta(db, sessionId);
-        return (
-            getServedSessionProjectIdentity(sessionMeta) ??
-            readSessionIdentityDecision(sessionId, directory, {
+        const pending = readSessionIdentityDecision(
+            sessionId,
+            sessionDirectoryBySession.get(sessionId),
+            {
                 sessionMeta,
                 allowHomeProject: deps.config.allow_home_project,
-            })?.identity
-        );
+            },
+        )?.identity;
+        return {
+            projectIdentity: backgroundSessionProjectIdentity(
+                db,
+                sessionId,
+                sessionMeta,
+                deps.config.memory?.enabled,
+                pending,
+            ),
+            cachedPrefix: sessionMeta.cachedM0Bytes !== null,
+        };
     };
     const getEmbedStatusText = (sessionId: string): string => {
         const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
-        const sessionProjectIdentity = sessionProjectIdentityForBackground(sessionId, directory);
+        const scope = sessionProjectIdentityForBackground(sessionId);
+        const sessionProjectIdentity = scope.projectIdentity;
+        if (!sessionProjectIdentity && scope.cachedPrefix)
+            return "Embedding is paused: the cached memory context has no verified project owner. It resumes after the next history rebuild records one.";
         if (!sessionProjectIdentity) return "No project identity is bound for the home directory.";
         maybeSendProjectIdentitySessionWarning(sessionId, directory);
         const coverage = getEmbeddingCoverageStatus(db, sessionProjectIdentity, sessionId);
@@ -593,7 +607,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
         const identity = owner
             ? owner.projectIdentity
-            : sessionProjectIdentityForBackground(sessionId, directory);
+            : sessionProjectIdentityForBackground(sessionId).projectIdentity;
         if (!identity) return;
         maybeAutoEmbedSessionBackfill(
             {

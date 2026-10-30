@@ -84,6 +84,56 @@ export function m0TextSha256(m0Text: string): string {
     return createHash("sha256").update(m0Text).digest("hex");
 }
 
+export interface CachedM0OwnerEvidence {
+    projectIdentity?: string;
+    unscopedHardMatch: boolean;
+}
+
+const unknownOwnerEvidence = new WeakMap<
+    Database,
+    BoundedSessionMap<{
+        digest: string;
+        evidence: CachedM0OwnerEvidence;
+    }>
+>();
+
+/** Only a unique HARD-origin tuple for these exact bytes can establish their project owner. */
+export function readCachedM0OwnerEvidence(
+    db: Database,
+    sessionId: string,
+    m0Bytes: Uint8Array,
+    force = false,
+): CachedM0OwnerEvidence {
+    const cacheKey = `${getHarness()}\0${sessionId}`;
+    const digest = createHash("sha256").update(m0Bytes).digest("hex");
+    let cache = unknownOwnerEvidence.get(db);
+    const cached = cache?.get(cacheKey);
+    if (!force && !db.inTransaction && cached?.digest === digest) return cached.evidence;
+    const rows = tablesPresent(db)
+        ? (db
+              .prepare(
+                  `SELECT project_path FROM memory_applied_snapshots
+         WHERE session_id = ? AND harness = ? AND m0_sha256 = ? AND legacy = 0
+         ORDER BY project_path LIMIT 2`,
+              )
+              .all(sessionId, getHarness(), digest) as Array<{ project_path: string }>)
+        : [];
+    const evidence: CachedM0OwnerEvidence = {
+        projectIdentity: rows.length === 1 && rows[0].project_path.trim().length > 0 ? rows[0].project_path : undefined,
+        unscopedHardMatch: rows.some((row) => row.project_path === ""),
+    };
+    // Successful recovery is persisted in the prefix ledger. Cache only unknown
+    // ownership; a later HARD/SOFT write invalidates this session's negative result.
+    if (!evidence.projectIdentity && !db.inTransaction) {
+        if (!cache) {
+            cache = new BoundedSessionMap(100);
+            unknownOwnerEvidence.set(db, cache);
+        }
+        cache.set(cacheKey, { digest, evidence });
+    }
+    return evidence;
+}
+
 const ID_CHUNK = 500;
 
 /** Read memory revisions inside the caller's read snapshot. */
@@ -114,6 +164,7 @@ function key(sessionId: string, projectPath: string | undefined) {
  * manifest never diverge.
  */
 export function writeHardProjection(db: Database, input: HardProjectionInput): void {
+    unknownOwnerEvidence.get(db)?.delete(`${getHarness()}\0${input.sessionId}`);
     if (!tablesPresent(db)) return;
     const k = key(input.sessionId, input.projectPath);
     const rows = new Map<
@@ -188,6 +239,7 @@ export function writeSoftProjection(
         projection: AppliedProjection;
     },
 ): void {
+    unknownOwnerEvidence.get(db)?.delete(`${getHarness()}\0${input.sessionId}`);
     if (!tablesPresent(db)) return;
     const k = key(input.sessionId, input.projectPath);
     db.prepare(

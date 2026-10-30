@@ -862,7 +862,7 @@ describe("OpenCode session decision integration", () => {
         expect(readSessionMeta(db, session).cachedM0ProjectIdentity).toBe("pj-FIRST-TOOL");
     });
 
-    test("a legacy cached prefix with no owner stays byte-identical and its tools use the decision", async () => {
+    test("a legacy cached prefix recovers its exact HARD owner without rebuilding its bytes", async () => {
         const directory = folder("legacy-owner");
         rememberPinnedProjectIdentity(directory, "pj-LEGACY-OWNER");
         const db = hostDatabase();
@@ -884,7 +884,7 @@ describe("OpenCode session decision integration", () => {
             JSON.stringify(first.messages.slice(0, 2)),
         );
         expect(readSessionMeta(db, session).cachedM0MaterializedAt).toBe(materializedAt);
-        expect(readSessionMeta(db, session).cachedM0ProjectIdentity).toBeNull();
+        expect(readSessionMeta(db, session).cachedM0ProjectIdentity).toBe("pj-LEGACY-OWNER");
         const { tools, context } = sessionTools(directory, session, deps.subcConnectionFile);
         expect(
             await tools.ctx_memory!.execute({ action: "get", ids: [alpha.id] }, context),

@@ -1,5 +1,6 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { describeUnresolvedProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import { UnprovenCachedProjectOwnerError } from "../../features/magic-context/memory/session-identity-decision";
 import { getLastIndexedOrdinal } from "../../features/magic-context/message-index";
 import {
     compileSurfaceCondition,
@@ -291,10 +292,29 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             const _surfaceCondition = wakePlaneActive ? undefined : args.surface_condition?.trim();
 
             // Use the same session decision as project-memory, including unpinned worktrees.
-            const projectIdentity = await deps.resolveProjectPath?.(
-                toolContext.directory,
-                toolContext.sessionID,
-            );
+            let projectIdentity: string | undefined;
+            let ownerUnavailable: UnprovenCachedProjectOwnerError | undefined;
+            try {
+                projectIdentity = await deps.resolveProjectPath?.(
+                    toolContext.directory,
+                    toolContext.sessionID,
+                );
+            } catch (error) {
+                if (!(error instanceof UnprovenCachedProjectOwnerError)) throw error;
+                ownerUnavailable = error;
+            }
+            const sessionOnlyTargets =
+                Array.isArray(noteIds) &&
+                noteIds.every(
+                    (id) =>
+                        getNoteByIdInScope(deps.db, id, { sessionId, projectPath: undefined })
+                            ?.type === "session",
+                );
+            if (!projectIdentity && Array.isArray(noteIds) && !sessionOnlyTargets)
+                return (ownerUnavailable ?? new UnprovenCachedProjectOwnerError(undefined)).refusal(
+                    "ctx_note",
+                    action,
+                );
 
             if (projectIdentity && projectNeedsSingleStoreMigration(deps.db, projectIdentity)) {
                 return renderSingleStoreMigrationRequiredRefusal();
@@ -327,6 +347,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                         return "Error: Smart notes require dreamer to be enabled. Enable dreamer in magic-context.jsonc to use surface_condition.";
                     }
                     if (!projectIdentity) {
+                        if (ownerUnavailable) return ownerUnavailable.refusal("ctx_note", action);
                         return `Error: Could not resolve project identity for smart note: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
                     }
                     const smartSurfaceCondition = args.surface_condition.trim();
@@ -350,7 +371,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             }
 
             if (action === "dismiss") {
-                if (!projectIdentity) {
+                if (!projectIdentity && !sessionOnlyTargets) {
                     return `Error: Could not resolve project identity for note dismiss: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
                 }
                 const ids = noteIds as number[];
@@ -376,7 +397,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 const updates: UpdateNoteOptions = {};
                 if (args.content?.trim()) updates.content = args.content.trim();
                 let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
-                if (args.surface_condition?.trim() && projectIdentity) {
+                if (args.surface_condition?.trim()) {
                     const existing = getNoteByIdInScope(deps.db, noteId, {
                         projectPath: projectIdentity,
                         sessionId,
@@ -396,7 +417,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 if (!updates.content && !updates.surfaceCondition) {
                     return "Error: Provide 'content' and/or 'surface_condition' to update.";
                 }
-                if (!projectIdentity) {
+                if (!projectIdentity && !sessionOnlyTargets) {
                     return `Error: Could not resolve project identity for note update: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
                 }
                 const updated = updateNote(deps.db, noteId, updates, {
@@ -418,7 +439,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                     : DEFAULT_READ_LIMIT;
             const offset =
                 typeof args.offset === "number" && args.offset > 0 ? Math.floor(args.offset) : 0;
-            if (Array.isArray(noteIds) && !projectIdentity) {
+            if (Array.isArray(noteIds) && !projectIdentity && !sessionOnlyTargets) {
                 return `Error: Could not resolve project identity for note read: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
             }
             const nowMs = Date.now();
@@ -426,7 +447,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 ? formatNotesById(
                       deps.db,
                       noteIds,
-                      { projectPath: projectIdentity as string, sessionId },
+                      { projectPath: projectIdentity, sessionId },
                       nowMs,
                   )
                 : renderGlance(

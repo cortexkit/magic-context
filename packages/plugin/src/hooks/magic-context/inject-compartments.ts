@@ -1040,6 +1040,7 @@ const EMPTY_HARD_SIGNALS: M0HardSignals = {
 };
 
 export interface M0M1State {
+    memoryBlockCount?: number | null;
     cachedM0ScoreSelectionWatermark?: number;
     sessionId: string;
     isSubagent?: boolean;
@@ -2995,6 +2996,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
 
         steps.mark("onFoldCommit");
         options.db.exec("COMMIT");
+        options.state.memoryBlockCount = visibleMemoryIds.length;
         steps.mark("commit");
         logSlowWriteTransaction(
             "opencode_materialize_cache",
@@ -3647,6 +3649,7 @@ function decodeM0Bytes(bytes: Buffer | Uint8Array | null): string | null {
 }
 
 interface CachedM0M1Row {
+    memory_block_count?: number | null;
     cached_m0_score_selection_watermark: number;
     cached_m0_bytes: Buffer | Uint8Array | null;
     cached_m0_mural_data_url: string | null;
@@ -3724,6 +3727,7 @@ function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | nul
             const row = db
                 .prepare(
                     `SELECT ${sessionRenderCacheSelect("cached_m0_bytes")},
+                memory_block_count,
                 cached_m0_score_selection_watermark,
                 ${sessionRenderCacheSelect("cached_m0_mural_data_url")},
                 cached_m0_mural_hash,
@@ -3826,6 +3830,8 @@ function cachedRowMatchesState(row: CachedM0M1Row, state: M0M1State): boolean {
 }
 
 function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
+    state.memoryBlockCount =
+        typeof row.memory_block_count === "number" ? row.memory_block_count : null;
     const markers = markersFromCachedRow(row);
     if (!row.cached_m0_bytes || !row.cached_m1_bytes || !markers) {
         throw new RenderM1InvalidMarkersError(state.sessionId);
@@ -4005,6 +4011,7 @@ function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
         )
             options.onM1Commit?.();
         options.db.exec("COMMIT");
+        options.state.memoryBlockCount = visibleMemoryIds.length;
         steps.mark("commit");
         logSlowWriteTransaction(
             "opencode_soft_refresh_cache",

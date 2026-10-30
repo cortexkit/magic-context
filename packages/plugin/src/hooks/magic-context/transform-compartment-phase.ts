@@ -113,6 +113,8 @@ interface RunCompartmentPhaseArgs {
     projectPath?: string;
     /** Owner this pass is authorized to serve, including a held prefix's owner. */
     projectIdentity?: string;
+    /** Pause only this session's project writes until its cached owner can be verified. */
+    projectOwnerUnavailable?: boolean;
     injectionBudgetTokens?: number;
     getNotificationParams?: () => import("./send-session-notification").NotificationParams;
     /** True when this pass is already safe for background compression to run. */
@@ -154,6 +156,17 @@ interface RunCompartmentPhaseArgs {
 export function runCompartmentPhase(
     args: RunCompartmentPhaseArgs,
 ): ReturnType<typeof runCompartmentPhaseImpl> {
+    if (args.projectOwnerUnavailable)
+        return Promise.resolve({
+            pendingCompartmentInjection: args.pendingCompartmentInjection,
+            awaitedCompartmentRun: false,
+            compartmentInProgress: args.sessionMeta.compartmentInProgress,
+            published: false,
+            justAwaitedPublication: false,
+            rebuiltHistoryThisPass: false,
+            historianJoinTimedOut: false,
+            historianJoinBudgetMs: null,
+        });
     if (
         args.historianRunnable !== false &&
         !args.compactionOff &&

@@ -3,7 +3,10 @@ import { getLastCompartmentEndMessage } from "../../features/magic-context/compa
 import { takeDubiousOwnershipProjectIdentityWarning } from "../../features/magic-context/memory/project-identity";
 import {
     awaitSessionIdentityDecision,
+    backgroundSessionProjectIdentity,
     hasSessionProjectAttribution,
+    permitsUnscopedHistoryEmbedding,
+    recoverCachedSessionProjectOwner,
 } from "../../features/magic-context/memory/session-identity-decision";
 import {
     type MessageReconciliationSource,
@@ -994,6 +997,7 @@ export function createTransform(deps: TransformDeps) {
         let sessionMeta: import("../../features/magic-context/types").SessionMeta | undefined;
         try {
             sessionMeta = getOrCreateSessionMeta(db, sessionId);
+            recoverCachedSessionProjectOwner(db, sessionId, sessionMeta);
             reconcileServedSessionProjectIdentity(db, sessionId, sessionMeta);
             const ttlModel =
                 findNewestUserModel(messages) ??
@@ -1249,6 +1253,14 @@ export function createTransform(deps: TransformDeps) {
             }
         }
         let servedProjectIdentity = getServedSessionProjectIdentity(sessionMeta);
+        let ownerEvidence = recoverCachedSessionProjectOwner(db, sessionId, sessionMeta);
+        let historyOnlyFrame =
+            sessionMeta.cachedM0Bytes !== null &&
+            permitsUnscopedHistoryEmbedding(sessionMeta, deps.memoryConfig?.enabled, ownerEvidence);
+        let projectOwnerUnavailable =
+            sessionMeta.cachedM0Bytes !== null &&
+            ownerEvidence.projectIdentity === undefined &&
+            !historyOnlyFrame;
         let decidedProjectIdentity = sessionDirectoryFellBack ? servedProjectIdentity : undefined;
         if (sessionDirectory) {
             const decision = await awaitSessionIdentityDecision(sessionId, sessionDirectory, {
@@ -1299,10 +1311,11 @@ export function createTransform(deps: TransformDeps) {
         let freezeM0M1 = unresolvedDirectoryHold;
         const compartmentDirectory = sessionDirectory;
         const historianRunnable = deps.historianRunnable !== false;
-        const canRunCompartments =
+        let canRunCompartments =
             fullFeatureMode &&
             !compactionOff &&
             historianRunnable &&
+            !projectOwnerUnavailable &&
             (deps.client !== undefined || deps.hiddenCompletionExecutor !== undefined) &&
             compartmentDirectory.length > 0;
         const fallbackModelId = deps.getFallbackModelId?.(sessionId);
@@ -1319,11 +1332,34 @@ export function createTransform(deps: TransformDeps) {
                 sessionDecisionCalibration(db, sessionId).proseRatio,
             );
             sessionMeta = getOrCreateSessionMeta(db, sessionId);
+            ownerEvidence = recoverCachedSessionProjectOwner(db, sessionId, sessionMeta);
             servedProjectIdentity = reconcileServedSessionProjectIdentity(
                 db,
                 sessionId,
                 sessionMeta,
             );
+            projectOwnerUnavailable =
+                sessionMeta.cachedM0Bytes !== null &&
+                ownerEvidence.projectIdentity === undefined &&
+                !permitsUnscopedHistoryEmbedding(
+                    sessionMeta,
+                    deps.memoryConfig?.enabled,
+                    ownerEvidence,
+                );
+            historyOnlyFrame =
+                sessionMeta.cachedM0Bytes !== null &&
+                permitsUnscopedHistoryEmbedding(
+                    sessionMeta,
+                    deps.memoryConfig?.enabled,
+                    ownerEvidence,
+                );
+            canRunCompartments =
+                fullFeatureMode &&
+                !compactionOff &&
+                historianRunnable &&
+                !projectOwnerUnavailable &&
+                (deps.client !== undefined || deps.hiddenCompletionExecutor !== undefined) &&
+                compartmentDirectory.length > 0;
             logTransformTiming(sessionId, "tagOwners.prepare", tOwners);
         }
 
@@ -1901,10 +1937,11 @@ export function createTransform(deps: TransformDeps) {
             !unresolvedDirectoryHold &&
             signedThinkingPolicy.mayRebuildForFit &&
             (thinkingFitRetries.has(sessionId) || !!recovery.rebuildReason);
-        const passProjectIdentity =
-            freezeM0M1 && !signedRebuildAuthorized
-                ? (servedProjectIdentity ?? decidedProjectIdentity)
-                : decidedProjectIdentity;
+        const passProjectIdentity = projectOwnerUnavailable
+            ? undefined
+            : freezeM0M1 && !signedRebuildAuthorized
+              ? (servedProjectIdentity ?? decidedProjectIdentity)
+              : (projectIdentity ?? servedProjectIdentity ?? decidedProjectIdentity);
         // Ceiling for the tiered emergency drop = contextLimit × executeThreshold%
         // (the usable working ceiling, NOT scaled by history_budget_percentage).
         // Resolve the limit the same way resolveHistoryBudgetTokens does: prefer
@@ -2094,7 +2131,7 @@ export function createTransform(deps: TransformDeps) {
                     historianExpandTools: historianRun?.expandTools ?? deps.historianExpandTools,
                     // Issue #44: gate historian-driven memory promotion so users
                     // who disable the feature actually see no memories created.
-                    memoryEnabled: deps.memoryConfig?.enabled,
+                    memoryEnabled: deps.memoryConfig?.enabled === true,
                     autoPromote: historianRun?.autoPromote ?? deps.memoryConfig?.autoPromote,
                     ensureProjectRegistered: deps.ensureProjectRegistered,
                     // Historian publication invalidates the injection cache AND
@@ -2796,6 +2833,7 @@ export function createTransform(deps: TransformDeps) {
             canRunCompartments,
             fullFeatureMode,
             compactionOff,
+            projectOwnerUnavailable,
             historianRunnable,
             sessionMeta,
             contextUsage,
@@ -2845,7 +2883,7 @@ export function createTransform(deps: TransformDeps) {
             // Issue #44: forward memory gating so the normal historian path
             // (not just the recovery path above) honors memory.enabled and
             // memory.auto_promote.
-            memoryEnabled: deps.memoryConfig?.enabled,
+            memoryEnabled: deps.memoryConfig?.enabled === true,
             autoPromote: historianRun?.autoPromote ?? deps.memoryConfig?.autoPromote,
             ensureProjectRegistered: deps.ensureProjectRegistered,
             // See startRecoveryRun above for the full rationale —
@@ -3194,6 +3232,13 @@ export function createTransform(deps: TransformDeps) {
             // Session-scoped (not launch) identity so note-nudge + auto-search
             // target the resumed session's real project. See sessionProjectIdentity.
             projectPath: sessionProjectIdentity,
+            readProjectScope: () => {
+                const owner = getServedSessionProjectIdentity(sessionMeta);
+                return {
+                    projectIdentity: owner ?? decidedProjectIdentity,
+                    memoryUnavailable: sessionMeta.cachedM0Bytes !== null && owner === undefined,
+                };
+            },
             sessionDirectory,
             autoSearch: deps.autoSearch,
             // Only forward caveman config for primary sessions. Subagents should
@@ -4019,8 +4064,13 @@ export function createTransform(deps: TransformDeps) {
 
         withoutSqliteTransformPass(() =>
             deps.maybeAutoEmbedSession?.(sessionId, {
-                projectIdentity:
-                    getServedSessionProjectIdentity(sessionMeta) ?? decidedProjectIdentity,
+                projectIdentity: backgroundSessionProjectIdentity(
+                    db,
+                    sessionId,
+                    sessionMeta,
+                    deps.memoryConfig?.enabled,
+                    decidedProjectIdentity,
+                ),
             }),
         );
 

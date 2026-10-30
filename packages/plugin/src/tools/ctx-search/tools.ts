@@ -8,6 +8,7 @@ import {
     describeUnresolvedProjectIdentity,
     directoryHasGitMetadata,
 } from "../../features/magic-context/memory/project-identity";
+import { UnprovenCachedProjectOwnerError } from "../../features/magic-context/memory/session-identity-decision";
 import {
     createUnifiedSearchDiagnostics,
     formatSearchResults,
@@ -15,6 +16,7 @@ import {
     resolveMemoriesByIdsForSearch,
     unifiedSearch,
 } from "../../features/magic-context/search";
+import { getNoteByIdInScope } from "../../features/magic-context/storage-notes";
 import { searchMessageHistoryOffThread } from "../../hooks/magic-context/auto-search-worker-client";
 import { getVisibleMemoryIds } from "../../hooks/magic-context/inject-compartments";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
@@ -139,16 +141,41 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
             // each call. OpenCode's top-level `ctx.directory` (the launch dir)
             // can differ from the session's working directory when the user
             // runs `opencode -s <id>` from outside the project.
-            const projectPath = await deps.resolveProjectPath(
-                toolContext.directory,
-                toolContext.sessionID,
-            );
+            let projectPath: string | undefined;
+            let ownerUnavailable = false;
+            const ownerNotice =
+                "Memory results are unavailable until the next history rebuild verifies the cached block's project owner. Returning only non-memory results.";
+            try {
+                projectPath = await deps.resolveProjectPath(
+                    toolContext.directory,
+                    toolContext.sessionID,
+                );
+            } catch (error) {
+                if (!(error instanceof UnprovenCachedProjectOwnerError)) throw error;
+                ownerUnavailable = true;
+                projectPath = error.nonMemoryProjectIdentity;
+            }
             if (!projectPath) {
+                if (ownerUnavailable) return `${ownerNotice}\n\nNo non-memory results found.`;
                 return `Error: Could not resolve project identity for search: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
             }
-            await deps.ensureProjectRegistered?.(toolContext.directory, deps.db);
+            if (!ownerUnavailable)
+                await deps.ensureProjectRegistered?.(toolContext.directory, deps.db);
             const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);
-            const memoryEnabled = embeddingSnapshot?.features.memoryEnabled ?? deps.memoryEnabled;
+            const memoryEnabled = ownerUnavailable
+                ? false
+                : (embeddingSnapshot?.features.memoryEnabled ?? deps.memoryEnabled);
+            const requestedSources = normalizeSources(args.sources);
+            const sourceCandidates: CtxSearchSource[] = requestedSources ?? [
+                "message",
+                "git_commit",
+                "note",
+            ];
+            const sources = ownerUnavailable
+                ? sourceCandidates.filter((source) => source !== "memory" && source !== "primer")
+                : requestedSources;
+            if (ownerUnavailable && sources?.length === 0)
+                return `${ownerNotice}\n\nNo non-memory sources requested.`;
             // Query embedding serves history, memory and commit lanes alike, so it
             // follows the provider alone; each lane applies its own feature gate.
             const embeddingEnabled = embeddingSnapshot
@@ -212,7 +239,8 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                     readMessages: deps.readMessages,
                     maxMessageOrdinal: messageOrdinalCutoff,
                     gitCommitsEnabled,
-                    sources: normalizeSources(args.sources),
+                    sources,
+                    chunkPoolWarmOnly: ownerUnavailable ? true : undefined,
                     visibleMemoryIds,
                     diagnostics,
                     gitRepositoryAvailable:
@@ -241,7 +269,24 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
             );
 
             return (
-                formatSearchResults(query, results, toolContext.sessionID, diagnostics) +
+                (ownerUnavailable ? `${ownerNotice}\n\n` : "") +
+                formatSearchResults(
+                    query,
+                    ownerUnavailable
+                        ? results.filter(
+                              (result) =>
+                                  result.source !== "memory" &&
+                                  result.source !== "primer" &&
+                                  (result.source !== "note" ||
+                                      getNoteByIdInScope(deps.db, result.noteId, {
+                                          sessionId: toolContext.sessionID,
+                                          projectPath: undefined,
+                                      })?.type === "session"),
+                          )
+                        : results,
+                    toolContext.sessionID,
+                    diagnostics,
+                ) +
                 (rerankSkipped ? `\n${rerankSkipped}` : "")
             );
         },

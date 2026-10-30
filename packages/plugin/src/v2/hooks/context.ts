@@ -29,6 +29,7 @@ import {
     awaitSessionIdentityDecision,
     forgetSessionIdentityDecision,
     readSessionIdentityDecision,
+    recoverCachedSessionProjectOwner,
 } from "../../features/magic-context/memory/session-identity-decision";
 import { scheduleClearAndReindex } from "../../features/magic-context/message-index-async";
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
@@ -1089,7 +1090,10 @@ export async function registerContext(context: V2Context) {
         });
         if (existing) return existing;
         const sessionMeta = db ? readSessionMeta(db, sessionID) : undefined;
-        if (db && sessionMeta) reconcileServedSessionProjectIdentity(db, sessionID, sessionMeta);
+        if (db && sessionMeta) {
+            recoverCachedSessionProjectOwner(db, sessionID, sessionMeta);
+            reconcileServedSessionProjectIdentity(db, sessionID, sessionMeta);
+        }
         return awaitSessionIdentityDecision(sessionID, sessionProjectDirectory(sessionID), {
             db,
             sessionMeta,
@@ -1098,11 +1102,17 @@ export async function registerContext(context: V2Context) {
             connectionFile: config.subc?.connection_file,
         });
     };
-    const sessionProjectIdentity = (sessionID: string) =>
-        getServedSessionProjectIdentity(db ? readSessionMeta(db, sessionID) : undefined) ??
-        readSessionIdentityDecision(sessionID, sessionProjectDirectory(sessionID), {
-            allowHomeProject: config.allow_home_project,
-        })?.identity;
+    const sessionProjectIdentity = (sessionID: string) => {
+        const state = db ? readSessionMeta(db, sessionID) : undefined;
+        if (db && state) recoverCachedSessionProjectOwner(db, sessionID, state);
+        return (
+            getServedSessionProjectIdentity(state) ??
+            readSessionIdentityDecision(sessionID, sessionProjectDirectory(sessionID), {
+                sessionMeta: state,
+                allowHomeProject: config.allow_home_project,
+            })?.identity
+        );
+    };
     const historyRefreshSessions = new Set<string>();
     registerSystemDateRefresh(historyRefreshSessions);
     const pendingMaterializationSessions = new Set<string>();
