@@ -1,4 +1,5 @@
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
+import { readSessionMeta } from "../../features/magic-context/storage-meta-session";
 import { HEAD_IDS } from "../hooks/payload";
 import type { SessionContext, V2Context, V2Message } from "../hooks/types";
 import {
@@ -220,6 +221,102 @@ export class NativeFoldReplay {
         } catch {
             return false;
         }
+    }
+    /** Prove checkpoint input when another process holds context.db's write lock.
+     * Recovery must not change durable provenance, and mismatched native
+     * provenance cannot authorize another store or be treated as legacy input.
+     */
+    async replayAdmission(
+        sessionID: string,
+        cut: StoreRow<"compaction">,
+        reader: V2StoreReader,
+    ): Promise<"native" | "legacy" | undefined> {
+        if (!isLocalCheckpoint(cut) || cut.session_id !== sessionID) return undefined;
+        try {
+            const source = reader.hostIdentity();
+            const observed = this.sources.get(sessionID);
+            if (observed && observed !== source) return undefined;
+            if (observed === source && isAdmittedLocalCheckpoint(this.storage, sessionID, cut))
+                return "native";
+            const saved = (await this.admissions?.get(this.admissionKey(sessionID))) as
+                | { payload: string; digest: string }
+                | undefined;
+            if (!saved) return "legacy";
+            if (!saved.payload || saved.digest !== foldDigest(saved.payload)) return undefined;
+            const snapshot = JSON.parse(saved.payload) as DurableSnapshot;
+            if (snapshot.admissionID !== cut.id) return "legacy";
+            if (
+                snapshot.sourceDigest !== foldDigest(source) ||
+                snapshot.sessionID !== sessionID ||
+                snapshot.summaryDigest !== foldDigest(cut.data.summary ?? "") ||
+                snapshot.historyDigest !== historyDigest(reader, sessionID, cut.seq - 1)
+            )
+                return undefined;
+            return "native";
+        } catch {
+            return undefined;
+        }
+    }
+    /** Build the native ingress projection without changing capture state. A
+     * refused model change must not invalidate the still-servable old capture.
+     */
+    replayInput(args: {
+        sessionID: string;
+        cut: StoreRow<"compaction">;
+        model: SessionContext["model"];
+        reader: V2StoreReader;
+        bounded: boolean;
+    }): V2Message[] | undefined {
+        const { sessionID, cut, model, reader } = args;
+        if (!isLocalCheckpoint(cut) || cut.session_id !== sessionID) return undefined;
+        let after = -1;
+        if (args.bounded && !this.changed.has(sessionID)) {
+            const state = readSessionMeta(this.storage.db, sessionID);
+            const max = this.storage.db
+                .prepare("SELECT COALESCE(MAX(id),0) AS id FROM m0_mutation_log WHERE session_id=?")
+                .get(sessionID) as { id: number };
+            const boundary = (
+                this.storage.db
+                    .prepare(
+                        "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id=?",
+                    )
+                    .get(sessionID) as { id: string | null } | undefined
+            )?.id;
+            if (max.id <= (state.cachedM0MaxMutationId ?? 0) && boundary)
+                after = reader.sequenceForId(sessionID, boundary) ?? -1;
+        }
+        const through = cut.seq - 1;
+        const metadata =
+            (this.metadataThrough.get(sessionID) ?? -1) >= through
+                ? this.metadata.get(sessionID)
+                : undefined;
+        const required = (metadata ?? reader.rowStampsThrough(sessionID, through))
+            .filter(conversational)
+            .filter((row) => row.seq > after && row.seq <= through);
+        const tail = this.tail(sessionID);
+        let records: readonly Pick<NativeRowRecord, "id" | "data">[];
+        if (
+            !this.dirty.has(sessionID) &&
+            tail?.model === `${model.providerID}/${model.id}` &&
+            this.storage.containsRows(
+                sessionID,
+                required.map((row) => row.id),
+            )
+        ) {
+            records = this.storage.rows(sessionID, after, through);
+        } else {
+            records = reader
+                .range(sessionID, after, through)
+                .filter(conversational)
+                .map((row) => this.record(row, this.rendered(row, model)));
+            const restored = new Set(records.map((row) => row.id));
+            if (required.some((row) => !restored.has(row.id))) return undefined;
+        }
+        return records.flatMap((row) => {
+            const messages = reviveNative(JSON.parse(row.data) as V2Message[]);
+            for (const message of messages) coordinates.set(message, row.id);
+            return messages;
+        });
     }
     private rendered(row: StoreRow, model: SessionContext["model"]): V2Message[] {
         return restoreRow(

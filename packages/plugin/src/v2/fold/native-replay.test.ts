@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 import { HEAD_IDS } from "../hooks/payload";
-import type { SessionContext, V2Message } from "../hooks/types";
+import type { SessionContext, V2Context, V2Message } from "../hooks/types";
 import type { StoreRow, V2StoreReader } from "../store-reader";
 import { copyNativeInput, isLocalCheckpoint, NativeFoldReplay } from "./native-replay";
 
@@ -427,4 +427,78 @@ test("bounded replay closes its source reader when resolving an uncached boundar
         "source unavailable",
     );
     expect(closed).toBe(1);
+});
+
+test("busy replay admission reads durable native provenance without updating or deleting it", async () => {
+    const f = fixture();
+    f.cut.seq = 3;
+    f.reader.hostIdentity = () => "fixture-host";
+    f.reader.latestRunningCompaction = () => ({ ...f.cut, data: { status: "running" } });
+    const saved = new Map<string, unknown>();
+    let writes = 0;
+    const provenance = {
+        get: async (key: string) => saved.get(key),
+        set: async (key: string, value: unknown) => {
+            writes++;
+            saved.set(key, value);
+        },
+    } as V2Context["storage"];
+    const first = new NativeFoldReplay(f.storage, () => f.reader, provenance);
+    await first.observeSource("s", f.reader);
+    await first.capture(context([user(HEAD_IDS[0], f.cut.data.summary!)]), [user("u", "served")]);
+    expect(
+        await first.supply({ draft: context([]), reader: f.reader, summary: f.cut.data.summary! }),
+    ).toBe(true);
+    const before = JSON.stringify([...saved]);
+    const writeCount = writes;
+    const changes = f.db.prepare("SELECT total_changes() AS n").get();
+    const coldStorage = nativeFoldCache(f.db);
+    const cold = new NativeFoldReplay(coldStorage, () => f.reader, provenance);
+    expect(await cold.replayAdmission("s", f.cut, f.reader)).toBe("native");
+    expect(
+        cold
+            .replayInput({
+                sessionID: "s",
+                cut: f.cut,
+                model: { providerID: "p", id: "m" },
+                reader: f.reader,
+                bounded: false,
+            })
+            ?.map((message) => message.id),
+    ).toEqual(["u", "a"]);
+    expect(coldStorage.usage()).toEqual({ sessions: 0, bytes: 0 });
+    expect(
+        cold.replayInput({
+            sessionID: "s",
+            cut: { ...f.cut, session_id: "other" },
+            model: { providerID: "p", id: "m" },
+            reader: f.reader,
+            bounded: false,
+        }),
+    ).toBeUndefined();
+    const tail = f.storage.tail("s");
+    const nativeRows = JSON.stringify(f.storage.rows("s", -1, 10));
+    expect(
+        first.replayInput({
+            sessionID: "s",
+            cut: f.cut,
+            model: { providerID: "p", id: "different" },
+            reader: f.reader,
+            bounded: false,
+        }),
+    ).toBeDefined();
+    expect(first.sourceChanged("s")).toBe(false);
+    expect(f.storage.tail("s")).toEqual(tail);
+    expect(JSON.stringify(f.storage.rows("s", -1, 10))).toBe(nativeRows);
+    f.rows[0]!.data.text = "edited source";
+    expect(await cold.replayAdmission("s", f.cut, f.reader)).toBeUndefined();
+    f.reader.hostIdentity = () => "other-host";
+    expect(await cold.replayAdmission("s", f.cut, f.reader)).toBeUndefined();
+    f.reader.hostIdentity = () => "fixture-host";
+    expect(await cold.replayAdmission("s", { ...f.cut, id: "legacy-cut" }, f.reader)).toBe(
+        "legacy",
+    );
+    expect(writes).toBe(writeCount);
+    expect(JSON.stringify([...saved])).toBe(before);
+    expect(f.db.prepare("SELECT total_changes() AS n").get()).toEqual(changes);
 });

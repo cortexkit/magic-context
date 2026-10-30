@@ -160,7 +160,7 @@ import {
     NativeFoldReplay,
     nativeRowID,
 } from "../fold/native-replay";
-import { FoldOwner } from "../fold/owner";
+import { FoldOwner, foldDigest } from "../fold/owner";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
@@ -255,6 +255,19 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
         ...draft.messages.filter((message) => message !== first),
     );
     return true;
+}
+
+function restoreNativeCheckpointInput(
+    messages: readonly V2Message[],
+    incoming: V2Message,
+    restored: readonly V2Message[],
+): V2Message[] {
+    const present = new Set(messages.flatMap((message) => (message.id ? [message.id] : [])));
+    const hidden = restored.filter((message) => {
+        const id = nativeRowID(message);
+        return !id || !present.has(id);
+    });
+    return [...hidden, ...messages.filter((message) => message !== incoming)];
 }
 
 // The event stream can trail the terminal store row by a scheduler tick; keep failure surfacing fast.
@@ -2125,7 +2138,7 @@ export async function registerContext(context: V2Context) {
          * synthetic marks, exactly as the managed pass below builds them.
          * Rust mode keeps the host's messages unchanged, as before. Undefined
          * when no replay can match (the store is unreadable, the checkpoint is
-         * missing from the draft, or the experimental native fold owns it).
+         * missing from the draft, or its native provenance cannot be proved).
          */
         const buildReplayInput = async (): Promise<
             { draft: SessionContext; mapped: ReturnType<typeof adaptPayload> } | undefined
@@ -2140,7 +2153,7 @@ export async function registerContext(context: V2Context) {
                     const localCut = cut && isLocalCheckpoint(cut) ? cut : undefined;
                     const incoming =
                         localCut && messages.find((message) => message.id === localCut.id);
-                    if ((localCut && !incoming) || (cut && nativeFoldReplay)) return undefined;
+                    if (localCut && !incoming) return undefined;
                     checkpointAtEntry = incoming || null;
                     // A replay serves the tool list a healthy pass would serve: in a
                     // subagent session that is without the primary-only tools, which
@@ -2166,17 +2179,41 @@ export async function registerContext(context: V2Context) {
                             )
                                 admitted.add(message.id);
                         const replayDb = db ?? storage.current();
-                        if (localCut && incoming && replayDb)
-                            messages = restoreAfterCheckpoint({
-                                db: replayDb,
-                                reader,
-                                draft,
-                                messages,
-                                cut: localCut,
-                                incoming,
-                                boundaryRepair: undefined,
-                            });
-                        else if (localCut) return undefined;
+                        if (localCut && incoming && replayDb) {
+                            const admission = nativeFoldReplay
+                                ? await nativeFoldReplay.replayAdmission(
+                                      draft.sessionID,
+                                      localCut,
+                                      reader,
+                                  )
+                                : "legacy";
+                            if (admission === undefined) return undefined;
+                            if (admission === "native" && nativeFoldReplay) {
+                                const restored = nativeFoldReplay.replayInput({
+                                    sessionID: draft.sessionID,
+                                    cut: localCut,
+                                    model: draft.model,
+                                    reader,
+                                    bounded: true,
+                                });
+                                if (!restored) return undefined;
+                                messages = restoreNativeCheckpointInput(
+                                    messages,
+                                    incoming,
+                                    restored,
+                                );
+                            } else {
+                                messages = restoreAfterCheckpoint({
+                                    db: replayDb,
+                                    reader,
+                                    draft,
+                                    messages,
+                                    cut: localCut,
+                                    incoming,
+                                    boundaryRepair: undefined,
+                                });
+                            }
+                        } else if (localCut) return undefined;
                         times = readTimes(reader, messages);
                     }
                 } finally {
@@ -2459,27 +2496,20 @@ export async function registerContext(context: V2Context) {
                     );
                 }
                 if (cut && incoming && nativeRestored) {
-                    const present = new Set(
-                        draft.messages.flatMap((message) => (message.id ? [message.id] : [])),
-                    );
-                    const hidden = nativeRestored.filter((message) => {
-                        const id = nativeRowID(message);
-                        return !id || !present.has(id);
-                    });
                     draft.messages.splice(
                         0,
                         draft.messages.length,
-                        ...hidden,
-                        ...draft.messages.filter((message) => message !== incoming),
+                        ...restoreNativeCheckpointInput(draft.messages, incoming, nativeRestored),
                     );
                 } else if (localCut && cut && incoming) {
-                    // A checkpoint without native replay admission still uses our
-                    // ordinary host-row reconstruction below. Let the transform
-                    // render or reuse the history head from our compartments, so
-                    // any rebuild opens the same mutation/drain gate as other folds.
-                    // Keep FoldOwner's host wrapper out of this path: its serialized
-                    // raw context can already be covered by the compartments.
-                    if (!nativeFoldReplay) {
+                    // Only a matching legacy owner can preserve a frozen carrier.
+                    // Unknown native wrappers must not become legacy state; the
+                    // existing owner's rebuild policy owns retiring old text.
+                    const legacy = await folds.read(draft.sessionID);
+                    if (
+                        legacy?.cutSeq === cut.seq &&
+                        legacy.submittedSha === foldDigest(cut.data.summary ?? "")
+                    ) {
                         const identity = await folds.observe({
                             sessionID: draft.sessionID,
                             cutSeq: cut.seq,
