@@ -546,6 +546,49 @@ fn split_cold_payloads(raw: &mut String) -> rusqlite::Result<Vec<(String, String
     Ok(cold)
 }
 
+pub(super) fn downgrade_record(conn: &Connection, reference: &str) -> rusqlite::Result<bool> {
+    let Some(current) = header(conn, reference)? else { return Ok(false); };
+    if legacy_exists(conn, reference)? {
+        // An old binary has already written newer state for this conversation.
+        // Preserve that family, not the dormant v2 copy from before rollback.
+        clear_owned(conn, reference)?;
+        return Ok(true);
+    }
+    let mut state: Value = decode(&current.state_json)?;
+    let record = state.as_object_mut().ok_or(rusqlite::Error::InvalidQuery)?;
+    if record.get("initial_stored").and_then(Value::as_bool) == Some(true) {
+        let raw = get(conn, &owner(reference), "setup-initial")?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        record.insert("initial".into(), decode(&raw)?);
+    }
+    if !record.contains_key("initial") { return Err(rusqlite::Error::InvalidQuery); }
+    record.remove("initial_stored"); record.remove("initial_ready"); record.remove("input_revision");
+    if let Some(Value::Object(moved)) = record.get_mut("standalone_move") {
+        if moved.get("bound_drops_stored").and_then(Value::as_bool) == Some(true) {
+            let raw = get(conn, &owner(reference), "moved-bound-drops")?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            moved.insert("bound_drops".into(), decode(&raw)?);
+        }
+        moved.remove("bound_drops_stored");
+    }
+    // Read and validate the complete family before the first legacy write.
+    let entries = entries(conn, reference, 0, i64::MAX as u64)?;
+    let views = views(conn, reference)?;
+    let baselines = conn.prepare("SELECT section,body FROM main.mc_cache_sections WHERE session_id=?1 AND section NOT GLOB '__ckmc_async_v2_*' AND section NOT IN ('setup-initial','moved-bound-drops')")?
+        .query_map([owner(reference)],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let state = encode(&state)?;
+    conn.execute("INSERT INTO main.mc_async_compaction(session_ref,conversation_key,session,state_json,version_high_water) VALUES(?1,?2,?3,?4,?5)",params![reference,current.key,current.session,state,current.version_high_water])?;
+    for entry in entries {
+        conn.execute("INSERT INTO main.mc_async_compaction_entries(session_ref,session,ordinal,entry_json,index_json,mid) VALUES(?1,?2,?3,?4,?5,?6)",params![reference,current.session,entry.ordinal,entry.entry_json,entry.index_json,entry.mid])?;
+    }
+    for view in views {
+        conn.execute("INSERT INTO main.mc_async_compaction_views(session_ref,session,version,view_json,engine_json,announced) VALUES(?1,?2,?3,?4,?5,?6)",params![reference,current.session,view.version,view.view_json,view.engine_json,view.announced])?;
+    }
+    for (slot,value) in baselines {
+        conn.execute("INSERT INTO main.mc_async_compaction_baselines(session_ref,session,slot,view_json) VALUES(?1,?2,?3,?4)",params![reference,current.session,slot,value])?;
+    }
+    clear_owned(conn, reference)?;
+    Ok(true)
+}
+
 pub(super) fn install_views(conn: &Connection) -> rusqlite::Result<()> {
     let installed = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE type='view' AND name='mc_async_compaction')", [], |row| row.get::<_,bool>(0))?;
     if !installed {

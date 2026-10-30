@@ -1102,7 +1102,7 @@ fn row(label: &str, size: u64, sample: &Sample) -> String {
     line
 }
 
-const PHASES: [&str; 24] = [
+const PHASES: [&str; 30] = [
     "load",
     "rem:base",
     "rem:last",
@@ -1110,6 +1110,12 @@ const PHASES: [&str; 24] = [
     "phase:checkout",
     "phase:read",
     "phase:index",
+    "index:ingest",
+    "index:ack",
+    "ingest:reindex",
+    "ingest:restore",
+    "ingest:bind",
+    "ingest:tags",
     "phase:policy",
     "phase:skip",
     "phase:skip_meta",

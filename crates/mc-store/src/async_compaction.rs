@@ -237,6 +237,31 @@ impl McStore {
             .map_err(Into::into)
     }
 
+    /// Losslessly restore provider KV families for an older binary. The caller
+    /// must prove both databases have no other holders before invoking this
+    /// offline-only operation. It never opens or writes the context database.
+    pub fn downgrade_async_layout_offline(path: &std::path::Path) -> Result<Vec<String>,McStoreError> {
+        let mut conn = rusqlite::Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.pragma_update(None,"foreign_keys",true)?;
+        let version = crate::single_store_schema::recorded_store_version(&conn)?;
+        if version != crate::LATEST_MIGRATION_VERSION {
+            return Err(McStoreError::Serde(format!("downgrade requires store fence {}, found {version}",crate::LATEST_MIGRATION_VERSION)));
+        }
+        let references = conn.prepare("SELECT section FROM main.mc_cache_sections WHERE session_id=?1 ORDER BY section")?
+            .query_map([layout::HEADERS],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut converted = Vec::new();
+        for reference in references {
+            let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if let Some(header)=layout::header(&tx,&reference)? {
+                crate::move_store::check_writer(&tx,&header.session)?;
+            }
+            let changed=layout::downgrade_record(&tx,&reference)?;
+            tx.commit()?;
+            if changed { converted.push(reference); }
+        }
+        Ok(converted)
+    }
+
     /// Thin candidate identities, never full seeds or rendered heads.
     pub fn load_async_cut_candidates(
         &self,

@@ -1355,9 +1355,19 @@ impl State {
     /// Validate and persist a completed transcript read while its provider
     /// serial is held, before returning the record to the resident cache.
     fn ingest_read(&mut self, store: &McStore, codec: codec::Codec) -> Result<(), HandlerOutcome> {
+        #[cfg(test)]
+        let step = scaling_tests::save_meter::start_kind(&self.reference(), "ingest:reindex");
         self.reindex()?;
+        #[cfg(test)]
+        drop(step);
+        #[cfg(test)]
+        let step = scaling_tests::save_meter::start_kind(&self.reference(), "ingest:restore");
         self.restore_sources(store, codec)?;
         self.restore_undo_edits(store)?;
+        #[cfg(test)]
+        drop(step);
+        #[cfg(test)]
+        let step = scaling_tests::save_meter::start_kind(&self.reference(), "ingest:bind");
         let bound = self
             .offline_first_pass
             .as_ref()
@@ -1368,7 +1378,13 @@ impl State {
                 offline.bound_generation = Some(self.generation);
             }
         }
+        #[cfg(test)]
+        drop(step);
+        #[cfg(test)]
+        let step = scaling_tests::save_meter::start_kind(&self.reference(), "ingest:tags");
         let rows = self.unsaved_tag_rows(codec)?;
+        #[cfg(test)]
+        drop(step);
         self.save(store, &rows)
     }
 
@@ -5031,7 +5047,13 @@ impl McHandler {
         state.record_restored_ack_descent(store)?;
         #[cfg(test)]
         let phase = scaling_tests::save_meter::start_kind(&notice.session_ref, "phase:index");
+        #[cfg(test)]
+        let index_step = scaling_tests::save_meter::start_kind(&notice.session_ref, "index:ingest");
         state.ingest_read(store, codec)?;
+        #[cfg(test)]
+        drop(index_step);
+        #[cfg(test)]
+        let index_step = scaling_tests::save_meter::start_kind(&notice.session_ref, "index:ack");
         if state.completed_seq < notice.seq || resuming {
             // Reset clears the read lineage, and ingestion normalizes served
             // source parts. Validate acknowledgements only after both recover.
@@ -5043,6 +5065,8 @@ impl McHandler {
                 state.save(store, &[])?;
             }
         }
+        #[cfg(test)]
+        drop(index_step);
         #[cfg(test)]
         drop(phase);
         #[cfg(test)]
