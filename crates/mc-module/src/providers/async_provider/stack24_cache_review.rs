@@ -779,6 +779,7 @@ fn damaged_pass(
         request_tokens: notice.est_tokens,
         context_window: 100_000,
         prefix_rebuilding: true,
+        cold_prefix: false,
         pipeline_switch: false,
         last_applied_version: None,
         last_not_applied: None,

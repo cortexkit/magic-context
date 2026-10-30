@@ -286,6 +286,15 @@ pub(crate) struct AsyncRecord {
     /// cleanup in it. Cleared by the first rebuild pass that succeeds.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pruned_rebuild_pending: bool,
+    /// A session moved from standalone has never been served by this runner,
+    /// so its first request writes the runner's prompt cache cold whatever ck-mc
+    /// decides. Its first engine pass therefore runs as a rebuild, as a
+    /// `ttl_expired` ride does: the imported history head and the carried drops
+    /// land in that one rebuild instead of waiting for an open signed turn to
+    /// close. Set when a moved record is created; cleared by the first pass
+    /// that publishes a view.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    moved_cold_prefix: bool,
     /// A rewrite ride (`ttl_expired`, `model_change`, `account_change`,
     /// `surface_change`, `chain_reset`) rebuilt this conversation since the last notice
     /// completed. Its request rewrote the runner's prompt cache from the
@@ -3068,6 +3077,7 @@ impl McHandler {
         let codec = codec::Codec::from_params(&Value::Object(request.params.clone()))?;
         let chosen = preset(request.preset.as_deref())?;
         let mut engine = transform::compaction::State::new(reference.clone(), chosen);
+        let moved_cold_prefix = standalone_move.is_some();
         let mut state = State {
             commands: Default::default(),
             historian_cadence: None,
@@ -3086,6 +3096,7 @@ impl McHandler {
             pruned_parts: BTreeMap::new(),
             pruned_reconcile_cursor: None,
             pruned_rebuild_pending: false,
+            moved_cold_prefix,
             rode_since_notice: false,
             page_reasoning_pruned: None,
             last_pass: None,
@@ -3198,6 +3209,7 @@ impl McHandler {
                 invalid_field("context_window", "async setup needs a context window")
             })?,
             prefix_rebuilding: false,
+            cold_prefix: false,
             pipeline_switch: false,
             last_applied_version: None,
             last_not_applied: None,
@@ -5564,7 +5576,7 @@ impl McHandler {
         // Held copies the runner pruned make this one pass a rebuild, as a
         // rewrite ride does.
         let pruned_rebuild = state.pruned_rebuild_pending && !ride;
-        let ride = ride || state.pruned_rebuild_pending;
+        let ride = ride || state.pruned_rebuild_pending || state.moved_cold_prefix;
         let store = self
             .store
             .get()
@@ -5609,6 +5621,7 @@ impl McHandler {
                 .or(notice.window.or(state.setup.context_window))
                 .ok_or_else(|| invalid("window unknown"))?,
             prefix_rebuilding: ride,
+            cold_prefix: state.moved_cold_prefix,
             pipeline_switch: false,
             last_applied_version: None,
             last_not_applied: None,
@@ -5974,6 +5987,8 @@ impl McHandler {
         if let Some(pass) = &mut state.last_pass {
             pass.published = true;
         }
+        // The moved session's cold first request is now covered by this view.
+        state.moved_cold_prefix = false;
         Ok(Some(view))
     }
 
@@ -6971,6 +6986,7 @@ impl McHandler {
             (meta.last_model_key != model, "model_changed"),
             (state.engine_failed, "previous_engine_pass_failed"),
             (state.pruned_rebuild_pending, "pruned_reasoning_rebuild"),
+            (state.moved_cold_prefix, "moved_cold_prefix"),
             (state.restored_head.is_some(), "restored_head"),
             (
                 state.engine.preset != transform::compaction::Preset::Head,

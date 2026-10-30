@@ -857,6 +857,13 @@ pub struct TransformRequest {
     /// Its declared render identity requests a rebuild; the module plan grants permission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_replay_rebuild: Option<RawReplayRebuild>,
+    /// The runner has never sent any of this conversation, so its next request writes the
+    /// prompt cache cold whatever this pass decides: a session moved from standalone, on its
+    /// first view. The head is rebuilt as on a first render, so an open signed turn cannot
+    /// hold it at bytes this runner never served. Set only by the async provider; never on
+    /// the wire.
+    #[serde(skip)]
+    pub cold_prefix: bool,
     /// Identity of the materializer's upgrade state, stored so a change is detected as a
     /// render-configuration change consistently with the TypeScript materializer.
     #[serde(default)]
@@ -1334,6 +1341,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             native_fold_output: None,
             native_fold_projection: None,
             raw_replay_rebuild: wire.raw_replay_rebuild,
+            cold_prefix: false,
             served_raw_block_ids: wire.served_raw_block_ids,
             kind: wire.kind,
             v: wire.v,
@@ -2570,6 +2578,8 @@ pub mod compaction {
         pub request_tokens: u64,
         pub context_window: u64,
         pub prefix_rebuilding: bool,
+        /// The runner has never served this conversation (`TransformRequest::cold_prefix`).
+        pub cold_prefix: bool,
         pub pipeline_switch: bool,
         pub last_applied_version: Option<u64>,
         pub last_not_applied: Option<NotApplied>,
@@ -2901,6 +2911,7 @@ pub mod compaction {
             req.native_messages = None;
         }
         req.tail_delta = None;
+        req.cold_prefix = status.cold_prefix;
         // Step hooks own appends and tags. Compaction must not first tag raw content
         // that the runner already served while compaction calls were gated off.
         // Host hooks own minting; the engine still renders the durable tag
@@ -5911,7 +5922,8 @@ fn apply_once(
         && (!loaded.meta.initialized
             || cached_m1_missing(&loaded.core)
             || lineage_state.force_hard
-            || raw_rebuild);
+            || raw_rebuild
+            || req.cold_prefix);
     // `classify` also makes bootstrap-seed and legacy-baseline passes HARD whatever is queued:
     // neither has an m0/m1 pair matching the stored coverage to replay.
     let head_replay_impossible = head_rebuild_forced
@@ -20707,6 +20719,7 @@ pub(crate) mod tests {
                 request_tokens: 90_000,
                 context_window: 100_000,
                 prefix_rebuilding: false,
+                cold_prefix: false,
                 pipeline_switch: false,
                 last_applied_version: None,
                 last_not_applied: None,
@@ -23855,6 +23868,7 @@ pub(crate) mod tests {
             adopted_system_prompt_hash: None,
             served_raw_block_ids: Vec::new(),
             raw_replay_rebuild: None,
+            cold_prefix: false,
             upgrade_state: String::new(),
             is_subagent: false,
             protected_tags: 20,
