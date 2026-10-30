@@ -1362,7 +1362,16 @@ fn counting_matches_plugin_known_answer_and_is_invariant_under_relocation() {
     host_sql(&paths, "DELETE FROM part; DELETE FROM message");
     for (id, time, data) in [
         ("b", 10, r#"{"role":"user"}"#),
-        ("a", 10, r#"{"role":"assistant"}"#),
+        // A finished assistant: same time as `b`, so the id breaks the tie.
+        ("a", 10, r#"{"role":"assistant","time":{"completed":10}}"#),
+        // A dead step (no parts, no completion, no error) is never counted,
+        // while a finished part-less error assistant still is (llm-runner 4.8).
+        ("dead_step", 10, r#"{"role":"assistant"}"#),
+        (
+            "error_step",
+            19,
+            r#"{"role":"assistant","error":{"name":"APIError"},"time":{"completed":19}}"#,
+        ),
         ("skip_bool", 11, r#"{"summary":true,"finish":"stop"}"#),
         ("skip_integer", 12, r#"{"summary":1,"finish":"stop"}"#),
         ("skip_real", 13, r#"{"summary":1.0,"finish":"stop"}"#),
@@ -1382,6 +1391,7 @@ fn counting_matches_plugin_known_answer_and_is_invariant_under_relocation() {
         "string_summary",
         "malformed",
         "ordinary_stop",
+        "error_step",
     ];
     let read = || {
         let host = load_host_session(
@@ -1481,7 +1491,9 @@ fn runner_tag_eligibility_matches_text_error_and_media_known_answers() {
 fn drops_missing_and_untagged_fail_closed_for_applied_and_queued_targets() {
     for queued in [false, true] {
         for (code, host) in [
-            ("drop_target_missing", "DELETE FROM part WHERE message_id='msg_m008'"),
+            // A finished assistant whose parts are gone. Left unfinished, it
+            // would be a dead step: never served, so its drops are not_served.
+            ("drop_target_missing", "DELETE FROM part WHERE message_id='msg_m008'; UPDATE message SET data=json_set(data,'$.time.completed',8001) WHERE id='msg_m008'"),
             ("drop_target_untagged", "UPDATE part SET data=json_set(data,'$.state.status','running') WHERE id='prt_m008_c'"),
         ] {
             let dir = tempfile::tempdir().unwrap();
@@ -1803,11 +1815,16 @@ fn admission_matches_the_five_frozen_session_shapes() {
         }
         if shape == "large_raw_back" {
             for index in 13..=2017 {
+                // Finished assistants: a part-less unfinished one is a dead
+                // step, which is neither counted nor a summary endpoint.
                 add_message(
                     &paths,
                     &format!("msg_m{index:03}"),
                     index * 1000,
-                    r#"{"role":"assistant"}"#,
+                    &format!(
+                        r#"{{"role":"assistant","time":{{"completed":{}}}}}"#,
+                        index * 1000
+                    ),
                 );
             }
             context_sql(
