@@ -2,6 +2,8 @@
 //! Revalidating the same source prefix must not spend the model's prompt cache.
 use super::*;
 
+mod independent_review;
+
 fn entry(n: u64, role: &str, content: Value, run: &str) -> ReadMessage {
     let mut entry = ReadMessage::new(n, format!("m{n}"), json!({"role":role,"content":[content]}))
         .with_tags(vec![tags::PartTag::tagged(
