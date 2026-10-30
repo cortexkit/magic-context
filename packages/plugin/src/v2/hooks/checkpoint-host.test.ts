@@ -16,10 +16,11 @@ import { V2StoreReader } from "../store-reader";
 import { rawMessages } from "./store";
 
 const cli = process.env.MC_ISSUE824_HOST_CLI;
+const versionUnderReview = process.env.MC_ISSUE824_HOST_VERSION ?? "2.2.2";
 
-// Opt in with a built plugin and an explicit 2.2.2 binary; never resolve a live host from PATH.
+// Opt in with a built plugin and an explicit versioned binary; never resolve a live host from PATH.
 test.skipIf(!cli)(
-    "2.2.2 checkpoint: no new recent context, and first oversized upgrade request is trimmed before egress",
+    `${versionUnderReview} checkpoint: no new recent context, and first oversized upgrade request is trimmed before egress`,
     async () => {
         const parent = join(tmpdir(), "magic-context", "issue824");
         mkdirSync(parent, { recursive: true });
@@ -53,7 +54,7 @@ test.skipIf(!cli)(
             windowsHide: true,
         });
         expect(version.status).toBe(0);
-        expect(version.stdout.trim()).toBe("opencode v2.2.2");
+        expect(version.stdout.trim()).toBe(`opencode v${versionUnderReview}`);
         const plugin = resolve(import.meta.dir, "../../../dist/v2/server.js");
         expect(existsSync(plugin)).toBe(true);
         await preloadTokenizer();
@@ -276,9 +277,11 @@ test.skipIf(!cli)(
             const data = JSON.parse(cut.data);
             expect(data.status).toBe("completed");
             expect(Object.hasOwn(data.metadata ?? {}, "keepID")).toBe(false);
+            expect(data.metadata?.recent ?? data.recent ?? "").toBe("");
             const fresh = await turn("new-compaction");
             expect(fresh).toHaveLength(1);
             expect(fresh[0]!.rawBody).not.toContain("<recent-context>");
+            for (let i = 6; i <= 12; i++) expect(fresh[0]!.rawBody).toContain(`TOOL-ROW-${i}`);
 
             // Recreate the old host record, then pin exactly the wrapper that an old
             // plugin observed. No live or external store is involved in this fixture.

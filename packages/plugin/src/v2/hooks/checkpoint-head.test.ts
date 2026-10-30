@@ -5,6 +5,7 @@ import { join } from "node:path";
 import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage-db";
+import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import * as transformModule from "../../hooks/magic-context/transform";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
@@ -250,6 +251,33 @@ test("removing recent-context never permits an oversized remaining request", asy
         ).toEqual({ n: 1 });
     } finally {
         logs.mockRestore();
+        await f.close();
+    }
+});
+
+test("checkpoint review: oversized generate suffix is refused after a permitted strip", async () => {
+    const f = await fixture();
+    try {
+        f.setPermission(true);
+        const main = f.draft();
+        await f.hooks.get("context")!(main);
+        expect(JSON.stringify(main.messages[0])).not.toContain("<recent-context>");
+
+        const side = f.draft();
+        side.messages.push({
+            role: "user",
+            content: [{ type: "text", text: "side question beyond the window ".repeat(40000) }],
+        });
+        const generating = f.hooks.get("generate")!(side);
+        await generating.then(
+            () => {
+                expect(JSON.stringify(side.messages[0])).not.toContain("<recent-context>");
+                expect(estimateTokens(JSON.stringify(side.messages))).toBeGreaterThan(32000);
+            },
+            () => {},
+        );
+        await expect(generating).rejects.toThrow("Context full");
+    } finally {
         await f.close();
     }
 });
