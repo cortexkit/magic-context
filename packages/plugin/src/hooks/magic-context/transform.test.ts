@@ -73,7 +73,7 @@ import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import type { MarkerUpdateOutcome } from "./compaction-marker-manager";
 import { getActiveCompartmentRun, registerActiveCompartmentRun } from "./compartment-runner";
 import { createToolExecuteAfterHook } from "./hook-handlers";
-import { HOST_BREAKDOWN_KEY } from "./host-token-breakdown";
+import { HOST_BREAKDOWN_KEY, HOST_BREAKDOWN_VERSION } from "./host-token-breakdown";
 import { injectM0M1 } from "./inject-compartments";
 import { captureSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
@@ -129,6 +129,12 @@ for (const generation of ["v1", "v2"] as const) {
         useTempDataHome(`phone-breakdown-${generation}-`);
         const db = openDatabase()!;
         const sessionId = `phone-${generation}`;
+        // The saved breakdown is the sidebar's calibrated attribution, which needs the
+        // provider's last input total; without one every part calibrates to zero.
+        db.prepare("INSERT INTO session_meta(session_id, last_input_tokens) VALUES (?, ?)").run(
+            sessionId,
+            1_000,
+        );
         recordToolDefinition(
             "anthropic",
             "opus",
@@ -146,6 +152,9 @@ for (const generation of ["v1", "v2"] as const) {
             liveModelBySession: new Map([
                 [sessionId, { providerID: "anthropic", modelID: "opus" }],
             ]),
+            // The breakdown reads tool definitions only with the plugin's route maps,
+            // which the real plugin always supplies.
+            agentBySession: new Map(),
             contextUsageMap: new Map(),
             historyRefreshSessions: new Set(),
             pendingMaterializationSessions: new Set(),
@@ -164,7 +173,7 @@ for (const generation of ["v1", "v2"] as const) {
             .prepare("SELECT value FROM session_render_cache WHERE session_id=? AND cache_key=?")
             .get(sessionId, HOST_BREAKDOWN_KEY) as { value: string };
         const saved = JSON.parse(row.value);
-        expect(saved.version).toBe(1);
+        expect(saved.version).toBe(HOST_BREAKDOWN_VERSION);
         expect(saved.parts.history_raw).toBeGreaterThan(0);
         expect(saved.parts.tool_definitions).toBeGreaterThan(0);
         expect(saved.measured_at).toBeGreaterThan(0);
