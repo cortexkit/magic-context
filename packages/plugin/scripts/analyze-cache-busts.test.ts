@@ -1306,6 +1306,96 @@ describe("analyze-cache-bust rotating billing header", () => {
         expect(output).toContain("1 latency-only short read(s)");
     });
 
+    test("never prints reasoning text, while a change inside it still diverges", () => {
+        const secret = "PRIVATE-REASONING-SENTENCE about the plan";
+        const changed = "PRIVATE-REASONING-SENTENCE about another plan";
+        const anthropic = (thinking: string) => ({
+            system: [{ type: "text", text: "stable system" }],
+            messages: [
+                { role: "user", content: [{ type: "text", text: "question" }] },
+                {
+                    role: "assistant",
+                    content: [
+                        { type: "thinking", thinking, signature: "SIGNATURE-BYTES-abc" },
+                        { type: "redacted_thinking", data: "REDACTED-DATA-xyz" },
+                        { type: "text", text: "visible answer" },
+                    ],
+                },
+            ],
+        });
+        const openai = {
+            input: [
+                {
+                    type: "reasoning",
+                    summary: [{ type: "summary_text", text: secret }],
+                    encrypted_content: "ENCRYPTED-REASONING-123",
+                },
+                { role: "assistant", content: [{ type: "output_text", text: "visible answer" }] },
+            ],
+        };
+        const gemini = {
+            contents: [
+                {
+                    role: "model",
+                    parts: [
+                        { text: secret, thought: true },
+                        {
+                            functionCall: { name: "read", args: { path: "a.ts" } },
+                            thoughtSignature: "GEMINI-SIGNATURE-777",
+                        },
+                    ],
+                },
+            ],
+        };
+        const forbidden = [
+            secret,
+            changed,
+            "SIGNATURE-BYTES-abc",
+            "REDACTED-DATA-xyz",
+            "ENCRYPTED-REASONING-123",
+            "GEMINI-SIGNATURE-777",
+        ];
+        const printed = (messages: ReturnType<typeof normalizeRequestBody>["messages"]) =>
+            messages
+                .flatMap((message) => [
+                    message.display,
+                    ...message.parts.map((part) => part.textPrefix),
+                ])
+                .join("\n");
+
+        const before = normalizeRequestBody(anthropic(secret), "anthropic").messages;
+        const after = normalizeRequestBody(anthropic(changed), "anthropic").messages;
+        for (const messages of [
+            before,
+            after,
+            normalizeRequestBody(openai, "openai").messages,
+            normalizeRequestBody(gemini, "gemini").messages,
+        ]) {
+            const text = printed(messages);
+            for (const value of forbidden) expect(text).not.toContain(value);
+        }
+        // Visible text, tool calls and part types stay printable.
+        expect(printed(before)).toContain("visible answer");
+        expect(printed(normalizeRequestBody(gemini, "gemini").messages)).toContain("a.ts");
+        expect(before[2].parts.map((part) => part.type)).toEqual([
+            "thinking",
+            "redacted_thinking",
+            "text",
+        ]);
+
+        // The raw canonical still drives detection, so a reasoning edit diverges and
+        // its redacted marker changes, without the printed diff showing either text.
+        expect(before[2].hash).not.toBe(after[2].hash);
+        const divergence = describeBodyPair(before, after);
+        expect(divergence?.index).toBe(2);
+        expect(divergence?.previousText).not.toBe(divergence?.currentText);
+        expect(divergence?.description).not.toContain("PRIVATE-REASONING");
+        for (const value of forbidden) {
+            expect(divergence?.previousText).not.toContain(value);
+            expect(divergence?.currentText).not.toContain(value);
+        }
+    });
+
     test("normalizes the rotated header into one shared system-message identity", () => {
         const [previous, current] = ["002-request.json", "003-request.json"].map(
             (file) => normalizeRequestBody(fixtureJson(file), "anthropic").messages[0],

@@ -918,7 +918,7 @@ function isTailShrink(previous: Snapshot, current: Snapshot, divergenceIndex: nu
             !previousPart ||
             currentPart.type !== previousPart.type ||
             currentPart.length > previousPart.length ||
-            !previousPart.textPrefix.startsWith(currentPart.textPrefix)
+            !previousPart.comparePrefix.startsWith(currentPart.comparePrefix)
         ) {
             return false;
         }
@@ -1249,8 +1249,9 @@ function fmtTime(iso: string): string {
     return `${mm}-${dd} ${hh}:${mi}:${ss} UTC`;
 }
 
+/** The printable form of a segment: reasoning content redacted, never the raw canonical. */
 function segmentText(snapshot: Snapshot, index: number): string | undefined {
-    return index < 0 ? undefined : snapshot.segments[index]?.canonical;
+    return index < 0 ? undefined : snapshot.segments[index]?.display;
 }
 
 function clippedDiff(text: string, start: number, end: number): string {
