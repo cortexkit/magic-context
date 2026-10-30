@@ -405,6 +405,7 @@ export function scheduleReconciliation(
                     // The source could not be prepared: try again later.
                     inRootAsyncContext(() =>
                         setTimeout(() => {
+                            if (getMessageIndexEpoch(sessionId) !== epoch) return;
                             heapHolder.reconciliationScheduledSessions.delete(sessionId);
                             scheduleReconciliation(db, sessionId, readMessages);
                         }, PREPARE_RETRY_MS),
@@ -418,10 +419,10 @@ export function scheduleReconciliation(
                     );
                     if (isDatabaseLockedError(error))
                         inRootAsyncContext(() =>
-                            setTimeout(
-                                () => scheduleReconciliation(db, sessionId, readMessages),
-                                1000,
-                            ),
+                            setTimeout(() => {
+                                if (getMessageIndexEpoch(sessionId) === epoch)
+                                    scheduleReconciliation(db, sessionId, readMessages);
+                            }, 1000),
                         ).unref();
                 })
                 .finally(() => {
@@ -500,20 +501,20 @@ export function scheduleIncrementalIndex(
                     if (ready) return runWithSessionLock(sessionId, indexMessage);
                     // Try again after PREPARE_RETRY_MS. A later reconciliation of the
                     // session also indexes this message.
-                    setTimeout(
-                        () => scheduleIncrementalIndex(db, sessionId, messageId, messageSource),
-                        PREPARE_RETRY_MS,
-                    ).unref?.();
+                    setTimeout(() => {
+                        if (getMessageIndexEpoch(sessionId) === epoch)
+                            scheduleIncrementalIndex(db, sessionId, messageId, messageSource);
+                    }, PREPARE_RETRY_MS).unref?.();
                 })
                 .catch((error) => {
                     if ((sessionEpochs.get(sessionId) ?? 0) !== epoch) return;
                     heapHolder.reconciledSessions.delete(sessionId);
                     logIndexingError(sessionId, `incremental index for ${messageId}`, error);
                     if (isDatabaseLockedError(error))
-                        setTimeout(
-                            () => scheduleIncrementalIndex(db, sessionId, messageId, messageSource),
-                            1000,
-                        ).unref();
+                        setTimeout(() => {
+                            if (getMessageIndexEpoch(sessionId) === epoch)
+                                scheduleIncrementalIndex(db, sessionId, messageId, messageSource);
+                        }, 1000).unref();
                 })
                 .finally(() => {
                     if ((sessionEpochs.get(sessionId) ?? 0) === epoch)
