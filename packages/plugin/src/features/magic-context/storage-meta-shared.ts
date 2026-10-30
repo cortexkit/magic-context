@@ -337,7 +337,7 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         cachedM0MuralDataUrl: null,
         cachedM0MuralHash: null,
         cachedM1Bytes: null,
-        memoryBlockCount: null,
+        memoryBlockCount: 0,
         cachedM0ProjectMemoryEpoch: null,
         cachedM0WorkspaceFingerprint: null,
         cachedM0ProjectUserProfileVersion: null,

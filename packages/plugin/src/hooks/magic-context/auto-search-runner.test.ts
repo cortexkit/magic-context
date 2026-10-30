@@ -124,25 +124,45 @@ for (const host of ["opencode", "opencode2"] as const) {
 
     test(`an ownerless turn keeps its captured empty hint across restart and later proof ${host}`, async () => {
         const fixture = createAutoSearchReplayFixture(host, "ownerless-empty-hint");
-        const snapshot = spyOn(embedding, "getProjectEmbeddingSnapshot").mockReturnValue(autoSearchTestSnapshot(fixture.projectPath));
+        const snapshot = spyOn(embedding, "getProjectEmbeddingSnapshot").mockReturnValue(
+            autoSearchTestSnapshot(fixture.projectPath),
+        );
         const search = spyOn(searchModule, "searchAutoHint").mockResolvedValue([replayHint]);
         try {
             const first = [makeUserMsg("ownerless-user", replayPrompt)];
-            await runAutoSearchHint({ sessionId: fixture.sessionId, db: fixture.db, messages: first, options: {
-                enabled: true, scoreThreshold: 0, minPromptChars: 1, memoryOwnerUnavailable: true,
-            } });
+            await runAutoSearchHint({
+                sessionId: fixture.sessionId,
+                db: fixture.db,
+                messages: first,
+                options: {
+                    enabled: true,
+                    scoreThreshold: 0,
+                    minPromptChars: 1,
+                    memoryOwnerUnavailable: true,
+                },
+            });
             const captured = JSON.stringify(first);
             expect(captured).toBe(JSON.stringify([makeUserMsg("ownerless-user", replayPrompt)]));
             expect(search).not.toHaveBeenCalled();
             fixture.reopen();
             const proven = [makeUserMsg("ownerless-user", replayPrompt)];
-            await runAutoSearchHint({ sessionId: fixture.sessionId, db: fixture.db, messages: proven, options: {
-                enabled: true, scoreThreshold: 0, minPromptChars: 1, projectPath: fixture.projectPath,
-            } });
+            await runAutoSearchHint({
+                sessionId: fixture.sessionId,
+                db: fixture.db,
+                messages: proven,
+                options: {
+                    enabled: true,
+                    scoreThreshold: 0,
+                    minPromptChars: 1,
+                    projectPath: fixture.projectPath,
+                },
+            });
             expect(JSON.stringify(proven)).toBe(captured);
             expect(search).not.toHaveBeenCalled();
         } finally {
-            search.mockRestore(); snapshot.mockRestore(); fixture.close();
+            search.mockRestore();
+            snapshot.mockRestore();
+            fixture.close();
         }
     });
 

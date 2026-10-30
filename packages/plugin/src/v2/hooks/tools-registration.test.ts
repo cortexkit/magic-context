@@ -222,6 +222,9 @@ test("v2 tools and auto-embedding follow the served owner through a held move an
     const first = { messages: [structuredClone(user)] };
     const transform = createTransform(deps);
     await transform({}, first);
+    expect(getRecordedSessionProjectIdentity(db, sessionID)).toBe("pj-V2-OWNER-A");
+    // Simulate an older session with cached project memory but no session_projects row.
+    db.prepare("DELETE FROM session_projects WHERE session_id = ?").run(sessionID);
     expect(getRecordedSessionProjectIdentity(db, sessionID)).toBeUndefined();
     const head = JSON.stringify(first.messages.slice(0, 2));
     const registered: RegisteredTool[] = [];

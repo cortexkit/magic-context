@@ -97,7 +97,7 @@ const unknownOwnerEvidence = new WeakMap<
     }>
 >();
 
-/** Only a unique HARD-origin tuple for these exact bytes can establish their project owner. */
+/** Only one non-legacy snapshot matching these exact bytes can establish their project owner. */
 export function readCachedM0OwnerEvidence(
     db: Database,
     sessionId: string,
@@ -119,11 +119,15 @@ export function readCachedM0OwnerEvidence(
               .all(sessionId, getHarness(), digest) as Array<{ project_path: string }>)
         : [];
     const evidence: CachedM0OwnerEvidence = {
-        projectIdentity: rows.length === 1 && rows[0].project_path.trim().length > 0 ? rows[0].project_path : undefined,
+        projectIdentity:
+            rows.length === 1 && rows[0].project_path.trim().length > 0
+                ? rows[0].project_path
+                : undefined,
         unscopedHardMatch: rows.some((row) => row.project_path === ""),
     };
-    // Successful recovery is persisted in the prefix ledger. Cache only unknown
-    // ownership; a later HARD/SOFT write invalidates this session's negative result.
+    // Successful recovery is persisted in session_meta.cached_m0_project_identity.
+    // Cache only unknown ownership; writeHardProjection and writeSoftProjection each
+    // invalidate this session's negative result before updating snapshots.
     if (!evidence.projectIdentity && !db.inTransaction) {
         if (!cache) {
             cache = new BoundedSessionMap(100);

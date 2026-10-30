@@ -335,13 +335,19 @@ export async function resolveSessionProjectIdentity(
     // A prefix may have materialized while the first bounded attempt was pending.
     const current = readSessionMeta(options.db, sessionId);
     recoverCachedSessionProjectOwner(options.db, sessionId, current);
-    const currentOwner = reconcileServedSessionProjectIdentity(options.db, sessionId, current, true);
+    const currentOwner = reconcileServedSessionProjectIdentity(
+        options.db,
+        sessionId,
+        current,
+        true,
+    );
     if (currentOwner !== undefined) return currentOwner;
-    if (current.cachedM0Bytes !== null) throw new UnprovenCachedProjectOwnerError(decision.identity);
+    if (current.cachedM0Bytes !== null)
+        throw new UnprovenCachedProjectOwnerError(decision.identity);
     const recorded = getRecordedSessionProjectIdentity(options.db, sessionId);
     const identity = decisions.get(sessionId)?.observedDirectoryMove
         ? decision.identity
-        : recorded ?? decision.identity;
+        : (recorded ?? decision.identity);
     if (identity !== undefined && recorded !== identity)
         recordSessionProjectIdentity(options.db, sessionId, identity);
     return identity;

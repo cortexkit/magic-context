@@ -1878,7 +1878,7 @@ interface RunPostTransformPhaseArgs {
     forceMaterializationPercentage: number;
     hasRecentReduceCall: boolean;
     projectPath?: string;
-    /** Read-only scope sampled after mutation gates; it never grants a rebuild or bust. */
+    /** Read-only scope sampled after mutation checks; it cannot authorize rebuilding the cached leading context messages. */
     readProjectScope?: () => { projectIdentity: string | undefined; memoryUnavailable: boolean };
     sessionDirectory?: string;
     /** Experimental auto-search: when enabled, runs ctx_search on the latest

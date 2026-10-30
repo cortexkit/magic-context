@@ -204,7 +204,11 @@ describe("legacy owner evidence and cold-upgrade cost", () => {
         for (const scenario of cases) {
             const sessionId = `owner-matrix-${scenario}`;
             const text = `<session-history>${scenario}: ${"baseline summary ".repeat(2048)}</session-history>`;
-            commitFrame(sessionId, scenario === "empty-only" ? undefined : scenario === "blank-path" ? " " : A, text);
+            commitFrame(
+                sessionId,
+                scenario === "empty-only" ? undefined : scenario === "blank-path" ? " " : A,
+                text,
+            );
             recordSessionProjectIdentity(db, sessionId, B);
             updateSessionMeta(db, sessionId, { cachedM0ProjectIdentity: null });
             if (scenario === "absent")
@@ -635,7 +639,9 @@ describe("history-only background exception", () => {
             expect(
                 backgroundSessionProjectIdentity(reader, "missing-count", state, false, B),
             ).toBeUndefined();
-            expect(readSessionMeta(reader, "absent-session").memoryBlockCount).toBeNull();
+            const absent = readSessionMeta(reader, "absent-session");
+            expect(absent.cachedM0Bytes).toBeNull();
+            expect(absent.memoryBlockCount).toBe(0);
         } finally {
             reader.close();
         }

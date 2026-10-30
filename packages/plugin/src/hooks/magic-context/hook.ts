@@ -1135,11 +1135,19 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         }),
     };
     const hooksWithBackends = hooks as typeof hooks & {
+        readonly launchIdentityDecision: SessionIdentityDecision;
         getDebugMemoryHolders?: () => {
             taggerCache: ReturnType<NonNullable<Tagger["getHeapStats"]>>;
         };
     };
     Object.defineProperties(hooksWithBackends, {
+        launchIdentityDecision: {
+            value: deps.launchIdentityDecision ?? {
+                directory: deps.directory,
+                identity: projectPath,
+            },
+            enumerable: false,
+        },
         getDebugMemoryHolders: {
             value: () => ({
                 taggerCache: deps.tagger.getHeapStats?.() ?? {

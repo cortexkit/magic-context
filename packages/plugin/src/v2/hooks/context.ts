@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled, isSmartNoteSurfaceAvailable } from "../../config/agent-disable";
@@ -784,6 +785,15 @@ export async function registerContext(context: V2Context) {
     // Let slow healthy storage finish before fixing the tool list for this host.
     // Discovery yields to HTTP while setup waits, with a bounded degraded fallback.
     let db: ReturnType<typeof openDatabase> | undefined = await probeV2StorageAtBoot(storage);
+    const launchKey = `launch:${randomUUID()}`;
+    const launchDecision = await awaitSessionIdentityDecision(launchKey, directory, {
+        db,
+        allowHomeProject: config.allow_home_project,
+        connectionFile: config.subc?.connection_file,
+    });
+    forgetSessionIdentityDecision(launchKey);
+    // Scheduled work stays on the launch project, even when another session is resumed.
+    const launchProjectIdentity = launchDecision.identity;
     const storageOpenedAtBoot = db !== undefined;
     let legacyCleanupStarted = false;
     const cleanupLegacyOnce = async (database: NonNullable<typeof db>) => {
@@ -940,8 +950,7 @@ export async function registerContext(context: V2Context) {
             },
             {
                 db: database,
-                projectIdentity:
-                    resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
+                projectIdentity: launchProjectIdentity ?? "",
                 directory,
                 hook: hiddenChildHook,
                 keepSubagents: config.keep_subagents === true,
@@ -964,11 +973,7 @@ export async function registerContext(context: V2Context) {
         dreamerRunConfig(config, liveConfigReader.poll().effective).dreamer?.disable === true;
     const startDreamer = (executor: HiddenCompletionExecutor) => {
         if (!dreamerAtBoot || dreamerDisabledNow()) return undefined;
-        const projectIdentity = resolveProjectIdentityForSession(
-            directory,
-            config.allow_home_project,
-        );
-        if (!projectIdentity) return undefined;
+        if (!launchProjectIdentity) return undefined;
         const cappedExecutor = withLiveDreamerOutputCap(
             executor,
             config,
@@ -985,8 +990,7 @@ export async function registerContext(context: V2Context) {
                 };
             },
             executor: cappedExecutor,
-            projectIdentity: () =>
-                resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
+            projectIdentity: () => launchProjectIdentity,
             projectMemoryEnabled: config.memory.enabled,
             language: config.language,
             mural: config.mural,
@@ -997,9 +1001,7 @@ export async function registerContext(context: V2Context) {
     };
     // Both stay undefined after a refused start until recoverHiddenWork wires them.
     let hiddenCompletionExecutor: V2HiddenCompletionExecutor | undefined =
-        db &&
-        isDatabasePersisted(db) &&
-        resolveProjectIdentityForSession(directory, config.allow_home_project)
+        db && isDatabasePersisted(db) && launchProjectIdentity
             ? await createHiddenExecutor(db)
             : undefined;
     let dreamTrigger = hiddenCompletionExecutor
@@ -1013,14 +1015,10 @@ export async function registerContext(context: V2Context) {
     // The shared timer samples the git indexing switch separately from dream tasks.
     let maintenanceTimer: ReturnType<typeof registerV2DreamScheduleTimer> | undefined;
     const startMaintenance = () => {
-        const timerProjectIdentity = resolveProjectIdentityForSession(
-            directory,
-            config.allow_home_project,
-        );
-        if (!timerProjectIdentity || maintenanceTimer) return;
+        if (!launchProjectIdentity || maintenanceTimer) return;
         maintenanceTimer = registerV2DreamScheduleTimer({
             directory,
-            projectIdentity: timerProjectIdentity,
+            projectIdentity: launchProjectIdentity,
             config,
             dreamer: dreamerAtBoot,
             liveConfig: () => liveConfigReader.poll().effective,
@@ -1041,7 +1039,7 @@ export async function registerContext(context: V2Context) {
      * so unlike tools they can start mid-session. Returns whether they are wired.
      */
     const recoverHiddenWork = (database: NonNullable<typeof db>): Promise<boolean> =>
-        !resolveProjectIdentityForSession(directory, config.allow_home_project)
+        !launchProjectIdentity
             ? Promise.resolve(false)
             : (hiddenWorkRecovery ??= (async () => {
                   try {
