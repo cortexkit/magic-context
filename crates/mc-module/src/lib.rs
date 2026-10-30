@@ -10937,7 +10937,11 @@ fn render_cached_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
             "  [tool: {tool_name} #{id}]\n  output:\n{}",
             expand_tool_output_text(output)
         )),
-        ck_wire::CkKind::Media(media) => Some(expand_file_label(media.filename.as_deref())),
+        ck_wire::CkKind::Media(media) => Some(
+            providers::codec::media::marker(media)
+                .map(str::to_owned)
+                .unwrap_or_else(|| expand_file_label(media.filename.as_deref())),
+        ),
         ck_wire::CkKind::Opaque(opaque) if opaque.kind == "file" => Some(expand_file_label(
             opaque
                 .raw
@@ -11183,7 +11187,11 @@ fn render_durable_range_part(part: &ck_wire::CkWireBlock) -> Option<String> {
             "TR: {tool_name} → output ~{} tok",
             mc_tokenizer::estimate_tokens(&expand_tool_output_text(output))
         )),
-        ck_wire::CkKind::Media(_) => Some("[media]".to_string()),
+        ck_wire::CkKind::Media(media) => Some(
+            providers::codec::media::marker(media)
+                .unwrap_or("[media]")
+                .to_string(),
+        ),
         ck_wire::CkKind::Reasoning { .. }
         | ck_wire::CkKind::RedactedReasoning { .. }
         | ck_wire::CkKind::Opaque(_) => None,
@@ -11394,6 +11402,9 @@ fn verbose_expand_key_argument(input: &Value) -> String {
 }
 
 fn expand_tool_output_text(output: &ck_wire::CkToolOutput) -> String {
+    if let Some(text) = providers::codec::media::parts_text(&output.kind) {
+        return text;
+    }
     match &output.kind {
         ck_wire::CkOutputKind::Text { text } | ck_wire::CkOutputKind::ErrorText { text } => {
             text.clone()

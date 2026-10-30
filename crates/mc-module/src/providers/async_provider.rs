@@ -3580,6 +3580,9 @@ fn render_part(part: &Value, tag: Option<&str>, render: bool) -> Value {
         return part;
     }
     let number = tag.and_then(tags::parse_tag);
+    if let Some(rendered) = codec::media::render_native_parts(&part, number) {
+        return rendered;
+    }
     let render_text = |text: &str| tags::render_part(tags::PartKind::ToolResultText, number, text);
     if let Value::String(text) = &part {
         return json!(render_text(text));
@@ -3693,6 +3696,13 @@ fn tag_rows_for<'a>(
                         "tool_result",
                         std::borrow::Cow::Owned(serde_json::to_string(value).map_err(transient)?),
                     ),
+                    ck_wire::CkOutputKind::Content { .. }
+                    | ck_wire::CkOutputKind::ErrorContent { .. } => {
+                        let Some(text) = codec::media::parts_text(&output.kind) else {
+                            continue;
+                        };
+                        ("tool_result", std::borrow::Cow::Owned(text))
+                    }
                     _ => continue,
                 },
                 _ => continue,
