@@ -56,9 +56,9 @@ fn ask_answer_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Pi template sends remain opaque journal entries until their codec is adopted.
-/// Read only their text for the exact ask-answer envelope; other notice content
-/// must not become the person's words in the historian.
+/// Read parked-question answers in the `<system-reminder>` format defined by
+/// `extract_ask_answer_notices`, without attributing extension prose to the
+/// person. Older serialized CK blocks kept Pi custom-message JSON as opaque.
 fn block_ask_answer_lines(block: &FlatBlock) -> Vec<String> {
     match &block.wire_shape().kind {
         CkKind::Text { .. } => block
@@ -350,7 +350,7 @@ impl Builder {
         // would drop it. Its answer lines follow the user's own words instead, in
         // block order. A message with no answer notice appends nothing and is
         // rendered exactly as before.
-        let answer_parts: Vec<String> = if message.role == "user" {
+        let answer_parts: Vec<String> = if matches!(message.role, "user" | "notice") {
             message
                 .blocks
                 .iter()
@@ -362,7 +362,11 @@ impl Builder {
             Vec::new()
         };
         let meaningful_text = !text_parts.is_empty();
-        let mut all_parts = self.render_parts(message, meaningful_text);
+        let mut all_parts = if message.role == "notice" && !answer_parts.is_empty() {
+            Vec::new()
+        } else {
+            self.render_parts(message, meaningful_text)
+        };
         all_parts.extend(answer_parts);
         let compacted = compact_text_for_summary(&all_parts.join(" / "), message.role);
         if compacted.text.is_empty() {
@@ -1872,6 +1876,16 @@ fn last_block_id(message: &FlatMessage<'_>) -> Option<String> {
 }
 
 fn text_parts(message: &FlatMessage<'_>) -> Vec<String> {
+    // An answer delivery can contain extension bookkeeping around the answer.
+    // Keep the recognized answer, not that surrounding notice prose.
+    if message.role == "notice"
+        && message
+            .blocks
+            .iter()
+            .any(|block| !block_ask_answer_lines(block).is_empty())
+    {
+        return Vec::new();
+    }
     message
         .blocks
         .iter()
@@ -1911,6 +1925,9 @@ fn has_text_parts(message: &FlatMessage<'_>) -> bool {
 }
 
 fn has_meaningful_user_text(message: &FlatMessage<'_>) -> bool {
+    if message.role != "user" {
+        return false;
+    }
     text_parts(message)
         .iter()
         .any(|text| !text.is_empty() && !is_system_directive(text))
@@ -2651,7 +2668,7 @@ mod tests {
             let built = project_and_build(&messages, 1, 10_000, 3);
             assert_eq!(
                 built.text.lines().next().unwrap_or_default(),
-                format!("[1] U: {}", normalize_answer(SINGLE_LINE)),
+                format!("[1] N: {}", normalize_answer(SINGLE_LINE)),
                 "{}",
                 built.text
             );
@@ -2664,6 +2681,45 @@ mod tests {
                 assert!(!built.text.contains(excluded), "{}", built.text);
             }
         }
+    }
+
+    #[test]
+    fn pi_shells_and_notices_never_become_the_persons_text() {
+        let rows = [
+            serde_json::json!({"type":"message","id":"person","message":{"role":"user","content":"person request"}}),
+            serde_json::json!({"type":"message","id":"shell","message":{"role":"bashExecution","command":"ls","output":"shell output"}}),
+            serde_json::json!({"type":"custom_message","id":"extension","content":"extension notice"}),
+            serde_json::json!({"type":"branch_summary","id":"branch","summary":"branch history"}),
+        ];
+        let mut messages = crate::codec::decode_pi(&rows).messages;
+        messages.push(msg("a5", 5, "assistant", vec![text("noted")]));
+        messages.push(msg("u6", 6, "user", vec![text("protected tail")]));
+        let projection = project_messages(&messages).unwrap();
+        for (ordinal, role) in [(1, "user"), (2, "tool"), (3, "notice"), (4, "notice")] {
+            let message = FlatMessage {
+                ordinal,
+                role,
+                blocks: projection
+                    .blocks
+                    .iter()
+                    .filter(|block| block.ordinal == ordinal)
+                    .collect(),
+            };
+            assert_eq!(has_meaningful_user_text(&message), ordinal == 1);
+        }
+        let built = project_and_build(&messages, 1, 10_000, 6);
+        assert!(built.text.contains("U: person request"), "{}", built.text);
+        assert!(built.text.contains("T: Ran `ls`"), "{}", built.text);
+        assert!(built.text.contains("N: extension notice"), "{}", built.text);
+        assert!(
+            built
+                .text
+                .contains("[3-4] N: extension notice / The following is a summary of a branch"),
+            "{}",
+            built.text
+        );
+        assert!(built.text.contains("shell output") && built.text.contains("branch history"));
+        assert_eq!(built.text.matches("U:").count(), 1, "{}", built.text);
     }
 
     #[test]

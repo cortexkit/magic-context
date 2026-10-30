@@ -3620,6 +3620,20 @@ impl McHandler {
 }
 
 fn parts(message: &Value) -> Result<std::borrow::Cow<'_, [Value]>, HandlerOutcome> {
+    if matches!(
+        message["type"].as_str(),
+        Some("message" | "custom_message" | "branch_summary")
+    ) && (message.get("message").is_some() || message["type"] != "message")
+    {
+        let projected =
+            cortexkit_role_llm_runner::serializer_profile::pi_projected_content(message)
+                .map_err(|reason| invalid_field("message", reason))?;
+        return Ok(std::borrow::Cow::Owned(match projected {
+            Value::Null => Vec::new(),
+            Value::Array(parts) => parts,
+            part => vec![part],
+        }));
+    }
     // An Anthropic message may carry its content as one string instead of a
     // block array; the runner exposes that string as the message's one part.
     if let Some(text @ Value::String(_)) = message.get("content") {
@@ -3925,9 +3939,14 @@ fn tag_rows_for<'a>(
             let number = tags::parse_tag(tag)
                 .ok_or_else(|| invalid_field("tags", "malformed runner tag"))?;
             let (kind, text) = match &block.kind {
-                ck_wire::CkKind::Text { text } => {
-                    ("message", std::borrow::Cow::Borrowed(text.as_str()))
-                }
+                ck_wire::CkKind::Text { text } => (
+                    if decoded.ck.role == "tool" {
+                        "tool_result"
+                    } else {
+                        "message"
+                    },
+                    std::borrow::Cow::Borrowed(text.as_str()),
+                ),
                 ck_wire::CkKind::ToolResult { output, .. } => match &output.kind {
                     ck_wire::CkOutputKind::Text { text }
                     | ck_wire::CkOutputKind::ErrorText { text } => {
