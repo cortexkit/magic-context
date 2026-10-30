@@ -718,6 +718,16 @@ export interface TransformDeps {
     onMessagesPassStarted?: (sessionId: string, messages: readonly MessageLike[]) => void;
     /** Report postprocessing's actual cache-bust permission; changed bytes alone do not authorize a bust. */
     onPostprocess?: (result: { bustedThisPass: boolean }) => void;
+    /** Final host request estimate, including text added after this transform. Never provider usage. */
+    hostInputEstimate?: (
+        sessionId: string,
+    ) => { tokens: number; pressureTokens: number } | undefined;
+    /**
+     * Read-only report of the single per-pass mutation permission, after the
+     * transform finishes. Host mutation code must use this report rather than
+     * derive its own permission.
+     */
+    onPassPermission?: (sessionId: string, prefixMutationPermitted: boolean) => void;
     /**
      * Set only by the bridge adapters' own deps. createTransform ignores it and
      * always runs the TypeScript transform.
@@ -1722,6 +1732,31 @@ export function createTransform(deps: TransformDeps) {
                   sessionID: sessionId,
               })
             : undefined;
+        const hostEstimate = deps.hostInputEstimate?.(sessionId);
+        const hostOverWindow =
+            fullFeatureMode &&
+            !compactionOff &&
+            resolvedContextLimit !== undefined &&
+            resolvedContextLimit > 0 &&
+            hostEstimate !== undefined &&
+            Number.isFinite(hostEstimate.tokens) &&
+            Number.isFinite(hostEstimate.pressureTokens) &&
+            hostEstimate.tokens > resolvedContextLimit;
+        if (hostOverWindow) {
+            // A host can add checkpoint text after this transform. Mark an
+            // estimated over-window request as at least 100% pressure before
+            // scheduling so it is reduced or refused, without treating the
+            // estimate as provider-proven usage.
+            contextUsageEarly = {
+                inputTokens: Math.max(contextUsageEarly.inputTokens, hostEstimate.pressureTokens),
+                percentage: Math.max(
+                    100,
+                    contextUsageEarly.percentage,
+                    (hostEstimate.pressureTokens / resolvedContextLimit) * 100,
+                ),
+            };
+            usagePercentageSynthetic = true;
+        }
         // A session Magic Context holds no state for (no compartment and no
         // dropped tag yet) sends its raw history as is, so on its first pass in
         // this process the incoming messages are the request. Nothing else
@@ -3018,7 +3053,7 @@ export function createTransform(deps: TransformDeps) {
         // saved reading is lower: the request grew after that reading was taken
         // (a long paste or tool output while the host was down), and waiting for
         // the provider would send a request that may not fit.
-        let contextUsageFromEstimate = false;
+        let contextUsageFromEstimate = hostOverWindow;
         if (contextUsage.inputTokens <= 0 && protectionCacheBustingPass) {
             // Overflow recovery sizes the request the provider just rejected, so
             // the saved reading (the last accepted request, which predates it) is
@@ -4163,6 +4198,7 @@ export function createTransform(deps: TransformDeps) {
                     ).buckets,
             });
         passReturned = true;
+        deps.onPassPermission?.(sessionId, postTransformResult.prefixMutationPermitted);
     };
 
     const timedTransform: typeof transform = (input, output) =>

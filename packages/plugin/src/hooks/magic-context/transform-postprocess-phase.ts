@@ -1979,6 +1979,8 @@ export interface PostTransformPhaseResult {
     emergencyReclaimedTokens: number;
     droppedCount: number;
     emergency: boolean;
+    /** Permission to rebuild the prefix, distinct from whether any bytes changed. */
+    prefixMutationPermitted: boolean;
     bustedThisPass: boolean;
     /** How the delivered prefix cut the raw conversation; null when no m[0]/m[1] prefix was delivered. */
     prefixTrimStatus: PrefixTrimStatus | null;
@@ -5995,6 +5997,7 @@ export async function runPostTransformPhase(
             emergencyReclaimedTokens,
             droppedCount,
             emergency,
+            prefixMutationPermitted: canEditWholePrefix,
             bustedThisPass,
             prefixTrimStatus: deliveredPrefix?.prefixTrimStatus ?? null,
             thinkingBindingRecovery,

@@ -61,10 +61,7 @@ import {
 	decodePiContentDecision,
 	encodePiContentDecision,
 } from "@magic-context/core/features/magic-context/pi-content-decisions";
-import {
-	computeProtectionWindow,
-	getProtectionWindowForSession,
-} from "@magic-context/core/features/magic-context/protection-window";
+import { getProtectionWindowForSession } from "@magic-context/core/features/magic-context/protection-window";
 import {
 	protectedToolTagNumbers,
 	protectedToolTokenCount,
@@ -168,6 +165,7 @@ import {
 	convertLegacyToolSkeletons,
 	foldBustsServedPrefix,
 	foldInvalidatesThinking,
+	prepareFlushedToolRemovals,
 	RECENT_TOOL_SKELETON_WINDOW,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
 import {
@@ -390,9 +388,16 @@ import {
 	applyNativeReasoningReplayPi,
 	applyNativeToolInputReplayPi,
 	authorizePiToolRemoval,
+	PiToolRemovalBatchError,
+	preparePiToolRemovalChecks,
 	preparePiToolRemovalMeasurements,
+	withPiToolRemovalBatch,
 } from "./native-replay-state-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
+import {
+	projectPiReplayDrops,
+	protectedPiPassTagNumbers,
+} from "./pass-tag-projection-pi";
 import {
 	type PiPrefixBranch,
 	pendingUserAlias,
@@ -554,7 +559,8 @@ import {
 	cancelPiTagSnapshotSession,
 	ensurePiTagSnapshotReady,
 	getPiActiveTagSnapshotView,
-	getPiTagSnapshotView,
+	getPiPassTagSnapshotView,
+	type PiTagMetadata,
 	prewarmPiTagSnapshot,
 	readPiFallbackTagRows,
 } from "./tag-snapshot-pi";
@@ -1055,6 +1061,7 @@ interface PiTextIdentityPlan {
 	legacyReminderTagNumbers: Set<number>;
 	reusableMessageIds: Set<string>;
 	sourceCache: Map<number, string>;
+	reusableTextMessageIds: Set<string>;
 }
 
 function buildPiTextIdentityPlan(
@@ -1125,6 +1132,7 @@ function buildPiTextIdentityPlan(
 	}
 
 	const driftedMessageIds = new Set<string>();
+	const reusableTextMessageIds = new Set<string>();
 	const legacyReminderTagNumbers = new Set<number>();
 	for (const [messageId, currentSources] of currentSourcesByMessageId) {
 		const legacyRows = legacyRowsByMessageId.get(messageId) ?? [];
@@ -1158,6 +1166,18 @@ function buildPiTextIdentityPlan(
 				return legacyReminderMatches;
 			});
 		if (!vectorMatches) driftedMessageIds.add(messageId);
+		// Reuse text tags only when every stored source matches the current text
+		// after removing tag prefixes and leading temporal markers. Matches that
+		// strip legacy reminders still need source insertion and reminder repair.
+		else if (
+			!messageId.startsWith("pi-msg-") &&
+			legacyRows.every(
+				(row) =>
+					sourceCache.has(row.tagId) &&
+					!legacyReminderTagNumbers.has(row.tagId),
+			)
+		)
+			reusableTextMessageIds.add(messageId);
 	}
 
 	const reusableMessageIds = new Set<string>();
@@ -1169,6 +1189,7 @@ function buildPiTextIdentityPlan(
 		legacyReminderTagNumbers,
 		reusableMessageIds,
 		sourceCache,
+		reusableTextMessageIds,
 	};
 }
 
@@ -4542,6 +4563,7 @@ export function registerPiContextHandler(
 					options.db,
 					sessionId,
 					budget,
+					"pass",
 				);
 				if (hydration) await guardAwait(hydration);
 			}
@@ -5861,7 +5883,7 @@ export function registerPiContextHandler(
 				assertPiThinkingEntryIds(event.messages, lkgEntryIds ?? []);
 			if (!options.compactionOff) {
 				assertPiTagSnapshotReady(options.db, sessionId);
-				getPiTagSnapshotView(options.db, sessionId);
+				getPiPassTagSnapshotView(options.db, sessionId);
 			}
 			let historianEvaluatedThisPass = false;
 			const historian = options.historian;
@@ -7157,7 +7179,7 @@ export function registerPiContextHandler(
 				budget.failureReason = err.message;
 				if (sessionIdForError) {
 					try {
-						prewarmPiTagSnapshot(lkgOptions.db, sessionIdForError);
+						prewarmPiTagSnapshot(lkgOptions.db, sessionIdForError, "pass");
 					} catch {}
 				}
 				throw err;
@@ -7291,10 +7313,10 @@ export function registerPiContextHandler(
 							},
 						);
 						assertPiTagSnapshotReady(lkgOptions.db, sessionIdForError);
-						const drops = getPiTagSnapshotView(
-							lkgOptions.db,
-							sessionIdForError,
-						).filter((tag) => tag.status === "dropped");
+						const drops = projectPiReplayDrops(
+							recoveryTranscript,
+							getPiPassTagSnapshotView(lkgOptions.db, sessionIdForError),
+						);
 						const changed = applyFlushedStatuses(
 							sessionIdForError,
 							lkgOptions.db,
@@ -8648,7 +8670,7 @@ interface RunPipelineArgs {
 
 interface PiChannelBaselineSnapshot {
 	tagCacheKey?: object;
-	tags: ReturnType<typeof getTagsBySession>;
+	tags: readonly PiTagMetadata[];
 	/** The rows of `tags` whose status is "active", in the same order. */
 	activeTags: readonly ReturnType<typeof getTagsBySession>[number][];
 	protectedTagNumbers: Set<number>;
@@ -10333,6 +10355,37 @@ function runSynchronousPipeline(
 	} catch {
 		/* Invalid native state must retain the whole pair. */
 	}
+	const removalBatch = <T>(edit: (flush: () => void) => T): T =>
+		withPiToolRemovalBatch(
+			{ db: args.db, sessionId: args.sessionId, saved: nativeRemovalInputs },
+			edit,
+		);
+	const applyToolRemovalGroup: PiEditPair = (edit, needs) => {
+		const savedRemovalInputs = nativeRemovalInputs;
+		nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
+		try {
+			return pair(
+				() =>
+					args.db
+						.transaction(() =>
+							removalBatch((flush) => {
+								const result = edit();
+								flush();
+								return result;
+							}),
+						)
+						.immediate(),
+				needs,
+			);
+		} catch (cause) {
+			nativeRemovalInputs = savedRemovalInputs;
+			// A failed group cannot expose transcript edits whose tag writes rolled back.
+			throw cause instanceof PiToolRemovalBatchError ||
+				cause instanceof PiCompanionFailure
+				? cause
+				: new PiToolRemovalBatchError(cause);
+		}
+	};
 	const tTranscriptBuild = performance.now();
 	const transcript = createPiTranscript(
 		args.messages,
@@ -10859,6 +10912,7 @@ function runSynchronousPipeline(
 					preserveTagOnlyAssistantText: true,
 					entryFingerprintByMessageId,
 					reuseMessageIds: textIdentityPlan.reusableMessageIds,
+					reuseTextMessageIds: textIdentityPlan.reusableTextMessageIds,
 					textIdentityDriftMessageIds: textIdentityPlan.driftedMessageIds,
 					textIdentitySourceCache: textIdentityPlan.sourceCache,
 					textTokenCache: tagTextTokenCache,
@@ -11192,31 +11246,52 @@ function runSynchronousPipeline(
 	// crash between the two leaves the tags legacy until the next HARD fold.
 	// Either way the next served request already carries the fold's new cached
 	// prefix, so it is a cache bust regardless of the tool bytes.
+	const tLegacyToolConversion = performance.now();
 	if (foldBustsServedPrefixThisPass) {
+		const savedRemovalInputs = nativeRemovalInputs;
 		try {
+			// Marker writes share the conversion transaction. Publish their in-memory
+			// view only with that commit, not with a nested savepoint that may roll back.
+			nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
 			let converted = 0;
 			pair(
 				() =>
 					args.db
-						.transaction(() => {
-							converted = convertLegacyToolSkeletons(
-								args.db,
-								args.sessionId,
-								targets,
-								{
-									// NATIVE_TOOL_REMOVAL_MARKER records removal of both the call
-									// and its result, rather than replacement with a text marker.
-									// Preserve that full-removal mode across model switches. If
-									// nativeRemovalInputs could not be read, retain every existing
-									// full-removal decision instead of guessing a new representation.
-									keepFullDrop: (callId) =>
-										nativeRemovalInputs === undefined ||
-										(callId !== null &&
-											nativeRemovalInputs.get(callId) ===
-												NATIVE_TOOL_REMOVAL_MARKER),
-								},
-							).size;
-						})
+						.transaction(() =>
+							removalBatch((flush) => {
+								converted = convertLegacyToolSkeletons(
+									args.db,
+									args.sessionId,
+									targets,
+									{
+										prepareRemovals: (rows) =>
+											preparePiToolRemovalChecks({
+												db: args.db,
+												rows,
+												targets,
+												messages: args.messages,
+												prepare: transcript.prepareToolRemovalMeasurements,
+											}),
+										// NATIVE_TOOL_REMOVAL_MARKER records removal of both the call
+										// and its result, rather than replacement with a text marker.
+										// Preserve that full-removal mode across model switches. If
+										// nativeRemovalInputs could not be read, retain every existing
+										// full-removal decision instead of guessing a new representation.
+										keepFullDrop: (callId) =>
+											nativeRemovalInputs === undefined ||
+											(callId !== null &&
+												authorizePiToolRemoval({
+													db: args.db,
+													sessionId: args.sessionId,
+													callId,
+													saved: nativeRemovalInputs,
+													canApply: false,
+												}) === true),
+									},
+								).size;
+								flush();
+							}),
+						)
 						.immediate(),
 				() => converted > 0,
 			);
@@ -11227,6 +11302,7 @@ function runSynchronousPipeline(
 				);
 			}
 		} catch (error) {
+			nativeRemovalInputs = savedRemovalInputs;
 			if (error instanceof PiCompanionFailure) throw error;
 			sessionLog(
 				args.sessionId,
@@ -11234,6 +11310,12 @@ function runSynchronousPipeline(
 			);
 		}
 	}
+
+	logTransformTiming(
+		args.sessionId,
+		"convertLegacyToolSkeletons",
+		tLegacyToolConversion,
+	);
 
 	// 1b. Note-nudge `commit_detected` trigger. Mirrors OpenCode's logic
 	// in `tag-messages.ts` + `transform.ts:677-690`: only fire on the
@@ -11312,9 +11394,15 @@ function runSynchronousPipeline(
 		signalPiPendingMaterialization(args.sessionId);
 		parkedTriggers?.holdMaterialization(heldMaterializationReason);
 	}
+	const tReclaimDistance = performance.now();
 	const reclaimDistance = isCacheBustingPass
 		? toolReclaimDistanceEntries(mutationView, targets)
 		: [];
+	logTransformTiming(
+		args.sessionId,
+		"toolReclaimDistanceEntries",
+		tReclaimDistance,
+	);
 	const protectedToolTags = protectedToolTagNumbers(
 		getActiveTagsBySession(args.db, args.sessionId),
 		args.protectedTools,
@@ -11385,12 +11473,15 @@ function runSynchronousPipeline(
 					nativeRemovalInputs = saved && new Map(saved);
 					probingExecuteRemoval = true;
 					args.db
-						.transaction(() => {
-							for (const [number, target] of targets) {
-								if (target.prepareDrop?.() !== false) allowed.add(number);
-							}
-							throw rollback;
-						})
+						.transaction(() =>
+							removalBatch((flush) => {
+								for (const [number, target] of targets) {
+									if (target.prepareDrop?.() !== false) allowed.add(number);
+								}
+								flush();
+								throw rollback;
+							}),
+						)
 						.immediate();
 				} catch (error) {
 					if (error !== rollback) allowed.clear();
@@ -11444,7 +11535,7 @@ function runSynchronousPipeline(
 		pendingDecisionLogObserverForTests?.(pendingDecisionLog);
 		try {
 			const tApplyPending = performance.now();
-			pendingOpsDidMutate = pair(
+			pendingOpsDidMutate = applyToolRemovalGroup(
 				() =>
 					applyPendingOperations(
 						args.sessionId,
@@ -11542,9 +11633,46 @@ function runSynchronousPipeline(
 		`targets=${targetTagNumbers.length} fetched=${flushedDroppedTags.length}`,
 	);
 	const tFlushed = performance.now();
-	runPersistedReplayStage("flushed-status-failure", undefined, () =>
-		applyFlushedStatuses(args.sessionId, args.db, targets, flushedDroppedTags),
-	);
+	runPersistedReplayStage("flushed-status-failure", undefined, () => {
+		const render = () =>
+			applyFlushedStatuses(
+				args.sessionId,
+				args.db,
+				targets,
+				flushedDroppedTags,
+			);
+		const savedRemovalInputs = nativeRemovalInputs;
+		const needsRemovalPreparation =
+			savedRemovalInputs !== undefined &&
+			flushedDroppedTags.some(
+				(tag) =>
+					tag.type === "tool" &&
+					tag.dropMode === "full" &&
+					savedRemovalInputs.get(tag.messageId) !== NATIVE_TOOL_REMOVAL_MARKER,
+			);
+		// Replaying existing permissions does not need a new write transaction.
+		if (!isCacheBustingPass || !needsRemovalPreparation) return render();
+		try {
+			// Eager markers and rendering have one failure boundary. A failed render
+			// must not publish durable or in-memory permission for unvisited calls.
+			nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
+			return args.db
+				.transaction(() =>
+					removalBatch((flush) => {
+						prepareFlushedToolRemovals(targets, flushedDroppedTags);
+						flush();
+						return render();
+					}),
+				)
+				.immediate();
+		} catch (error) {
+			nativeRemovalInputs = savedRemovalInputs;
+			// If preparing batch markers fails, restore the saved inputs and render
+			// with the existing per-call authorization checks.
+			if (error instanceof PiToolRemovalBatchError) return render();
+			throw error;
+		}
+	});
 	logTransformTiming(args.sessionId, "applyFlushedStatuses", tFlushed);
 	logTransformTiming(args.sessionId, "batchFinalize:flushed", tFlushed);
 
@@ -11655,9 +11783,10 @@ function runSynchronousPipeline(
 	let routineCleanupApplied = false;
 	let heuristicsResult: PiHeuristicCleanupResult | null = null;
 	const tActiveTags = performance.now();
-	// Load the canonical tag set once after pending operations. Heuristics use its
-	// active projection; Channel-1 baseline construction reuses the full set.
-	const allTagsForPass = getPiTagSnapshotView(args.db, args.sessionId);
+	// Read one immutable snapshot of the session's tags before heuristics change
+	// their statuses. Active tags have full rows; other tags keep only the identity
+	// and size/token fields needed to protect tags and match them to request parts.
+	const allTagsForPass = getPiPassTagSnapshotView(args.db, args.sessionId);
 	// Same rows as filtering allTagsForPass by status, kept current from changed
 	// rows instead of walking every tag the session ever had.
 	const activeTags = getPiActiveTagSnapshotView(
@@ -11727,7 +11856,7 @@ function runSynchronousPipeline(
 				rideSignals.explicitFlush ||
 				deferredMaterialize ||
 				independentMutationBeforeHeuristics;
-			heuristicsResult = pair(
+			heuristicsResult = applyToolRemovalGroup(
 				() =>
 					applyPiHeuristicCleanup(
 						args.sessionId,
@@ -11780,7 +11909,7 @@ function runSynchronousPipeline(
 				!routineCleanupApplied &&
 				heuristicsResult.emergencyDroppedTools > 0
 			) {
-				const ridingCleanup = pair(
+				const ridingCleanup = applyToolRemovalGroup(
 					() =>
 						applyPiHeuristicCleanup(
 							args.sessionId,
@@ -11884,7 +12013,11 @@ function runSynchronousPipeline(
 				`droppedTools=${heuristicsResult.droppedTools} deduplicatedTools=${heuristicsResult.deduplicatedTools} droppedInjections=${heuristicsResult.droppedInjections} staleReduce=${heuristicsResult.droppedStaleReduceCalls} compressedTextTags=${heuristicsResult.compressedTextTags} mutatedTextTags=${heuristicsResult.mutatedTextTags}`,
 			);
 		} catch (err) {
-			if (err instanceof PiCompanionFailure) throw err;
+			if (
+				err instanceof PiCompanionFailure ||
+				err instanceof PiToolRemovalBatchError
+			)
+				throw err;
 			sessionLog(
 				args.sessionId,
 				`heuristic cleanup failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
@@ -12119,7 +12252,7 @@ function runSynchronousPipeline(
 		}
 		autoReclaimTargetCount = syntheticPendingOps.length;
 		if (syntheticPendingOps.length > 0) {
-			autoReclaimDidMutate = pair(
+			autoReclaimDidMutate = applyToolRemovalGroup(
 				() =>
 					applyPendingOperations(
 						args.sessionId,
@@ -12167,14 +12300,10 @@ function runSynchronousPipeline(
 			}
 			// Transcript user rows can contain several results and a later user's
 			// text. Associate tool tags with their native occurrences, never that row.
-			const imageToolTags = new Map(
-				allTagsForPass
-					.filter((tag) => tag.type === "tool")
-					.map((tag) => [
-						`${tag.toolOwnerMessageId ?? ""}\0${tag.messageId}`,
-						tag.tagNumber,
-					]),
-			);
+			const imageToolCoordinates: Array<{
+				id: string | undefined;
+				key: string;
+			}> = [];
 			const imageToolOwners = new Map<string, string>();
 			for (let index = 0; index < workingMessages.length; index++) {
 				const message = workingMessages[index];
@@ -12183,20 +12312,26 @@ function runSynchronousPipeline(
 					for (const part of message.content) {
 						if (part.type !== "toolCall") continue;
 						imageToolOwners.set(part.id, id ?? "");
-						noteImagePosition(
-							id,
-							imageToolTags.get(`${id ?? ""}\0${part.id}`) ?? 0,
-						);
+						imageToolCoordinates.push({ id, key: `${id ?? ""}\0${part.id}` });
 					}
 				} else if (message.role === "toolResult") {
-					noteImagePosition(
+					imageToolCoordinates.push({
 						id,
-						imageToolTags.get(
-							`${imageToolOwners.get(message.toolCallId) ?? ""}\0${message.toolCallId}`,
-						) ?? 0,
-					);
+						key: `${imageToolOwners.get(message.toolCallId) ?? ""}\0${message.toolCallId}`,
+					});
 				}
 			}
+			// Index only owners/calls this rendered pass can ask about. Keep the
+			// matching historical tag rows and the map's last-row-wins behavior intact.
+			const imageToolKeys = new Set(imageToolCoordinates.map(({ key }) => key));
+			const imageToolTags = new Map<string, number>();
+			for (const tag of allTagsForPass) {
+				if (tag.type !== "tool") continue;
+				const key = `${tag.toolOwnerMessageId ?? ""}\0${tag.messageId}`;
+				if (imageToolKeys.has(key)) imageToolTags.set(key, tag.tagNumber);
+			}
+			for (const { id, key } of imageToolCoordinates)
+				noteImagePosition(id, imageToolTags.get(key) ?? 0);
 			const protectedImageToolKeys = new Set(
 				activeTags
 					.filter(
@@ -13025,11 +13160,11 @@ function runSynchronousPipeline(
 	);
 	protectionFloorResolution = resolveProtectionFloor();
 	const protectedTagNumbers = usesTokenProtection
-		? computeProtectionWindow(
+		? protectedPiPassTagNumbers(
 				allTagsForPass,
 				protectionFloorResolution.floor,
 				activeCalibration.toolsRatio,
-			).protectedTagNumbers
+			)
 		: newestActiveTagNumbersByCount(activeTags, args.protectedTags);
 	// A defer pass cannot consume queue rows, so preserve the snapshot loaded at
 	// pass start. Execute passes may remove only a subset (protected/incomplete

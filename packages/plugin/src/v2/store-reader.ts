@@ -457,10 +457,19 @@ export class V2StoreReaderPool {
  * row of the session for each batch of ids. The session is still checked on
  * each row found.
  */
-export function messageTimesQuery(count: number): string {
+export function messageTimesQuery(count: number, withVersions = false): string {
     return `SELECT id, COALESCE(time_created, json_extract(data, '$.time.created')) AS created,
                    json_extract(data, '$.time.completed') AS completed
+                   ${withVersions ? ", type, seq, time_created AS version_created, time_updated AS version_updated" : ""}
             FROM session_message WHERE +session_id = ? AND id IN (${Array.from({ length: count }, () => "?").join(",")})`;
+}
+
+export interface V2MessageTimeVersion {
+    id: string;
+    type: string;
+    seq: number;
+    created: number | null;
+    updated: number | null;
 }
 
 /** Opens an existing store read-only; missing/corrupt stores propagate errors, never an empty history. */
@@ -840,28 +849,80 @@ export class V2StoreReader {
         });
     }
 
+    /** Check membership and row revisions without loading or parsing message data. */
+    messageTimeVersions(
+        sessionID: string,
+        ids: readonly string[],
+        span?: { first: number; last: number },
+    ): Map<string, V2MessageTimeVersion> {
+        const versions = new Map<string, V2MessageTimeVersion>();
+        // A dense retained window is cheaper to read in sequence order than as
+        // thousands of primary-key probes. Sparse anchor reads still use ids.
+        if (ids.length > 0 && span && span.last - span.first < ids.length * 2) {
+            const wanted = new Set(ids);
+            const rows =
+                this.prepare(`SELECT id, type, seq, time_created AS created, time_updated AS updated
+                FROM session_message WHERE session_id = ? AND seq >= ? AND seq <= ?`).all(
+                    sessionID,
+                    span.first,
+                    span.last,
+                ) as V2MessageTimeVersion[];
+            for (const row of rows) if (wanted.has(row.id)) versions.set(row.id, row);
+            for (const [id, version] of this.messageTimeVersions(
+                sessionID,
+                ids.filter((id) => !versions.has(id)),
+            ))
+                versions.set(id, version);
+            return versions;
+        }
+        for (let offset = 0; offset < ids.length; offset += 500) {
+            const batch = ids.slice(offset, offset + 500);
+            const rows =
+                this.prepare(`SELECT id, type, seq, time_created AS created, time_updated AS updated
+                FROM session_message WHERE +session_id = ? AND id IN (${batch.map(() => "?").join(",")})`).all(
+                    sessionID,
+                    ...batch,
+                ) as V2MessageTimeVersion[];
+            for (const row of rows) versions.set(row.id, row);
+        }
+        return versions;
+    }
+
     messageTimes(
         sessionID: string,
         ids: readonly string[],
+        versions?: Map<string, V2MessageTimeVersion>,
     ): Map<string, { created?: number; completed?: number }> {
         const times = new Map<string, { created?: number; completed?: number }>();
         // Read only timing metadata for the served draft, not full stored content
         // or the session's archived history. Bound each query's parameter count.
         for (let offset = 0; offset < ids.length; offset += 500) {
             const batch = ids.slice(offset, offset + 500);
-            const rows = this.prepare(messageTimesQuery(batch.length)).all(
+            const rows = this.prepare(messageTimesQuery(batch.length, versions !== undefined)).all(
                 sessionID,
                 ...batch,
             ) as Array<{
                 id: string;
                 created: number | null;
                 completed: number | null;
+                type: string;
+                seq: number;
+                version_created: number | null;
+                version_updated: number | null;
             }>;
-            for (const row of rows)
+            for (const row of rows) {
                 times.set(row.id, {
                     created: typeof row.created === "number" ? row.created : undefined,
                     completed: typeof row.completed === "number" ? row.completed : undefined,
                 });
+                versions?.set(row.id, {
+                    id: row.id,
+                    type: row.type,
+                    seq: row.seq,
+                    created: row.version_created,
+                    updated: row.version_updated,
+                });
+            }
         }
         return times;
     }

@@ -1784,6 +1784,77 @@ describe("createDreamTaskExecutor — lease setup fence", () => {
 });
 
 describe("createDreamTaskExecutor — map-memories disposition", () => {
+    test.each([
+        {
+            label: "a valid empty manifest",
+            manifest: "<mappings>\n</mappings>",
+            status: "completed",
+        },
+        {
+            label: "a rejected manifest",
+            manifest: '<mappings><mapping id="1"/></mappings>',
+            status: "failed",
+        },
+    ] as const)("records $label as $status with no confirmed mappings", async ({
+        manifest,
+        status,
+    }) => {
+        db = freshDb();
+        const project = `/repo/map-zero-progress-${status}`;
+        for (let index = 0; index < 5; index += 1) {
+            insertMemory(db, {
+                projectPath: project,
+                category: "ARCHITECTURE",
+                content: `Uncertain scheduled mapping fact ${index}.`,
+            });
+        }
+        const client = {
+            session: {
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
+                create: mock(async () => ({ data: { id: "map-child" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({ data: assistantMessages(manifest) })),
+                delete: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+        });
+        const leaseKey = leaseKeyFor("map-memories", project);
+        expect(acquireLease(db, "holder-map-zero-progress", leaseKey)).toBe(true);
+
+        const result = await executor(
+            {
+                task: "map-memories",
+                schedule: "0 5 * * *",
+                timeoutMinutes: 20,
+                model: "anthropic/claude-sonnet-4-6",
+                fallbackModels: ["openai/gpt-5"],
+            },
+            { db, projectIdentity: project, holderId: "holder-map-zero-progress", leaseKey },
+        );
+
+        expect(result.status).toBe(status);
+        expect(client.session.prompt).toHaveBeenCalledTimes(2);
+        const run = getDreamRuns(db, project)[0];
+        expect(run?.tasks_succeeded).toBe(status === "completed" ? 1 : 0);
+        expect(run?.tasks_failed).toBe(status === "failed" ? 1 : 0);
+        const summary = JSON.parse(run?.tasks_json ?? "[]")[0];
+        if (status === "completed") {
+            expect(summary.progress).toBe(
+                "map-memories: committed 0 mapping(s) (mapped 0, independent 0); 5 remain",
+            );
+            expect(summary.error).toBeUndefined();
+        } else {
+            expect(result.error).toContain("root <mapping> unrecognized");
+            expect(summary.error).toContain("root <mapping> unrecognized");
+        }
+    });
+
     test("records banked deadline progress as completed and advances lastRunAt", async () => {
         db = freshDb();
         const project = "/repo/map-banked-progress";

@@ -30,7 +30,7 @@ function describe(schema: any, path = ""): any {
     const result: any = { type: d.type };
     if (d.type === "pipe") {
         const inner = describe(d.in, path);
-        if (path === "embedding" || path === "protected_tools" || path === "subc.connection_file") return { type: "transform", rule: path, inner };
+        if (path === "embedding" || path === "protected_tools" || path === "subc.connection_file" || path === "rerank.timeout_ms") return { type: "transform", rule: path, inner };
         if (!path) return inner;
         throw new Error(`Unregistered schema transform: ${path}`);
     }

@@ -8,6 +8,7 @@ import {
 	queuePendingOp,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import { getNativeReplayState } from "@magic-context/core/features/magic-context/storage-native-replay";
 import { __test as decisions } from "@magic-context/core/features/magic-context/transform-decision-log";
 import { resetLkgSlotsForTest } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { Database } from "@magic-context/core/shared/sqlite";
@@ -178,7 +179,7 @@ for (const failure of [
 					queuePendingOp(db, sessionId, tag.tagNumber, "drop");
 					if (index !== 0) continue;
 					// Stale entries fill the first 64-operation chunk, so the
-					// second real drop fails after the first drop has committed.
+					// second real drop fails after the first chunk has been planned.
 					for (let offset = 0; offset < 63; offset++) {
 						const number = 100_000 + offset;
 						db.prepare(
@@ -196,7 +197,13 @@ for (const failure of [
 					getTagsBySession(db, sessionId).filter(
 						(tag) => tag.type === "tool" && tag.status === "dropped",
 					),
-				).toHaveLength(failure === "paired drop batch" ? 0 : 1);
+					// Whole-lane rollback replaces partial commits: unserved drops must not alter provider-cached bytes.
+				).toHaveLength(0);
+				// Permissions, queue deletions and drops commit together. A failed
+				// transaction cannot serve its edited tool calls/results, even when no
+				// reasoning blocks need omission. Replay only the last-served request.
+				expect(getNativeReplayState(db, sessionId).toolInputs.size).toBe(0);
+				expect(served.replay).toEqual(served.baseline);
 				if (failure === "paired drop batch") {
 					expect(served.replay).toEqual(served.baseline);
 					expect(JSON.stringify(served.replay)).toContain(
@@ -261,6 +268,15 @@ for (const failure of [
 				clearContextHandlerSession(sessionId);
 			}
 			const released = await pass("release", rebuiltRaw, 76);
+			if (failure.endsWith("drop batch")) {
+				// The permitted rebuild retries all rolled-back permissions and drops.
+				expect(
+					getTagsBySession(db, sessionId).filter(
+						(tag) => tag.type === "tool" && tag.status === "dropped",
+					),
+				).toHaveLength(4);
+				expect(getNativeReplayState(db, sessionId).toolInputs.size).toBe(4);
+			}
 			const releaseGate = gate;
 			expect(decisions.getPendingPi(sessionId)?.lkgFrozenReleaseReason).toBe(
 				unchangedRecovery
