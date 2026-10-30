@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { underRoot } from "./activation-driver";
 
 /** Sidecars only record host events; they register no tools and change no model input. */
-export function stageEventObserver(root: string, lane: "opencode-1" | "opencode-2" | "omp") {
+export function stageEventObserver(root: string, lane: "opencode-1" | "opencode-2" | "pi" | "omp") {
     const directory = underRoot(root, join(root, "host-event-observer"));
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const eventsPath = underRoot(root, join(directory, "events.jsonl"));

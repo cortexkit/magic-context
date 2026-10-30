@@ -10,7 +10,7 @@ import { mockMeteringProxy } from "./provider-meter";
 import { readHostEvents, stageEventObserver } from "./event-observer";
 import { redactedLines } from "./credential-protocol";
 
-export type HostLane = "opencode-1" | "opencode-2" | "omp";
+export type HostLane = "opencode-1" | "opencode-2" | "pi" | "omp";
 export interface HostAdapterOptions {
     sourceRoot: string;
     mockProviderURL: string;
@@ -22,8 +22,13 @@ export interface HostAdapterOptions {
     classify?(path: string, body: string): CallBound["kind"];
     magicContext: Record<string, unknown>;
     outputCeiling: number;
+    /** Pin an explicitly installed release when comparing host versions. */
+    hostVersion?: string;
+    modelOptions?: Record<string, unknown>;
+    reasoning?: boolean;
     timeoutMs?: number;
     startupTimeoutMs?: number;
+    providerTimeoutMs?: number;
     expectTurnTwo?: boolean;
     /** Synthetic probes can add a second foreground turn and explicitly request wrapup. */
     forceWrapup?: boolean;
@@ -51,8 +56,9 @@ export function hostAdapter(lane: HostLane, options: HostAdapterOptions): Activa
     let hostPid: number | undefined;
     const processProofs = new Map<number, Isolation>();
     const logFilters: ReturnType<typeof redactedLines>[] = [];
-    const binary = (root: string) => join(root, "host-dist/node_modules/.bin", lane === "omp" ? "omp" : "opencode");
-    const entrypoint = (root: string) => join(root, lane === "omp" ? "packages/pi-plugin/dist/index.js" : lane === "opencode-2" ? "packages/plugin/dist/v2/server.js" : "packages/plugin/dist/index.js");
+    const isPi = lane === "pi" || lane === "omp";
+    const binary = (root: string) => join(root, "host-dist/node_modules/.bin", isPi ? lane : "opencode");
+    const entrypoint = (root: string) => join(root, isPi ? "packages/pi-plugin/dist/index.js" : lane === "opencode-2" ? "packages/plugin/dist/v2/server.js" : "packages/plugin/dist/index.js");
     return processActivationTransport({
         stage: (root) => ({ argv: [process.execPath, installer, "stage", options.sourceRoot, root, lane], cwd: root }),
         build: (root) => ({ argv: [process.execPath, installer, "build", options.sourceRoot, root, lane], cwd: root }),
@@ -77,12 +83,13 @@ export function hostAdapter(lane: HostLane, options: HostAdapterOptions): Activa
             const result = spawnSync(binary(input.installRoot), ["--version"], { cwd: work, env: { PATH: process.env.PATH, ...versionEnv }, encoding: "utf8" });
             versionOutput = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
             version = versionOutput.match(/\d+\.\d+\.\d+/)?.[0] ?? "";
-            if (result.status !== 0 || (lane === "opencode-1" ? !/^1\.18\.(3[1-9]|[4-9]\d|\d{3,})$/.test(version) : lane === "opencode-2" ? version !== "2.0.22" : !/18\.12\.\d+/.test(version)))
+            if (result.status !== 0 || (options.hostVersion ? version !== options.hostVersion : lane === "opencode-1" ? !/^1\.18\.(3[1-9]|[4-9]\d|\d{3,})$/.test(version) : lane === "opencode-2" ? version !== "2.0.22" : lane === "pi" ? version !== "1.4.0" : !/18\.12\.\d+/.test(version)))
                 throw new Error("host_version_not_pinned");
             proxy = await mockMeteringProxy({ upstream: options.mockProviderURL, meter: input.meter,
                 secrets, forwardCredentials: !!options.providerKeyEnv || !!options.grantFree, paidProvider: options.paidProvider,
                 onProviderAttempt: options.onProviderAttempt,
-                outputCeiling: options.outputCeiling,
+                 outputCeiling: options.outputCeiling,
+                timeoutMs: options.providerTimeoutMs,
                 // Prompt text can mention another stage; it is not evidence of this dispatch's purpose.
                 classify: options.classify ?? (() => "unclassified"),
                 async beforeDispatch() {
@@ -96,7 +103,7 @@ export function hostAdapter(lane: HostLane, options: HostAdapterOptions): Activa
             observer = stageEventObserver(root, lane);
             input.env.MC_HOST_EVENT_JSONL = observer.eventsPath;
             writeConfigs(lane, input.installRoot, work, hostEnv, proxy.url, options, observer);
-            return { argv: lane === "omp" ? [binary(input.installRoot), "--mode", "rpc", "--extension", entrypoint(input.installRoot), "--extension", observer.entrypoint]
+            return { argv: isPi ? [binary(input.installRoot), "--mode", "rpc", "--extension", entrypoint(input.installRoot), "--extension", observer.entrypoint]
                 : [binary(input.installRoot), "serve", "--hostname", "127.0.0.1", "--port", "0", "--print-logs"], cwd: work };
         },
         async connect(input) {
@@ -113,7 +120,7 @@ export function hostAdapter(lane: HostLane, options: HostAdapterOptions): Activa
             let observedStore: string | null = null;
             let sessionId = "";
             let prompt: (text: string) => Promise<unknown>;
-            if (lane === "omp") {
+            if (isPi) {
                 const lines = createInterface({ input: input.stdout });
                 const pending = new Map<string, { resolve(value: any): void; reject(error: Error): void }>();
                 const settled: Array<() => void> = [];
@@ -143,6 +150,7 @@ export function hostAdapter(lane: HostLane, options: HostAdapterOptions): Activa
                     for (;;) {
                         if (Date.now() >= end) throw new Error("omp_settlement_timeout");
                         const value = (await rpc("get_state")).data;
+                        if (lane === "pi" && value?.isStreaming === false) return value;
                         if (typeof value?.isSettled !== "boolean" || typeof value?.hasPendingAsyncWork !== "boolean")
                             throw new Error("omp_settlement_unobservable");
                         if (value.isSettled && !value.isStreaming && !value.hasPendingAsyncWork) return {
@@ -305,37 +313,39 @@ async function deadline<T>(promise: Promise<T>, timeout: number): Promise<T> {
     finally { clearTimeout(timer!); }
 }
 
-function writeConfigs(lane: HostLane, install: string, work: string, env: Record<string, string>, endpoint: string, options: HostAdapterOptions, observer: ReturnType<typeof stageEventObserver>) {
+export function writeConfigs(lane: HostLane, install: string, work: string, env: Record<string, string>, endpoint: string, options: HostAdapterOptions, observer: ReturnType<typeof stageEventObserver>) {
+    const isPi = lane === "pi" || lane === "omp";
     const providerId = options.providerId ?? "mock";
     const model = `${providerId}/${options.modelId}`;
     const plugin = lane === "opencode-2" ? join(install, "packages/plugin") : pathToFileURL(join(install, "packages/plugin/dist/index.js")).href;
     const limits = { context: 200_000, output: options.outputCeiling };
     // OpenCode's grant-free Zen path uses the public marker, not an account credential.
-    const apiKey = options.grantFree ? "public" : options.providerKeyEnv ? (lane === "omp" ? options.providerKeyEnv : `{env:${options.providerKeyEnv}}`) : "mock-only-key";
+    const apiKey = options.grantFree ? "public" : options.providerKeyEnv ? (isPi ? options.providerKeyEnv : `{env:${options.providerKeyEnv}}`) : "mock-only-key";
     const config = lane === "opencode-2" ? { plugins: [plugin, observer.directory], model,
-        providers: { [providerId]: { package: options.providerPackage ?? "@ai-sdk/openai-compatible", settings: { baseURL: `${endpoint}/v1`, apiKey }, models: { [options.modelId]: { name: options.modelId, limit: limits } } } },
+        providers: { [providerId]: { package: options.providerPackage ?? "@opencode/ai/providers/openai-compatible", settings: { baseURL: `${endpoint}/v1`, apiKey }, ...(options.modelOptions ? { body: options.modelOptions } : {}), models: { [options.modelId]: { name: options.modelId, limit: limits } } } },
         compaction: { auto: false },
     } : { plugin: [plugin, pathToFileURL(observer.entrypoint).href], model, small_model: model, enabled_providers: [providerId], autoupdate: false,
-        provider: { [providerId]: { npm: options.providerPackage ?? "@ai-sdk/openai-compatible", options: { baseURL: `${endpoint}/v1`, apiKey }, models: { [options.modelId]: { name: options.modelId, limit: limits } } } },
+        provider: { [providerId]: { npm: options.providerPackage ?? "@ai-sdk/openai-compatible", options: { baseURL: `${endpoint}/v1`, apiKey }, models: { [options.modelId]: { name: options.modelId, limit: limits, options: options.modelOptions, reasoning: options.reasoning } } } },
         compaction: { auto: false, prune: false }, agent: { title: { disable: true }, summary: { disable: true } },
     };
-    if (lane === "omp") {
+    if (isPi) {
         mkdirSync(env.PI_CODING_AGENT_DIR, { recursive: true });
         writeFileSync(join(env.PI_CODING_AGENT_DIR, "config.yml"), JSON.stringify({ defaultProvider: providerId, defaultModel: options.modelId,
             enabledModels: [model], retry: { enabled: false }, compaction: { enabled: false }, quietStartup: true, enableInstallTelemetry: false, tools: { xdev: false, intentTracing: false } }));
         const models = JSON.stringify({ providers: { [providerId]: { api: options.piApi ?? "anthropic-messages", baseUrl: endpoint, apiKey,
             ...(options.piAuth ? { auth: options.piAuth } : {}),
-            models: [{ id: options.modelId, name: options.modelId, input: ["text"], contextWindow: 200_000, maxTokens: options.outputCeiling, reasoning: false, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } });
+            models: [{ id: options.modelId, name: options.modelId, input: ["text"], contextWindow: 200_000, maxTokens: options.outputCeiling, reasoning: options.reasoning ?? false, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } });
         // OMP 18.12 reads YAML first; updating only JSON leaves a previously imported endpoint active.
         writeFileSync(join(env.PI_CODING_AGENT_DIR, "models.yml"), models);
         writeFileSync(join(env.PI_CODING_AGENT_DIR, "models.json"), models);
+        if (lane === "pi") writeFileSync(join(env.PI_CODING_AGENT_DIR, "settings.json"), JSON.stringify({ defaultProvider: providerId, defaultModel: options.modelId, compaction: { enabled: false }, retry: { enabled: false } }));
     } else if (lane === "opencode-2") writeFileSync(join(work, "opencode.json"), JSON.stringify(config));
     else {
         if (existsSync(join(work, "opencode.json"))) unlinkSync(join(work, "opencode.json"));
         writeFileSync(join(env.XDG_CONFIG_HOME, "opencode.json"), JSON.stringify(config));
     }
     const settings = { enabled: true, memory: { enabled: true, auto_search: { enabled: false }, git_commit_indexing: { enabled: false } },
-        embedding: { provider: "off" }, dreamer: { disable: true }, historian: { [lane === "omp" ? "omp" : "opencode"]: { model } }, ...options.magicContext };
+        embedding: { provider: "off" }, dreamer: { disable: true }, historian: { [isPi ? lane : "opencode"]: { model } }, ...options.magicContext };
     mkdirSync(join(env.XDG_CONFIG_HOME, "cortexkit"), { recursive: true });
     writeFileSync(join(env.XDG_CONFIG_HOME, "cortexkit/magic-context.jsonc"), JSON.stringify(settings));
 }

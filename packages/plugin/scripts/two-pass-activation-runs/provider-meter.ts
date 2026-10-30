@@ -92,6 +92,7 @@ export async function mockMeteringProxy(input: {
     secrets?: readonly string[];
     forwardCredentials?: boolean;
     onProviderAttempt?(providerHost: string): void;
+    timeoutMs?: number;
 }) {
     const upstream = new URL(input.upstream);
     if (upstream.username || upstream.password || (input.paidProvider ? upstream.protocol !== "https:"
@@ -127,7 +128,7 @@ export async function mockMeteringProxy(input: {
                     input.onProviderAttempt?.(target.host);
                     const reply = await fetch(target, {
                         method: request.method, headers: forwardHeaders(request.headers, input.forwardCredentials), body,
-                        redirect: "error", signal: AbortSignal.timeout(120_000),
+                        redirect: "error", signal: AbortSignal.timeout(input.timeoutMs ?? 120_000),
                     });
                     // Record every upstream response header (rate-limit/reset hints live here,
                     // not in the body). The host-facing reply still carries only status/body/content-type.

@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 export const hostPackages = {
     "opencode-1": "opencode-ai@1.18.31",
     "opencode-2": "@opencode/cli@2.0.22",
+    pi: "@earendil-works/pi-coding-agent@1.4.0",
     omp: "@oh-my-pi/pi-coding-agent@18.12.3",
 } as const;
 
@@ -25,14 +26,14 @@ if (import.meta.main) {
         };
         run([process.execPath, "install", "--frozen-lockfile"], root);
         run([process.execPath, "run", "--cwd", "packages/plugin", "build"], root);
-        if (lane === "omp") run([process.execPath, "run", "--cwd", "packages/pi-plugin", "build"], root);
+        if (lane === "omp" || lane === "pi") run([process.execPath, "run", "--cwd", "packages/pi-plugin", "build"], root);
         const host = join(root, "host-dist");
         mkdirSync(host, { recursive: true });
         const pinned = hostPackages[lane as keyof typeof hostPackages];
         writeFileSync(join(host, "package.json"), JSON.stringify({ private: true, trustedDependencies: [pinned.slice(0, pinned.lastIndexOf("@"))] }));
         run([process.execPath, "add", "--exact", hostPackages[lane as keyof typeof hostPackages]], host);
         if (lane === "opencode-2") run([process.execPath, join(host, "node_modules/@opencode/cli/postinstall.mjs")], host);
-        if (lane !== "omp") {
+        if (lane !== "omp" && lane !== "pi") {
             // OpenCode otherwise installs its plugin SDK on first directory initialization,
             // which cannot finish when the proof container has external networking disabled.
             const config = process.env.XDG_CONFIG_HOME;

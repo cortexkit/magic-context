@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 
 /** Synthetic usage is deliberately different on every request to expose last-step accounting. */
 export function mockProvider(replyText: (request: Record<string, any>) => string, captured?: (requests: unknown[]) => void,
-    observeHeaders?: (headers: Headers) => void) {
-    const requests: Array<{ path: string; method: string; rawBodyHash: string; body: Record<string, any>; inputTokens: number; outputTokens: number }> = [];
+    observeHeaders?: (headers: Headers) => void,
+    finishReason: (request: Record<string, any>) => "stop" | "length" = () => "stop") {
+    const requests: Array<{ path: string; method: string; rawBody: string; rawBodyHash: string; body: Record<string, any>; inputTokens: number; outputTokens: number }> = [];
     const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
         observeHeaders?.(request.headers);
         const rawBody = await request.text();
@@ -16,16 +17,17 @@ export function mockProvider(replyText: (request: Record<string, any>) => string
         const inputTokens = 101 + index * 103;
         const outputTokens = 11 + index * 7;
         requests.push({ path: new URL(request.url).pathname, method: request.method,
-            rawBodyHash: createHash("sha256").update(rawBody).digest("hex"), body, inputTokens, outputTokens });
+            rawBody, rawBodyHash: createHash("sha256").update(rawBody).digest("hex"), body, inputTokens, outputTokens });
         captured?.(requests);
         const text = replyText(body);
+        const finish = finishReason(body);
         const anthropic = new URL(request.url).pathname.endsWith("/messages");
         if (!body.stream) return Response.json(anthropic ? {
             id: `mock-${index}`, type: "message", role: "assistant", model: body.model,
-            content: [{ type: "text", text }], stop_reason: "end_turn",
+            content: [{ type: "text", text }], stop_reason: finish === "length" ? "max_tokens" : "end_turn",
             usage: { input_tokens: inputTokens, output_tokens: outputTokens },
         } : { id: `mock-${index}`, object: "chat.completion", created: 1, model: body.model,
-            choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+            choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: finish }],
             usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens, total_tokens: inputTokens + outputTokens } });
         const events = anthropic ? [
             { type: "message_start", message: { id: `mock-${index}`, type: "message", role: "assistant", model: body.model,
@@ -33,11 +35,11 @@ export function mockProvider(replyText: (request: Record<string, any>) => string
             { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
             { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
             { type: "content_block_stop", index: 0 },
-            { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: outputTokens } },
+            { type: "message_delta", delta: { stop_reason: finish === "length" ? "max_tokens" : "end_turn", stop_sequence: null }, usage: { output_tokens: outputTokens } },
             { type: "message_stop" },
         ] : [
             { choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }] },
-            { choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens } },
+            { choices: [{ index: 0, delta: {}, finish_reason: finish }], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens } },
         ].map((event) => ({ id: `mock-${index}`, object: "chat.completion.chunk", created: 1, model: body.model, ...event }));
         return new Response(events.map((event: Record<string, unknown>) => `${anthropic ? `event: ${event.type}\n` : ""}data: ${JSON.stringify(event)}\n\n`).join("") + (anthropic ? "" : "data: [DONE]\n\n"),
             { headers: { "content-type": "text/event-stream" } });

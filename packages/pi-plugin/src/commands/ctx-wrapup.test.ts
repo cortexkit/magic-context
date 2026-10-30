@@ -238,6 +238,48 @@ function deps(
 }
 
 describe("Pi /ctx-wrapup", () => {
+	it.each([
+		{ name: "print", hasUI: false, mode: undefined, expected: false },
+		{ name: "RPC with UI shims", hasUI: true, mode: "rpc", expected: false },
+		{ name: "interactive", hasUI: true, mode: undefined, expected: true },
+	])("passes $name lifetime to the historian", async ({
+		hasUI,
+		mode,
+		expected,
+	}) => {
+		const db = createDb();
+		try {
+			const sessionId = `wrapup-lifetime-${String(mode)}-${hasUI}`;
+			const seen: Array<boolean | undefined> = [];
+			const configured = deps(db, {
+				runPiHistorianForWrapup: mock(async (args) => {
+					seen.push(args.hasUI);
+					appendRange(
+						db,
+						sessionId,
+						1,
+						args.boundarySnapshot.eligibleEndOrdinal - 1,
+					);
+				}),
+			});
+			await runPiWrapup(
+				pi().api,
+				configured,
+				{
+					...(ctx(sessionId, 8) as object),
+					hasUI,
+					mode,
+					ui: { setStatus() {}, notify() {} },
+				} as never,
+				sessionId,
+				2,
+			);
+			expect(seen).toEqual([expected]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("parses optional positive messages_to_keep", () => {
 		expect(parseWrapupArgs("")).toEqual({ ok: true, messagesToKeep: 20 });
 		expect(parseWrapupArgs(" 7 ")).toEqual({ ok: true, messagesToKeep: 7 });
