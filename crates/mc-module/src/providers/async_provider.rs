@@ -287,7 +287,7 @@ pub(crate) struct AsyncRecord {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pruned_rebuild_pending: bool,
     /// A rewrite ride (`ttl_expired`, `model_change`, `account_change`,
-    /// `surface_change`) rebuilt this conversation since the last notice
+    /// `surface_change`, `chain_reset`) rebuilt this conversation since the last notice
     /// completed. Its request rewrote the runner's prompt cache from the
     /// runner's own current bytes, so a prune reconciled before the next
     /// notice completes needs no second rebuild. Kept only for a session that
@@ -413,6 +413,8 @@ pub(crate) struct AsyncRecord {
     applied: Option<u64>,
     acknowledgements: Vec<String>,
     marker_outcomes: BTreeMap<String, String>,
+    /// Canonical latest notice headers, including the raw edit-cost hint. Keep
+    /// unknown hints too: their wire spelling participates in the notice digest.
     conditions: Option<BTreeMap<String, String>>,
     resync: bool,
     generation: u64,
@@ -5025,7 +5027,14 @@ impl McHandler {
         };
         self.log_decision(decision_log::line(
             &notice.session_ref,
-            &format!("notice seq={}", notice.seq),
+            &format!(
+                "notice seq={} history_edit_cost={:?}",
+                notice.seq,
+                notice
+                    .history_edit_cost
+                    .as_ref()
+                    .map_or("absent", |cost| cost.as_str())
+            ),
             decision,
             &why,
             &facts,
@@ -6002,10 +6011,7 @@ impl McHandler {
             ride::RideProblem::Account => invalid_field("account", e.name()),
             _ => invalid_field("deadline_ms", e.name()),
         })?;
-        if matches!(
-            request.cause,
-            ride::RideCause::Unknown(_) | ride::RideCause::ChainReset
-        ) {
+        if matches!(request.cause, ride::RideCause::Unknown(_)) {
             return bytes(&ride::RideAnswer::nothing());
         }
         let started = Instant::now();
@@ -6084,6 +6090,7 @@ impl McHandler {
             let rewrite = matches!(
                 request.cause,
                 ride::RideCause::TtlExpired
+                    | ride::RideCause::ChainReset
                     | ride::RideCause::ModelChange
                     | ride::RideCause::AccountChange
                     | ride::RideCause::SurfaceChange
