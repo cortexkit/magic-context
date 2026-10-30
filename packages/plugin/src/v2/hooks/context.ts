@@ -1159,7 +1159,10 @@ export async function registerContext(context: V2Context) {
             log("[magic-context] v2 Channel 2 delivery deferred", error);
         }
     });
-    const pagedRead = createV2RawMessageReader(openStoreReader);
+    const pagedRead = createV2RawMessageReader(
+        openStoreReader,
+        gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
+    );
     // Commands can precede the first context pass after a restart. Their background
     // historian reads need the same durable v2 source as automatic historian work.
     const prepareHistorySession = (sessionID: string): void => {

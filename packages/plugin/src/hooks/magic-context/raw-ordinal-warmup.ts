@@ -38,6 +38,7 @@ import {
 } from "./read-session-raw";
 
 export interface RawOrdinalWarmupInput {
+    v2ArchiveReader?: boolean;
     path: string;
     sessionId: string;
     tagRatio?: number;

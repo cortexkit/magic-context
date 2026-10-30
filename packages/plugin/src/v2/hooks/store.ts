@@ -100,6 +100,7 @@ export function rawMessagePage(rows: readonly StoreRow[], afterOrdinal: number):
 }
 
 export interface V2RawMessageReader {
+    storePath?: string;
     getRevision(sessionID: string): number;
     getCountAfterRevision(sessionID: string, after: number, through: number): number;
     readPage(
@@ -228,9 +229,13 @@ export function* readV2RawMessagePagesForConversion(
 }
 
 /** Build the SQL-bounded reader used by context, indexing, and historian passes. */
-export function createV2RawMessageReader(openReader: () => V2StoreReader): V2RawMessageReader {
+export function createV2RawMessageReader(
+    openReader: () => V2StoreReader,
+    storePath?: string,
+): V2RawMessageReader {
     const servedBoundaryCache = new Map<string, string | null>();
     return {
+        storePath,
         getRevision: (sessionID) => {
             const reader = openReader();
             try {
@@ -368,6 +373,9 @@ export function createV2RawMessageProvider(
     sessionID: string,
 ): BoundedRawMessageProvider {
     return {
+        ...(reader.storePath
+            ? { workerSource: { kind: "opencode2" as const, path: reader.storePath } }
+            : {}),
         readMessagePage: (afterOrdinal, limit, finalWatermark, after) =>
             reader.readPage(sessionID, afterOrdinal, limit, finalWatermark, after),
         readMessageById: (messageID) => reader.findById(sessionID, messageID),

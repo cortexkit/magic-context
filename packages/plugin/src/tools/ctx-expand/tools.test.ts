@@ -120,6 +120,12 @@ describe("ctx_expand search archive", () => {
         let available = original.slice(2);
         const unregister = setRawMessageProvider(sessionId, {
             readMessages: () => available,
+            readMessageIdOrdinalsForRangeOffThread: async (from, to) =>
+                new Map(
+                    available
+                        .filter((message) => message.ordinal >= from && message.ordinal <= to)
+                        .map((message) => [message.id, message.ordinal]),
+                ),
         });
         try {
             const context = { sessionID: sessionId } as never;

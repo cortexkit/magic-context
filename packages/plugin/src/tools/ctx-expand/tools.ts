@@ -3,15 +3,18 @@ import { getLastCompartmentEndMessage } from "../../features/magic-context/compa
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import {
     prepareRawSessionOrdinals,
+    rawMessageWorkerSource,
     readSessionChunk,
 } from "../../hooks/magic-context/read-session-chunk";
 import type { ToolExpansionMap } from "../../shared/historian-tool-template";
+import { getSqliteDatabasePath } from "../../shared/sqlite";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_EXPAND_DESCRIPTION, CTX_EXPAND_TOKEN_BUDGET } from "./constants";
 import { resolveCtxExpandMode } from "./mode";
 import { renderItemByTag, renderMessageByOrdinal, renderVerboseRange } from "./render";
 import { renderSearchArchiveOffThread } from "./search-archive";
 import type { CtxExpandArgs } from "./types";
+import { readV2ArchiveOffThread } from "./v2-archive-reader";
 
 export { CTX_EXPAND_LIGHT_DESCRIPTION } from "../light-descriptions";
 
@@ -94,6 +97,21 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                 return mode.message;
             }
             if (mode.kind === "tag") {
+                const source = rawMessageWorkerSource(sessionId);
+                const path = getSqliteDatabasePath(deps.db);
+                if (source) {
+                    if (!path)
+                        throw new Error(
+                            "Search archive worker unavailable: private archive has no off-thread source",
+                        );
+                    const text = await readV2ArchiveOffThread(path, source.path, sessionId, {
+                        kind: "tag",
+                        tag: mode.tag,
+                    });
+                    if (text === null)
+                        throw new Error("Search archive worker unavailable: unexpected tag reply");
+                    return text;
+                }
                 return renderItemByTag(deps.db, sessionId, mode.tag);
             }
             if (mode.kind === "message") {
