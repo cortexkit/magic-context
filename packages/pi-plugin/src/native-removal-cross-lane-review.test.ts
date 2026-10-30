@@ -159,7 +159,7 @@ test("review witness: failed heuristic group preserves an earlier successful que
 				cleanupCalls: cleanupSpy.mock.calls.length,
 			}),
 		);
-		// Rollback is per group: the earlier queued drop survives the failed heuristic group.
+		// Each transaction rolls back separately: failed heuristic drops cannot undo the committed queued drop.
 		expect(dropped).toHaveLength(1);
 		if (returned) {
 			expect(JSON.stringify(next?.messages)).toBe(

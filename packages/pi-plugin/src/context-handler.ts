@@ -10539,8 +10539,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						staleReduceStripEnabled: true,
 						onStaleReduceEdit: recordStaleReduceEdit,
 						// Tiered emergency drop fires only at the derived force band AND when the
-						// ceiling is known. forceMaterialization already incorporates
-						// the derived force-band / emergency condition for Pi (primary-equivalent).
+						// ceiling is known. For Pi, forceMaterialization already includes
+						// the derived force-band and emergency conditions.
 						emergency:
 							args.forceMaterialization === true &&
 							args.emergencyCeilingTokens !== undefined &&

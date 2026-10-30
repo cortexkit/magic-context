@@ -2,6 +2,7 @@ import type { ContextDatabase } from "@magic-context/core/features/magic-context
 import {
 	addNativeReasoningIds,
 	saveNativeToolInputs,
+	withNativeReplayWriteBarrier,
 } from "@magic-context/core/features/magic-context/storage-native-replay";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
@@ -22,8 +23,10 @@ type RemovalBatch = {
 	saved: Map<string, string> | undefined;
 	planned: Map<string, string>;
 	requested: Map<string, string>;
+	pending: Map<string, string>;
 	flushed: boolean;
 	flush: () => void;
+	persistPending: () => void;
 };
 const removalBatches = new WeakMap<
 	ContextDatabase,
@@ -38,8 +41,9 @@ export class PiToolRemovalBatchError extends Error {
 
 /**
  * Authorize against a private, ordered overlay, then merge the native tool inputs
- * once alongside the drop's tag statuses and pending-operation deletions. The
- * caller owns the transaction and must flush before recording which
+ * once alongside selected tool tags' status updates and pending-operation
+ * deletions, unless another native writer needs the earlier keys published first.
+ * The caller owns the transaction and must flush before recording which
  * provider-signed reasoning blocks were omitted. Publish the permission map only
  * after that caller returns successfully; outer transactions register restoration
  * on rollback.
@@ -60,13 +64,20 @@ export function withPiToolRemovalBatch<T>(
 		sessions = new Map();
 		removalBatches.set(args.db, sessions);
 	}
+	let publishing = false;
 	const batch: RemovalBatch = {
 		saved: args.saved,
 		planned: new Map(args.saved),
 		requested: new Map(),
+		pending: new Map(),
 		flushed: false,
 		flush() {
 			if (batch.flushed) return;
+			batch.persistPending();
+			batch.flushed = true;
+		},
+		persistPending() {
+			if (publishing || batch.pending.size === 0) return;
 			const connection = args.db as unknown as {
 				inTransaction?: boolean;
 				isTransaction?: boolean;
@@ -78,20 +89,27 @@ export function withPiToolRemovalBatch<T>(
 				throw new Error(
 					"Native removal publication requires a caller-owned transaction",
 				);
-			batch.flushed = true;
-			if (batch.requested.size === 0) return;
 			try {
-				saveNativeToolInputs(args.db, args.sessionId, batch.requested);
+				publishing = true;
+				saveNativeToolInputs(args.db, args.sessionId, batch.pending);
+				batch.pending.clear();
 			} catch (cause) {
 				// The edit callback may have changed its private transcript. Cleanup
 				// must not expose those edits after the transaction rolls back.
 				throw new PiToolRemovalBatchError(cause);
+			} finally {
+				publishing = false;
 			}
 		},
 	};
 	sessions.set(args.sessionId, batch);
 	try {
-		const result = edit(batch.flush);
+		const result = withNativeReplayWriteBarrier(
+			args.db,
+			args.sessionId,
+			batch.persistPending,
+			() => edit(batch.flush),
+		);
 		if (batch.requested.size > 0 && !batch.flushed)
 			throw new Error(
 				"Native removal markers were not flushed in the caller's transaction",
@@ -363,6 +381,7 @@ export function authorizePiToolRemoval(args: {
 			throw new Error("Tool removal requested after lane publication");
 		batch.planned.set(args.callId, NATIVE_TOOL_REMOVAL_MARKER);
 		batch.requested.set(args.callId, NATIVE_TOOL_REMOVAL_MARKER);
+		batch.pending.set(args.callId, NATIVE_TOOL_REMOVAL_MARKER);
 		return true;
 	}
 	if (args.saved.get(args.callId) === NATIVE_TOOL_REMOVAL_MARKER) return true;
