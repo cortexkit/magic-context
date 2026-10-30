@@ -711,7 +711,7 @@ impl Rig {
     }
 
     fn sql(&self) -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open(&self.db).unwrap();
+        let conn = inspection_sql(&self.db);
         conn.busy_timeout(Duration::from_secs(30)).unwrap();
         conn
     }
@@ -1102,7 +1102,7 @@ fn row(label: &str, size: u64, sample: &Sample) -> String {
     line
 }
 
-const PHASES: [&str; 21] = [
+const PHASES: [&str; 24] = [
     "load",
     "rem:base",
     "rem:last",
@@ -1118,6 +1118,9 @@ const PHASES: [&str; 21] = [
     "phase:cache_state_load",
     "phase:cadence",
     "phase:historian",
+    "hist:projection",
+    "hist:identities",
+    "hist:fire",
     "phase:checkin",
     "save",
     "pub:engine",

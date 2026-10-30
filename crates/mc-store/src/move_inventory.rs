@@ -3199,7 +3199,7 @@ pub const TABLES: &[TableInventory] = &[
         Module,
         "mc_cache_sections",
         Ship,
-        RowSelector::Predicate("session_id = ?1"),
+        RowSelector::Predicate(crate::async_compaction_layout::MOVE_SELECTOR),
         &["session_id", "section"],
         &["session_id", "section", "body"],
         &[],

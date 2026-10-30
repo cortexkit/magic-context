@@ -91,8 +91,7 @@ impl Adapter {
 
     /// The primary keys of the provider's stored records for `session`.
     fn stored_refs(&self, session: &str) -> Result<BTreeSet<String>, String> {
-        let conn =
-            rusqlite::Connection::open(self.base.join("store.db")).map_err(|e| e.to_string())?;
+        let conn = try_inspection_sql(self.base.join("store.db")).map_err(|e| e.to_string())?;
         let mut query = conn
             .prepare("SELECT session_ref FROM mc_async_compaction WHERE session=?1")
             .map_err(|e| e.to_string())?;

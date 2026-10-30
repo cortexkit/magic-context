@@ -39,6 +39,10 @@ pub use historian_claim::with_historian_claim_fixture_entropy;
 mod historian_telemetry;
 pub use historian_telemetry::{HistorianInvocation, HistorianRunTelemetry};
 mod async_compaction;
+mod async_compaction_layout;
+pub const ASYNC_COMPACTION_ENTRY_LOOKUP_SQL: &str = async_compaction_layout::ENTRY_LOOKUP_SQL;
+pub const ASYNC_COMPACTION_EXISTS_FOR_SESSION_SQL: &str =
+    async_compaction_layout::EXISTS_FOR_SESSION_SQL;
 mod cut_head;
 pub use cut_head::NamespaceHead;
 pub mod memory_history;

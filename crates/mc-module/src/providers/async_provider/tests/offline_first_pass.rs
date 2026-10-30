@@ -362,7 +362,7 @@ impl Arm {
 
     /// Every stored view, `(version, view_json, announced)`.
     fn views(&self) -> Vec<(u64, String, i64)> {
-        let conn = rusqlite::Connection::open(self.store_dir.join("store.db")).unwrap();
+        let conn = inspection_sql(self.store_dir.join("store.db"));
         conn.busy_timeout(Duration::from_secs(30)).unwrap();
         let views = conn.prepare("SELECT version,view_json,announced FROM mc_async_compaction_views WHERE session_ref=?1 ORDER BY version")
             .unwrap()
@@ -375,7 +375,7 @@ impl Arm {
 
     /// The stored native-edit baselines, by slot.
     fn edit_baselines(&self) -> Vec<(String, String)> {
-        let conn = rusqlite::Connection::open(self.store_dir.join("store.db")).unwrap();
+        let conn = inspection_sql(self.store_dir.join("store.db"));
         let baselines = conn.prepare("SELECT slot,view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot IN ('frozen_edits','retired_native_edits') ORDER BY slot")
             .unwrap()
             .query_map([self.reference()], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -623,7 +623,7 @@ fn proof_of(served: &[ReadMessage]) -> EntryInputProof {
 }
 
 fn rewrite_offline_marker(prep: &Prepared, rewrite: impl FnOnce(&mut Value)) {
-    let conn = rusqlite::Connection::open(&prep.paths.store_db).unwrap();
+    let conn = inspection_sql(&prep.paths.store_db);
     let reference = runner_session_ref(MODULE, "opencode", &prep.session);
     let raw: String = conn
         .query_row(
@@ -1205,7 +1205,7 @@ async fn an_offline_run_that_stopped_before_its_proof_requires_an_offline_rerun(
     // The record as a run stopped before its last save leaves it: marked, but
     // with no proof.
     let reference = runner_session_ref(MODULE, "opencode", &prep.session);
-    let conn = rusqlite::Connection::open(store.path().join("store.db")).unwrap();
+    let conn = inspection_sql(store.path().join("store.db"));
     let raw: String = conn
         .query_row(
             "SELECT state_json FROM mc_async_compaction WHERE session_ref=?1",

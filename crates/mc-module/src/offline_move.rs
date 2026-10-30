@@ -1409,7 +1409,7 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
     if table_exists(&store, "mc_async_compaction").map_err(sql)? {
         let existing: bool = store
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM mc_async_compaction WHERE session=?1)",
+                mc_store::ASYNC_COMPACTION_EXISTS_FOR_SESSION_SQL,
                 [session],
                 |row| row.get(0),
             )

@@ -524,6 +524,30 @@ pub fn project_messages(messages: &[CkIngressMessage]) -> Result<FlatProjection,
     project_messages_from_state(messages, FlatProjectionBuilder::default())
 }
 
+/// Extend a proven immutable input prefix without copying its retained blocks.
+/// The owner must invalidate the projection before any non-append input change.
+pub(crate) fn append_projected_messages(
+    cached: FlatProjection,
+    messages: &[CkIngressMessage],
+) -> Result<FlatProjection, CkWireError> {
+    let state = cached
+        .states_after_messages
+        .last()
+        .map(|state| state.as_ref().clone())
+        .unwrap_or_default();
+    project_messages_from_state(
+        messages,
+        FlatProjectionBuilder {
+            blocks: cached.blocks,
+            identity_by_mid: cached.identity_by_mid,
+            message_meta: cached.message_meta,
+            message_block_ends: cached.message_block_ends,
+            states_after_messages: cached.states_after_messages,
+            state,
+        },
+    )
+}
+
 /// Reuse an acknowledged message prefix and project only its replacement suffix.
 ///
 /// The caller validates the session fingerprint and context before supplying `cached`; malformed
@@ -1022,6 +1046,44 @@ mod tests {
                 ProviderExtras::new(),
                 HarnessMeta::default(),
             ),
+        }
+    }
+
+    #[test]
+    fn owned_append_projection_matches_full_projection_at_every_frontier() {
+        let mut messages = Vec::new();
+        for turn in 0..24 {
+            let ordinal = turn * 3;
+            messages.push(text_msg(&format!("u{turn}"), ordinal, "user", "question"));
+            messages.push(assistant_with_call(
+                &format!("a{turn}"),
+                ordinal + 1,
+                "reused-call",
+            ));
+            messages.push(CkIngressMessage {
+                mid: format!("r{turn}"),
+                ordinal: ordinal + 2,
+                ck: CkWireMessage::from_parts(
+                    "user",
+                    vec![CkWireBlock::bare(CkKind::ToolResult {
+                        id: "reused-call".into(),
+                        tool_name: "read".into(),
+                        output: CkToolOutput::bare(CkOutputKind::Text {
+                            text: "result".into(),
+                        }),
+                        provider_executed: false,
+                    })],
+                    None,
+                    ProviderExtras::new(),
+                    HarnessMeta::default(),
+                ),
+            });
+        }
+        let full = project_messages(&messages).unwrap();
+        for frontier in 0..=messages.len() {
+            let prefix = project_messages(&messages[..frontier]).unwrap();
+            let appended = append_projected_messages(prefix, &messages[frontier..]).unwrap();
+            assert_eq!(appended, full, "frontier {frontier}");
         }
     }
 

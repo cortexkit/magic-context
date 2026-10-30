@@ -19,6 +19,8 @@ use serde_json::Value;
 use crate::historian::HistorianNoFireCause;
 use crate::scheduler::escalation_bands;
 use crate::selection::SelKind;
+mod async_cache;
+pub(crate) use async_cache::AsyncTriggerCache;
 
 // --- Constants for protected-tail sizing and trigger thresholds. ---
 
@@ -432,6 +434,16 @@ fn resolve_protected_tail_boundary_with_index(
     ctx: &BoundaryContext,
     index: &TokenIndex,
 ) -> BoundaryResolution {
+    let arcs = build_tool_arcs(messages);
+    resolve_protected_tail_boundary_prepared(messages, ctx, index, &arcs)
+}
+
+fn resolve_protected_tail_boundary_prepared(
+    messages: &[BoundaryMsg],
+    ctx: &BoundaryContext,
+    index: &TokenIndex,
+    arcs: &[ToolArc],
+) -> BoundaryResolution {
     let raw_message_count = index.raw_message_count;
     let offset = compartment_offset(ctx.last_compartment_end_ordinal, messages).unwrap_or(1);
     let usage_percentage = clamp_percentage(ctx.usage_percentage);
@@ -456,7 +468,6 @@ fn resolve_protected_tail_boundary_with_index(
         .emergency_tail_scale
         .map(|scale| (target.n * scale).floor().max(1.0))
         .unwrap_or(target.n);
-    let arcs = build_tool_arcs(messages);
     let mut boundary = index.find_suffix_start_for_tokens(scaled_n);
     let recent_open_arc_cutoff = boundary;
     let mut boundary_reason = if boundary == index.first_ordinal {
@@ -474,7 +485,7 @@ fn resolve_protected_tail_boundary_with_index(
         boundary_reason = "huge-message-exception".to_string();
     }
 
-    let first_fence = fence_boundary_for_tool_arcs(boundary, &arcs, offset, recent_open_arc_cutoff);
+    let first_fence = fence_boundary_for_tool_arcs(boundary, arcs, offset, recent_open_arc_cutoff);
     let mut fenced_by_open_arc = first_fence.open_arc;
     boundary = first_fence.boundary;
 
@@ -482,7 +493,7 @@ fn resolve_protected_tail_boundary_with_index(
     if snapped != boundary {
         boundary_reason = "semantic-snap".to_string();
     }
-    let second_fence = fence_boundary_for_tool_arcs(snapped, &arcs, offset, recent_open_arc_cutoff);
+    let second_fence = fence_boundary_for_tool_arcs(snapped, arcs, offset, recent_open_arc_cutoff);
     fenced_by_open_arc |= second_fence.open_arc;
     boundary = second_fence.boundary;
 
@@ -520,7 +531,7 @@ fn resolve_protected_tail_boundary_with_index(
         // On verbatim-tail profiles, folding is the only reclaim path, while the newest message
         // is still forwarded in full. Keep the newest message and its tool pair out of the
         // fold so the live turn cannot become a durable compartment boundary.
-        let newest_floor = newest_message_protected_floor(&arcs, index);
+        let newest_floor = newest_message_protected_floor(arcs, index);
         protected_tail_start = protected_tail_start.min(newest_floor).max(offset);
         protected_tail_start = index.clamp_ordinal(protected_tail_start);
     }
@@ -528,7 +539,7 @@ fn resolve_protected_tail_boundary_with_index(
     // Runtime floors, semantic snapping, and the newest-message guard can each move a previously
     // safe candidate. Pairing is the final boundary invariant, so re-fence after all of them.
     protected_tail_start =
-        fence_boundary_for_completed_tool_arcs(protected_tail_start, &arcs, offset);
+        fence_boundary_for_completed_tool_arcs(protected_tail_start, arcs, offset);
 
     let per_run_cap = select_per_run_cap(
         usage_percentage,
@@ -540,7 +551,7 @@ fn resolve_protected_tail_boundary_with_index(
         index,
         protected_tail_start,
         offset,
-        arcs: &arcs,
+        arcs,
         cap_tokens: per_run_cap,
         recent_open_arc_cutoff,
     });
@@ -797,6 +808,17 @@ fn check_compartment_trigger_with_index(
     index: &TokenIndex,
     token_estimator: &mut dyn FnMut(&str) -> usize,
 ) -> TriggerDecision {
+    check_compartment_trigger_prepared(messages, ctx, index, token_estimator, None, None)
+}
+
+fn check_compartment_trigger_prepared(
+    messages: &[BoundaryMsg],
+    ctx: &TriggerContext,
+    index: &TokenIndex,
+    token_estimator: &mut dyn FnMut(&str) -> usize,
+    arcs: Option<&[ToolArc]>,
+    chunks: Option<&async_cache::ChunkCache>,
+) -> TriggerDecision {
     let trigger_budget = ctx.boundary.trigger_budget.unwrap_or_else(|| {
         derive_trigger_budget(
             ctx.boundary.context_limit,
@@ -805,11 +827,7 @@ fn check_compartment_trigger_with_index(
     });
     let offset =
         compartment_offset(ctx.boundary.last_compartment_end_ordinal, messages).unwrap_or(1);
-    let has_live_at_or_after_offset = messages
-        .iter()
-        .map(|message| message.message_ordinal)
-        .max()
-        .is_some_and(|max_ordinal| max_ordinal >= offset);
+    let has_live_at_or_after_offset = index.raw_message_count > 0 && index.last_ordinal >= offset;
     if !has_live_at_or_after_offset {
         return no_fire(HistorianNoFireCause::NoLiveMessageAtOrAfterOffset);
     }
@@ -817,7 +835,11 @@ fn check_compartment_trigger_with_index(
     let mut primary_ctx = ctx.boundary.clone();
     primary_ctx.trigger_budget = Some(trigger_budget);
     primary_ctx.emergency_tail_scale = None;
-    let boundary = resolve_protected_tail_boundary_with_index(messages, &primary_ctx, index);
+    let boundary = if let Some(arcs) = arcs {
+        resolve_protected_tail_boundary_prepared(messages, &primary_ctx, index, arcs)
+    } else {
+        resolve_protected_tail_boundary_with_index(messages, &primary_ctx, index)
+    };
     let has_protected_eligible_head =
         boundary.eligible_head.start < boundary.protected_start_ordinal;
 
@@ -830,13 +852,25 @@ fn check_compartment_trigger_with_index(
         / source_ratio)
         .floor();
     let mut chunk = if has_protected_eligible_head {
-        chunked_message_estimate_with_estimator(
-            messages,
-            boundary.eligible_head.start,
-            Some(boundary.protected_start_ordinal),
-            scan_budget,
-            token_estimator,
-        )
+        chunks
+            .and_then(|cache| {
+                cache.estimate(
+                    messages,
+                    boundary.eligible_head.start,
+                    Some(boundary.protected_start_ordinal),
+                    scan_budget,
+                    token_estimator,
+                )
+            })
+            .unwrap_or_else(|| {
+                chunked_message_estimate_with_estimator(
+                    messages,
+                    boundary.eligible_head.start,
+                    Some(boundary.protected_start_ordinal),
+                    scan_budget,
+                    token_estimator,
+                )
+            })
     } else {
         ChunkEstimate {
             tokens: 0.0,
@@ -890,8 +924,11 @@ fn check_compartment_trigger_with_index(
         };
         let mut scaled_ctx = primary_ctx;
         scaled_ctx.emergency_tail_scale = Some(scale);
-        let scaled_boundary =
-            resolve_protected_tail_boundary_with_index(messages, &scaled_ctx, index);
+        let scaled_boundary = if let Some(arcs) = arcs {
+            resolve_protected_tail_boundary_prepared(messages, &scaled_ctx, index, arcs)
+        } else {
+            resolve_protected_tail_boundary_with_index(messages, &scaled_ctx, index)
+        };
         if has_runnable_compartment_window(
             &scaled_boundary,
             ctx.boundary.usage_percentage,
@@ -1658,6 +1695,7 @@ struct ChunkBuilder<'a> {
     current_block_approx_tokens: f64,
     last_appended_part_tokens: f64,
     formatted_budget_crossed: bool,
+    captured_blocks: Option<Vec<ChunkBlock>>,
 }
 
 impl<'a> ChunkBuilder<'a> {
@@ -1683,6 +1721,7 @@ impl<'a> ChunkBuilder<'a> {
             current_block_approx_tokens: 0.0,
             last_appended_part_tokens: 0.0,
             formatted_budget_crossed: false,
+            captured_blocks: None,
         }
     }
 
@@ -1839,6 +1878,9 @@ impl<'a> ChunkBuilder<'a> {
             self.commit_cluster_count += 1;
         }
         self.last_flushed_role.clone_from(&current_block.role);
+        if let Some(blocks) = &mut self.captured_blocks {
+            blocks.push(current_block.clone());
+        }
         self.messages_processed += current_block.meta.len();
         self.formatted_blocks.push(block_text);
         self.block_tokens.push(block_tokens);

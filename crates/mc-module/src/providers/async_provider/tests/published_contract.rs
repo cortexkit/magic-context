@@ -341,7 +341,7 @@ fn opencode_text(n: u64, text: &str) -> ReadMessage {
 /// runner removed (revert) or never persisted. The Setup under test only
 /// reads them back through its normal store loads.
 fn delete_store_entries(dir: &std::path::Path, reference: &str, ordinals: &[u64]) {
-    let conn = rusqlite::Connection::open(dir.join("store.db")).unwrap();
+    let conn = inspection_sql(dir.join("store.db"));
     let mut stmt = conn
         .prepare("DELETE FROM mc_async_compaction_entries WHERE session_ref = ?1 AND ordinal = ?2")
         .unwrap();

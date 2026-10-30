@@ -16,6 +16,7 @@ mod emptied_messages;
 mod frozen_edits;
 mod full_array_floor;
 mod held_entries;
+mod historian_cache;
 mod historian_tail;
 mod history_expand;
 mod moved_session;
@@ -35,6 +36,32 @@ use moved_session::CheckpointSource;
 use resident::{EngineView, HeldEntry};
 #[cfg(test)]
 use scaling_tests::reminder_work;
+
+#[cfg(test)]
+fn inspection_sql(path: impl AsRef<std::path::Path>) -> rusqlite::Connection {
+    try_inspection_sql(path).unwrap()
+}
+
+#[cfg(test)]
+fn try_inspection_sql(path: impl AsRef<std::path::Path>) -> rusqlite::Result<rusqlite::Connection> {
+    let conn = rusqlite::Connection::open(path)?;
+    McStore::install_async_compaction_inspection(&conn)?;
+    Ok(conn)
+}
+
+#[cfg(test)]
+fn guard_async_writes(path: impl AsRef<std::path::Path>, kind: &str) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let sql = match kind {
+        "cold" => "CREATE TRIGGER no_cold_payload_rewrite BEFORE UPDATE ON mc_cache_sections WHEN NEW.session_id GLOB '__ckmc_async_v2_record:*' AND NEW.section IN ('setup-initial','moved-bound-drops') BEGIN SELECT RAISE(ABORT,'unchanged cold payload rewritten'); END;
+            CREATE TRIGGER no_bound_replay BEFORE INSERT ON pending_agent_drops BEGIN SELECT RAISE(ABORT,'bound queue replayed in the same generation'); END;",
+        "initial" => "CREATE TRIGGER fail_setup_payload BEFORE UPDATE ON mc_cache_sections WHEN NEW.session_id GLOB '__ckmc_async_v2_record:*' AND NEW.section='setup-initial' BEGIN SELECT RAISE(ABORT,'interrupted answer save'); END;",
+        "entries" => "CREATE TRIGGER fail_historian_source BEFORE UPDATE ON mc_cache_sections WHEN NEW.section GLOB '__ckmc_async_v2_entry:*' BEGIN SELECT RAISE(ABORT,'source write interrupted'); END;",
+        _ => panic!("unknown async storage guard"),
+    };
+    conn.execute_batch(sql).unwrap();
+    conn
+}
 
 /// The shared session reference for a bare runner module id, harness and
 /// session, derived without `Key` so tests check the provider's keys against
@@ -219,6 +246,9 @@ struct RecordStart {
     preparation: Option<offline_first_pass::OfflineFirstPass>,
 }
 
+/// Cold records live only in the versioned KV layout. Legacy binaries see an
+/// absent record and rebuild at Setup; exposing an undecodable cold header in
+/// the legacy table would stop their global pending-view announcement walk.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AsyncRecord {
     #[serde(default, skip_serializing_if = "user_commands::Ledger::is_empty")]
@@ -361,6 +391,10 @@ pub(crate) struct AsyncRecord {
     initial_ready: bool,
     #[serde(skip)]
     setup_payload_bytes: (usize, usize),
+    /// Missing on older records: an unknown source revision can never prove
+    /// that a resident historian prefix is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_revision: Option<u64>,
     #[serde(default)]
     cache_policy: contract_policy::CachePolicy,
     /// Only the engine's fixed-size counters are in this record; its produced
@@ -412,6 +446,8 @@ pub(crate) struct AsyncRecord {
     /// `fold_entries`.
     #[serde(skip)]
     aggregates: resident::Aggregates,
+    #[serde(skip)]
+    historian_cache: Arc<Mutex<historian_cache::Cache>>,
     /// Bytes held by the entries through the given ordinal, so the resident
     /// size is updated by what each operation added.
     #[serde(skip)]
@@ -664,6 +700,7 @@ struct Journal {
     complete: bool,
     /// Highest held ordinal already stored.
     persisted_through: Option<u64>,
+    input_epoch: u64,
     /// Highest held ordinal already in `tag_index`.
     indexed_through: Option<u64>,
     /// Stored entries to delete on the next save: after this ordinal, or all
@@ -1349,6 +1386,9 @@ impl State {
         if !self.journal.complete {
             return Err(transient("async record was loaded without its transcript"));
         }
+        if self.journal.truncate_below.is_some() {
+            self.historian_cache = Arc::default();
+        }
         self.reindex()?;
         let mut baselines = Vec::new();
         let produced = self.place_baseline(
@@ -1444,6 +1484,7 @@ impl State {
         }
         let reference = self.reference();
         let key = self.key.store_key().conversation_key();
+        self.prepare_input_revision()?;
         let payloads = self.setup_payload_writes()?;
         let state = serde_json::to_string(self).map_err(transient)?;
         let mut save = store.async_compaction_save(&reference, &key, &self.key.session, &state);
@@ -1547,6 +1588,7 @@ impl State {
         self.retired_frozen.dirty = false;
         self.journal.clear_published = false;
         self.journal.persisted_through = self.entries.last_key_value().map(|(n, _)| *n);
+        self.journal.input_epoch = self.entries.mutation_epoch();
         self.journal.produced = self
             .produced_view
             .as_ref()
@@ -1558,6 +1600,21 @@ impl State {
             self.published_engine
                 .retain(|version, _| *version >= floor || Some(*version) == newest);
         }
+        Ok(())
+    }
+
+    fn prepare_input_revision(&mut self) -> Result<(), HandlerOutcome> {
+        let changed = self.journal.input_epoch != self.entries.mutation_epoch()
+            || self.journal.truncate.is_some()
+            || self.journal.truncate_below.is_some()
+            || !self.journal.replaced.is_empty();
+        self.input_revision = Some(match self.input_revision {
+            Some(prior) if changed => prior
+                .checked_add(1)
+                .ok_or_else(|| transient("historian source revision exhausted"))?,
+            Some(prior) => prior,
+            None => 0,
+        });
         Ok(())
     }
 
@@ -1736,6 +1793,7 @@ impl State {
     /// Drop held entries after `through`, or all of them for `None`, with
     /// their tag addresses; the next save deletes the stored rows.
     fn truncate_entries(&mut self, through: Option<u64>) {
+        self.historian_cache = Arc::default();
         self.cut_signature = None;
         self.logical_prefix = None;
         self.mid_index
@@ -1874,6 +1932,11 @@ impl State {
             + entries
             + self.setup_payload_bytes.0
             + self.setup_payload_bytes.1
+            + self
+                .historian_cache
+                .lock()
+                .expect("historian input cache mutex")
+                .retained_bytes()
             + self.tag_index.len() * TAG_ADDRESS
             + self.mid_index.len() * 96
             + cache_state
@@ -2356,6 +2419,7 @@ fn load(store: &McStore, reference: &str) -> Result<Option<State>, HandlerOutcom
     state.journal = Journal {
         complete: true,
         persisted_through: through,
+        input_epoch: state.entries.mutation_epoch(),
         indexed_through: through,
         truncate: None,
         truncate_below: None,
@@ -3145,6 +3209,7 @@ impl McHandler {
             initial_stored: false,
             initial_ready: false,
             setup_payload_bytes: (0, 0),
+            input_revision: None,
             cache_policy: contract_policy::CachePolicy::freeze(
                 &self.effective_config(&binding.project_root),
             ),
@@ -3160,6 +3225,7 @@ impl McHandler {
             entries: Default::default(),
             mid_index: BTreeMap::new(),
             aggregates: Default::default(),
+            historian_cache: Arc::default(),
             entry_bytes: Default::default(),
             cache_state: None,
             seq: 0,
@@ -4528,19 +4594,38 @@ impl McHandler {
         for (reference, version, raw) in
             store.pending_async_compaction_views().map_err(transient)?
         {
-            let view: view::CompactionView = serde_json::from_str(&raw).map_err(transient)?;
-            let Some(state) = load_head(store, &reference)? else {
-                continue;
+            let view: view::CompactionView = match serde_json::from_str(&raw) {
+                Ok(view) => view,
+                Err(error) => {
+                    tracing::warn!(session_ref=%reference, version, %error, "async view announcement skipped: unreadable view");
+                    continue;
+                }
+            };
+            let state = match load_head(store, &reference) {
+                Ok(Some(state)) => state,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(session_ref=%reference, version, ?error, "async view announcement skipped: unreadable session");
+                    continue;
+                }
             };
             let invalid_cut = if let Some(cut) = &view.cut {
-                state
-                    .published_cut_for(store, cut.through_ordinal + 1, &view.lineage_id)?
-                    .is_none_or(|held| {
+                let Some(first) = cut.through_ordinal.checked_add(1) else {
+                    tracing::warn!(session_ref=%reference, version, "async view announcement skipped: invalid cut ordinal");
+                    continue;
+                };
+                match state.published_cut_for(store, first, &view.lineage_id) {
+                    Ok(held) => held.is_none_or(|held| {
                         held.version != version
                             || held
                                 .covered_through
                                 .is_none_or(|end| end > cut.through_ordinal)
-                    })
+                    }),
+                    Err(error) => {
+                        tracing::warn!(session_ref=%reference, version, ?error, "async view announcement skipped: unreadable cut");
+                        continue;
+                    }
+                }
             } else {
                 false
             };
@@ -6299,6 +6384,48 @@ struct AsyncHistoryFence {
 }
 
 impl AsyncHistoryFence {
+    fn prepare_cached_input(
+        &self,
+        mut source: historian_cache::Source<'_>,
+        parsed: &mut TransformRequest,
+        cache: &Mutex<historian_cache::Cache>,
+    ) -> Result<(historian_cache::Prepared, u64), HandlerOutcome> {
+        let store = source.store;
+        let head = load_head(store, &self.reference)?
+            .ok_or_else(|| transient("async conversation disappeared"))?;
+        if head.generation != self.generation || head.resync {
+            return Err(transient("async historian lineage changed"));
+        }
+        source.stamp.refresh_head(&head);
+        #[cfg(test)]
+        let timer = scaling_tests::save_meter::start_kind(&self.reference, "hist:projection");
+        let input = cache
+            .lock()
+            .expect("historian input cache mutex")
+            .prepare(source, parsed)?;
+        #[cfg(test)]
+        drop(timer);
+        #[cfg(test)]
+        let _timer = scaling_tests::save_meter::start_kind(&self.reference, "hist:identities");
+        let version = store
+            .load_meta(&parsed.session_id)
+            .map_err(transient)?
+            .row_version
+            .ok_or_else(|| transient("async historian cache state missing"))?;
+        // The returned revision proves that the prefix rows we filled still
+        // exist. Any intervening writer makes us fill the full window again.
+        let identities = if input.reused && input.known_version == Some(version) {
+            &input.delta
+        } else {
+            &input.projection.identity_by_mid
+        };
+        let version = store
+            .commit_missing_block_identities(&parsed.session_id, version, identities)
+            .map_err(transient)?;
+        Ok((input, version))
+    }
+
+    #[cfg(test)]
     /// The caller holds the conversation serial through source preparation.
     fn prepare_input(
         &self,
@@ -6314,6 +6441,8 @@ impl AsyncHistoryFence {
         if head.generation != self.generation || head.resync {
             return Err(transient("async historian lineage changed"));
         }
+        #[cfg(test)]
+        let timer = scaling_tests::save_meter::start_kind(&self.reference, "hist:projection");
         let projection = historian_tail::prepare_cut_input(
             store,
             &self.reference,
@@ -6323,6 +6452,10 @@ impl AsyncHistoryFence {
             echoes,
             prelude,
         )?;
+        #[cfg(test)]
+        drop(timer);
+        #[cfg(test)]
+        let _timer = scaling_tests::save_meter::start_kind(&self.reference, "hist:identities");
         let version = store
             .load_meta(&parsed.session_id)
             .map_err(transient)?
@@ -6506,6 +6639,9 @@ impl McHandler {
                 "async historian scheduled before its entries were stored",
             ));
         }
+        let window = from.through(through);
+        let input_stamp = historian_cache::Stamp::of(state, codec, window)?;
+        let input_cache = Arc::clone(&state.historian_cache);
         let store = Arc::clone(
             self.store
                 .get()
@@ -6557,24 +6693,31 @@ impl McHandler {
             let serial = worker.provider_serial.lock_for(&key).await;
             let result = tokio::task::spawn_blocking(move || {
                 let _serial = serial;
-                let projection = fence.prepare_input(
-                    &store,
-                    from.through(through),
-                    codec,
+                let (mut input, _version) = fence.prepare_cached_input(
+                    historian_cache::Source {
+                        store: &store,
+                        reference: &fence.reference,
+                        window,
+                        codec,
+                        echoes: &reminder_echoes,
+                        prelude: historian_seed
+                            .as_ref()
+                            .and_then(|seed| seed.historian_prelude.as_ref()),
+                        stamp: input_stamp,
+                    },
                     &mut parsed,
-                    &reminder_echoes,
-                    historian_seed
-                        .as_ref()
-                        .and_then(|seed| seed.historian_prelude.as_ref()),
+                    &input_cache,
                 )?;
                 let mut timings = HistorianTriggerTimings::default();
-                Ok::<_, HandlerOutcome>(prepare.prepare_historian_fire(
-                    store,
+                #[cfg(test)]
+                let _timer = scaling_tests::save_meter::start_kind(&fence.reference, "hist:fire");
+                let action = prepare.prepare_async_historian_fire(
+                    Arc::clone(&store),
                     &parsed,
                     &binding,
                     &binding.project_root.to_string_lossy(),
-                    &projection,
-                    HistorianPrepareContext {
+                    &input.projection,
+                    (HistorianPrepareContext {
                         rust_background_enabled: None,
                         now: now_ms(),
                         publication_fence: Some(fence),
@@ -6582,8 +6725,24 @@ impl McHandler {
                         reclaim_ride_available: false,
                         runner_lane: true,
                         timings: &mut timings,
-                    },
-                ))
+                    }, &mut input.boundary),
+                );
+                #[cfg(test)]
+                if std::env::var_os("MC_HISTORIAN_PROFILE_DETAIL").is_some() {
+                    eprintln!("HISTORIAN_DETAIL boundary_ms={:.3} trigger_ms={:.3} cache_ms={:.3} hits={} misses={}",
+                        timings.boundary_build_ms, timings.trigger_eval_ms, timings.cache_store_ms,
+                        timings.token_cache_hits, timings.tokenized_blocks);
+                }
+                let mut cache = input_cache.lock().expect("historian input cache mutex");
+                if matches!(action, PreparedHistorianAction::Complete(_)) {
+                    // No-fire diagnostics may advance scalar meta under this
+                    // serial, without removing the identities just filled.
+                    let known = store.load_meta(&parsed.session_id).ok().and_then(|meta| meta.row_version);
+                    cache.finish(input, &mut parsed, known);
+                } else {
+                    cache.clear();
+                }
+                Ok::<_, HandlerOutcome>(action)
             })
             .await;
             match result {

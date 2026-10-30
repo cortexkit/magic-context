@@ -1261,7 +1261,7 @@ async fn pruning_below_a_cut_leaves_no_row_below_it_in_any_table() {
                     .iter()
                     .any(|mid| text == mid || text.contains(&format!("{mid}#")))
         };
-        let conn = rusqlite::Connection::open(&side.db).unwrap();
+        let conn = inspection_sql(&side.db);
         let tables = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table'")
             .unwrap()
@@ -1387,7 +1387,7 @@ async fn a_record_from_before_cut_seeds_is_rebuilt() {
     let mut rng = Rng(5);
     pair.notice(&mut rng, None).await;
     for side in [&pair.resident, &pair.oracle] {
-        let conn = rusqlite::Connection::open(&side.db).unwrap();
+        let conn = inspection_sql(&side.db);
         conn.execute(
             "UPDATE mc_async_compaction SET state_json=json_remove(state_json,'$.record_version') WHERE session_ref=?1",
             [&pair.reference],

@@ -41,15 +41,7 @@ async fn unchanged_saves_leave_setup_and_move_payloads_untouched() {
             .unwrap();
         assert_eq!(serde_json::from_str::<Value>(&json).unwrap(), expected);
     }
-    let conn = rusqlite::Connection::open(dir.path().join("store.db")).unwrap();
-    conn.execute_batch(
-        "CREATE TRIGGER no_cold_payload_rewrite BEFORE UPDATE ON mc_async_compaction_baselines
-        WHEN NEW.slot IN ('setup-initial','moved-bound-drops')
-        BEGIN SELECT RAISE(ABORT,'unchanged cold payload rewritten'); END;
-        CREATE TRIGGER no_bound_replay BEFORE INSERT ON pending_agent_drops
-        BEGIN SELECT RAISE(ABORT,'bound queue replayed in the same generation'); END;",
-    )
-    .unwrap();
+    let _conn = guard_async_writes(dir.path().join("store.db"), "cold");
     state
         .ingest_read(store, codec::Codec::OpencodeAiSdk)
         .unwrap();
@@ -118,13 +110,7 @@ async fn changed_setup_payload_commits_with_its_header_or_not_at_all() {
     let changed = state.initial.clone();
     assert_ne!(initial, changed);
     state.seq += 1;
-    let conn = rusqlite::Connection::open(dir.path().join("store.db")).unwrap();
-    conn.execute_batch(
-        "CREATE TRIGGER fail_setup_payload BEFORE UPDATE ON mc_async_compaction_baselines
-        WHEN NEW.slot='setup-initial'
-        BEGIN SELECT RAISE(ABORT,'interrupted answer save'); END;",
-    )
-    .unwrap();
+    let conn = guard_async_writes(dir.path().join("store.db"), "initial");
     assert!(state.save(store, &[]).is_err());
     let mut reloaded = rig.state();
     assert_eq!(reloaded.initial, initial);

@@ -380,7 +380,7 @@ impl PrunedReasoningProbe for Adapter {
 impl Adapter {
     /// The probe's sessions ck-mc holds records for.
     fn sessions(&self) -> Vec<String> {
-        let conn = rusqlite::Connection::open(self.dir.join("store.db")).unwrap();
+        let conn = inspection_sql(self.dir.join("store.db"));
         let mut query = conn
             .prepare("SELECT DISTINCT session FROM mc_async_compaction")
             .unwrap();
