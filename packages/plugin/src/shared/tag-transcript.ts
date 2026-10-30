@@ -803,8 +803,9 @@ function readAggregateToolAccounting(
     const byteSize = getToolPartByteSize(part, text);
     // Persisted tool-result accounting tracks the largest byte size seen. Skip
     // output tokenization when that size has not grown and a count is stored;
-    // known input counts also need no tokenization. Growth and missing counts still take
-    // the original counting path, even when the identity was not reusable.
+    // known input counts also need no tokenization. Growth and missing counts still
+    // use the counting path, even if the owning message ID was not eligible for
+    // tag reuse through options.reuseMessageIds.
     const metadata = part.getToolMetadata({
         skipInputTokenCount: persisted?.inputTokenCount != null,
     });

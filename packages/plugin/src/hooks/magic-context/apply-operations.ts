@@ -330,8 +330,9 @@ export function prepareLegacyToolSkeletonConversions(
         });
     };
     const rows = readRows(db);
-    // Hosts may batch the same authorizations requested by cannotRemove().
-    // Per-target checks still decide the conversion and remain the failure fallback.
+    // Hosts may batch the removal authorizations requested by cannotRemove().
+    // Preparation does not replace the per-target cannotRemove() checks that
+    // decide whether each conversion must retain the tool call.
     options.prepareRemovals?.(rows);
     const converted = new Map<number, ConvertedToolDropMode>();
     for (const row of rows) {
