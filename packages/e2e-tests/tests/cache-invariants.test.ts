@@ -616,7 +616,7 @@ forEachHost(import.meta.url, null, (host) => {
 
             // The same session's ctx_memory save is the positive control for SOFT fragments.
             const own = "Agent save still reaches the memory delta.";
-            await runMemoryTool(sessionId, { action: "write", category: "PROJECT_RULES", content: own }, "K1 save an agent rule.");
+            await runMemoryTool(sessionId, { action: "write", ids: [], category: "PROJECT_RULES", content: own }, "K1 save an agent rule.");
             expect(writeContextDb((db) => db.prepare("SELECT content FROM memories WHERE project_path=? AND source_session_id=? AND content=?")
                 .all(projectPath, sessionId, own))).toEqual([{ content: own }]);
             h.mock.setDefault({ text: "K1 soft pressure", usage: EXECUTE_USAGE });
