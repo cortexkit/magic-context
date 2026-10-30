@@ -20,11 +20,16 @@ import { accessSync, constants, existsSync, realpathSync, statSync } from "node:
 import { homedir } from "node:os";
 import path from "node:path";
 import { log } from "../../../shared/logger";
-import { readGitCheckoutMetadata } from "./git-common-dir";
 import {
-    findPinnedIdentityByGitCommonDir,
+    invalidateGitCheckoutMetadata,
+    readCachedGitCheckoutMetadata,
+    readGitCheckoutMetadata,
+} from "./git-common-dir";
+import {
+    __resetProjectIdentitySidecarCachesForTests,
     isPinnedProjectIdentity,
     projectDirectoryKey,
+    readBorrowedProjectIdentity,
     readRememberedGitIdentity,
     readRememberedProjectIdentity,
     rememberGitIdentity,
@@ -42,6 +47,7 @@ const GIT_TIMEOUT_MS = 5_000;
 const TRANSIENT_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 const identityCache = new Map<string, string>();
 const linkedGitWorktreeCache = new Map<string, boolean>();
+const linkedIdentityDirectories = new Set<string>();
 const lastKnownGitIdentityCache = new Map<string, string>();
 // Cached `dir:` fallbacks for directories that have NO `.git` entry in their
 // ancestor chain. We only cache the no-`.git` case: once a `.git` appears we
@@ -583,19 +589,15 @@ function pinForUsableDirectory(
     const pinned = readRememberedProjectIdentity(canonical)?.identity;
     return isPinnedProjectIdentity(pinned)
         ? pinned
-        : readGitCheckoutMetadata(canonical)?.linkedWorktree
+        : readCachedGitCheckoutMetadata(canonical)?.linkedWorktree
           ? borrowedProjectIdentity(canonical, cleanup)
           : undefined;
 }
 
 export function borrowedProjectIdentity(directory: string, cleanup = true): string | undefined {
-    const metadata = readGitCheckoutMetadata(directory);
+    const metadata = readCachedGitCheckoutMetadata(directory);
     const pin = metadata?.gitCommonDir
-        ? findPinnedIdentityByGitCommonDir(
-              metadata.gitCommonDir,
-              undefined,
-              metadata.linkedWorktree,
-          )
+        ? readBorrowedProjectIdentity(directory, metadata.gitCommonDir, metadata.linkedWorktree)
         : undefined;
     if (cleanup && pin && metadata?.linkedWorktree) {
         removeStaleWorktreeIdentity(directory);
@@ -831,8 +833,9 @@ export function resolveProjectIdentityForSession(
 ): string | undefined {
     const resolvedDirectory = path.resolve(directory);
     const cacheKey = `${allowHomeProject ? "1" : "0"}\0${resolvedDirectory}`;
-    // A main checkout can gain a registered pin after this process cached git:.
-    if (readGitCheckoutMetadata(resolvedDirectory)?.linkedWorktree) {
+    const cached = sessionIdentityCache.get(cacheKey);
+    // Only known worktrees revalidate a borrow; ordinary warm sessions keep their no-I/O fast path.
+    if (cached && linkedIdentityDirectories.has(resolvedDirectory)) {
         try {
             assertProjectAllowed(directory, allowHomeProject);
         } catch (error) {
@@ -846,7 +849,6 @@ export function resolveProjectIdentityForSession(
         const pinned = pinForUsableDirectory(resolvedDirectory, directory);
         if (pinned) return pinned;
     }
-    const cached = sessionIdentityCache.get(cacheKey);
     if (
         cached &&
         (cached.revalidateAt === null || nowMs() < cached.revalidateAt) &&
@@ -855,6 +857,8 @@ export function resolveProjectIdentityForSession(
         return cached.identity;
     }
     sessionIdentityCache.delete(cacheKey);
+    if (cached?.identity?.startsWith("dir:") && hasGitDir(resolvedDirectory))
+        invalidateGitCheckoutMetadata(resolvedDirectory);
 
     filesystemProbeObserverForTests?.();
     const canonicalDirectory = (() => {
@@ -893,6 +897,8 @@ export function resolveProjectIdentityForSession(
         }
     }
     if (identity !== undefined) pausedIdentityReasons.delete(resolvedDirectory);
+    if (readCachedGitCheckoutMetadata(resolvedDirectory)?.linkedWorktree)
+        linkedIdentityDirectories.add(resolvedDirectory);
 
     // Successful git identities are immutable. Directory/home fallbacks are
     // revalidated after the same cooldown used for recoverable git failures so a
@@ -955,7 +961,7 @@ export function isLinkedGitWorktree(directory: string): boolean {
     const cached = linkedGitWorktreeCache.get(resolvedDirectory);
     if (cached !== undefined) return cached;
 
-    const metadata = readGitCheckoutMetadata(resolvedDirectory);
+    const metadata = readCachedGitCheckoutMetadata(resolvedDirectory);
     const resolvedLinked =
         metadata?.gitCommonDir === undefined ? undefined : metadata.linkedWorktree;
     // If Git metadata exists but its topology cannot be resolved, fail closed:
@@ -993,12 +999,17 @@ export function __clearProjectIdentityTransientCooldownForTests(directory?: stri
 }
 
 export function __clearProjectIdentityResolutionCacheForTests(directory?: string): void {
+    invalidateGitCheckoutMetadata(directory);
     if (directory === undefined) {
+        linkedGitWorktreeCache.clear();
+        linkedIdentityDirectories.clear();
         identityCache.clear();
         sessionIdentityCache.clear();
         return;
     }
     const resolvedDirectory = path.resolve(directory);
+    linkedGitWorktreeCache.delete(resolvedDirectory);
+    linkedIdentityDirectories.delete(resolvedDirectory);
     identityCache.delete(resolvedDirectory);
     for (const allowHome of ["0", "1"]) {
         sessionIdentityCache.delete(`${allowHome}\0${resolvedDirectory}`);
@@ -1006,12 +1017,15 @@ export function __clearProjectIdentityResolutionCacheForTests(directory?: string
 }
 
 export function __resetProjectIdentityForTests(): void {
+    invalidateGitCheckoutMetadata();
+    __resetProjectIdentitySidecarCachesForTests();
     homeProjectPermission = false;
     homeProjectSkipLogged = false;
     pausedIdentityReasons.clear();
     pausedIdentityLogged.clear();
     identityCache.clear();
     linkedGitWorktreeCache.clear();
+    linkedIdentityDirectories.clear();
     lastKnownGitIdentityCache.clear();
     directoryFallbackCache.clear();
     transientFailureCooldown.clear();

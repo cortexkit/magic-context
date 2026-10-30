@@ -107,6 +107,10 @@ impl PinWriter {
             .collect()
     }
 
+    pub(super) fn generation(&self) -> u64 {
+        self.shared.state.lock().unwrap().revision
+    }
+
     pub(super) fn publish(&self, sidecars: &Path, record: IdentityRecord, private: bool) {
         let path = sidecar_path(sidecars, Path::new(&record.directory));
         let mut state = self.shared.state.lock().unwrap();
@@ -391,6 +395,35 @@ mod tests {
         assert_eq!(resolver.common_dir_pin(&child).as_deref(), Some("pj-root"));
         resolver.pin_live_answer(&child, "pj-nested", Some(&child));
         assert!(resolver.common_dir_pin(&child).is_none());
+        gate.release();
+        assert!(writer.shutdown(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn publishing_a_pin_invalidates_a_cached_worktree_miss_before_persistence() {
+        let temp = temp();
+        let sidecars = temp.path().join("sidecars");
+        let main = temp.path().join("repo");
+        let worktree = temp.path().join("worktree");
+        let gitdir = main.join(".git/worktrees/linked");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::create_dir(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        let (writer, gate) = blocked_writer();
+        let resolver = ProjectIdentityResolver::with_pin_writer(sidecars.clone(), writer.clone());
+        assert!(resolver.common_dir_pin(&worktree).is_none());
+        resolver.pin_live_answer(&main, "pj-PENDING", Some(&main));
+        gate.wait_for_write();
+        assert!(!sidecar_path(&sidecars, &main).exists());
+        assert_eq!(
+            resolver.common_dir_pin(&worktree).as_deref(),
+            Some("pj-PENDING")
+        );
         gate.release();
         assert!(writer.shutdown(Duration::from_secs(5)));
     }

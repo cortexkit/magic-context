@@ -9,6 +9,20 @@ export interface GitCheckoutMetadata {
     linkedWorktree: boolean;
 }
 
+const checkoutMetadata = new Map<string, GitCheckoutMetadata | undefined>();
+
+/** Fallback lookups reuse topology; live pin authorization still reads the current layout. */
+export function readCachedGitCheckoutMetadata(directory: string): GitCheckoutMetadata | undefined {
+    const key = path.resolve(directory);
+    if (!checkoutMetadata.has(key)) checkoutMetadata.set(key, readGitCheckoutMetadata(key));
+    return checkoutMetadata.get(key);
+}
+
+export function invalidateGitCheckoutMetadata(directory?: string): void {
+    if (directory === undefined) checkoutMetadata.clear();
+    else checkoutMetadata.delete(path.resolve(directory));
+}
+
 /** Read Git's on-disk topology without invoking Git or guessing a checkout from a gitdir path. */
 export function readGitCheckoutMetadata(directory: string): GitCheckoutMetadata | undefined {
     let current: string;

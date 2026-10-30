@@ -11,6 +11,7 @@ import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import {
     __resetProjectIdentityForTests,
     __setProjectIdentityTestHooks,
+    borrowedProjectIdentity,
     describeUnresolvedProjectIdentity,
     isLinkedGitWorktree,
     type LiveProjectIdentityAnswer,
@@ -23,6 +24,7 @@ import {
     projectDirectoryKey,
     readRememberedProjectIdentity,
     rememberGitIdentity,
+    rememberPinnedProjectIdentity,
 } from "./project-identity-cache";
 import { __setProjectPinWriterForTests, flushProjectPinWrites } from "./project-pin-writer";
 import {
@@ -180,6 +182,126 @@ function sidecarBytes(): Map<string, string> {
         fs.readdirSync(dir).map((file) => [file, readFileSync(join(dir, file), "utf8")]),
     );
 }
+
+function linkedIdentityFixture() {
+    const main = join(testRoot, "main");
+    const worktree = join(testRoot, "worktree");
+    const gitDir = join(main, ".git", "worktrees", "linked");
+    mkdirSync(gitDir, { recursive: true });
+    mkdirSync(worktree);
+    writeFileSync(join(worktree, ".git"), `gitdir: ${gitDir}\n`);
+    writeFileSync(join(gitDir, "commondir"), "../..\n");
+    return { main, worktree, gitDir };
+}
+
+test("warm linked-worktree identity with 500 sidecars performs no scans or file reads", async () => {
+    const { main, worktree, gitDir } = linkedIdentityFixture();
+    pin(main, "pj-ROOT");
+    for (let i = 0; i < 499; i++) pin(join(testRoot, `unrelated-${i}`), `pj-other-${i}`);
+    const read = spyOn(fs, "readFileSync");
+    const scan = spyOn(fs, "readdirSync");
+    try {
+        expect(resolveProjectIdentityForSession(worktree)).toBe("pj-ROOT");
+        expect(await flushProjectPinWrites(2_000)).toBe(true);
+        expect(resolveProjectIdentityForSession(worktree)).toBe("pj-ROOT");
+        expect(read.mock.calls.filter(([file]) => file === join(worktree, ".git"))).toHaveLength(1);
+        expect(read.mock.calls.filter(([file]) => file === join(gitDir, "commondir"))).toHaveLength(
+            1,
+        );
+        read.mockClear();
+        scan.mockClear();
+        const started = performance.now();
+        let answer: string | undefined;
+        for (let i = 0; i < 100; i++) answer = resolveProjectIdentityForSession(worktree);
+        const elapsed = performance.now() - started;
+        console.info(
+            `WORKTREE_WARM_TS calls=100 sidecars=500 us_per_call=${elapsed * 10} reads=${read.mock.calls.length} scans=${scan.mock.calls.length}`,
+        );
+        expect(answer).toBe("pj-ROOT");
+        expect(resolveProjectIdentity(worktree)).toBe("pj-ROOT");
+        expect(resolveProjectIdentityStrict(worktree)).toBe("pj-ROOT");
+        expect(borrowedProjectIdentity(worktree)).toBe("pj-ROOT");
+        expect(scan).not.toHaveBeenCalled();
+        expect(read).not.toHaveBeenCalled();
+    } finally {
+        read.mockRestore();
+        scan.mockRestore();
+    }
+});
+
+test.each([
+    "external",
+    "pending",
+])("a cached worktree git answer observes an %s checkout pin", async (source) => {
+    const { main, worktree } = linkedIdentityFixture();
+    __setProjectIdentityTestHooks({ execFileSync: returningRootCommit("abcdef123") });
+    expect(resolveProjectIdentityForSession(worktree)).toBe("git:abcdef123");
+    expect(resolveProjectIdentityForSession(worktree)).toBe("git:abcdef123");
+    if (source === "external") pin(main, "pj-NEW");
+    else {
+        rememberPinnedProjectIdentity(main, "pj-NEW");
+        const mainPin = join(
+            storageDir,
+            "project-identities",
+            `${createHash("sha256").update(projectDirectoryKey(main)).digest("hex")}.json`,
+        );
+        expect(fs.existsSync(mainPin)).toBe(false);
+    }
+    expect(resolveProjectIdentityForSession(worktree)).toBe("pj-NEW");
+    expect(await flushProjectPinWrites(2_000)).toBe(true);
+});
+
+test("a borrowed answer notices an in-place pin replacement and a new exact worktree pin", () => {
+    const { main, worktree } = linkedIdentityFixture();
+    pin(main, "pj-FIRST");
+    expect(resolveProjectIdentityForSession(worktree)).toBe("pj-FIRST");
+    pin(main, "pj-OTHER");
+    expect(resolveProjectIdentityForSession(worktree)).toBe("pj-OTHER");
+    pin(worktree, "pj-EXACT");
+    expect(resolveProjectIdentityForSession(worktree)).toBe("pj-EXACT");
+});
+
+test("worktree cleanup runs only once even if a legacy writer recreates its sidecar", async () => {
+    const { main, worktree } = linkedIdentityFixture();
+    pin(main, "pj-ROOT");
+    const stale = pin(worktree, "git:abcdef123");
+    expect(borrowedProjectIdentity(worktree)).toBe("pj-ROOT");
+    expect(await flushProjectPinWrites(2_000)).toBe(true);
+    expect(fs.existsSync(stale)).toBe(false);
+    pin(worktree, "git:abcdef123");
+    expect(borrowedProjectIdentity(worktree)).toBe("pj-ROOT");
+    expect(await flushProjectPinWrites(2_000)).toBe(true);
+    expect(fs.existsSync(stale)).toBe(true);
+});
+
+test("ordinary warm sessions perform no new filesystem probes", () => {
+    const main = join(testRoot, "main");
+    mkdirSync(join(main, ".git"), { recursive: true });
+    __setProjectIdentityTestHooks({ execFileSync: returningRootCommit("abcdef123") });
+    expect(resolveProjectIdentityForSession(main)).toBe("git:abcdef123");
+    const read = spyOn(fs, "readFileSync");
+    const scan = spyOn(fs, "readdirSync");
+    const stat = spyOn(fs, "lstatSync");
+    try {
+        for (let i = 0; i < 100; i++)
+            expect(resolveProjectIdentityForSession(main)).toBe("git:abcdef123");
+        expect(read).not.toHaveBeenCalled();
+        expect(scan).not.toHaveBeenCalled();
+        expect(stat).not.toHaveBeenCalled();
+    } finally {
+        read.mockRestore();
+        scan.mockRestore();
+        stat.mockRestore();
+    }
+});
+
+test("session topology caching preserves fail-closed worktree detection for malformed metadata", () => {
+    const { worktree } = linkedIdentityFixture();
+    writeFileSync(join(worktree, ".git"), "not a gitdir pointer\n");
+    __setProjectIdentityTestHooks({ execFileSync: returningRootCommit("abcdef123") });
+    expect(resolveProjectIdentityForSession(worktree)).toBe("git:abcdef123");
+    expect(isLinkedGitWorktree(worktree)).toBe(true);
+});
 
 describe("live project pin writes", () => {
     for (const row of parity.cases.filter((row) => row.name.startsWith("worktree-"))) {

@@ -30,6 +30,7 @@ export class ProjectPinWriter {
     private saturated = false;
     private pumpScheduled = false;
     private readonly changed = new Set<() => void>();
+    private revision = 0;
 
     constructor(
         private readonly write: WritePin,
@@ -41,6 +42,7 @@ export class ProjectPinWriter {
         // Keep the original record if later resolutions propose a different identity
         // for this destination, even while its first write is still pending.
         const existing = this.pins.get(destination);
+        if (!existing) this.revision++;
         const pin = existing ?? {
             destination,
             record: { ...record },
@@ -78,6 +80,10 @@ export class ProjectPinWriter {
         return [...this.pins.values()]
             .filter((pin) => dirname(pin.destination) === sidecarDirectory)
             .map((pin) => ({ ...pin.record }));
+    }
+
+    get generation(): number {
+        return this.revision;
     }
 
     private schedule(pin: Pin): void {
