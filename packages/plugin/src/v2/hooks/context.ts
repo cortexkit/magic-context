@@ -27,6 +27,7 @@ import {
 } from "../../features/magic-context/memory/project-identity";
 import { scheduleClearAndReindex } from "../../features/magic-context/message-index-async";
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
+import { v2ToolDefinitionsHash } from "../../features/magic-context/request-tool-definitions";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import { backfillSessionActivity } from "../../features/magic-context/session-activity";
 import {
@@ -590,7 +591,7 @@ export function applyV2PromptSurfaceTools(
 }
 
 /**
- * Measure the tool definitions this request is actually going to send.
+ * Measure the tool definitions visible to this session's context hook.
  *
  * OpenCode 1 measures the same thing through its `tool.definition` hook; OpenCode 2 has no such
  * hook, but the request draft carries the whole tool set, so the draft is the measurement seam.
@@ -602,8 +603,8 @@ export function applyV2PromptSurfaceTools(
  * this session's figure: a tool an earlier request carried, or another session's request carried,
  * does not count toward this request's size.
  *
- * Measuring changes no served byte: the resulting tool-set hash is an attribution marker that the
- * m[0] materialization decision records but never folds on.
+ * Measuring changes no served byte. The names-only measurement hash remains attribution;
+ * the separate request-definition hash is captured by the managed context hook.
  */
 export function recordV2ToolDefinitions(draft: SessionContext): void {
     if (!draft.tools) return;
@@ -788,6 +789,7 @@ export async function registerContext(context: V2Context) {
     const hiddenModelActivity = new HiddenModelActivity();
     // Draft-authoritative model/variant/agent. Not the v1 event-driven map.
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
+    const toolDefinitionsHashes = new BoundedSessionMap<string>(1000);
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
         harness: "opencode2",
         directory,
@@ -1626,6 +1628,7 @@ export async function registerContext(context: V2Context) {
                     draft.agent,
                     draft.sessionID,
                 ),
+                toolDefinitionsHash: toolDefinitionsHashes.get(draft.sessionID),
                 modelKey: `${draft.model.providerID}/${draft.model.id}`,
                 // materializeM0 does not read cacheExpired. mustMaterialize owns
                 // expiry decisions on the transform path; this fold always renders
@@ -1932,6 +1935,7 @@ export async function registerContext(context: V2Context) {
                     sessionId,
                 );
             },
+            getToolDefinitionsHash: (sessionId) => toolDefinitionsHashes.get(sessionId),
             channel1StateBySession: channel1,
             historyRefreshSessions,
             pendingMaterializationSessions,
@@ -2265,6 +2269,7 @@ export async function registerContext(context: V2Context) {
             // or the primary session's cached tool definitions.
             if (admissionDb) hideSubagentTools(draft, admissionDb);
             recordV2ToolDefinitions(draft);
+            toolDefinitionsHashes.set(draft.sessionID, v2ToolDefinitionsHash(draft.tools));
             // Only a failure to read or record usage refuses here. A high reading is
             // left to the transform below: its force band and emergency path are what
             // reduce an over-limit session, and refusing ahead of them would refuse

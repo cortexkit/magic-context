@@ -2535,6 +2535,14 @@ export async function runPostTransformPhase(
             args.sessionId,
             `m[0] HARD fold decision: reason=${m0MaterializeReason ?? foldDueDecision.reason ?? (foldExecutedThisPass ? "drift" : "soft_refresh")} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
         );
+        const toolChange = m0ComparisonDecision?.toolDefinitionsChange;
+        if (foldExecutedThisPass && toolChange) {
+            sessionLog(
+                args.sessionId,
+                "m[0] request tool definitions changed:",
+                JSON.stringify(toolChange),
+            );
+        }
     }
     // Fold decision, cached-prefix capture and the m[1] soft refresh run above;
     // time precomputation and commit together so setup has no untimed stretch.

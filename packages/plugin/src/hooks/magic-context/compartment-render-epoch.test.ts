@@ -4,9 +4,11 @@ import {
     decodeCachedM0UpgradeIdentity,
     encodeCachedM0UpgradeIdentity,
     readCachedM0MemoryIds,
+    readCachedM0ToolDefinitionsHash,
     renderedBudgetShrinkReason,
     renderedBudgetSnapshot,
     withCachedM0MemoryIds,
+    withCachedM0ToolDefinitionsHash,
 } from "./compartment-render-epoch";
 
 describe("legacy upgrade-identity crossing (R3 F7)", () => {
@@ -100,4 +102,36 @@ describe("frozen m[0] memory selection metadata", () => {
         expect(readCachedM0MemoryIds(identity, [1, 3, 5], 3)).toEqual([1, 3]);
         expect(readCachedM0MemoryIds(`${identity}|m0-memory-ids:invalid`, [1, 5], 3)).toEqual([1]);
     });
+});
+
+test("request tool identity extends the frozen KV container without changing other components", () => {
+    const legacy = withCachedM0MemoryIds(
+        encodeCachedM0UpgradeIdentity(
+            "ready",
+            "cre2",
+            true,
+            "m4000-h60000",
+            "mre3",
+            "m4000-h60000",
+        ),
+        [3, 7],
+    );
+    const hash = JSON.stringify({
+        hash: "sha256",
+        tools: [["name|with:separators%", "fingerprint"]],
+    });
+    expect(readCachedM0ToolDefinitionsHash(legacy)).toBeNull();
+    const recorded = withCachedM0ToolDefinitionsHash(legacy, hash);
+    expect(readCachedM0ToolDefinitionsHash(recorded)).toBe(hash);
+    expect(decodeCachedM0UpgradeIdentity(recorded)).toEqual(decodeCachedM0UpgradeIdentity(legacy));
+    expect(readCachedM0MemoryIds(recorded, [], 10)).toEqual([3, 7]);
+    expect(withCachedM0ToolDefinitionsHash(recorded, hash)).toBe(recorded);
+    expect(withCachedM0ToolDefinitionsHash(recorded, null)).toBe(legacy);
+    expect(readCachedM0ToolDefinitionsHash(withCachedM0MemoryIds(recorded, [9]))).toBe(hash);
+    expect(
+        readCachedM0ToolDefinitionsHash(`${legacy}|request-tool-definitions:%broken`),
+    ).toBeNull();
+    expect(
+        decodeCachedM0UpgradeIdentity(withCachedM0ToolDefinitionsHash(null, hash)).upgradeState,
+    ).toBeNull();
 });
