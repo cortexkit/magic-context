@@ -82,7 +82,7 @@ function fakeChild(pid: number, supported: boolean) {
 					id: command.id,
 					command: command.type,
 					success: true,
-					data: { dumpTools: [] },
+					data: { dumpTools: [], isSettled: true, hasPendingAsyncWork: false },
 				});
 		}
 	});
@@ -385,7 +385,7 @@ test("OMP v2 chunk framing preserves UTF-8 and enforces the negotiated line limi
 			id: JSON.parse(lines[1]).id,
 			command: "get_state",
 			success: true,
-			data: { dumpTools: [] },
+			data: { dumpTools: [], isSettled: true, hasPendingAsyncWork: false },
 		}),
 	);
 	lines.length = 0;

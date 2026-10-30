@@ -233,6 +233,15 @@ export class OmpRetainedRpc {
 					throw new Error(
 						"OMP historian tool inventory is not empty or observable",
 					);
+				// RPC v2 only guarantees framing. Older OMP releases advertise it
+				// but never emit a completed prompt_result for agent turns. Require
+				// the settled-session lifecycle before sending a retained prompt;
+				// otherwise turn one's reply would wait forever for that terminal.
+				if (
+					typeof data.isSettled !== "boolean" ||
+					typeof data.hasPendingAsyncWork !== "boolean"
+				)
+					throw new Error("OMP retained RPC settlement is unobservable");
 				this.phase = "supported";
 				this.callbacks.ready();
 			} else if (frame.type === "prompt_result" && frame.id === this.activeId) {

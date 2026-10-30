@@ -7750,7 +7750,10 @@ function spawnPiHistorianRun(args: {
 				if (!runBoundary) return;
 				await runPiHistorian({
 					db,
-					hasUI: ctx.hasUI,
+					// OMP's RPC UI adapter reports hasUI=true even without a TUI.
+					// Its client can exit after turn one, so publish complete one-pass
+					// history rather than leaving reconciliation to a detached turn two.
+					hasUI: ctx.hasUI && !(getHarness() === "omp" && ctx.mode === "rpc"),
 					sessionId,
 					directory: ctx.cwd,
 					provider,
