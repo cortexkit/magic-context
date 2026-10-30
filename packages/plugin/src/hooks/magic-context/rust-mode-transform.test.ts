@@ -744,7 +744,15 @@ describe("Rust mode authority adapter", () => {
                     step >= 2 &&
                     String(sql).startsWith("UPDATE session_meta SET compaction_marker_state")
                 ) {
-                    throw new Error("injected post-cut context mirror failure");
+                    const statement = originalPrepare(sql);
+                    const run = statement.run.bind(statement);
+                    statement.run = (...bindings) => {
+                        // Staging intent precedes the host commit; only fail its final mirror.
+                        if (!JSON.parse(String(bindings[0])).pending)
+                            throw new Error("injected post-cut context mirror failure");
+                        return run(...bindings);
+                    };
+                    return statement;
                 }
                 return originalPrepare(sql);
             });

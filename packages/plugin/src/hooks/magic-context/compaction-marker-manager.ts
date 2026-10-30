@@ -21,22 +21,17 @@ import {
     listSessionCompactionMarkers,
     removeCompactionMarker,
     removeForeignCompactionMarker,
-    replaceCompactionMarker,
 } from "../../features/magic-context/compaction-marker";
 import {
     getCompartmentsByEndMessageId,
     getUncoveredCompartmentEndsThrough,
 } from "../../features/magic-context/compartment-storage";
 import {
+    getCompactionMarkerPublicationState,
     getPersistedCompactionMarkerState,
     type PendingCompactionMarker,
-    type PersistedCompactionMarkerState,
     setPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
-import {
-    getTagNumberByMessageId,
-    updateTagStatus,
-} from "../../features/magic-context/storage-tags";
 import { getHarness } from "../../shared/harness";
 import { log, sessionLog } from "../../shared/logger";
 import {
@@ -47,33 +42,11 @@ import {
 import type { Database } from "../../shared/sqlite";
 import { Database as SqliteDb } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
+import { publishRecoverableCompactionMarker } from "./compaction-marker-publication";
 
 /** Static placeholder. The real session-history comes from transform injection. */
 export const MARKER_SUMMARY_TEXT =
     "[Compacted by magic-context — session history is managed by the plugin]";
-
-function dropMarkerSummaryTag(db: Database, sessionId: string, summaryMessageId: string): void {
-    const tagNumber = getTagNumberByMessageId(db, sessionId, `${summaryMessageId}:p0`);
-    if (tagNumber !== null) updateTagStatus(db, sessionId, tagNumber, "dropped");
-}
-
-function persistMarkerStateAndDropReplacedTag(
-    db: Database,
-    sessionId: string,
-    state: PersistedCompactionMarkerState | null,
-    replacedSummaryMessageId: string | null,
-): void {
-    let transactionStartedAt = 0;
-    db.transaction(() => {
-        transactionStartedAt = performance.now();
-        setPersistedCompactionMarkerState(db, sessionId, state);
-        if (replacedSummaryMessageId !== null) {
-            dropMarkerSummaryTag(db, sessionId, replacedSummaryMessageId);
-        }
-    }).immediate();
-    logSlowWriteTransaction("marker-drain", transactionStartedAt);
-}
 
 /**
  * Result of draining one persisted marker request.
@@ -352,6 +325,7 @@ export function applyDeferredCompactionMarker(
         const existing = getPersistedCompactionMarkerState(db, sessionId);
         if (
             existing &&
+            !getCompactionMarkerPublicationState(db, sessionId).pending &&
             existingMarkerAlreadyCoversTarget(
                 sessionId,
                 existing,
@@ -395,16 +369,22 @@ export function applyDeferredCompactionMarker(
 
         // Replace both host-store row sets under one BEGIN IMMEDIATE. A busy
         // store fails before deletion; any later failure rolls the deletion back.
-        const removedSummaryMessageId = existing?.summaryMessageId ?? null;
         cut = "uncertain";
-        const replacement = replaceCompactionMarker(existing, {
-            sessionId,
-            endOrdinal: pending.ordinal,
-            endMessageId: pending.endMessageId,
-            summaryText: MARKER_SUMMARY_TEXT,
-            directory: directory ?? process.cwd(),
-            resolvedBoundary: boundary,
-        });
+        const replacement = publishRecoverableCompactionMarker(
+            db,
+            {
+                sessionId,
+                endOrdinal: pending.ordinal,
+                endMessageId: pending.endMessageId,
+                summaryText: MARKER_SUMMARY_TEXT,
+                directory: directory ?? process.cwd(),
+                resolvedBoundary: boundary,
+            },
+            () =>
+                JSON.stringify(getPersistedCompactionMarkerState(db, sessionId)) ===
+                    JSON.stringify(existing) &&
+                (responseFencesTarget || validatePendingTarget(db, sessionId, pending) === "ok"),
+        );
         endStep("replace");
         if (replacement.kind === "deferred")
             return { kind: "deferred", reason: "candidate-preparation" };
@@ -415,23 +395,8 @@ export function applyDeferredCompactionMarker(
                 error: replacement.error,
             };
         }
-        const result = replacement.marker;
-
-        persistMarkerStateAndDropReplacedTag(
-            db,
-            sessionId,
-            {
-                ...result,
-                boundaryOrdinal: pending.ordinal,
-                targetEndMessageId: pending.endMessageId,
-            },
-            removedSummaryMessageId,
-        );
         endStep("persist");
-        sessionLog(
-            sessionId,
-            `compaction-marker drain: applied at ordinal ${pending.ordinal}, boundary user msg ${result.boundaryMessageId} ${stepMs.join(" ")}`,
-        );
+        sessionLog(sessionId, `compaction-marker drain timings: ${stepMs.join(" ")}`);
         return {
             kind: "applied",
             markerOrdinal: pending.ordinal,
@@ -494,9 +459,8 @@ export function updateCompactionMarkerAfterPublication(
     }
 
     const existing = getPersistedCompactionMarkerState(db, sessionId);
-    const removedSummaryMessageId = existing?.summaryMessageId ?? null;
 
-    if (existing) {
+    if (existing && !getCompactionMarkerPublicationState(db, sessionId).pending) {
         if (
             existingMarkerAlreadyCoversTarget(
                 sessionId,
@@ -527,31 +491,24 @@ export function updateCompactionMarkerAfterPublication(
         return false;
     }
 
-    const replacement = replaceCompactionMarker(existing, {
-        sessionId,
-        endOrdinal: lastCompartmentEnd,
-        endMessageId: targetEndMessageId,
-        summaryText: MARKER_SUMMARY_TEXT,
-        directory: directory ?? process.cwd(),
-        resolvedBoundary: boundary,
-    });
+    const replacement = publishRecoverableCompactionMarker(
+        db,
+        {
+            sessionId,
+            endOrdinal: lastCompartmentEnd,
+            endMessageId: targetEndMessageId,
+            summaryText: MARKER_SUMMARY_TEXT,
+            directory: directory ?? process.cwd(),
+            resolvedBoundary: boundary,
+        },
+        () =>
+            JSON.stringify(getPersistedCompactionMarkerState(db, sessionId)) ===
+                JSON.stringify(existing) &&
+            getCompartmentEndMessageIdForOrdinal(db, sessionId, lastCompartmentEnd) ===
+                targetEndMessageId,
+    );
 
     if (replacement.kind === "committed") {
-        const result = replacement.marker;
-        persistMarkerStateAndDropReplacedTag(
-            db,
-            sessionId,
-            {
-                ...result,
-                boundaryOrdinal: lastCompartmentEnd,
-                targetEndMessageId,
-            },
-            removedSummaryMessageId,
-        );
-        sessionLog(
-            sessionId,
-            `compaction-marker: injected at ordinal ${lastCompartmentEnd}, boundary user msg ${result.boundaryMessageId}`,
-        );
         return true;
     }
     // Injection failed after boundary preflight (e.g. OpenCode DB write error).
