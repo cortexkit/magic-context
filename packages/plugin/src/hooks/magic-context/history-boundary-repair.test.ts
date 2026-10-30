@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import {
     acquireCompartmentLease,
     releaseCompartmentLease,
@@ -93,7 +93,190 @@ function depthOrdinals(database: Database): number[] {
     ).map((row) => row.ordinal);
 }
 
+function captureBoundaryRead(database: Database) {
+    const prepare = database.prepare.bind(database);
+    let sql = "";
+    let rows: Array<Record<string, unknown>> = [];
+    const spy = spyOn(database, "prepare").mockImplementation((query) => {
+        const statement = prepare(query);
+        if (sql || !/\bFROM\s+compartments\b/i.test(query)) return statement;
+        sql = query;
+        return {
+            all: (...params: Parameters<typeof statement.all>) => {
+                rows = statement.all(...params) as Array<Record<string, unknown>>;
+                return rows;
+            },
+        } as typeof statement;
+    });
+    return {
+        get sql() {
+            return sql;
+        },
+        get rows() {
+            return rows;
+        },
+        restore: () => spy.mockRestore(),
+    };
+}
+
 describe("repairMissingHistoryBoundary", () => {
+    it("store checks transfer only sequence and end id, not compartment bodies", () => {
+        const database = seed();
+        database
+            .prepare("UPDATE compartments SET content = ?, p1 = ?, p2 = ?, p3 = ?, p4 = ?")
+            .run(...Array.from({ length: 5 }, () => "Summary payload ".repeat(1024)));
+        const expected = getCompartments(database, SESSION).map(({ sequence, endMessageId }) => ({
+            sequence,
+            endMessageId,
+        }));
+        const captured = captureBoundaryRead(database);
+        try {
+            expect(
+                repairMissingHistoryBoundary({
+                    db: database,
+                    sessionId: SESSION,
+                    scope: "store",
+                    isInHostStore: store(["m-2", "m-4", "m-6"]),
+                }),
+            ).toEqual({ kind: "intact" });
+            expect(
+                captured.sql
+                    .split(/\bFROM\b/i)[0]
+                    ?.replace(/\s+/g, " ")
+                    .trim(),
+            ).toBe("SELECT sequence, end_message_id AS endMessageId");
+            expect(captured.rows).toEqual(expected);
+        } finally {
+            captured.restore();
+        }
+    });
+
+    it("store projection preserves full-row filtering, anchor and retirement decisions", () => {
+        const database = seed();
+        appendCompartments(
+            database,
+            SESSION,
+            Array.from({ length: 8 }, (_, offset) => {
+                const sequence = offset + 3;
+                return {
+                    sequence,
+                    startMessage: sequence * 2 + 1,
+                    endMessage: sequence * 2 + 2,
+                    startMessageId: `m-${sequence * 2 + 1}`,
+                    endMessageId: sequence === 9 ? "" : `m-${sequence * 2 + 2}`,
+                    title: `Compartment ${sequence}`,
+                    content: "Summary",
+                    p1: null,
+                    p2: null,
+                    p3: null,
+                    p4: null,
+                };
+            }),
+        );
+        database.exec("UPDATE compartments SET end_message_id = NULL WHERE sequence IN (3, 10)");
+        database.exec("UPDATE compartments SET start_message_id = NULL WHERE sequence = 4");
+        database
+            .prepare("UPDATE compartments SET content = ? WHERE sequence = 5")
+            .run(new Uint8Array([65, 66, 67]));
+        database
+            .prepare("UPDATE compartments SET p2 = ? WHERE sequence = 6")
+            .run(new Uint8Array([65, 66, 67]));
+        database.exec("UPDATE compartments SET importance = 'invalid' WHERE sequence = 7");
+        const previous = getCompartments(database, SESSION);
+        expect(previous.map((row) => row.sequence)).toEqual([0, 1, 2, 8, 9]);
+        const held = new Set(["m-2", "m-4", "m-10", "m-12", "m-14", "m-16"]);
+        const latestIndex = previous.findLastIndex((row) => row.endMessageId !== "");
+        const latest = previous[latestIndex]!;
+        const anchor = previous
+            .slice(0, latestIndex)
+            .findLast((row) => held.has(row.endMessageId))!;
+        const expectedDropped = (
+            database
+                .prepare(
+                    "SELECT sequence FROM compartments WHERE session_id = ? AND sequence > ? ORDER BY sequence",
+                )
+                .all(SESSION, anchor.sequence) as Array<{ sequence: number }>
+        ).map((row) => row.sequence);
+        const checked: string[] = [];
+        let retired: Array<{ sequence: number; endMessageId: string }> = [];
+        let retiredAnchor: { sequence: number; endMessageId: string } | null = null;
+        expect(
+            repairMissingHistoryBoundary({
+                db: database,
+                sessionId: SESSION,
+                scope: "store",
+                isInHostStore: (id) => {
+                    checked.push(id);
+                    return held.has(id);
+                },
+                onRetire: (rows, surviving) => {
+                    retired = rows.map(({ sequence, endMessageId }) => ({
+                        sequence,
+                        endMessageId,
+                    }));
+                    retiredAnchor = surviving
+                        ? { sequence: surviving.sequence, endMessageId: surviving.endMessageId }
+                        : null;
+                },
+            }),
+        ).toEqual({
+            kind: "repaired",
+            missingEndMessageId: latest.endMessageId,
+            anchorEndMessageId: anchor.endMessageId,
+            droppedSequences: expectedDropped,
+        });
+        expect(checked).toEqual(["m-18", "m-6", "m-4"]);
+        expect(retired).toEqual(
+            previous
+                .slice(latestIndex)
+                .map(({ sequence, endMessageId }) => ({ sequence, endMessageId })),
+        );
+        expect(retiredAnchor).toEqual({
+            sequence: anchor.sequence,
+            endMessageId: anchor.endMessageId,
+        });
+        expect(getCompartments(database, SESSION).map((row) => row.sequence)).toEqual([0, 1]);
+        expect(depthOrdinals(database)).toEqual([2, 4]);
+        expect(cachedPair(database)).toEqual({ m0: null, boundary: null });
+    });
+
+    it("store projection keeps the full-row path's older-schema behavior", () => {
+        const database = seed();
+        database.exec("ALTER TABLE compartments RENAME COLUMN p2 TO retired_p2");
+        database.exec("ALTER TABLE compartments RENAME COLUMN importance TO retired_importance");
+        const expected = getCompartments(database, SESSION).map(({ sequence, endMessageId }) => ({
+            sequence,
+            endMessageId,
+        }));
+        const captured = captureBoundaryRead(database);
+        try {
+            expect(
+                repairMissingHistoryBoundary({
+                    db: database,
+                    sessionId: SESSION,
+                    scope: "store",
+                    isInHostStore: () => true,
+                }),
+            ).toEqual({ kind: "intact" });
+            expect(captured.rows).toEqual(expected);
+        } finally {
+            captured.restore();
+        }
+        database.exec("ALTER TABLE compartments RENAME COLUMN title TO retired_title");
+        database.exec(
+            "ALTER TABLE compartments RENAME COLUMN end_message_id TO retired_end_message_id",
+        );
+        expect(getCompartments(database, SESSION)).toEqual([]);
+        expect(
+            repairMissingHistoryBoundary({
+                db: database,
+                sessionId: SESSION,
+                scope: "store",
+                isInHostStore: () => false,
+            }),
+        ).toEqual({ kind: "intact" });
+    });
+
     it("leaves a session alone when the store has the newest compartment end", () => {
         const database = seed();
         const result = repairMissingHistoryBoundary({

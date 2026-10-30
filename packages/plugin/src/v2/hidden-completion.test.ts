@@ -955,6 +955,35 @@ describe("OpenCode 2 hidden child completion", () => {
         }
     });
 
+    for (const keepSubagents of [false, true]) {
+        for (const identity of [run, dreamerRun]) {
+            test(`logs one retirement decision for ${identity.kind} with keep_subagents=${keepSubagents}`, async () => {
+                const logs: string[] = [];
+                const state = await setup("host-generation-1", { keepSubagents, logs });
+                try {
+                    state.setProviderError({ message: "provider unavailable" });
+                    const handle = await state.executor.open(identity);
+                    await expect(state.executor.attempt(handle, request())).rejects.toThrow(
+                        "Hidden completion provider error: ",
+                    );
+                    await close(state.executor, handle, false);
+                    const role = identity.kind === "dreamer-task" ? "dreamer" : "historian";
+                    expect(logs.filter((line) => line.includes("hidden child child-1 "))).toEqual([
+                        `[magic-context] hidden child child-1 created role=${role} parent=none keep_subagents=${keepSubagents}`,
+                        ...(keepSubagents && role === "historian"
+                            ? ["[magic-context] hidden child child-1 kept (keep_subagents)"]
+                            : [
+                                  "[magic-context] hidden child child-1 removing",
+                                  "[magic-context] hidden child child-1 removed",
+                              ]),
+                    ]);
+                } finally {
+                    state.db.close();
+                }
+            });
+        }
+    }
+
     test("reopens a fresh child when a fallback retries a retired run", async () => {
         const state = await setup();
         try {
