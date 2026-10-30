@@ -80,7 +80,7 @@ describe("session switch handler wiring", () => {
 
 	test("session_switch drains the recorded outgoing session", () => {
 		const body = afterSwitch?.[0] ?? "";
-		expect(body).toContain("clearContextHandlerSession(outgoingSessionId)");
+		expect(body).toContain("clearContextHandlerSession(outgoingSessionId, db)");
 		expect(body).toContain("clearPiSystemPromptSession(outgoingSessionId)");
 	});
 });
@@ -101,6 +101,6 @@ describe("session_shutdown handler also drains per-session maps", () => {
 		// context-handler caches were never drained on shutdown, so a
 		// long-lived process re-running the extension between shutdowns
 		// (e.g. via /reload) would leak.
-		expect(body).toContain("clearContextHandlerSession(");
+		expect(body).toContain("clearContextHandlerSession(sessionId, db)");
 	});
 });

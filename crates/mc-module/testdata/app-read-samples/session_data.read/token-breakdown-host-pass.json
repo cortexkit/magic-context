@@ -1,0 +1,100 @@
+{
+  "name": "token-breakdown-host-pass",
+  "request": {
+    "method": "session_data.read",
+    "params": {
+      "section": "token_breakdown",
+      "session": {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "host"
+      }
+    }
+  },
+  "response": {
+    "as_of_ms": 1700000000000,
+    "op": "session_data.read",
+    "row": {
+      "as_of": {
+        "at_ms": 1700000000200,
+        "step_ref": null
+      },
+      "context_window": {
+        "source": null,
+        "tokens": null
+      },
+      "estimation_source": "host_pass",
+      "last_user_message_in_history_raw": true,
+      "managed": {
+        "value": true
+      },
+      "measured_at": 1700000000000,
+      "parts": [
+        {
+          "estimate": false,
+          "part": "system_prompt",
+          "tokens": 18000
+        },
+        {
+          "estimate": true,
+          "estimation_source": "host_pass",
+          "part": "tool_definitions",
+          "tokens": 27000
+        },
+        {
+          "count": 0,
+          "estimate": true,
+          "part": "memory",
+          "tokens": 0
+        },
+        {
+          "estimate": true,
+          "estimation_source": "host_pass",
+          "part": "project_docs",
+          "tokens": 21000
+        },
+        {
+          "estimate": true,
+          "estimation_source": "host_pass",
+          "part": "user_profile",
+          "tokens": 3000
+        },
+        {
+          "estimate": true,
+          "part": "history_summaries",
+          "tokens": 0
+        },
+        {
+          "estimate": true,
+          "estimation_source": "host_pass",
+          "part": "history_raw",
+          "tokens": 76000
+        },
+        {
+          "estimate": true,
+          "estimation_source": "host_pass",
+          "part": "tool_calls_results",
+          "tokens": 481000
+        },
+        {
+          "estimate": true,
+          "estimation_source": "host_pass",
+          "part": "last_user_message",
+          "tokens": 0
+        }
+      ],
+      "tolerance": {
+        "ratio": 0.01,
+        "tokens": 500
+      },
+      "total": {
+        "source": "provider",
+        "tokens": 649000
+      },
+      "unattributed": 23000
+    },
+    "schema": 1,
+    "section": "token_breakdown",
+    "version": null
+  }
+}

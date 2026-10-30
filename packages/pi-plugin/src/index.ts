@@ -3130,7 +3130,7 @@ async function startPiMagicContextRuntime(
 				// Drain context-handler session-keyed maps too. Without
 				// this, sessions accumulate state across `session_shutdown`
 				// in long-lived Pi processes that re-init the extension.
-				clearContextHandlerSession(sessionId);
+				clearContextHandlerSession(sessionId, db);
 				forgetSessionIdentityDecision(sessionId);
 				// A cancelled prewarm is still owned by this runtime until its
 				// result settles and worker exits, within the existing shutdown cap.
@@ -3206,7 +3206,7 @@ async function startPiMagicContextRuntime(
 				return;
 			clearPiSystemPromptSession(outgoingSessionId);
 			promptSurfaceGuidanceEpochs.clear(outgoingSessionId);
-			clearContextHandlerSession(outgoingSessionId);
+			clearContextHandlerSession(outgoingSessionId, db);
 		} catch {
 			// best-effort cleanup
 		}

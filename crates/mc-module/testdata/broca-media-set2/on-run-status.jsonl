@@ -1,0 +1,1 @@
+{"result":{"state":"completed","final_step_finish_reason":"stop","undelivered_steers":[],"usage":{"steps":2,"unreported_steps":2,"by_model":[{"provider":"fake","model":"fake","steps":2,"unreported_steps":2}]},"retries_used":0}}

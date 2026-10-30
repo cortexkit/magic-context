@@ -39,9 +39,11 @@ import { validateCue } from "./cue-validation";
 import {
     computeCueContentHash,
     getMuralCueState,
+    markCurrentCuesFresh,
     memoryNeedsCue,
     recordMuralCueRejection,
     setMuralCue,
+    timestampStaleCurrentCues,
 } from "./storage-mural-cues";
 
 /**
@@ -53,9 +55,12 @@ import {
  * tool calls; no selection/ranking/packing (those are deterministic
  * in resolveMural / renderMural).
  *
- * Gate: mural_cue IS NULL OR mural_cue_hash != sha256(content). Resumable — cues
- * are written per memory, so a partial run sticks and the next run picks up the
- * remaining gate set.
+ * Selection: mural_cue IS NULL OR mural_cue_hash != sha256(content). The
+ * scheduler's cheap gate also treats updated_at > mural_cue_at as due. A
+ * timestamp-only write trips that gate without changing the text, so a run
+ * first moves mural_cue_at up to updated_at when the stored hash already
+ * matches, and leaves the cue text alone. Resumable — cues are written per
+ * memory, so a partial run sticks and the next run picks up the remaining set.
  *
  * Economics: chunks are small (~40 memories), so after the initial backfill the
  * daily trickle is cheap. First run on a 470-memory pool is ~12 chunks; steady
@@ -249,6 +254,14 @@ export function computeChunkSliceMs(remainingMs: number, chunksRemaining: number
 }
 
 export async function runCompressCues(args: CompressCuesArgs): Promise<CompressCuesResult> {
+    // A newer updated_at does not mean the cue is stale. Retire those rows
+    // before selection so the scheduler gate goes quiet without a model call.
+    const currentButTimestampStale = timestampStaleCurrentCues(args.db, args.projectIdentity);
+    if (currentButTimestampStale.length > 0) {
+        runLeaseGuardedWrite(args.db, args.holderId, args.leaseKey, () => {
+            markCurrentCuesFresh(args.db, args.projectIdentity, currentButTimestampStale);
+        });
+    }
     const candidates = selectCandidates(args.db, args.projectIdentity);
     const result: CompressCuesResult = {
         compressed: 0,

@@ -158,12 +158,16 @@ fn manifest_before_participant(
             let mut role = crate::subagent_invocations_read::management_role();
             if let ProviderRole::ManagementSurface { operations, .. } = &mut role {
                 operations.extend(
-                    ["session_data.read", "context.cache_why", "context.search"].map(|name| {
-                        subc_protocol::manifest::ManagementOperation {
-                            name: name.into(),
-                            kind: subc_protocol::manifest::ManagementOperationKind::Query,
-                            description: None,
-                        }
+                    [
+                        "session_data.read",
+                        "context.cache_why",
+                        "context.search",
+                        "context.watch",
+                    ]
+                    .map(|name| subc_protocol::manifest::ManagementOperation {
+                        name: name.into(),
+                        kind: subc_protocol::manifest::ManagementOperationKind::Query,
+                        description: None,
                     }),
                 );
             }

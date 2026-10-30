@@ -149,6 +149,7 @@ struct State {
     gate: Option<Arc<tokio::sync::Notify>>,
     log: Vec<(String, String, Value)>,
     lose_send_replies: usize,
+    send_reply: Option<Value>,
     steps: Vec<Step>,
     ignore_allowlist: bool,
     ignore_cancel: bool,
@@ -641,7 +642,10 @@ impl FakeBroca {
                 }
                 Ok(self.state().describe.clone())
             }
-            "session.send" => self.send(session, params),
+            "session.send" => {
+                let reply = self.send(session, params)?;
+                Ok(self.state().send_reply.clone().unwrap_or(reply))
+            }
             "run.result" => {
                 let s = self.state();
                 let run = s
@@ -1782,4 +1786,39 @@ async fn broca_child_bare_send_reply_is_refused_by_name() {
         "{error:?}"
     );
     assert_eq!(f.sent().len(), 1);
+}
+
+#[tokio::test]
+async fn broca_session_change_send_goldens_start_the_dream_child() {
+    for stem in ["send_reply.admission", "send_reply.session_class"] {
+        for suffix in ["before", "after"] {
+            let name = format!("send-reply-goldens/{stem}.json.{suffix}");
+            let f = Fixture::new(BASE);
+            f.broca.state().send_reply = Some(crate::broca_session_change_tests::sample(&name));
+            let request = f.request(&[], 3);
+            let mut carrier = f.carrier(policy());
+            let child = bounded(carrier.open(&request)).await.expect("open");
+            bounded(carrier.start(&child))
+                .await
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            assert_eq!(
+                carrier.attempt.as_ref().unwrap().run_id.as_deref(),
+                Some("run-1")
+            );
+            assert_eq!(f.sent().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn broca_session_change_describe_opens_the_dream_child() {
+    let f = Fixture::new(BASE);
+    f.broca.state().describe = crate::session_resolver::read_runner_reply(
+        crate::broca_session_change_tests::sample("role.describe.session_change.json"),
+    )
+    .unwrap();
+    let request = f.request(&[], 3);
+    let mut carrier = f.carrier(policy());
+    bounded(carrier.open(&request)).await.expect("open");
+    assert!(f.sent().is_empty());
 }

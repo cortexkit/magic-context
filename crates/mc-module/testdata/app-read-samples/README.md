@@ -88,6 +88,11 @@ differ, so the samples cannot drift from the handlers. `SHA256SUMS` is
 
 ## `session_data.read`
 
+The `mc-app-read-samples-v3` collection adds `token-breakdown-host-pass.json`.
+The v1/v2 tags are unchanged, and this change preserves all existing JSON
+exchanges in the checkout byte-for-byte. The tag version names a sample
+collection, not a new role or envelope schema version.
+
 - `session_data.read/meta.json`: the session row plus
   `compartment_count`, `newest_compartment_at_ms` and `queued_stamp_count`
   (one compartment, one listed queued stamp; a queued drop inside the
@@ -96,6 +101,36 @@ differ, so the samples cannot drift from the handlers. `SHA256SUMS` is
   provider-reported input total (`total.source: "provider"`).
 - `session_data.read/token-breakdown-estimate.json`: no provider total, so
   the legacy estimate stands in (`estimation_source: "legacy_estimate"`).
+- `session_data.read/token-breakdown-host-pass.json`: standalone pass counts
+  maintained by the host plugin, with provider usage still supplying `total`.
+
+### Token-breakdown response fields
+
+`as_of.at_ms` remains the last provider-response completion time; it does not
+date the plugin's measurements. A versioned, threshold-maintained host payload
+adds `measured_at` (Unix milliseconds of the pass that saved the counts) and
+`tolerance: {"ratio": 0.01, "tokens": 500}`. Every subsequent served pass compares
+its counts to the saved values: a part moving by **more than 1% or 500 tokens**
+causes one replacement of the compact latest value, never a per-pass row.
+Unchanged counts do not refresh `measured_at`. Counts may therefore remain useful
+long after that timestamp; they are approximate, not a claim of same-response
+measurement. The stored `session_render_cache` value at cache key
+`host_token_breakdown` must have `version: 1`; missing or unsupported stored
+versions fall back to the legacy response. This stamp is internal storage
+metadata, not an extra wire-schema version. Plugin-disabled sessions cannot
+advance these saved estimates.
+
+The row's `estimation_source: "host_pass"` means host attribution is available.
+Each newly attributed part also has `estimation_source: "host_pass"`; an
+unmeasured part stays null with `estimation_source: "legacy_estimate"`. Older
+rows without a usable payload retain their previous shape exactly. All part
+counts remain estimates, not provider-reported per-part usage. The host reuses
+the existing conversation total, including the last user message:
+`last_user_message_in_history_raw: true` explains why `last_user_message` is 0
+and that message is included in `history_raw`, not counted twice. `unattributed`
+is `max(0, total.tokens - sum(non-null part tokens))`.
+
+Remaining session-data samples:
 - `session_data.read/token-breakdown-unmanaged.json`: an unmanaged session
   answers `managed: {value: false}` with null totals and no parts.
 - `session_data.read/token-breakdown-mode3-unavailable.json`: a mode-3
@@ -110,3 +145,17 @@ differ, so the samples cannot drift from the handlers. `SHA256SUMS` is
 - `config.read/effective.json`: the effective config with secrets redacted.
 - `config.embedding_probe/disabled.json`: no embedding is configured, so
   the probe refuses with `embedding_disabled`.
+
+## Live context subscription
+
+`context.watch` uses a held-open subc subscription. Each StreamData payload is a
+cursor-only invalidation, not a unary read response. Management-surface consumers
+unwrap `{"result": <notice>}` just as they do the other phone reads. The cursor's
+fixture epoch is pinned to `abc`; production epochs change with the handler.
+
+- `context.watch/resync.json`: first subscription (or an unresumable cursor),
+  requiring the app to read its watched sessions.
+- `context.watch/changes.json`: a committed historian-progress update invalidates
+  the watched session, without embedding rows.
+- `context.watch/refusal.json`: the caller already holds eight watches and receives
+  `watch_limit_exceeded` before any notice.

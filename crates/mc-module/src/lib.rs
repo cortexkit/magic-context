@@ -31,6 +31,8 @@ macro_rules! profile_end {
     };
 }
 #[cfg(test)]
+mod broca_session_change_tests;
+#[cfg(test)]
 mod per_pass_profile;
 #[cfg(test)]
 mod private_permissions_source_test;
@@ -1855,6 +1857,7 @@ struct RuntimeStoreError {
 pub struct McHandler {
     agent_data: Option<agent_data::AgentDataService>,
     app_channels: Mutex<HashMap<u16, app_read::admission::AppCaller>>,
+    context_watches: Arc<app_read::watch::Hub>,
     // Management routes also handle requests unrelated to app reads. Keep app-read
     // admission separate so those requests can continue through the usual dispatcher,
     // while app-data requests must pass the same check as the internal service.
@@ -2728,6 +2731,7 @@ impl McHandler {
             agent_data,
             app_channels: Mutex::default(),
             memory_sync: memory_sync::Service::new(connection_file.clone(), module_id.clone()),
+            context_watches: Arc::default(),
             management_app_callers: Mutex::default(),
             move_visibility,
             registered_module_id: module_id,
@@ -3182,6 +3186,7 @@ impl McHandler {
             move_visibility,
             registered_module_id: DEFAULT_MODULE_ID.into(),
             app_channels: Mutex::default(),
+            context_watches: Arc::default(),
             management_app_callers: Mutex::default(),
             store,
             log_directory: None,
@@ -9419,6 +9424,7 @@ impl ModuleHandler for McHandler {
     /// project from the daemon-controlled channel (never a per-pass request field). Accept
     /// session routes. The independent app service authorizes its caller first.
     async fn on_bind(&self, req: &RouteBindRequest) -> subc_client_rs::BindDecision {
+        self.context_watches.remove_channel(req.handle.channel);
         self.app_channels
             .lock()
             .expect("app channels")
@@ -9605,6 +9611,8 @@ impl ModuleHandler for McHandler {
     /// Drop the route's binding on teardown so a reused channel can't resolve a stale
     /// project and the map doesn't leak.
     async fn on_route_gone(&self, handle: &RouteHandle) {
+        self.context_watches
+            .remove_route((handle.channel, handle.epoch));
         self.app_channels
             .lock()
             .expect("app channels")
@@ -9624,11 +9632,69 @@ impl ModuleHandler for McHandler {
     }
 
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
-        self.handle_channel(ctx.route_handle().channel, body).await
+        self.handle_with_context(ctx, body).await
     }
 }
 
 impl McHandler {
+    async fn handle_with_context(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
+        let route = ctx.route_handle();
+        if app_read::watch::is_watch(&body) {
+            let internal = self
+                .app_channels
+                .lock()
+                .expect("app channels")
+                .get(&route.channel)
+                .cloned();
+            let (caller, management) = if let Some(caller) = internal {
+                (Some(Ok(caller)), false)
+            } else {
+                (
+                    self.management_app_callers
+                        .lock()
+                        .expect("management app callers")
+                        .get(&route.channel)
+                        .cloned(),
+                    true,
+                )
+            };
+            if let Some(caller) = caller {
+                let caller = match caller {
+                    Ok(caller) => caller,
+                    Err(refusal) => return refusal.outcome(),
+                };
+                let hub = Arc::clone(&self.context_watches);
+                let store = self.store.get().cloned();
+                let config = Arc::clone(&self.config);
+                let prepared = tokio::task::spawn_blocking(move || {
+                    let context =
+                        app_read::AppReadContext::from_parts(store, config, Vec::new(), now_ms());
+                    caller.recheck(!caller.is_direct() || config::user_app_read_allow_direct())?;
+                    let request = app_read::envelope::parse(&body)?;
+                    let request = app_read::watch::Request::parse(&request.params)?;
+                    hub.subscribe(
+                        caller.watch_key(),
+                        (route.channel, route.epoch),
+                        request,
+                        &context,
+                    )
+                })
+                .await;
+                return match prepared {
+                    Ok(Ok(subscription)) => {
+                        app_read::watch::forward(ctx, subscription, management).await
+                    }
+                    Ok(Err(refusal)) => refusal,
+                    Err(error) => HandlerOutcome::Error {
+                        code: "watch_unavailable".into(),
+                        message: format!("Context watch setup failed: {error}"),
+                    },
+                };
+            }
+        }
+        self.handle_channel(route.channel, body).await
+    }
+
     async fn handle_channel(&self, channel: u16, body: Vec<u8>) -> HandlerOutcome {
         self.handle_channel_at(channel, body, now_ms()).await
     }
@@ -11156,7 +11222,11 @@ fn render_cached_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
             "  [tool: {tool_name} #{id}]\n  output:\n{}",
             expand_tool_output_text(output)
         )),
-        ck_wire::CkKind::Media(media) => Some(expand_file_label(media.filename.as_deref())),
+        ck_wire::CkKind::Media(media) => Some(
+            providers::codec::media::marker(media)
+                .map(str::to_owned)
+                .unwrap_or_else(|| expand_file_label(media.filename.as_deref())),
+        ),
         ck_wire::CkKind::Opaque(opaque) if opaque.kind == "file" => Some(expand_file_label(
             opaque
                 .raw
@@ -11402,7 +11472,11 @@ fn render_durable_range_part(part: &ck_wire::CkWireBlock) -> Option<String> {
             "TR: {tool_name} → output ~{} tok",
             mc_tokenizer::estimate_tokens(&expand_tool_output_text(output))
         )),
-        ck_wire::CkKind::Media(_) => Some("[media]".to_string()),
+        ck_wire::CkKind::Media(media) => Some(
+            providers::codec::media::marker(media)
+                .unwrap_or("[media]")
+                .to_string(),
+        ),
         ck_wire::CkKind::Reasoning { .. }
         | ck_wire::CkKind::RedactedReasoning { .. }
         | ck_wire::CkKind::Opaque(_) => None,
@@ -11613,6 +11687,9 @@ fn verbose_expand_key_argument(input: &Value) -> String {
 }
 
 fn expand_tool_output_text(output: &ck_wire::CkToolOutput) -> String {
+    if let Some(text) = providers::codec::media::parts_text(&output.kind) {
+        return text;
+    }
     match &output.kind {
         ck_wire::CkOutputKind::Text { text } | ck_wire::CkOutputKind::ErrorText { text } => {
             text.clone()
@@ -14972,7 +15049,8 @@ mod tests {
                 ("subagent_invocations.read", "query"),
                 ("session_data.read", "query"),
                 ("context.cache_why", "query"),
-                ("context.search", "query")
+                ("context.search", "query"),
+                ("context.watch", "query")
             ]
         );
         assert_eq!(wire["trust_tier"], serde_json::json!("first_party"));

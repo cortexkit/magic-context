@@ -3158,6 +3158,11 @@ pub mod compaction {
         let mut changed = message.content.len() != before;
         for block in &mut message.content {
             if let ck_wire::CkKind::ToolResult { output, .. } = &mut block.kind {
+                // Broca owns its parts' boundaries; removing an empty text part
+                // would move retained media after a text-only edit.
+                if crate::providers::codec::media::parts_text(&output.kind).is_some() {
+                    continue;
+                }
                 if let ck_wire::CkOutputKind::Content { blocks }
                 | ck_wire::CkOutputKind::ErrorContent { blocks } = &mut output.kind
                 {
@@ -12883,16 +12888,22 @@ pub(crate) fn taggable_source(
                 Some((TaggableKind::ToolResult, block.scalar_text()?))
             }
             ck_wire::CkOutputKind::Content { blocks }
-            | ck_wire::CkOutputKind::ErrorContent { blocks } => blocks.iter().find_map(|block| {
-                if let ck_wire::ResultBlockKind::Text { text } = &block.kind {
-                    Some((
-                        TaggableKind::ToolResult,
-                        std::borrow::Cow::Borrowed(text.as_str()),
-                    ))
-                } else {
-                    None
+            | ck_wire::CkOutputKind::ErrorContent { blocks } => {
+                if let Some(text) = crate::providers::codec::media::parts_text(&output.kind) {
+                    return (!text.is_empty())
+                        .then_some((TaggableKind::ToolResult, std::borrow::Cow::Owned(text)));
                 }
-            }),
+                blocks.iter().find_map(|block| {
+                    if let ck_wire::ResultBlockKind::Text { text } = &block.kind {
+                        Some((
+                            TaggableKind::ToolResult,
+                            std::borrow::Cow::Borrowed(text.as_str()),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+            }
             ck_wire::CkOutputKind::Json { .. }
             | ck_wire::CkOutputKind::ErrorJson { .. }
             | ck_wire::CkOutputKind::ExecutionDenied { .. } => None,
@@ -13547,6 +13558,11 @@ pub(crate) fn apply_tag_prefix_to_block(
 }
 
 fn prepend_tag_to_tool_output(output: &mut ck_wire::CkToolOutput, tag_number: i64) -> bool {
+    if let Some(changed) =
+        crate::providers::codec::media::prepend_parts_tag(&mut output.kind, tag_number)
+    {
+        return changed;
+    }
     match &mut output.kind {
         ck_wire::CkOutputKind::Text { text } | ck_wire::CkOutputKind::ErrorText { text } => {
             let next = prepend_tag(tag_number, text);

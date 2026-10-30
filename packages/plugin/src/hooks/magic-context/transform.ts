@@ -1,5 +1,6 @@
 import type { ProtectedTokensTierOverrides } from "../../config/project-security";
 import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
+import { clearHostTokenBreakdownMemo } from "../../features/magic-context/host-token-breakdown-state";
 import { takeDubiousOwnershipProjectIdentityWarning } from "../../features/magic-context/memory/project-identity";
 import {
     awaitSessionIdentityDecision,
@@ -781,6 +782,7 @@ export function createTransform(deps: TransformDeps) {
     // before its thinking strip is recorded, so the retry still strips.
     const compactionModeTransitionPending = new Set<string>();
     const clearSessionLogState = (sessionId: string): void => {
+        clearHostTokenBreakdownMemo(deps.db, sessionId);
         prefixHoldLogTurnIds.delete(sessionId);
         clearDiagnosticLogState(sessionId);
     };
@@ -3917,6 +3919,7 @@ export function createTransform(deps: TransformDeps) {
                 storedByMessage = new Map();
             }
         }
+        let tokenAccountingPersisted = false;
         let conversationTokens = 0;
         let toolCallTokens = 0;
         for (const message of messages) {
@@ -3946,6 +3949,7 @@ export function createTransform(deps: TransformDeps) {
         }
         try {
             updateSessionMeta(db, sessionId, { conversationTokens, toolCallTokens });
+            tokenAccountingPersisted = true;
         } catch (error) {
             // Pure display/telemetry optimization — never fail transform on a
             // BUSY/transient error here. Next pass will refresh the value.
@@ -4071,6 +4075,13 @@ export function createTransform(deps: TransformDeps) {
                 savedAtReturn.servedCaptureWithheld = undefined;
             }
         }
+        if (tokenAccountingPersisted)
+            scheduleHostTokenBreakdown(db, sessionId, {
+                measuredAt: Date.now(),
+                prefixChanged: postTransformResult.prefixChanged,
+                conversationTokens,
+                toolCallTokens,
+            });
         passReturned = true;
     };
 
@@ -4083,6 +4094,7 @@ export { resolveHistoryBudgetTokens } from "./render-options";
 
 import { protectedToolTokenCount } from "../../features/magic-context/reclaim-protection";
 import { resolveDecisionCalibration } from "./decision-calibration";
+import { scheduleHostTokenBreakdown } from "./host-token-breakdown";
 import {
     beginSystemDateRequest,
     bindSystemDateRequest,

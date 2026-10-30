@@ -40,6 +40,11 @@ serde_json = { workspace = true }
 regex = "1"
 semver = "1"
 tokio = { workspace = true }
+# Native database and write-ahead log (WAL) notifications shared by all app subscriptions.
+notify = "8.2"
+# Already pinned by the transport graph; native SHA-256 avoids per-block Rust
+# debug-build overhead without changing the watch fingerprint's digest format.
+ring = "0.17"
 sha2 = { workspace = true }
 getrandom = "=0.2.17"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

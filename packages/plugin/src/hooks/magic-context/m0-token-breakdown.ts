@@ -1,8 +1,8 @@
 import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { extractM0Block } from "./decay-render";
+import { measureHostTokenText as estimateTokens } from "./host-token-breakdown";
 import { renderMemoryBlockV2, trimMemoriesToBudgetV2 } from "./inject-compartments";
-import { estimateFixedPromptTokens as estimateTokens } from "./read-session-formatting";
 
 /**
  * Per-block token attribution for the synthetic m[0] message, shared by BOTH

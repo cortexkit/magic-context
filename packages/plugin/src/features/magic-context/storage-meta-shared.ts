@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { getHarness, type HarnessId } from "../../shared/harness";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { type Database, prepareCachedStatement, type Statement } from "../../shared/sqlite";
-import { clearSessionRenderCache, writeSessionRenderCache } from "./storage-session-cache";
+import { SESSION_RENDER_CACHE_COLUMNS, writeSessionRenderCache } from "./storage-session-cache";
 import { writeSessionMetaCollection } from "./storage-session-collections";
 import type { SessionMeta } from "./types";
 
@@ -588,8 +588,18 @@ export function persistCachedM0(
 export function clearCachedM0M1(db: Database, sessionId: string): void {
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
-        if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'session_render_cache'").get())
-            clearSessionRenderCache(db, sessionId);
+        if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'session_render_cache'").get()) {
+            // Leave queued summary-repair requests intact. Clear render payloads through
+            // writeSessionRenderCache so failures roll back the enclosing history mutation.
+            for (const column of SESSION_RENDER_CACHE_COLUMNS) {
+                writeSessionRenderCache(
+                    db,
+                    sessionId,
+                    column,
+                    column === "memory_block_cache" ? "" : null,
+                );
+            }
+        }
         const existingColumns = new Set(
             (db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>).map(
                 (column) => column.name,

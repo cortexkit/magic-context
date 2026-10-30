@@ -1940,6 +1940,9 @@ fn text_parts(message: &FlatMessage<'_>) -> Vec<String> {
 }
 
 fn media_placeholder(media: &crate::ck_wire::MediaBlock) -> String {
+    if let Some(marker) = crate::providers::codec::media::marker(media) {
+        return marker.to_owned();
+    }
     let kind = match media.kind {
         crate::ck_wire::MediaKind::Image => "image",
         crate::ck_wire::MediaKind::Audio => "audio",
@@ -2031,6 +2034,10 @@ fn build_tool_expansion_lookup(
                 }
                 CkOutputKind::Json { value } | CkOutputKind::ErrorJson { value } => value.clone(),
                 CkOutputKind::Content { blocks } | CkOutputKind::ErrorContent { blocks } => {
+                    if let Some(text) = crate::providers::codec::media::parts_text(&output.kind) {
+                        results.insert(arc.clone(), Value::String(text));
+                        continue;
+                    }
                     Value::String(
                         blocks
                             .iter()
@@ -2365,6 +2372,28 @@ fn space_before_punct_regex() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn broca_media_summarizer_text_uses_only_media_off_markers() {
+        let capture: serde_json::Value = serde_json::from_str(include_str!(
+            "../testdata/broca-media-set2/on-session-read-descriptors.jsonl"
+        ))
+        .unwrap();
+        let entries: Vec<crate::providers::codec::InboundMessage> =
+            serde_json::from_value(capture["result"]["messages"].clone()).unwrap();
+        let messages = crate::providers::codec::Codec::OwnedBroca
+            .decode_entries(&entries)
+            .unwrap();
+        let projection = crate::ck_wire::project_messages(&messages).unwrap();
+        let overrides =
+            std::collections::BTreeMap::from([("work".into(), serde_json::json!("${output}"))]);
+        let expanded = super::build_tool_expansion_lookup(&projection.blocks, 6, &overrides);
+        // Historian templates normalize line breaks without changing marker bytes.
+        assert_eq!(expanded["m3#0"], "before-media [media not shown: kind=image mime=image/png bytes=4749 sha256=2bb3f6f7eb60 reason=carrier] [media not shown: kind=document mime=application/pdf bytes=584 sha256=b7442ba422ac reason=carrier] after-media");
+        let crate::ck_wire::CkKind::Media(media) = &messages[2].ck.content[1].kind else {
+            panic!("person media")
+        };
+        assert_eq!(super::media_placeholder(media), "[media not shown: kind=image mime=image/png bytes=3592 sha256=2d317c5c185e reason=carrier]");
+    }
     mod score_projection {
         use super::*;
         include!("historian_score_projection_tests.rs");
