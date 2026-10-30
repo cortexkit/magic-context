@@ -565,3 +565,97 @@ fn broca_media_reference_changes_refuse_before_view_publication() {
         "{printed}"
     );
 }
+
+#[test]
+fn review_broca_media_retarget_to_other_captured_reference_is_refused() {
+    let entries: Vec<_> = rows(ON).iter().map(entry).collect();
+    let mut changed = view(&entries);
+    let CkKind::ToolResult { output, .. } = &mut changed.replacement[4].content[0].kind else {
+        panic!("tool result")
+    };
+    let CkOutputKind::Content { blocks } = &mut output.kind else {
+        panic!("parts")
+    };
+    // A captured PDF is not an authorized replacement for the captured image.
+    blocks[1] = blocks[2].clone();
+    let outcome = Codec::OwnedBroca.render_view(&changed, "review", &entries);
+    assert!(
+        outcome.is_err(),
+        "a view replaced the image with a second copy of the PDF: {outcome:?}"
+    );
+}
+
+#[test]
+fn review_broca_media_tags_match_broca_shared_placement_contract() {
+    use cortexkit_role_llm_runner::tags::{
+        numbered_block_index, render_counted_text, ToolResultBlock,
+    };
+
+    for first in ["", " ", "before"] {
+        let mut inbound = tool();
+        inbound.message["content"][0]["output"]["parts"][0]["text"] = json!(first);
+        let mut message = Codec::OwnedBroca.decode_message(&inbound).unwrap().ck;
+        let mut expected = inbound.message.clone();
+        // Broca's parts_numbering uses these shared blocks, including empty text.
+        let index = numbered_block_index(&[
+            ToolResultBlock::Text(first),
+            ToolResultBlock::Image,
+            ToolResultBlock::Media,
+            ToolResultBlock::Text("after-media"),
+        ])
+        .expect("the nonempty text part is numbered");
+        let text = expected["content"][0]["output"]["parts"][index]["text"]
+            .as_str()
+            .unwrap();
+        expected["content"][0]["output"]["parts"][index]["text"] =
+            json!(render_counted_text(8, text));
+        crate::transform::apply_tag_prefix_to_block(
+            "tool",
+            &mut message.content[0],
+            crate::transform::TaggableKind::ToolResult,
+            8,
+        );
+        assert_eq!(
+            codec::encode_message(&message).unwrap(),
+            expected,
+            "leading text {first:?}"
+        );
+    }
+}
+
+#[test]
+fn review_broca_media_nonimage_null_dimensions_are_accepted() {
+    let mut inbound = tool();
+    let document = &mut inbound.message["content"][0]["output"]["parts"][2]["media"];
+    // Broca's MediaRefFields accepts null Option<u32> members on non-images.
+    document["width"] = Value::Null;
+    document["height"] = Value::Null;
+    let decoded = Codec::OwnedBroca
+        .decode_message(&inbound)
+        .expect("Broca accepts absent or null dimensions on a document reference");
+    assert_eq!(codec::encode_message(&decoded.ck).unwrap(), inbound.message);
+}
+
+#[test]
+fn review_broca_legacy_null_member_rendering_matches_base() {
+    let inbound = InboundMessage {
+        ordinal: 0,
+        mid: "m0".into(),
+        message: json!({"role":"assistant","content":[
+            {"type":"text","text":"before"},
+            {"type":"tool_call","tool_call_id":"call","tool_name":"work",
+             "input":{},"thought_signature":null}
+        ]}),
+    };
+    let mut message = Codec::OwnedBroca.decode_message(&inbound).unwrap().ck;
+    let CkKind::Text { text } = &mut message.content[0].kind else {
+        panic!("text")
+    };
+    *text = "after".into();
+    // Legacy encoding omits a null thought_signature even after an unrelated text edit.
+    let expected = json!({"role":"assistant","content":[
+        {"type":"text","text":"after"},
+        {"type":"tool_call","tool_call_id":"call","tool_name":"work","input":{}}
+    ]});
+    assert_eq!(codec::encode_message(&message).unwrap(), expected);
+}
