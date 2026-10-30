@@ -7,6 +7,7 @@ import {
 import { getHarness } from "../../shared/harness";
 import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import { isKnownAutocommit } from "../../shared/sqlite-helpers";
 import { isSynapseEmbeddingTruncated } from "./memory/embedding-synapse";
 import { messageFtsOrdinalRangeIsMapped } from "./message-fts-rowid-map";
 import { recursiveCharacterSplit } from "./recursive-text-splitter";
@@ -470,16 +471,22 @@ function readDatabaseRevision(db: Database): string | null {
     if (!statements) {
         statements = {
             version: db.prepare("PRAGMA data_version"),
-            changes: db.prepare("SELECT total_changes() AS changes"),
+            changes: db.prepare(
+                "SELECT total_changes() AS changes, (SELECT schema_version FROM pragma_schema_version) AS schemaVersion",
+            ),
         };
         revisionStatements.set(db, statements);
     }
     const version = statements.version.get() as { data_version?: number } | null;
-    const changes = statements.changes.get() as { changes?: number } | null;
+    const changes = statements.changes.get() as { changes?: number; schemaVersion?: number } | null;
     // Without both counters nothing proves the absence of writes.
-    if (typeof version?.data_version !== "number" || typeof changes?.changes !== "number")
+    if (
+        typeof version?.data_version !== "number" ||
+        typeof changes?.changes !== "number" ||
+        typeof changes.schemaVersion !== "number"
+    )
         return null;
-    return `${version.data_version}:${changes.changes}`;
+    return `${version.data_version}:${changes.changes}:${changes.schemaVersion}`;
 }
 
 function sameSearchScope(left: SearchPoolProbeRow, right: SearchPoolProbeRow): boolean {
@@ -1955,10 +1962,73 @@ function storedWindowsMatchRecordedSource(
 
 const COVERAGE_MEMO_LIMIT = 2048;
 const cachedCoverageWindows = new Map<string, CompartmentChunkWindow[]>();
+let cachedCoverageSources = new WeakMap<
+    Database,
+    {
+        revision: string;
+        entries: Map<string, { canonicalText: string; sourceKey: string }>;
+    }
+>();
 
 /** Forget memoized coverage windows, as a process restart does. */
 export function _resetCompartmentChunkCoverageMemoForTests(): void {
     cachedCoverageWindows.clear();
+    cachedCoverageSources = new WeakMap();
+}
+
+function coverageSource(
+    db: Database,
+    candidate: CompartmentChunkBackfillCandidate,
+    modelId: string,
+    maxInputTokens: number,
+): { canonicalText: string; sourceKey: string } | null {
+    // Full-text search (FTS) progress timestamps do not prove that rows were not edited or
+    // renumbered. Until an exact FTS revision exists, any database write forces
+    // a rebuild. This also covers summary fallback edits and direct SQL writes.
+    const revision = isKnownAutocommit(db) ? readDatabaseRevision(db) : null;
+    if (revision === null) cachedCoverageSources.delete(db);
+    let cache = cachedCoverageSources.get(db);
+    if (revision !== null && cache?.revision !== revision) {
+        cache = { revision, entries: new Map() };
+        cachedCoverageSources.set(db, cache);
+    }
+    const key = JSON.stringify([
+        candidate.id,
+        candidate.sessionId,
+        candidate.startMessage,
+        candidate.endMessage,
+        modelId,
+        maxInputTokens,
+        CHUNKER_VERSION,
+        getTokenEstimatorFingerprint(),
+    ]);
+    const cached = cache?.entries.get(key);
+    if (cached) return cached;
+    const mappedText = buildCanonicalChunkTextFromFts(
+        db,
+        candidate.sessionId,
+        candidate.startMessage,
+        candidate.endMessage,
+    );
+    if (mappedText === null) return null;
+    const canonicalText = mappedText || buildCompartmentSummaryFallbackText(db, candidate.id);
+    const source = {
+        canonicalText,
+        sourceKey: chunkWindowSourceKey(
+            canonicalText,
+            candidate.startMessage,
+            candidate.endMessage,
+            maxInputTokens,
+        ),
+    };
+    if (cache && readDatabaseRevision(db) === revision) {
+        // Large sessions must fit without evicting their own first compartments
+        // on every sequential coverage count.
+        if (cache.entries.size >= 8192)
+            cache.entries.delete(cache.entries.keys().next().value as string);
+        cache.entries.set(key, source);
+    }
+    return source;
 }
 
 function memoizedCoverageWindows(
@@ -2053,26 +2123,15 @@ function classifyChunkCoverageDefect(
     candidate: CompartmentChunkBackfillCandidate,
     maxInputTokens: number,
 ): ChunkCoverageClassification {
-    const mappedText = buildCanonicalChunkTextFromFts(
-        db,
-        candidate.sessionId,
-        candidate.startMessage,
-        candidate.endMessage,
-    );
-    if (mappedText === null) return { defect: "deferred", windows: [] };
-    const canonicalText = mappedText || buildCompartmentSummaryFallbackText(db, candidate.id);
+    const source = coverageSource(db, candidate, modelId, maxInputTokens);
+    if (source === null) return { defect: "deferred", windows: [] };
+    const { canonicalText, sourceKey } = source;
     if (
         !canonicalText ||
         chunkEmbedBackoffActive(db, candidate, projectPath, modelId, canonicalText)
     ) {
         return { defect: "deferred", windows: [] };
     }
-    const sourceKey = chunkWindowSourceKey(
-        canonicalText,
-        candidate.startMessage,
-        candidate.endMessage,
-        maxInputTokens,
-    );
     const existing = getExistingChunkHashes(db, candidate.id, modelId, projectPath);
     // Same verdict as re-chunking below, without tokenizing (see recordChunkWindowSource).
     if (storedWindowsMatchRecordedSource(db, candidate.id, sourceKey, existing)) {

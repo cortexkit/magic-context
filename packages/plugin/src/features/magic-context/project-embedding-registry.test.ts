@@ -1874,6 +1874,57 @@ describe("project embedding registry", () => {
         ).toHaveLength(0);
     });
 
+    it("registration scans once per identity and rescans after rebinding or chunk writes", () => {
+        const db = useTempDb();
+        const identity = "git:repair-memo";
+        const config = localConfig("test-model");
+        const features = { memoryEnabled: true, gitCommitEnabled: false };
+        seedCompartmentWithFts(db, "ses-repair-memo");
+        recordSessionProjectIdentity(db, "ses-repair-memo", identity);
+        const prepare = spyOn(db, "prepare");
+        const register = () =>
+            registerProjectEmbedding(db, identity, config, features, "/fixture/repair-memo");
+        try {
+            register();
+            const scans = () =>
+                prepare.mock.calls.filter(
+                    ([sql]) =>
+                        sql.startsWith("SELECT id FROM (") &&
+                        sql.includes(MIS_SCOPED_PROJECT_CHUNK_IDS_SQL),
+                ).length;
+            expect(scans()).toBe(1);
+            for (let poll = 0; poll < 5; poll++) {
+                db.prepare(
+                    "INSERT OR REPLACE INTO schema_migrations_meta(key, value) VALUES ('unrelated', ?)",
+                ).run(String(poll));
+                recordSessionProjectIdentity(db, "ses-repair-memo", identity);
+                register();
+            }
+            expect(scans()).toBe(1);
+            db.prepare(
+                "UPDATE session_projects SET project_path = 'git:rebound' WHERE session_id = ?",
+            ).run("ses-repair-memo");
+            register();
+            expect(scans()).toBe(2);
+            const compartmentId = getCompartments(db, "ses-repair-memo")[0].id;
+            replaceCompartmentChunkEmbeddings(db, [
+                {
+                    compartmentId,
+                    sessionId: "ses-repair-memo",
+                    projectPath: identity,
+                    modelId: currentChunkModelId(identity),
+                    vector: new Float32Array([1, 0]),
+                    window: chunkCanonicalText("m[1] U: original", 1, 1, 512)[0],
+                },
+            ]);
+            register();
+            expect(scans()).toBe(3);
+            expect(hasMisScopedCompartmentChunkEmbeddingsForProject(db, identity)).toBe(false);
+        } finally {
+            prepare.mockRestore();
+        }
+    });
+
     it("registers a current identity by reading and probes repairs through project indexes", () => {
         const db = useTempDb();
         const identity = "git:repair-read";
