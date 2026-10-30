@@ -10,11 +10,11 @@ import {
     getLastCompartmentEndMessage,
     getLastCompartmentEndMessageId,
 } from "../../features/magic-context/compartment-storage";
-import { isWrapupInProgress, updateSessionMeta } from "../../features/magic-context/storage-meta";
 import {
     drainHistoryHealQueue,
     getHistoryHealQueue,
 } from "../../features/magic-context/history-heal-queue";
+import { isWrapupInProgress, updateSessionMeta } from "../../features/magic-context/storage-meta";
 import { sessionLog } from "../../shared/logger";
 import { withoutSqliteTransformPass } from "../../shared/sqlite";
 import { runCompartmentAgent } from "./compartment-runner-incremental";
