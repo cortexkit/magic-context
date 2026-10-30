@@ -160,6 +160,7 @@ import {
     NativeFoldReplay,
     nativeRowID,
 } from "../fold/native-replay";
+import { controlKey, effortPart, rememberedControlKey } from "../fold/native-replay-v3";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
@@ -263,11 +264,30 @@ function restoreNativeCheckpointInput(
     restored: readonly V2Message[],
 ): V2Message[] {
     const present = new Set(messages.flatMap((message) => (message.id ? [message.id] : [])));
+    const currentControls = new Map<string, number>();
+    let after: string | undefined;
+    for (const message of messages) {
+        const part = effortPart(message);
+        if (part) {
+            const key = controlKey({
+                after,
+                effort: part.effort as string | undefined,
+                previous: part.previous as string | undefined,
+            });
+            currentControls.set(key, (currentControls.get(key) ?? 0) + 1);
+        } else if (message.id && message !== incoming) after = message.id;
+    }
     const hidden = restored.filter((message) => {
+        const key = rememberedControlKey(message);
+        if (key && (currentControls.get(key) ?? 0) > 0) {
+            currentControls.set(key, currentControls.get(key)! - 1);
+            return false;
+        }
         const id = nativeRowID(message);
         return !id || !present.has(id);
     });
-    return [...hidden, ...messages.filter((message) => message !== incoming)];
+    const at = messages.indexOf(incoming);
+    return [...messages.slice(0, at), ...hidden, ...messages.slice(at + 1)];
 }
 
 // The event stream can trail the terminal store row by a scheduler tick; keep failure surfacing fast.
@@ -760,7 +780,10 @@ export async function registerContext(context: V2Context) {
     // missing captures are restored from the source store rather than lost.
     const nativeFoldMemory = compactionOff ? undefined : nativeFoldCache(() => storage.require());
     const nativeFoldReplay = nativeFoldMemory
-        ? new NativeFoldReplay(nativeFoldMemory, () => openStoreReader(), context.storage)
+        ? new NativeFoldReplay(nativeFoldMemory, () => openStoreReader(), context.storage, {
+              protocol: 3,
+              log: sessionLog,
+          })
         : undefined;
     setOutputReserveConfig(config.output_reserve);
     const queriedModels = new Set<string>();
@@ -1389,6 +1412,7 @@ export async function registerContext(context: V2Context) {
                   storage: nativeFoldMemory,
                   openReader: openStoreReader,
                   canReplay: (sessionID, reader) => nativeFoldReplay.canReplay(sessionID, reader),
+                  canFold: (sessionID, reader) => nativeFoldReplay.canFold(sessionID, reader),
                   threshold: Number(process.env.MC_OC2_HOST_FOLD_ROWS ?? 1000),
                   log: sessionLog,
               })
@@ -1764,7 +1788,7 @@ export async function registerContext(context: V2Context) {
      * only, so a replay can build the same transform input the managed pass
      * builds and compare the saved copy against it.
      */
-    const restoreAfterCheckpoint = (args: {
+    const restoreAfterCheckpoint = async (args: {
         db: NonNullable<typeof db>;
         reader: V2StoreReader;
         draft: SessionContext;
@@ -1772,7 +1796,7 @@ export async function registerContext(context: V2Context) {
         cut: NonNullable<ReturnType<V2StoreReader["latestCompaction"]>>;
         incoming: V2Message;
         boundaryRepair: HistoryBoundaryRepair | undefined;
-    }): V2Message[] => {
+    }): Promise<V2Message[]> => {
         const { db, reader, draft, cut, boundaryRepair } = args;
         // Rust mode restores against the boundary the module itself published and
         // keeps that boundary row, because the array handed to the module has to
@@ -1810,16 +1834,19 @@ export async function registerContext(context: V2Context) {
         const servedBoundary = boundaryID
             ? servedBoundaryRow(reader, draft.sessionID, boundaryID)
             : null;
-        const boundary =
+        const nativeFloor = await nativeFoldReplay?.restorationFloor(draft.sessionID, cut, reader);
+        const boundary = Math.max(
+            nativeFloor ?? -Infinity,
             // A changed hidden row may have lived inside the frozen
             // prefix. Make it available to the shared-path rebuild too.
             (nativeFoldReplay?.sourceChanged(draft.sessionID) && !rustModeModuleClient
                 ? (reader.earliestSequence(draft.sessionID) ?? 0) - 1
                 : undefined) ??
-            (moduleBoundarySeq !== undefined ? moduleBoundarySeq - 1 : undefined) ??
-            servedBoundary?.seq ??
-            reader.sequenceForId(draft.sessionID, boundaryID) ??
-            (reader.earliestSequence(draft.sessionID) ?? 0) - 1;
+                (moduleBoundarySeq !== undefined ? moduleBoundarySeq - 1 : undefined) ??
+                servedBoundary?.seq ??
+                reader.sequenceForId(draft.sessionID, boundaryID) ??
+                (reader.earliestSequence(draft.sessionID) ?? 0) - 1,
+        );
         if (moduleBoundarySeq !== undefined)
             sessionLog(
                 draft.sessionID,
@@ -2189,7 +2216,7 @@ export async function registerContext(context: V2Context) {
                                 : "legacy";
                             if (admission === undefined) return undefined;
                             if (admission === "native" && nativeFoldReplay) {
-                                const restored = nativeFoldReplay.replayInput({
+                                const restored = await nativeFoldReplay.projectReplay({
                                     sessionID: draft.sessionID,
                                     cut: localCut,
                                     model: draft.model,
@@ -2203,7 +2230,7 @@ export async function registerContext(context: V2Context) {
                                     restored,
                                 );
                             } else {
-                                messages = restoreAfterCheckpoint({
+                                messages = await restoreAfterCheckpoint({
                                     db: replayDb,
                                     reader,
                                     draft,
@@ -2533,7 +2560,7 @@ export async function registerContext(context: V2Context) {
                     draft.messages.splice(
                         0,
                         draft.messages.length,
-                        ...restoreAfterCheckpoint({
+                        ...(await restoreAfterCheckpoint({
                             db,
                             reader,
                             draft,
@@ -2541,7 +2568,7 @@ export async function registerContext(context: V2Context) {
                             cut: localCut,
                             incoming,
                             boundaryRepair,
-                        }),
+                        })),
                     );
                 }
                 messageTimes = readTimes(reader, draft.messages);

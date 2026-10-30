@@ -2,6 +2,7 @@
 
 import { afterAll, beforeAll, expect, it } from "bun:test";
 import { OpenCode2TestHarness } from "../src/opencode2-harness";
+import { expectNativeAdmission, summaryHeads } from "./opencode2/helpers/native-admission";
 import {
     createScenarioHarness,
     forEachHost,
@@ -62,10 +63,21 @@ forEachHost(import.meta.url, "conflict detection", (host) => {
             if (h instanceof OpenCode2TestHarness) {
                 expect(h.countTags(sessionId)).toBeGreaterThan(0);
                 const requests = h.mock.requests().length;
+                const before = structuredClone(h.mock.lastRequest()!.body);
                 await h.compactSession(sessionId);
                 expect(h.mock.requests().length).toBe(requests);
+                expectNativeAdmission(h, sessionId);
                 await h.sendPrompt(sessionId, "after native compaction");
-                expect(JSON.stringify(h.mock.lastRequest()?.body)).toContain("<conversation-checkpoint>");
+                const after = h.mock.lastRequest()!.body;
+                // The new turn extends the conversation; the frozen summary
+                // heads and system prompt must not change just because it folded.
+                expect(summaryHeads(after)).toEqual(summaryHeads(before));
+                expect(after.system).toEqual(before.system);
+                const sent = JSON.stringify(after);
+                expect(sent).toContain("hello — should not be tagged.");
+                expect(sent).toContain("after native compaction");
+                expect(sent).not.toContain("<conversation-checkpoint>");
+                expect(sent).not.toContain("<recent-context>");
                 return;
             }
 

@@ -28,6 +28,7 @@ export class HostFoldPolicy {
             storage: NativeFoldCache;
             openReader(): V2StoreReader;
             canReplay(sessionID: string, reader: V2StoreReader): Promise<boolean>;
+            canFold?(sessionID: string, reader: V2StoreReader): Promise<boolean>;
             threshold: number;
             log(sessionID: string, line: string): void;
             now?: () => number;
@@ -87,6 +88,7 @@ export class HostFoldPolicy {
                 const after = cut?.seq ?? -1;
                 const before = reader.storedRowsAfter(sessionID, after);
                 if (before < threshold) return;
+                if (this.deps.canFold && !(await this.deps.canFold(sessionID, reader))) return;
                 const capture = await this.deps.canReplay(sessionID, reader);
                 const retry =
                     old?.after === after

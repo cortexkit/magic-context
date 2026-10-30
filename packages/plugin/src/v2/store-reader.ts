@@ -1150,7 +1150,12 @@ export class V2StoreReader {
      * Identity columns of every row of a session up to and including `throughSeq`,
      * in seq order, without decoding any message body.
      */
-    rowStampsThrough(sessionID: string, throughSeq: number): V2RowStamp[] {
+    rowStampsThrough(sessionID: string, throughSeq: number, after?: number): V2RowStamp[] {
+        if (after !== undefined)
+            return this.prepare(
+                `SELECT id, type, seq, time_created FROM session_message
+                     WHERE session_id = ? AND seq > ? AND seq <= ? ORDER BY seq ASC`,
+            ).all(sessionID, after, throughSeq) as V2RowStamp[];
         return this.prepare(
             `SELECT id, type, seq, time_created FROM session_message
                  WHERE session_id = ? AND seq <= ? ORDER BY seq ASC`,
