@@ -278,8 +278,18 @@ pub(crate) fn check_checkpoint(record: &MoveRecord, pages: &Pages) -> Result<(),
 fn read_setup(path: &Path, session: &str) -> Result<OfflineSetup, Refusal> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| refusal("setup_unreadable", format!("{}: {error}", path.display())))?;
-    let file: SetupFile = serde_json::from_str(&text)
+    let mut file: SetupFile = serde_json::from_str(&text)
         .map_err(|error| refusal("setup_unreadable", error.to_string()))?;
+    // `request_id` and `now` differ on every call, so an export made before the
+    // live Setup cannot know them, and the Setup identity digest leaves both
+    // out (`setup_identity_digest`). Fill them only when absent so the contract
+    // type decodes; a value the export did carry is kept as written.
+    if let Value::Object(fields) = &mut file.request {
+        fields
+            .entry("request_id")
+            .or_insert_with(|| Value::String("offline-first-pass".into()));
+        fields.entry("now").or_insert(Value::from(0u64));
+    }
     let request: SetupRequest = serde_json::from_value(file.request)
         .map_err(|error| refusal("setup_unreadable", format!("request: {error}")))?;
     if !file.project_root.is_absolute() {
