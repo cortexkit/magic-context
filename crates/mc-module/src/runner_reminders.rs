@@ -938,6 +938,31 @@ async fn send_due_reminders_impl<const FULL_META: bool>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn broca_session_change_describe_keeps_reminder_delivery_modes() {
+        let answer = crate::session_resolver::read_runner_reply(
+            crate::broca_session_change_tests::sample("role.describe.session_change.json"),
+        )
+        .unwrap();
+        let describe = cortexkit_role_llm_runner::describe::check_describe(&answer)
+            .unwrap_or_else(|problems| panic!("{problems:?}"));
+        assert!(describe.declares("delivery_order"));
+        for templated in [true, false] {
+            assert!(!super::delivery_modes(templated, &describe).is_empty());
+        }
+    }
+
+    #[test]
+    fn broca_session_change_send_goldens_are_accepted_for_reminders() {
+        for stem in ["send_reply.admission", "send_reply.session_class"] {
+            for suffix in ["before", "after"] {
+                let name = format!("send-reply-goldens/{stem}.json.{suffix}");
+                let reply = crate::broca_session_change_tests::sample(&name);
+                assert!(super::accepted(&reply), "{name}: {reply}");
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
