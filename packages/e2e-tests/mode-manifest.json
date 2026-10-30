@@ -3043,6 +3043,14 @@
             "hosts": ["opencode2"]
         },
         {
+            "path": "tests/opencode2/tool-definition-cache-loss.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Session request tool definitions change the provider prefix: one HARD fold drains held drops, an upgraded baseline adopts without folding, subsequent prefixes replay identically, and a second session stays isolated",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/opencode2/copied-tag-persistence.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },

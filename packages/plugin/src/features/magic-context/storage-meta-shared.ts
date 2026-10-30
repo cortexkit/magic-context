@@ -45,6 +45,7 @@ export interface SessionMetaRow {
     cached_m0_upgrade_state: string | null;
     cached_m0_system_hash: string | null;
     cached_m0_tool_set_hash: string | null;
+    cached_m0_tool_definitions_hash: string | null;
     cached_m0_model_key: string | null;
     cached_m0_project_identity: string | null;
     last_observed_model_key: string | null;
@@ -103,6 +104,7 @@ export const SESSION_META_SELECT_COLUMNS = [
     "cached_m0_upgrade_state",
     "cached_m0_system_hash",
     "cached_m0_tool_set_hash",
+    "cached_m0_tool_definitions_hash",
     "cached_m0_model_key",
     "cached_m0_project_identity",
     "last_observed_model_key",
@@ -160,6 +162,7 @@ export const META_COLUMNS: Record<string, string> = {
     cachedM0UpgradeState: "cached_m0_upgrade_state",
     cachedM0SystemHash: "cached_m0_system_hash",
     cachedM0ToolSetHash: "cached_m0_tool_set_hash",
+    cachedM0ToolDefinitionsHash: "cached_m0_tool_definitions_hash",
     cachedM0ModelKey: "cached_m0_model_key",
     cachedM0ProjectIdentity: "cached_m0_project_identity",
     lastObservedModelKey: "last_observed_model_key",
@@ -286,6 +289,7 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         isStringOrNull(r.cached_m0_upgrade_state) &&
         isStringOrNull(r.cached_m0_system_hash) &&
         isStringOrNull(r.cached_m0_tool_set_hash) &&
+        isStringOrNull(r.cached_m0_tool_definitions_hash) &&
         isStringOrNull(r.cached_m0_model_key) &&
         isStringOrNull(r.cached_m0_project_identity) &&
         isStringOrNull(r.last_observed_model_key) &&
@@ -345,6 +349,7 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         cachedM0UpgradeState: null,
         cachedM0SystemHash: null,
         cachedM0ToolSetHash: null,
+        cachedM0ToolDefinitionsHash: null,
         cachedM0ModelKey: null,
         cachedM0ProjectIdentity: null,
         lastObservedModelKey: null,
@@ -482,6 +487,7 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         cachedM0UpgradeState: stringOrNull(row.cached_m0_upgrade_state),
         cachedM0SystemHash: stringOrNull(row.cached_m0_system_hash),
         cachedM0ToolSetHash: stringOrNull(row.cached_m0_tool_set_hash),
+        cachedM0ToolDefinitionsHash: stringOrNull(row.cached_m0_tool_definitions_hash),
         cachedM0ModelKey: stringOrNull(row.cached_m0_model_key),
         cachedM0ProjectIdentity: stringOrNull(row.cached_m0_project_identity),
         lastObservedModelKey: stringOrNull(row.last_observed_model_key),
@@ -518,6 +524,7 @@ export interface PersistCachedM0Payload {
     upgradeState: string | null;
     systemHash?: string | null;
     toolSetHash?: string | null;
+    toolDefinitionsHash?: string | null;
     modelKey?: string | null;
     projectIdentity?: string | null;
 }
@@ -547,6 +554,7 @@ export function persistCachedM0(
             cached_m0_upgrade_state = ?,
             cached_m0_system_hash = ?,
             cached_m0_tool_set_hash = ?,
+            cached_m0_tool_definitions_hash = ?,
             cached_m0_model_key = ?,
             cached_m0_project_identity = ?
          WHERE session_id = ?`,
@@ -568,6 +576,7 @@ export function persistCachedM0(
         payload.upgradeState,
         payload.systemHash ?? "",
         payload.toolSetHash ?? "",
+        payload.toolDefinitionsHash ?? null,
         payload.modelKey ? piModelRefToCanonical(payload.modelKey) : "",
         payload.projectIdentity ?? null,
         sessionId,
@@ -599,6 +608,7 @@ export function clearCachedM0M1(db: Database, sessionId: string): void {
         ["cached_m0_upgrade_state", null],
         ["cached_m0_system_hash", null],
         ["cached_m0_tool_set_hash", null],
+        ["cached_m0_tool_definitions_hash", null],
         ["cached_m0_model_key", null],
         ["cached_m0_project_identity", null],
         ["cached_m0_last_baseline_end_message_id", null],

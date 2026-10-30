@@ -3214,6 +3214,16 @@ export const MIGRATIONS: Migration[] = [
             installV95PerfSchema(db, true);
         },
     },
+    {
+        version: 96,
+        description: "freeze session request tool definitions with the cached m0 baseline",
+        up(db: Database): void {
+            if (!tableExists(db, "session_meta")) return;
+            // Old baselines have no definition identity. Adopt it on the next
+            // observed request without invalidating their cached message bytes.
+            ensureColumn(db, "session_meta", "cached_m0_tool_definitions_hash", "TEXT");
+        },
+    },
 ];
 
 /**

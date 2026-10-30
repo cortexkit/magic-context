@@ -626,6 +626,7 @@ export interface TransformDeps {
      * telemetry only: a change is recorded but never asks m[0] to fold.
      */
     getToolSetHash?: (sessionId: string) => string;
+    getToolDefinitionsHash?: (sessionId: string) => string | undefined;
     getFallbackModelId?: (sessionId: string) => string | undefined;
     projectPath?: string;
     experimentalUserMemories?: boolean;
@@ -2884,9 +2885,9 @@ export function createTransform(deps: TransformDeps) {
 
         // HARD-bust signals for the m[0]/m[1] materialization decision capture
         // provider-side cache eviction, such as a model switch or system-block
-        // change, plus the TTL idle window. The tool-set fingerprint is observed
-        // alongside them but never folds m[0] because its process-global scope
-        // would create false-positive folds across sessions. When system.transform
+        // change, plus the TTL idle window. Only OpenCode 2 supplies a definition
+        // hash from the session's request; the process-global names fingerprint
+        // stays attribution-only on OpenCode 1. When system.transform
         // follows messages.transform (OpenCode 1), systemHash is the persisted
         // last-turn hash. The system hook then adopts a change on the request that
         // first carries it (see system-prompt-hash.ts), so the next pass does not
@@ -2908,6 +2909,7 @@ export function createTransform(deps: TransformDeps) {
         const m0HardSignals = {
             systemHash: hardSystemHash,
             toolSetHash: hardToolSetHash,
+            toolDefinitionsHash: deps.getToolDefinitionsHash?.(sessionId),
             modelKey: hardModelKey,
             cacheExpired: hardCacheExpired,
             lastResponseTime: sessionMeta.lastResponseTime,

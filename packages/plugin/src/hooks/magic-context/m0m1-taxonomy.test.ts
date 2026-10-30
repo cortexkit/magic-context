@@ -25,6 +25,7 @@ import {
     appendCompartments,
     type CompartmentInput,
 } from "../../features/magic-context/compartment-storage";
+import { v2ToolDefinitionsHash } from "../../features/magic-context/request-tool-definitions";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { resolveHistorianModel } from "../../shared/model-resolution";
@@ -125,6 +126,75 @@ afterEach(() => {
 });
 
 describe("m[0]/m[1] materialization taxonomy", () => {
+    it("session request definitions adopt an upgraded baseline silently, then fold exactly once per real change", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        appendCompartments(db, SESSION_ID, [compartment(0, "A", "Alpha baseline")]);
+        const baseline = pass({ projectDirectory, isCacheBustingPass: true });
+        const tools = {
+            read: { description: "Read a file", input: { type: "object", properties: {} } },
+        };
+        const hash = v2ToolDefinitionsHash(tools);
+        const signal = { ...BASE_HARD, toolDefinitionsHash: hash };
+        const upgraded = pass({ projectDirectory, isCacheBustingPass: false, hard: signal });
+        expect(upgraded.rematerialized).toBe(false);
+        expect([upgraded.m0, upgraded.m1]).toEqual([baseline.m0, baseline.m1]);
+        expect(getOrCreateSessionMeta(db, SESSION_ID).cachedM0ToolDefinitionsHash).toBe(hash);
+
+        // Changing field insertion order does not change OpenCode's projected
+        // definition; a JSON round trip also leaves the served definitions alone.
+        const reordered = {
+            read: { input: tools.read.input, description: tools.read.description },
+        };
+        expect(v2ToolDefinitionsHash(reordered)).toBe(hash);
+        expect(v2ToolDefinitionsHash(JSON.parse(JSON.stringify(tools)))).toBe(hash);
+        appendCompartments(db, SESSION_ID, [compartment(1, "B", "Bravo delta")]);
+        const unchanged = pass({ projectDirectory, isCacheBustingPass: false, hard: signal });
+        expect([unchanged.m0, unchanged.m1]).toEqual([baseline.m0, baseline.m1]);
+
+        const described = { read: { ...tools.read, description: "Read the whole file" } };
+        const reschemed = {
+            read: {
+                ...described.read,
+                input: { type: "object", properties: { path: { type: "string" } } },
+            },
+        };
+        const variants = [
+            described,
+            reschemed,
+            { ...reschemed, added: tools.read },
+            { added: tools.read, ...reschemed },
+            {},
+        ];
+        for (const definitions of variants) {
+            const hard = { ...BASE_HARD, toolDefinitionsHash: v2ToolDefinitionsHash(definitions) };
+            const state = getOrCreateSessionMeta(db, SESSION_ID);
+            const run = () =>
+                injectM0M1({
+                    db,
+                    sessionId: SESSION_ID,
+                    state,
+                    projectPath: PROJECT_PATH,
+                    projectDirectory,
+                    historyBudgetTokens: 98_000,
+                    isCacheBustingPass: false,
+                    hardSignals: hard,
+                });
+            const folded = run();
+            expect(folded.decision.reason).toBe("tool_definitions");
+            expect(folded.decision.toolDefinitionsChange?.firstDifferingTool).not.toBe("unknown");
+            expect(folded.m0RematerializedThisPass).toBe(true);
+            expect(folded.m0Bytes!.toString()).toContain("Bravo delta");
+            expect(state.cachedM0ToolDefinitionsHash).toBe(hard.toolDefinitionsHash);
+            expect(run().m0RematerializedThisPass).toBe(false);
+            expect(pass({ projectDirectory, isCacheBustingPass: false, hard }).rematerialized).toBe(
+                false,
+            );
+        }
+        const unknown = pass({ projectDirectory, isCacheBustingPass: false, hard: BASE_HARD });
+        expect(unknown.rematerialized).toBe(false);
+    });
+
     it("SOFT+: a new compartment + defer passes replay m[0] AND m[1] byte-identical", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();

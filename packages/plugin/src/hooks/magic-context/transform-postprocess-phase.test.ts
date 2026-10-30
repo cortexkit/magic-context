@@ -5815,7 +5815,10 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         );
     });
 
-    it("drains queued pending ops on an m[0] HARD-fold pass EVEN WHILE the historian runs", async () => {
+    it.each([
+        "model_change",
+        "tool_definitions",
+    ])("%s drains pending ops and cleanup on a HARD fold EVEN WHILE the historian runs", async (reason) => {
         // The double-bust fix: a HARD fold (e.g. system-prompt change) re-caches
         // m[0] this pass, so the prefix is busting regardless. If the historian is
         // mid-run, the compartmentRunning veto USED to block the drain → it spilled
@@ -5826,6 +5829,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         initializeDatabase(db);
         const sessionId = "ses-hardfold-drain-while-historian";
         materializeBaseline(sessionId);
+        updateSessionMeta(db, sessionId, { cachedM0ToolDefinitionsHash: "tools-before" });
 
         const message = makeToolMessage("tool-1");
         insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");
@@ -5834,6 +5838,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
 
         // Historian in progress for this session (never resolves during the test).
         registerActiveCompartmentRun(sessionId, new Promise<void>(() => {}));
+        const cleanup = spyOn(heuristicCleanup, "applyHeuristicCleanup");
 
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, [message], {
@@ -5848,7 +5853,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                     historyBudgetTokens: 98_000,
                     hardSignals: {
                         ...BASE_HARD,
-                        modelKey: "anthropic/sonnet", // ← the HARD trigger
+                        ...(reason === "model_change"
+                            ? { modelKey: "anthropic/sonnet" }
+                            : { toolDefinitionsHash: "tools-after" }),
                     },
                 },
             }),
@@ -5859,6 +5866,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
             "dropped",
         );
+        expect(getPendingOps(db, sessionId)).toHaveLength(0);
+        expect(cleanup).toHaveBeenCalled();
+        cleanup.mockRestore();
     });
 
     it.each([

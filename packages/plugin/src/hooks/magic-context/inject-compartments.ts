@@ -25,6 +25,7 @@ import type { Memory } from "../../features/magic-context/memory/types";
 import { resolveMuralWire } from "../../features/magic-context/mural/render-trigger";
 import type { MuralWireOptions } from "../../features/magic-context/mural/resolve-mural";
 import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
+import { describeRequestToolDefinitionChange } from "../../features/magic-context/request-tool-definitions";
 import {
     GLOBAL_USER_PROFILE_PROJECT_PATH,
     getMaxM0MutationId,
@@ -894,10 +895,11 @@ export interface M0SnapshotMarkers {
     memoryRenderEpoch: string | null;
     // HARD-bust markers are captured from runtime signals at the injectM0M1
     // call site (NOT a pure DB read), so readCurrentM0SnapshotMarkers takes
-    // them as inputs. The tool-set hash is retained for attribution only: its
-    // process-global scope makes it deliberately ineligible to trigger a fold.
+    // them as inputs. The names-only tool-set hash is attribution; the optional
+    // definition hash comes only from OpenCode 2's session request.
     systemHash: string;
     toolSetHash: string;
+    toolDefinitionsHash?: string | null;
     modelKey: string;
     projectIdentity?: string | null;
     /** Hash of the image identity folded into this m0 baseline. */
@@ -912,13 +914,15 @@ export interface M0SnapshotMarkers {
  * Runtime cache-eviction signals threaded into the materialization decision.
  * These are NOT derived from durable DB state like the content markers — they
  * come from the current flight (system-prompt hash, tool-set fingerprint,
- * provider/model key) plus the TTL idle window. Tool-set changes are observed
- * for attribution only; they never request a materialization.
+ * provider/model key) plus the TTL idle window. Only the session request's
+ * definition hash can trigger a tool change; the names-only hash is attribution.
  */
 export interface M0HardSignals {
     systemHash: string;
     /** Empty or absent means the provider tool set is not observable this pass. */
     toolSetHash?: string;
+    /** OpenCode 2 only: ordered tool definitions from this session's outgoing request. */
+    toolDefinitionsHash?: string;
     modelKey: string;
     /** True when the provider cache TTL has elapsed since lastResponseTime. */
     cacheExpired: boolean;
@@ -971,6 +975,7 @@ export interface M0M1State {
     cachedM0UpgradeState: string | null;
     cachedM0SystemHash: string | null;
     cachedM0ToolSetHash: string | null;
+    cachedM0ToolDefinitionsHash?: string | null;
     cachedM0ModelKey: string | null;
     cachedM0ProjectIdentity?: string | null;
     snapshotMarkers?: M0SnapshotMarkers | null;
@@ -1066,6 +1071,7 @@ export interface MaterializeDecision {
      */
     m0ToolSetHashPrev?: string | null;
     m0ToolSetHashNew?: string | null;
+    toolDefinitionsChange?: ReturnType<typeof describeRequestToolDefinitionChange>;
 }
 
 export interface MaterializeM0Result {
@@ -1630,6 +1636,7 @@ function readCurrentM0SnapshotMarkersUncached(args: M0SnapshotMarkerReadArgs): {
             memoryRenderEpoch: MEMORY_RENDER_FORMAT_EPOCH,
             systemHash: hard.systemHash,
             toolSetHash: hard.toolSetHash ?? "",
+            toolDefinitionsHash: hard.toolDefinitionsHash ?? null,
             modelKey: piModelRefToCanonical(hard.modelKey),
             projectIdentity: args.projectPath ?? null,
             muralEnabled: args.memoryEnabled !== false && args.muralEnabled === true,
@@ -1656,6 +1663,7 @@ function refreshVolatileMarkerInputs(
         materializedAt: Date.now(),
         systemHash: hard.systemHash,
         toolSetHash: hard.toolSetHash ?? "",
+        toolDefinitionsHash: hard.toolDefinitionsHash ?? null,
         modelKey: hard.modelKey,
         projectIdentity: args.projectPath ?? null,
         muralEnabled: args.memoryEnabled !== false && args.muralEnabled === true,
@@ -1747,6 +1755,7 @@ function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null
         memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
         systemHash: state.cachedM0SystemHash ?? "",
         toolSetHash: state.cachedM0ToolSetHash ?? "",
+        toolDefinitionsHash: state.cachedM0ToolDefinitionsHash ?? null,
         modelKey: state.cachedM0ModelKey ?? "",
         projectIdentity: state.cachedM0ProjectIdentity ?? null,
         muralHash: state.cachedM0MuralHash ?? null,
@@ -1880,8 +1889,31 @@ export function mustMaterialize(args: {
             systemHashNew: hard.systemHash,
         };
     }
-    // Tool-set changes are deliberately not HARD-fold triggers: this signal is
-    // process-global, so folding on it would manufacture unrelated session busts.
+    const liveDefinitionsHash = hard.toolDefinitionsHash;
+    if (liveDefinitionsHash) {
+        const cachedDefinitionsHash = args.state.cachedM0ToolDefinitionsHash;
+        if (!cachedDefinitionsHash) {
+            // Upgraded baselines cannot tell us what tools they served. Seed the
+            // comparison without rebuilding or changing a single served byte.
+            args.db
+                .prepare(
+                    "UPDATE session_meta SET cached_m0_tool_definitions_hash = ? WHERE session_id = ?",
+                )
+                .run(liveDefinitionsHash, args.sessionId);
+            args.state.cachedM0ToolDefinitionsHash = liveDefinitionsHash;
+        } else if (cachedDefinitionsHash !== liveDefinitionsHash) {
+            return {
+                value: true,
+                reason: "tool_definitions",
+                toolDefinitionsChange: describeRequestToolDefinitionChange(
+                    cachedDefinitionsHash,
+                    liveDefinitionsHash,
+                ),
+            };
+        }
+    }
+    // The names-only hash can be process-global on OpenCode 1. It remains
+    // attribution only so unrelated sessions cannot trigger each other.
     // Preserve the actual operands from this decision site for a later query.
     const liveToolSetHash = hard.toolSetHash ?? "";
     const toolSetHashComparison =
@@ -2434,6 +2466,7 @@ function applyMarkersToState(
     // tool-set marker would lose its comparison baseline.
     state.cachedM0SystemHash = markers.systemHash;
     state.cachedM0ToolSetHash = markers.toolSetHash;
+    state.cachedM0ToolDefinitionsHash = markers.toolDefinitionsHash ?? null;
     state.cachedM0ModelKey = markers.modelKey;
     state.cachedM0ProjectIdentity = markers.projectIdentity;
     state.cachedM0MuralHash = markers.muralHash ?? null;
@@ -2708,6 +2741,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             // so carry the captured values and exclude them from the stale check.
             systemHash: snapshotMarkers.systemHash,
             toolSetHash: snapshotMarkers.toolSetHash,
+            toolDefinitionsHash: snapshotMarkers.toolDefinitionsHash,
             modelKey: snapshotMarkers.modelKey,
             projectIdentity: projectPath ?? null,
             muralEnabled: snapshotMarkers.muralEnabled,
@@ -2776,6 +2810,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             upgradeState: upgradeIdentity,
             systemHash: snapshotMarkers.systemHash,
             toolSetHash: snapshotMarkers.toolSetHash,
+            toolDefinitionsHash: snapshotMarkers.toolDefinitionsHash,
             modelKey: snapshotMarkers.modelKey,
             projectIdentity: snapshotMarkers.projectIdentity,
         });
@@ -3102,6 +3137,7 @@ interface CachedM0M1Row {
     cached_m0_upgrade_state: string | null;
     cached_m0_system_hash: string | null;
     cached_m0_tool_set_hash: string | null;
+    cached_m0_tool_definitions_hash: string | null;
     cached_m0_model_key: string | null;
     cached_m0_project_identity: string | null;
     cached_m0_last_baseline_end_message_id: string | null;
@@ -3165,7 +3201,8 @@ function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | nul
                     cached_m0_session_facts_version,
                      cached_m0_upgrade_state,
                      cached_m0_system_hash,
-                     cached_m0_tool_set_hash,
+                      cached_m0_tool_set_hash,
+                      cached_m0_tool_definitions_hash,
                      cached_m0_model_key,
                      cached_m0_project_identity,
                      cached_m0_last_baseline_end_message_id,
@@ -3202,6 +3239,7 @@ function markersFromCachedRow(row: CachedM0M1Row): M0SnapshotMarkers | null {
         memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
         systemHash: row.cached_m0_system_hash ?? "",
         toolSetHash: row.cached_m0_tool_set_hash ?? "",
+        toolDefinitionsHash: row.cached_m0_tool_definitions_hash,
         modelKey: row.cached_m0_model_key ?? "",
         projectIdentity: row.cached_m0_project_identity ?? null,
         muralHash: row.cached_m0_mural_hash ?? null,
@@ -3232,6 +3270,8 @@ function cachedRowMatchesState(row: CachedM0M1Row, state: M0M1State): boolean {
         (row.cached_m0_upgrade_state ?? null) === (state.cachedM0UpgradeState ?? null) &&
         (row.cached_m0_system_hash ?? "") === (state.cachedM0SystemHash ?? "") &&
         (row.cached_m0_tool_set_hash ?? "") === (state.cachedM0ToolSetHash ?? "") &&
+        (row.cached_m0_tool_definitions_hash ?? null) ===
+            (state.cachedM0ToolDefinitionsHash ?? null) &&
         piModelRefToCanonical(row.cached_m0_model_key ?? "") ===
             piModelRefToCanonical(state.cachedM0ModelKey ?? "") &&
         (row.cached_m0_project_identity ?? null) === (state.cachedM0ProjectIdentity ?? null)
@@ -3267,6 +3307,7 @@ function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
     );
     state.cachedM0SystemHash = markers.systemHash;
     state.cachedM0ToolSetHash = markers.toolSetHash;
+    state.cachedM0ToolDefinitionsHash = markers.toolDefinitionsHash ?? null;
     state.cachedM0ModelKey = markers.modelKey;
     state.cachedM0ProjectIdentity = markers.projectIdentity;
     state.snapshotMarkers = markers;
