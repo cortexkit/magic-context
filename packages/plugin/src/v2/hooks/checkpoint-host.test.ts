@@ -20,7 +20,7 @@ const versionUnderReview = process.env.MC_ISSUE824_HOST_VERSION ?? "2.2.2";
 
 // Opt in with a built plugin and an explicit versioned binary; never resolve a live host from PATH.
 test.skipIf(!cli)(
-    `${versionUnderReview} checkpoint: no new recent context, and first oversized upgrade request is trimmed before egress`,
+    `${versionUnderReview} checkpoint: fresh and upgraded compactions fit before egress`,
     async () => {
         const parent = join(tmpdir(), "magic-context", "issue824");
         mkdirSync(parent, { recursive: true });
@@ -266,6 +266,12 @@ test.skipIf(!cli)(
             building = true;
             await turn("build-history");
             building = false;
+            // Apply the smaller window before compaction, without sending another
+            // context request. The next turn is the first to use the fresh checkpoint.
+            await stop();
+            configure(21000);
+            enforceWindow = true;
+            await start();
             await client!.session.compact({ sessionID: sid });
             await client!.session.wait({ sessionID: sid }, { signal: AbortSignal.timeout(60000) });
             const db = new Database(hostDB);
@@ -277,11 +283,37 @@ test.skipIf(!cli)(
             const data = JSON.parse(cut.data);
             expect(data.status).toBe("completed");
             expect(Object.hasOwn(data.metadata ?? {}, "keepID")).toBe(false);
-            expect(data.metadata?.recent ?? data.recent ?? "").toBe("");
+            const storedRecent = data.metadata?.recent ?? data.recent ?? "";
+            if (versionUnderReview === "2.0.22") {
+                // 2.0.22 copies recent separately from the supplied hook result;
+                // keepID only suppresses stored recent in the 2.1+ host protocol.
+                expect(storedRecent).not.toBe("");
+            } else {
+                expect(storedRecent).toBe("");
+            }
+            const frames = (label: string) =>
+                readFileSync(join(root, `${label}.jsonl`), "utf8")
+                    .trim()
+                    .split("\n")
+                    .map((line) => JSON.parse(line));
+            const logOffset = readFileSync(join(root, "mc.log"), "utf8").length;
             const fresh = await turn("new-compaction");
             expect(fresh).toHaveLength(1);
             expect(fresh[0]!.rawBody).not.toContain("<recent-context>");
+            expect(estimateTokens(fresh[0]!.rawBody!)).toBeLessThanOrEqual(21000);
             for (let i = 6; i <= 12; i++) expect(fresh[0]!.rawBody).toContain(`TOOL-ROW-${i}`);
+            if (versionUnderReview === "2.0.22") {
+                const incoming = JSON.stringify(frames("before").at(-1));
+                expect(incoming).toContain("<recent-context>");
+                expect(estimateTokens(incoming)).toBeGreaterThan(21000);
+                const passLog = readFileSync(join(root, "mc.log"), "utf8").slice(logOffset);
+                console.log(
+                    `fresh legacy checkpoint: input=${estimateTokens(incoming)} wire=${estimateTokens(fresh[0]!.rawBody!)}\n${passLog
+                        .split("\n")
+                        .filter((line) => /HARD fold decision|heuristics WILL RUN/.test(line))
+                        .join("\n")}`,
+                );
+            }
 
             // Recreate the old host record, then pin exactly the wrapper that an old
             // plugin observed. No live or external store is involved in this fixture.
@@ -299,12 +331,7 @@ test.skipIf(!cli)(
             await stop();
             await start();
             await turn("legacy-checkpoint");
-            const frames = () =>
-                readFileSync(join(root, "before.jsonl"), "utf8")
-                    .trim()
-                    .split("\n")
-                    .map((line) => JSON.parse(line));
-            const legacy = frames()
+            const legacy = frames("before")
                 .at(-1)
                 .find((message: { id?: string }) => message.id === cut.id);
             expect(JSON.stringify(legacy)).toContain("<recent-context>");
@@ -338,15 +365,10 @@ test.skipIf(!cli)(
             ).toEqual(before);
             const rawStore = JSON.stringify(rows(sid));
             for (let i = 6; i <= 12; i++) expect(rawStore).toContain(`TOOL-ROW-${i}`);
-            const afterFrames = () =>
-                readFileSync(join(root, "after.jsonl"), "utf8")
-                    .trim()
-                    .split("\n")
-                    .map((line) => JSON.parse(line));
-            const repaired = JSON.stringify(afterFrames().at(-1)[0]);
+            const repaired = JSON.stringify(frames("after").at(-1)[0]);
             for (let i = 0; i < 3; i++) {
                 await turn(`cache-hit-${i}`);
-                expect(JSON.stringify(afterFrames().at(-1)[0])).toBe(repaired);
+                expect(JSON.stringify(frames("after").at(-1)[0])).toBe(repaired);
             }
             console.log(`checkpoint host checked isolated stores at ${root}`);
         } finally {

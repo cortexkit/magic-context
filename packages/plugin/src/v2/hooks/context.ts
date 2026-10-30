@@ -1725,12 +1725,16 @@ export async function registerContext(context: V2Context) {
             // host's rate and ours are separate facts, and only reading both
             // explains a session's checkpoint cadence.
             sessionLog(draft.sessionID, `v2 compaction hook: fired answered=true source=${source}`);
-            // OpenCode otherwise appends raw stored history as recent-context.
+            // OpenCode 2.1+ otherwise appends raw stored history as recent-context.
             // restoreAfterCheckpoint restores every row after the frozen history
             // baseline through the host cut, so no unsummarized messages
             // depend on that second copy. The own
             // undefined key overrides the host's default kept range before JSON
             // storage omits it; the native replay path above needs it as well.
+            // In 2.0.22 recent is a separate host-owned result field, not hook
+            // metadata. That version stores the transcript; the context hook
+            // removes it only when the shared transform permits a cache rewrite.
+            // A checkpoint request still over the model limit is refused before egress.
             draft.result = { summary: fold.submitted, metadata: { keepID: undefined } };
         } catch (cause) {
             await refuseBeforeProvider(context.session, draft.sessionID, "compaction-fold", cause);
@@ -2770,20 +2774,7 @@ export async function registerContext(context: V2Context) {
             }
         }
     };
-    const hasRecentCheckpoint = (draft: SessionContext) =>
-        draft.messages.some((message) =>
-            message.content.some(
-                (part) =>
-                    part.type === "text" &&
-                    typeof part.text === "string" &&
-                    part.text.startsWith("<conversation-checkpoint>") &&
-                    part.text.includes("<recent-context>"),
-            ),
-        );
-    const refuseOversizedCheckpoint = async (
-        draft: SessionContext,
-        enteredWithRecentCheckpoint = false,
-    ) => {
+    const refuseOversizedCheckpoint = async (draft: SessionContext) => {
         const hasCheckpoint = draft.messages.some((message) =>
             message.content.some(
                 (part) =>
@@ -2793,12 +2784,10 @@ export async function registerContext(context: V2Context) {
             ),
         );
         const limit = draft.model.limit?.input ?? draft.model.limit?.context;
-        if (
-            !hasCheckpoint ||
-            (!enteredWithRecentCheckpoint && !hasRecentCheckpoint(draft)) ||
-            !limit
-        )
-            return;
+        // Removing a checkpoint's duplicated transcript does not ensure the request
+        // fits: a generate hook can append a large user question after replay.
+        // Size every request that contains a checkpoint, even without recent-context.
+        if (!hasCheckpoint || !limit) return;
         let estimate: ReturnType<typeof estimateCheckpointRequest>;
         try {
             estimate = estimateCheckpointRequest(draft);
@@ -2820,11 +2809,9 @@ export async function registerContext(context: V2Context) {
     await context.session.hook("context", (draft) =>
         withSqliteTransformPass(async () => {
             const anchor = generateReplayAnchor(draft.messages);
-            const enteredWithRecentCheckpoint = hasRecentCheckpoint(draft);
             try {
                 await runManagedContext(draft);
-                if (!compactionOff)
-                    await refuseOversizedCheckpoint(draft, enteredWithRecentCheckpoint);
+                if (!compactionOff) await refuseOversizedCheckpoint(draft);
             } finally {
                 checkpointInputEstimates.delete(draft.sessionID);
                 checkpointPassPermissions.delete(draft.sessionID);

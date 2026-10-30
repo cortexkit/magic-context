@@ -281,3 +281,20 @@ test("checkpoint review: oversized generate suffix is refused after a permitted 
         await f.close();
     }
 });
+
+test("generate refuses an oversized checkpoint without a recent-context block or replay", async () => {
+    const f = await fixture();
+    const logs = spyOn(logger, "sessionLog");
+    try {
+        const side = f.draft();
+        side.messages[0]!.content[0]!.text =
+            `<conversation-checkpoint><summary>${"checkpoint summary ".repeat(40000)}</summary></conversation-checkpoint>`;
+        await expect(f.hooks.get("generate")!(side)).rejects.toThrow("Context full");
+        expect(
+            logs.mock.calls.some(([, message]) => message.includes("arm=checkpoint-over-window")),
+        ).toBe(true);
+    } finally {
+        logs.mockRestore();
+        await f.close();
+    }
+});
