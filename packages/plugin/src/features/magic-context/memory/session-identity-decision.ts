@@ -22,7 +22,7 @@ import {
     resolveProjectIdentityForSession,
     shouldSkipHomeProjectMemory,
 } from "./project-identity";
-import { isPinnedProjectIdentity, readRememberedProjectIdentity } from "./project-identity-cache";
+import { isPinnedProjectIdentity, readPinnedProjectIdentity } from "./project-identity-cache";
 
 /** A directory decision may be pending while another project's prefix is served. */
 export interface SessionIdentityDecision {
@@ -168,8 +168,7 @@ function eligible(directory: string, options: SessionIdentityDecisionOptions): b
 }
 
 function pin(directory: string): string | undefined {
-    const identity = readRememberedProjectIdentity(directory)?.identity;
-    return isPinnedProjectIdentity(identity) ? identity : undefined;
+    return readPinnedProjectIdentity(directory);
 }
 
 function commonDirPin(directory: string): string | undefined {

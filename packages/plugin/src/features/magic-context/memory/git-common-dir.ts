@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { projectDirectoryKey } from "../../../shared/project-directory-key";
 
@@ -9,13 +9,34 @@ export interface GitCheckoutMetadata {
     linkedWorktree: boolean;
 }
 
-const checkoutMetadata = new Map<string, GitCheckoutMetadata | undefined>();
+interface CachedCheckout {
+    metadata: GitCheckoutMetadata | undefined;
+    evidence: Map<string, string | undefined>;
+}
 
-/** Fallback lookups reuse topology; live pin authorization still reads the current layout. */
+const checkoutMetadata = new Map<string, CachedCheckout>();
+
+function topologySignature(file: string): string | undefined {
+    try {
+        const stat = statSync(file, { bigint: true });
+        return `${stat.dev}:${stat.ino}:${stat.mode}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    } catch {
+        return undefined;
+    }
+}
+
+/** Reuse topology only while its Git pointers and targets have unchanged metadata. */
 export function readCachedGitCheckoutMetadata(directory: string): GitCheckoutMetadata | undefined {
     const key = path.resolve(directory);
-    if (!checkoutMetadata.has(key)) checkoutMetadata.set(key, readGitCheckoutMetadata(key));
-    return checkoutMetadata.get(key);
+    const cached = checkoutMetadata.get(key);
+    if (cached && [...cached.evidence].every(([file, stamp]) => topologySignature(file) === stamp))
+        return cached.metadata;
+    const evidence = new Map<string, string | undefined>();
+    const metadata = readCheckoutMetadata(key, (file) => {
+        evidence.set(file, topologySignature(file));
+    });
+    checkoutMetadata.set(key, { metadata, evidence });
+    return metadata;
 }
 
 export function invalidateGitCheckoutMetadata(directory?: string): void {
@@ -25,7 +46,15 @@ export function invalidateGitCheckoutMetadata(directory?: string): void {
 
 /** Read Git's on-disk topology without invoking Git or guessing a checkout from a gitdir path. */
 export function readGitCheckoutMetadata(directory: string): GitCheckoutMetadata | undefined {
+    return readCheckoutMetadata(directory, () => {});
+}
+
+function readCheckoutMetadata(
+    directory: string,
+    watch: (file: string) => void,
+): GitCheckoutMetadata | undefined {
     let current: string;
+    watch(directory);
     try {
         current = realpathSync.native(directory);
     } catch {
@@ -33,6 +62,7 @@ export function readGitCheckoutMetadata(directory: string): GitCheckoutMetadata 
     }
     while (true) {
         const dotGit = path.join(current, ".git");
+        watch(dotGit);
         try {
             const stat = lstatSync(dotGit);
             let gitDir: string;
@@ -45,9 +75,12 @@ export function readGitCheckoutMetadata(directory: string): GitCheckoutMetadata 
                 const target = /^gitdir:\s*(.+?)\s*$/u.exec(readFileSync(dotGit, "utf8"))?.[1];
                 if (!target) return undefined;
                 gitDir = path.resolve(current, target);
+                watch(gitDir);
+                watch(path.join(gitDir, "gitdir"));
                 commonDir = gitDir;
                 try {
                     const commonFile = path.join(gitDir, "commondir");
+                    watch(commonFile);
                     if (lstatSync(commonFile).isFile()) {
                         linkedWorktree = true;
                         const target = readFileSync(commonFile, "utf8").trim();
@@ -62,6 +95,7 @@ export function readGitCheckoutMetadata(directory: string): GitCheckoutMetadata 
                 return undefined;
             }
             let gitCommonDir: string | undefined;
+            watch(commonDir);
             try {
                 gitCommonDir = projectDirectoryKey(realpathSync.native(commonDir));
             } catch {

@@ -1169,10 +1169,11 @@ describe("OpenCode session decision integration", () => {
             getMemoriesByProject(db, registeredProjectId).map((memory) => memory.content),
         ).toContain("tool-written directive");
         expect(getMemoriesByProject(db, fallback!)).toHaveLength(0);
-        if (linked)
-            expect(readRememberedProjectIdentity(directory)?.identity).not.toBe(
-                registeredProjectId,
-            );
+        if (linked) {
+            // The fake registry explicitly registers this folder as a root, not as a borrowed worktree.
+            expect(readRememberedProjectIdentity(directory)?.identity).toBe(registeredProjectId);
+            expect(readRememberedProjectIdentity(directory)?.via).toBe("root");
+        }
         const output = { messages: messages(session) };
         await createTransform(hostDeps(db, session, directory, fake.connectionFile))({}, output);
         expect(rendered(output)).toContain("tool-written directive");

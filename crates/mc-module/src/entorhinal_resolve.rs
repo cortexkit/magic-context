@@ -32,6 +32,7 @@ pub enum ResolveAnswer {
     Registered {
         project_id: String,
         canonical_root: Option<PathBuf>,
+        root_registered: bool,
     },
 }
 
@@ -225,6 +226,7 @@ pub(crate) fn decode_reply(bytes: &[u8]) -> ResolveAnswer {
             ResolveAnswer::Registered {
                 project_id: reply.project_id,
                 canonical_root: reply.canonical_root,
+                root_registered: reply.via == "root",
             }
         }
         Ok(reply) => {
@@ -285,6 +287,7 @@ async fn resolve_with_store_attempt(
         ResolveAnswer::Registered {
             project_id,
             canonical_root,
+            root_registered,
         } => {
             if let Some(store) = store {
                 let fallback = identities.resolve(&directory)?;
@@ -307,7 +310,12 @@ async fn resolve_with_store_attempt(
                     }
                 }
             }
-            identities.pin_live_answer(&directory, &project_id, canonical_root.as_deref());
+            identities.pin_live_answer_with_root(
+                &directory,
+                &project_id,
+                canonical_root.as_deref(),
+                root_registered,
+            );
             Ok(project_id)
         }
         ResolveAnswer::NotAnswering | ResolveAnswer::Implicit => {

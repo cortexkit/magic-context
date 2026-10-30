@@ -258,7 +258,8 @@ test("a borrowed answer notices an in-place pin replacement and a new exact work
     pin(main, "pj-OTHER");
     expect(resolveProjectIdentityForSession(worktree)).toBe("pj-OTHER");
     pin(worktree, "pj-EXACT");
-    expect(resolveProjectIdentityForSession(worktree)).toBe("pj-EXACT");
+    // A linked folder keeps its own pin only with explicit Entorhinal root-registration evidence.
+    expect(resolveProjectIdentityForSession(worktree)).toBe("pj-OTHER");
 });
 
 test("worktree cleanup runs only once even if a legacy writer recreates its sidecar", async () => {
@@ -304,7 +305,9 @@ test("session topology caching preserves fail-closed worktree detection for malf
 });
 
 describe("live project pin writes", () => {
-    for (const row of parity.cases.filter((row) => row.name.startsWith("worktree-"))) {
+    for (const row of parity.cases.filter(
+        (row) => row.name.startsWith("worktree-") || "cacheTransition" in row,
+    )) {
         test(`parity worktree resolvers: ${row.name}`, async () => {
             const expand = (value: string) => value.replaceAll("<fixture>", testRoot);
             const fixture = parity.fixtures.linked;
@@ -335,7 +338,6 @@ describe("live project pin writes", () => {
                     }),
                 );
             }
-            const before = sidecarBytes();
             let probes = 0;
             __setProjectIdentityTestHooks({
                 execFileSync: (() => {
@@ -345,6 +347,50 @@ describe("live project pin writes", () => {
             });
             const directory = expand(row.directory);
             const expected = row.expected.identity;
+            if ("cacheTransition" in row) {
+                const transition = row.cacheTransition as {
+                    publication?: { directory: string; identity: string };
+                    warmIdentity: string;
+                    sidecars: { directory: string; identity: string }[];
+                    atomic?: boolean;
+                    recreateFromFixture?: keyof typeof parity.fixtures;
+                };
+                if (transition.publication)
+                    rememberPinnedProjectIdentity(
+                        expand(transition.publication.directory),
+                        transition.publication.identity,
+                    );
+                expect(await flushProjectPinWrites(2_000)).toBe(true);
+                expect(resolveProjectIdentityForSession(directory)).toBe(transition.warmIdentity);
+                expect(await flushProjectPinWrites(2_000)).toBe(true);
+                borrowedProjectIdentity(directory);
+                if (transition.recreateFromFixture) {
+                    const [parent] = parity.fixtures[transition.recreateFromFixture].repositories;
+                    const gitDir = join(expand(parent.gitDir), "worktrees", "recreated");
+                    fs.rmSync(directory, { recursive: true });
+                    mkdirSync(directory, { recursive: true });
+                    mkdirSync(gitDir, { recursive: true });
+                    writeFileSync(join(directory, ".git"), `gitdir: ${gitDir}\n`);
+                    writeFileSync(join(gitDir, "commondir"), "../..\n");
+                }
+                for (const record of transition.sidecars) {
+                    const file = join(
+                        storageDir,
+                        "project-identities",
+                        `${createHash("sha256")
+                            .update(projectDirectoryKey(expand(record.directory)))
+                            .digest("hex")}.json`,
+                    );
+                    const destination = transition.atomic ? `${file}.replacement` : file;
+                    writeFileSync(
+                        destination,
+                        JSON.stringify({ ...record, directory: expand(record.directory) }),
+                    );
+                    if (transition.atomic) fs.renameSync(destination, file);
+                }
+                probes = 0;
+            }
+            const before = sidecarBytes();
             if (row.name === "worktree-stale-git-sidecar-retired") {
                 expect(resolveProjectIdentityStrict(directory, false, { cache: false })).toBe(
                     expected,
@@ -386,6 +432,8 @@ describe("live project pin writes", () => {
         "registered-root",
         "registered-subfolder",
         "registered-linked-worktree",
+        "registered-linked-root",
+        "nonroot-linked-equal-canonical-root",
         "unregistered-checkout",
         "nested-registration-without-parent-pin",
         "nested-registration-with-parent-pin",

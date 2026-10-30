@@ -22,9 +22,8 @@ struct Pin {
 
 #[derive(Default)]
 struct State {
-    // This is the process's identity cache, not a work queue. Failed and overflowed
-    // pins stay visible and are retried when their folder is next bound. Keeping
-    // completed pins also prevents a concurrent late answer replacing the first pin.
+    // Failed and overflowed pins stay visible until persisted. Completed destinations
+    // reject late publications but are never returned by overlay lookups.
     pins: HashMap<PathBuf, Pin>,
     queued: HashMap<PathBuf, Pin>,
     active: Option<(PathBuf, u64)>,
@@ -90,6 +89,9 @@ impl PinWriter {
     pub(super) fn lookup(&self, path: &Path) -> Option<IdentityRecord> {
         let mut state = self.shared.state.lock().unwrap();
         let pin = state.pins.get(path)?.clone();
+        if pin.persisted {
+            return None;
+        }
         Self::schedule(&mut state, path, pin.clone());
         self.shared.changed.notify_all();
         Some(pin.record)
@@ -102,7 +104,7 @@ impl PinWriter {
             .unwrap()
             .pins
             .iter()
-            .filter(|(path, _)| path.parent() == Some(sidecars))
+            .filter(|(path, pin)| !pin.persisted && path.parent() == Some(sidecars))
             .map(|(_, pin)| (pin.record.directory.clone(), pin.record.clone()))
             .collect()
     }
@@ -114,7 +116,7 @@ impl PinWriter {
     pub(super) fn publish(&self, sidecars: &Path, record: IdentityRecord, private: bool) {
         let path = sidecar_path(sidecars, Path::new(&record.directory));
         let mut state = self.shared.state.lock().unwrap();
-        // Two concurrent accepted answers must not replace the first process pin.
+        // Two concurrent accepted answers must not replace the first pending pin.
         if let Some(pin) = state.pins.get(&path).cloned() {
             Self::schedule(&mut state, &path, pin);
         } else {
@@ -176,7 +178,7 @@ impl PinWriter {
             let result = if let Some(expected) = &pin.remove_if_unchanged {
                 match std::fs::read(&path) {
                     Ok(bytes) if bytes == *expected => std::fs::remove_file(&path).inspect(|()| {
-                        tracing::info!(path = %path.display(), "Removed stale git worktree identity; borrowing checkout project pin");
+                        tracing::info!(path = %path.display(), "Removed stale worktree identity; borrowing checkout project pin");
                     }),
                     Ok(_) => Ok(()),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -190,10 +192,13 @@ impl PinWriter {
             let mut state = shared.state.lock().unwrap();
             state.active = None;
             if result.is_ok() {
-                if let Some(current) = state.pins.get_mut(&path) {
-                    if current.revision == pin.revision {
-                        current.persisted = true;
-                    }
+                if state
+                    .pins
+                    .get(&path)
+                    .is_some_and(|current| current.revision == pin.revision)
+                {
+                    state.pins.get_mut(&path).unwrap().persisted = true;
+                    state.revision += 1;
                 }
             } else {
                 tracing::warn!(path = %path.display(), error = ?result.err(), "Project pin persistence failed; retaining process pin");
@@ -294,6 +299,7 @@ mod tests {
             directory: super::super::project_directory_key(directory),
             identity: identity.into(),
             git_common_dir: None,
+            via: None,
         }
     }
 
@@ -337,6 +343,7 @@ mod tests {
             ResolveAnswer::Registered {
                 project_id: identity.into(),
                 canonical_root: Some(folder.to_path_buf()),
+                root_registered: false,
             }
         })
         .await

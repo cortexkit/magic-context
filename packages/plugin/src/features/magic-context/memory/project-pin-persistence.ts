@@ -11,7 +11,7 @@ export function persistPinRequest(request: PinWriteRequest): void {
         try {
             if (readFileSync(request.destination, "utf8") === request.removeIfUnchanged) {
                 unlinkSync(request.destination);
-                log(`[magic-context] removed stale git worktree identity: ${request.destination}`);
+                log(`[magic-context] removed stale worktree identity: ${request.destination}`);
             }
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

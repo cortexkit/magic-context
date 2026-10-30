@@ -16,6 +16,7 @@ export interface ProjectIdentityRecord {
     directory: string;
     identity: string;
     gitCommonDir?: string;
+    via?: string;
 }
 
 const ignoredImplicitRecords = new Set<string>();
@@ -35,6 +36,7 @@ const borrowedCache = new Map<
         identity: string | undefined;
         source: string | undefined;
         sourceSignature: string;
+        candidates: Map<string, string>;
     }
 >();
 const cleanedWorktrees = new Set<string>();
@@ -85,6 +87,7 @@ function readIdentityRecord(file: string): ProjectIdentityRecord | undefined {
             ...(typeof record.gitCommonDir === "string"
                 ? { gitCommonDir: record.gitCommonDir }
                 : {}),
+            ...(typeof record.via === "string" ? { via: record.via } : {}),
         };
     } catch {
         // Missing or damaged sidecars never prevent a session from starting.
@@ -117,14 +120,16 @@ export function rememberPinnedProjectIdentity(
     directory: string,
     identity: string,
     gitCommonDir?: string,
+    via?: "root",
 ): void {
     if (!isPinnedProjectIdentity(identity)) return;
     try {
-        if (isPinnedProjectIdentity(readRememberedProjectIdentity(directory)?.identity)) return;
+        if (readPinnedProjectIdentity(directory)) return;
         projectPinWriter().publish(cachePath(directory), {
             directory: projectDirectoryKey(directory),
             identity,
             gitCommonDir,
+            ...(via ? { via } : {}),
         });
     } catch {
         // A read-only sidecar store must not prevent use of the live identity for this session.
@@ -151,6 +156,15 @@ export function readRememberedProjectIdentity(
     return record?.directory === projectDirectoryKey(directory) ? { ...record } : undefined;
 }
 
+/** Only an explicit root registration lets a linked folder keep its own project pin. */
+export function readPinnedProjectIdentity(directory: string): string | undefined {
+    const record = readRememberedProjectIdentity(directory);
+    if (!record || !isPinnedProjectIdentity(record.identity)) return undefined;
+    if (record.via !== "root" && readCachedGitCheckoutMetadata(directory)?.linkedWorktree)
+        return undefined;
+    return record.identity;
+}
+
 /** `storageDir` lets offline tools read the sidecars that sit next to a chosen `context.db`. */
 export function readRememberedGitIdentity(
     directory: string,
@@ -173,6 +187,7 @@ function findPinnedRecordByGitCommonDir(
     gitCommonDir: string,
     storageDir: string,
     preferCheckoutRoot: boolean,
+    candidates?: Map<string, string>,
 ): ProjectIdentityRecord | undefined {
     const sidecarDir = path.join(storageDir, "project-identities");
     let files: string[];
@@ -189,10 +204,18 @@ function findPinnedRecordByGitCommonDir(
     const identities = new Map<string, ProjectIdentityRecord>();
     for (const file of files) {
         if (!file.endsWith(".json")) continue;
-        const record = readIdentityRecord(path.join(sidecarDir, file));
+        const source = path.join(sidecarDir, file);
+        candidates?.set(source, fileSignature(source));
+        const record = readIdentityRecord(source);
         if (record && !records.has(record.directory)) records.set(record.directory, record);
     }
     for (const record of records.values()) {
+        if (
+            isPinnedProjectIdentity(record.identity) &&
+            record.via !== "root" &&
+            readCachedGitCheckoutMetadata(record.directory)?.linkedWorktree
+        )
+            continue;
         if (preferCheckoutRoot && isPinnedProjectIdentity(record.identity)) {
             const checkout = readCachedGitCheckoutMetadata(record.directory);
             // Older root pins predate gitCommonDir. Verify their topology on disk,
@@ -236,10 +259,18 @@ export function readBorrowedProjectIdentity(
         cached.writer === writer &&
         cached.generation === projectIdentityPinGeneration() &&
         cached.signature === signature &&
-        (!cached.source || cached.sourceSignature === fileSignature(cached.source))
+        (!cached.source || cached.sourceSignature === fileSignature(cached.source)) &&
+        [...cached.candidates].every(([file, stamp]) => fileSignature(file) === stamp)
     )
         return cached.identity;
-    const record = findPinnedRecordByGitCommonDir(gitCommonDir, storageDir, preferCheckoutRoot);
+    // Even malformed and legacy records can become a matching pin through an in-place edit.
+    const candidates = new Map<string, string>();
+    const record = findPinnedRecordByGitCommonDir(
+        gitCommonDir,
+        storageDir,
+        preferCheckoutRoot,
+        candidates,
+    );
     const source = record ? cachePath(record.directory, storageDir) : undefined;
     borrowedCache.set(key, {
         commonDir: gitCommonDir,
@@ -250,6 +281,7 @@ export function readBorrowedProjectIdentity(
         identity: record?.identity,
         source,
         sourceSignature: source ? fileSignature(source) : "missing",
+        candidates: record ? new Map() : candidates,
     });
     return record?.identity;
 }
@@ -260,7 +292,7 @@ export function __resetProjectIdentitySidecarCachesForTests(): void {
     cleanedWorktrees.clear();
 }
 
-/** Worktrees inherit the checkout's pj- identity without saving it; retire only the git: bytes read here. */
+/** Retire unregistered worktree pins only if their bytes still match the stale record read here. */
 export function removeStaleWorktreeIdentity(directory: string): void {
     const destination = cachePath(directory);
     if (cleanedWorktrees.has(destination)) return;
@@ -271,7 +303,8 @@ export function removeStaleWorktreeIdentity(directory: string): void {
         const record = JSON.parse(bytes);
         if (
             record.directory === projectDirectoryKey(directory) &&
-            /^git:[0-9a-f]{7,64}$/.test(record.identity)
+            (/^git:[0-9a-f]{7,64}$/.test(record.identity) ||
+                (isPinnedProjectIdentity(record.identity) && record.via !== "root"))
         )
             projectPinWriter().removeIfUnchanged(destination, record, bytes);
     } catch {
