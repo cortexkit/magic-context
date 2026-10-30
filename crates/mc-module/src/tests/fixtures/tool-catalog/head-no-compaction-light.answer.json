@@ -1,6 +1,6 @@
 {
-  "generation": "9de5b6d68b0e5205019f4dfaf11af3bd62f366dc057ec56b50c2ffcca2d8bce0",
-  "catalog_digest": "9de5b6d68b0e5205019f4dfaf11af3bd62f366dc057ec56b50c2ffcca2d8bce0",
+  "generation": "01569a1bcb825adb3a7a4e4b9df3be33276bcf52bb5ec8820d5ca6b3a3bddfbd",
+  "catalog_digest": "01569a1bcb825adb3a7a4e4b9df3be33276bcf52bb5ec8820d5ca6b3a3bddfbd",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -26,7 +26,7 @@
               "update",
               "dismiss"
             ],
-            "description": "write | read | update | dismiss (default: write with content, else read)."
+            "description": "write | read | update | dismiss."
           },
           "content": {
             "type": "string",
@@ -71,7 +71,7 @@
               "minimum": 1,
               "maximum": 9007199254740991
             },
-            "description": "One id for update, 1–50 for dismiss or read (full bodies). Ignored by write."
+            "description": "One id for update, 1–50 for dismiss, or 1–50 to read those notes in full. Write and a plain read take an empty list."
           }
         },
         "additionalProperties": false
@@ -117,7 +117,7 @@
               "CONFIG_VALUES",
               "NAMING"
             ],
-            "description": "Kind of fact (required for write; optional on update/merge)."
+            "description": "Kind of fact (required for write; on update/merge pass the current category to keep it)."
           },
           "ids": {
             "type": "array",
@@ -197,7 +197,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive — what earlier sessions said and decided, commits and notes; ask it before asking the user anything that may already be recorded, phrased as a question with the exact names in it. `ctx_memory` pins facts that stay true for the months this work lasts, for you and every agent on the project: what must not have to be found again, especially what cost you turns. They are not shown to you automatically; recall them with `ctx_search`. `ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note; \"take a note\" from the user always goes there.",
     "item_digest": "7ab356879bd31a5af7b0899ff5c41c2d85ea663f35ec05f032a94db23e934726",
-    "preflight_digest": "293f232cc8357835948b41a3586fed656b1675ec4d3638c5ba7ba50d7be9d7a3",
+    "preflight_digest": "9a988aab81c8accfc9f13b9957fc1e438ab05c389c9a1154a3b3523e35776fac",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

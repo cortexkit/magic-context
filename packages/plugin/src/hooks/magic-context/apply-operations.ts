@@ -288,7 +288,10 @@ export function convertLegacyToolSkeletons(
     db: ContextDatabase,
     sessionId: string,
     targets: ReadonlyMap<number, TagTarget>,
-    options: { keepFullDrop?: (callId: string | null) => boolean } = {},
+    options: {
+        keepFullDrop?: (callId: string | null) => boolean;
+        prepareRemovals?: (rows: readonly { tagNumber: number; callId: string | null }[]) => void;
+    } = {},
 ): Map<number, ConvertedToolDropMode> {
     const prepared = prepareLegacyToolSkeletonConversions(db, sessionId, targets, options);
     prepared.persist(db);
@@ -300,7 +303,10 @@ export function prepareLegacyToolSkeletonConversions(
     db: ContextDatabase,
     sessionId: string,
     targets: ReadonlyMap<number, TagTarget>,
-    options: { keepFullDrop?: (callId: string | null) => boolean } = {},
+    options: {
+        keepFullDrop?: (callId: string | null) => boolean;
+        prepareRemovals?: (rows: readonly { tagNumber: number; callId: string | null }[]) => void;
+    } = {},
 ) {
     // Only calls on the wire can change. Point lookups use the session/tag
     // unique index instead of reading every historical dropped tool twice.
@@ -325,6 +331,10 @@ export function prepareLegacyToolSkeletonConversions(
         });
     };
     const rows = readRows(db);
+    // Hosts may batch the removal authorizations requested by cannotRemove().
+    // Preparation does not replace the per-target cannotRemove() checks that
+    // decide whether each conversion must retain the tool call.
+    options.prepareRemovals?.(rows);
     const converted = new Map<number, ConvertedToolDropMode>();
     for (const row of rows) {
         const target = targets.get(row.tagNumber);
@@ -701,11 +711,23 @@ export function applyPendingOperations(
     return didMutateMessage;
 }
 
+/** Plan precisely the authorizations requested by full-drop replay, in replay order. */
+export function prepareFlushedToolRemovals(
+    targets: Map<number, TagTarget>,
+    tags: readonly TagEntry[],
+): void {
+    for (const tag of tags) {
+        if (tag.status !== "dropped" || tag.type !== "tool") continue;
+        if (tag.dropMode != null && tag.dropMode !== "full") continue;
+        targets.get(tag.tagNumber)?.prepareReplayDrop?.();
+    }
+}
+
 export function applyFlushedStatuses(
     sessionId: string,
     db: ContextDatabase,
     targets: Map<number, TagTarget>,
-    preloadedTags?: TagEntry[],
+    preloadedTags?: readonly Pick<TagEntry, "tagNumber" | "type" | "status" | "dropMode">[],
 ): boolean {
     let didMutateMessage = false;
     // Rows without a target in the visible output cannot change that output.

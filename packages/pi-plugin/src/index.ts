@@ -119,7 +119,10 @@ import { setHarness } from "@magic-context/core/shared/harness";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { setKeepSubagents } from "@magic-context/core/shared/keep-subagents";
 import { flushLogger, log } from "@magic-context/core/shared/logger";
-import { resolveHistorianModel } from "@magic-context/core/shared/model-resolution";
+import {
+	type ModelInput,
+	resolveHistorianModel,
+} from "@magic-context/core/shared/model-resolution";
 import {
 	createPromptSurfaceGuidanceEpochCache,
 	createPromptSurfaceRuntime,
@@ -1780,7 +1783,7 @@ async function startPiMagicContextRuntime(
 			}
 			const emptyHistorian = empty.find((chain) => chain.owner === "historian");
 			const historianLine = historian
-				? `registered historian trigger (model=${historian.model}${historian.fallbackModels?.length ? `, fallbacks=${historian.fallbackModels.join(",")}` : ""}, executeThreshold=${formatExecuteThresholdForLog(historian.executeThresholdPercentage)})`
+				? `registered historian trigger (model=${historian.model}${historian.fallbackModels?.length ? `, fallbacks=${historian.fallbackModels.map(formatPiModelForLog).join(",")}` : ""}, executeThreshold=${formatExecuteThresholdForLog(historian.executeThresholdPercentage)})`
 				: emptyHistorian
 					? `registered historian trigger: DISABLED (no configured model is registered in Pi: ${formatEmptyPiModelChain(emptyHistorian)})`
 					: undefined;
@@ -1985,7 +1988,7 @@ async function startPiMagicContextRuntime(
 		{
 			db,
 			signalPendingMarker: signalPiDeferredCompactionMarkerDrain,
-			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId),
+			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId, "pass"),
 		},
 	);
 	pi.on("session_start", async (event, ctx) => {
@@ -2021,7 +2024,7 @@ async function startPiMagicContextRuntime(
 		await handlePiCloneSessionStart(event, ctx, {
 			db,
 			signalPendingMarker: signalPiDeferredCompactionMarkerDrain,
-			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId),
+			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId, "pass"),
 		});
 		const sessionId = resolveSessionId(ctx);
 		if (
@@ -2041,7 +2044,7 @@ async function startPiMagicContextRuntime(
 				modelKey: canonicalPiModelKey(model.provider, model.id),
 			});
 		}
-		if (sessionId) prewarmPiTagSnapshot(db, sessionId);
+		if (sessionId) prewarmPiTagSnapshot(db, sessionId, "pass");
 	});
 
 	pi.on("agent_start", (_event, ctx) => {
@@ -3248,7 +3251,7 @@ async function startPiMagicContextRuntime(
 				incomingSessionId &&
 				(_event as { reason?: unknown })?.reason !== "fork"
 			)
-				prewarmPiTagSnapshot(db, incomingSessionId);
+				prewarmPiTagSnapshot(db, incomingSessionId, "pass");
 			if (!outgoingSessionId || outgoingSessionId === readSessionId(ctx))
 				return;
 			clearPiSystemPromptSession(outgoingSessionId);
@@ -3282,4 +3285,9 @@ function formatExecuteThresholdForLog(
 		.map(([key, pct]) => `${key}=${pct}%`);
 	const base = `${value.default}%`;
 	return overrides.length > 0 ? `${base} (${overrides.join(", ")})` : base;
+}
+
+function formatPiModelForLog(entry: ModelInput): string {
+	if (typeof entry === "string") return entry;
+	return `${entry.model}${entry.qualifier ? ` (thinking_level=${entry.qualifier})` : ""}`;
 }

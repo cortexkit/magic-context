@@ -123,6 +123,131 @@ function userFlushSessions(sessionId: string): Set<string> {
 
 const tempDirs: string[] = [];
 
+it("host checkpoint estimates enter the emergency band before scheduling without provider proof", async () => {
+    useTempDataHome("host-checkpoint-estimate-");
+    const db = openDatabase()!;
+    const sessionId = "host-checkpoint-estimate";
+    await refreshModelLimitsFromApi({
+        config: {
+            providers: async () => ({
+                data: {
+                    providers: [
+                        {
+                            id: "anthropic",
+                            models: { "checkpoint-model": { limit: { context: 200000 } } },
+                        },
+                    ],
+                },
+            }),
+        },
+    });
+    const scheduler = createScheduler({ executeThresholdPercentage: 65 });
+    const events: string[] = [];
+    const original = scheduler.shouldExecute.bind(scheduler);
+    const decide = spyOn(scheduler, "shouldExecute").mockImplementation((...args) => {
+        events.push("schedule");
+        return original(...args);
+    });
+    const usage = new Map([
+        [
+            sessionId,
+            {
+                usage: { inputTokens: 100, percentage: 0.05 },
+                hasUsageTokens: true,
+                updatedAt: Date.now(),
+            },
+        ],
+    ]);
+    let permission: boolean | undefined;
+    const transform = createTransform({
+        db,
+        tagger: createTagger(),
+        scheduler,
+        contextUsageMap: usage,
+        liveModelBySession: new Map([
+            [sessionId, { providerID: "anthropic", modelID: "checkpoint-model" }],
+        ]),
+        getModelKey: () => "anthropic/checkpoint-model",
+        historyRefreshSessions: new Set(),
+        pendingMaterializationSessions: new Set(),
+        lastHeuristicsTurnId: new Map(),
+        clearReasoningAge: 50,
+        protectedTokens: 0,
+        hostInputEstimate: () => {
+            events.push("estimate");
+            return { tokens: 240000, pressureTokens: 210000 };
+        },
+        onPassPermission: (_id, value) => {
+            permission = value;
+        },
+    });
+    try {
+        await transform(
+            {},
+            {
+                messages: [
+                    {
+                        info: { id: "u1", role: "user", sessionID: sessionId },
+                        parts: [{ type: "text", text: "Retain this user request." }],
+                    },
+                ],
+            },
+        );
+        expect(events.indexOf("estimate")).toBeLessThan(events.indexOf("schedule"));
+        expect(decide.mock.results.at(-1)?.value).toBe("execute");
+        expect(permission).toBe(true);
+        expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(0);
+        expect(getOverflowState(db, sessionId).needsEmergencyRecovery).toBe(false);
+        for (const reading of usage.values()) expect(reading.usage.inputTokens).toBe(100);
+        expect(getOrCreateSessionMeta(db, sessionId).lastInputTokens ?? 0).toBeLessThanOrEqual(100);
+    } finally {
+        decide.mockRestore();
+    }
+});
+
+it("reports the final read-only pass permission after rendering and before returning to the host", async () => {
+    useTempDataHome("pass-permission-");
+    const db = openDatabase()!;
+    const sessionId = "permission-session";
+    const reports: boolean[] = [];
+    let output: { messages: TestMessage[] };
+    let returned = false;
+    const transform = createTransform({
+        db,
+        tagger: createTagger(),
+        scheduler: createScheduler({ executeThresholdPercentage: 65 }),
+        contextUsageMap: new Map(),
+        liveModelBySession: new Map([[sessionId, { providerID: "anthropic", modelID: "opus" }]]),
+        historyRefreshSessions: new Set(),
+        pendingMaterializationSessions: new Set(),
+        lastHeuristicsTurnId: new Map(),
+        clearReasoningAge: 50,
+        protectedTokens: 0,
+        onPassPermission: (id, permission) => {
+            expect(id).toBe(sessionId);
+            expect(returned).toBe(false);
+            expect(JSON.stringify(output.messages)).toContain("§1§ question");
+            reports.push(permission);
+        },
+    });
+    for (let pass = 0; pass < 2; pass++) {
+        output = {
+            messages: [
+                {
+                    info: { id: "u1", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "question" }],
+                },
+            ],
+        };
+        returned = false;
+        await transform({}, output);
+        returned = true;
+    }
+    expect(reports).toHaveLength(2);
+    expect(typeof reports[0]).toBe("boolean");
+    expect(reports[1]).toBe(false);
+});
+
 for (const generation of ["v1", "v2"] as const) {
     for (const configured of [true, false]) {
         it(`${generation} pass ${configured ? "applies live user TTL edits without a prompt or model change" : "keeps built-in TTL changes frozen"}`, async () => {

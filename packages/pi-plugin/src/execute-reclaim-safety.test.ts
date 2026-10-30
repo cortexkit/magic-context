@@ -6,6 +6,7 @@ import {
 	queuePendingOp,
 	updateSessionMeta,
 } from "../../plugin/src/features/magic-context/storage";
+import * as replayDocument from "../../plugin/src/features/magic-context/storage-replay-document";
 import * as executeModule from "../../plugin/src/hooks/magic-context/execute-reclaim";
 import {
 	__test,
@@ -379,29 +380,15 @@ for (const [count, busy] of [
 				if (sql === "COMMIT") observation.commits++;
 				return exec(sql);
 			}) as typeof db.exec;
-			db.prepare = ((sql: string) => {
-				const statement = prepare(sql);
-				if (
-					!sql.startsWith(
-						"UPDATE session_meta SET trailing_blank_decisions = ?",
-					)
-				)
-					return statement;
-				return new Proxy(statement, {
-					get(target, key) {
-						const value = Reflect.get(target, key);
-						if (key === "run")
-							return (...values: unknown[]) => {
-								observation.writes++;
-								return (value as (...values: unknown[]) => unknown).apply(
-									target,
-									values,
-								);
-							};
-						return typeof value === "function" ? value.bind(target) : value;
-					},
-				});
-			}) as typeof db.prepare;
+			const updateDocument = replayDocument.updateReplayDocument;
+			// Count the native document merge rather than individual SQL statements.
+			const writeSpy = spyOn(
+				replayDocument,
+				"updateReplayDocument",
+			).mockImplementation((target, sessionId, mutate) => {
+				if (target === db && sessionId === id) observation.writes++;
+				return updateDocument(target, sessionId, mutate);
+			});
 			const start = performance.now();
 			try {
 				observation.tokens = originalEstimate({
@@ -417,7 +404,7 @@ for (const [count, busy] of [
 			} finally {
 				observation.elapsedMs = performance.now() - start;
 				db.exec = exec;
-				db.prepare = prepare;
+				writeSpy.mockRestore();
 				expect(document()).toEqual(before);
 				observations.push(observation);
 			}
@@ -438,7 +425,7 @@ for (const [count, busy] of [
 			expect(observed.begins).toBe(1);
 			expect(observed.commits).toBe(0);
 			expect(observed.rollbacks).toBe(busy ? 0 : 1);
-			expect(observed.writes).toBe(busy ? 0 : count);
+			expect(observed.writes).toBe(busy ? 0 : 1);
 			if (busy) {
 				expect(observed.tokens).toBe(0);
 				expect(getPendingOps(db, id)).toHaveLength(count);

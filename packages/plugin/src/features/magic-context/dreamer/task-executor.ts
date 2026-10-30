@@ -930,11 +930,10 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                         return { status: "failed", transient: true, error };
                     }
                     const processed = result.mapped + result.independent;
-                    if (processed > 0) {
-                        // Mappings are persisted one completed host batch at a time.
-                        // Like a resumable verify-broad cycle, bank real progress as a
-                        // completed scheduled run so lastRunAt advances, while the
-                        // remaining gate set drives the next scheduled run.
+                    if (processed > 0 || result.failure === undefined) {
+                        // Bank committed progress or a valid answer with no confirmed
+                        // mappings. Uncertain ids remain unmapped for the mapper's
+                        // retry/backoff policy rather than becoming a parse failure.
                         const progress = `map-memories: committed ${processed} mapping(s) (mapped ${result.mapped}, independent ${result.independent}); ${result.remaining} remain`;
                         recordRun("completed", null, { progress });
                         return { status: "completed" };

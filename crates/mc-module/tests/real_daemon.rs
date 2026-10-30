@@ -844,7 +844,9 @@ fn build_daemon_binaries(workspace: &Path) -> DaemonBinaries {
         target.to_str().unwrap(),
     ];
     DAEMON_BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
-    let output = Command::new("cargo")
+    let mut command = Command::new("cargo");
+    daemon_checkout::configure_daemon_cargo(&mut command);
+    let output = command
         .env("CARGO_BUILD_JOBS", "2")
         .args(cargo_args)
         .current_dir(&source)
@@ -1095,7 +1097,7 @@ fn workspace_root() -> PathBuf {
 }
 
 fn subconscious_root(workspace: &Path) -> PathBuf {
-    fs::canonicalize(workspace.parent().unwrap().join("subconscious")).unwrap()
+    fs::canonicalize(daemon_checkout::root(workspace)).unwrap()
 }
 
 fn unique_temp_dir(name: &str) -> PathBuf {

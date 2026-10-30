@@ -10,6 +10,7 @@ export interface FoldIdentity {
     rendered?: V2Message;
     renderedSha?: string;
     renderedSummary?: string;
+    withoutRecentContext?: string;
     rejectedSha?: string;
     reason?: "host_rerender" | "host_cut_before_watermark" | "boot_recovery";
 }
@@ -72,8 +73,15 @@ export class FoldOwner {
     }): Promise<FoldIdentity> {
         return this.serial(args.sessionID, async () => {
             let state = await this.read(args.sessionID);
+            // Discard a saved rendered checkpoint with a different message ID,
+            // even if a revert lets the host reuse its sequence number.
+            if (state?.rendered && state.rendered.id !== args.rendered.id) state = undefined;
             let changed = !state;
-            const renderedSha = foldDigest(JSON.stringify(args.rendered));
+            const observedSha = foldDigest(JSON.stringify(args.rendered));
+            const rendered = structuredClone(args.rendered);
+            if (state?.withoutRecentContext && state.withoutRecentContext === rendered.id)
+                stripCheckpointRecentContext(rendered, args.summary);
+            const renderedSha = foldDigest(JSON.stringify(rendered));
             // An already-persisted checkpoint can predate the plugin's storage commit.
             // Recover its two identities without draining any pending operation twice.
             if (!state) {
@@ -92,10 +100,10 @@ export class FoldOwner {
                         (state.renderedSha && state.renderedSha !== renderedSha)
                       ? "host_rerender"
                       : undefined;
-            if (reason && state.rejectedSha !== renderedSha) {
+            if (reason && state.rejectedSha !== observedSha) {
                 args.onHard(reason);
                 state.reason = reason;
-                state.rejectedSha = renderedSha;
+                state.rejectedSha = observedSha;
                 changed = true;
             }
             if (state.cutSeq === undefined && args.cutSeq >= state.watermark) {
@@ -103,7 +111,7 @@ export class FoldOwner {
                 changed = true;
             }
             if (!state.rendered && reason !== "host_cut_before_watermark") {
-                state.rendered = structuredClone(args.rendered);
+                state.rendered = rendered;
                 state.renderedSha = renderedSha;
                 state.renderedSummary = args.summary;
                 changed = true;
@@ -112,4 +120,56 @@ export class FoldOwner {
             return state;
         });
     }
+
+    async stripRecentContext(
+        sessionID: string,
+        checkpointID: string,
+    ): Promise<FoldIdentity | undefined> {
+        return this.serial(sessionID, async () => {
+            const state = await this.read(sessionID);
+            if (!state?.rendered || state.rendered.id !== checkpointID) return undefined;
+            if (state.withoutRecentContext === checkpointID) return state;
+            if (
+                !stripCheckpointRecentContext(
+                    state.rendered,
+                    state.renderedSummary ?? state.submitted,
+                )
+            )
+                return state;
+            state.withoutRecentContext = checkpointID;
+            state.renderedSha = foldDigest(JSON.stringify(state.rendered));
+            // Keep rejection identity tied to the original host input. Trimming
+            // the stored wrapper must not repeat its hard-rejection callback.
+            await this.storage.set(this.key(sessionID), state);
+            return state;
+        });
+    }
+}
+
+/** Remove the host's rendered recent transcript, preserving the supplied summary. */
+export function stripCheckpointRecentContext(message: V2Message, summary: string): boolean {
+    let changed = false;
+    for (const part of message.content) {
+        if (part.type !== "text" || typeof part.text !== "string") continue;
+        const summaryStart = part.text.indexOf("<summary>");
+        if (summaryStart < 0) continue;
+        const summaryText = part.text.indexOf(summary, summaryStart + "<summary>".length);
+        if (summaryText < 0) continue;
+        const start =
+            part.text.indexOf("</summary>", summaryText + summary.length) + "</summary>".length;
+        const end = part.text.lastIndexOf("</conversation-checkpoint>");
+        if (start < "</summary>".length || end < start) continue;
+        const suffix = part.text.slice(start, end);
+        if (!/^\s*<recent-context>[\s\S]*<\/recent-context>\s*$/.test(suffix)) continue;
+        part.text = `${part.text.slice(0, start)}\n${part.text.slice(end)}`;
+        changed = true;
+    }
+    if (changed && message.metadata && typeof message.metadata === "object") {
+        const metadata = { ...(message.metadata as Record<string, unknown>) };
+        // The host also carries its derived transcript outside the text part.
+        // It must not survive in the saved checkpoint after the text is removed.
+        delete metadata.recent;
+        message.metadata = metadata;
+    }
+    return changed;
 }
