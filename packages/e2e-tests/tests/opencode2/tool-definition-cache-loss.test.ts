@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
+import { readCachedM0ToolDefinitionsHash, withCachedM0ToolDefinitionsHash } from "../../../plugin/src/hooks/magic-context/compartment-render-epoch";
 import {
     inspectOpenFiles,
     isolation,
@@ -68,6 +69,7 @@ test("OC2 session request tools fold once, draining held drops on the changed re
         const a = await create();
         const b = await create();
         await waitForPluginActive(client, host.cwd);
+        expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 95 });
         const databases = inspectOpenFiles(host.pid!, host.root, host.env).filter(path => /\.(?:db|sqlite)(?:-(?:wal|shm))?$/.test(path));
         expect(databases.length).toBeGreaterThan(0);
         expect(databases.every(path => path.startsWith(host.root + "/"))).toBe(true);
@@ -81,7 +83,10 @@ test("OC2 session request tools fold once, draining held drops on the changed re
             expect(requests).toHaveLength(1);
             return requests[0]!.body as Body;
         };
-        const meta = (id: string) => db.query("SELECT cached_m0_materialized_at AS at, cached_m0_tool_definitions_hash AS hash FROM session_meta WHERE session_id = ?").get(id) as { at: number; hash: string | null };
+        const meta = (id: string) => {
+            const row = db.query("SELECT cached_m0_materialized_at AS at, cached_m0_upgrade_state AS identity FROM session_meta WHERE session_id = ?").get(id) as { at: number; identity: string | null };
+            return { at: row.at, hash: readCachedM0ToolDefinitionsHash(row.identity) };
+        };
         const pending = () => db.query("SELECT tag_id FROM pending_ops WHERE session_id = ?").all(a.id);
         const head = (body: Body) => wire(body.messages.flatMap(message => {
             const content = (message as { content?: unknown }).content;
@@ -96,7 +101,8 @@ test("OC2 session request tools fold once, draining held drops on the changed re
 
         // Simulate an upgraded session: it has frozen message bytes but no new
         // comparison marker. The first observation must neither fold nor drain.
-        db.query("UPDATE session_meta SET cached_m0_tool_definitions_hash = NULL WHERE session_id = ?").run(a.id);
+        const beforeUpgrade = db.query("SELECT cached_m0_upgrade_state AS identity FROM session_meta WHERE session_id = ?").get(a.id) as { identity: string | null };
+        db.query("UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?").run(withCachedM0ToolDefinitionsHash(beforeUpgrade.identity, null), a.id);
         const target = db.query("SELECT tag_id FROM source_contents WHERE session_id = ? AND content LIKE '%DROP-819%' ORDER BY tag_id LIMIT 1").get(a.id) as { tag_id: number };
         expect(target).not.toBeNull();
         db.query("INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, ?, 'drop', ?, 'opencode2')").run(a.id, target.tag_id, Date.now());

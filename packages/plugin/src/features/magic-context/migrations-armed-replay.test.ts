@@ -745,22 +745,6 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
             });
             populateModuleOwnedRows(db, version, state);
             return;
-        case 96:
-            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
-            expect(
-                (
-                    db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name: string }>
-                ).map(({ name }) => name),
-            ).toContain("cached_m0_tool_definitions_hash");
-            expect(
-                db
-                    .prepare(
-                        "SELECT COUNT(*) AS n FROM session_meta WHERE cached_m0_tool_definitions_hash IS NOT NULL",
-                    )
-                    .get(),
-            ).toEqual({ n: 0 });
-            populateModuleOwnedRows(db, version, state);
-            return;
         default:
             throw new Error(`populateForVersion has no arm for migration v${version}`);
     }

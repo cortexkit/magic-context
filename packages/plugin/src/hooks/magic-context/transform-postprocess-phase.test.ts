@@ -81,6 +81,7 @@ import * as autoSearchRunner from "./auto-search-runner";
 import { autoSearchTestSnapshot } from "./auto-search-snapshot.fixture";
 import * as searchModule from "./auto-search-worker-client";
 import { MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
+import { withCachedM0ToolDefinitionsHash } from "./compartment-render-epoch";
 import { registerActiveCompartmentRun } from "./compartment-runner";
 import { queueDropsForCompartmentalizedMessages } from "./compartment-runner-drop-queue";
 import { clearToolPermissionDenied } from "./ctx-reduce-availability";
@@ -5829,7 +5830,12 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         initializeDatabase(db);
         const sessionId = "ses-hardfold-drain-while-historian";
         materializeBaseline(sessionId);
-        updateSessionMeta(db, sessionId, { cachedM0ToolDefinitionsHash: "tools-before" });
+        updateSessionMeta(db, sessionId, {
+            cachedM0UpgradeState: withCachedM0ToolDefinitionsHash(
+                getOrCreateSessionMeta(db, sessionId).cachedM0UpgradeState,
+                "tools-before",
+            ),
+        });
 
         const message = makeToolMessage("tool-1");
         insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");

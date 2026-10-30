@@ -60,7 +60,6 @@ const SESSION_META_FALLBACK_SELECTS: Partial<
     cached_m0_upgrade_state: "NULL AS cached_m0_upgrade_state",
     cached_m0_system_hash: "NULL AS cached_m0_system_hash",
     cached_m0_tool_set_hash: "NULL AS cached_m0_tool_set_hash",
-    cached_m0_tool_definitions_hash: "NULL AS cached_m0_tool_definitions_hash",
     cached_m0_model_key: "NULL AS cached_m0_model_key",
     cached_m0_project_identity: "NULL AS cached_m0_project_identity",
     last_observed_model_key: "NULL AS last_observed_model_key",

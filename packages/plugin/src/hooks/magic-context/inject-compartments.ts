@@ -70,10 +70,12 @@ import {
     encodeCachedM0UpgradeIdentity,
     MEMORY_RENDER_FORMAT_EPOCH,
     readCachedM0MemoryIds,
+    readCachedM0ToolDefinitionsHash,
     renderBudgetIdentityChanged,
     renderedBudgetShrinkReason,
     renderedBudgetSnapshot,
     withCachedM0MemoryIds,
+    withCachedM0ToolDefinitionsHash,
 } from "./compartment-render-epoch";
 import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
 import { historyLocalBudget } from "./decision-calibration";
@@ -975,7 +977,6 @@ export interface M0M1State {
     cachedM0UpgradeState: string | null;
     cachedM0SystemHash: string | null;
     cachedM0ToolSetHash: string | null;
-    cachedM0ToolDefinitionsHash?: string | null;
     cachedM0ModelKey: string | null;
     cachedM0ProjectIdentity?: string | null;
     snapshotMarkers?: M0SnapshotMarkers | null;
@@ -1755,7 +1756,7 @@ function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null
         memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
         systemHash: state.cachedM0SystemHash ?? "",
         toolSetHash: state.cachedM0ToolSetHash ?? "",
-        toolDefinitionsHash: state.cachedM0ToolDefinitionsHash ?? null,
+        toolDefinitionsHash: readCachedM0ToolDefinitionsHash(state.cachedM0UpgradeState),
         modelKey: state.cachedM0ModelKey ?? "",
         projectIdentity: state.cachedM0ProjectIdentity ?? null,
         muralHash: state.cachedM0MuralHash ?? null,
@@ -1891,16 +1892,25 @@ export function mustMaterialize(args: {
     }
     const liveDefinitionsHash = hard.toolDefinitionsHash;
     if (liveDefinitionsHash) {
-        const cachedDefinitionsHash = args.state.cachedM0ToolDefinitionsHash;
+        const cachedDefinitionsHash = readCachedM0ToolDefinitionsHash(
+            args.state.cachedM0UpgradeState,
+        );
         if (!cachedDefinitionsHash) {
             // Upgraded baselines cannot tell us what tools they served. Seed the
             // comparison without rebuilding or changing a single served byte.
-            args.db
+            const previousIdentity = args.state.cachedM0UpgradeState;
+            const adoptedIdentity = withCachedM0ToolDefinitionsHash(
+                previousIdentity,
+                liveDefinitionsHash,
+            );
+            const adopted = args.db
                 .prepare(
-                    "UPDATE session_meta SET cached_m0_tool_definitions_hash = ? WHERE session_id = ?",
+                    "UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ? AND cached_m0_upgrade_state IS ?",
                 )
-                .run(liveDefinitionsHash, args.sessionId);
-            args.state.cachedM0ToolDefinitionsHash = liveDefinitionsHash;
+                .run(adoptedIdentity, args.sessionId, previousIdentity);
+            // A concurrent fold owns its whole snapshot. Never overwrite its
+            // renderer/budget/selection markers with an older adoption read.
+            if (adopted.changes > 0) args.state.cachedM0UpgradeState = adoptedIdentity;
         } else if (cachedDefinitionsHash !== liveDefinitionsHash) {
             return {
                 value: true,
@@ -2448,16 +2458,19 @@ function applyMarkersToState(
     state.cachedM0ProjectDocsHash = markers.projectDocsHash;
     state.cachedM0MaterializedAt = markers.materializedAt;
     state.cachedM0SessionFactsVersion = markers.sessionFactsVersion;
-    state.cachedM0UpgradeState = withCachedM0MemoryIds(
-        encodeCachedM0UpgradeIdentity(
-            markers.upgradeState,
-            markers.compartmentRenderEpoch,
-            markers.muralEnabled,
-            markers.renderBudgetIdentity,
-            markers.memoryRenderEpoch,
-            markers.renderedBudgets ?? null,
+    state.cachedM0UpgradeState = withCachedM0ToolDefinitionsHash(
+        withCachedM0MemoryIds(
+            encodeCachedM0UpgradeIdentity(
+                markers.upgradeState,
+                markers.compartmentRenderEpoch,
+                markers.muralEnabled,
+                markers.renderBudgetIdentity,
+                markers.memoryRenderEpoch,
+                markers.renderedBudgets ?? null,
+            ),
+            renderedM0Ids,
         ),
-        renderedM0Ids,
+        markers.toolDefinitionsHash ?? null,
     );
     // Runtime markers must be mirrored into flat state because the next
     // mustMaterialize pass reads cachedM0SystemHash/ToolSetHash/ModelKey directly
@@ -2466,7 +2479,6 @@ function applyMarkersToState(
     // tool-set marker would lose its comparison baseline.
     state.cachedM0SystemHash = markers.systemHash;
     state.cachedM0ToolSetHash = markers.toolSetHash;
-    state.cachedM0ToolDefinitionsHash = markers.toolDefinitionsHash ?? null;
     state.cachedM0ModelKey = markers.modelKey;
     state.cachedM0ProjectIdentity = markers.projectIdentity;
     state.cachedM0MuralHash = markers.muralHash ?? null;
@@ -2678,16 +2690,19 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     options.beforePhase3ForTest?.();
 
     const steps = new WriteTransactionSteps();
-    const upgradeIdentity = withCachedM0MemoryIds(
-        encodeCachedM0UpgradeIdentity(
-            snapshotMarkers.upgradeState,
-            snapshotMarkers.compartmentRenderEpoch,
-            snapshotMarkers.muralEnabled,
-            snapshotMarkers.renderBudgetIdentity,
-            snapshotMarkers.memoryRenderEpoch,
-            snapshotMarkers.renderedBudgets ?? null,
+    const upgradeIdentity = withCachedM0ToolDefinitionsHash(
+        withCachedM0MemoryIds(
+            encodeCachedM0UpgradeIdentity(
+                snapshotMarkers.upgradeState,
+                snapshotMarkers.compartmentRenderEpoch,
+                snapshotMarkers.muralEnabled,
+                snapshotMarkers.renderBudgetIdentity,
+                snapshotMarkers.memoryRenderEpoch,
+                snapshotMarkers.renderedBudgets ?? null,
+            ),
+            renderedMemoryIds,
         ),
-        renderedMemoryIds,
+        snapshotMarkers.toolDefinitionsHash ?? null,
     );
     const baselineEndMessageId = lastCompartmentBoundaryId(compartments);
     steps.mark("pre_metadata");
@@ -2810,7 +2825,6 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             upgradeState: upgradeIdentity,
             systemHash: snapshotMarkers.systemHash,
             toolSetHash: snapshotMarkers.toolSetHash,
-            toolDefinitionsHash: snapshotMarkers.toolDefinitionsHash,
             modelKey: snapshotMarkers.modelKey,
             projectIdentity: snapshotMarkers.projectIdentity,
         });
@@ -3137,7 +3151,6 @@ interface CachedM0M1Row {
     cached_m0_upgrade_state: string | null;
     cached_m0_system_hash: string | null;
     cached_m0_tool_set_hash: string | null;
-    cached_m0_tool_definitions_hash: string | null;
     cached_m0_model_key: string | null;
     cached_m0_project_identity: string | null;
     cached_m0_last_baseline_end_message_id: string | null;
@@ -3202,7 +3215,6 @@ function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | nul
                      cached_m0_upgrade_state,
                      cached_m0_system_hash,
                       cached_m0_tool_set_hash,
-                      cached_m0_tool_definitions_hash,
                      cached_m0_model_key,
                      cached_m0_project_identity,
                      cached_m0_last_baseline_end_message_id,
@@ -3239,7 +3251,7 @@ function markersFromCachedRow(row: CachedM0M1Row): M0SnapshotMarkers | null {
         memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
         systemHash: row.cached_m0_system_hash ?? "",
         toolSetHash: row.cached_m0_tool_set_hash ?? "",
-        toolDefinitionsHash: row.cached_m0_tool_definitions_hash,
+        toolDefinitionsHash: readCachedM0ToolDefinitionsHash(row.cached_m0_upgrade_state),
         modelKey: row.cached_m0_model_key ?? "",
         projectIdentity: row.cached_m0_project_identity ?? null,
         muralHash: row.cached_m0_mural_hash ?? null,
@@ -3270,8 +3282,6 @@ function cachedRowMatchesState(row: CachedM0M1Row, state: M0M1State): boolean {
         (row.cached_m0_upgrade_state ?? null) === (state.cachedM0UpgradeState ?? null) &&
         (row.cached_m0_system_hash ?? "") === (state.cachedM0SystemHash ?? "") &&
         (row.cached_m0_tool_set_hash ?? "") === (state.cachedM0ToolSetHash ?? "") &&
-        (row.cached_m0_tool_definitions_hash ?? null) ===
-            (state.cachedM0ToolDefinitionsHash ?? null) &&
         piModelRefToCanonical(row.cached_m0_model_key ?? "") ===
             piModelRefToCanonical(state.cachedM0ModelKey ?? "") &&
         (row.cached_m0_project_identity ?? null) === (state.cachedM0ProjectIdentity ?? null)
@@ -3297,17 +3307,19 @@ function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
     state.cachedM0ProjectDocsHash = markers.projectDocsHash;
     state.cachedM0MaterializedAt = markers.materializedAt;
     state.cachedM0SessionFactsVersion = markers.sessionFactsVersion;
-    state.cachedM0UpgradeState = encodeCachedM0UpgradeIdentity(
-        markers.upgradeState,
-        markers.compartmentRenderEpoch,
-        markers.muralEnabled,
-        markers.renderBudgetIdentity,
-        markers.memoryRenderEpoch,
-        markers.renderedBudgets ?? null,
+    state.cachedM0UpgradeState = withCachedM0ToolDefinitionsHash(
+        encodeCachedM0UpgradeIdentity(
+            markers.upgradeState,
+            markers.compartmentRenderEpoch,
+            markers.muralEnabled,
+            markers.renderBudgetIdentity,
+            markers.memoryRenderEpoch,
+            markers.renderedBudgets ?? null,
+        ),
+        markers.toolDefinitionsHash ?? null,
     );
     state.cachedM0SystemHash = markers.systemHash;
     state.cachedM0ToolSetHash = markers.toolSetHash;
-    state.cachedM0ToolDefinitionsHash = markers.toolDefinitionsHash ?? null;
     state.cachedM0ModelKey = markers.modelKey;
     state.cachedM0ProjectIdentity = markers.projectIdentity;
     state.snapshotMarkers = markers;

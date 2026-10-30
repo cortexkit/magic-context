@@ -25,12 +25,25 @@ import {
     appendCompartments,
     type CompartmentInput,
 } from "../../features/magic-context/compartment-storage";
+import { LATEST_MIGRATION_VERSION } from "../../features/magic-context/migrations";
 import { v2ToolDefinitionsHash } from "../../features/magic-context/request-tool-definitions";
-import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
-import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { clearCachedM0M1, getOrCreateSessionMeta } from "../../features/magic-context/storage";
+import {
+    initializeDatabase,
+    LATEST_SUPPORTED_VERSION,
+} from "../../features/magic-context/storage-db";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import { Database } from "../../shared/sqlite";
-import { clearInjectionCache, injectM0M1, type M0HardSignals } from "./inject-compartments";
+import {
+    readCachedM0ToolDefinitionsHash,
+    withCachedM0ToolDefinitionsHash,
+} from "./compartment-render-epoch";
+import {
+    clearInjectionCache,
+    injectM0M1,
+    type M0HardSignals,
+    materializeM0,
+} from "./inject-compartments";
 
 const SESSION_ID = "ses_taxonomy";
 const PROJECT_PATH = "/tmp/test-taxonomy-project";
@@ -131,6 +144,7 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         const projectDirectory = makeProjectDir();
         appendCompartments(db, SESSION_ID, [compartment(0, "A", "Alpha baseline")]);
         const baseline = pass({ projectDirectory, isCacheBustingPass: true });
+        const legacyIdentity = getOrCreateSessionMeta(db, SESSION_ID).cachedM0UpgradeState;
         const tools = {
             read: { description: "Read a file", input: { type: "object", properties: {} } },
         };
@@ -139,7 +153,17 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         const upgraded = pass({ projectDirectory, isCacheBustingPass: false, hard: signal });
         expect(upgraded.rematerialized).toBe(false);
         expect([upgraded.m0, upgraded.m1]).toEqual([baseline.m0, baseline.m1]);
-        expect(getOrCreateSessionMeta(db, SESSION_ID).cachedM0ToolDefinitionsHash).toBe(hash);
+        expect(
+            readCachedM0ToolDefinitionsHash(
+                getOrCreateSessionMeta(db, SESSION_ID).cachedM0UpgradeState,
+            ),
+        ).toBe(hash);
+        expect(
+            withCachedM0ToolDefinitionsHash(
+                getOrCreateSessionMeta(db, SESSION_ID).cachedM0UpgradeState,
+                null,
+            ),
+        ).toBe(legacyIdentity);
 
         // Changing field insertion order does not change OpenCode's projected
         // definition; a JSON round trip also leaves the served definitions alone.
@@ -185,7 +209,9 @@ describe("m[0]/m[1] materialization taxonomy", () => {
             expect(folded.decision.toolDefinitionsChange?.firstDifferingTool).not.toBe("unknown");
             expect(folded.m0RematerializedThisPass).toBe(true);
             expect(folded.m0Bytes!.toString()).toContain("Bravo delta");
-            expect(state.cachedM0ToolDefinitionsHash).toBe(hard.toolDefinitionsHash);
+            expect(readCachedM0ToolDefinitionsHash(state.cachedM0UpgradeState)).toBe(
+                hard.toolDefinitionsHash,
+            );
             expect(run().m0RematerializedThisPass).toBe(false);
             expect(pass({ projectDirectory, isCacheBustingPass: false, hard }).rematerialized).toBe(
                 false,
@@ -193,6 +219,76 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         }
         const unknown = pass({ projectDirectory, isCacheBustingPass: false, hard: BASE_HARD });
         expect(unknown.rematerialized).toBe(false);
+    });
+
+    it("request tool identity is written and cleared atomically with the frozen markers at fence 95", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        expect(LATEST_MIGRATION_VERSION).toBe(95);
+        expect(LATEST_SUPPORTED_VERSION).toBe(95);
+        expect(
+            (db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name: string }>).map(
+                ({ name }) => name,
+            ),
+        ).not.toContain("cached_m0_tool_definitions_hash");
+        appendCompartments(db, SESSION_ID, [compartment(0, "A", "Alpha baseline")]);
+        const beforeSignals = { ...BASE_HARD, toolDefinitionsHash: "tools-before" };
+        pass({ projectDirectory, isCacheBustingPass: true, hard: beforeSignals });
+        const snapshot = () =>
+            db
+                .prepare(`SELECT hex(cached_m0_bytes) AS m0, hex(cached_m1_bytes) AS m1,
+            cached_m0_upgrade_state AS identity, cached_m0_system_hash AS system,
+            cached_m0_model_key AS model, cached_m0_materialized_at AS at,
+            cached_m0_max_compartment_seq AS seq FROM session_meta WHERE session_id = ?`)
+                .get(SESSION_ID);
+        const before = snapshot();
+        expect(
+            readCachedM0ToolDefinitionsHash(
+                getOrCreateSessionMeta(db, SESSION_ID).cachedM0UpgradeState,
+            ),
+        ).toBe("tools-before");
+        appendCompartments(db, SESSION_ID, [compartment(1, "B", "Bravo delta")]);
+        db.exec(`CREATE TEMP TRIGGER reject_fold_marker BEFORE UPDATE OF cached_m0_bytes ON session_meta
+            BEGIN SELECT RAISE(ABORT, 'fold write rejected'); END`);
+        expect(() =>
+            materializeM0({
+                db,
+                sessionId: SESSION_ID,
+                state: getOrCreateSessionMeta(db, SESSION_ID),
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+                historyBudgetTokens: 98_000,
+                hardSignals: { ...BASE_HARD, toolDefinitionsHash: "tools-after" },
+            }),
+        ).toThrow("fold write rejected");
+        expect(snapshot()).toEqual(before);
+        db.exec("DROP TRIGGER reject_fold_marker");
+        const folded = pass({
+            projectDirectory,
+            isCacheBustingPass: false,
+            hard: { ...BASE_HARD, toolDefinitionsHash: "tools-after" },
+        });
+        expect(folded.rematerialized).toBe(true);
+        expect(folded.m0).toContain("Bravo delta");
+        expect(
+            readCachedM0ToolDefinitionsHash(
+                getOrCreateSessionMeta(db, SESSION_ID).cachedM0UpgradeState,
+            ),
+        ).toBe("tools-after");
+        const committed = snapshot();
+        db.exec(`CREATE TEMP TRIGGER reject_clear_marker BEFORE UPDATE OF cached_m0_bytes ON session_meta
+            WHEN NEW.cached_m0_bytes IS NULL BEGIN SELECT RAISE(ABORT, 'clear write rejected'); END`);
+        expect(() => clearCachedM0M1(db, SESSION_ID)).toThrow("clear write rejected");
+        expect(snapshot()).toEqual(committed);
+        db.exec("DROP TRIGGER reject_clear_marker");
+        clearCachedM0M1(db, SESSION_ID);
+        const cleared = getOrCreateSessionMeta(db, SESSION_ID);
+        expect(cleared.cachedM0Bytes).toBeNull();
+        expect(cleared.cachedM1Bytes).toBeNull();
+        expect(cleared.cachedM0UpgradeState).toBeNull();
+        expect(cleared.cachedM0SystemHash).toBeNull();
+        expect(cleared.cachedM0ModelKey).toBeNull();
+        expect(readCachedM0ToolDefinitionsHash(cleared.cachedM0UpgradeState)).toBeNull();
     });
 
     it("SOFT+: a new compartment + defer passes replay m[0] AND m[1] byte-identical", () => {

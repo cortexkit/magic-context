@@ -171,7 +171,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastUnconfirmedMigrationHolders = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 96;
+export const LATEST_SUPPORTED_VERSION = 95;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1874,7 +1874,6 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       cached_m0_upgrade_state TEXT,
       cached_m0_system_hash TEXT,
       cached_m0_tool_set_hash TEXT,
-      cached_m0_tool_definitions_hash TEXT,
       cached_m0_model_key TEXT,
        cached_m0_project_identity TEXT,
        cached_m0_last_baseline_end_message_id TEXT,
@@ -2372,7 +2371,6 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "cached_m0_upgrade_state", "TEXT");
     ensureColumn(db, "session_meta", "cached_m0_system_hash", "TEXT");
     ensureColumn(db, "session_meta", "cached_m0_tool_set_hash", "TEXT");
-    ensureColumn(db, "session_meta", "cached_m0_tool_definitions_hash", "TEXT");
     ensureColumn(db, "session_meta", "cached_m0_model_key", "TEXT");
     ensureColumn(db, "session_meta", "cached_m0_project_identity", "TEXT");
     // Pi-only: frozen baseline boundary (end_message_id) captured at
