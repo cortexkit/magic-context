@@ -1941,6 +1941,7 @@ export async function registerContext(context: V2Context) {
     // with replay helpers that hold the request's messages and attachments.
     const checkpointPassPermissions = new Map<string, boolean>();
     const checkpointInputEstimates = new Map<string, { tokens: number; pressureTokens: number }>();
+    const legacyUpgradePasses = new Set<string>();
     const initializeTransform = (database: NonNullable<typeof db>) =>
         (transform ??= createTransform({
             ...createV2TransformFeatureDeps(
@@ -2560,11 +2561,14 @@ export async function registerContext(context: V2Context) {
                         upgradeCheckpointSequence = carrier.row.seq;
                     }
                 }
-                let nativeRestored: V2Message[] | undefined;
+                let nativeRestored = localCut
+                    ? nativeFoldReplay?.legacyUpgradeInput(draft.sessionID, draft.model)
+                    : undefined;
                 // Validate fold provenance before the cache path or its raw-row
                 // fallback can invisibly replace the checkpoint. Without a valid
                 // local admission, use ordinary managed-history reconstruction instead.
                 if (
+                    nativeRestored === undefined &&
                     cut &&
                     nativeFoldReplay &&
                     (await nativeFoldReplay.admits(draft.sessionID, cut, reader))
@@ -2815,6 +2819,14 @@ export async function registerContext(context: V2Context) {
                     );
                 }
             }
+            if (
+                (checkpointPermission ||
+                    (checkpointPermission === undefined &&
+                        upgradeCheckpointSequence !== undefined &&
+                        headApplied)) &&
+                replayHead === undefined
+            )
+                legacyUpgradePasses.add(draft.sessionID);
             const capturedSlot = getSlot(draft.sessionID);
             if (
                 capturedSlot &&
@@ -2980,7 +2992,14 @@ export async function registerContext(context: V2Context) {
             try {
                 await runManagedContext(draft);
                 if (!compactionOff) await refuseOversizedCheckpoint(draft);
+                if (
+                    !deletedSessions.has(draft.sessionID) &&
+                    legacyUpgradePasses.has(draft.sessionID)
+                )
+                    await nativeFoldReplay?.commitLegacyUpgrade(draft.sessionID);
             } finally {
+                legacyUpgradePasses.delete(draft.sessionID);
+                nativeFoldReplay?.cancelLegacyUpgrade(draft.sessionID);
                 checkpointInputEstimates.delete(draft.sessionID);
                 checkpointPassPermissions.delete(draft.sessionID);
             }

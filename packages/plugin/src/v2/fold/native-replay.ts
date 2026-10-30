@@ -138,6 +138,14 @@ export class NativeFoldReplay {
     private readonly loaded = new Map<string, number>();
     private readonly sources = new Map<string, string>();
     private readonly staleHeads = new Set<string>();
+    private readonly legacyUpgrades = new Map<
+        string,
+        {
+            value: AdmissionV3;
+            rows: StoreRow[];
+            started: number;
+        }
+    >();
     constructor(
         readonly storage: NativeFoldCache,
         private readonly openReader: (sessionID: string) => V2StoreReader,
@@ -331,6 +339,13 @@ export class NativeFoldReplay {
             }
             return true;
         }
+        if (
+            (await this.admissions?.get(admissionKey(sessionID))) &&
+            !(await this.readV3(sessionID))
+        ) {
+            this.report(sessionID, "fold refused: V2 upgrade has not completed a rebuilding pass");
+            return false;
+        }
         const replay = await this.floorState(sessionID, reader);
         if (!replay || replay.blocked) {
             this.report(
@@ -346,10 +361,11 @@ export class NativeFoldReplay {
         _cut: StoreRow<"compaction">,
         reader: V2StoreReader,
     ): Promise<number | undefined> {
-        // V2 records have no replay floor. A healthy writer pass upgrades only
-        // from a proven host boundary, or replaces the frozen history prefix
-        // once with the host checkpoint during upgrade, before calling this method.
-        // Read-only recovery must never guess an origin for an old receipt.
+        // V2 records have no replay floor. A healthy writer stages a proven
+        // summary boundary, a complete host checkpoint, or the legacy-only
+        // validated source repair. It saves the new floor only after a successful
+        // prefix rebuild. Read-only recovery cannot guess an origin or start
+        // that repair while another writer owns the store.
         if (this.options.protocol !== 3) return undefined;
         const replay = await this.floorState(sessionID, reader);
         if (replay) return replay.floor.after;
@@ -374,6 +390,8 @@ export class NativeFoldReplay {
         const admissions = this.admissions;
         if (this.options.protocol !== 3 || !admissions || !isLocalCheckpoint(cut)) return false;
         if (await this.readV3(draft.sessionID)) return false;
+        this.legacyUpgrades.delete(draft.sessionID);
+        const started = performance.now();
         const receipt = (await this.admissions?.get(admissionKey(draft.sessionID))) as
             | { payload?: string; digest?: string }
             | undefined;
@@ -393,20 +411,14 @@ export class NativeFoldReplay {
         )
             return false;
 
-        // The host's kept range is authoritative. On legacy hosts the exact
-        // persisted summary can instead bind its source boundary; never use an
-        // unrelated cached head merely because it happens to have a coordinate.
+        // Preserve V2's full provenance check before trusting a legacy receipt.
+        // This one validation read is also the repair input if the old record
+        // cannot prove which source rows its served summary covered.
+        const rows = reader.range(draft.sessionID, -1, cut.seq - 1).filter(conversational);
+        if (foldDigest(JSON.stringify(rows)) !== legacy.historyDigest) return false;
+        // keepID only bounds the host's retained tail. It does not prove that
+        // Magic Context summarized every row before it.
         let floor: ReplayFloor | undefined;
-        const metadata = cut.data.metadata as { keepID?: string } | undefined;
-        const keepID = metadata?.keepID ?? cut.data.keepID;
-        const keepSeq =
-            typeof keepID === "string" ? reader.sequenceForId(draft.sessionID, keepID) : undefined;
-        if (keepSeq !== undefined && keepSeq < cut.seq) {
-            const row = reader
-                .range(draft.sessionID, keepSeq - 1, keepSeq)
-                .find((row) => row.id === keepID && conversational(row));
-            if (row) floor = floorFor(row, "start");
-        }
         if (!floor) {
             const candidate = await this.floorState(draft.sessionID, reader);
             const cached = readSessionMeta(
@@ -420,8 +432,30 @@ export class NativeFoldReplay {
             )
                 floor = candidate.floor;
         }
-        const mode = floor ? "bounded" : "host-checkpoint";
-        floor ??= floorFor(cut, "host-checkpoint");
+        const recent = cut.data.recent;
+        const completeRecent =
+            !floor &&
+            !!recent &&
+            rows.every((row) =>
+                this.rendered(row, draft.model).every((message) =>
+                    message.content.every(
+                        (part) =>
+                            part.type === "text" &&
+                            typeof part.text === "string" &&
+                            recent.includes(part.text),
+                    ),
+                ),
+            );
+        const mode = floor ? "bounded" : completeRecent ? "host-checkpoint" : "source-repair";
+        // Only a valid V2 receipt can enter this exception. Without coverage or
+        // a complete host transcript, reuse the validated source once on the
+        // upgrade's prefix-rebuilding pass. Normal V3 admission never guesses
+        // an origin after restart. No V3 floor is saved until the pass succeeds.
+        floor ??= completeRecent
+            ? floorFor(cut, "host-checkpoint")
+            : rows[0]
+              ? floorFor(rows[0], "start")
+              : floorFor(cut, "checkpoint");
         let controls: ReturnType<typeof captureControls> = [];
         let blocked = false;
         try {
@@ -450,26 +484,67 @@ export class NativeFoldReplay {
                 sessionID: draft.sessionID,
                 admissionID: cut.id,
                 summaryDigest: legacy.summaryDigest,
-                historyDigest: historyDigest(reader, draft.sessionID, cut.seq - 1, floor.after),
+                historyDigest: foldDigest(
+                    JSON.stringify(rows.filter((row) => row.seq > floor.after)),
+                ),
             },
         };
-        // Clear the old cached head before recording the transition. A crash
-        // after the receipt write still permits building a fresh history head,
-        // without clearing a frozen head again on restart or a later defer pass.
+        // A failed attempt leaves no durable V3 floor. The next healthy writer
+        // retries under the same rebuild permission rather than replaying a
+        // partially repaired prefix.
         args.onHard();
-        const payload = JSON.stringify(value);
-        await admissions.set(this.admissionKey(draft.sessionID), {
-            payload,
-            digest: foldDigest(payload),
-        });
+        this.legacyUpgrades.set(draft.sessionID, { value, rows, started });
         await this.retainReplay(
             draft.sessionID,
             replay,
             `${draft.model.providerID}/${draft.model.id}`,
             cut.seq - 1,
         );
-        this.report(draft.sessionID, `V2 upgrade-state HARD mode=${mode} checkpoint=${cut.id}`);
         return true;
+    }
+
+    legacyUpgradeInput(sessionID: string, model: SessionContext["model"]): V2Message[] | undefined {
+        const pending = this.legacyUpgrades.get(sessionID);
+        if (!pending) return undefined;
+        return pending.rows
+            .filter((row) => row.seq > pending.value.replay.floor.after)
+            .flatMap((row) => {
+                const messages = this.rendered(structuredClone(row), model);
+                for (const message of messages) coordinates.set(message, row.id);
+                return messages;
+            });
+    }
+
+    async commitLegacyUpgrade(sessionID: string): Promise<boolean> {
+        const pending = this.legacyUpgrades.get(sessionID);
+        const admissions = this.admissions;
+        if (!pending || !admissions) return false;
+        const replay = this.tail(sessionID)?.replay ?? pending.value.replay;
+        const value: AdmissionV3 = {
+            ...pending.value,
+            replay,
+            proof: {
+                ...pending.value.proof,
+                historyDigest: foldDigest(
+                    JSON.stringify(pending.rows.filter((row) => row.seq > replay.floor.after)),
+                ),
+            },
+        };
+        const payload = JSON.stringify(value);
+        await admissions.set(this.admissionKey(sessionID), {
+            payload,
+            digest: foldDigest(payload),
+        });
+        this.legacyUpgrades.delete(sessionID);
+        this.report(
+            sessionID,
+            `V2 upgrade-state HARD mode=${replay.upgrade?.mode} rows_read=${pending.rows.length} duration_ms=${Math.round(performance.now() - pending.started)} floor=${replay.floor.id}:${replay.floor.after}`,
+        );
+        return true;
+    }
+
+    cancelLegacyUpgrade(sessionID: string): void {
+        this.legacyUpgrades.delete(sessionID);
     }
 
     async checkpointForReplay(sessionID: string, reader: V2StoreReader) {
@@ -489,7 +564,8 @@ export class NativeFoldReplay {
     async checkpointCovered(sessionID: string, checkpointID: string): Promise<void> {
         const admissions = this.admissions;
         if (!admissions) return;
-        const value = await this.readV3(sessionID);
+        const pending = this.legacyUpgrades.get(sessionID);
+        const value = (await this.readV3(sessionID)) ?? pending?.value;
         if (
             value?.replay.floor.kind !== "host-checkpoint" ||
             value.replay.floor.id !== checkpointID ||
@@ -498,10 +574,11 @@ export class NativeFoldReplay {
             return;
         value.replay.withoutRecentContext = true;
         const payload = JSON.stringify(value);
-        await admissions.set(this.admissionKey(sessionID), {
-            payload,
-            digest: foldDigest(payload),
-        });
+        if (!pending)
+            await admissions.set(this.admissionKey(sessionID), {
+                payload,
+                digest: foldDigest(payload),
+            });
         const tail = this.tail(sessionID);
         if (tail) await this.retainReplay(sessionID, value.replay, tail.model, tail.sourceSeq);
     }
@@ -1067,6 +1144,11 @@ export class NativeFoldReplay {
     }): Promise<boolean> {
         const { draft, reader, summary } = args;
         if (this.options.protocol === 3) {
+            if (
+                (await this.admissions?.get(admissionKey(draft.sessionID))) &&
+                !(await this.readV3(draft.sessionID))
+            )
+                return false;
             const running = reader.latestRunningCompaction(draft.sessionID);
             const replay = await this.floorState(draft.sessionID, reader);
             if (!running || !replay || replay.blocked) {
@@ -1362,6 +1444,7 @@ export class NativeFoldReplay {
         this.staleHeads.delete(sessionID);
     }
     async forget(sessionID: string): Promise<void> {
+        this.cancelLegacyUpgrade(sessionID);
         // The session id locates the v2 key and matching legacy keys without any
         // prior source observation. Real hosts remove rows instead of leaving tombstones.
         if (this.admissions) await forgetNativeFoldProvenance(this.admissions, sessionID);

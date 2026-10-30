@@ -23,7 +23,7 @@ export interface ReplayStateV3 {
     floor: ReplayFloor;
     controls: EffortControl[];
     blocked?: boolean;
-    upgrade?: { admissionID: string; mode: "bounded" | "host-checkpoint" };
+    upgrade?: { admissionID: string; mode: "bounded" | "host-checkpoint" | "source-repair" };
     withoutRecentContext?: boolean;
 }
 export class ControlMetadataUnavailable extends Error {}

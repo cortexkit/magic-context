@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
@@ -320,16 +320,18 @@ async function oldReceipt(f: ReturnType<typeof fixture>, summary = "head") {
     return { raw, cut, bytes };
 }
 
-test("a V2 receipt upgrades once from the host's proven kept range without changing V2 bytes", async () => {
-    const f = fixture(3);
-    const { cut, bytes } = await oldReceipt(f, "summary covering message 1");
-    cut.data.metadata = { keepID: "u2" };
+test("a V2 receipt upgrades once from exact summary coverage, not keepID alone", async () => {
+    const f = fixture(8);
+    const summary = "summary covering messages 1 through 6";
+    const { cut, bytes } = await oldReceipt(f, summary);
+    cut.data.metadata = { keepID: "u8" };
+    f.db
+        .prepare(
+            "UPDATE session_meta SET cached_m0_bytes=?,cached_m0_last_baseline_end_message_id='u6' WHERE session_id='s'",
+        )
+        .run(Buffer.from(summary));
     let hard = 0;
-    const draft = context([
-        message(cut.id, "host checkpoint"),
-        message("u2", "message 2"),
-        message("u3", "message 3"),
-    ]);
+    const draft = context([message(cut.id, "host checkpoint"), message("u8", "message 8")]);
     f.loads.length = 0;
     expect(
         await f.replay.prepareLegacyUpgrade({
@@ -342,6 +344,10 @@ test("a V2 receipt upgrades once from the host's proven kept range without chang
         }),
     ).toBe(true);
     expect(hard).toBe(1);
+    expect(f.kv.has("native-fold/v3/s")).toBe(false);
+    expect(f.loads.filter((load) => load.after === -1)).toHaveLength(1);
+    expect(await f.replay.commitLegacyUpgrade("s")).toBe(true);
+    f.loads.length = 0;
     expect(JSON.stringify(f.kv.get("native-fold/v2/s"))).toBe(bytes);
     const cold = f.make();
     expect(
@@ -356,10 +362,10 @@ test("a V2 receipt upgrades once from the host's proven kept range without chang
     ).toBe(false);
     expect(await cold.admits("s", cut, f.reader)).toBe(true);
     expect((await cold.restore("s", cut, "p/m", { bounded: true }))?.map((row) => row.id)).toEqual([
-        "u2",
-        "u3",
+        "u7",
+        "u8",
     ]);
-    expect(f.loads.every((load) => load.after >= 1)).toBe(true);
+    expect(f.loads.every((load) => load.after >= 5)).toBe(true);
     expect(hard).toBe(1);
     expect(f.logs.filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(1);
     expect(f.logs.join("\n")).toContain("mode=bounded");
@@ -383,6 +389,9 @@ test("a V2 receipt without a proven floor keeps the host checkpoint across resta
         }),
     ).toBe(true);
     expect(hard).toBe(1);
+    expect(f.kv.has("native-fold/v3/s")).toBe(false);
+    expect(await f.replay.commitLegacyUpgrade("s")).toBe(true);
+    f.loads.length = 0;
     const carrier = await f.replay.checkpointForReplay("s", f.reader);
     expect(carrier?.rendered.id).toBe(cut.id);
     for (const row of raw)
@@ -481,6 +490,7 @@ test("a revoked V1 receipt stays untouched and unadmitted until cleanup", async 
 test("an unsupported effort control blocks a new fold but not a V2 upgrade turn", async () => {
     const f = fixture();
     const { cut } = await oldReceipt(f);
+    cut.data.recent = "message 1\nmessage 2";
     const draft = context([
         { role: "system", content: [{ type: "effort", effort: "future-private-effort" }] },
         message(cut.id, "host checkpoint"),
@@ -491,6 +501,88 @@ test("an unsupported effort control blocks a new fold but not a V2 upgrade turn"
     );
     expect(JSON.stringify(draft)).toBe(before);
     expect(await f.replay.checkpointForReplay("s", f.reader)).toBeDefined();
+    expect(await f.replay.commitLegacyUpgrade("s")).toBe(true);
     expect(await f.replay.canFold("s", f.reader)).toBe(false);
     expect(f.logs.filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(1);
+});
+
+test("a legacy-only full repair retries after interruption and persists only its successful source floor", async () => {
+    const f = fixture(8);
+    const { cut } = await oldReceipt(f);
+    cut.data.metadata = { keepID: "u8" };
+    f.loads.length = 0;
+    const draft = context([message(cut.id, "host checkpoint"), message("u8", "message 8")]);
+    let hard = 0;
+    expect(
+        await f.replay.prepareLegacyUpgrade({
+            draft,
+            cut,
+            reader: f.reader,
+            onHard: () => {
+                hard++;
+            },
+        }),
+    ).toBe(true);
+    expect(f.kv.has("native-fold/v3/s")).toBe(false);
+    const projection = f.replay as unknown as {
+        rendered(row: StoreRow, model: SessionContext["model"]): V2Message[];
+    };
+    const interrupted = spyOn(projection, "rendered").mockImplementationOnce(() => {
+        throw new Error("repair interrupted");
+    });
+    try {
+        expect(() => f.replay.legacyUpgradeInput("s", draft.model)).toThrow("repair interrupted");
+    } finally {
+        interrupted.mockRestore();
+        f.replay.cancelLegacyUpgrade("s");
+    }
+    expect(f.kv.has("native-fold/v3/s")).toBe(false);
+    expect(f.logs.filter((line) => line.includes("upgrade-state HARD"))).toEqual([]);
+    const retry = f.make();
+    expect(
+        await retry.prepareLegacyUpgrade({
+            draft,
+            cut,
+            reader: f.reader,
+            onHard: () => {
+                hard++;
+            },
+        }),
+    ).toBe(true);
+    expect(retry.legacyUpgradeInput("s", draft.model)?.map((row) => row.id)).toEqual(
+        f.rows.filter((row) => row.type === "user").map((row) => row.id),
+    );
+    expect(f.loads.filter((load) => load.after === -1)).toHaveLength(2);
+    const summary = "summary covering messages 1 through 6";
+    f.db
+        .prepare(
+            "UPDATE session_meta SET cached_m0_bytes=?,cached_m0_last_baseline_end_message_id='u6' WHERE session_id='s'",
+        )
+        .run(Buffer.from(summary));
+    const tail = [message("u7", "message 7"), message("u8", "message 8")];
+    await retry.capture(context([message(HEAD_IDS[0], summary), ...tail]), tail, {
+        id: "u6",
+        summary,
+    });
+    expect(await retry.commitLegacyUpgrade("s")).toBe(true);
+    expect(f.logs.filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(1);
+    expect(f.logs.join("\n")).toMatch(/mode=source-repair rows_read=8 duration_ms=\d+ floor=u6:6/);
+    f.loads.length = 0;
+    const restarted = f.make();
+    expect(
+        await restarted.prepareLegacyUpgrade({
+            draft,
+            cut,
+            reader: f.reader,
+            onHard: () => {
+                hard++;
+            },
+        }),
+    ).toBe(false);
+    expect(await restarted.admits("s", cut, f.reader)).toBe(true);
+    expect(
+        (await restarted.restore("s", cut, "p/m", { bounded: true }))?.map((row) => row.id),
+    ).toEqual(["u7", "u8"]);
+    expect(f.loads.every((load) => load.after >= 5)).toBe(true);
+    expect(hard).toBe(2);
 });

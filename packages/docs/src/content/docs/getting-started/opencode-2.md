@@ -158,3 +158,5 @@ $TMPDIR/opencode2/magic-context/magic-context.log
 OpenCode 1 writes to `$TMPDIR/opencode/magic-context/magic-context.log`. On Linux, `$TMPDIR` is usually `/tmp`. Set `MAGIC_CONTEXT_LOG_PATH` to write the log somewhere else.
 
 When Magic Context refuses a turn before it reaches the provider, the reason and session are written to this log. Include the log when you [file a bug report](/help/troubleshooting/#filing-a-bug-report).
+
+Sessions created with an older experimental host-fold version may need one cache rebuild when upgrading. Magic Context validates the old checkpoint and preserves its history before recording the new replay boundary. If that one-time repair is interrupted, the next turn retries it instead of accepting a partial checkpoint.

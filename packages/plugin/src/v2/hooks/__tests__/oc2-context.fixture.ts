@@ -411,11 +411,17 @@ export async function oc2ContextFixture(
                     .slice(0, hostWindowStart)
                     .map((row) => row.text)
                     .join("\n\n");
+            const metadata = {
+                ...(host === "2.1.0" && windowRows > 0
+                    ? { keepID: rows[hostWindowStart]!.id }
+                    : {}),
+                ...draft.result.metadata,
+            };
             const data = {
                 status: "completed",
                 summary: draft.result.summary,
                 recent,
-                ...(draft.result.metadata ? { metadata: draft.result.metadata } : {}),
+                ...(Object.keys(metadata).length ? { metadata } : {}),
             };
             raw.prepare("UPDATE session_message SET data=? WHERE id=?").run(
                 JSON.stringify(data),
