@@ -117,6 +117,26 @@ function folder(name: string, git = true): string {
     return directory;
 }
 
+test("a new worktree session borrows the root pin while an established session keeps git", async () => {
+    const main = folder("main");
+    const worktree = folder("worktree", false);
+    const gitDir = join(main, ".git", "worktrees", "linked");
+    mkdirSync(gitDir, { recursive: true });
+    writeFileSync(join(worktree, ".git"), `gitdir: ${gitDir}\n`);
+    writeFileSync(join(gitDir, "commondir"), "../..\n");
+    const options = { connectionFile: join(temp.dir, "absent.json") };
+    const first = await awaitSessionIdentityDecision("established", worktree, options);
+    expect(first.identity).toBe(`git:${"a".repeat(40)}`);
+    rememberPinnedProjectIdentity(main, "pj-ROOT");
+    expect((await awaitSessionIdentityDecision("new", worktree, options)).identity).toBe("pj-ROOT");
+    expect(readSessionIdentityDecision("established", worktree, options)?.identity).toBe(
+        first.identity,
+    );
+    expect(resolveProjectIdentityForSession(worktree)).toBe("pj-ROOT");
+    expect(await flushProjectPinWrites(2_000)).toBe(true);
+    expect(readRememberedProjectIdentity(worktree)).toBeUndefined();
+});
+
 function database(): Database {
     const db = new Database(":memory:");
     db.exec(`

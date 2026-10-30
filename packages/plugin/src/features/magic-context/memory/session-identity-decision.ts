@@ -16,16 +16,13 @@ import { readCachedM0OwnerEvidence } from "./applied-projection";
 import { type EntorhinalResolveOptions, resolveEntorhinalProject } from "./entorhinal-resolve";
 import { readGitCheckoutMetadata } from "./git-common-dir";
 import {
+    borrowedProjectIdentity,
     isUserHomeDirectory,
     rememberResolvedProjectIdentity,
     resolveProjectIdentityForSession,
     shouldSkipHomeProjectMemory,
 } from "./project-identity";
-import {
-    findPinnedIdentityByGitCommonDir,
-    isPinnedProjectIdentity,
-    readRememberedProjectIdentity,
-} from "./project-identity-cache";
+import { isPinnedProjectIdentity, readRememberedProjectIdentity } from "./project-identity-cache";
 
 /** A directory decision may be pending while another project's prefix is served. */
 export interface SessionIdentityDecision {
@@ -176,8 +173,7 @@ function pin(directory: string): string | undefined {
 }
 
 function commonDirPin(directory: string): string | undefined {
-    const commonDir = readGitCheckoutMetadata(directory)?.gitCommonDir;
-    return commonDir ? findPinnedIdentityByGitCommonDir(commonDir) : undefined;
+    return borrowedProjectIdentity(directory);
 }
 
 function rustManaged(db: Database | null | undefined, identity: string | undefined): boolean {

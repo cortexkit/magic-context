@@ -3469,7 +3469,7 @@ impl McHandler {
                 if let Some(pin) = self
                     .project_identities
                     .pinned_identity(&directory)
-                    .or_else(|| self.project_identities.common_dir_pin(&directory))
+                    .or_else(|| self.project_identities.borrowed_identity(&directory))
                 {
                     project.initial = Some(Ok(pin));
                 }
@@ -15008,6 +15008,70 @@ mod tests {
                 .route_project(channel, store, &binding)
                 .unwrap_or_else(|_| panic!("project resolution failed"))
                 .key
+        }
+
+        #[tokio::test]
+        async fn route_worktree_retires_git_sidecar_and_borrows_root_pin_without_common_metadata() {
+            use sha2::Digest;
+            let (mut handler, store, temp, project) = fixture();
+            let git = |args: &[&str]| {
+                let output = std::process::Command::new("git")
+                    .current_dir(&project)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            };
+            git(&["init", "-q"]);
+            git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "fixture",
+            ]);
+            let worktree = temp.path().join("linked-worktree");
+            git(&["worktree", "add", "--detach", worktree.to_str().unwrap()]);
+            let path_for = |directory: &Path| {
+                temp.path().join("sidecars").join(format!(
+                    "{:x}.json",
+                    sha2::Sha256::digest(
+                        project_identity::project_directory_key(directory).as_bytes()
+                    )
+                ))
+            };
+            let old = handler.project_identities.resolve(&worktree).unwrap();
+            assert!(old.starts_with("git:"));
+            handler.entorhinal =
+                entorhinal_resolve::EntorhinalResolver::new(Some(temp.path().join("absent.json")));
+            bind(&handler, &worktree, 6).await;
+            assert_eq!(served(&handler, &store, 6), old);
+            let stale = path_for(&worktree);
+            assert!(stale.exists());
+            println!(
+                "route fallback wrote {}: {}",
+                stale.display(),
+                std::fs::read_to_string(&stale).unwrap()
+            );
+            std::fs::write(path_for(&project), serde_json::to_vec(&json!({"directory": project_identity::project_directory_key(&project), "identity": "pj-ROOT"})).unwrap()).unwrap();
+            handler.entorhinal =
+                entorhinal_resolve::EntorhinalResolver::new(Some(temp.path().join("absent.json")));
+            bind(&handler, &worktree, 7).await;
+            assert_eq!(served(&handler, &store, 7), "pj-ROOT");
+            assert_eq!(served(&handler, &store, 6), old);
+            handler.project_identities.flush_pins();
+            assert!(!stale.exists());
+            assert_eq!(
+                handler.project_identities.resolve(&worktree).unwrap(),
+                "pj-ROOT"
+            );
         }
 
         #[tokio::test]

@@ -7,7 +7,7 @@
     "tolerantReader": "The unknown-via row also adds an extra field, covering the combined malformed-value example in constraints. Unknown via and numeric projectId count as not answering: use the fallback and log once. An unknown extra field alone is ignored: use the registered pj- answer, pin it, and do not log a resolve error. resolveLogs counts diagnostic lines from the Entorhinal decision, not unrelated logs.",
     "rootPin": "Intent section 2's pin-writing bullet pins the resolved folder, and pins its checkout root only when the answer's canonicalRoot and that checkout root have equal canonical spellings. The two walk-subfolder rows vary only the returned canonicalRoot; via: walk alone never authorizes a parent pin. expected.canonicalRoot, when present, records the returned spelling independently of the queried directory.",
     "eligibility": "A fixture's optional home field supplies the test user's home directory instead of the real home. Home access is disabled. A refused row has null identity and gitCommonDir, errorClass home_project_disabled, zero resolveCalls and gitProbeCalls, and no writes; eligibility runs before any identity resolution.",
-    "writes": "sidecarWrites is the complete set of writes, including legacy git records, not the resulting sidecar inventory. An empty list means existing sidecar bytes must remain unchanged. sidecarBytesUnchanged makes that byte comparison an explicit assertion for the no-overwrite row, independently of the returned identity. gitCommonDir is omitted on legacy git records."
+    "writes": "sidecarWrites is the complete set of writes, including legacy git records, not the resulting sidecar inventory. sidecarRemovals optionally lists directory keys whose stale git records must be removed; borrowed worktree pins are never persisted. All other existing sidecar bytes must remain unchanged unless listed in sidecarWrites. sidecarBytesUnchanged makes that byte comparison an explicit assertion for the no-overwrite row, independently of the returned identity. gitCommonDir is omitted on legacy git records."
   },
   "gitCommit": "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor Fixture <fixture@example.invalid> 0 +0000\ncommitter Fixture <fixture@example.invalid> 0 +0000\n\nProject identity parity fixture\n",
   "gitRootCommit": "73a7d66b6d566a1519aa44f6a275ca35ae2817cc",
@@ -54,6 +54,89 @@
     }
   },
   "cases": [
+    {
+      "name": "worktree-checkout-pin-absent-endpoint",
+      "fixture": "linked",
+      "directory": "<fixture>/worktree",
+      "answer": "absent",
+      "sidecars": [
+        {
+          "directory": "<fixture>/repo",
+          "identity": "pj-parent",
+          "gitCommonDir": "<fixture>/repo/.git"
+        }
+      ],
+      "expected": {
+        "identity": "pj-parent",
+        "gitCommonDir": "<fixture>/repo/.git",
+        "sidecarWrites": [],
+        "sidecarRemovals": [],
+        "gitProbeCalls": 0
+      }
+    },
+    {
+      "name": "worktree-checkout-pin-without-common-dir",
+      "fixture": "linked",
+      "directory": "<fixture>/worktree",
+      "answer": "absent",
+      "sidecars": [
+        {
+          "directory": "<fixture>/repo",
+          "identity": "pj-parent"
+        }
+      ],
+      "expected": {
+        "identity": "pj-parent",
+        "gitCommonDir": "<fixture>/repo/.git",
+        "sidecarWrites": [],
+        "sidecarRemovals": [],
+        "gitProbeCalls": 0
+      }
+    },
+    {
+      "name": "worktree-stale-git-sidecar-retired",
+      "fixture": "linked",
+      "directory": "<fixture>/worktree",
+      "answer": "absent",
+      "sidecars": [
+        {
+          "directory": "<fixture>/repo",
+          "identity": "pj-parent"
+        },
+        {
+          "directory": "<fixture>/worktree",
+          "identity": "git:73a7d66b6d566a1519aa44f6a275ca35ae2817cc"
+        }
+      ],
+      "expected": {
+        "identity": "pj-parent",
+        "gitCommonDir": "<fixture>/repo/.git",
+        "sidecarWrites": [],
+        "sidecarRemovals": [
+          "<fixture>/worktree"
+        ],
+        "gitProbeCalls": 0
+      }
+    },
+    {
+      "name": "worktree-without-checkout-pin-keeps-git",
+      "fixture": "linked",
+      "directory": "<fixture>/worktree",
+      "answer": "absent",
+      "sidecars": [
+        {
+          "directory": "<fixture>/worktree",
+          "identity": "git:73a7d66b6d566a1519aa44f6a275ca35ae2817cc"
+        }
+      ],
+      "expected": {
+        "identity": "git:73a7d66b6d566a1519aa44f6a275ca35ae2817cc",
+        "gitCommonDir": "<fixture>/repo/.git",
+        "sidecarWrites": [],
+        "sidecarRemovals": [],
+        "gitProbeCalls": 1
+      }
+    },
     {
       "name": "registered-root",
       "fixture": "main",
