@@ -39,6 +39,7 @@ import {
     setPendingCompactionMarkerState,
     setPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
+import { getTagById, insertTag } from "../../features/magic-context/storage-tags";
 import { createTagger } from "../../features/magic-context/tagger";
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
 import * as logger from "../../shared/logger";
@@ -46,11 +47,14 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     applyDeferredCompactionMarker as applyDeferredOriginal,
+    checkCompactionMarkerConsistency,
     closeCompactionMarkerConnection,
     MARKER_SUMMARY_TEXT,
+    markerUpdateDefinitelyDidNotCut,
     updateCompactionMarkerAfterPublication as updateOriginal,
 } from "./compaction-marker-manager";
 import {
+    clearInjectionCache,
     prepareCompartmentInjection,
     selectHiddenMessagesAtCompactionSeam,
 } from "./inject-compartments";
@@ -1178,6 +1182,136 @@ describe("recoverable two-store marker publication", () => {
     }
     const first = makePending({ endMessageId: "first" });
     const second = makePending({ ordinal: 20, endMessageId: "second" });
+
+    it("review witness: a cold defer must not delete the committed pending pair as a fork orphan", async () => {
+        const { home, sid, oc, db } = fixture();
+        try {
+            expect((await applyDeferredCompactionMarker(db, sid, first, home)).kind).toBe(
+                "applied",
+            );
+            failFinalization(db);
+            expect(await applyDeferredCompactionMarker(db, sid, second, home)).toMatchObject({
+                kind: "retryable-failure",
+                cut: "uncertain",
+            });
+            db.exec("DROP TRIGGER fail_finalization");
+            const pending = markerJson(db, sid);
+            const before = hostRows(oc);
+            expect(pairCount(oc)).toBe(1);
+            db.prepare(`UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = ?,
+                cached_m0_last_baseline_end_message_id = 'first' WHERE session_id = ?`).run(
+                Buffer.from("<session-history>frozen baseline</session-history>"),
+                Buffer.from("<session-history>frozen delta</session-history>"),
+                sid,
+            );
+            // The host's newer cut hides the frozen baseline boundary after a restart.
+            clearInjectionCache(sid);
+            const messages = [
+                {
+                    info: { id: "tail", role: "user", sessionID: sid },
+                    parts: [{ type: "text", text: "retained tail" }],
+                },
+            ] as MessageLike[];
+            prepareCompartmentInjection(db, sid, messages, false, [], home);
+            expect(markerJson(db, sid)).toBe(pending);
+            expect(hostRows(oc)).toEqual(before);
+        } finally {
+            clearInjectionCache(sid);
+            closeQuietly(oc);
+        }
+    });
+
+    it("review witness: a superseded target must not certify no cut while a committed intent is unfinalized", async () => {
+        const { home, sid, oc, db } = fixture();
+        try {
+            failFinalization(db);
+            expect(await applyDeferredCompactionMarker(db, sid, first, home)).toMatchObject({
+                kind: "retryable-failure",
+                cut: "uncertain",
+            });
+            db.exec("DROP TRIGGER fail_finalization");
+            const pending = markerJson(db, sid);
+            // Deleting the target compartment does not revert the host cut.
+            db.prepare(
+                "DELETE FROM compartments WHERE session_id = ? AND end_message_id = 'first'",
+            ).run(sid);
+            const outcome = await applyDeferredCompactionMarker(db, sid, first, home);
+            expect(pairCount(oc)).toBe(1);
+            expect(markerJson(db, sid)).toBe(pending);
+            expect(markerUpdateDefinitelyDidNotCut(outcome)).toBe(false);
+            expect(outcome).toMatchObject({ kind: "retryable-failure", cut: "uncertain" });
+        } finally {
+            closeQuietly(oc);
+        }
+    });
+
+    it("review witness: a host revert after intent but before commit must not permanently block an older valid frontier", async () => {
+        const { home, sid, oc, db } = fixture();
+        try {
+            oc.exec(`CREATE TRIGGER interrupt_host BEFORE INSERT ON message
+                BEGIN SELECT RAISE(ABORT, 'interrupted before host commit'); END`);
+            expect((await applyDeferredCompactionMarker(db, sid, second, home)).kind).toBe(
+                "retryable-failure",
+            );
+            expect(JSON.parse(markerJson(db, sid)).pending.targetEndMessageId).toBe("second");
+            expect(pairCount(oc)).toBe(0);
+            oc.exec("DROP TRIGGER interrupt_host");
+            oc.prepare("DELETE FROM message WHERE id = 'second'").run();
+            db.prepare(
+                "DELETE FROM compartments WHERE session_id = ? AND end_message_id = 'second'",
+            ).run(sid);
+            expect((await applyDeferredCompactionMarker(db, sid, first, home)).kind).toBe(
+                "applied",
+            );
+            expect(pairCount(oc)).toBe(1);
+            expect(JSON.parse(markerJson(db, sid)).pending).toBeUndefined();
+        } finally {
+            closeQuietly(oc);
+        }
+    });
+
+    it("review control: startup is read-only and a failed tag drop rolls finalization back before one successful retry", async () => {
+        const { home, sid, oc, db } = fixture();
+        try {
+            expect((await applyDeferredCompactionMarker(db, sid, first, home)).kind).toBe(
+                "applied",
+            );
+            const old = getPersistedCompactionMarkerState(db, sid)!;
+            insertTag(db, sid, `${old.summaryMessageId}:p0`, "message", 100, 1);
+            db.exec(`CREATE TRIGGER fail_tag_drop BEFORE UPDATE OF status ON tags
+                WHEN NEW.status = 'dropped'
+                BEGIN SELECT RAISE(ABORT, 'interrupted tag drop'); END`);
+            expect(await applyDeferredCompactionMarker(db, sid, second, home)).toMatchObject({
+                kind: "retryable-failure",
+                cut: "uncertain",
+            });
+            expect(getPersistedCompactionMarkerState(db, sid)).toEqual(old);
+            expect(getTagById(db, sid, 1)?.status).toBe("active");
+            const pending = markerJson(db, sid);
+            const before = hostRows(oc);
+            checkCompactionMarkerConsistency(db);
+            expect(markerJson(db, sid)).toBe(pending);
+            expect(hostRows(oc)).toEqual(before);
+            db.exec("DROP TRIGGER fail_tag_drop");
+            db.exec(`CREATE TABLE review_tag_drops (n INTEGER);
+                CREATE TRIGGER count_tag_drop AFTER UPDATE OF status ON tags
+                WHEN NEW.status = 'dropped'
+                BEGIN INSERT INTO review_tag_drops VALUES (1); END`);
+            expect((await applyDeferredCompactionMarker(db, sid, second, home)).kind).toBe(
+                "applied",
+            );
+            expect((await applyDeferredCompactionMarker(db, sid, second, home)).kind).toBe(
+                "already-current",
+            );
+            expect(db.prepare("SELECT count(*) AS n FROM review_tag_drops").get()).toEqual({
+                n: 1,
+            });
+            expect(getTagById(db, sid, 1)?.status).toBe("dropped");
+            expect(hostRows(oc)).toEqual(before);
+        } finally {
+            closeQuietly(oc);
+        }
+    });
 
     it("adopts a post-commit state-write failure before advancing to the next fold, leaving one pair", async () => {
         const { home, sid, oc, db } = fixture();
