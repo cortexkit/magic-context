@@ -6,6 +6,7 @@ import {
 	queuePendingOp,
 	updateSessionMeta,
 } from "../../plugin/src/features/magic-context/storage";
+import * as sessionCollections from "../../plugin/src/features/magic-context/storage-session-collections";
 import * as executeModule from "../../plugin/src/hooks/magic-context/execute-reclaim";
 import {
 	__test,
@@ -355,7 +356,7 @@ for (const [count, busy] of [
 			const prepare = db.prepare.bind(db);
 			const document = () =>
 				prepare(
-					"SELECT trailing_blank_decisions FROM session_meta WHERE session_id=?",
+					`SELECT ${sessionCollections.sessionMetaCollectionSelect("trailing_blank_decisions", "trailing_blank_decisions", db)} FROM session_meta WHERE session_id=?`,
 				).get(id);
 			const before = document();
 			const observation = {
@@ -379,29 +380,20 @@ for (const [count, busy] of [
 				if (sql === "COMMIT") observation.commits++;
 				return exec(sql);
 			}) as typeof db.exec;
-			db.prepare = ((sql: string) => {
-				const statement = prepare(sql);
+			const updateCollection = sessionCollections.updateSessionMetaCollection;
+			// Count logical publications, independent of inline or chunked storage.
+			const writeSpy = spyOn(
+				sessionCollections,
+				"updateSessionMetaCollection",
+			).mockImplementation((target, sessionId, column, value, expected) => {
 				if (
-					!sql.startsWith(
-						"UPDATE session_meta SET trailing_blank_decisions = ?",
-					)
+					target === db &&
+					sessionId === id &&
+					column === "trailing_blank_decisions"
 				)
-					return statement;
-				return new Proxy(statement, {
-					get(target, key) {
-						const value = Reflect.get(target, key);
-						if (key === "run")
-							return (...values: unknown[]) => {
-								observation.writes++;
-								return (value as (...values: unknown[]) => unknown).apply(
-									target,
-									values,
-								);
-							};
-						return typeof value === "function" ? value.bind(target) : value;
-					},
-				});
-			}) as typeof db.prepare;
+					observation.writes++;
+				return updateCollection(target, sessionId, column, value, expected);
+			});
 			const start = performance.now();
 			try {
 				observation.tokens = originalEstimate({
@@ -417,7 +409,7 @@ for (const [count, busy] of [
 			} finally {
 				observation.elapsedMs = performance.now() - start;
 				db.exec = exec;
-				db.prepare = prepare;
+				writeSpy.mockRestore();
 				expect(document()).toEqual(before);
 				observations.push(observation);
 			}
@@ -438,7 +430,7 @@ for (const [count, busy] of [
 			expect(observed.begins).toBe(1);
 			expect(observed.commits).toBe(0);
 			expect(observed.rollbacks).toBe(busy ? 0 : 1);
-			expect(observed.writes).toBe(busy ? 0 : count);
+			expect(observed.writes).toBe(busy ? 0 : 1);
 			if (busy) {
 				expect(observed.tokens).toBe(0);
 				expect(getPendingOps(db, id)).toHaveLength(count);

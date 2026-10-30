@@ -5,6 +5,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage-native-replay";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
+import { isSqliteTransactionOpen } from "@magic-context/core/shared/sqlite";
 import {
 	clearNativeReasoning,
 	NATIVE_TOOL_REMOVAL_MARKER,
@@ -17,6 +18,96 @@ type ReplayArgs = {
 	sessionId: string;
 	messages: unknown[];
 };
+
+type RemovalBatch = {
+	saved: Map<string, string> | undefined;
+	planned: Map<string, string>;
+	requested: Map<string, string>;
+	flushed: boolean;
+	flush: () => void;
+};
+const removalBatches = new WeakMap<
+	ContextDatabase,
+	Map<string, RemovalBatch>
+>();
+
+export class PiToolRemovalBatchError extends Error {
+	constructor(cause: unknown) {
+		super("Native tool removal batch could not be persisted", { cause });
+	}
+}
+
+/**
+ * Authorize against a private, ordered overlay, then merge the native tool inputs
+ * once alongside the drop's tag statuses and pending-operation deletions. The
+ * caller owns the transaction and must flush before recording which
+ * provider-signed reasoning blocks were omitted. Publish the permission map only
+ * after that caller returns successfully; outer transactions register restoration
+ * on rollback.
+ */
+export function withPiToolRemovalBatch<T>(
+	args: {
+		db: ContextDatabase;
+		sessionId: string;
+		saved: Map<string, string> | undefined;
+		rollbackObservations?: (() => void)[];
+	},
+	edit: (flush: () => void) => T,
+): T {
+	let sessions = removalBatches.get(args.db);
+	const enclosing = sessions?.get(args.sessionId);
+	if (enclosing) return edit(enclosing.flush);
+	if (!sessions) {
+		sessions = new Map();
+		removalBatches.set(args.db, sessions);
+	}
+	const batch: RemovalBatch = {
+		saved: args.saved,
+		planned: new Map(args.saved),
+		requested: new Map(),
+		flushed: false,
+		flush() {
+			if (batch.flushed) return;
+			if (!isSqliteTransactionOpen(args.db))
+				throw new Error(
+					"Native removal publication requires a caller-owned transaction",
+				);
+			batch.flushed = true;
+			if (batch.requested.size === 0) return;
+			try {
+				saveNativeToolInputs(args.db, args.sessionId, batch.requested);
+			} catch (cause) {
+				// The edit callback may have changed its private transcript. Cleanup
+				// must not expose those edits after the transaction rolls back.
+				throw new PiToolRemovalBatchError(cause);
+			}
+		},
+	};
+	sessions.set(args.sessionId, batch);
+	try {
+		const result = edit(batch.flush);
+		if (batch.requested.size > 0 && !batch.flushed)
+			throw new Error(
+				"Native removal markers were not flushed in the caller's transaction",
+			);
+		const saved = args.saved;
+		if (saved && batch.requested.size > 0) {
+			const prior = new Map(
+				[...batch.requested.keys()].map((id) => [id, saved.get(id)]),
+			);
+			args.rollbackObservations?.push(() => {
+				for (const [id, value] of prior) {
+					if (value === undefined) saved.delete(id);
+					else saved.set(id, value);
+				}
+			});
+			for (const [id, marker] of batch.requested) saved.set(id, marker);
+		}
+		return result;
+	} finally {
+		sessions.delete(args.sessionId);
+	}
+}
 
 /** Replay frozen inputs first; publish new native bytes only after their write succeeds. */
 export function applyNativeToolInputReplayPi(
@@ -172,6 +263,12 @@ export function preparePiToolRemovalMeasurements(args: {
 	canApply: boolean;
 }): void {
 	if (!args.saved || !args.canApply) return;
+	const batch = removalBatches.get(args.db)?.get(args.sessionId);
+	if (batch?.saved === args.saved) {
+		for (const callId of args.callIds)
+			authorizePiToolRemoval({ ...args, callId });
+		return;
+	}
 	const requested = new Map<string, string>();
 	for (const callId of args.callIds) {
 		if (args.saved.get(callId) !== NATIVE_TOOL_REMOVAL_MARKER)
@@ -251,6 +348,17 @@ export function authorizePiToolRemoval(args: {
 	canApply: boolean;
 }): boolean | "defer" {
 	if (!args.saved) return false;
+	const batch = removalBatches.get(args.db)?.get(args.sessionId);
+	if (batch?.saved === args.saved) {
+		if (batch.planned.get(args.callId) === NATIVE_TOOL_REMOVAL_MARKER)
+			return true;
+		if (!args.canApply) return false;
+		if (batch.flushed)
+			throw new Error("Tool removal requested after lane publication");
+		batch.planned.set(args.callId, NATIVE_TOOL_REMOVAL_MARKER);
+		batch.requested.set(args.callId, NATIVE_TOOL_REMOVAL_MARKER);
+		return true;
+	}
 	if (args.saved.get(args.callId) === NATIVE_TOOL_REMOVAL_MARKER) return true;
 	if (!args.canApply) return false;
 	try {

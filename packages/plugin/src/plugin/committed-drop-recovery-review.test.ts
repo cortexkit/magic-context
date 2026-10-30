@@ -50,7 +50,9 @@ for (const lane of ["oc1", "oc2", "pi"]) {
                     const dropped = proof.state.tags.filter(
                         (row: unknown[]) => row[3] === "dropped",
                     );
-                    expect(dropped).toHaveLength(position - 1);
+                    // Pi commits native permissions and drops atomically, so a
+                    // failed write cannot leave an unserved durable prefix.
+                    expect(dropped).toHaveLength(lane === "pi" ? 0 : position - 1);
                     expect(proof.wire.split("independent tool result ".repeat(1200))).toHaveLength(
                         9 - dropped.length,
                     );
@@ -83,9 +85,11 @@ for (const lane of ["oc1", "oc2", "pi"]) {
         try {
             const recovered = child(root, lane, "seed", 2, true);
             expect(recovered.status, recovered.stderr).toBe(0);
+            // Pi's atomic commit retains the original signed prefix on failure;
+            // OpenCode still exercises recovery of earlier per-drop commits.
             expect(
                 recovered.proof.state.tags.filter((row: unknown[]) => row[3] === "dropped"),
-            ).toHaveLength(1);
+            ).toHaveLength(lane === "pi" ? 0 : 1);
             expect(recovered.proof.before).toContain("independent-signature");
             if (!recovered.proof.wire) {
                 expect(recovered.proof.error).toContain("This request was not sent");
