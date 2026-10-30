@@ -1,12 +1,5 @@
 {
-  "name": "standalone session runner must equal its harness",
-  "refusal": {
-    "code": "session_runner_mismatch",
-    "detail": {
-      "runner": "opencode"
-    },
-    "message": "A standalone session's runner must equal its harness."
-  },
+  "name": "a session named with another runner is watched; its own read refuses",
   "request": {
     "method": "context.watch",
     "params": {
@@ -18,5 +11,18 @@
         }
       ]
     }
+  },
+  "response": {
+    "cursor": "abc:0",
+    "kind": "resync",
+    "op": "context.watch",
+    "schema": 1,
+    "sessions": [
+      {
+        "harness": "opencode",
+        "runner": "other",
+        "session": "s"
+      }
+    ]
   }
 }

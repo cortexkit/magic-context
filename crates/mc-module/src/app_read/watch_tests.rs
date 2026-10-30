@@ -393,3 +393,86 @@ async fn mode3_runner_publication_queue_usage_and_historian_changes_wake() {
     assert_eq!(next(&mut sub).await["kind"], "changes");
     assert_eq!(next(&mut sub).await["kind"], "changes");
 }
+
+/// Store a mode-3 record for session `s` held by runner `runner`, as a move
+/// from standalone leaves it: the standalone `session_meta` row stays.
+fn seed_mode3_record(dir: &std::path::Path) {
+    let key = crate::providers::Key {
+        runner: "runner".into(),
+        session: "s".into(),
+        harness: "opencode".into(),
+    };
+    let state =
+        json!({"key":key,"runner_module":"runner","generation":1,"resync":false,"applied":0});
+    let namespace = format!("{}:async:1", key.engine_key());
+    apply_sql(&dir.join("store.db"), &format!("INSERT INTO mc_async_compaction(session_ref,session,conversation_key,state_json,version_high_water) VALUES('runner:opencode:s','s','{}','{}',0); INSERT INTO mc_cache_state(session_id,row_version,core_state,meta) VALUES('{namespace}',1,'{{}}','{{}}');", key.store_key().conversation_key().replace('\'',"''"), state.to_string().replace('\'',"''")));
+}
+
+#[tokio::test]
+async fn a_refused_session_stays_its_own_and_the_rest_keep_updating() {
+    let (dir, ctx, hub) = setup();
+    let stale = json!({"runner":"opencode","harness":"opencode","session":"gone"});
+    let params = json!({"sessions":[session(), stale]});
+    // `gone` has no record anywhere. Before, one unreadable reference refused
+    // the whole subscription.
+    let mut sub = hub
+        .subscribe(
+            "direct".into(),
+            (1, 1),
+            Request::parse(params.as_object().unwrap()).unwrap_or_else(|e| panic!("{e:?}")),
+            &ctx,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(next(&mut sub).await["kind"], "resync");
+    // Settle the one admission confirmation every watched session gets after its
+    // first full-hash baseline. On the refused session that full hash is its
+    // refusal, so it must never turn into a resync of every session.
+    let store = Arc::clone(ctx.store.as_ref().unwrap());
+    hub.check_slow(Arc::clone(&store), false, true);
+    hub.refresh(Arc::clone(&store));
+    tokio::time::sleep(DEBOUNCE * 3).await;
+    while let Ok(notice) = sub.rx.try_recv() {
+        assert_eq!(notice["kind"], "changes", "{notice}");
+    }
+    let db = dir.path().join("context.db");
+    apply_sql(
+        &db,
+        "UPDATE session_meta SET counter=1 WHERE session_id='s'",
+    );
+    let notice = next(&mut sub).await;
+    assert_eq!(notice["kind"], "changes");
+    assert_eq!(notice["sessions"], json!([session()]));
+    hub.check_slow(Arc::clone(&store), false, true);
+    hub.refresh(Arc::clone(&store));
+    tokio::time::sleep(DEBOUNCE * 3).await;
+    assert!(sub.rx.try_recv().is_err(), "an unchanged refusal is silent");
+    // Becoming readable is reported once, for that session alone.
+    apply_sql(
+        &db,
+        "INSERT INTO session_meta(session_id,harness) VALUES('gone','opencode')",
+    );
+    let notice = next(&mut sub).await;
+    assert_eq!(notice["kind"], "changes");
+    assert_eq!(notice["sessions"], json!([stale]));
+}
+
+#[test]
+fn a_moved_session_is_not_served_from_its_stale_standalone_rows() {
+    let (dir, ctx, _hub) = setup();
+    seed_mode3_record(dir.path());
+    let caller = crate::app_read::tests_support::caller();
+    let read = |session: Value| {
+        let body = serde_json::to_vec(
+            &json!({"method":"session_data.read","params":{"session":session,"section":"meta"}}),
+        )
+        .unwrap();
+        super::super::handle(&caller, true, &body, &ctx)
+    };
+    match read(session()) {
+        HandlerOutcome::ErrorWithDetail { code, detail, .. } => {
+            assert_eq!(code, "session_runner_mismatch");
+            assert_eq!(detail["runner"], "runner");
+        }
+        other => panic!("a moved session's old runner must refuse, got {other:?}"),
+    }
+}

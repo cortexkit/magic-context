@@ -372,6 +372,37 @@ struct SlowState {
     admission_fast: Option<Vec<u8>>,
 }
 
+/// Refusals that belong to one session reference: the reference names another
+/// runner, names nothing, or is ambiguous. A watch keeps such a session as a
+/// refused snapshot instead of failing every other session's read; its own read
+/// returns the named refusal. Store and budget failures still fail the whole read.
+const SESSION_REFUSALS: [&str; 3] = [
+    "session_runner_mismatch",
+    "session_not_found",
+    "session_ambiguous",
+];
+
+/// The snapshot digest of a session-scoped refusal, or `None` for any other
+/// failure. It names the refusal code and detail, so a session that becomes
+/// readable again, or is refused for a different reason, is reported changed once.
+fn refused_digest(error: &HandlerOutcome) -> Option<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    let (code, detail) = match error {
+        HandlerOutcome::ErrorWithDetail { code, detail, .. } => (code, detail.to_string()),
+        HandlerOutcome::Error { code, .. } => (code, String::new()),
+        _ => return None,
+    };
+    if !SESSION_REFUSALS.contains(&code.as_str()) {
+        return None;
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"watch-refused/v1\0");
+    digest.update(code.as_bytes());
+    digest.update([0]);
+    digest.update(detail.as_bytes());
+    Some(digest.finalize().to_vec())
+}
+
 fn read_snapshots<'a>(
     ctx: &AppReadContext,
     sessions: impl Iterator<Item = &'a locator::SessionRef>,
@@ -383,7 +414,13 @@ fn read_snapshots<'a>(
         for session in sessions {
             let target = match locator::locate(context, store, session) {
                 Ok(target) => target,
-                Err(error) => return Ok(Err(error)),
+                Err(error) => match refused_digest(&error) {
+                    Some(digest) => {
+                        snapshots.insert(key(session), Snapshot { digest, deadline: None });
+                        continue;
+                    }
+                    None => return Ok(Err(error)),
+                },
             };
             let version = super::version::session_version(context, store, &target, super::version::VersionRequest::States(&[]))?;
             let (mut meta, response, ttl) = match &target.source {
@@ -434,7 +471,14 @@ fn slow_digest(
     session: &locator::SessionRef,
 ) -> Result<Vec<u8>, HandlerOutcome> {
     ctx.with_reads(|context, store| {
-        let target = match locator::locate(context, store, session) { Ok(target) => target, Err(error) => return Ok(Err(error)) };
+        let target = match locator::locate(context, store, session) {
+            Ok(target) => target,
+            // A refused session's full digest is its refusal, as on the fast path,
+            // so the slow check never turns it into a resync of every session.
+            Err(error) => {
+                return Ok(refused_digest(&error).ok_or(error));
+            }
+        };
         let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
         if matches!(target.source, locator::SessionSource::Standalone) {
             // SQLite builds the canonical scalar in C. Do not allocate and

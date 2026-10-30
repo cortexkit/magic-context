@@ -150,6 +150,16 @@ fn locate(
                     json!({"runner": stored}),
                 ));
             }
+            // A session moved to mode 3 keeps its standalone rows, which stop
+            // changing at the move. Serving them would show a stale session, so
+            // name the runner that holds it now.
+            if let Some(runner) = moved_runner(ctx, session)? {
+                return Err(named_detail(
+                    "session_runner_mismatch",
+                    "The session was moved to another runner.",
+                    json!({"runner": runner}),
+                ));
+            }
             Ok(Located::Standalone)
         }
         Some(_) | None if unmanaged_ok && session.runner == session.harness => {
@@ -160,6 +170,32 @@ fn locate(
             "idx_mc_async_compaction_session",
         )),
     }
+}
+
+/// The runner of a mode-3 record for this session and harness when it is not
+/// the referenced runner. Without a module store there is no such record.
+fn moved_runner(
+    ctx: &AppReadContext,
+    session: &SessionRef,
+) -> Result<Option<String>, HandlerOutcome> {
+    if ctx.store.is_none() && ctx.connections.is_none() {
+        return Ok(None);
+    }
+    let states = ctx.store_db(|conn| {
+        let mut statement = conn.prepare(super::locator::ASYNC_LOOKUP)?;
+        let rows = statement
+            .query_map([&session.session, &session.harness], |row| {
+                row.get::<_, String>(1)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>();
+        rows
+    })?;
+    Ok(states.into_iter().find_map(|state| {
+        serde_json::from_str::<super::locator::AsyncHeader>(&state)
+            .ok()
+            .map(|header| header.runner_module)
+            .filter(|runner| *runner != session.runner)
+    }))
 }
 
 fn compartments(

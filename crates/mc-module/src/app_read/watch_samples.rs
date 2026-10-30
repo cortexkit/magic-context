@@ -254,16 +254,6 @@ async fn refusal_samples() -> Vec<Sample> {
             "context.watch/refusal-cursor-syntax.json",
             params(Some("not-a-cursor")),
         ),
-        (
-            "unknown session is refused before streaming",
-            "context.watch/refusal-unknown-session.json",
-            json!({"sessions":[{"runner":"opencode","harness":"opencode","session":"missing"}]}),
-        ),
-        (
-            "standalone session runner must equal its harness",
-            "context.watch/refusal-runner-mismatch.json",
-            json!({"sessions":[{"runner":"other","harness":"opencode","session":"s"}]}),
-        ),
     ] {
         let mut sub = rig.sample_subscribe(false, &request).await;
         let refusal = wire_refusal(&mut sub).await;
@@ -272,6 +262,26 @@ async fn refusal_samples() -> Vec<Sample> {
             "setup refusal emitted a notice"
         );
         records.push(record(name, file, request, Err(refusal)));
+    }
+
+    // A reference that names no session, names another runner, or is ambiguous
+    // is refused for that session alone: the watch streams, lists it in the
+    // first notice, and reports it again only when its readability changes. Its
+    // own `session_data.read` returns the named refusal.
+    for (name, file, request) in [
+        (
+            "an unknown session is watched; its own read refuses",
+            "context.watch/refusal-unknown-session.json",
+            json!({"sessions":[{"runner":"opencode","harness":"opencode","session":"missing"}]}),
+        ),
+        (
+            "a session named with another runner is watched; its own read refuses",
+            "context.watch/refusal-runner-mismatch.json",
+            json!({"sessions":[{"runner":"other","harness":"opencode","session":"s"}]}),
+        ),
+    ] {
+        let mut sub = rig.sample_subscribe(false, &request).await;
+        records.push(record(name, file, request, Ok(wire_notice(&mut sub).await)));
     }
 
     // Ambiguity is detected before decoding either async record. Two different
@@ -285,10 +295,10 @@ async fn refusal_samples() -> Vec<Sample> {
     let request = params(None);
     let mut sub = rig.sample_subscribe(false, &request).await;
     records.push(record(
-        "ambiguous session is refused before streaming",
+        "an ambiguous session is watched; its own read refuses",
         "context.watch/refusal-ambiguous-session.json",
         request.clone(),
-        Err(wire_refusal(&mut sub).await),
+        Ok(wire_notice(&mut sub).await),
     ));
 
     let unavailable = Rig::start_configured(|handler, _| {

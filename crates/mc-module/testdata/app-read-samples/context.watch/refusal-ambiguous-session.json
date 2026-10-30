@@ -1,10 +1,5 @@
 {
-  "name": "ambiguous session is refused before streaming",
-  "refusal": {
-    "code": "session_ambiguous",
-    "detail": null,
-    "message": "More than one conversation matches the session."
-  },
+  "name": "an ambiguous session is watched; its own read refuses",
   "request": {
     "method": "context.watch",
     "params": {
@@ -16,5 +11,18 @@
         }
       ]
     }
+  },
+  "response": {
+    "cursor": "abc:0",
+    "kind": "resync",
+    "op": "context.watch",
+    "schema": 1,
+    "sessions": [
+      {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "s"
+      }
+    ]
   }
 }

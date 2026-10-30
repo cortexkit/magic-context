@@ -1,10 +1,5 @@
 {
-  "name": "unknown session is refused before streaming",
-  "refusal": {
-    "code": "session_not_found",
-    "detail": null,
-    "message": "No session matches the reference."
-  },
+  "name": "an unknown session is watched; its own read refuses",
   "request": {
     "method": "context.watch",
     "params": {
@@ -16,5 +11,18 @@
         }
       ]
     }
+  },
+  "response": {
+    "cursor": "abc:0",
+    "kind": "resync",
+    "op": "context.watch",
+    "schema": 1,
+    "sessions": [
+      {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "missing"
+      }
+    ]
   }
 }
