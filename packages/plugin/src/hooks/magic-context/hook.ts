@@ -725,6 +725,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         historianHostRunnerEnabled: deps.config.historian?.host_runner?.enabled,
         liveModelBySession,
         sessionDirectoryBySession,
+        agentBySession,
         autoSearch: {
             enabled: deps.config.memory?.auto_search?.enabled ?? true,
             scoreThreshold: deps.config.memory?.auto_search?.score_threshold ?? 0.6,
