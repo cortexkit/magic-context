@@ -3,6 +3,9 @@ use super::*;
 use cortexkit_role_llm_runner::serializer_profile::error_output::ErrorOutput;
 use serde::Deserialize;
 
+#[path = "codec_broca_media.rs"]
+pub(crate) mod media;
+
 /// A transcript message held by the compaction engine, independent of its transport.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct InboundMessage {
@@ -210,7 +213,7 @@ impl Codec {
         context: &super::codec_opencode::NativeRenderContext<'_>,
     ) -> Result<codec::OutboundMessage, HandlerOutcome> {
         match self {
-            Self::OwnedBroca => encode_view(view),
+            Self::OwnedBroca => media::encode_prepared_view(view, request),
             Self::AnthropicMessages => super::codec_anthropic::encode_view(view),
             Self::Pi => super::codec_pi::encode_view(view, request),
             Self::OpencodeAiSdk => super::codec_opencode::encode_view(view, request, context),
@@ -266,7 +269,13 @@ impl Codec {
         entries: &[InboundMessage],
     ) -> Result<OutboundMessage, HandlerOutcome> {
         if self == Self::OwnedBroca {
-            return encode_view(view);
+            let encoded = encode_view(view)?;
+            media::validate_view(
+                &encoded,
+                view,
+                entries.iter().map(|entry| (entry.ordinal, &entry.message)),
+            )?;
+            return Ok(encoded);
         }
         let mut request: TransformRequest = decode(&json!({"v":2,"kind":"compaction.step",
             "serializer_profile":self.serializer_profile().wire_id(),"session_id":session,
@@ -285,7 +294,7 @@ impl Codec {
         source: &TransformRequest,
     ) -> Result<OutboundMessage, HandlerOutcome> {
         if self == Self::OwnedBroca {
-            return encode_view(view);
+            return media::encode_prepared_view(view, source);
         }
         let mut request: TransformRequest = decode(&json!({"v":2,"kind":"compaction.step",
             "serializer_profile":self.serializer_profile().wire_id(),"session_id":session,
@@ -341,6 +350,27 @@ struct NativeMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum NativeBlock {
+    MediaRef {
+        part: String,
+        kind: String,
+        mime: String,
+        byte_size: u64,
+        sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+    },
+    Media {
+        kind: String,
+        mime: String,
+        byte_size: u64,
+        sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+    },
     Text {
         text: String,
     },
@@ -371,6 +401,9 @@ enum NativeBlock {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum NativeOutput {
+    Parts {
+        parts: Vec<media::NativePart>,
+    },
     Text {
         text: String,
     },
@@ -417,6 +450,7 @@ fn native(message: &Value) -> Result<NativeMessage, HandlerOutcome> {
         .into_iter()
         .flatten()
     {
+        media::validate_block(block)?;
         let is_error_output = block.get("type").and_then(Value::as_str) == Some("tool_result")
             && block.pointer("/output/kind").and_then(Value::as_str) == Some("error");
         if is_error_output {
@@ -444,9 +478,19 @@ pub fn decode_message(
     };
     let parsed = native(&message.message)?;
     let mut content = Vec::new();
-    for block in parsed.content {
-        let raw = serde_json::to_value(&block).map_err(transient)?;
+    for (index, block) in parsed.content.into_iter().enumerate() {
+        let raw = message.message["content"][index].clone();
         let kind = match block {
+            NativeBlock::Media { .. } => CkKind::Media(media::decode_ref(&raw)?),
+            NativeBlock::MediaRef { part, .. } => {
+                if part != format!("{}#{index}", message.mid) {
+                    return Err(error(
+                        "history_unreadable",
+                        "media_ref part must match its message part",
+                    ));
+                }
+                CkKind::Media(media::decode_descriptor(&raw)?)
+            }
             NativeBlock::Text { text } => CkKind::Text { text },
             NativeBlock::Reasoning { text, signature } => CkKind::Reasoning { text, signature },
             NativeBlock::RedactedReasoning { data, .. } => CkKind::RedactedReasoning { data },
@@ -467,6 +511,7 @@ pub fn decode_message(
                 is_error,
             } => {
                 let kind = match output {
+                    NativeOutput::Parts { parts } => media::decode_parts(parts, is_error)?,
                     NativeOutput::Text { text } => {
                         if is_error {
                             CkOutputKind::ErrorText { text }
@@ -545,6 +590,7 @@ pub fn encode_message(message: &ck_wire::CkWireMessage) -> Result<Value, Handler
             .get("mc-provider")
             .and_then(|v| v.get("native_block"));
         let native = match &block.kind {
+            CkKind::Media(media) => media::encode_block(media, raw)?,
             CkKind::Text { text } => json!({"type":"text","text":text}),
             CkKind::Reasoning { text, signature } => {
                 let mut value = json!({"type":"reasoning","text":text});
@@ -584,7 +630,10 @@ pub fn encode_message(message: &ck_wire::CkWireMessage) -> Result<Value, Handler
                         | CkOutputKind::ErrorContent { .. }
                         | CkOutputKind::ExecutionDenied { .. }
                 );
-                let output = match &output.kind {
+                let mut output = match &output.kind {
+                    CkOutputKind::Content { blocks } | CkOutputKind::ErrorContent { blocks } => {
+                        media::encode_parts(blocks)?
+                    }
                     CkOutputKind::Text { text } => json!({"kind":"text","text":text}),
                     CkOutputKind::ErrorText { text } => {
                         if raw
@@ -653,13 +702,10 @@ pub fn encode_message(message: &ck_wire::CkWireMessage) -> Result<Value, Handler
                     CkOutputKind::ExecutionDenied { reason } => {
                         json!({"kind":"denied","reason":reason.as_deref().unwrap_or("denied")})
                     }
-                    _ => {
-                        return Err(error(
-                            "history_unreadable",
-                            "Broca does not accept a CK content-array output",
-                        ))
-                    }
                 };
+                if raw.and_then(|block| block.get("output")) != Some(&output) {
+                    media::inline_parts(&mut output);
+                }
                 // Error/denied outputs and their error flag are independent on
                 // Broca's wire. An unchanged block retains even a false flag.
                 let candidate = json!({"type":"tool_result","tool_call_id":id,"output":output,"is_error":is_error});
@@ -681,11 +727,12 @@ pub fn encode_message(message: &ck_wire::CkWireMessage) -> Result<Value, Handler
         };
         content.push(native);
     }
-    if let Some(original) = message
+    let original = message
         .provider_extras
         .get("mc-provider")
-        .and_then(|v| v.get("native_message"))
-    {
+        .and_then(|v| v.get("native_message"));
+    media::validate_message(&json!({"content":content}), original)?;
+    if let Some(original) = original {
         if original.get("role") == Some(&json!(message.role))
             && original.get("content") == Some(&json!(content))
         {

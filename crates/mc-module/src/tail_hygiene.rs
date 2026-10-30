@@ -200,6 +200,9 @@ fn estimated_tokens(content: &str) -> i64 {
 }
 
 fn media_content(media: &MediaBlock) -> String {
+    if let Some(marker) = crate::providers::codec::media::marker(media) {
+        return marker.to_owned();
+    }
     media
         .source
         .as_str()
@@ -217,6 +220,9 @@ fn media_tokens(media: &MediaBlock, content: &str) -> i64 {
 }
 
 pub(crate) fn tool_output_content(output: &CkOutputKind) -> String {
+    if let Some(text) = crate::providers::codec::media::parts_text(output) {
+        return text;
+    }
     match output {
         CkOutputKind::Text { text } | CkOutputKind::ErrorText { text } => text.clone(),
         CkOutputKind::Json { value } | CkOutputKind::ErrorJson { value } => {
