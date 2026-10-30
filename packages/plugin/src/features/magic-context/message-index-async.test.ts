@@ -432,6 +432,39 @@ describe("message-index-async", () => {
         expect(countMessageRows(db, "burst", "survivor")).toBe(1);
     });
 
+    it("does not restart an obsolete incremental prepare retry after a rebuild", async () => {
+        const originalTimeout = globalThis.setTimeout;
+        // Shorten only the one-minute preparation retry so the fixture can
+        // exercise its queued callback while leaving other timer delays unchanged.
+        const timers = spyOn(globalThis, "setTimeout").mockImplementation(((
+            handler,
+            delay,
+            ...args
+        ) =>
+            originalTimeout(handler, delay === 60_000 ? 30 : delay, ...args)) as typeof setTimeout);
+        const sessionId = "prepare-retry-branch";
+        let prepares = 0;
+        const old = message("abandoned", 2, "abandoned retry bytes");
+        const source = Object.assign(() => old, {
+            prepare: async () => ++prepares > 1,
+        });
+        try {
+            scheduleIncrementalIndex(db, sessionId, old.id, source);
+            await waitUntil(() => prepares === 1);
+            scheduleClearAndReindex(db, sessionId, () => [
+                message("keep", 1, "legitimate archive"),
+                message("replacement", 2, "active branch"),
+            ]);
+            await waitUntil(() => isSessionReconciled(sessionId));
+            await wait(200);
+            expect(prepares).toBe(1);
+            expect(countMessageRows(db, sessionId, "abandoned")).toBe(0);
+            expect(countMessageRows(db, sessionId, "replacement")).toBe(1);
+        } finally {
+            timers.mockRestore();
+        }
+    });
+
     it("rebuilds again when a removal lands during paged reconciliation", async () => {
         let messages = Array.from({ length: 250 }, (_, i) => message(`m-${i}`, i + 1, `text ${i}`));
         let removed = false;

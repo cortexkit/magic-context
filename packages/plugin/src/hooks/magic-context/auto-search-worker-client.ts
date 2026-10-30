@@ -6,6 +6,10 @@ import {
     getProjectEmbeddingSnapshot,
 } from "../../features/magic-context/memory/embedding";
 import type { EmbeddingPurpose } from "../../features/magic-context/memory/embedding-provider";
+import {
+    getMessageIndexEpoch,
+    isMessageIndexSearchable,
+} from "../../features/magic-context/message-index-async";
 import type {
     CapturedQueryEmbedding,
     MessageHistorySearchOutcome,
@@ -274,6 +278,8 @@ export async function searchAutoHint(
         import.meta.url,
     ),
 ): Promise<UnifiedSearchResult[]> {
+    const messageIndexEpoch = getMessageIndexEpoch(sessionId);
+    const messageIndexWasSearchable = isMessageIndexSearchable(sessionId);
     // Automatic hints must never score remotely, even if a caller reuses the
     // explicit-search options. Keep credentials and non-cloneable clients out
     // of the worker message as well as disabling reranking there.
@@ -285,7 +291,7 @@ export async function searchAutoHint(
         captureRerankLanes: _captureRerankLanes,
         ...hintOptions
     } = options;
-    return executeAutoSearchWorker(
+    const results = await executeAutoSearchWorker(
         db,
         sessionId,
         projectPath,
@@ -294,6 +300,12 @@ export async function searchAutoHint(
         entry,
         "search",
     );
+    // The owner, not the worker's module globals, knows whether history changed.
+    return messageIndexWasSearchable &&
+        isMessageIndexSearchable(sessionId) &&
+        getMessageIndexEpoch(sessionId) === messageIndexEpoch
+        ? results
+        : results.filter((result) => result.source !== "message");
 }
 
 const pendingBackfills = new WeakMap<Database, Map<string, Promise<void>>>();

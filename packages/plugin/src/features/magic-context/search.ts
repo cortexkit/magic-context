@@ -29,6 +29,7 @@ import {
     withMessageFtsSessionFilter,
 } from "./message-fts-session-filter";
 import { getIndexedMessageCorpusSize } from "./message-index";
+import { getMessageIndexEpoch, isMessageIndexSearchable } from "./message-index-async";
 import { recordShadowMeasurement } from "./search-measurement";
 import {
     candidateTexts,
@@ -276,6 +277,8 @@ export function searchMessageHistory(
     db: Database,
     request: MessageHistorySearchRequest,
 ): MessageHistorySearchOutcome {
+    if (!isMessageIndexSearchable(request.sessionId))
+        return { results: [], suppressedLiveMessageMatches: 0 };
     const diagnostics = request.collectDiagnostics ? createUnifiedSearchDiagnostics() : undefined;
     const capture = request.captureLimit
         ? { limit: request.captureLimit, results: [] as MessageSearchResult[] }
@@ -2292,6 +2295,12 @@ export async function unifiedSearch(
     query: string,
     options: UnifiedSearchOptions = {},
 ): Promise<UnifiedSearchResult[]> {
+    const messageIndexEpoch = getMessageIndexEpoch(sessionId);
+    const messageIndexWasSearchable = isMessageIndexSearchable(sessionId);
+    const messageIndexStillCurrent = () =>
+        messageIndexWasSearchable &&
+        isMessageIndexSearchable(sessionId) &&
+        getMessageIndexEpoch(sessionId) === messageIndexEpoch;
     const trimmedQuery = query.trim();
     const measurementStartedAt = Date.now();
     if (trimmedQuery.length === 0 || options.signal?.aborted) {
@@ -2391,7 +2400,7 @@ export async function unifiedSearch(
     const timings = options.stepTimings;
     let stepStartedAt = performance.now();
     let messageResults: MessageSearchResult[] = [];
-    if (runMessages) {
+    if (runMessages && messageIndexStillCurrent()) {
         const messageRequest: MessageHistorySearchRequest = {
             sessionId,
             query: trimmedQuery,
@@ -2623,6 +2632,11 @@ export async function unifiedSearch(
             }).immediate();
         }
     }
+
+    // Worker, embedding and reranking awaits can outlive a tree navigation.
+    // Only raw-message hits depend on this index; retain every other lane.
+    if (!messageIndexStillCurrent())
+        results = results.filter((result) => result.source !== "message");
 
     if (options.autoHint) {
         return results.map((result) => ({
