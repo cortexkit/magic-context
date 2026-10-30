@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Worker } from "node:worker_threads";
 import {
@@ -8,6 +8,7 @@ import {
     writeStorageFileAtomicSync,
 } from "../../../shared/storage-permissions";
 import { createTestTempDir } from "../../../shared/test-temp-dir";
+import { persistPinRequest } from "./project-pin-persistence";
 import type { PinWriteRequest } from "./project-pin-worker";
 import {
     __resetProjectPinWriterDiagnosticsForTests,
@@ -50,6 +51,24 @@ function publish(writer: ProjectPinWriter, name: string, identity = "pj-FIRST") 
     writer.publish(destination, { directory: `/${name}`, identity, gitCommonDir: "/repo.git" });
     return destination;
 }
+
+test("queued worktree cleanup preserves a changed sidecar and never publishes a borrowed pin", async () => {
+    const destination = join(temp.dir, "cleanup", "pin.json");
+    const record = { directory: "/worktree", identity: "git:abcdef123" };
+    const bytes = JSON.stringify(record);
+    writeStorageFileAtomicSync(destination, bytes);
+    const writer = new ProjectPinWriter(async (request) => persistPinRequest(request));
+    writers.push(writer);
+    writer.removeIfUnchanged(destination, record, bytes);
+    writeStorageFileAtomicSync(destination, JSON.stringify({ ...record, identity: "pj-NEW" }));
+    expect(await writer.flush(1_000)).toBe(true);
+    expect(JSON.parse(readFileSync(destination, "utf8")).identity).toBe("pj-NEW");
+    expect(writer.lookup(destination)).toBeUndefined();
+    writeStorageFileAtomicSync(destination, bytes);
+    writer.removeIfUnchanged(destination, record, bytes);
+    expect(await writer.flush(1_000)).toBe(true);
+    expect(existsSync(destination)).toBe(false);
+});
 
 test("publishes before writing and coalesces a folder without replacing its first pin", async () => {
     const { writer, calls, completions } = controlled();

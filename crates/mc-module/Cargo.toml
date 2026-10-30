@@ -36,6 +36,11 @@ serde_json = { workspace = true }
 # lookarounds in those patterns); fancy-regex stays confined to mc-tokenizer.
 regex = "1"
 tokio = { workspace = true }
+# Native database and write-ahead log (WAL) notifications shared by all app subscriptions.
+notify = "8.2"
+# Already pinned by the transport graph; native SHA-256 avoids per-block Rust
+# debug-build overhead without changing the watch fingerprint's digest format.
+ring = "0.17"
 sha2 = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The single-store writer opens the host's context.db directly (src/host_store.rs).

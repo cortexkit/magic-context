@@ -141,6 +141,16 @@ impl AppCaller {
     pub fn is_direct(&self) -> bool {
         matches!(self.principal, Some(Principal::Direct))
     }
+
+    /// All Direct routes share one quota; non-Direct routes are grouped by
+    /// their stored harness value.
+    pub(crate) fn watch_key(&self) -> String {
+        if self.is_direct() {
+            "direct".into()
+        } else {
+            self.harness.clone()
+        }
+    }
 }
 
 #[cfg(test)]

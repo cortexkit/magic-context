@@ -13,17 +13,26 @@ import {
     replaceAllCompartments,
 } from "../../features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import { rememberPinnedProjectIdentity } from "../../features/magic-context/memory/project-identity-cache";
+import { __resetSessionIdentityDecisionsForTests } from "../../features/magic-context/memory/session-identity-decision";
 import {
     getMemoriesByProject,
     insertMemory,
 } from "../../features/magic-context/memory/storage-memory";
 import { __turnTwoChildrenTest } from "../../features/magic-context/memory/turn-two-children";
 import {
+    getRecordedSessionProjectIdentity,
+    recordSessionProjectIdentity,
+} from "../../features/magic-context/session-project-storage";
+import {
     closeDatabase,
     getHistorianFailureState,
     openDatabase,
+    updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { readSessionMeta } from "../../features/magic-context/storage-meta-session";
+import { persistCachedM0 } from "../../features/magic-context/storage-meta-shared";
+import { createTagger } from "../../features/magic-context/tagger";
 import type { PluginContext } from "../../plugin/types";
 import { __resetNotificationStateForTests } from "../../shared/rpc-notifications";
 import { Database } from "../../shared/sqlite";
@@ -37,6 +46,7 @@ import {
     prepareProducerFixture,
 } from "./producer-window-test-support";
 import { __ignoredNotificationTest } from "./send-session-notification";
+import { createTransform } from "./transform";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -55,6 +65,7 @@ afterEach(async () => {
     clearProducerModelObservations();
     __ignoredNotificationTest.reset();
     __resetNotificationStateForTests();
+    __resetSessionIdentityDecisionsForTests();
     closeDatabase();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
@@ -77,13 +88,13 @@ function useTempDataHome(prefix: string): void {
 }
 
 /** Two summarised messages, two eligible ones, and a five-message protected tail. */
-function createOpenCodeSession(sessionId: string): void {
+function createOpenCodeSession(sessionId: string, protectedBallast = ""): void {
     const messages = [
         { id: "m-1", role: "user", text: "zero" },
         { id: "m-2", role: "assistant", text: "one" },
         { id: "m-3", role: "user", text: "Cap the upload at 64 KiB." },
         { id: "m-4", role: "assistant", text: "Done." },
-        { id: "m-5", role: "user", text: "protected 1" },
+        { id: "m-5", role: "user", text: `protected 1${protectedBallast}` },
         { id: "m-6", role: "user", text: "protected 2" },
         { id: "m-7", role: "user", text: "protected 3" },
         { id: "m-8", role: "user", text: "protected 4" },
@@ -244,6 +255,127 @@ const REPLY_WITH_FACTS = `<output><compartments>
 </output>`;
 
 describe("historian turn one on a dormant lane (production default)", () => {
+    it("review: an unproven memory owner must not prevent history-only summarization", async () => {
+        useTempDataHome("review-historian-unproven-");
+        const sessionId = "ses-review-historian-unproven";
+        const directory = join(process.env.XDG_DATA_HOME!, "project");
+        mkdirSync(directory);
+        createOpenCodeSession(sessionId);
+        const db = openDatabase();
+        seedPriorCompartment(db, sessionId);
+        persistCachedM0(db, sessionId, {
+            m0Bytes: Buffer.from("<project-memory>Unattributed legacy memory</project-memory>"),
+            m1Bytes: Buffer.from("<session-history-since>(none)</session-history-since>"),
+            projectIdentity: undefined,
+            projectMemoryEpoch: 0,
+            projectUserProfileVersion: 0,
+            maxCompartmentSeq: 0,
+            maxMemoryId: 0,
+            maxMutationId: 0,
+            projectDocsHash: "fixture-docs",
+            materializedAt: Date.now(),
+            sessionFactsVersion: 0,
+            upgradeState: null,
+        });
+        const { client, prompt } = historianClient(directory, () => REPLY_WITH_FACTS);
+        await runHistorian(db, sessionId, client, directory, {
+            memoryEnabled: false,
+            autoPromote: false,
+        });
+        expect(getCompartments(db, sessionId).map((row) => row.title)).toContain("Upload cap");
+        expect(sentPrompts(prompt).length).toBeGreaterThan(0);
+        expect(pendingFacts(db)).toEqual([]);
+    });
+
+    it("review witness: a blocking historian on a move pass promotes into the served block's project", async () => {
+        useTempDataHome("review-historian-move-");
+        const sessionId = "ses-review-historian-move";
+        const a = join(process.env.XDG_DATA_HOME!, "project-a");
+        const b = join(process.env.XDG_DATA_HOME!, "project-b");
+        mkdirSync(join(a, ".git"), { recursive: true });
+        mkdirSync(join(b, ".git"), { recursive: true });
+        rememberPinnedProjectIdentity(a, "pj-REVIEW-HIST-A");
+        rememberPinnedProjectIdentity(b, "pj-REVIEW-HIST-B");
+        const protectedBallast = " ballast".repeat(60_000);
+        createOpenCodeSession(sessionId, protectedBallast);
+        const db = openDatabase();
+        seedPriorCompartment(db, sessionId);
+        insertMemory(db, {
+            projectPath: "pj-REVIEW-HIST-B",
+            category: "NAMING",
+            content: "review project beta block memory",
+        });
+        const { client, prompt } = historianClient(b, () => REPLY_WITH_FACTS);
+        const deps = {
+            db,
+            client,
+            tagger: createTagger(),
+            scheduler: { shouldExecute: () => "defer" as const },
+            contextUsageMap: new Map(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTokens: 0,
+            historianRunnable: false,
+            historianModel: "test/fixture-historian",
+            getHistorianChunkTokens: () => 10_000,
+            directory: a,
+            sessionDirectoryBySession: new Map([[sessionId, a]]),
+            memoryConfig: { enabled: true, injectionBudgetTokens: 500, autoPromote: true },
+        };
+        const raw = [
+            "zero",
+            "one",
+            "Cap the upload at 64 KiB.",
+            "Done.",
+            `protected 1${protectedBallast}`,
+            "protected 2",
+            "protected 3",
+            "protected 4",
+            "protected 5",
+        ].map((text, index) => ({
+            info: {
+                id: `m-${index + 1}`,
+                role: index === 1 || index === 3 ? "assistant" : "user",
+                sessionID: sessionId,
+            },
+            parts: [{ type: "text", text }],
+        }));
+        const transform = createTransform(deps);
+        await transform({}, { messages: structuredClone(raw) });
+        deps.sessionDirectoryBySession.set(sessionId, b);
+        deps.historianRunnable = true;
+        deps.contextUsageMap.set(sessionId, {
+            usage: { percentage: 96, inputTokens: 960_000 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        });
+        // Resume a saved run request at pressure that waits for promotion before serving the new project's block.
+        updateSessionMeta(db, sessionId, { compartmentInProgress: true });
+        const moved = { messages: structuredClone(raw) };
+        await transform({}, moved);
+        expect(sentPrompts(prompt)).toHaveLength(1);
+        expect(JSON.stringify(moved.messages)).toContain("review project beta block memory");
+        expect(readSessionMeta(db, sessionId)?.cachedM0ProjectIdentity).toBe("pj-REVIEW-HIST-B");
+        expect({
+            owner: getRecordedSessionProjectIdentity(db, sessionId),
+            publications: db.prepare("SELECT DISTINCT project_path FROM memory_publications").all(),
+            promoted: getMemoriesByProject(db, "pj-REVIEW-HIST-B").map((memory) => memory.content),
+            oldProject: getMemoriesByProject(db, "pj-REVIEW-HIST-A").map(
+                (memory) => memory.content,
+            ),
+        }).toEqual({
+            owner: "pj-REVIEW-HIST-B",
+            publications: [{ project_path: "pj-REVIEW-HIST-B" }],
+            promoted: expect.arrayContaining([
+                "Uploads are capped at 64 KiB.",
+                "Uploads go through the gateway.",
+            ]),
+            oldProject: [],
+        });
+    });
+
     it("keeps today's prompt and promotion, and commits the publication once with its activity", async () => {
         useTempDataHome("turn-one-dormant-ts-");
         const sessionId = "ses-dormant-ts";
@@ -294,6 +426,41 @@ describe("historian turn one on a dormant lane (production default)", () => {
         expect(
             db.prepare("SELECT publication_id, compartment_id FROM memory_activity_ledger").all(),
         ).toEqual([{ publication_id: publication!.publication_id, compartment_id: newRow.id }]);
+    });
+
+    it("uses the recorded session decision for the memory pool and promotion", async () => {
+        useTempDataHome("turn-one-session-identity-");
+        const sessionId = "ses-session-identity";
+        const directory = join(process.env.XDG_DATA_HOME!, "project");
+        mkdirSync(directory);
+        createOpenCodeSession(sessionId);
+        const db = openDatabase();
+        const fallback = resolveProjectIdentity(directory);
+        const projectPath = "pj-historian-session";
+        recordSessionProjectIdentity(db, sessionId, projectPath);
+        seedPriorCompartment(db, sessionId);
+        insertMemory(db, {
+            projectPath,
+            category: "NAMING",
+            content: "Only the session decision can see this memory.",
+            sourceType: "historian",
+        });
+        const { client, prompt } = historianClient(directory, () => REPLY_WITH_FACTS);
+        await runHistorian(db, sessionId, client, directory);
+        expect(sentPrompts(prompt)[0]).toContain("Only the session decision can see this memory.");
+        expect(
+            getMemoriesByProject(db, projectPath)
+                .map((memory) => memory.content)
+                .sort(),
+        ).toEqual([
+            "Only the session decision can see this memory.",
+            "Uploads are capped at 64 KiB.",
+            "Uploads go through the gateway.",
+        ]);
+        expect(getMemoriesByProject(db, fallback)).toHaveLength(0);
+        expect(db.prepare("SELECT DISTINCT project_path FROM memory_publications").all()).toEqual([
+            { project_path: projectPath },
+        ]);
     });
 
     it("records every fact as an authority_elsewhere candidate when the module owns memory", async () => {

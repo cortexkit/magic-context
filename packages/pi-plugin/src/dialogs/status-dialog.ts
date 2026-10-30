@@ -44,7 +44,6 @@ import { countHistorianRuns } from "@magic-context/core/features/magic-context/s
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import {
 	getCompactionMarkerHealth,
-	getOverflowState,
 	getSessionWorkMetrics,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getNotes } from "@magic-context/core/features/magic-context/storage-notes";
@@ -90,16 +89,14 @@ import {
 import packageJson from "../../package.json";
 import { resolveSessionId } from "../commands/pi-command-utils";
 import { getPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
-import { readHostSystemPrompt } from "../host-system-prompt";
+import {
+	buildPiTokenAttribution,
+	measureHostToolDefinitions,
+	readPiAttributionHost,
+	readPiAttributionUsage,
+} from "../host-token-breakdown";
 import { resolvePiWindowGeometry } from "../pi-context-limit";
-import {
-	piPressureEvidenceLimit,
-	resolvePiStatusPressureSnapshot,
-} from "../pi-pressure";
-import {
-	piProvenFloorModelKey,
-	resolvePiProvenInputFloor,
-} from "../pi-proven-floor";
+import { resolvePiStatusPressureSnapshot } from "../pi-pressure";
 import { isPiRecompInFlight } from "../pi-recomp-runner";
 
 /** Countdown/usage cadence while dialog is open. */
@@ -739,15 +736,7 @@ function readStatusHostBytes(
 	return {
 		modelKey: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
 		modelBytes: safeStringify(ctx.model),
-		system: safeRead(() => readHostSystemPrompt(ctx), undefined),
-		tools: safeRead(
-			() =>
-				(pi.getAllTools?.() ?? []).map(
-					(tool) =>
-						`${tool.name ?? ""}\n${tool.description ?? ""}\n${safeStringify(tool.parameters)}`,
-				),
-			[],
-		),
+		...readPiAttributionHost(pi, ctx),
 	};
 }
 
@@ -758,22 +747,22 @@ export class PiStatusTokenCache {
 	private toolsKey: string | undefined;
 	private toolTokens = 0;
 
-	constructor(private readonly estimate = estimateTokens) {}
+	constructor(private readonly estimate?: (text: string) => number) {}
 
 	estimates(host: StatusHostBytes, fallbackSystemTokens: number) {
 		if (host.system !== undefined) {
 			const key = JSON.stringify([host.modelKey, host.system]);
 			if (this.systemKey !== key) {
-				this.systemTokens = this.estimate(host.system);
+				this.systemTokens = (this.estimate ?? estimateTokens)(host.system);
 				this.systemKey = key;
 			}
 		}
 		const key = JSON.stringify([host.modelKey, host.tools]);
 		if (this.toolsKey !== key) {
-			this.toolTokens = host.tools.reduce(
-				(sum, bytes) => sum + this.estimate(bytes),
-				0,
-			);
+			const estimate = this.estimate;
+			this.toolTokens = estimate
+				? host.tools.reduce((sum, bytes) => sum + estimate(bytes), 0)
+				: measureHostToolDefinitions(host.tools);
 			this.toolsKey = key;
 		}
 		return {
@@ -892,18 +881,13 @@ function conversationTokensFor(
 		| "toolDefinitionTokens"
 	>,
 ): number {
-	return Math.max(
-		0,
-		detail.inputTokens -
-			detail.systemPromptTokens -
-			detail.compartmentTokens -
-			detail.factTokens -
-			detail.memoryTokens -
-			detail.docsTokens -
-			detail.profileTokens -
-			detail.toolCallTokens -
-			detail.toolDefinitionTokens,
-	);
+	return buildPiTokenAttribution(
+		detail.inputTokens,
+		detail.systemPromptTokens,
+		detail.toolDefinitionTokens,
+		detail.toolCallTokens,
+		{ ...detail, muralTokens: 0 },
+	).conversationTokens;
 }
 
 function refreshLiveStatus(
@@ -1005,55 +989,14 @@ function buildStatusDetail(
 	state: StatusBuildState,
 	host = readStatusHostBytes(pi, ctx),
 ): StatusDialogDetail {
-	const usage = ctx.getContextUsage?.();
-
 	const meta = getOrCreateSessionMeta(deps.db, sessionId);
-	let detectedContextLimit: number | undefined;
-	try {
-		const detected = getOverflowState(deps.db, sessionId).detectedContextLimit;
-		if (detected > 0) detectedContextLimit = detected;
-	} catch {
-		// Status remains available when overflow metadata cannot be read.
-	}
-	const providerInputLimit = piPressureEvidenceLimit(
-		resolvePiWindowGeometry({
-			rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
-			rawContextWindowSource: "catalog",
-			model: ctx.model,
-			detectedContextLimit,
-		}),
+	const { pressure, windowGeometry, live } = readPiAttributionUsage(
+		ctx,
+		deps.db,
+		sessionId,
+		meta,
 	);
-	const provenInputTokens = resolvePiProvenInputFloor({
-		db: deps.db,
-		sessionId,
-		modelKey: piProvenFloorModelKey(ctx.model),
-		readBranch: () => ctx.sessionManager.getBranch(),
-		providerInputLimit,
-	});
-	state.live = {
-		persistedInputTokens: meta.lastInputTokens,
-		persistedPercentage: meta.lastContextPercentage,
-		detectedContextLimit,
-		provenInputTokens: provenInputTokens || undefined,
-		providerInputLimit,
-	};
-	const windowGeometry = resolvePiWindowGeometry({
-		rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
-		rawContextWindowSource: "catalog",
-		model: ctx.model,
-		detectedContextLimit,
-		provenInputTokens: provenInputTokens || undefined,
-		persistedInputTokens: meta.lastInputTokens,
-		persistedPercentage: meta.lastContextPercentage,
-	});
-	const pressure = resolvePiStatusPressureSnapshot({
-		providerInputLimit,
-		sessionId,
-		persistedPercentage: meta.lastContextPercentage,
-		persistedInputTokens: meta.lastInputTokens,
-		liveInputTokens: usage?.tokens,
-		usableContextLimit: windowGeometry?.usableSoft,
-	});
+	state.live = live;
 	const inputTokens = pressure.inputTokens;
 	const contextLimit = pressure.contextLimit ?? 0;
 	const usagePercentage = pressure.percentage;
@@ -1119,17 +1062,13 @@ function buildStatusDetail(
 	// authoritative source for what the LLM receives.
 	const toolCallTokens = meta.toolCallTokens;
 
-	const conversationTokens = conversationTokensFor({
+	const { conversationTokens } = buildPiTokenAttribution(
 		inputTokens,
 		systemPromptTokens,
-		compartmentTokens,
-		factTokens,
-		memoryTokens,
-		docsTokens,
-		profileTokens,
-		toolCallTokens,
 		toolDefinitionTokens,
-	});
+		toolCallTokens,
+		m0Blocks,
+	);
 	const workMetrics = getSessionWorkMetrics(deps.db, sessionId);
 	const tailHygiene = resolveTailHygieneStatus(
 		getPiChannel1Baseline(sessionId),

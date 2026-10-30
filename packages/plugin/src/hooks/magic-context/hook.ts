@@ -36,6 +36,7 @@ import {
 } from "../../features/magic-context/memory/project-identity";
 import {
     awaitSessionIdentityDecision,
+    backgroundSessionProjectIdentity,
     forgetSessionIdentityDecision,
     readSessionIdentityDecision,
     type SessionIdentityDecision,
@@ -52,6 +53,7 @@ import {
     type DatabaseBootTimings,
     openDatabaseAsync,
 } from "../../features/magic-context/storage-db";
+import { readSessionMeta } from "../../features/magic-context/storage-meta-session";
 import { describeStorageUnavailability } from "../../features/magic-context/storage-unavailable-reason";
 import type { Tagger } from "../../features/magic-context/tagger";
 import { getCurrentToolSetHash } from "../../features/magic-context/tool-definition-tokens";
@@ -99,7 +101,7 @@ import type { ManagedRecompContext } from "./recomp-orchestrator";
 import { runManagedRecomp } from "./recomp-orchestrator";
 import { openCodeRescoreCommand } from "./rescore-opencode";
 import { createTextCompleteHandler } from "./text-complete";
-import { createTransform } from "./transform";
+import { createTransform, type TransformDeps } from "./transform";
 import { type ManagedWrapupContext, runManagedWrapup } from "./wrapup-orchestrator";
 
 export type { CommandExecuteInput, CommandExecuteOutput } from "./command-handler";
@@ -559,11 +561,33 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const pauseEmbedDrain = (sessionId: string): string =>
         pauseEmbedHistoryDrain(embedHistoryDeps, sessionId);
 
+    const sessionProjectIdentityForBackground = (sessionId: string) => {
+        const sessionMeta = readSessionMeta(db, sessionId);
+        const pending = readSessionIdentityDecision(
+            sessionId,
+            sessionDirectoryBySession.get(sessionId),
+            {
+                sessionMeta,
+                allowHomeProject: deps.config.allow_home_project,
+            },
+        )?.identity;
+        return {
+            projectIdentity: backgroundSessionProjectIdentity(
+                db,
+                sessionId,
+                sessionMeta,
+                deps.config.memory?.enabled,
+                pending,
+            ),
+            cachedPrefix: sessionMeta.cachedM0Bytes !== null,
+        };
+    };
     const getEmbedStatusText = (sessionId: string): string => {
         const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
-        const sessionProjectIdentity = readSessionIdentityDecision(sessionId, directory, {
-            allowHomeProject: deps.config.allow_home_project,
-        })?.identity;
+        const scope = sessionProjectIdentityForBackground(sessionId);
+        const sessionProjectIdentity = scope.projectIdentity;
+        if (!sessionProjectIdentity && scope.cachedPrefix)
+            return "Embedding is paused: the cached memory context has no verified project owner. It resumes after the next history rebuild records one.";
         if (!sessionProjectIdentity) return "No project identity is bound for the home directory.";
         maybeSendProjectIdentitySessionWarning(sessionId, directory);
         const coverage = getEmbeddingCoverageStatus(db, sessionProjectIdentity, sessionId);
@@ -576,11 +600,14 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         });
     };
 
-    const maybeAutoEmbedSession = (sessionId: string): void => {
+    const maybeAutoEmbedSession: NonNullable<TransformDeps["maybeAutoEmbedSession"]> = (
+        sessionId,
+        owner,
+    ): void => {
         const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
-        const identity = readSessionIdentityDecision(sessionId, directory, {
-            allowHomeProject: deps.config.allow_home_project,
-        })?.identity;
+        const identity = owner
+            ? owner.projectIdentity
+            : sessionProjectIdentityForBackground(sessionId).projectIdentity;
         if (!identity) return;
         maybeAutoEmbedSessionBackfill(
             {
@@ -698,6 +725,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         historianHostRunnerEnabled: deps.config.historian?.host_runner?.enabled,
         liveModelBySession,
         sessionDirectoryBySession,
+        agentBySession,
         autoSearch: {
             enabled: deps.config.memory?.auto_search?.enabled ?? true,
             scoreThreshold: deps.config.memory?.auto_search?.score_threshold ?? 0.6,
@@ -1108,11 +1136,19 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         }),
     };
     const hooksWithBackends = hooks as typeof hooks & {
+        readonly launchIdentityDecision: SessionIdentityDecision;
         getDebugMemoryHolders?: () => {
             taggerCache: ReturnType<NonNullable<Tagger["getHeapStats"]>>;
         };
     };
     Object.defineProperties(hooksWithBackends, {
+        launchIdentityDecision: {
+            value: deps.launchIdentityDecision ?? {
+                directory: deps.directory,
+                identity: projectPath,
+            },
+            enumerable: false,
+        },
         getDebugMemoryHolders: {
             value: () => ({
                 taggerCache: deps.tagger.getHeapStats?.() ?? {

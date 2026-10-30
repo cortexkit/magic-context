@@ -621,6 +621,68 @@ export function getPreparedCompactionMarkerSummaryIds(
     return readMarkerCandidateBasis(getWritableOpenCodeDb(), sessionId)?.ids;
 }
 
+/** Build the same deterministic marker rows for live publication and offline repair. */
+export function buildCompactionMarkerRows(
+    args: InjectCompactionMarkerArgs,
+    boundary: BoundaryUserMessage,
+) {
+    const boundaryTime = boundary.timeCreated;
+    const markerIdentity = `${args.sessionId}\0${args.endMessageId}`;
+    const summaryMsgId = generateMessageId(
+        boundaryTime + 1,
+        1n,
+        `${markerIdentity}\0summary-message`,
+    );
+    const compactionPartId = generatePartId(boundaryTime, 1n, `${markerIdentity}\0compaction-part`);
+    const summaryPartId = generatePartId(boundaryTime + 1, 2n, `${markerIdentity}\0summary-part`);
+    const summaryMsgData = JSON.stringify({
+        role: "assistant",
+        parentID: boundary.id,
+        summary: true,
+        finish: "stop",
+        mode: "compaction",
+        agent: "compaction",
+        path: { cwd: args.directory, root: args.directory },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: "magic-context",
+        providerID: "magic-context",
+        time: { created: boundaryTime + 1, completed: boundaryTime + 1 },
+    });
+    return {
+        marker: {
+            boundaryMessageId: boundary.id,
+            summaryMessageId: summaryMsgId,
+            compactionPartId,
+            summaryPartId,
+        },
+        summaryMsgData,
+        message: {
+            id: summaryMsgId,
+            session_id: args.sessionId,
+            time_created: boundaryTime + 1,
+            time_updated: boundaryTime + 1,
+            data: summaryMsgData,
+        },
+        compaction: {
+            id: compactionPartId,
+            message_id: boundary.id,
+            session_id: args.sessionId,
+            time_created: boundaryTime,
+            time_updated: boundaryTime,
+            data: '{"type":"compaction","auto":true}',
+        },
+        text: {
+            id: summaryPartId,
+            message_id: summaryMsgId,
+            session_id: args.sessionId,
+            time_created: boundaryTime + 1,
+            time_updated: boundaryTime + 1,
+            data: JSON.stringify({ type: "text", text: args.summaryText }),
+        },
+    };
+}
+
 function injectCompactionMarkerFromBasis(
     args: InjectCompactionMarkerArgs,
     validatedBasis?: MarkerCandidateBasis,
@@ -645,29 +707,10 @@ function injectCompactionMarkerFromBasis(
     // Use timestamps relative to the boundary so OpenCode's time/id ordering
     // places the marker immediately after the boundary.
     const boundaryTime = boundary.timeCreated;
-    const markerIdentity = `${args.sessionId}\0${args.endMessageId}`;
-    const summaryMsgId = generateMessageId(
-        boundaryTime + 1,
-        1n,
-        `${markerIdentity}\0summary-message`,
-    );
-    const compactionPartId = generatePartId(boundaryTime, 1n, `${markerIdentity}\0compaction-part`);
-    const summaryPartId = generatePartId(boundaryTime + 1, 2n, `${markerIdentity}\0summary-part`);
-
-    const summaryMsgData = JSON.stringify({
-        role: "assistant",
-        parentID: boundary.id,
-        summary: true,
-        finish: "stop",
-        mode: "compaction",
-        agent: "compaction",
-        path: { cwd: args.directory, root: args.directory },
-        cost: 0,
-        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-        modelID: "magic-context",
-        providerID: "magic-context",
-        time: { created: boundaryTime + 1, completed: boundaryTime + 1 },
-    });
+    const {
+        marker: { summaryMessageId: summaryMsgId, compactionPartId, summaryPartId },
+        summaryMsgData,
+    } = buildCompactionMarkerRows(args, boundary);
 
     try {
         const basis = validatedBasis ?? readMarkerCandidateBasis(db, args.sessionId);

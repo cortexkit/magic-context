@@ -79,6 +79,7 @@ import { createTagger } from "../../features/magic-context/tagger";
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
 import * as loggerModule from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { adaptPayload } from "../../v2/hooks/payload";
 import type { SessionContext } from "../../v2/hooks/types";
@@ -917,6 +918,94 @@ describe("postprocess replay-or-refuse", () => {
 });
 
 describe("note nudge first-serve fence", () => {
+    it("unproven project notes preserve their trigger and deliver once after proof on the next eligible pass", async () => {
+        makeNoteDb();
+        const sessionId = "owner-paused-smart-nudge";
+        const projectPath = "git:owner-note-project";
+        const smart = addNote(db, "smart", {
+            projectPath,
+            sessionId,
+            content: "deferred smart reminder",
+            surfaceCondition: "when work resumes",
+        });
+        db.prepare("UPDATE notes SET status='ready', ready_at=? WHERE id=?").run(
+            Date.now(),
+            smart.id,
+        );
+        const delivery = spyOn(noteNudger, "markNoteNudgeDelivered");
+        try {
+            const invoke = async (id: string, proven: boolean) => {
+                const messages: MessageLike[] = [
+                    {
+                        info: { id, role: "user", sessionID: sessionId },
+                        parts: [{ type: "text", text: "continue" }],
+                    },
+                ];
+                const original = JSON.stringify(messages);
+                await runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, messages, {
+                        currentTurnId: id,
+                        projectPath,
+                        readProjectScope: () => ({
+                            projectIdentity: proven ? projectPath : "git:pending-other",
+                            memoryUnavailable: !proven,
+                        }),
+                    }),
+                );
+                return { messages, original };
+            };
+            await invoke("smart-old", false);
+            noteNudger.onNoteTrigger(db, sessionId, "historian_complete");
+            replayStorage.setPersistedNoteNudgeTriggerMessageId(db, sessionId, "smart-old");
+            const paused = await invoke("smart-unproven", false);
+            expect(JSON.stringify(paused.messages)).toBe(paused.original);
+            expect(replayStorage.getPersistedNoteNudge(db, sessionId).triggerPending).toBe(true);
+            expect(delivery).not.toHaveBeenCalled();
+            const proven = await invoke("smart-proven", true);
+            expect(JSON.stringify(proven.messages)).toContain(smart.content);
+            expect(delivery).toHaveBeenCalledTimes(1);
+            expect(replayStorage.getPersistedNoteNudge(db, sessionId).triggerPending).toBe(false);
+            await invoke("smart-proven", true);
+            expect(delivery).toHaveBeenCalledTimes(1);
+        } finally {
+            delivery.mockRestore();
+        }
+    });
+
+    it("session-note nudges continue while project ownership is unproven", async () => {
+        makeNoteDb();
+        const sessionId = "owner-session-only-nudge";
+        const invoke = async (id: string) => {
+            const messages: MessageLike[] = [
+                {
+                    info: { id, role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "continue" }],
+                },
+            ];
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    currentTurnId: id,
+                    projectPath: "git:pending-other",
+                    readProjectScope: () => ({
+                        projectIdentity: "git:pending-other",
+                        memoryUnavailable: true,
+                    }),
+                }),
+            );
+            return messages;
+        };
+        await invoke("session-old");
+        const note = addNote(db, "session", {
+            sessionId,
+            content: "session-only reminder survives",
+        });
+        noteNudger.onNoteTrigger(db, sessionId, "historian_complete");
+        replayStorage.setPersistedNoteNudgeTriggerMessageId(db, sessionId, "session-old");
+        const served = await invoke("session-fresh");
+        expect(JSON.stringify(served)).toContain(note.content);
+        expect(replayStorage.getPersistedNoteNudge(db, sessionId).triggerPending).toBe(false);
+    });
+
     const makeNoteDb = (path = ":memory:") => {
         db = new Database(path);
         initializeDatabase(db);
@@ -7056,6 +7145,108 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         }
 
         // Every cache-losing or byte-changing trigger must still open the lanes.
+        async function scopedOwnerPass(
+            sessionId: string,
+            hard: M0HardSignals,
+            readProjectScope: NonNullable<PostTransformArgs["readProjectScope"]>,
+        ) {
+            const messages = tail(sessionId);
+            const tagger = createTagger();
+            tagger.initFromDb(sessionId, db);
+            const tagged = tagMessages(sessionId, messages, tagger, db);
+            const replayed = applyFlushedStatuses(sessionId, db, tagged.targets);
+            tagged.batch.finalize();
+            const target = toolTag(sessionId, "c-mid", "m-mid");
+            expect(tagged.targets.get(target)?.canDrop?.()).toBe(true);
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    tagger,
+                    tags: getActiveTagsBySession(db, sessionId),
+                    targets: tagged.targets,
+                    reasoningByMessage: tagged.reasoningByMessage,
+                    messageTagNumbers: tagged.messageTagNumbers,
+                    batch: tagged.batch,
+                    didMutateFromFlushedStatuses: replayed,
+                    schedulerDecision: "defer",
+                    contextUsage: { percentage: 40, inputTokens: 4000 },
+                    readProjectScope,
+                    m0M1: {
+                        projectPath: FOLD_PROJECT,
+                        projectDirectory: FOLD_PROJECT,
+                        historyBudgetTokens: 98_000,
+                        hardSignals: hard,
+                    },
+                }),
+            );
+            return { messages, result };
+        }
+
+        for (const lane of [
+            { name: "ordinary defer", hard: BASE_HARD, reason: null },
+            {
+                name: "system HARD",
+                hard: { ...BASE_HARD, systemHash: "sys-v2" },
+                reason: "system_hash",
+            },
+            {
+                name: "model HARD",
+                hard: { ...BASE_HARD, modelKey: "anthropic/sonnet" },
+                reason: "model_change",
+            },
+        ]) {
+            it(`late owner scope cannot change ${lane.name} admission or drop permission`, async () => {
+                const observations: Array<Record<string, unknown>> = [];
+                for (const proven of [true, false]) {
+                    closeQuietly(db);
+                    db = new Database(":memory:");
+                    initializeDatabase(db);
+                    const sessionId = `late-owner-${lane.name}-${proven}`;
+                    materializeBaseline(sessionId);
+                    const before = await pass(sessionId, { pct: 40 });
+                    const target = toolTag(sessionId, "c-mid", "m-mid");
+                    expect(statusOf(sessionId, target)).toBe("active");
+                    queuePendingOp(db, sessionId, target, "drop");
+                    let reads = 0;
+                    const { messages, result } = await scopedOwnerPass(sessionId, lane.hard, () => {
+                        reads++;
+                        return {
+                            projectIdentity: proven ? FOLD_PROJECT : undefined,
+                            memoryUnavailable: !proven,
+                        };
+                    });
+                    const opens = lane.reason !== null;
+                    expect(reads).toBe(1);
+                    expect(result.materialized).toBe(opens);
+                    expect(result.materializeReason).toBe(lane.reason);
+                    expect(result.droppedCount > 0).toBe(opens);
+                    expect(statusOf(sessionId, target)).toBe(opens ? "dropped" : "active");
+                    expect(getPendingOps(db, sessionId)).toHaveLength(opens ? 0 : 1);
+                    expect(sha(messages) === sha(before.messages)).toBe(!opens);
+                    observations.push({
+                        materialized: result.materialized,
+                        reason: result.materializeReason,
+                        explicit: result.explicitMaterializedSuccessfully,
+                        deferred: result.deferredMaterializedSuccessfully,
+                        historian: result.historianFoldMaterializedThisPass,
+                        systemPrev: result.systemHashPrev,
+                        systemNew: result.systemHashNew,
+                        modelPrev: result.m0ModelKeyPrev,
+                        modelNew: result.m0ModelKeyNew,
+                        dropped: result.droppedCount,
+                        tokens: result.droppedTokens,
+                        emergency: result.emergency,
+                        emergencyTokens: result.emergencyReclaimedTokens,
+                        busted: result.bustedThisPass,
+                        trim: result.prefixTrimStatus,
+                        status: statusOf(sessionId, target),
+                        pending: getPendingOps(db, sessionId).length,
+                        changed: sha(messages) !== sha(before.messages),
+                    });
+                }
+                expect(observations[0]).toEqual(observations[1]);
+            });
+        }
+
         const OPENING: Array<{
             reason: string;
             arm: (sessionId: string) => Promise<M0HardSignals | undefined>;

@@ -61,6 +61,7 @@ import {
 	awaitSessionIdentityDecision,
 	forgetSessionIdentityDecision,
 	readSessionIdentityDecision,
+	resolveSessionProjectIdentity,
 } from "@magic-context/core/features/magic-context/memory/session-identity-decision";
 import { detectOverflow } from "@magic-context/core/features/magic-context/overflow-detection";
 import { resolveSessionCacheTtl } from "@magic-context/core/features/magic-context/session-cache-ttl";
@@ -1943,8 +1944,18 @@ async function startPiMagicContextRuntime(
 			resolveCurrentProjectDeps(ctx).config.protected_tools,
 		resolveProtectedTags: (ctx) =>
 			resolveCurrentProjectDeps(ctx).config.protected_tags ?? 20,
-		resolveProjectIdentity: (ctx) =>
-			resolveCurrentProjectDeps(ctx).projectIdentity,
+		resolveProjectIdentity: (ctx) => {
+			const project = resolveProjectDepsForDir(ctx.cwd);
+			return resolveSessionProjectIdentity(
+				ctx.sessionManager.getSessionId(),
+				ctx.cwd,
+				{
+					db,
+					allowHomeProject: project.config.allow_home_project,
+					connectionFile: project.config.subc?.connection_file,
+				},
+			);
+		},
 		// Smart notes (surface_condition) only work when dreamer is
 		// running — otherwise the note sits `pending` forever with no
 		// path to surface. Match the user's dreamer config flag.
@@ -3080,7 +3091,7 @@ async function startPiMagicContextRuntime(
 				// Drain context-handler session-keyed maps too. Without
 				// this, sessions accumulate state across `session_shutdown`
 				// in long-lived Pi processes that re-init the extension.
-				clearContextHandlerSession(sessionId);
+				clearContextHandlerSession(sessionId, db);
 				forgetSessionIdentityDecision(sessionId);
 				// A cancelled prewarm is still owned by this runtime until its
 				// result settles and worker exits, within the existing shutdown cap.
@@ -3156,7 +3167,7 @@ async function startPiMagicContextRuntime(
 				return;
 			clearPiSystemPromptSession(outgoingSessionId);
 			promptSurfaceGuidanceEpochs.clear(outgoingSessionId);
-			clearContextHandlerSession(outgoingSessionId);
+			clearContextHandlerSession(outgoingSessionId, db);
 		} catch {
 			// best-effort cleanup
 		}

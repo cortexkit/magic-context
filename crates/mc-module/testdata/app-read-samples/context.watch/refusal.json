@@ -1,0 +1,24 @@
+{
+  "name": "refusal",
+  "refusal": {
+    "code": "watch_limit_exceeded",
+    "detail": {
+      "limit": 8,
+      "session_limit": 256,
+      "total_limit": 32
+    },
+    "message": "The caller has too many context watches."
+  },
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  }
+}

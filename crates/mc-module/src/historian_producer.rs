@@ -2225,6 +2225,50 @@ fn retry_after_secs_from_value(value: &Value) -> Option<u64> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[tokio::test]
+    async fn broca_session_change_goldens_start_historian_through_unary_json() {
+        let describe = crate::session_resolver::read_runner_reply(
+            crate::broca_session_change_tests::sample("role.describe.session_change.json"),
+        )
+        .unwrap();
+        assert!(matches!(
+            super::retention_from_role_describe(&describe),
+            crate::child_retention::ChildRetention::Seconds(_)
+        ));
+        for stem in ["send_reply.admission", "send_reply.session_class"] {
+            for suffix in ["before", "after"] {
+                let name = format!("send-reply-goldens/{stem}.json.{suffix}");
+                let reply = crate::broca_session_change_tests::sample(&name);
+                assert_eq!(
+                    super::send_outcome(&reply),
+                    super::SendOutcome::Active("run-1".into())
+                );
+                let server =
+                    fake_server_with_role_describe(reply, Vec::new(), describe.clone(), false)
+                        .await;
+                let mut producer = client(&server).await;
+                producer
+                    .start("child", "", "prompt", "provider/model")
+                    .await
+                    .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+                producer.close().await;
+                let log = server.log.lock().await;
+                assert_eq!(log.sends.len(), 1, "{name}");
+                assert_eq!(log.role_describes.len(), 1, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn broca_session_change_plan_model_mismatch_decodes_as_producer_error() {
+        let bytes = crate::broca_session_change_tests::sample_bytes(
+            "session.refresh.plan_model_mismatch.json",
+        );
+        let body = super::error_body(&bytes);
+        assert_eq!(body.code, "plan_model_mismatch");
+        assert_eq!(body.message, "pending refresh generation 1: provider fixture has a plan model different from the send model");
+    }
+
     use super::*;
     use std::{
         collections::{BTreeMap, VecDeque},

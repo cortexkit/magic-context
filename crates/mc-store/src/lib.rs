@@ -133,6 +133,11 @@ pub type ProviderExtras = BTreeMap<String, BTreeMap<String, Value>>;
 
 static NEXT_TAG_CACHE_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 
+/// Resolved storage keys must never be interpreted as filesystem paths.
+pub fn is_resolved_project_id(value: &str) -> bool {
+    value.starts_with("git:") || value.starts_with("dir:") || value.starts_with("pj-")
+}
+
 /// Canonicalize a filesystem route root before using it as lineage state.
 ///
 /// Transform and facade lanes can observe the same directory through different spellings when

@@ -226,11 +226,31 @@ function mergeMemoryRow(
         const sourceClassifiedAt = Number(row.classified_at ?? 0);
         const targetClassifiedAt = Number(collision.classified_at ?? 0);
         if (sourceClassifiedAt > targetClassifiedAt) {
+            // Importance, scope, and shareable are the memory's scored meaning.
+            // Copying a newer classification is an edit of that meaning, so the
+            // survivor's updated_at moves. A newer stamp with the same scores is
+            // bookkeeping and must not look like the text was edited.
+            const meaningChanged =
+                collision.importance !== row.importance ||
+                collision.scope !== row.scope ||
+                Number(collision.shareable ?? 0) !== Number(row.shareable ?? 0);
             db.prepare(
-                `UPDATE memories
-                     SET importance = ?, scope = ?, shareable = ?, classified_at = ?, updated_at = ?
-                   WHERE id = ?`,
-            ).run(row.importance, row.scope, row.shareable, row.classified_at, mergedAt, targetId);
+                meaningChanged
+                    ? `UPDATE memories
+                         SET importance = ?, scope = ?, shareable = ?, classified_at = ?,
+                             updated_at = ?
+                       WHERE id = ?`
+                    : `UPDATE memories
+                         SET importance = ?, scope = ?, shareable = ?, classified_at = ?
+                       WHERE id = ?`,
+            ).run(
+                row.importance,
+                row.scope,
+                row.shareable,
+                row.classified_at,
+                ...(meaningChanged ? [mergedAt] : []),
+                targetId,
+            );
         }
         const sourceHasCue = typeof row.mural_cue === "string" && row.mural_cue.length > 0;
         const targetHasCue =
@@ -238,17 +258,18 @@ function mergeMemoryRow(
         const sourceCueAt = Number(row.mural_cue_at ?? 0);
         const targetCueAt = Number(collision.mural_cue_at ?? 0);
         if (sourceHasCue && (!targetHasCue || sourceCueAt > targetCueAt)) {
+            // A mural cue is a derived render cache of the memory text, not the
+            // text or its scored meaning. Copying it must not look like an edit.
             db.prepare(
                 `UPDATE memories
                      SET mural_cue = ?, mural_cue_hash = ?, mural_cue_at = ?,
-                         mural_cue_rejection_count = ?, updated_at = ?
+                         mural_cue_rejection_count = ?
                    WHERE id = ?`,
             ).run(
                 row.mural_cue,
                 row.mural_cue_hash,
                 row.mural_cue_at,
                 row.mural_cue_rejection_count,
-                mergedAt,
                 targetId,
             );
         }
@@ -273,9 +294,27 @@ function mergeMemoryRow(
             collision.status === null ||
             collision.status === undefined
         ) {
+            // seen_count is usage bookkeeping. updated_at moves only when the
+            // survivor's status itself changes (for example a null status becoming
+            // active), because that changes what the memory means in the live pool.
             db.prepare(
-                "UPDATE memories SET seen_count = ?, status = CASE WHEN ? = 'active' THEN 'active' ELSE COALESCE(status, 'active') END, updated_at = ? WHERE id = ?",
-            ).run(mergedSeen, row.status, mergedAt, targetId);
+                `UPDATE memories
+                    SET seen_count = ?,
+                        status = CASE
+                            WHEN ? = 'active' THEN 'active'
+                            ELSE COALESCE(status, 'active')
+                        END,
+                        updated_at = CASE
+                            WHEN status IS NOT (
+                                CASE
+                                    WHEN ? = 'active' THEN 'active'
+                                    ELSE COALESCE(status, 'active')
+                                END
+                            ) THEN ?
+                            ELSE updated_at
+                        END
+                  WHERE id = ?`,
+            ).run(mergedSeen, row.status, row.status, mergedAt, targetId);
         }
         db.prepare(
             `UPDATE memories SET first_seen_at = MIN(first_seen_at, ?), last_seen_at = MAX(last_seen_at, ?), retrieval_count = COALESCE(retrieval_count, 0) + ?, merged_from = CASE WHEN merged_from IS NULL OR merged_from = '' THEN ? ELSE merged_from || ',' || ? END WHERE id = ?`,
@@ -287,6 +326,8 @@ function mergeMemoryRow(
             String(sourceId),
             targetId,
         );
+        // Archiving the duplicate and pointing it at the survivor changes its
+        // lifecycle meaning: it is no longer the live claim. That is an edit.
         db.prepare(
             `UPDATE memories
                 SET status = 'archived',
@@ -321,11 +362,11 @@ function mergeMemoryRow(
             "UPDATE memories SET metadata_json = json_set(CASE WHEN json_valid(metadata_json) THEN metadata_json ELSE '{}' END, '$.identity_merge_review', ?) WHERE id = ?",
         ).run(fromIdentity, sourceId);
     }
+    // Moving a memory onto its project's new id does not change the memory.
+    // Leaving updated_at alone keeps a re-key from looking like an edit.
     const result = db
-        .prepare(
-            "UPDATE memories SET project_path = ?, updated_at = ? WHERE id = ? AND project_path = ?",
-        )
-        .run(toIdentity, mergedAt, sourceId, fromIdentity) as { changes?: number };
+        .prepare("UPDATE memories SET project_path = ? WHERE id = ? AND project_path = ?")
+        .run(toIdentity, sourceId, fromIdentity) as { changes?: number };
     if ((result.changes ?? 0) === 0) return false;
     logRow(db, fromIdentity, toIdentity, "memories", String(sourceId), "rekeyed", null, mergedAt);
     return true;
