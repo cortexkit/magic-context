@@ -16739,7 +16739,7 @@ fn strip_injected_regions(text: &str) -> Option<String> {
     Some(cleaned.trim().to_string())
 }
 
-fn is_dropped_placeholder_block(block: &CkWireBlock) -> bool {
+pub(crate) fn is_dropped_placeholder_block(block: &CkWireBlock) -> bool {
     matches!(
         &block.kind,
         ck_wire::CkKind::Text { text } | ck_wire::CkKind::Reasoning { text, .. }

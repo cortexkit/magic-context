@@ -603,7 +603,12 @@ pub(crate) fn measure_tail_hygiene_with_pending_drops(
         );
         let queued_for_drop = tag_number.is_some_and(|number| queued_numbers.contains(&number));
         let measured = match &block.wire_shape().kind {
-            mc_store::CkKind::Text { .. } if block.role == "user" || block.role == "assistant" => {
+            mc_store::CkKind::Text { .. }
+                if matches!(
+                    block.role.as_str(),
+                    "user" | "assistant" | "tool" | "notice"
+                ) =>
+            {
                 let text = block.scalar_text().expect("text payload");
                 let content = caveman_content(&caveman_payloads, block).unwrap_or(&text);
                 let content = if block.runner_lane {
@@ -616,7 +621,11 @@ pub(crate) fn measure_tail_hygiene_with_pending_drops(
                 } else {
                     part_measurement(
                         key,
-                        TailHygienePartKind::Text,
+                        if block.role == "tool" {
+                            TailHygienePartKind::ToolOutput
+                        } else {
+                            TailHygienePartKind::Text
+                        },
                         content,
                         estimated_tokens(content),
                         tag_number,
@@ -1582,6 +1591,36 @@ mod tests {
         let projection = project_messages(&[real, reminder, channel2]).unwrap();
 
         assert_eq!(real_user_turn_count(&projection), 1);
+    }
+
+    #[test]
+    fn pi_notices_and_shell_outputs_are_reclaimable_but_not_user_turns() {
+        let messages = crate::codec::decode_pi(&[
+            serde_json::json!({"type":"message","id":"person","message":{"role":"user","content":"person request"}}),
+            serde_json::json!({"type":"message","id":"shell","message":{"role":"bashExecution","command":"ls","output":"shell output"}}),
+            serde_json::json!({"type":"custom_message","id":"extension","content":"extension notice"}),
+            serde_json::json!({"type":"branch_summary","id":"branch","summary":"branch history"}),
+        ]).messages;
+        let projection = project_messages(&messages).unwrap();
+        assert_eq!(real_user_turn_count(&projection), 1);
+        let tags = projection
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, block)| tag(i as i64 + 1, &block.id))
+            .collect::<Vec<_>>();
+        let measured = measure_tail_hygiene(
+            &projection,
+            &CoreState::default(),
+            None,
+            &tags,
+            0,
+            &HashSet::new(),
+        );
+        assert_eq!(measured.parts[1].kind, TailHygienePartKind::ToolOutput);
+        for part in &measured.parts {
+            assert!(part.u_tokens > 0, "{part:?}");
+        }
     }
 
     #[test]
