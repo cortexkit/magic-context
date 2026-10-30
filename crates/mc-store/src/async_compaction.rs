@@ -230,6 +230,19 @@ impl McStore {
         layout::read_sql(sql)
     }
 
+    /// Select the authoritative family's indexed message lookup. Resolving the
+    /// family first avoids a compound query that searches both layouts.
+    pub fn async_compaction_placement_sql(
+        conn: &rusqlite::Connection,
+        reference: &str,
+    ) -> rusqlite::Result<&'static str> {
+        Ok(if layout::legacy_exists(conn, reference)? {
+            layout::ENTRY_LOOKUP_SQL
+        } else {
+            layout::KV_ENTRY_LOOKUP_SQL
+        })
+    }
+
     /// Move legacy records without changing any public conversation identity.
     pub fn migrate_async_compaction_records(&self) -> Result<(), McStoreError> {
         self.inner
@@ -240,24 +253,43 @@ impl McStore {
     /// Losslessly restore provider KV families for an older binary. The caller
     /// must prove both databases have no other holders before invoking this
     /// offline-only operation. It never opens or writes the context database.
-    pub fn downgrade_async_layout_offline(path: &std::path::Path) -> Result<Vec<String>,McStoreError> {
-        let mut conn = rusqlite::Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        conn.pragma_update(None,"foreign_keys",true)?;
+    pub fn downgrade_async_layout_offline(
+        path: &std::path::Path,
+    ) -> Result<Vec<String>, McStoreError> {
+        Self::downgrade_async_layout_sqlite(path)
+            .map_err(|error| McStoreError::Serde(format!("async layout downgrade: {error}")))
+    }
+
+    fn downgrade_async_layout_sqlite(path: &std::path::Path) -> rusqlite::Result<Vec<String>> {
+        let mut conn = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        conn.pragma_update(None, "foreign_keys", true)?;
         let version = crate::single_store_schema::recorded_store_version(&conn)?;
         if version != crate::LATEST_MIGRATION_VERSION {
-            return Err(McStoreError::Serde(format!("downgrade requires store fence {}, found {version}",crate::LATEST_MIGRATION_VERSION)));
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "downgrade requires store fence {}, found {version}",
+                crate::LATEST_MIGRATION_VERSION
+            )));
         }
-        let references = conn.prepare("SELECT section FROM main.mc_cache_sections WHERE session_id=?1 ORDER BY section")?
-            .query_map([layout::HEADERS],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let references = conn
+            .prepare(
+                "SELECT section FROM main.mc_cache_sections WHERE session_id=?1 ORDER BY section",
+            )?
+            .query_map([layout::HEADERS], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut converted = Vec::new();
         for reference in references {
-            let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            if let Some(header)=layout::header(&tx,&reference)? {
-                crate::move_store::check_writer(&tx,&header.session)?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if let Some(header) = layout::header(&tx, &reference)? {
+                crate::move_store::check_writer(&tx, &header.session)?;
             }
-            let changed=layout::downgrade_record(&tx,&reference)?;
+            let changed = layout::downgrade_record(&tx, &reference)?;
             tx.commit()?;
-            if changed { converted.push(reference); }
+            if changed {
+                converted.push(reference);
+            }
         }
         Ok(converted)
     }
@@ -386,11 +418,12 @@ impl McStore {
         session_ref: &str,
         mids: &[String],
     ) -> Result<Vec<String>, McStoreError> {
+        self.prepare_async_record(session_ref)?;
         let mids =
             serde_json::to_string(mids).map_err(|error| McStoreError::Serde(error.to_string()))?;
         self.inner.with_read(|conn| {
-            conn.prepare(&crate::async_compaction_layout::read_sql("SELECT b.view_json FROM json_each(?2) AS wanted CROSS JOIN mc_async_compaction_baselines b ON b.session_ref=?1 AND b.slot='undo-native-edits:mid:'||wanted.value"))?
-                .query_map(params![session_ref, mids], |row| row.get(0))?
+            conn.prepare("SELECT b.body FROM json_each(?2) AS wanted CROSS JOIN main.mc_cache_sections b ON b.session_id=?1 AND b.section='undo-native-edits:mid:'||wanted.value")?
+                .query_map(params![layout::owner(session_ref), mids], |row| row.get(0))?
                 .collect::<rusqlite::Result<Vec<String>>>()
         }).map_err(Into::into)
     }

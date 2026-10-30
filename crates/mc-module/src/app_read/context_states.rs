@@ -30,6 +30,7 @@ pub(crate) const STAMP: &str = "SELECT queued_at FROM pending_ops WHERE session_
 pub(crate) const STAMPED_TAGS: &str = "SELECT tag_number,message_id,type,status,byte_size,token_count,input_byte_size,input_token_count,drop_mode,tool_name,tool_owner_message_id FROM tags WHERE session_id=?1 AND status='active' AND type IN ('message','file','tool') AND tag_number IN (SELECT tag_id FROM pending_ops WHERE session_id=?1 AND operation='drop')";
 const STAMP_SUMMARIES: &str = "SELECT id,sequence,start_message,end_message,start_message_id,end_message_id,start_block_index,end_block_index FROM compartments WHERE session_id=?1 ORDER BY sequence";
 // Force the mid index: MIN(ordinal) otherwise filters a session-sized primary-key prefix by mid.
+#[cfg(test)]
 pub(crate) const ASYNC_PLACEMENT: &str = mc_store::ASYNC_COMPACTION_ENTRY_LOOKUP_SQL;
 pub(crate) const ASYNC_TAGS: &str = "SELECT tag_number,block_id,kind,token_count,length(source_bytes) FROM mc_tags WHERE session_id=?1 AND block_id>=?2 AND block_id<?3";
 pub(crate) const FROZEN: &str = "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot='frozen_edits'";
@@ -504,10 +505,10 @@ fn read(context: &Connection, store: &Connection, input: &Value) -> Result<Value
                 .optional()
                 .map_err(query_error)?,
             SessionSource::Async { reference, .. } => {
+                let sql = mc_store::McStore::async_compaction_placement_sql(store, reference)
+                    .map_err(query_error)?;
                 let row: Option<(i64, String)> = store
-                    .query_row(ASYNC_PLACEMENT, params![reference, mid], |r| {
-                        Ok((r.get(0)?, r.get(1)?))
-                    })
+                    .query_row(sql, params![reference, mid], |r| Ok((r.get(0)?, r.get(1)?)))
                     .optional()
                     .map_err(query_error)?;
                 if let Some((ordinal, index)) = row {

@@ -566,9 +566,16 @@ impl AsyncRecord {
         if !self.pending_undo_edits {
             return Ok(());
         }
+        let from = self
+            .undo_checked_through
+            .filter(|through| *through >= self.lineage_first_ordinal)
+            .map_or(
+                std::ops::Bound::Included(self.lineage_first_ordinal),
+                std::ops::Bound::Excluded,
+            );
         let mids = self
             .entries
-            .range(self.lineage_first_ordinal..)
+            .range((from, std::ops::Bound::Unbounded))
             .map(|(_, entry)| entry.mid.clone())
             .collect::<Vec<_>>();
         for archive in store
@@ -579,6 +586,7 @@ impl AsyncRecord {
                 .merge(&frozen_edits::FrozenEdits::from_json(&archive)?);
         }
         self.pending_undo_edits = false;
+        self.undo_checked_through = self.entries.last_key_value().map(|(ordinal, _)| *ordinal);
         Ok(())
     }
 
@@ -1114,6 +1122,7 @@ impl McHandler {
                             revision: cut.parent_revision.clone(),
                         });
                         state.pending_undo_edits = true;
+                        state.undo_checked_through = None;
                         // The retried Setup only writes the small record: the
                         // new lineage's rows were already persisted by the
                         // crashed `begin_at_cut`. Allow the save without a
@@ -1293,6 +1302,7 @@ impl McHandler {
                 revision: cut.parent_revision.clone(),
             });
         state.pending_undo_edits = true;
+        state.undo_checked_through = None;
         let old: compact::setup::SetupAnswer = decode(&state.initial)?;
         let codec = codec::Codec::from_params(&Value::Object(request.params.clone()))?;
         // The one Setup rule: the new lineage's `initial` spans from `first`

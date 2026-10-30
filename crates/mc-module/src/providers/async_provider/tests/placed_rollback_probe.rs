@@ -84,7 +84,12 @@ async fn placed_rollback_seed() {
         let seq = index as u64 * 2 + 1;
         rig.notice(seq, 1000, None).await;
         settle(&rig).await;
-        rig.history(20, "rollback fixture history");
+        if index == 0 {
+            rig.history(20, "rollback fixture history");
+        } else {
+            rig.queue(&[103]).await;
+            rig.ride("ttl_expired").await;
+        }
         rig.notice(seq + 1, 1000, None).await;
         settle(&rig).await;
         assert!(rig.newest().is_some());
@@ -114,16 +119,21 @@ async fn placed_rollback_seed() {
     );
 }
 
-fn handler(path: &Path, store: Arc<McStore>, seen: Arc<Seen>) -> (McHandler, SessionBinding) {
+fn handler(
+    path: &Path,
+    store: Arc<McStore>,
+    seen: Arc<Seen>,
+) -> (McHandler, SessionBinding, Arc<Runner>) {
     let mut h = McHandler::new();
     h.producer_factory =
         crate::providers::session_runner_fake::FakeSessionRunner::for_project(path).factory();
     h.store.set(store).ok().unwrap();
-    h.provider_runner = Arc::new(Runner {
+    let runner = Arc::new(Runner {
         module: MODULE.into(),
         lineage: Mutex::new("L".into()),
         ..Default::default()
     });
+    h.provider_runner = runner.clone();
     h.session_resolver = Arc::new(CountingResolver::default());
     let config = McModuleConfig {
         inject_docs: false,
@@ -146,12 +156,12 @@ fn handler(path: &Path, store: Arc<McStore>, seen: Arc<Seen>) -> (McHandler, Ses
     };
     h.bind_route(7, binding.clone());
     *h.provider_store.async_runtime.publisher.lock().unwrap() = Some(seen);
-    (h, binding)
+    (h, binding, runner)
 }
 
 #[tokio::test]
 #[ignore]
-async fn placed_rollback_decoder_and_announcements() {
+async fn placed_without_downgrade_refuses_only_migrated_session() {
     let path = root();
     let references: Vec<String> =
         serde_json::from_slice(&std::fs::read(path.join("references.json")).unwrap()).unwrap();
@@ -181,7 +191,7 @@ async fn placed_rollback_decoder_and_announcements() {
         "optional revision changed old decoder output"
     );
     let seen = Arc::new(Seen::default());
-    let (h, binding) = handler(&path, Arc::clone(&store), Arc::clone(&seen));
+    let (h, binding, _) = handler(&path, Arc::clone(&store), Arc::clone(&seen));
     h.announce_async_views().await.unwrap();
     assert!(!seen.0.lock().unwrap().is_empty());
     assert!(seen
@@ -195,34 +205,25 @@ async fn placed_rollback_decoder_and_announcements() {
         seen.0.lock().unwrap()
     );
     let request = setup_request(FIRST, "fresh-after-rollback");
-    let answer: Value =
-        serde_json::from_slice(&h.async_setup(7, &binding, &request).await.unwrap()).unwrap();
-    assert_eq!(answer["answer"], "ready", "{answer}");
-    let fresh = load_head(&store, &references[0]).unwrap().unwrap();
-    assert_eq!(fresh.generation, 0);
-    let epoch = fresh.engine.rebuild_epoch;
-    let repeat: Value =
-        serde_json::from_slice(&h.async_setup(7, &binding, &request).await.unwrap()).unwrap();
-    assert_eq!(
-        serde_json::to_vec(&repeat).unwrap(),
-        serde_json::to_vec(&answer).unwrap()
-    );
-    assert_eq!(
-        load_head(&store, &references[0])
-            .unwrap()
-            .unwrap()
-            .engine
-            .rebuild_epoch,
-        epoch
-    );
+    let error = h.async_setup(7, &binding, &request).await.unwrap_err();
     assert!(
-        store
-            .load_async_compaction_views(&references[0])
-            .unwrap()
-            .0
-            .is_empty(),
-        "old Setup inherited stale new-build views"
+        matches!(error, HandlerOutcome::Error { ref code, .. } if code == "transient"),
+        "{error:?}"
     );
+    let mut healthy_binding = binding;
+    healthy_binding.session = SECOND.into();
+    h.bind_route(7, healthy_binding.clone());
+    let answer: Value = serde_json::from_slice(
+        &h.async_setup(
+            7,
+            &healthy_binding,
+            &setup_request(SECOND, "healthy-after-rollback"),
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(answer["answer"], "ready", "{answer}");
     h.announce_async_views().await.unwrap();
     assert!(seen
         .0
@@ -230,5 +231,72 @@ async fn placed_rollback_decoder_and_announcements() {
         .unwrap()
         .iter()
         .all(|reference| reference == &references[1]));
-    eprintln!("PLACED_FRESH_SETUP ready=true generation=0 rebuild_epoch={epoch} repeated_setup_identical=true stale_views=0 revision_field_ignored=true");
+    eprintln!("PLACED_WITHOUT_DOWNGRADE affected_transient=true healthy_setup=true healthy_announcements=true");
+}
+
+#[tokio::test]
+#[ignore]
+async fn placed_after_downgrade_preserves_setup_and_first_notice() {
+    let path = root();
+    let references: Vec<String> =
+        serde_json::from_slice(&std::fs::read(path.join("references.json")).unwrap()).unwrap();
+    let store = open(&path);
+    for (reference, session) in references.iter().zip([FIRST, SECOND]) {
+        let before = load(&store, reference).unwrap().unwrap();
+        let history = store.load_compartments(&before.namespace()).unwrap();
+        assert_eq!(history.is_empty(), session == SECOND);
+        let (h, mut binding, runner) =
+            handler(&path, Arc::clone(&store), Arc::new(Seen::default()));
+        binding.session = session.into();
+        h.bind_route(7, binding.clone());
+        *runner.entries.lock().unwrap() = before
+            .entries
+            .values()
+            .map(|entry| entry.read().unwrap())
+            .collect();
+        *runner.lineage.lock().unwrap() = before.lineage.clone().unwrap();
+        let answer: Value = serde_json::from_slice(
+            &h.async_setup(7, &binding, &setup_request(session, "after-downgrade"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(answer["answer"], "ready");
+        assert_eq!(answer["initial"], before.initial["initial"]);
+        let after_setup = load(&store, reference).unwrap().unwrap();
+        assert_eq!(
+            after_setup.engine.rebuild_epoch, before.engine.rebuild_epoch,
+            "upgrade/downgrade must not rebuild a matching engine"
+        );
+        assert_eq!(after_setup.generation, before.generation);
+        let last = runner.entries.lock().unwrap().last().cloned().unwrap();
+        let seq = before.seq + 1;
+        let notice = notice::AdvanceNotice::new(
+            reference,
+            seq,
+            runner.lineage.lock().unwrap().clone(),
+            last.ordinal,
+            contract::digest::content_digest(&last.message),
+            1_000,
+            "fixture",
+        )
+        .with_window(100_000);
+        let message = cortexkit_bus_trait::Message {
+            subject: notice::event_subject("fixture", MODULE, notice::ADVANCED_EVENT),
+            id: bus_id(reference, "advanced", seq),
+            digest: notice.digest().parse().unwrap(),
+            headers: notice.to_headers(),
+        };
+        h.advance_compaction("fixture", &message).await.unwrap();
+        let after = load(&store, reference).unwrap().unwrap();
+        assert_eq!(after.completed_seq, seq);
+        assert_eq!(after.engine.rebuild_epoch, before.engine.rebuild_epoch);
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.entries.len(), before.entries.len());
+        assert_eq!(
+            store.load_compartments(&after.namespace()).unwrap(),
+            history
+        );
+    }
+    eprintln!("PLACED_DOWNGRADED sessions=2 summarized=1 setup_preserved=true first_notice=true");
 }

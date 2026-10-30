@@ -547,7 +547,9 @@ fn split_cold_payloads(raw: &mut String) -> rusqlite::Result<Vec<(String, String
 }
 
 pub(super) fn downgrade_record(conn: &Connection, reference: &str) -> rusqlite::Result<bool> {
-    let Some(current) = header(conn, reference)? else { return Ok(false); };
+    let Some(current) = header(conn, reference)? else {
+        return Ok(false);
+    };
     if legacy_exists(conn, reference)? {
         // An old binary has already written newer state for this conversation.
         // Preserve that family, not the dormant v2 copy from before rollback.
@@ -557,14 +559,21 @@ pub(super) fn downgrade_record(conn: &Connection, reference: &str) -> rusqlite::
     let mut state: Value = decode(&current.state_json)?;
     let record = state.as_object_mut().ok_or(rusqlite::Error::InvalidQuery)?;
     if record.get("initial_stored").and_then(Value::as_bool) == Some(true) {
-        let raw = get(conn, &owner(reference), "setup-initial")?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let raw = get(conn, &owner(reference), "setup-initial")?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         record.insert("initial".into(), decode(&raw)?);
     }
-    if !record.contains_key("initial") { return Err(rusqlite::Error::InvalidQuery); }
-    record.remove("initial_stored"); record.remove("initial_ready"); record.remove("input_revision");
+    if !record.contains_key("initial") {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    record.remove("initial_stored");
+    record.remove("initial_ready");
+    record.remove("input_revision");
+    record.remove("engine_cache_witness");
     if let Some(Value::Object(moved)) = record.get_mut("standalone_move") {
         if moved.get("bound_drops_stored").and_then(Value::as_bool) == Some(true) {
-            let raw = get(conn, &owner(reference), "moved-bound-drops")?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            let raw = get(conn, &owner(reference), "moved-bound-drops")?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
             moved.insert("bound_drops".into(), decode(&raw)?);
         }
         moved.remove("bound_drops_stored");
@@ -582,7 +591,7 @@ pub(super) fn downgrade_record(conn: &Connection, reference: &str) -> rusqlite::
     for view in views {
         conn.execute("INSERT INTO main.mc_async_compaction_views(session_ref,session,version,view_json,engine_json,announced) VALUES(?1,?2,?3,?4,?5,?6)",params![reference,current.session,view.version,view.view_json,view.engine_json,view.announced])?;
     }
-    for (slot,value) in baselines {
+    for (slot, value) in baselines {
         conn.execute("INSERT INTO main.mc_async_compaction_baselines(session_ref,session,slot,view_json) VALUES(?1,?2,?3,?4)",params![reference,current.session,slot,value])?;
     }
     clear_owned(conn, reference)?;
@@ -646,12 +655,13 @@ pub(super) fn read_sql(sql: &str) -> std::borrow::Cow<'_, str> {
 pub(crate) const ENTRY_LOOKUP_SQL: &str = "/* async-v2-direct */
  SELECT ordinal,index_json FROM main.mc_async_compaction_entries INDEXED BY idx_mc_async_compaction_entries_mid
  WHERE session_ref=?1 AND mid=?2 AND ordinal=(SELECT MIN(ordinal) FROM main.mc_async_compaction_entries INDEXED BY idx_mc_async_compaction_entries_mid WHERE session_ref=?1 AND mid=?2)
- UNION ALL
+";
+
+pub(crate) const KV_ENTRY_LOOKUP_SQL: &str = "/* async-v2-direct */
  SELECT json_extract(e.body,'$.ordinal'),json_extract(e.body,'$.index_json')
- FROM main.mc_cache_sections i JOIN main.mc_cache_sections e ON e.session_id=i.session_id AND e.section=json_extract(i.body,'$')
- WHERE i.session_id='__ckmc_async_v2_record:'||?1
- AND i.section=(SELECT section FROM main.mc_cache_sections WHERE session_id='__ckmc_async_v2_record:'||?1 AND section>='__ckmc_async_v2_mid:'||json_quote(?2)||':' AND section<'__ckmc_async_v2_mid:'||json_quote(?2)||';' ORDER BY section LIMIT 1)
- AND NOT EXISTS(SELECT 1 FROM main.mc_async_compaction WHERE session_ref=?1)
+ FROM main.mc_cache_sections e
+ WHERE e.session_id='__ckmc_async_v2_record:'||?1
+ AND e.section=(SELECT json_extract(body,'$') FROM main.mc_cache_sections WHERE session_id='__ckmc_async_v2_record:'||?1 AND section>='__ckmc_async_v2_mid:'||json_quote(?2)||':' AND section<'__ckmc_async_v2_mid:'||json_quote(?2)||';' ORDER BY section LIMIT 1)
 ";
 
 pub(crate) const EXISTS_FOR_SESSION_SQL: &str = "SELECT EXISTS(SELECT 1 FROM main.mc_async_compaction WHERE session=?1) OR EXISTS(SELECT 1 FROM main.mc_cache_sections WHERE session_id='__ckmc_async_v2_headers' AND CASE WHEN json_valid(body) THEN json_extract(body,'$.session') END=?1)";

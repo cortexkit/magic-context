@@ -13,6 +13,7 @@ mod decision_log;
 #[cfg(test)]
 mod differential_tests;
 mod emptied_messages;
+mod engine_cache;
 mod frozen_edits;
 mod full_array_floor;
 mod held_entries;
@@ -403,6 +404,10 @@ pub(crate) struct AsyncRecord {
     engine: transform::compaction::State,
     #[serde(default)]
     engine_baselines: EngineBaselines,
+    /// The independently committed engine rows must still describe the pass
+    /// that supplied this provider baseline before another view can use them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    engine_cache_witness: Option<engine_cache::Witness>,
     /// Certificate recording which earlier source input the last permitted
     /// rebuild covered. Produced and applied views remain separate; a runner
     /// acknowledgement never advances this certificate.
@@ -509,6 +514,10 @@ pub(crate) struct AsyncRecord {
     pending_parent_history: Option<cut_runtime::ParentHistory>,
     #[serde(default)]
     pending_undo_edits: bool,
+    /// Archive lookups already completed in this resident window. A restart
+    /// deliberately forgets the watermark and replays any pending recovery.
+    #[serde(skip)]
+    undo_checked_through: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cut_signature: Option<crate::tail_hygiene::signature::SignaturePrefix>,
 }
@@ -2274,6 +2283,7 @@ impl State {
     }
 
     fn finish_reset(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
+        self.undo_checked_through = None;
         self.resync = true;
         self.partial_read_seq = None;
         // A reset invalidates an unadopted proof, not durable adoption. An
@@ -3199,6 +3209,7 @@ impl McHandler {
             last_transferred_drops: 0,
             tag_index: BTreeMap::new(),
             engine_baselines: EngineBaselines::default(),
+            engine_cache_witness: None,
             logical_prefix: None,
             prefix_input_proof: None,
             journal: Journal::new_record(),
@@ -3265,6 +3276,7 @@ impl McHandler {
             cut_history_gc_pending: false,
             pending_parent_history: None,
             pending_undo_edits: false,
+            undo_checked_through: None,
             cut_signature: None,
         };
         let route = state.runner()?;
@@ -3315,6 +3327,7 @@ impl McHandler {
         };
         let (_template, output) =
             self.async_engine(channel, binding, &state, codec, &status, &mut engine)?;
+        state.engine_cache_witness = Some(engine_cache::capture(store, &state)?);
         let transform::compaction::Answer::Replacement(initial) = &output.answer else {
             return Err(transient("async setup returned no initial view"));
         };
@@ -3437,6 +3450,13 @@ impl McHandler {
                 "the stored head requires a fresh full lineage",
             ));
         }
+        let mut status = status.clone();
+        if !engine_cache::matches(store, state)? {
+            // Provider baselines own the served view. An engine cache from a
+            // different pass must rebuild before it can produce another one.
+            status.prefix_rebuilding = true;
+        }
+        let status = &status;
         let model = state
             .conditions
             .as_ref()
@@ -5356,6 +5376,12 @@ impl McHandler {
                     #[cfg(test)]
                     let held = held.counted_as(state.reference());
                     state.entries.insert(entry.ordinal, Arc::new(held));
+                    if state
+                        .undo_checked_through
+                        .is_some_and(|through| entry.ordinal <= through)
+                    {
+                        state.undo_checked_through = entry.ordinal.checked_sub(1);
+                    }
                     state.record_pruned_parts(
                         entry.ordinal,
                         pruned.get(&entry.mid).map_or(&[][..], Vec::as_slice),
@@ -5722,6 +5748,7 @@ impl McHandler {
 
         let (template, output) =
             self.async_engine(channel, &binding, state, codec, &status, &mut engine)?;
+        state.engine_cache_witness = Some(engine_cache::capture(store, state)?);
         // The pass committed the pruned messages' identities and ran as the
         // rebuild the prune called for.
         state.pruned_readopt.clear();
@@ -7450,7 +7477,7 @@ impl AsyncRecord {
                 bootstrap.boundary_id = last.end_message_id.clone();
                 bootstrap.compartment_seq = last.sequence;
             }
-            self.initialize_cut_namespace(store, &bootstrap)?;
+            self.engine_cache_witness = Some(self.initialize_cut_namespace(store, &bootstrap)?);
         }
         let copied = store
             .copy_async_history_artifacts(&source.namespace, &namespace, &sequences)

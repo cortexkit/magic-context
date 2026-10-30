@@ -31,7 +31,7 @@ subc-transport = { workspace = true }
 subc-client-rs = { workspace = true }
 subc-os = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 # Provider context-overflow error patterns (scheduler unit). Plain regex (no
 # lookarounds in those patterns); fancy-regex stays confined to mc-tokenizer.
 regex = "1"

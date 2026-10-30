@@ -320,6 +320,7 @@ pub mod m1_compose;
 pub mod memory_render;
 pub mod memory_tool;
 mod memory_verification;
+mod offline_async_downgrade;
 pub mod offline_first_pass;
 pub mod offline_move;
 mod ops_facade;

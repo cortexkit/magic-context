@@ -164,10 +164,12 @@ impl McHandler {
                 return refusal;
             }
         }
+        // Provider operations hold large working records across awaits. Keep
+        // their futures off the parent request's stack, including unused arms.
         let result = match method {
-            "compaction.setup" => self.async_setup(channel, &binding, params).await,
-            "view.get" => self.async_view_get(&binding, params).await,
-            "compaction.ride" => self.async_ride(&binding, params).await,
+            "compaction.setup" => Box::pin(self.async_setup(channel, &binding, params)).await,
+            "view.get" => Box::pin(self.async_view_get(&binding, params)).await,
+            "compaction.ride" => Box::pin(self.async_ride(&binding, params)).await,
             _ => Err(invalid("unknown compaction operation")),
         };
         match result {

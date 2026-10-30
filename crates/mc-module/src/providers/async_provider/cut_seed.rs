@@ -1448,7 +1448,7 @@ impl AsyncRecord {
                 "the stored head requires a fresh full lineage",
             ));
         }
-        self.initialize_cut_namespace(store, &seed)?;
+        self.engine_cache_witness = Some(self.initialize_cut_namespace(store, &seed)?);
         if let Some(json) = &seed.window.frozen_edits {
             self.frozen_edits = frozen_edits::FrozenEdits::from_json(json)?;
             self.frozen_edits.dirty = true;
@@ -1481,7 +1481,7 @@ impl AsyncRecord {
         &self,
         store: &McStore,
         seed: &CutSeed,
-    ) -> Result<(), HandlerOutcome> {
+    ) -> Result<engine_cache::Witness, HandlerOutcome> {
         // Commit the history's coverage through the cut in the engine
         // namespace first, as the fold that made the cut did: the seeded
         // boundary adopts it from the compartments, and the engine's first
@@ -1565,7 +1565,10 @@ impl AsyncRecord {
                 loaded.meta.shadow_seq = seq_before;
             })?;
         }
-        Ok(())
+        // Installing a certified cut intentionally replaces the engine's
+        // baseline. Record the replacement's digest so later passes validate
+        // against it, not against the parent namespace's last pass.
+        engine_cache::capture(store, self)
     }
 
     /// Whether a Setup that names `descends_from` continues from a cut this
@@ -1731,6 +1734,7 @@ impl AsyncRecord {
         self.journal.cut_seed_dirty = true;
         let codec = codec::Codec::from_params(&Value::Object(self.setup.params.clone()))?;
         let rows = tag_rows(self, codec)?;
+        self.engine_cache_witness = Some(engine_cache::capture(store, self)?);
         self.save(store, &rows)
     }
 
