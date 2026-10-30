@@ -575,11 +575,23 @@ for (const timeout of [false, true]) {
         expect(host.row(session)).toBe(expectedIdentity);
         expect(timer.mock.calls[0][0].projectIdentity).toBe(host.row(session));
         expect(JSON.stringify(first.messages)).toContain("launch-scoped Dreamer memory");
-        expect(readRememberedProjectIdentity(launch)?.identity).not.toBe(projectId);
-        expect(fake.calls).toEqual([
-            { method: "resolve", params: { canonicalRoot: launch } },
-            { method: "resolve", params: { canonicalRoot: launch } },
-        ]);
+        if (timeout) {
+            // No registry answer arrived in time, so nothing proves an owner to pin.
+            expect(readRememberedProjectIdentity(launch)?.identity).not.toBe(projectId);
+        } else {
+            // The fake registry answers via=root with this linked folder as the
+            // canonical root, which proves it is registered as its own project, so the
+            // worktree keeps its own pin, marked via=root.
+            expect(readRememberedProjectIdentity(launch)).toMatchObject({
+                identity: projectId,
+                via: "root",
+            });
+        }
+        // With a proven root pin saved by the launch decision, the session's own
+        // decision reads that pin instead of asking the registry again. Without an
+        // answer in time there is no pin, so the session asks once more.
+        const resolve = { method: "resolve", params: { canonicalRoot: launch } };
+        expect(fake.calls).toEqual(timeout ? [resolve, resolve] : [resolve]);
 
         const resumed = folder("dream-resumed");
         rememberPinnedProjectIdentity(resumed, "pj-DREAM-RESUMED");
