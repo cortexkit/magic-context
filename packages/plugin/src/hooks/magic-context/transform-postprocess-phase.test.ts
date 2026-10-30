@@ -11866,6 +11866,7 @@ describe("issue 619 metadata-only trailing decisions", () => {
             for (let index = 0; index < 3; index++) {
                 const execute = await pass("execute");
                 expect(JSON.stringify(execute.messages)).toBe(JSON.stringify(baseline.messages));
+                expect(execute.result.prefixMutationPermitted).toBe(isSubagent);
                 expect(execute.result.bustedThisPass).toBe(false);
                 expect(execute.result.proactiveThinkingStrip).toBeNull();
             }

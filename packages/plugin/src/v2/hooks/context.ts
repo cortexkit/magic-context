@@ -1872,10 +1872,7 @@ export async function registerContext(context: V2Context) {
     // Construct retained callbacks outside the request scope. Even callbacks that
     // only read instance state can keep a shared closure environment alive, along
     // with replay helpers that hold the request's messages and attachments.
-    const checkpointPassPermissions = new Map<
-        string,
-        { decision: string; bustedThisPass: boolean; overWindow?: boolean }
-    >();
+    const checkpointPassPermissions = new Map<string, boolean>();
     const checkpointInputEstimates = new Map<string, { tokens: number; pressureTokens: number }>();
     const initializeTransform = (database: NonNullable<typeof db>) =>
         (transform ??= createTransform({
@@ -2606,13 +2603,7 @@ export async function registerContext(context: V2Context) {
             const checkpointPermission = checkpointPassPermissions.get(draft.sessionID);
             checkpointPassPermissions.delete(draft.sessionID);
             checkpointInputEstimates.delete(draft.sessionID);
-            if (
-                checkpoint?.id &&
-                checkpointPermission &&
-                (checkpointPermission?.bustedThisPass || checkpointPermission?.overWindow) &&
-                checkpointPermission.decision !== "defer" &&
-                replayHead === undefined
-            ) {
+            if (checkpoint?.id && checkpointPermission && replayHead === undefined) {
                 const stripped = await folds.stripRecentContext(draft.sessionID, checkpoint.id);
                 if (stripped?.rendered) checkpoint = structuredClone(stripped.rendered);
             }

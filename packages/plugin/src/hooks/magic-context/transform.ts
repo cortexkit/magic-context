@@ -703,10 +703,7 @@ export interface TransformDeps {
      * transform finishes. Host mutation code must use this report rather than
      * derive its own permission.
      */
-    onPassPermission?: (
-        sessionId: string,
-        permission: { decision: string; bustedThisPass: boolean; overWindow?: boolean },
-    ) => void;
+    onPassPermission?: (sessionId: string, prefixMutationPermitted: boolean) => void;
     /** Resolved project mode. Rust mode bypasses every TS mutation below. */
     transformMode?: "ts" | "rust";
     /** Prompt-surface routing and USER description overrides forwarded to Rust mode. */
@@ -4056,11 +4053,7 @@ export function createTransform(deps: TransformDeps) {
                 sessionId,
                 systemPromptHash: sessionMeta.systemPromptHash,
             });
-        deps.onPassPermission?.(sessionId, {
-            decision: schedulerDecision,
-            bustedThisPass: postTransformResult.bustedThisPass || hardCacheExpired,
-            ...(hostOverWindow || emergencyRecoveryArmed ? { overWindow: true } : {}),
-        });
+        deps.onPassPermission?.(sessionId, postTransformResult.prefixMutationPermitted);
     };
 
     const timedTransform: typeof transform = (input, output) =>

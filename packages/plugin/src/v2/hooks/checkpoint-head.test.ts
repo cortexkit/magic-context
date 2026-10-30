@@ -56,10 +56,7 @@ async function fixture() {
         },
     };
     const hooks = new Map<string, (draft: SessionContext) => Promise<void>>();
-    let permission: { decision: string; bustedThisPass: boolean; overWindow?: boolean } = {
-        decision: "defer",
-        bustedThisPass: false,
-    };
+    let permission = false;
     let insideTransformHadRecent = false;
     let insideHostEstimate: { tokens: number; pressureTokens: number } | undefined;
     const transform = spyOn(transformModule, "createTransform").mockImplementation((deps) => {
@@ -157,15 +154,13 @@ test("checkpoint strip uses this pass's final permission, persists once, and rep
         const deferred = f.draft();
         await context(deferred);
         expect(JSON.stringify(deferred.messages[0])).toContain("RAW-HOST-TRANSCRIPT");
-        f.setPermission({ decision: "defer", bustedThisPass: true });
-        const stillDeferred = f.draft();
-        await context(stillDeferred);
-        expect(JSON.stringify(stillDeferred.messages[0])).toContain("RAW-HOST-TRANSCRIPT");
-        f.setPermission({ decision: "execute", bustedThisPass: false });
-        const unbusted = f.draft();
-        await context(unbusted);
-        expect(JSON.stringify(unbusted.messages[0])).toContain("RAW-HOST-TRANSCRIPT");
-        f.setPermission({ decision: "execute", bustedThisPass: true });
+        const originalHead = JSON.stringify(deferred.messages[0]);
+        for (let pass = 0; pass < 3; pass++) {
+            const replay = f.draft();
+            await context(replay);
+            expect(JSON.stringify(replay.messages[0])).toBe(originalHead);
+        }
+        f.setPermission(true);
         const rebuilding = f.draft();
         await context(rebuilding);
         expect(f.insideTransformHadRecent()).toBe(true);
@@ -174,7 +169,7 @@ test("checkpoint strip uses this pass's final permission, persists once, and rep
             "RAW-HOST-TRANSCRIPT",
         );
         const head = JSON.stringify(rebuilding.messages[0]);
-        f.setPermission({ decision: "defer", bustedThisPass: false });
+        f.setPermission(false);
         for (let pass = 0; pass < 3; pass++) {
             const replay = f.draft();
             await context(replay);
@@ -224,7 +219,7 @@ test("an oversized deferred checkpoint is refused, then an overflow permission r
         ).toBe(true);
         expect(f.insideHostEstimate()!.tokens).toBeGreaterThan(32000);
         expect(JSON.stringify(await f.storage.get("fold/v1/s"))).toContain("<recent-context>");
-        f.setPermission({ decision: "execute", bustedThisPass: false, overWindow: true });
+        f.setPermission(true);
         const repaired = oversized();
         await f.hooks.get("context")!(repaired);
         expect(JSON.stringify(repaired.messages[0])).not.toContain("<recent-context>");
@@ -242,7 +237,7 @@ test("removing recent-context never permits an oversized remaining request", asy
         f.source
             .prepare("UPDATE session_message SET data=? WHERE id='u1'")
             .run(JSON.stringify({ text: "unsummarized user content ".repeat(40000) }));
-        f.setPermission({ decision: "execute", bustedThisPass: false, overWindow: true });
+        f.setPermission(true);
         await expect(f.hooks.get("context")!(f.draft())).rejects.toThrow("Context full");
         expect(
             logs.mock.calls.some(([, message]) => message.includes("arm=checkpoint-over-window")),

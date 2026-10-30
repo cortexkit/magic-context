@@ -158,7 +158,7 @@ it("host checkpoint estimates enter the emergency band before scheduling without
             },
         ],
     ]);
-    let permission: { decision: string; overWindow?: boolean } | undefined;
+    let permission: boolean | undefined;
     const transform = createTransform({
         db,
         tagger: createTagger(),
@@ -195,7 +195,7 @@ it("host checkpoint estimates enter the emergency band before scheduling without
         );
         expect(events.indexOf("estimate")).toBeLessThan(events.indexOf("schedule"));
         expect(decide.mock.results.at(-1)?.value).toBe("execute");
-        expect(permission).toMatchObject({ decision: "execute", overWindow: true });
+        expect(permission).toBe(true);
         expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(0);
         expect(getOverflowState(db, sessionId).needsEmergencyRecovery).toBe(false);
         for (const reading of usage.values()) expect(reading.usage.inputTokens).toBe(100);
@@ -209,7 +209,7 @@ it("reports the final read-only pass permission after rendering and before retur
     useTempDataHome("pass-permission-");
     const db = openDatabase()!;
     const sessionId = "permission-session";
-    const reports: Array<{ decision: string; bustedThisPass: boolean }> = [];
+    const reports: boolean[] = [];
     let output: { messages: TestMessage[] };
     let returned = false;
     const transform = createTransform({
@@ -244,8 +244,8 @@ it("reports the final read-only pass permission after rendering and before retur
         returned = true;
     }
     expect(reports).toHaveLength(2);
-    expect(typeof reports[0]?.bustedThisPass).toBe("boolean");
-    expect(reports[1]).toEqual({ decision: "defer", bustedThisPass: false });
+    expect(typeof reports[0]).toBe("boolean");
+    expect(reports[1]).toBe(false);
 });
 
 for (const generation of ["v1", "v2"] as const) {
