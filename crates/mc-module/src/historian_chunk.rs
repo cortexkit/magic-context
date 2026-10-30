@@ -56,6 +56,33 @@ fn ask_answer_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Pi template sends remain opaque journal entries until their codec is adopted.
+/// Read only their text for the exact ask-answer envelope; other notice content
+/// must not become the person's words in the historian.
+fn block_ask_answer_lines(block: &FlatBlock) -> Vec<String> {
+    match &block.wire_shape().kind {
+        CkKind::Text { .. } => block
+            .scalar_text()
+            .map_or_else(Vec::new, |text| ask_answer_lines(&text)),
+        CkKind::Opaque(opaque) if opaque.raw["type"] == "custom_message" => {
+            let content = &opaque.raw["content"];
+            if let Some(text) = content.as_str() {
+                ask_answer_lines(text)
+            } else {
+                content
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|part| part["type"] == "text")
+                    .filter_map(|part| part["text"].as_str())
+                    .flat_map(ask_answer_lines)
+                    .collect()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkSnapshotOwnedItem {
     pub id: String,
@@ -327,9 +354,7 @@ impl Builder {
             message
                 .blocks
                 .iter()
-                .filter(|block| matches!(block.wire_shape().kind, CkKind::Text { .. }))
-                .filter_map(|block| block.scalar_text())
-                .flat_map(|text| ask_answer_lines(&text))
+                .flat_map(|block| block_ask_answer_lines(block))
                 .map(|line| normalize_text(&line))
                 .filter(|line| !line.is_empty())
                 .collect()
@@ -1891,12 +1916,10 @@ fn has_meaningful_user_text(message: &FlatMessage<'_>) -> bool {
         .any(|text| !text.is_empty() && !is_system_directive(text))
         // A message that held only an answer notice cleans to nothing, but it
         // carries a decision the user made, so it is not noise.
-        || message.blocks.iter().any(|block| match &block.wire_shape().kind {
-            CkKind::Text { .. } => block
-                .scalar_text()
-                .is_some_and(|text| !ask_answer_lines(&text).is_empty()),
-            _ => false,
-        })
+        || message
+            .blocks
+            .iter()
+            .any(|block| !block_ask_answer_lines(block).is_empty())
 }
 
 fn tool_result_body_tokens(message: &FlatMessage<'_>) -> usize {
@@ -2048,7 +2071,7 @@ fn clean_user_text(text: &str) -> String {
     result.trim().to_string()
 }
 
-/// Every ask answer notice in one user text, in delivery order.
+/// Every ask answer notice in user or template text, in delivery order.
 ///
 /// Prefrontal renders an ask notice as a `<system-reminder>` envelope: an inbox attribution line, a
 /// fixed body, and an unindented closing line. The shape is matched exactly and anything
@@ -2603,6 +2626,44 @@ mod tests {
             "{}",
             built.text
         );
+    }
+
+    #[test]
+    fn pi_custom_message_ask_answers_reach_the_historian_without_other_notice_text() {
+        for content in [
+            serde_json::json!(format!(
+                "Extension notice\n{SINGLE}\nNot the person's words"
+            )),
+            serde_json::json!([
+                {"type":"text", "text":"Extension notice"},
+                {"type":"text", "text":SINGLE},
+                {"type":"text", "text":DRIFT_HEADER},
+                {"type":"image", "text":TYPED}
+            ]),
+        ] {
+            let mut messages = crate::codec::decode_pi(&[serde_json::json!({
+                "type":"custom_message", "id":"notice", "parentId":null,
+                "customType":"cortexkit:ask-answer", "display":true, "content":content
+            })])
+            .messages;
+            messages.push(msg("a2", 2, "assistant", vec![text("noted")]));
+            messages.push(msg("u3", 3, "user", vec![text("protected tail")]));
+            let built = project_and_build(&messages, 1, 10_000, 3);
+            assert_eq!(
+                built.text.lines().next().unwrap_or_default(),
+                format!("[1] U: {}", normalize_answer(SINGLE_LINE)),
+                "{}",
+                built.text
+            );
+            for excluded in [
+                "Extension notice",
+                "Not the person's words",
+                "user_answers",
+                "What should I write?",
+            ] {
+                assert!(!built.text.contains(excluded), "{}", built.text);
+            }
+        }
     }
 
     #[test]

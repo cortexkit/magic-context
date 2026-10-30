@@ -6002,7 +6002,10 @@ impl McHandler {
             ride::RideProblem::Account => invalid_field("account", e.name()),
             _ => invalid_field("deadline_ms", e.name()),
         })?;
-        if matches!(request.cause, ride::RideCause::Unknown(_)) {
+        if matches!(
+            request.cause,
+            ride::RideCause::Unknown(_) | ride::RideCause::ChainReset
+        ) {
             return bytes(&ride::RideAnswer::nothing());
         }
         let started = Instant::now();

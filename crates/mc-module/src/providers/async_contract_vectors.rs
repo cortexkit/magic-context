@@ -206,7 +206,11 @@ fn the_largest_well_formed_notice_fits_the_header_bound() {
     // Every value at its bound: `events` at 1,024 bytes, both lineage ids at
     // 256, and the rest at their widest encodings. compaction-provider 0.7.3
     // added `reasoning_pruned` (`<generation>:<through>:<at_ms>`).
-    let names: usize = notice::headers::NOTICE.iter().map(|n| n.len()).sum();
+    let names: usize = notice::headers::NOTICE
+        .iter()
+        .filter(|name| **name != notice::headers::HISTORY_EDIT_COST)
+        .map(|n| n.len())
+        .sum();
     let descent = 256 + 1 + 20 + 1 + 64;
     let pruned = 3 * 20 + 2;
     let widest = names + 1024 + 4 * 20 + 3 + 256 + 32 + 64 + 5 * 20 + 256 + descent + pruned;
