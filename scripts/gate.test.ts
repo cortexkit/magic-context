@@ -101,6 +101,11 @@ test("matrix substitutions and once-only checks fail closed on unknown workflow 
     ).toBe(true);
     expect(condition("${{ !cancelled() && matrix.shard == 0 }}", { shard: 1 }, false)).toBe(false);
     expect(() => condition("${{ success() }}", {}, false)).toThrow("Unsupported");
+    // Local runs are never the scheduled drift run; a failure still skips the step.
+    expect(condition("${{ github.event_name != 'schedule' }}", {}, false)).toBe(true);
+    expect(condition("${{ github.event_name == 'schedule' }}", {}, false)).toBe(false);
+    expect(condition("${{ github.event_name != 'schedule' }}", {}, true)).toBe(false);
+    expect(() => condition("${{ github.event_name != 'push' }}", {}, false)).toThrow("Unsupported");
     expect(
         condition("${{ !cancelled() && steps.dists.outcome == 'success' }}", {}, false, false),
     ).toBe(false);

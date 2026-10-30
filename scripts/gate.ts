@@ -100,6 +100,10 @@ export function condition(
     distsRestored = false,
 ): boolean {
     if (!value) return !failed;
+    // A local run stands in for a push or check-branch run, never the scheduled
+    // upstream-drift run. Without a status function, Actions adds success().
+    const event = value.match(/^\$\{\{\s*github\.event_name (==|!=) 'schedule'\s*\}\}$/);
+    if (event) return !failed && event[1] === "!=";
     if (!value.includes("!cancelled()"))
         throw new Error(`Unsupported local step condition: ${value}`);
     const shard = value.match(/matrix\.shard == (\d+)/);
