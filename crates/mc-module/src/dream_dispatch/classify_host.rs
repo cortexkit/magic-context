@@ -538,7 +538,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn safety_only_classification_reaches_the_runner_and_real_store_without_rescoring() {
+    async fn legacy_classification_leaves_scored_null_safety_memories_out_of_the_runner() {
         let fixture = Fixture::new(TaskName::Classify);
         fixture.store.with_context_conn_for_test(|db| {
             db.execute("UPDATE memories SET scope='ecosystem',shareable=0,importance=50", [])?;
@@ -548,7 +548,7 @@ mod tests {
             Ok(())
         }).unwrap();
         let mut carrier = fixture.carrier();
-        carrier.answer = format!("<classify>{}</classify>", (1..=10).map(|id|
+        carrier.answer = format!("<classify>{}</classify>", (4..=10).map(|id|
             format!(r#"<memory id="{id}" importance="1" scope="universe" shareable="true" safety_critical="{}"/>"#, id <= 3)
         ).collect::<String>());
         let mut host = ClassifyHost::new(carrier, fixture.store.clone(), fixture.context.clone());
@@ -556,15 +556,25 @@ mod tests {
         let Outcome::Classify(Some(result)) = outcome else {
             panic!("classifier did not run")
         };
-        assert_eq!(result.classified, 10);
+        assert_eq!(result.classified, 7);
         assert!(result.complete);
         assert_eq!(host.carrier.requests.len(), 1);
         for id in 1..=10 {
-            assert!(host.carrier.requests[0].prompt.contains(&format!("[{id}]")));
+            assert_eq!(
+                host.carrier.requests[0].prompt.contains(&format!("[{id}]")),
+                id > 3
+            );
             let memory = fixture.store.get_memory_full(id).unwrap().unwrap();
             if id <= 3 {
-                assert_eq!(memory.safety_critical, Some(true));
-                assert_eq!(memory.importance, Some(if id == 2 { 95 } else { 80 }));
+                assert_eq!(memory.safety_critical, None);
+                assert_eq!(
+                    memory.importance,
+                    Some(match id {
+                        1 => 40,
+                        2 => 95,
+                        _ => 50,
+                    })
+                );
                 assert_eq!(memory.scope, "ecosystem");
                 assert_eq!(memory.shareable, 0);
                 assert_eq!(

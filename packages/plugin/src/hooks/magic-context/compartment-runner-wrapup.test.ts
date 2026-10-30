@@ -246,6 +246,7 @@ async function runWithLease(args: {
     try {
         await runCompartmentAgent(
             await prepareProducerFixture({
+                historianTurnTwo: "off",
                 client: client(args.output, args.beforeHistorianCollect),
                 db: args.db,
                 sessionId: args.sessionId,

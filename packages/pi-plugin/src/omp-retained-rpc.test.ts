@@ -219,6 +219,70 @@ test("OMP negotiated RPC retains one child and waits for correlated prompt resul
 	await first.child!.close();
 });
 
+test("OMP negotiated RPC reports truncation and a fresh retained run succeeds", async () => {
+	let spawns = 0;
+	const runner = new PiSubagentRunner({
+		invocation: { command: "omp", prefixArgs: [], targetHarness: "omp" },
+		budgetGuardAvailable: true,
+		spawnImpl: (() => {
+			const index = spawns++;
+			const fake = fakeChild(200 + index, true);
+			fake.child.stdin.on("data", (bytes) => {
+				for (const line of bytes.toString().trim().split("\n")) {
+					const command = JSON.parse(line);
+					if (command.type !== "prompt") continue;
+					fake.emit({
+						type: "agent_end",
+						messages: [
+							{
+								role: "assistant",
+								provider: "mock",
+								model: "model",
+								stopReason: index === 1 ? "length" : "stop",
+								content: [
+									{ type: "text", text: "valid but length-capped reply" },
+								],
+								usage: { input: 10, output: 5 },
+							},
+						],
+					});
+					fake.emit({
+						type: "prompt_result",
+						id: command.id,
+						status: "completed",
+						agentInvoked: true,
+						sessionSettled: true,
+					});
+				}
+			});
+			return fake.child;
+		}) as never,
+	});
+	expect(await runner.prepareRetainedHistorian(root)).toBe(true);
+	const options = {
+		agent: "historian",
+		systemPrompt: "system",
+		userMessage: "first",
+		tokenBudget: 100000,
+		cwd: root,
+		timeoutMs: 2000,
+		maxOutputTokens: 64000,
+	};
+	const first = await runner.runRetainedHistorian(options, "capped-turn");
+	expect(first.result).toMatchObject({
+		ok: false,
+		reason: "truncated",
+		meta: { lengthCapped: true },
+	});
+	await first.child?.close();
+	const second = await runner.runRetainedHistorian(options, "fresh-turn");
+	expect(second.result).toMatchObject({
+		ok: true,
+		meta: { lengthCapped: false },
+	});
+	await second.child?.close();
+});
+
 test("OMP protocol refuses offered tools before sending a provider prompt", () => {
 	const commands: Record<string, any>[] = [];
 	const failures: string[] = [];

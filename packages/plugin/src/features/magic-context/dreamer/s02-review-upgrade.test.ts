@@ -21,7 +21,7 @@ test("s02 review: first upgrade classification scans the full backlog in 100-row
             });
         db.exec("UPDATE memories SET importance=40,classified_at=7,scope='ecosystem',shareable=0");
         db.exec(
-            "ALTER TABLE memories DROP COLUMN safety_critical; DELETE FROM schema_migrations WHERE version=104",
+            "ALTER TABLE memories DROP COLUMN safety_critical; DELETE FROM schema_migrations WHERE version=105",
         );
         runMigrations(db);
         const chunks: number[] = [];

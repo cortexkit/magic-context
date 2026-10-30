@@ -4673,6 +4673,7 @@ describe("createTransform historian failure handling", () => {
         const prompt = mock(async () => ({}));
         const transform = createTransform({
             historianModel: "test/recovery-producer",
+            historianTurnTwo: "off",
             tagger: createTagger(),
             scheduler: { shouldExecute: mock(() => "defer" as const) },
             contextUsageMap: new Map([

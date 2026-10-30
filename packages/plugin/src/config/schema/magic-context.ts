@@ -766,7 +766,7 @@ export const HistorianConfigSchema = AgentMetadataSchema.extend({
         .default("on")
         .meta({ "x-mc-user-only": true })
         .describe(
-            'User-level config only. Verify and reconcile memories in a second historian turn on every model and supported host. "off" disables memory verification. Invalid values are reported and treated as "off". Independent of two_pass, the legacy editor-polish pass, which keeps memory verification dormant while enabled. (default: "on")',
+            'User-level config only. Verify and reconcile memories in a second historian turn on every model and supported host. "off" disables memory verification. Invalid values are reported and treated as "off". Headless Pi/OMP use one pass because the main host process can exit while the historian\'s second turn is still running in the background. Independent of two_pass, the legacy editor-polish pass, which keeps memory verification dormant while enabled. (default: "on")',
         ),
     disallowed_tools: z
         .array(z.enum(["*", "read", "aft_outline", "aft_zoom", "aft_search"]))

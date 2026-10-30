@@ -284,14 +284,11 @@ pub fn plan_classify(active: &[Memory]) -> ClassifyPlan {
     let stage = if active.len() <= 100 { 2 } else { 3 };
     let ids = active
         .iter()
-        .filter(|m| (m.unclassified && !m.open_classification) || m.safety_critical.is_none())
+        .filter(|m| m.unclassified && !m.open_classification)
         .map(|m| m.id)
         .collect();
     let mut classified: Vec<_> = if stage == 3 {
-        active
-            .iter()
-            .filter(|m| !m.unclassified && m.safety_critical.is_some())
-            .collect()
+        active.iter().filter(|m| !m.unclassified).collect()
     } else {
         vec![]
     };
@@ -2948,7 +2945,7 @@ mod tests {
     }
 
     #[test]
-    fn safety_assessments_match_host_selection_and_preserve_scored_metadata() {
+    fn optional_safety_assessments_preserve_scored_metadata_without_backfill_selection() {
         let fixture: Value = serde_json::from_str(include_str!(
             "../../testdata/safety_critical_classify_selection.json"
         ))
@@ -2973,10 +2970,7 @@ mod tests {
                 m
             })
             .collect();
-        assert_eq!(
-            serde_json::to_value(plan_classify(&active).ids).unwrap(),
-            fixture["prompted"]
-        );
+        assert_eq!(plan_classify(&active).ids, vec![4, 5, 6, 7, 8, 9, 10]);
         let manifest = format!("<classify>{}</classify>", active.iter().map(|m|
             format!(r#"<memory id="{}" importance="1" scope="universe" shareable="true" safety_critical="{}"/>"#, m.id, m.id <= 3)
         ).collect::<String>());
@@ -3015,9 +3009,27 @@ mod tests {
         large[0].safety_critical = None;
         large[1].safety_critical = None;
         let plan = plan_classify(&large);
-        assert_eq!(plan.ids, vec![1, 2]);
-        assert!(!plan.anchors.contains(&1) && !plan.anchors.contains(&2));
+        assert!(plan.ids.is_empty());
+        assert!(plan.anchors.contains(&1));
         assert_eq!(plan.anchors.len(), 30);
+    }
+
+    #[test]
+    fn legacy_persona_does_not_requeue_scored_null_safety_memories() {
+        assert!(!classify_system_prompt()
+            .unwrap()
+            .contains("safety_critical"));
+        for count in [10, 120] {
+            let mut active: Vec<_> = (1..=count).map(memory).collect();
+            for item in &mut active {
+                item.unclassified = false;
+                item.safety_critical = None;
+            }
+            active[0].unclassified = true;
+            active[0].open_classification = true;
+            active[1].unclassified = true;
+            assert_eq!(plan_classify(&active).ids, vec![2]);
+        }
     }
     #[test]
     fn prompts_match_pinned_ts_bytes() {

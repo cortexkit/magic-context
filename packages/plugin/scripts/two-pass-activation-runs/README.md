@@ -1,9 +1,11 @@
 # Disposable two-pass integrations
 
 These scripts exercise real hosts without using an operator installation or its
-stores. They do not enable a production profile. Candidate authorization is
-written only into the staged plugin copy by `runActivation` or the mock proof's
-`prepare` operation.
+stores. The historian summarizes older conversation and proposes project memories;
+its second turn checks those proposals against evidence and existing memory.
+That verification now defaults on for every supported model on interactive hosts.
+`runActivation` records a candidate profile beside the staged build as provenance;
+that file does not restrict which models can run the second historian turn.
 
 ## Host transports
 
@@ -55,9 +57,11 @@ to Magic Context. Rebuild status is therefore **unobservable**, not zero.
 
 ## Provider-free host proof
 
-`mock-host-proof.ts prepare <lane> <root> <install> [carrier]` writes a mock
-candidate into the staged source and seeds contradicted project memory. OpenCode 1
-requires its carrier argument explicitly. `reset` uses the same arguments and
+`mock-host-proof.ts prepare <lane> <root> <install> [carrier]` seeds contradicted
+project memory without restricting which models can run the second historian turn.
+OpenCode 1 requires its carrier argument explicitly: `opencode-session` identifies
+the native hidden session path and `hidden-completion` the shared executor path.
+`reset` uses the same arguments and
 recreates only the disposable host/plugin stores before seeding. Build
 the plugin after preparation. `run` uses the real host with the mock, requires
 Linux with only a loopback network interface, requires actual `lsof` rather than

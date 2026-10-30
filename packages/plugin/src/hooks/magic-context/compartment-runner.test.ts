@@ -74,16 +74,25 @@ import { __ignoredNotificationTest } from "./send-session-notification";
 import { tagMessages } from "./tag-messages";
 
 const runCompartmentAgent: typeof runCompartmentAgentImpl = async (deps) =>
-    runCompartmentAgentImpl(await prepareProducerFixture(deps));
+    runCompartmentAgentImpl(await prepareProducerFixture({ historianTurnTwo: "off", ...deps }));
 const executeContextRecomp: typeof executeContextRecompImpl = async (deps, options) =>
-    executeContextRecompImpl(await prepareProducerFixture(deps), options);
+    executeContextRecompImpl(
+        await prepareProducerFixture({ historianTurnTwo: "off", ...deps }),
+        options,
+    );
 const executeContextRecompWithResult: typeof executeContextRecompWithResultImpl = async (
     deps,
     options,
-) => executeContextRecompWithResultImpl(await prepareProducerFixture(deps), options);
+) =>
+    executeContextRecompWithResultImpl(
+        await prepareProducerFixture({ historianTurnTwo: "off", ...deps }),
+        options,
+    );
 const startCompartmentAgent: typeof startCompartmentAgentImpl = (deps, runAgent) =>
     startCompartmentAgentImpl(
-        runAgent ? deps : { ...deps, model: deps.model ?? "test/fixture-historian" },
+        runAgent
+            ? deps
+            : { historianTurnTwo: "off", ...deps, model: deps.model ?? "test/fixture-historian" },
         runAgent,
     );
 
@@ -3880,6 +3889,7 @@ describe("historian prompt sized to the producer window", () => {
         expect(acquireCompartmentLease(db, sessionId, holderId)).not.toBeNull();
         try {
             await runCompartmentAgentImpl({
+                historianTurnTwo: "off",
                 client,
                 db,
                 sessionId,

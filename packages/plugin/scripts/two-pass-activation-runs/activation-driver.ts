@@ -334,7 +334,7 @@ export function assertObservedPluginStore(isolation: Isolation, storePath: strin
     return path;
 }
 
-/** The turn-two authorization entry comes from the candidate JSON compiled into this isolated build. */
+/** Record model identity and prompt hashes beside the build; all supported models remain eligible. */
 export async function runActivation(options: {
     root: string;
     profile: Profile;
@@ -351,12 +351,7 @@ export async function runActivation(options: {
     const installRoot = underRoot(root, join(root, "install"));
     mkdirSync(installRoot, { recursive: true });
     await transport.stage(installRoot);
-    const candidatePath = underRoot(
-        root,
-        join(
-            installRoot,
-        ),
-    );
+    const candidatePath = underRoot(root, join(installRoot, "two-pass-candidate.json"));
     const candidate = { version: 1, entries: [profile.entry] };
     mkdirSync(resolve(candidatePath, ".."), { recursive: true });
     writeFileSync(candidatePath, JSON.stringify(candidate, null, 2));
