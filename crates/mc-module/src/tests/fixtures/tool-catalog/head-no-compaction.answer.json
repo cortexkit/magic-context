@@ -1,6 +1,6 @@
 {
-  "generation": "6070f6d414718531de24169d04ea2a8881c602215638f92b0684c2475311d414",
-  "catalog_digest": "6070f6d414718531de24169d04ea2a8881c602215638f92b0684c2475311d414",
+  "generation": "c3302f094107a7885887d119d89378a4fe0b4fb507651045df667fd51b62ae3c",
+  "catalog_digest": "c3302f094107a7885887d119d89378a4fe0b4fb507651045df667fd51b62ae3c",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -26,7 +26,7 @@
               "update",
               "dismiss"
             ],
-            "description": "write | read | update | dismiss. Defaults to write when content is given, else read."
+            "description": "write | read | update | dismiss."
           },
           "content": {
             "type": "string",
@@ -71,7 +71,7 @@
               "minimum": 1,
               "maximum": 9007199254740991
             },
-            "description": "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write."
+            "description": "Note ids: one for update, 1–50 for dismiss, or 1–50 to read those notes in full. Write and a plain read take an empty list."
           }
         },
         "additionalProperties": false
@@ -117,7 +117,7 @@
               "CONFIG_VALUES",
               "NAMING"
             ],
-            "description": "Kind of fact (required for write; on update/merge optional, omitted keeps the current category)."
+            "description": "Kind of fact (required for write; on update/merge, pass the memory's current category to keep it)."
           },
           "ids": {
             "type": "array",
@@ -197,7 +197,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive: what earlier sessions said and decided, commits and notes. Ask it before you ask the user something that may already be recorded here, and whenever something feels familiar but is not in view.\n\n`ctx_memory` pins facts about this project that stay true for the months this work lasts, for you and for every other agent working on this project. Pin one when you learn something that must not have to be found again, and especially when it cost you several turns to find. Pinned facts are not shown to you automatically: `ctx_search` recalls them.\n\n`ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note. When the user says \"take a note\", it always goes in the tray.",
     "item_digest": "73c679706bf3e65cc5f7a3de7e7d52600e8e9d071e8b5bdc074ee66cc316bec0",
-    "preflight_digest": "fbb5d6cdb477e9889872be8d5e14df78b3714682c96c80896664cc3c8ae0f65b",
+    "preflight_digest": "2b868262d174d4597c3870f3b7a1b13b5a88843a81a8cc6308c8e3a21796815d",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

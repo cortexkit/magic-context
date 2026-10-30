@@ -8,6 +8,7 @@ import {
 	queuePendingOp,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import { getNativeReplayState } from "@magic-context/core/features/magic-context/storage-native-replay";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import {
 	applyFlushedStatuses,
@@ -220,7 +221,7 @@ for (const [provider, api] of [
 	["openai-codex", "openai-codex-responses"],
 ]) {
 	for (const faultPosition of [-1, 0, 1, 2])
-		test(`cache review F11 ${api}: ${faultPosition < 0 ? "defer cannot first-apply; admitted cleanup and replay preserve complete pairs" : `write failure ${faultPosition + 1} rejects dispatch with a committed prefix`}`, async () => {
+		test(`cache review F11 ${api}: ${faultPosition < 0 ? "defer cannot first-apply; admitted cleanup and replay preserve complete pairs" : `write failure ${faultPosition + 1} rejects dispatch and rolls back the lane`}`, async () => {
 			const db = createTestDb();
 			const fake = createFakePi();
 			registerPiContextHandler(fake.pi as never, {
@@ -295,19 +296,20 @@ for (const [provider, api] of [
 						`CREATE TEMP TRIGGER reject_stale_review BEFORE UPDATE OF status ON tags WHEN NEW.tag_number = ${tag.tagNumber} AND NEW.status = 'dropped' BEGIN SELECT RAISE(ABORT, 'stale review fault'); END`,
 					);
 				}
-				const count = faultPosition < 0 ? 3 : faultPosition;
+				const count = 3;
 				if (faultPosition >= 0) {
 					await expect(pass(6)).rejects.toThrow("stale review fault");
+					// Native permissions and drops are one atomic lane. A rejected
+					// request must not leave unserved drops for a later defer to replay.
 					expect(
 						getTagsBySession(db, session)
 							.filter((t) => t.type === "tool")
 							.map((t) => t.status),
-					).toEqual(
-						Array.from({ length: 6 }, (_, i) =>
-							i < count ? "dropped" : "active",
-						),
-					);
-					return;
+					).toEqual(Array.from({ length: 6 }, () => "active"));
+					expect(getNativeReplayState(db, session).toolInputs.size).toBe(0);
+					db.exec("DROP TRIGGER reject_stale_review");
+					// The still-permitted rebuild lands the whole cleanup lane, then
+					// the ordinary defer below must replay exactly those served bytes.
 				}
 				const admitted = await pass(6);
 				expect(

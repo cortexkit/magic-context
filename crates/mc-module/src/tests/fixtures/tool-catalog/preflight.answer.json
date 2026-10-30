@@ -1,6 +1,6 @@
 {
-  "generation": "ad208b282a43a6098e2d6eb68b80cd2bb6dbcdc7c828f6d3c7434e0d26a9e07a",
-  "catalog_digest": "ad208b282a43a6098e2d6eb68b80cd2bb6dbcdc7c828f6d3c7434e0d26a9e07a",
+  "generation": "0078085d46e1e361b0a568fd807b62fa64c173479bb47eb51bce3369dd2a8240",
+  "catalog_digest": "0078085d46e1e361b0a568fd807b62fa64c173479bb47eb51bce3369dd2a8240",
   "tools": [
     {
       "name": "ctx_note",
@@ -25,7 +25,7 @@
               "update",
               "dismiss"
             ],
-            "description": "write | read | update | dismiss. Defaults to write when content is given, else read."
+            "description": "write | read | update | dismiss."
           },
           "content": {
             "type": "string",
@@ -70,7 +70,7 @@
               "minimum": 1,
               "maximum": 9007199254740991
             },
-            "description": "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write."
+            "description": "Note ids: one for update, 1–50 for dismiss, or 1–50 to read those notes in full. Write and a plain read take an empty list."
           }
         },
         "additionalProperties": false
@@ -116,7 +116,7 @@
               "CONFIG_VALUES",
               "NAMING"
             ],
-            "description": "Kind of fact (required for write; on update/merge optional, omitted keeps the current category)."
+            "description": "Kind of fact (required for write; on update/merge, pass the memory's current category to keep it)."
           },
           "ids": {
             "type": "array",

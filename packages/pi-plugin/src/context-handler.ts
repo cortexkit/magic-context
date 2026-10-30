@@ -158,6 +158,7 @@ import {
 	applyPendingOperations,
 	convertLegacyToolSkeletons,
 	foldBustsServedPrefix,
+	prepareFlushedToolRemovals,
 	RECENT_TOOL_SKELETON_WINDOW,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
 import {
@@ -351,8 +352,10 @@ import {
 	applyNativeReasoningReplayPi,
 	applyNativeToolInputReplayPi,
 	authorizePiToolRemoval,
+	PiToolRemovalBatchError,
 	preparePiToolRemovalChecks,
 	preparePiToolRemovalMeasurements,
+	withPiToolRemovalBatch,
 } from "./native-replay-state-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
 import {
@@ -9343,6 +9346,32 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	} catch {
 		/* Invalid native state must retain the whole pair. */
 	}
+	const removalBatch = <T>(edit: (flush: () => void) => T): T =>
+		withPiToolRemovalBatch(
+			{ db: args.db, sessionId: args.sessionId, saved: nativeRemovalInputs },
+			edit,
+		);
+	const applyToolRemovalGroup = <T>(edit: () => T): T => {
+		const savedRemovalInputs = nativeRemovalInputs;
+		nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
+		try {
+			return args.db
+				.transaction(() =>
+					removalBatch((flush) => {
+						const result = edit();
+						flush();
+						return result;
+					}),
+				)
+				.immediate();
+		} catch (cause) {
+			nativeRemovalInputs = savedRemovalInputs;
+			// A failed group cannot expose transcript edits whose tag writes rolled back.
+			throw cause instanceof PiToolRemovalBatchError
+				? cause
+				: new PiToolRemovalBatchError(cause);
+		}
+	};
 	const tTranscriptBuild = performance.now();
 	const transcript = createPiTranscript(
 		args.messages,
@@ -9915,33 +9944,41 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
 			let converted = 0;
 			args.db
-				.transaction(() => {
-					converted = convertLegacyToolSkeletons(
-						args.db,
-						args.sessionId,
-						targets,
-						{
-							prepareRemovals: (rows) =>
-								preparePiToolRemovalChecks({
-									db: args.db,
-									rows,
-									targets,
-									messages: args.messages,
-									prepare: transcript.prepareToolRemovalMeasurements,
-								}),
-							// A full drop whose arc removal is recorded was removed, not
-							// served as a marker. Keep it full even when this pass's model
-							// must keep tool pairs, so passes that can remove it still do
-							// and the placeholder strip never sees its call come back.
-							// Unreadable removal records keep every full drop as it is.
-							keepFullDrop: (callId) =>
-								nativeRemovalInputs === undefined ||
-								(callId !== null &&
-									nativeRemovalInputs.get(callId) ===
-										NATIVE_TOOL_REMOVAL_MARKER),
-						},
-					).size;
-				})
+				.transaction(() =>
+					removalBatch((flush) => {
+						converted = convertLegacyToolSkeletons(
+							args.db,
+							args.sessionId,
+							targets,
+							{
+								prepareRemovals: (rows) =>
+									preparePiToolRemovalChecks({
+										db: args.db,
+										rows,
+										targets,
+										messages: args.messages,
+										prepare: transcript.prepareToolRemovalMeasurements,
+									}),
+								// A full drop whose arc removal is recorded was removed, not
+								// served as a marker. Keep it full even when this pass's model
+								// must keep tool pairs, so passes that can remove it still do
+								// and the placeholder strip never sees its call come back.
+								// Unreadable removal records keep every full drop as it is.
+								keepFullDrop: (callId) =>
+									nativeRemovalInputs === undefined ||
+									(callId !== null &&
+										authorizePiToolRemoval({
+											db: args.db,
+											sessionId: args.sessionId,
+											callId,
+											saved: nativeRemovalInputs,
+											canApply: false,
+										}) === true),
+							},
+						).size;
+						flush();
+					}),
+				)
 				.immediate();
 			if (converted > 0) {
 				sessionLog(
@@ -10106,12 +10143,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					nativeRemovalInputs = saved && new Map(saved);
 					probingExecuteRemoval = true;
 					args.db
-						.transaction(() => {
-							for (const [number, target] of targets) {
-								if (target.prepareDrop?.() !== false) allowed.add(number);
-							}
-							throw rollback;
-						})
+						.transaction(() =>
+							removalBatch((flush) => {
+								for (const [number, target] of targets) {
+									if (target.prepareDrop?.() !== false) allowed.add(number);
+								}
+								flush();
+								throw rollback;
+							}),
+						)
 						.immediate();
 				} catch (error) {
 					if (error !== rollback) allowed.clear();
@@ -10165,26 +10205,28 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		pendingDecisionLogObserverForTests?.(pendingDecisionLog);
 		try {
 			const tApplyPending = performance.now();
-			pendingOpsDidMutate = applyPendingOperations(
-				args.sessionId,
-				args.db,
-				newTargets,
-				new Set([
-					...(args.contextUsage.percentage >= 95
-						? []
-						: protectedTagNumbersForPass),
-					...protectedToolTags,
-					...identityAdoption.protectedTagNumbers,
-				]),
-				pendingOperationTags,
-				pendingOps,
-				[],
-				new Set(),
-				(reduction) => droppedTokenReductions.push(reduction),
-				undefined,
-				(eligible) => {
-					eligiblePendingDropTagIds = eligible;
-				},
+			pendingOpsDidMutate = applyToolRemovalGroup(() =>
+				applyPendingOperations(
+					args.sessionId,
+					args.db,
+					newTargets,
+					new Set([
+						...(args.contextUsage.percentage >= 95
+							? []
+							: protectedTagNumbersForPass),
+						...protectedToolTags,
+						...identityAdoption.protectedTagNumbers,
+					]),
+					pendingOperationTags,
+					pendingOps,
+					[],
+					new Set(),
+					(reduction) => droppedTokenReductions.push(reduction),
+					undefined,
+					(eligible) => {
+						eligiblePendingDropTagIds = eligible;
+					},
+				),
 			);
 			if (pendingOpsDidMutate) {
 				droppedCount += pendingOps.length;
@@ -10282,24 +10324,18 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// must not publish durable or in-memory permission for unvisited calls.
 			nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
 			return args.db
-				.transaction(() => {
-					preparePiToolRemovalChecks({
-						db: args.db,
-						rows: flushedDroppedTags
-							.filter((tag) => tag.type === "tool" && tag.dropMode === "full")
-							.map((tag) => ({
-								tagNumber: tag.tagNumber,
-								callId: tag.messageId,
-							})),
-						targets,
-						messages: args.messages,
-						prepare: transcript.prepareToolRemovalMeasurements,
-					});
-					return render();
-				})
+				.transaction(() =>
+					removalBatch((flush) => {
+						prepareFlushedToolRemovals(targets, flushedDroppedTags);
+						flush();
+						return render();
+					}),
+				)
 				.immediate();
 		} catch (error) {
 			nativeRemovalInputs = savedRemovalInputs;
+			// Publication failed before rendering; retain the legacy per-call fallback.
+			if (error instanceof PiToolRemovalBatchError) return render();
 			throw error;
 		}
 	});
@@ -10485,63 +10521,67 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				rideSignals.explicitFlush ||
 				deferredMaterialize ||
 				independentMutationBeforeHeuristics;
-			heuristicsResult = applyPiHeuristicCleanup(
-				args.sessionId,
-				args.db,
-				newTargets,
-				args.messages,
-				{
-					protectedTags: args.protectedTags,
-					prepareToolRemovalMeasurements:
-						transcript.prepareToolRemovalMeasurements,
-					protectedToolTags,
-					protectedCutoff: usesTokenProtection
-						? protectionWindowForPass.cutoff
-						: undefined,
-					routine: routineCleanupApplied,
-					staleReduceStripEnabled: true,
-					onStaleReduceEdit: recordStaleReduceEdit,
-					// Tiered emergency drop fires only at the derived force band AND when the
-					// ceiling is known. forceMaterialization already incorporates
-					// the derived force-band / emergency condition for Pi (primary-equivalent).
-					emergency:
-						args.forceMaterialization === true &&
-						args.emergencyCeilingTokens !== undefined &&
-						args.emergencyCeilingTokens > 0
-							? {
-									currentTotalInputTokens: args.contextUsage.inputTokens,
-									ceilingTokens: args.emergencyCeilingTokens,
-									usagePercentage: args.contextUsage.percentage,
-									passAlreadyPriced: independentMutationBeforeHeuristics,
-								}
-							: undefined,
-					caveman: args.isSubagent ? undefined : args.heuristics.caveman,
-				},
-				activeTags,
-				stableIdResolver,
-			);
-			if (
-				!routineCleanupApplied &&
-				heuristicsResult.emergencyDroppedTools > 0
-			) {
-				const ridingCleanup = applyPiHeuristicCleanup(
+			heuristicsResult = applyToolRemovalGroup(() =>
+				applyPiHeuristicCleanup(
 					args.sessionId,
 					args.db,
 					newTargets,
 					args.messages,
 					{
 						protectedTags: args.protectedTags,
+						prepareToolRemovalMeasurements:
+							transcript.prepareToolRemovalMeasurements,
 						protectedToolTags,
 						protectedCutoff: usesTokenProtection
 							? protectionWindowForPass.cutoff
 							: undefined,
-						routine: true,
+						routine: routineCleanupApplied,
 						staleReduceStripEnabled: true,
 						onStaleReduceEdit: recordStaleReduceEdit,
-						caveman: args.isSubagent ? undefined : args.heuristics.caveman,
+						// Tiered emergency drop fires only at the derived force band AND when the
+						// ceiling is known. For Pi, forceMaterialization already includes
+						// the derived force-band and emergency conditions.
+						emergency:
+							args.forceMaterialization === true &&
+							args.emergencyCeilingTokens !== undefined &&
+							args.emergencyCeilingTokens > 0
+								? {
+										currentTotalInputTokens: args.contextUsage.inputTokens,
+										ceilingTokens: args.emergencyCeilingTokens,
+										usagePercentage: args.contextUsage.percentage,
+										passAlreadyPriced: independentMutationBeforeHeuristics,
+									}
+								: undefined,
+						caveman: args.isSubagent ? undefined : args.heuristics?.caveman,
 					},
-					getActiveTagsBySession(args.db, args.sessionId),
+					activeTags,
 					stableIdResolver,
+				),
+			);
+			if (
+				!routineCleanupApplied &&
+				heuristicsResult.emergencyDroppedTools > 0
+			) {
+				const ridingCleanup = applyToolRemovalGroup(() =>
+					applyPiHeuristicCleanup(
+						args.sessionId,
+						args.db,
+						newTargets,
+						args.messages,
+						{
+							protectedTags: args.protectedTags,
+							protectedToolTags,
+							protectedCutoff: usesTokenProtection
+								? protectionWindowForPass.cutoff
+								: undefined,
+							routine: true,
+							staleReduceStripEnabled: true,
+							onStaleReduceEdit: recordStaleReduceEdit,
+							caveman: args.isSubagent ? undefined : args.heuristics?.caveman,
+						},
+						getActiveTagsBySession(args.db, args.sessionId),
+						stableIdResolver,
+					),
 				);
 				heuristicsResult = {
 					droppedTools:
@@ -10614,6 +10654,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				`droppedTools=${heuristicsResult.droppedTools} deduplicatedTools=${heuristicsResult.deduplicatedTools} droppedInjections=${heuristicsResult.droppedInjections} staleReduce=${heuristicsResult.droppedStaleReduceCalls} compressedTextTags=${heuristicsResult.compressedTextTags} mutatedTextTags=${heuristicsResult.mutatedTextTags}`,
 			);
 		} catch (err) {
+			if (err instanceof PiToolRemovalBatchError) throw err;
 			sessionLog(
 				args.sessionId,
 				`heuristic cleanup failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
@@ -10848,16 +10889,18 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 		autoReclaimTargetCount = syntheticPendingOps.length;
 		if (syntheticPendingOps.length > 0) {
-			autoReclaimDidMutate = applyPendingOperations(
-				args.sessionId,
-				args.db,
-				newTargets,
-				protectedTagNumbersForPass,
-				undefined,
-				[],
-				syntheticPendingOps,
-				editMarkerTagIds,
-				(reduction) => droppedTokenReductions.push(reduction),
+			autoReclaimDidMutate = applyToolRemovalGroup(() =>
+				applyPendingOperations(
+					args.sessionId,
+					args.db,
+					newTargets,
+					protectedTagNumbersForPass,
+					undefined,
+					[],
+					syntheticPendingOps,
+					editMarkerTagIds,
+					(reduction) => droppedTokenReductions.push(reduction),
+				),
 			);
 			if (autoReclaimDidMutate) {
 				droppedCount += syntheticPendingOps.length;

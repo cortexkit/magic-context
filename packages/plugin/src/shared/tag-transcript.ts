@@ -1446,6 +1446,11 @@ function buildAggregateTarget(
         },
         // Open invocations still belong to the current turn; only complete arcs reclaim.
         prepareDrop: () => !occurrences.some((occ) => occ.part.canRemove?.() === "defer"),
+        prepareReplayDrop: () => {
+            if (complete() && !requiresToolArcSkeleton) {
+                for (const occ of occurrences) occ.part.canRemove?.();
+            }
+        },
         canDrop: () => complete() && !occurrences.some((occ) => occ.part.hasUserAnswer?.()),
         requiresToolArcSkeleton,
         // Non-mutating read of the invocation input (the tool_use occurrence

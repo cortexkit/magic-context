@@ -709,6 +709,18 @@ export function applyPendingOperations(
     return didMutateMessage;
 }
 
+/** Plan precisely the authorizations requested by full-drop replay, in replay order. */
+export function prepareFlushedToolRemovals(
+    targets: Map<number, TagTarget>,
+    tags: readonly TagEntry[],
+): void {
+    for (const tag of tags) {
+        if (tag.status !== "dropped" || tag.type !== "tool") continue;
+        if (tag.dropMode != null && tag.dropMode !== "full") continue;
+        targets.get(tag.tagNumber)?.prepareReplayDrop?.();
+    }
+}
+
 export function applyFlushedStatuses(
     sessionId: string,
     db: ContextDatabase,
