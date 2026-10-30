@@ -408,6 +408,35 @@ impl AsyncRecord {
         self.replay_bound_drops(store, codec, &bound)
     }
 
+    /// The runner's key for a carried drop's part. The offline move records
+    /// each target by the host's own part id (OpenCode's `prt_…`), but a tag
+    /// row's `part` is the runner's opaque key for the part, which may be its
+    /// position instead (llm-runner `PartTag`). Rows come in the message's
+    /// part order, so a host id resolves through the held message's parts to
+    /// the row at the same position. A target already named by the runner's
+    /// key is returned as is; `None` when the message or the part isn't held.
+    fn runner_part_key(&self, mid: &str, part: &str) -> Result<Option<String>, HandlerOutcome> {
+        let Some(held) = self
+            .mid_index
+            .get(mid)
+            .and_then(|ordinal| self.entries.get(ordinal))
+        else {
+            return Ok(None);
+        };
+        let entry = held.read()?;
+        if entry.tags.iter().any(|row| row.part == part) {
+            return Ok(Some(part.to_owned()));
+        }
+        let native = parts(&entry.message)?;
+        let Some(index) = native
+            .iter()
+            .position(|value| value.get("id").and_then(Value::as_str) == Some(part))
+        else {
+            return Ok(None);
+        };
+        Ok(entry.tags.get(index).map(|row| row.part.clone()))
+    }
+
     /// Bind the move record's carried drops on the first read, fail closed.
     /// Every target must resolve to a served tagged part with a droppable block
     /// for queued drops; anything else refuses `drop_target_unbound`. Success
@@ -438,7 +467,10 @@ impl AsyncRecord {
         let mut bound = Vec::with_capacity(pending.drops.len());
         let (mut applied, mut queued) = (0, 0);
         for drop in &pending.drops {
-            let Some((tag, digest)) = served.get(&(drop.mid.clone(), drop.part.clone())) else {
+            let part = self
+                .runner_part_key(&drop.mid, &drop.part)?
+                .unwrap_or_else(|| drop.part.clone());
+            let Some((tag, digest)) = served.get(&(drop.mid.clone(), part.clone())) else {
                 return Err(refuse(
                     "drop_target_unbound",
                     format!("drop target {}:{} has no served tag", drop.mid, drop.part),
@@ -446,7 +478,7 @@ impl AsyncRecord {
             };
             match drop.kind {
                 DropKind::Applied => {
-                    self.frozen_edits.insert_drop(&drop.mid, &drop.part, digest);
+                    self.frozen_edits.insert_drop(&drop.mid, &part, digest);
                     applied += 1;
                 }
                 DropKind::Queued => {
@@ -475,9 +507,11 @@ impl AsyncRecord {
                     queued += 1;
                 }
             }
+            // Bound under the runner's key, so later generations replay against
+            // the served rows without resolving host ids again.
             bound.push(BoundDrop {
                 mid: drop.mid.clone(),
-                part: drop.part.clone(),
+                part,
                 digest: digest.clone(),
                 kind: drop.kind,
                 queued_at_ms: drop.queued_at_ms,
