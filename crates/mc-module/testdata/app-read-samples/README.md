@@ -2,9 +2,11 @@
 
 Recorded exchanges for the Alfonso phone (CKIOS) and desktop (CKDESK)
 decoders. Every file was produced by the real ck-mc handlers through the
-real dispatch: a `Direct` bind with no scope is admitted with
+real dispatch. Unary samples use a `Direct` bind with no scope admitted with
 `app_read.allow_direct` on, then the request bytes go through
-`app_read::handle`. Nothing here is hand-written.
+`app_read::handle`. Watch samples use the daemon/provider/consumer subscription
+path through `McHandler`, including management wrapping. Nothing here is
+hand-written.
 
 Each sample is one JSON object with sorted keys:
 
@@ -146,16 +148,80 @@ Remaining session-data samples:
 - `config.embedding_probe/disabled.json`: no embedding is configured, so
   the probe refuses with `embedding_disabled`.
 
-## Live context subscription
+## `context.watch`
 
 `context.watch` uses a held-open subc subscription. Each StreamData payload is a
-cursor-only invalidation, not a unary read response. Management-surface consumers
+cursor-only invalidation, not a unary read response: notices carry session
+references, **no content** (no rows, messages, summaries or token counts). Read
+the affected sessions with the app-read methods to refresh the UI. Management-surface consumers
 unwrap `{"result": <notice>}` just as they do the other phone reads. The cursor's
-fixture epoch is pinned to `abc`; production epochs change with the handler.
+fixture epoch is pinned to `abc`; production epochs change with the handler. The
+fixture drives refreshes explicitly to avoid background observer timing races;
+all requests and served notices/refusals still traverse real dispatch.
 
-- `context.watch/resync.json`: first subscription (or an unresumable cursor),
-  requiring the app to read its watched sessions.
+The first notice is always immediate: without `params.cursor` it is `resync`
+listing all watched sessions. A still-replayable cursor instead produces one
+`changes` notice listing the watched sessions changed since that cursor, possibly
+an empty list if already current. Subsequent notices invalidate changed sessions;
+an observer rescan can also send `resync`. A cursor identifies the hub epoch and
+invalidation version, not a content snapshot or read version. Treat it as opaque
+and retain the last received cursor. Replay requires the same epoch, retained
+history, no intervening resync barrier, and continuous observation of every
+requested session (another subscriber must keep it observed while disconnected).
+An old, unknown or otherwise unresumable cursor is not a refusal: it yields
+`resync`. On **every `resync`, re-read all listed sessions**; do not apply it as a
+content delta. On **`lagged`, reconnect with the last received cursor** and follow
+the new first notice, which can require a re-read.
+
+### Normal end
+
+Cancellation or closure of the hub's notice channel ends forwarding without an
+additional application frame (`HandlerOutcome::Streamed`); an emit failure also
+ends forwarding silently. There is no end-notice JSON sample. The transport can
+signal subscription completion separately. A lagging subscriber instead ends
+with the named `lagged` error frame, not a final notice.
+
+### Recorded cases
+
+- `context.watch/resync.json`: original first subscription, requiring a re-read.
 - `context.watch/changes.json`: a committed historian-progress update invalidates
   the watched session, without embedding rows.
 - `context.watch/refusal.json`: the caller already holds eight watches and receives
   `watch_limit_exceeded` before any notice.
+- `context.watch/first-no-cursor.json`: first notice without a cursor is `resync`.
+- `context.watch/first-valid-cursor.json`: first notice with a replayable older
+  cursor is `changes`, coalescing the changes since that cursor.
+- `context.watch/first-current-cursor.json`: first notice with the current cursor
+  is `changes` with an empty `sessions` list, not silence.
+- `context.watch/first-stale-cursor.json`: a cursor before a resync barrier gets
+  `resync`, even with the current epoch and retained history.
+- `context.watch/first-unknown-cursor.json`: an unknown epoch gets `resync`.
+- `context.watch/management-first-no-cursor.json`: wrapped first `resync` notice.
+- `context.watch/management-changes.json`: wrapped subsequent `changes` notice.
+- `context.watch/refusal-lagged.json`: terminal `lagged`, with the exact message
+  instructing the subscriber to reconnect with the last received cursor.
+- `context.watch/refusal-watch-unavailable.json`: `watch_unavailable` when an open
+  database's original path cannot be observed. The OS error text is recorded on
+  Linux; other platforms may phrase the underlying error differently.
+- `context.watch/refusal-store-unavailable.json`: `store_unavailable` before the
+  serving store is open.
+- `context.watch/refusal-unknown-session.json`: `session_not_found`.
+- `context.watch/refusal-runner-mismatch.json`: `session_runner_mismatch`.
+- `context.watch/refusal-ambiguous-session.json`: `session_ambiguous` when two
+  conversations match the harness/session.
+- `context.watch/refusal-invalid-params.json`: `invalid_params` for a non-array
+  `sessions` value.
+- `context.watch/refusal-empty-sessions.json`: `invalid_params` for no sessions.
+- `context.watch/refusal-too-many-sessions.json`: `invalid_params` above 32 sessions.
+- `context.watch/refusal-duplicate-session.json`: `invalid_params` for duplicates.
+- `context.watch/refusal-unknown-param.json`: `invalid_params` for unknown fields.
+- `context.watch/refusal-invalid-session.json`: `invalid_params` for a bad session
+  reference field.
+- `context.watch/refusal-cursor-type.json`: `cursor_invalid` for a non-string cursor
+  (also used for empty or over-512-byte strings).
+- `context.watch/refusal-cursor-syntax.json`: `cursor_invalid` for malformed
+  `<epoch>:<version>` syntax, distinct from a well-formed but unknown cursor.
+
+Refusals before streaming carry no initial notice. Admission policy and common
+request-envelope limits still apply on both surfaces; management errors are not
+wrapped in `result`.

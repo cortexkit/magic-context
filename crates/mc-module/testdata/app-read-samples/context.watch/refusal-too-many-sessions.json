@@ -1,0 +1,184 @@
+{
+  "name": "sessions are limited to 32 references",
+  "refusal": {
+    "code": "invalid_params",
+    "detail": {
+      "field": "params.sessions",
+      "limit": 32,
+      "reason": "range"
+    },
+    "message": "Parameter params.sessions is invalid (range)."
+  },
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        },
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  }
+}

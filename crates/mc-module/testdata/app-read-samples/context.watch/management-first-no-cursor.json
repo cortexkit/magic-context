@@ -1,0 +1,30 @@
+{
+  "name": "management first notice without cursor is wrapped resync",
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  },
+  "response": {
+    "result": {
+      "cursor": "abc:0",
+      "kind": "resync",
+      "op": "context.watch",
+      "schema": 1,
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  }
+}

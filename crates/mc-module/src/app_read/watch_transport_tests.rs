@@ -41,12 +41,15 @@ impl Drop for Rig {
 }
 impl Rig {
     async fn start() -> Self {
+        Self::start_configured(|_, _| {}).await
+    }
+    async fn start_configured(configure: impl FnOnce(&mut McHandler, &std::path::Path)) -> Self {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
             mc_store::private_permissions::tighten_directory(dir.path(), true).failures,
             0
         );
-        let handler = Arc::new(McHandler::new());
+        let mut handler = McHandler::new();
         handler
             .store
             .set(super::super::tests_support::open_store(dir.path()))
@@ -56,6 +59,8 @@ impl Rig {
             &dir.path().join("context.db"),
             "INSERT INTO session_meta(session_id,harness) VALUES('s','opencode');",
         );
+        configure(&mut handler, dir.path());
+        let handler = Arc::new(handler);
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
@@ -153,6 +158,9 @@ impl Rig {
         .unwrap();
     }
 }
+
+#[path = "watch_samples.rs"]
+pub(super) mod sample_fixtures;
 async fn event(sub: &mut subc_client_rs::Subscription, management: bool) -> Value {
     let bytes = tokio::time::timeout(Duration::from_secs(5), sub.events().recv())
         .await

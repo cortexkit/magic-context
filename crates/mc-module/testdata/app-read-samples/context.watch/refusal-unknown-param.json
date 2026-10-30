@@ -1,0 +1,24 @@
+{
+  "name": "unknown watch parameters are refused",
+  "refusal": {
+    "code": "invalid_params",
+    "detail": {
+      "field": "params.extra",
+      "reason": "unknown"
+    },
+    "message": "Parameter params.extra is invalid (unknown)."
+  },
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "extra": true,
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  }
+}

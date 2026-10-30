@@ -6,8 +6,8 @@
 //! (with `app_read.allow_direct` on, as the local desktop binds), then the
 //! request bytes go through `app_read::handle` exactly as the daemon would
 //! deliver them. The files only record what the handlers served; nothing in
-//! them is hand-written. Watch notices/refusals come from the live subscription
-//! hub; the daemon subscription tests separately check their StreamData framing.
+//! them is hand-written. Watch samples use the real daemon, provider dispatch
+//! and consumer subscription, including management StreamData wrapping.
 //!
 //! Layout: `testdata/app-read-samples/<op>/<case>.json` plus `SHA256SUMS`
 //! (`sha256sum` format, sorted by path) and a `README.md` that lists each
@@ -824,35 +824,30 @@ fn all_records() -> Vec<Record> {
     records.extend(dreamer_records());
     records.extend(health_records());
     records.extend(config_records());
-    for (name, params, result) in super::watch::samples() {
-        let (file, served) = match result {
-            Ok(value) => (
-                if name == "resync" {
-                    "context.watch/resync.json"
-                } else {
-                    "context.watch/changes.json"
-                },
-                Served::Reply(value),
-            ),
+    for sample in super::watch::samples() {
+        let served = match sample.result {
+            Ok(value) => Served::Reply(value),
             Err(HandlerOutcome::ErrorWithDetail {
                 code,
                 message,
                 detail,
-            }) => (
-                "context.watch/refusal.json",
-                Served::Refusal {
-                    code,
-                    message,
-                    detail,
-                },
-            ),
+            }) => Served::Refusal {
+                code,
+                message,
+                detail,
+            },
+            Err(HandlerOutcome::Error { code, message }) => Served::Refusal {
+                code,
+                message,
+                detail: Value::Null,
+            },
             Err(other) => panic!("unexpected watch refusal {other:?}"),
         };
         records.push(Record {
-            name,
-            file,
+            name: sample.name,
+            file: sample.file,
             method: super::watch::METHOD,
-            params,
+            params: sample.params,
             served,
         });
     }

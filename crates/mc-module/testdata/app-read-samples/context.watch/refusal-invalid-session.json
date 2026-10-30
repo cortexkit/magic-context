@@ -1,0 +1,23 @@
+{
+  "name": "session reference fields must be strings",
+  "refusal": {
+    "code": "invalid_params",
+    "detail": {
+      "field": "params.sessions.0.session",
+      "reason": "type"
+    },
+    "message": "Parameter params.sessions.0.session is invalid (type)."
+  },
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": false
+        }
+      ]
+    }
+  }
+}
