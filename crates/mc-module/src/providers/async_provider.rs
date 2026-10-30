@@ -22,6 +22,7 @@ pub(crate) mod offline_first_pass;
 mod pruned_reasoning;
 pub(crate) mod reminder_echoes;
 mod resident;
+mod resync_replay;
 #[cfg(test)]
 mod scaling_tests;
 #[cfg(test)]
@@ -224,6 +225,8 @@ pub(crate) struct AsyncRecord {
     restored_no_new_content: bool,
     #[serde(default)]
     resync_sources: Option<ResyncSources>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    resync_replay_pending: bool,
     #[serde(default)]
     restored_head: Option<RestoredHead>,
     /// Set for a session the offline move brought over from the standalone
@@ -759,6 +762,8 @@ struct ResyncSources {
     head: Option<HistoryHeadSource>,
     #[serde(default)]
     messages: Vec<SourceMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replay: Option<resync_replay::Replay>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -2018,6 +2023,22 @@ impl State {
         self.finish_reset(store)
     }
 
+    fn reset_for_notice(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
+        // A mismatching notice requires rereading the source, not necessarily
+        // discarding the engine's cached serving state. Never reuse a baseline
+        // an earlier structural reset rejected.
+        let replay = if self.resync_sources.is_none() {
+            resync_replay::Replay::capture(self)?
+        } else {
+            None
+        };
+        self.capture_resync_sources(store)?;
+        if let Some(replay) = replay {
+            self.resync_sources.as_mut().expect("resync sources").replay = Some(replay);
+        }
+        self.finish_reset(store)
+    }
+
     fn capture_resync_sources(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
         if self.resync_sources.is_none() {
             let namespace = self.namespace();
@@ -2134,6 +2155,7 @@ impl State {
                 })
             });
             self.resync_sources = Some(ResyncSources {
+                replay: None,
                 namespace,
                 lineage: self.lineage.clone(),
                 from_start: self.lineage_first_ordinal == 0
@@ -2157,6 +2179,7 @@ impl State {
 
     fn finish_reset(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
         self.resync = true;
+        self.resync_replay_pending = false;
         self.partial_read_seq = None;
         // The held entries an offline proof described are gone with the reset.
         self.offline_first_pass = None;
@@ -2874,6 +2897,7 @@ impl McHandler {
             historian_pending: false,
             restored_no_new_content: false,
             resync_sources: None,
+            resync_replay_pending: false,
             restored_head: None,
             standalone_move: standalone_move.map(moved_session::StandaloneMove::from_record),
             full_array_floor: None,
@@ -3294,6 +3318,9 @@ impl McHandler {
         // views never remove the signed reasoning they invalidate.
         let signed = transform::compaction::SignedReasoning::RunnerCompanion;
         let previous_engine = engine.clone();
+        let replay_applied = state
+            .resync_replay_pending
+            .then(|| engine.last_applied.clone());
         #[cfg(test)]
         if self
             .provider_store
@@ -3318,7 +3345,7 @@ impl McHandler {
             .logical_prefix
             .as_ref()
             .and_then(|prefix| prefix.declared_cut_trim());
-        let output = if engine.last_applied.is_none() {
+        let output = if engine.last_applied.is_none() || state.resync_replay_pending {
             transform::compaction::setup_with(store, &template, &context, status, engine, signed)
         } else {
             transform::compaction::step_with(store, &template, &context, status, engine, signed)
@@ -3355,7 +3382,7 @@ impl McHandler {
                     .logical_prefix
                     .as_ref()
                     .and_then(|prefix| prefix.declared_cut_trim());
-                if engine.last_applied.is_none() {
+                if engine.last_applied.is_none() || state.resync_replay_pending {
                     transform::compaction::setup_with(
                         store, &template, &context, status, engine, signed,
                     )
@@ -3368,6 +3395,11 @@ impl McHandler {
             }
             Err(error) => return Err(engine_error(error)),
         };
+        if let Some(applied) = replay_applied {
+            // Reissuing verified bytes is not another Setup and does not
+            // acknowledge the new version on the runner's behalf.
+            engine.last_applied = applied;
+        }
         Ok((template, output))
     }
 }
@@ -4639,7 +4671,7 @@ impl McHandler {
                 state.reminder_echoes.finish_resync();
                 break;
             }
-            state.reset(store)?;
+            state.reset_for_notice(store)?;
             state.save(store, &[])?;
             resynced = true;
             if attempt == 1 {
@@ -4736,7 +4768,8 @@ impl McHandler {
         state.last_pass = None;
         let mut waiting_for_result = false;
         if run_engine {
-            match self.publish_async(0, &mut state, codec, resynced) {
+            let rebuild = resynced && !state.resync_replay_pending;
+            match self.publish_async(0, &mut state, codec, rebuild) {
                 Ok(_) => state.engine_failed = false,
                 // The newest assistant turn ends in a tool call whose result
                 // is not written yet. The runner sends a notice after every
@@ -4763,7 +4796,7 @@ impl McHandler {
             }
         }
         let (decision, why) = match &state.last_pass {
-            Some(pass) if pass.published => (
+            Some(pass) if pass.published && !pass.replayed => (
                 decision_log::Decision::Execute,
                 decision_log::pass_why(pass),
             ),
@@ -5350,6 +5383,7 @@ impl McHandler {
             rebuild: ride,
             pruned_rebuild,
             published: false,
+            replayed: state.resync_replay_pending && !ride && !output.prefix_bust_permitted,
         });
 
         #[cfg(test)]
@@ -5432,7 +5466,7 @@ impl McHandler {
             state.adopt_engine(engine)?;
             return Ok(None);
         };
-        if !ride && !output.prefix_bust_permitted {
+        if !ride && !output.prefix_bust_permitted && !state.resync_replay_pending {
             state.adopt_engine(engine)?;
             return Ok(None);
         }
@@ -5691,6 +5725,7 @@ impl McHandler {
         if let Some(pass) = &mut state.last_pass {
             pass.published = true;
         }
+        state.resync_replay_pending = false;
         Ok(Some(view))
     }
 
@@ -6879,6 +6914,15 @@ impl AsyncRecord {
         let Some(source) = &self.resync_sources else {
             return Ok(());
         };
+        let replay_engine = if let Some(replay) = &source.replay {
+            if source.lineage == self.lineage && replay.matches(self)? {
+                Some(replay.engine.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         // Restoring sources after a resync is rare; it reads every held
         // message once.
         let held = self
@@ -7063,6 +7107,20 @@ impl AsyncRecord {
             });
         if !self.restored_no_new_content {
             self.historian_pending = true;
+        }
+        if let Some(engine) = replay_engine {
+            // A reset still advances the generation, invalidating in-flight
+            // work. Carry only the verified serving state into its new
+            // namespace so verification does not bootstrap a cold engine.
+            let mut served = store.load(&source.namespace).map_err(transient)?;
+            let target = store.load(&namespace).map_err(transient)?;
+            // Historian claims belong to their namespace, not the served bytes.
+            served.meta.historian = target.meta.historian;
+            store
+                .commit(&namespace, target.row_version, &served.core, &served.meta)
+                .map_err(transient)?;
+            self.adopt_engine(engine)?;
+            self.resync_replay_pending = true;
         }
         tracing::info!(session_ref=%self.reference(),history_compartments=retained.len(),copied_chunk_embeddings=copied,transferred_drops=transferred,discarded_drops=self.last_discarded_drops,"async lineage sources revalidated");
         self.resync_sources = None;
