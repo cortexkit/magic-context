@@ -168,3 +168,85 @@ test("OC2 session request tools fold once, draining held drops on the changed re
         await host.stop();
     }
 }, 180_000);
+
+test.each(["normalized_schema", "later_plugin"] as const)(
+    "OC2 tool identity follows final provider bytes: %s",
+    async (scenario) => {
+        const fixture = isolation();
+        const control = join(fixture.root, "change-tools.json");
+        writeFileSync(control, "false");
+        const plugin = join(fixture.root, "tool-byte-review");
+        mkdirSync(plugin);
+        writeFileSync(join(plugin, "server.js"), `
+            import { readFileSync } from "node:fs";
+            export default { id: "tool-byte-review", async setup(context) {
+                await context.session.hook("context", draft => {
+                    const changed = JSON.parse(readFileSync(${JSON.stringify(control)}, "utf8"));
+                    if (${JSON.stringify(scenario)} === "normalized_schema") {
+                        draft.tools.ctx_search.input = changed
+                            ? { type: "object", properties: {} }
+                            : { properties: {} };
+                    } else if (changed) {
+                        delete draft.tools.ctx_search;
+                    }
+                });
+            }};
+        `);
+        writeFileSync(join(fixture.cwd, "ARCHITECTURE.md"), "# Before tool change\n".repeat(20));
+        const host = await spawnOpencode2({
+            existingIsolation: fixture,
+            ...(scenario === "later_plugin" ? { probePlugin: plugin } : { prePlugin: plugin }),
+            providerID: "anthropic",
+            defaultModelID: "claude-sonnet-5-5",
+            modelContextLimit: 200_000,
+            modelOutputLimit: 1024,
+            compactionAuto: false,
+            magicContextConfig: {
+                cache_ttl: "13h", protected_tokens: 4000,
+                historian: { disable: true }, dreamer: { disable: true },
+            },
+        });
+        const db = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+        db.exec("PRAGMA busy_timeout = 10000");
+        try {
+            const client = OpenCode.make({ baseUrl: host.url,
+                headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
+            const session = await client.session.create({ location: { directory: host.cwd },
+                model: { providerID: "anthropic", id: "claude-sonnet-5-5" } });
+            await waitForPluginActive(client, host.cwd);
+            const turn = async (text: string): Promise<Body> => {
+                const before = host.mock.requests().length;
+                await client.session.prompt({ sessionID: session.id, text });
+                await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
+                const requests = host.mock.requests().slice(before).filter(request => request.body.model === "claude-sonnet-5-5");
+                expect(requests).toHaveLength(1);
+                return requests[0]!.body as Body;
+            };
+            await turn("Establish the frozen baseline.");
+            const baseline = await turn("Keep the baseline steady.");
+            const since = readPluginLog(host.env).length;
+            writeFileSync(join(fixture.cwd, "ARCHITECTURE.md"), "# New docs must ride a genuine tool bust\n".repeat(20));
+            writeFileSync(control, "true");
+            const changed = await turn("Observe the tool change.");
+            const folds = readPluginLog(host.env).slice(since).split("\n").filter(line =>
+                line.includes(`[${session.id}]`) && line.includes("m[0] HARD fold decision:") && line.includes("executed=true"));
+            const toolBytesEqual = wire(changed.tools) === wire(baseline.tools);
+            console.log("TOOL_CACHE_EXACTNESS_WITNESS", JSON.stringify({ scenario, toolBytesEqual, folds }));
+            if (scenario === "normalized_schema") {
+                // OpenCode adds the tool schema's missing object root before sending.
+                // Identical provider tools cannot justify serving new ARCHITECTURE.md content.
+                expect(toolBytesEqual).toBe(true);
+                expect(wire(changed.messages)).not.toContain("New docs must ride a genuine tool bust");
+                expect(folds).toHaveLength(0);
+            } else {
+                expect(toolBytesEqual).toBe(false);
+                expect(folds).toHaveLength(1);
+                expect(folds[0]).toContain("reason=tool_definitions");
+                expect(wire(changed.messages)).toContain("New docs must ride a genuine tool bust");
+            }
+        } finally {
+            db.close();
+            await host.stop();
+        }
+    }, 180_000,
+);

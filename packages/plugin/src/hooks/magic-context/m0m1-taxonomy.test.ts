@@ -43,6 +43,7 @@ import {
     injectM0M1,
     type M0HardSignals,
     materializeM0,
+    mustMaterialize,
 } from "./inject-compartments";
 
 const SESSION_ID = "ses_taxonomy";
@@ -139,6 +140,120 @@ afterEach(() => {
 });
 
 describe("m[0]/m[1] materialization taxonomy", () => {
+    it("request identity adoption is one metadata write, not an upgrade-state fold, across defer and restart", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        appendCompartments(db, SESSION_ID, [compartment(0, "A", "Frozen baseline")]);
+        const baseline = pass({ projectDirectory, isCacheBustingPass: true });
+        db.exec(`CREATE TEMP TABLE adoption_writes (identity TEXT);
+            CREATE TEMP TRIGGER count_adoption AFTER UPDATE OF cached_m0_upgrade_state ON session_meta
+            BEGIN INSERT INTO adoption_writes VALUES (NEW.cached_m0_upgrade_state); END`);
+        const hard = { ...BASE_HARD, toolDefinitionsHash: "observed-tools" };
+        const state = getOrCreateSessionMeta(db, SESSION_ID);
+        const before = state.cachedM0UpgradeState;
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+                historyBudgetTokens: 98_000,
+                hardSignals: BASE_HARD,
+            }).value,
+        ).toBe(false);
+        expect(db.query("SELECT COUNT(*) AS n FROM adoption_writes").get()).toEqual({ n: 0 });
+        const decide = () =>
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+                historyBudgetTokens: 98_000,
+                hardSignals: hard,
+            });
+        expect(decide()).toMatchObject({ value: false, reason: null });
+        expect(decide()).toMatchObject({ value: false, reason: null });
+        expect(db.query("SELECT COUNT(*) AS n FROM adoption_writes").get()).toEqual({ n: 1 });
+        expect(withCachedM0ToolDefinitionsHash(state.cachedM0UpgradeState, null)).toBe(before);
+        const replay = pass({ projectDirectory, isCacheBustingPass: false, hard });
+        expect(replay.reason).toBeNull();
+        expect([replay.m0, replay.m1]).toEqual([baseline.m0, baseline.m1]);
+        clearInjectionCache(SESSION_ID);
+        expect(pass({ projectDirectory, isCacheBustingPass: false, hard }).rematerialized).toBe(
+            false,
+        );
+        expect(db.query("SELECT COUNT(*) AS n FROM adoption_writes").get()).toEqual({ n: 1 });
+    });
+
+    it("stale adoption cannot overwrite a concurrently folded tool identity", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        appendCompartments(db, SESSION_ID, [compartment(0, "A", "Frozen baseline")]);
+        pass({ projectDirectory, isCacheBustingPass: true });
+        const stale = getOrCreateSessionMeta(db, SESSION_ID);
+        appendCompartments(db, SESSION_ID, [compartment(1, "B", "Concurrent fold")]);
+        const hard = { ...BASE_HARD, toolDefinitionsHash: "concurrent-tools" };
+        pass({ projectDirectory, isCacheBustingPass: false, hard });
+        const committed = getOrCreateSessionMeta(db, SESSION_ID);
+        const decision = mustMaterialize({
+            db,
+            sessionId: SESSION_ID,
+            state: stale,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            historyBudgetTokens: 98_000,
+            hardSignals: { ...BASE_HARD, toolDefinitionsHash: "stale-tools" },
+        });
+        expect(decision.value).toBe(false);
+        const after = getOrCreateSessionMeta(db, SESSION_ID);
+        expect(after.cachedM0UpgradeState).toBe(committed.cachedM0UpgradeState);
+        expect(after.cachedM0Bytes).toEqual(committed.cachedM0Bytes);
+        expect(after.cachedM0MaterializedAt).toBe(committed.cachedM0MaterializedAt);
+        expect(readCachedM0ToolDefinitionsHash(stale.cachedM0UpgradeState)).toBeNull();
+        expect(pass({ projectDirectory, isCacheBustingPass: false, hard }).rematerialized).toBe(
+            false,
+        );
+    });
+
+    it("cached-row recovery retains the tool component for the following restart pass", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        appendCompartments(db, SESSION_ID, [compartment(0, "A", "Frozen baseline")]);
+        pass({ projectDirectory, isCacheBustingPass: true });
+        const state = getOrCreateSessionMeta(db, SESSION_ID);
+        const identity = withCachedM0ToolDefinitionsHash(
+            state.cachedM0UpgradeState,
+            "sibling-tools",
+        );
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            historyBudgetTokens: 98_000,
+            hardSignals: BASE_HARD,
+            isCacheBustingPass: true,
+            beforeCacheCommitForTest: () => {
+                db.prepare(
+                    "UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?",
+                ).run(identity, SESSION_ID);
+            },
+        });
+        expect(result.m0RematerializedThisPass).toBe(false);
+        expect(readCachedM0ToolDefinitionsHash(state.cachedM0UpgradeState)).toBe("sibling-tools");
+        clearInjectionCache(SESSION_ID);
+        expect(
+            pass({
+                projectDirectory,
+                isCacheBustingPass: false,
+                hard: { ...BASE_HARD, toolDefinitionsHash: "sibling-tools" },
+            }).rematerialized,
+        ).toBe(false);
+    });
+
     it("session request definitions adopt an upgraded baseline silently, then fold exactly once per real change", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();
