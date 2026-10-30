@@ -10,6 +10,7 @@ import {
 } from "../../features/magic-context/storage-meta";
 import { clearSessionRenderCache } from "../../features/magic-context/storage-session-cache";
 import {
+    getSessionToolDefinitionTokens,
     recordToolDefinition,
     recordToolDefinitionSet,
 } from "../../features/magic-context/tool-definition-tokens";
@@ -19,13 +20,62 @@ import * as decayRender from "./decay-render";
 import {
     HOST_BREAKDOWN_KEY,
     HostTokenMeasurementCache,
-    persistHostTokenBreakdown,
-    scheduleHostTokenBreakdown,
+    persistHostTokenBreakdown as persistAttribution,
+    scheduleHostTokenBreakdown as scheduleAttribution,
 } from "./host-token-breakdown";
 import { computeM0BlockTokens } from "./m0-token-breakdown";
 import * as tokenCount from "./token-count-exact";
+import { calibrateBuckets } from "./tokenizer-calibration";
 
 export const drainHostBreakdown = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+// Neutral calibration keeps these tolerance/cache fixtures independent of model catalogs.
+function testPass(
+    session: string,
+    pass: {
+        measuredAt: number;
+        prefixChanged: boolean;
+        conversationTokens: number;
+        toolCallTokens: number;
+        toolDefinitionTokens?: number;
+    },
+) {
+    return {
+        ...pass,
+        projectIdentity: undefined,
+        readAttribution: (blocks: ReturnType<typeof computeM0BlockTokens>) => {
+            const tools = pass.toolDefinitionTokens ?? getSessionToolDefinitionTokens(session) ?? 0;
+            const injected =
+                blocks.docsTokens +
+                blocks.profileTokens +
+                blocks.memoryTokens +
+                blocks.compartmentTokens;
+            return calibrateBuckets({
+                inputTokens: pass.conversationTokens + pass.toolCallTokens + tools,
+                systemLocal: 0,
+                toolDefsLocal: tools,
+                compartmentsLocal: blocks.compartmentTokens,
+                factsLocal: blocks.factTokens,
+                memoriesLocal: blocks.memoryTokens,
+                docsLocal: blocks.docsTokens,
+                profileLocal: blocks.profileTokens,
+                conversationLocal: Math.max(0, pass.conversationTokens - injected),
+                toolCallsLocal: pass.toolCallTokens,
+                calibration: { systemRatio: 1, toolsRatio: 1, proseRatio: 1 },
+            });
+        },
+    };
+}
+const persistHostTokenBreakdown = (
+    db: Database,
+    session: string,
+    pass: Parameters<typeof testPass>[1],
+) => persistAttribution(db, session, testPass(session, pass));
+const scheduleHostTokenBreakdown = (
+    db: Database,
+    session: string,
+    pass: Parameters<typeof testPass>[1],
+) => scheduleAttribution(db, session, testPass(session, pass));
 
 test("host token measurements leave tokenizer loading to the prompt preload", () => {
     const breakdownUrl = new URL("./host-token-breakdown.ts", import.meta.url).href;
@@ -110,18 +160,16 @@ test("prefix attribution reads once per fold or delta refresh, never on a memoiz
         reads = 0;
         extract.mockClear();
     };
+    let hasDelta = false;
     const expectOneDerivation = () => {
         expect(reads).toBe(1);
-        // Four m[0] slices and the m[1] history delta: exactly one extraction per slice.
-        expect(extract).toHaveBeenCalledTimes(5);
-        for (const tag of [
-            "project-docs",
-            "user-profile",
-            "project-memory",
-            "session-history",
-            "new-compartments",
-        ])
+        // The shared sidebar helper only extracts a history delta when m[1] exists.
+        expect(extract).toHaveBeenCalledTimes(hasDelta ? 5 : 4);
+        for (const tag of ["project-docs", "user-profile", "project-memory", "session-history"])
             expect(extract.mock.calls.filter(([, actual]) => actual === tag)).toHaveLength(1);
+        expect(extract.mock.calls.filter(([, tag]) => tag === "new-compartments")).toHaveLength(
+            hasDelta ? 1 : 0,
+        );
     };
     try {
         expect(run()).toBe(true);
@@ -154,6 +202,7 @@ test("prefix attribution reads once per fold or delta refresh, never on a memoiz
                 `<new-compartments>${"new history ".repeat(1000)}</new-compartments>`,
             ),
         });
+        hasDelta = true;
         reset();
         expect(run(true)).toBe(true);
         expectOneDerivation();
@@ -183,6 +232,7 @@ test("prefix attribution reads once per fold or delta refresh, never on a memoiz
 
         scheduleHostTokenBreakdown(db, session, { ...pass, measuredAt: clock++ });
         clearSessionRenderCache(db, session);
+        hasDelta = false;
         reset();
         await drainHostBreakdown();
         expect(reads).toBe(0);
@@ -301,7 +351,7 @@ describe("host pass token breakdown", () => {
         });
     }
 
-    test("one percent can trigger before 500 tokens and missing measurements remain null", () => {
+    test("one percent can trigger before 500 tokens and unmeasured tools match the sidebar's zero", () => {
         const db = new Database(":memory:");
         initializeDatabase(db);
         getOrCreateSessionMeta(db, "small");
@@ -332,7 +382,7 @@ describe("host pass token breakdown", () => {
                     "SELECT value FROM session_render_cache WHERE session_id='small' AND cache_key=?",
                 )
                 .get(HOST_BREAKDOWN_KEY) as { value: string };
-            expect(JSON.parse(row.value).parts.tool_definitions).toBeNull();
+            expect(JSON.parse(row.value).parts.tool_definitions).toBe(0);
             expect(persistHostTokenBreakdown(db, "small", { ...pass, measuredAt: 2 })).toBe(false);
         } finally {
             db.close();

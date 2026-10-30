@@ -221,10 +221,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/execute-reclaim";
 import { foldExecutesThisPass } from "@magic-context/core/hooks/magic-context/fold-execution-gate";
 import { isHistorianDrainBudgetSpent } from "@magic-context/core/hooks/magic-context/historian-drain-gate";
-import {
-	type HostTokenPass,
-	scheduleHostTokenBreakdown,
-} from "@magic-context/core/hooks/magic-context/host-token-breakdown";
+import { scheduleHostTokenBreakdown } from "@magic-context/core/hooks/magic-context/host-token-breakdown";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import {
 	hasActiveAnthropicThinkingTurn,
@@ -370,7 +367,7 @@ import {
 	repairPiHistoryBoundary,
 } from "./history-boundary-repair-pi";
 import { readHostSystemPrompt } from "./host-system-prompt";
-import { hostToolSchemaBytes } from "./host-token-breakdown";
+import { readPiTokenAttribution } from "./host-token-breakdown";
 import {
 	clearM0M1PiCache,
 	clearPiInjectionTokenCountCache,
@@ -7129,9 +7126,22 @@ export function registerPiContextHandler(
 				scheduleHostTokenBreakdown(options.db, sessionId, {
 					...result.hostTokenPass,
 					measuredAt: Date.now(),
-					readToolSchemas: pi.getAllTools
-						? () => hostToolSchemaBytes(pi.getAllTools())
-						: undefined,
+					projectIdentity: servedProjectIdentity || undefined,
+					injectionBudgetTokens: options.injection?.injectionBudgetTokens,
+					memoryBlockCount: sessionMeta.memoryBlockCount ?? 0,
+					readAttribution: (blocks) =>
+						readPiTokenAttribution(
+							pi,
+							ctx,
+							sessionMeta,
+							{
+								sessionId,
+								providerInputLimit,
+								usableContextLimit: usageContextLimit,
+							},
+							result.hostTokenPass!.toolCallTokens,
+							blocks,
+						),
 				});
 			return { messages: outputMessages } as {
 				messages: typeof event.messages;
@@ -8646,10 +8656,11 @@ interface PiChannelBaselineSnapshot {
 }
 
 interface RunPipelineResult {
-	hostTokenPass?: Pick<
-		HostTokenPass,
-		"conversationTokens" | "toolCallTokens" | "prefixChanged"
-	>;
+	hostTokenPass?: {
+		conversationTokens: number;
+		toolCallTokens: number;
+		prefixChanged: boolean;
+	};
 	prefixPass?: PiPrefixPass;
 	prefixStableIds?: ReadonlyMap<object, string>;
 	recoveryNormalized?: boolean;

@@ -544,13 +544,13 @@ fn unmanaged_breakdown() -> Value {
     })
 }
 
-// Version 1 writers compare every served pass against these saved counts. The
+// Host writers compare every served pass against these saved counts. The
 // timestamp is a measurement time, not the provider response's completion time.
 // Timestamp-only or older payloads cannot promise the threshold comparison.
-fn host_pass_breakdown(
+pub(super) fn host_pass_breakdown_text(
     conn: &rusqlite::Connection,
     session: &str,
-) -> rusqlite::Result<Option<Value>> {
+) -> rusqlite::Result<Option<String>> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_render_cache')",
         [],
@@ -559,11 +559,18 @@ fn host_pass_breakdown(
     if !exists {
         return Ok(None);
     }
-    let Some(text) = render_cache(conn, session, "host_token_breakdown")? else {
+    render_cache(conn, session, "host_token_breakdown")
+}
+
+fn host_pass_breakdown(
+    conn: &rusqlite::Connection,
+    session: &str,
+) -> rusqlite::Result<Option<Value>> {
+    let Some(text) = host_pass_breakdown_text(conn, session)? else {
         return Ok(None);
     };
     Ok(serde_json::from_str::<Value>(&text).ok().filter(|value| {
-        value["version"] == 1
+        matches!(value["version"].as_i64(), Some(1 | 2))
             && value["measured_at"].as_i64().is_some_and(|time| time > 0)
             && value["parts"].as_object().is_some_and(|parts| {
                 parts.values().all(|tokens| {
@@ -597,8 +604,11 @@ fn managed_breakdown(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutco
             return Ok(None);
         };
         let limit = column_i64(conn, &session_id, "last_usage_context_limit")?;
-        let system_tokens = column_i64(conn, &session_id, "system_prompt_tokens")?;
+        let host_pass = host_pass_breakdown(conn, &session_id)?;
+        let current_host = host_pass.as_ref().is_some_and(|host| host["version"] == 2);
+        let system_tokens = if current_host { None } else { column_i64(conn, &session_id, "system_prompt_tokens")? };
         let overflow_limit = column_i64(conn, &session_id, "detected_context_limit")?;
+        let (history_tokens, memory) = if current_host { (0, 0) } else {
         let summary_bytes: i64 = conn.query_row(
             "SELECT COALESCE(SUM(LENGTH(CAST(title AS BLOB)) + LENGTH(CAST(content AS BLOB)) + 24), 0) FROM compartments WHERE session_id = ?1",
             [&session_id],
@@ -611,7 +621,8 @@ fn managed_breakdown(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutco
             None => (summary_bytes + 3) / 4,
         };
         let memory = render_cache(conn, &session_id, "memory_block_cache")?.map(|text| text.len().div_ceil(4) as i64).unwrap_or(0);
-        let host_pass = host_pass_breakdown(conn, &session_id)?;
+        (history_tokens, memory)
+        };
         let step_ref: Option<String> = conn.query_row(
             "SELECT message_id FROM transform_decisions WHERE session_id = ?1 AND harness = ?2 AND ts_ms = ?3 ORDER BY message_id LIMIT 1",
             params![session_id, session.harness, at_ms], |row| row.get(0),
@@ -643,6 +654,7 @@ fn managed_breakdown(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutco
         host_pass,
     ) = row;
     let provider = last_input.filter(|value| *value > 0);
+    let current_host = host_pass.as_ref().is_some_and(|host| host["version"] == 2);
     let mut parts = json!([
         {"part": "system_prompt", "tokens": system_tokens, "estimate": system_tokens.is_none()},
         {"part": "tool_definitions", "tokens": null, "estimate": true},
@@ -657,19 +669,24 @@ fn managed_breakdown(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutco
     if let Some(host) = &host_pass {
         for part in parts.as_array_mut().expect("parts array") {
             let key = part["part"].as_str().expect("part name");
-            if !matches!(
-                key,
-                "tool_definitions"
-                    | "project_docs"
-                    | "user_profile"
-                    | "history_raw"
-                    | "tool_calls_results"
-                    | "last_user_message"
-            ) {
+            if !current_host
+                && !matches!(
+                    key,
+                    "tool_definitions"
+                        | "project_docs"
+                        | "user_profile"
+                        | "history_raw"
+                        | "tool_calls_results"
+                        | "last_user_message"
+                )
+            {
                 continue;
             }
             if let Some(tokens) = host["parts"][key].as_i64() {
                 part["tokens"] = json!(tokens);
+                part["estimation_source"] = json!("host_pass");
+            } else if current_host {
+                part["tokens"] = Value::Null;
                 part["estimation_source"] = json!("host_pass");
             } else if part["tokens"].is_null() {
                 part["estimation_source"] = json!("legacy_estimate");
@@ -686,7 +703,13 @@ fn managed_breakdown(ctx: &AppReadContext, session: &SessionRef) -> HandlerOutco
         Some(tokens) => (Some(tokens), Some("provider")),
         None => (Some(estimated), Some("estimate")),
     };
-    let unattributed = total_tokens.map(|total| total.saturating_sub(estimated).max(0));
+    let unattributed = total_tokens.map(|total| {
+        if current_host {
+            total - estimated
+        } else {
+            total.saturating_sub(estimated).max(0)
+        }
+    });
     let window = if limit.unwrap_or(0) > 0 {
         json!({"tokens": limit, "source": "usage"})
     } else if overflow_limit.unwrap_or(0) > 0 {
@@ -1285,6 +1308,42 @@ mod tests {
         assert_eq!(over["row"]["estimation_source"], "host_pass");
         assert_eq!(over["row"]["total"]["tokens"], 10);
         assert_eq!(over["row"]["unattributed"], 0);
+    }
+
+    #[test]
+    fn token_breakdown_current_attribution_is_served_without_local_estimates_or_residual_clamping()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, db) = ctx(dir.path());
+        saved_host_breakdown(&ctx, &db, 2);
+        apply_sql(&db, "UPDATE session_meta SET system_prompt_tokens=9000 WHERE session_id='ses';
+            UPDATE session_render_cache SET value=json_set(value, '$.parts.system_prompt',50,'$.parts.memory',25,'$.parts.history_summaries',50) WHERE cache_key='host_token_breakdown';
+            INSERT INTO session_render_cache VALUES('ses','cached_m0_bytes','<session-history>Do not estimate this history</session-history>');
+            INSERT INTO session_render_cache VALUES('ses','memory_block_cache','Do not estimate this memory');");
+        let read_row = || {
+            response(&read(
+                &caller(),
+                &ctx,
+                json!({"session":session(),"section":"token_breakdown"})
+                    .as_object()
+                    .unwrap(),
+            ))["row"]
+                .clone()
+        };
+        let row = read_row();
+        let expected = [50, 100, 25, 50, 25, 50, 400, 300, 0];
+        let parts = row["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), expected.len());
+        for (part, tokens) in parts.iter().zip(expected) {
+            assert_eq!(part["tokens"], tokens, "{part}");
+            assert_eq!(part["estimation_source"], "host_pass");
+        }
+        assert_eq!(row["unattributed"], 0);
+        apply_sql(
+            &db,
+            "UPDATE session_meta SET last_input_tokens=900 WHERE session_id='ses';",
+        );
+        assert_eq!(read_row()["unattributed"], -100);
     }
 
     #[test]

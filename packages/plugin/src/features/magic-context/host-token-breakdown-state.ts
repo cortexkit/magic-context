@@ -1,15 +1,9 @@
 import type { HostTokenBreakdown } from "../../hooks/magic-context/host-token-breakdown";
+import type { M0BlockTokens } from "../../hooks/magic-context/m0-token-breakdown";
 import type { Database } from "../../shared/sqlite";
 
-export interface HostTokenBlockCounts {
-    docs: number;
-    profile: number;
-    memory: number;
-    history: number;
-}
-
 interface HostTokenBreakdownMemo {
-    blocks?: HostTokenBlockCounts;
+    blocks?: M0BlockTokens;
     previous?: HostTokenBreakdown;
     prefixDirty: boolean;
     pending?: ReturnType<typeof setTimeout>;

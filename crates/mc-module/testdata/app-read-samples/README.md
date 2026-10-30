@@ -103,6 +103,9 @@ collection, not a new role or envelope schema version.
   the legacy estimate stands in (`estimation_source: "legacy_estimate"`).
 - `session_data.read/token-breakdown-host-pass.json`: standalone pass counts
   maintained by the host plugin, with provider usage still supplying `total`.
+- `session_data.read/token-breakdown-calibrated.json`: version-2 attribution
+  shared with the OpenCode sidebar, summing to the provider's 448,000 input
+  tokens with zero `unattributed`. Existing sample exchanges are unchanged.
 
 ### Token-breakdown response fields
 
@@ -115,20 +118,23 @@ causes one replacement of the compact latest value, never a per-pass row.
 Unchanged counts do not refresh `measured_at`. Counts may therefore remain useful
 long after that timestamp; they are approximate, not a claim of same-response
 measurement. The stored `session_render_cache` value at cache key
-`host_token_breakdown` must have `version: 1`; missing or unsupported stored
-versions fall back to the legacy response. This stamp is internal storage
+`host_token_breakdown` uses `version: 2` for the complete display attribution.
+Version 1 retains its original partial-attribution behavior; missing or unsupported
+stored versions fall back to the legacy response. This stamp is internal storage
 metadata, not an extra wire-schema version. Plugin-disabled sessions cannot
 advance these saved estimates.
 
 The row's `estimation_source: "host_pass"` means host attribution is available.
 Each newly attributed part also has `estimation_source: "host_pass"`; an
-unmeasured part stays null with `estimation_source: "legacy_estimate"`. Older
+unmeasured version-1 part stays null with `estimation_source: "legacy_estimate"`. Older
 rows without a usable payload retain their previous shape exactly. All part
 counts remain estimates, not provider-reported per-part usage. The host reuses
 the existing conversation total, including the last user message:
 `last_user_message_in_history_raw: true` explains why `last_user_message` is 0
 and that message is included in `history_raw`, not counted twice. `unattributed`
-is `max(0, total.tokens - sum(non-null part tokens))`.
+is `total.tokens - sum(non-null part tokens)` for version 2, without clamping:
+the saved buckets already include system, tools, memory and history attribution.
+Legacy responses retain `max(0, total.tokens - sum(non-null part tokens))`.
 
 Remaining session-data samples:
 - `session_data.read/token-breakdown-unmanaged.json`: an unmanaged session

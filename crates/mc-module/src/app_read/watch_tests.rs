@@ -134,6 +134,31 @@ fn slow_check_interval_is_bounded_by_measured_cost() {
 }
 
 #[tokio::test]
+async fn host_breakdown_changes_wake_once_and_identical_rewrites_are_silent() {
+    let (dir, ctx, hub) = setup();
+    let mut sub = hub
+        .subscribe("direct".into(), (1, 1), request(None), &ctx)
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(next(&mut sub).await["kind"], "resync");
+    let db = dir.path().join("context.db");
+    let sql = "CREATE TABLE IF NOT EXISTS session_render_cache(session_id TEXT, cache_key TEXT, value BLOB, PRIMARY KEY(session_id,cache_key)) WITHOUT ROWID;
+        INSERT OR REPLACE INTO session_render_cache VALUES('s','host_token_breakdown','{\"version\":2,\"measured_at\":100,\"parts\":{\"system_prompt\":10}}');";
+    apply_sql(&db, sql);
+    let store = Arc::clone(ctx.store.as_ref().unwrap());
+    // Exercise one FAST refresh, without waiting for the slow payload scanner.
+    hub.refresh(Arc::clone(&store));
+    let notice = sub
+        .rx
+        .try_recv()
+        .expect("one wake publishes the saved breakdown");
+    assert_eq!(notice["kind"], "changes");
+    assert_eq!(notice["sessions"], json!([session()]));
+    apply_sql(&db, sql);
+    hub.refresh(store);
+    assert!(sub.rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn burst_coalesces_and_unrelated_commits_are_silent() {
     let (dir, ctx, hub) = setup();
     let mut sub = hub

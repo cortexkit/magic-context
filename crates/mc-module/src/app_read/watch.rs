@@ -386,7 +386,7 @@ fn read_snapshots<'a>(
                 Err(error) => return Ok(Err(error)),
             };
             let version = super::version::session_version(context, store, &target, super::version::VersionRequest::States(&[]))?;
-            let (meta, response, ttl) = match &target.source {
+            let (mut meta, response, ttl) = match &target.source {
                 locator::SessionSource::Standalone => context.query_row(super::session_data::META_SQL, [&session.session], |r| {
                     let values: Vec<_> = (0..r.as_ref().column_count()).map(|i| r.get_ref(i).map(|v| format!("{v:?}"))).collect::<rusqlite::Result<_>>()?;
                     Ok((values.join("\0"), r.get::<_, Option<i64>>(1)?, r.get::<_, Option<String>>(2)?))
@@ -397,6 +397,13 @@ fn read_snapshots<'a>(
                     (format!("{meta}\0{policy}"), response, ttl)
                 }
             };
+            if matches!(target.source, locator::SessionSource::Standalone) {
+                // Breakdown writes are thresholded independently of session_meta usage updates.
+                meta.push('\0');
+                if let Some(breakdown) = super::session_data::host_pass_breakdown_text(context, &session.session)? {
+                    meta.push_str(&breakdown);
+                }
+            }
             let expiry = response.filter(|v| *v > 0).zip(ttl.as_deref().and_then(|s| crate::scheduler::parse_cache_ttl(s).ok()))
                 .and_then(|(at, ttl)| i64::try_from(ttl).ok().and_then(|ttl| at.checked_add(ttl)?.checked_add(1)));
             let expired = expiry.is_some_and(|at| at <= ctx.now_ms());

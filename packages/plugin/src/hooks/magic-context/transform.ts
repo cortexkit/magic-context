@@ -663,6 +663,7 @@ export interface TransformDeps {
     historianTwoPass?: boolean;
     historianExpandTools?: Record<string, string | false>;
     liveModelBySession?: LiveModelBySession;
+    agentBySession?: Map<string, string>;
     /**
      * Process-scoped cache of resolved session.directory values. When provided,
      * we look up here before hitting OpenCode's API and populate after a
@@ -4138,8 +4139,28 @@ export function createTransform(deps: TransformDeps) {
             scheduleHostTokenBreakdown(db, sessionId, {
                 measuredAt: Date.now(),
                 prefixChanged: postTransformResult.prefixChanged,
-                conversationTokens,
-                toolCallTokens,
+                projectIdentity: passProjectIdentity,
+                injectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
+                memoryBlockCount: sessionMeta.memoryBlockCount ?? 0,
+                readAttribution: (blocks) =>
+                    buildOpenCodeTokenAttribution(
+                        db,
+                        sessionId,
+                        {
+                            last_input_tokens: sessionMeta.lastInputTokens,
+                            system_prompt_tokens: sessionMeta.systemPromptTokens,
+                            conversation_tokens: conversationTokens,
+                            tool_call_tokens: toolCallTokens,
+                        },
+                        { projectIdentity: passProjectIdentity },
+                        deps.liveModelBySession && deps.agentBySession
+                            ? {
+                                  liveModelBySession: deps.liveModelBySession,
+                                  agentBySession: deps.agentBySession,
+                              }
+                            : undefined,
+                        blocks,
+                    ).buckets,
             });
         passReturned = true;
     };
@@ -4154,6 +4175,7 @@ export { resolveHistoryBudgetTokens } from "./render-options";
 import { protectedToolTokenCount } from "../../features/magic-context/reclaim-protection";
 import { resolveDecisionCalibration } from "./decision-calibration";
 import { scheduleHostTokenBreakdown } from "./host-token-breakdown";
+import { buildOpenCodeTokenAttribution } from "./session-token-attribution";
 import {
     beginSystemDateRequest,
     bindSystemDateRequest,

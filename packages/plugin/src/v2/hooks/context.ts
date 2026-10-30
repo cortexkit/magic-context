@@ -1843,6 +1843,7 @@ export async function registerContext(context: V2Context) {
             protectedTokens: config.protected_tokens,
             protectedTokenTierOverrides: getProtectedTokensTierOverrides(config),
             liveModelBySession: liveModels,
+            agentBySession: agents,
             getToolSetHash: (sessionId) => {
                 const model = liveModels.get(sessionId);
                 if (!model) return "";
