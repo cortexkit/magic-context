@@ -9,6 +9,7 @@ import {
 	commitTurnOnePublication,
 } from "@magic-context/core/features/magic-context/memory/turn-one-publication";
 import { runTurnTwo } from "@magic-context/core/features/magic-context/memory/turn-two";
+import { authorizationFixture } from "@magic-context/core/features/magic-context/memory/turn-two-test-fixtures.test";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestDb } from "./test-utils.test";
 
@@ -16,16 +17,31 @@ const projectPath = resolveProjectIdentity(process.cwd());
 if (!projectPath)
 	throw new Error("Turn-two fixtures require a project identity");
 
+const authorization = authorizationFixture(
+	{
+		lane: "pi",
+		carrier: "pi-historian-rpc",
+		provider: "test",
+		modelId: "review-model",
+		variant: null,
+		temperature: null,
+		thinkingLevel: null,
+	},
+	"historian system",
+	[],
+);
+
 function publication(db: ReturnType<typeof createTestDb>) {
 	const send = allocateTurnOneSend(db, {
 		projectPath,
 		sessionId: "ses-review",
 		harness: "pi",
-		carrier: "pi-review",
+		carrier: "pi-historian-rpc",
 		lane: "enabled",
 		chunkStart: 1,
 		chunkEnd: 2,
 	});
+	authorization.persist(db, send.stageKey);
 	db.transaction(() =>
 		commitTurnOnePublication(db, {
 			send,
@@ -75,15 +91,25 @@ for (const action of ["retire", "promote_rule"] as const) {
 				lane: "enabled",
 				carrier: {
 					harness: "pi",
-					carrier: "pi-review",
+					carrier: "pi-historian-rpc",
 					enforcedJson: true,
 					childSessionId: `review-${action}`,
 					send: async () => ({
 						text: JSON.stringify({
-							decisions: [{ fact_id: 1, action, target_id: memory.id }],
+							result: {
+								step: "turn_two",
+								decisions: [
+									{
+										fact_id: 1,
+										check: "Audit fixture.",
+										action,
+										target_id: memory.id,
+									},
+								],
+							},
 						}),
 						lengthCapped: false,
-						profile: null,
+						profile: authorization.profile,
 						usage: null,
 					}),
 					check: async () => {
@@ -92,7 +118,7 @@ for (const action of ["retire", "promote_rule"] as const) {
 				},
 				memoryEnabled: true,
 				autoPromote: true,
-				validatedProfiles: [],
+				validatedProfiles: authorization.rows,
 				log: (line) => logs.push(line),
 			});
 			expect(getMemoryById(db, memory.id)?.status).toBe("active");

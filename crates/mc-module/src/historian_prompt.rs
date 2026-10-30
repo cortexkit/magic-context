@@ -99,6 +99,15 @@ pub struct ReferenceBlocks {
 pub use crate::persona_host::LanguageOptions as ContentLanguageDirectiveOptions;
 /// Role-scoped system guidance has one live source in the embedded persona.
 pub use crate::persona_host::HISTORIAN_SYSTEM_PROMPT;
+pub const HISTORIAN_COMBINED_SYSTEM_PROMPT: &str =
+    include_str!("../testdata/historian-two-pass-system-prompt.txt");
+pub fn historian_system_prompt(turn_two_enabled: bool) -> &'static str {
+    if turn_two_enabled {
+        HISTORIAN_COMBINED_SYSTEM_PROMPT
+    } else {
+        HISTORIAN_SYSTEM_PROMPT
+    }
+}
 
 /// Build the content-language instruction used by hidden prose-producing agents.
 ///

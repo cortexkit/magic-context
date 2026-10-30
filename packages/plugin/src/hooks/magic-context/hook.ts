@@ -315,6 +315,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             timeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
             toastDurationMs: config.toast_duration_ms,
             twoPass: config.historian?.two_pass === true,
+            turnTwo: config.historian?.turn_two ?? "on",
             expandTools: config.historian?.expand_tools,
             autoPromote: config.memory?.auto_promote ?? true,
             userMemoriesEnabled: userObservationCollectionEnabled(config.dreamer),
@@ -327,6 +328,11 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     };
     const bootHistorian = sampleHistorian();
     const getHistorianChunkTokens = (): number => sampleHistorian().chunkTokens;
+    // `sampleHistorian` reads the live config through `sampleHistorianConfig`,
+    // which production wires to the live config reader polled on each call. So
+    // asking it again late in a run answers with whatever the file says now,
+    // while the start-time value stays the snapshot the run began with.
+    const historianTurnTwoIsEnabled = (): boolean => sampleHistorian().turnTwo !== "off";
 
     // Three independent cache-busting signal sets, sourced from the
     // process-scoped LiveSessionState so RPC handlers (TUI recomp) can
@@ -493,6 +499,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 return model ? `${model.providerID}/${model.modelID}` : undefined;
             })(),
             historianTwoPass: historianRun.twoPass,
+            historianTurnTwo: historianRun.turnTwo,
+            historianTurnTwoIsEnabled,
             historianExpandTools: historianRun.expandTools,
             // Option C privacy gate: behavioral observation candidates are collected
             // during historian runs only when the user has SCHEDULED the
@@ -693,6 +701,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         experimentalTemporalAwareness: deps.config.temporal_awareness === true,
         muralEnabled: deps.config.mural?.enabled === true,
         historianTwoPass: deps.config.historian?.two_pass === true,
+        historianTurnTwo: deps.config.historian?.turn_two ?? "on",
+        historianTurnTwoIsEnabled,
         historianExpandTools: deps.config.historian?.expand_tools,
         historianRunner: deps.config.historian?.runner,
         historianHostRunnerEnabled: deps.config.historian?.host_runner?.enabled,
@@ -818,6 +828,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                     openOpenCodeDb,
                 }),
             userMemoryCollectionEnabled: userMemoryCollectionEnabled(dreaming),
+            memoryInjectionBudgetTokens: deps.config.memory?.injection_budget_tokens,
             language: deps.config.language,
             retinaHandoff: deps.config.smart_notes?.retina_handoff === true,
             smartNotesEnabled: deps.config.smart_notes?.enabled,

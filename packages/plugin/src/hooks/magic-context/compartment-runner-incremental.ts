@@ -27,10 +27,19 @@ import {
     blocksSentToHistorian,
     commitTurnOnePublication,
     publishedFacts,
-    resolveTurnOneLane,
+    readTurnOneFailureCount,
+    recordTurnOneCounter,
+    selectTurnOneExecution,
+    sweepDormantTurnTwo,
     type TurnOneFact,
     type TurnOneSend,
+    turnOneCounterKey,
+    turnOneProfileAuthorized,
 } from "../../features/magic-context/memory/turn-one-publication";
+import {
+    freezeTurnOneProfile,
+    persistTurnOneAuthorization,
+} from "../../features/magic-context/memory/turn-two";
 import {
     clearEmergencyDrainLatch,
     clearEmergencyRecovery,
@@ -74,12 +83,15 @@ import { toModelEntry } from "../../shared/resolve-fallbacks";
 import { beginSqliteWriterAsync, isTransientSqliteError } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
-import { buildCompartmentAgentPrompt, COMPARTMENT_AGENT_SYSTEM_PROMPT } from "./compartment-prompt";
+import { buildCompartmentAgentPrompt, historianSystemPrompt } from "./compartment-prompt";
 import {
     prepareCompartmentDrops,
     queuePreparedCompartmentDrops,
 } from "./compartment-runner-drop-queue";
-import { runValidatedHistorianPass } from "./compartment-runner-historian";
+import {
+    resolveHiddenCompletionExecutor,
+    runValidatedHistorianPass,
+} from "./compartment-runner-historian";
 import type {
     HiddenCompartmentRunnerDeps,
     RetainedHistorianChild,
@@ -108,7 +120,7 @@ import {
     finishHistorianPublishStage,
     startHistorianPublishStage,
 } from "./historian-publish-stage-logger";
-import { scheduleHistorianTurnTwo } from "./historian-turn-two-step";
+import { openCodeTurnOneAuthorization, scheduleHistorianTurnTwo } from "./historian-turn-two-step";
 import { snapTerminalCompartmentToServedRow } from "./host-served-rows";
 import { clearInjectionCache } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
@@ -332,6 +344,46 @@ export function clearHistorianAlertState(sessionId: string): void {
 }
 
 export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Promise<void> {
+    const selectionProjectPath = resolveProjectIdentity(deps.directory ?? process.cwd());
+    const harness = deps.hiddenCompletionExecutor?.capabilities.harness ?? "opencode";
+    const carrier = deps.hiddenCompletionExecutor ? "hidden-completion" : "opencode-session";
+    let authorizationRequest = openCodeTurnOneAuthorization({
+        harness,
+        carrier,
+        model: deps.model ?? deps.fallbackModelId,
+        system: withContentLanguageDirective(historianSystemPrompt(true), deps.language),
+    });
+    const selection = selectTurnOneExecution(deps.db, {
+        projectPath: selectionProjectPath,
+        request: authorizationRequest,
+        override: deps.memoryLifecycleLane,
+        turnTwo: deps.historianTurnTwoIsEnabled?.() === false ? "off" : deps.historianTurnTwo,
+        twoPass: deps.historianTwoPass,
+        canContinue: true,
+        validatedProfiles: deps.memoryLifecycleValidatedProfiles,
+        trialAuthorization: deps.memoryLifecycleTrialAuthorization,
+    });
+    const sweep = () =>
+        sweepDormantTurnTwo(deps.db, selectionProjectPath, async (id) => {
+            const executor = resolveHiddenCompletionExecutor(
+                deps.hiddenCompletionExecutor,
+                deps.client,
+                deps.db,
+                deps.directory,
+                "historian",
+            );
+            await executor.close(
+                { id, childSessionId: id },
+                {
+                    promptSettled: true,
+                    privacySensitive: false,
+                    context: "historian revoked",
+                    log: (message) => sessionLog(deps.sessionId, message),
+                },
+            );
+        });
+    if (selection.lane === "dormant") await sweep();
+    if (selection.refused) return;
     if (shouldSkipHomeProjectMemory(deps.directory ?? process.cwd())) return;
     const {
         client,
@@ -746,7 +798,22 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         // historian gets no project-memory block and anchors every fact to its source
         // lines; the anchor is stored with the fact's candidate row, and a later
         // reconcile step compares the fact with existing memory instead.
-        const turnOneLane = resolveTurnOneLane(deps.memoryLifecycleLane);
+        let counterKey = turnOneCounterKey(
+            authorizationRequest,
+            sessionId,
+            readSessionChunk(sessionId, Number.MAX_SAFE_INTEGER, offset, offset + 1).lines[0]
+                ?.messageId ?? `ordinal:${offset}`,
+        );
+        const turnOneLane =
+            readTurnOneFailureCount(db, selectionProjectPath, counterKey) >= 3
+                ? "dormant"
+                : selection.lane;
+        if (turnOneLane === "dormant" && deps.memoryLifecycleTrialAuthorization) {
+            telemetry.status = "noop";
+            telemetry.failureReason = "turn_one_budget_exhausted";
+            return;
+        }
+        if (turnOneLane === "dormant" && selection.lane === "enabled") await sweep();
         const anchoredFacts = turnOneLane === "enabled" && deps.memoryEnabled !== false;
         // Every configured attempt sends this same prompt, so size it for each
         // of their windows too, resolved as their pre-send check resolves them.
@@ -760,7 +827,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             window: producerWindow,
             fallbackWindows,
             systemPrompt: withContentLanguageDirective(
-                COMPARTMENT_AGENT_SYSTEM_PROMPT,
+                historianSystemPrompt(turnOneLane === "enabled"),
                 deps.language,
             ),
             requestedChunkTokens: historianChunkTokens,
@@ -849,8 +916,9 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         }
         drainReservation = reserve.reservation;
 
-        const chunk = readSessionChunk(sessionId, chunkTokens, offset, eligibleEndOrdinal, {
+        let chunk = readSessionChunk(sessionId, chunkTokens, offset, eligibleEndOrdinal, {
             expandTools: deps.historianExpandTools,
+            singleMessageLines: turnOneLane === "enabled",
         });
         const forceKeepLastCompartmentForChunk =
             deps.forceKeepLastCompartment === true && !chunk.hasMore;
@@ -881,19 +949,23 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             rollbackDrainReservation();
             return;
         }
-        const fittedAtomicSource = chunk.oversizeAtomicUnit
-            ? fitAtomicHistorianSourceToProducerWindow({
-                  text: chunk.text,
-                  resultBoundaries: chunk.toolResultBoundaries,
-                  contextLimitTokens: producerContext,
-                  inputLimitTokens: producerLimits.input,
-                  maxOutputTokens: producerReserve,
-                  maxSourceTokens: promptFit.roomTokens,
-              })
-            : null;
-        const chunkText = chunk.oversizeAtomicUnit
-            ? (fittedAtomicSource?.text ?? chunk.text)
-            : truncateHistorianInputIfNeeded(chunk.text, chunkTokens);
+        const fittedAtomicSource =
+            chunk.oversizeAtomicUnit && turnOneLane !== "enabled"
+                ? fitAtomicHistorianSourceToProducerWindow({
+                      text: chunk.text,
+                      resultBoundaries: chunk.toolResultBoundaries,
+                      contextLimitTokens: producerContext,
+                      inputLimitTokens: producerLimits.input,
+                      maxOutputTokens: producerReserve,
+                      maxSourceTokens: promptFit.roomTokens,
+                  })
+                : null;
+        const chunkText =
+            turnOneLane === "enabled"
+                ? chunk.text
+                : chunk.oversizeAtomicUnit
+                  ? (fittedAtomicSource?.text ?? chunk.text)
+                  : truncateHistorianInputIfNeeded(chunk.text, chunkTokens);
         const producerSourceTokens = estimateTokens(chunkText);
         if (boundarySnapshot.oversizeAtomicUnit || chunk.oversizeAtomicUnit) {
             sessionLog(
@@ -977,15 +1049,16 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         //     golden.
         // The prompt fit above rendered these blocks, trimmed if the producer
         // window needed room for the chunk.
-        const prompt = buildCompartmentAgentPrompt({
-            seedExamples: promptFit.seedExamples,
-            sessionReferences: promptFit.sessionReferences,
-            projectMemory: anchoredFacts ? "" : promptFit.projectMemory,
-            inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunkText}`,
-            memoryEnabled: deps.memoryEnabled !== false,
-            anchoredFacts,
-            userObservationsRequested: deps.userObservationsRequested,
-        });
+        const prompt =
+            buildCompartmentAgentPrompt({
+                seedExamples: promptFit.seedExamples,
+                sessionReferences: promptFit.sessionReferences,
+                projectMemory: anchoredFacts ? "" : promptFit.projectMemory,
+                inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunkText}`,
+                memoryEnabled: deps.memoryEnabled !== false,
+                anchoredFacts,
+                userObservationsRequested: deps.userObservationsRequested,
+            }) + (turnOneLane === "enabled" ? `\n\n${authorizationRequest.formatInstruction}` : "");
 
         // Intentional: session.get failure is non-fatal — we fall back to deps.directory
         const parentSessionResponse = await client?.session
@@ -1018,6 +1091,25 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 chunkStart: chunk.startIndex,
                 chunkEnd: chunk.endIndex,
             });
+            if (turnOneLane === "enabled" && !turnOneSend.recovery) {
+                persistTurnOneAuthorization(db, turnOneSend.stageKey, authorizationRequest);
+                db.prepare(
+                    "UPDATE memory_stage_attempts SET request_json=json_set(request_json,'$.prompt',?,'$.chunk',json(?)) WHERE stage_key=?",
+                ).run(prompt, JSON.stringify(chunk), turnOneSend.stageKey);
+            }
+            if (turnOneSend.recovery) {
+                const stored = db
+                    .prepare("SELECT request_json FROM memory_stage_attempts WHERE stage_key=?")
+                    .get(turnOneSend.stageKey) as { request_json: string };
+                const request = JSON.parse(stored.request_json);
+                authorizationRequest = request;
+                chunk = request.chunk;
+                counterKey = turnOneCounterKey(
+                    authorizationRequest,
+                    sessionId,
+                    chunk.lines[0]?.messageId ?? `ordinal:${chunk.startIndex}`,
+                );
+            }
         } catch (error) {
             if (!isTransientSqliteError(error)) throw error;
             // The store stayed busy past its timeout before anything was sent. This
@@ -1072,13 +1164,47 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             twoPass: deps.historianTwoPass,
             language: deps.language,
             retainChild: anchoredFacts,
+            turnTwoEnabled: turnOneLane === "enabled",
+            turnOneStageKey: turnOneLane === "enabled" ? turnOneSend.stageKey : undefined,
+            recoverTurnOne: turnOneSend.recovery,
         });
         retainedChild = validatedPass.ok ? validatedPass.retainedChild : undefined;
+        if (turnOneLane === "enabled" && validatedPass.reportedProfile) {
+            const frozen = db
+                .prepare(
+                    "SELECT reported_profile_json FROM memory_stage_attempts WHERE stage_key=?",
+                )
+                .get(turnOneSend.stageKey) as { reported_profile_json: string | null };
+            if (!frozen.reported_profile_json)
+                freezeTurnOneProfile(db, turnOneSend.stageKey, validatedPass.reportedProfile);
+        }
+        if (
+            turnOneLane === "enabled" &&
+            (deps.historianTurnTwo === "off" || deps.historianTurnTwoIsEnabled?.() === false)
+        ) {
+            await sweep();
+            return;
+        }
         // A window refusal here comes from a fallback too small to hold even a
         // minimal prompt (every other chain model was fitted above). Treat it like
         // any other failed pass: count it, notify, and keep
         // the reserved drain budget spent so the next trigger does not retry at once.
         if (!validatedPass.ok) {
+            if (
+                validatedPass.failureReason !== "outcome_unknown" &&
+                validatedPass.failureReason !== "carrier_expired"
+            )
+                db.prepare(
+                    "UPDATE memory_stage_attempts SET state='dispatched' WHERE stage_key=? AND state='replied'",
+                ).run(turnOneSend.stageKey);
+            if (turnOneLane === "enabled" && validatedPass.failureReason === "parse_failed")
+                recordTurnOneCounter(db, {
+                    projectPath: publicationProjectPath,
+                    key: counterKey,
+                    harness,
+                    carrier,
+                    state: "parse_failed",
+                });
             // Always track historian failures regardless of usage percentage.
             // The emergency abort path at 95% checks failureCount > 0, so failures
             // at any pressure level must be recorded.
@@ -1400,6 +1526,13 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                         : [],
                 candidateFacts,
                 honourAnchors: turnOneLane === "enabled",
+            });
+            recordTurnOneCounter(db, {
+                projectPath: publicationProjectPath,
+                key: counterKey,
+                harness,
+                carrier,
+                state: "counter_reset",
             });
             if (turnOnePublication.candidatesInserted > 0) {
                 sessionLog(
@@ -1745,7 +1878,15 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         // the project's retryable backlog) with existing memory on the same child.
         // It runs as its own task after this run settles (see
         // `scheduleHistorianTurnTwo`), which takes over the child.
-        if (retainedChild) {
+        if (
+            retainedChild &&
+            turnOneProfileAuthorized(
+                authorizationRequest,
+                validatedPass.reportedProfile,
+                selection.validatedProfiles,
+                deps.memoryLifecycleTrialAuthorization,
+            )
+        ) {
             const child = retainedChild;
             retainedChild = undefined;
             scheduleHistorianTurnTwo({
@@ -1759,7 +1900,19 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 memoryEnabled: deps.memoryEnabled !== false,
                 autoPromote: deps.autoPromote !== false,
                 timeoutMs: historianTimeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
-                validatedProfiles: deps.memoryLifecycleValidatedProfiles,
+                validatedProfiles: selection.validatedProfiles,
+                trialAuthorization: deps.memoryLifecycleTrialAuthorization,
+                formatInstructions: authorizationRequest.formatInstruction,
+                beforeResolve: async () => {
+                    if (
+                        deps.historianTurnTwo === "off" ||
+                        deps.historianTurnTwoIsEnabled?.() === false
+                    ) {
+                        await sweep();
+                        return false;
+                    }
+                    return true;
+                },
                 embedQuery: deps.memoryLifecycleEmbedQuery,
             });
         }

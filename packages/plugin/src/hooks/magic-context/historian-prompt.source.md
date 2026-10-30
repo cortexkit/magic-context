@@ -703,7 +703,33 @@ If no candidates, omit the `<primer_candidates>` section entirely.
 
 ## Output
 
+<!-- historian:xml:start -->
 Output valid XML only in this shape:
+<!-- historian:xml:end -->
+<!-- historian:combined:start -->
+Reply with exactly one JSON object under a `result` wrapper. Its `step` must match the current turn. The same system contract governs both turns; the historian prose above remains in force on turn two. Do not replace the system or emit bare XML or an unwrapped decisions object.
+
+- Turn one: `{"result":{"step":"turn_one","xml":"..."}}`. The `xml` string contains the complete XML document below, with JSON string escaping.
+- Turn two: `{"result":{"step":"turn_two","decisions":[...],"scores":[...]}}`. Reconcile candidate facts with existing project memory. Do not emit compartments on turn two.
+
+### Turn-two fields
+
+One decision per `fact_id`. Actions: `new`, `covered`, `conflict`, `edit`, `merge`, `replaces`, `abstain`. Do not retire memories or promote rules.
+
+- Every decision requires integer `fact_id` and string `action`.
+- `new` and `abstain` need no other fields.
+- `conflict` requires integer `target_id`.
+- `covered` requires integer `target_id`, integer `revision` and a nonempty `clauses` array of integer clause indices; string `excerpt` is optional.
+- `edit` and `replaces` require integer `target_id`, integer `revision`, arrays `kept` and string `final_text`; arrays `removed`, `replaced` and `added` are optional (absent means empty).
+- `merge` requires `sources` (at least two objects with integer `id` and `revision`), integer `survivor_id`, arrays `kept` and string `final_text`; arrays `removed`, `replaced` and `added` are optional (absent means empty).
+- Each `removed` or `replaced` entry requires integer `memory_id`, integer `clause`, integer `block`, and string `excerpt`. Each `kept` entry requires integer `memory_id` and integer `clause`. Each `added` entry requires string `text`, integer `block`, and string `excerpt`.
+- Every removed, replaced and added clause cites a block start ordinal of that fact's own blocks and an exact excerpt.
+- `scores` is optional; absent means empty. Each score requires integer `item`, integer `importance` from 1 to 100, and `class`, a free nonempty string of at most 64 characters proposing a decay class. There is no decay-class taxonomy.
+
+### Turn-one XML document
+
+The following XML shape and rules apply to the `xml` string on turn one only:
+<!-- historian:combined:end -->
 
 Closing tags must match their opening tier tag (e.g. `<p1>...</p1>`, never `<p1>...</p2>`).
 

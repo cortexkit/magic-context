@@ -1358,7 +1358,28 @@ mod tests {
         json!({"rows":rows(conn,"SELECT id,project_path,category,content,normalized_hash,status,revision,verification_status,verified_at,verify_result,verify_files_json,verify_commit,metadata_json,shareable,classified_at,expires_at FROM memories ORDER BY id"),"mappings":rows(conn,"SELECT * FROM memory_verifications ORDER BY memory_id,file_path"),"history":history,"receipts":receipts,"journal":journal,"mutationCount":conn.query_row("SELECT count(*) FROM memory_mutation_log",[],|r|r.get::<_,i64>(0)).unwrap()})
     }
     fn fixture() -> Value {
-        serde_json::from_str(TS_FIXTURE).unwrap()
+        fn add_unassessed_safety(value: &mut Value) {
+            match value {
+                Value::Object(object) => {
+                    // The historical oracle predates the nullable safety column. Extend only
+                    // its full memory snapshots; keep every recorded value and projection exact.
+                    if object.contains_key("normalized_hash")
+                        && object.contains_key("mural_cue_rejection_count")
+                    {
+                        assert!(!object.contains_key("safety_critical"));
+                        object.insert("safety_critical".into(), Value::Null);
+                    }
+                    for field in object.values_mut() {
+                        add_unassessed_safety(field);
+                    }
+                }
+                Value::Array(values) => values.iter_mut().for_each(add_unassessed_safety),
+                _ => {}
+            }
+        }
+        let mut fixture = serde_json::from_str(TS_FIXTURE).unwrap();
+        add_unassessed_safety(&mut fixture);
+        fixture
     }
     fn verify_request(conn: &Connection, manifest: &str) -> Value {
         json!({"action":"verify","batch":memories(conn,"project-a",NOW).unwrap(),"manifest":manifest,"checked_commit":"a".repeat(40),"current_commit":"a".repeat(40)})

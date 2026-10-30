@@ -234,7 +234,7 @@ fn concurrent_startup_serializes_and_does_not_duplicate_migrations() {
 fn unsupported_upstream_versions_are_refused_byte_for_byte() {
     for version in [0, 86, BOOTSTRAP_VERSION + 1, 9999] {
         let temp = throwaway();
-        let path = copy_fixture(102, &temp);
+        let path = copy_fixture(mc_store::context_schema::BOOTSTRAP_VERSION, &temp);
         let db = Connection::open(&path).unwrap();
         db.execute("DELETE FROM schema_migrations WHERE version<10000", [])
             .unwrap();

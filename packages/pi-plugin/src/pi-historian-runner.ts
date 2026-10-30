@@ -54,20 +54,36 @@ import {
 	embedPromotedFacts,
 	promoteSessionFactsDurable,
 } from "@magic-context/core/features/magic-context/memory";
+import { hasHistorianToolActivity } from "@magic-context/core/features/magic-context/memory/historian-wire";
 import { tsOwnsMemory } from "@magic-context/core/features/magic-context/memory/lifecycle-applier";
 import type { ReportedProfile } from "@magic-context/core/features/magic-context/memory/lifecycle-gates";
+import { lifecycleTextHash } from "@magic-context/core/features/magic-context/memory/lifecycle-text";
 import { resolveProjectIdentityForSession } from "@magic-context/core/features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
 	allocateTurnOneSend,
 	blocksSentToHistorian,
 	commitTurnOnePublication,
+	HISTORIAN_FORMAT_INSTRUCTION,
+	parseEnabledTurnOne,
 	publishedFacts,
-	resolveTurnOneLane,
+	readTurnOneFailureCount,
+	recordTurnOneCounter,
+	registerTurnOneChild,
+	selectTurnOneExecution,
+	sweepDormantTurnTwo,
 	type TurnOneFact,
 	type TurnOneLane,
 	type TurnOneSend,
+	turnOneCounterKey,
+	turnOneProfileAuthorized,
 } from "@magic-context/core/features/magic-context/memory/turn-one-publication";
+import {
+	buildTurnOneAuthorizationRequest,
+	freezeTurnOneProfile,
+	persistTurnOneAuthorization,
+} from "@magic-context/core/features/magic-context/memory/turn-two";
+import type { TurnTwoTrialAuthorization } from "@magic-context/core/features/magic-context/memory/turn-two-profile";
 import {
 	clearEmergencyDrainLatch,
 	clearEmergencyRecovery,
@@ -97,8 +113,8 @@ import { insertUserMemoryCandidates } from "@magic-context/core/features/magic-c
 import {
 	buildCompartmentAgentPrompt,
 	buildHistorianEditorPrompt,
-	COMPARTMENT_AGENT_SYSTEM_PROMPT,
 	HISTORIAN_EDITOR_SYSTEM_PROMPT,
+	historianSystemPrompt as selectedHistorianSystem,
 } from "@magic-context/core/hooks/magic-context/compartment-prompt";
 import {
 	prepareCompartmentDrops,
@@ -164,6 +180,7 @@ import type {
 	ModelInput,
 	ResolvedModelEntry,
 } from "@magic-context/core/shared/model-resolution";
+import { toModelEntry } from "@magic-context/core/shared/resolve-fallbacks";
 import {
 	type Database,
 	isTransientSqliteError,
@@ -182,6 +199,7 @@ import {
 	isPiRpcHistorianRunner,
 	PI_RPC_CARRIER,
 	recoverLostPiRpcStages,
+	reportedProfile,
 	schedulePiHistorianTurnTwo,
 } from "./pi-historian-turn-two";
 import { acknowledgePiHistoryRetirement } from "./pi-history-retirement";
@@ -521,20 +539,21 @@ export interface PiHistorianDeps {
 	/** Persist the final weak-lookahead compartment for coverage while skipping promotion. */
 	forceKeepLastCompartment?: boolean;
 	/**
-	 * Which historian turn one this lane runs (see `TurnOneLane`). Unset means
-	 * `dormant`, the only production value: `enabled` needs the Pi subagent to make
-	 * the provider enforce a JSON response schema, which it does not yet.
+	 * Test-only publication override; it never authorizes turn-two application.
+	 * Production enables memory verification unless the user turns it off.
 	 */
 	memoryLifecycleLane?: TurnOneLane;
-	/** Provider/model/variant/temperature and system-prompt hashes whose recorded replay tests passed. Production Pi sends no reconciliation turn. */
+	turnTwo?: "on" | "off";
+	/** Reads the live switch after provider replies rather than freezing a scheduling-time value. */
+	turnTwoIsEnabled?: () => boolean;
+	trialAuthorization?: TurnTwoTrialAuthorization;
+	/** Test-only expected provider/model and request identities for isolated checks. */
 	validatedProfiles?: readonly ReportedProfile[];
 	/** Headless sessions may compartment history, but cannot run the experimental memory lifecycle. */
 	hasUI?: boolean;
 }
 
 export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
-	recoverLostPiRpcStages(deps.db);
-	if (deps.hasUI === false && deps.memoryLifecycleLane === "enabled") return;
 	const {
 		db,
 		sessionId,
@@ -583,8 +602,62 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					undefined,
 					deps.resolveHostOutputLimit?.(primaryModelKey) ?? 32_000,
 				));
-	const historianSystemPrompt = withContentLanguageDirective(
-		COMPARTMENT_AGENT_SYSTEM_PROMPT,
+	const combinedSystem = withContentLanguageDirective(
+		selectedHistorianSystem(true),
+		deps.language,
+		{ preserveUserQuotes: true },
+	);
+	const harness = resolvePiHarnessKind();
+	const requestedModel = toModelEntry(historianModel ?? fallbackModelId);
+	const route = piModelRefToCanonical(requestedModel?.model ?? "");
+	const slash = route.indexOf("/");
+	let authorizationRequest = buildTurnOneAuthorizationRequest(
+		{
+			lane: harness,
+			carrier: PI_RPC_CARRIER,
+			provider: slash < 0 ? "" : route.slice(0, slash),
+			modelId: slash < 0 ? route : route.slice(slash + 1),
+			variant: requestedModel?.qualifier ?? null,
+			temperature: temperature ?? null,
+			thinkingLevel: thinkingLevel ?? null,
+		},
+		{
+			system: combinedSystem,
+			formatInstruction: HISTORIAN_FORMAT_INSTRUCTION,
+			toolSurface: [],
+			checkToolSurface: [],
+		},
+	);
+	const selectionProject =
+		resolveProjectIdentityForSession(directory, allowHomeProject) ?? "";
+	// Negotiate retained historian support before selecting the two-pass carrier.
+	if (
+		harness === "omp" &&
+		twoPass !== true &&
+		deps.turnTwo !== "off" &&
+		"prepareRetainedHistorian" in runner &&
+		typeof runner.prepareRetainedHistorian === "function"
+	) {
+		await runner.prepareRetainedHistorian(directory);
+	}
+	const rpcRunner = isPiRpcHistorianRunner(runner) ? runner : null;
+	const selection = selectTurnOneExecution(db, {
+		projectPath: selectionProject,
+		request: authorizationRequest,
+		override: deps.memoryLifecycleLane,
+		turnTwo: deps.turnTwoIsEnabled?.() === false ? "off" : deps.turnTwo,
+		twoPass,
+		canContinue: !!rpcRunner,
+		hasUI: deps.hasUI,
+		validatedProfiles: deps.validatedProfiles,
+		trialAuthorization: deps.trialAuthorization,
+	});
+	const sweep = () => sweepDormantTurnTwo(db, selectionProject);
+	if (selection.lane === "dormant") await sweep();
+	if (selection.refused) return;
+	recoverLostPiRpcStages(db);
+	let historianSystemPrompt = withContentLanguageDirective(
+		selectedHistorianSystem(selection.lane === "enabled"),
 		deps.language,
 		{ preserveUserQuotes: true },
 	);
@@ -815,9 +888,27 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// historian gets no project-memory block and anchors every fact to its
 			// source lines; the anchor is stored with the fact's candidate row, and a
 			// later reconcile step compares the fact with existing memory instead.
-			const rpcRunner = isPiRpcHistorianRunner(runner) ? runner : null;
-			const turnOneLane = resolveTurnOneLane(
-				rpcRunner ? deps.memoryLifecycleLane : "dormant",
+			let counterKey = turnOneCounterKey(
+				authorizationRequest,
+				sessionId,
+				readSessionChunk(sessionId, Number.MAX_SAFE_INTEGER, offset, offset + 1)
+					.lines[0]?.messageId ?? `ordinal:${offset}`,
+			);
+			const turnOneLane =
+				readTurnOneFailureCount(db, projectPath ?? "", counterKey) >= 3
+					? "dormant"
+					: selection.lane;
+			if (turnOneLane === "dormant" && deps.trialAuthorization) {
+				telemetry.status = "noop";
+				telemetry.failureReason = "turn_one_budget_exhausted";
+				return;
+			}
+			if (turnOneLane === "dormant" && selection.lane === "enabled")
+				await sweep();
+			historianSystemPrompt = withContentLanguageDirective(
+				selectedHistorianSystem(turnOneLane === "enabled"),
+				deps.language,
+				{ preserveUserQuotes: true },
 			);
 			const anchoredFacts =
 				turnOneLane === "enabled" && memoryEnabled !== false;
@@ -939,12 +1030,15 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			}
 			drainReservation = reserve.reservation;
 
-			const chunk = readSessionChunk(
+			let chunk = readSessionChunk(
 				sessionId,
 				chunkTokens,
 				offset,
 				eligibleEndOrdinal,
-				{ expandTools: deps.expandTools },
+				{
+					expandTools: deps.expandTools,
+					singleMessageLines: turnOneLane === "enabled",
+				},
 			);
 			const forceKeepLastCompartmentForChunk =
 				forceKeepLastCompartment === true && !chunk.hasMore;
@@ -1013,18 +1107,22 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// golden. The prompt fit above rendered these blocks, trimmed if the
 			// producer window needed room for the chunk. Mirrors the OpenCode
 			// incremental runner.
-			const fittedAtomicSource = chunk.oversizeAtomicUnit
-				? fitAtomicHistorianSourceToProducerWindow({
-						text: chunk.text,
-						resultBoundaries: chunk.toolResultBoundaries,
-						contextLimitTokens: historianContextLimit,
-						maxOutputTokens,
-						maxSourceTokens: promptFit.roomTokens,
-					})
-				: null;
-			const chunkText = chunk.oversizeAtomicUnit
-				? (fittedAtomicSource?.text ?? chunk.text)
-				: truncateHistorianInputIfNeeded(chunk.text, chunkTokens);
+			const fittedAtomicSource =
+				chunk.oversizeAtomicUnit && turnOneLane !== "enabled"
+					? fitAtomicHistorianSourceToProducerWindow({
+							text: chunk.text,
+							resultBoundaries: chunk.toolResultBoundaries,
+							contextLimitTokens: historianContextLimit,
+							maxOutputTokens,
+							maxSourceTokens: promptFit.roomTokens,
+						})
+					: null;
+			const chunkText =
+				turnOneLane === "enabled"
+					? chunk.text
+					: chunk.oversizeAtomicUnit
+						? (fittedAtomicSource?.text ?? chunk.text)
+						: truncateHistorianInputIfNeeded(chunk.text, chunkTokens);
 			const producerSourceTokens = estimateTokens(chunkText);
 			if (boundarySnapshot.oversizeAtomicUnit || chunk.oversizeAtomicUnit) {
 				sessionLog(
@@ -1155,6 +1253,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// chunk's candidates and activity are published under one id however many
 			// sends it takes.
 			let turnOneSend: TurnOneSend;
+			let recoveredResult: SubagentRunResult | undefined;
+			let recoveredOptions: SubagentRunOptions | undefined;
 			try {
 				turnOneSend = allocateTurnOneSend(db, {
 					projectPath,
@@ -1165,6 +1265,49 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					chunkStart: chunk.startIndex,
 					chunkEnd: chunk.endIndex,
 				});
+				if (turnOneSend.recovery) {
+					const stored = db
+						.prepare(
+							"SELECT request_json,reply_json FROM memory_stage_attempts WHERE stage_key=?",
+						)
+						.get(turnOneSend.stageKey) as {
+						request_json: string;
+						reply_json: string | null;
+					};
+					if (!stored.reply_json) {
+						db.prepare(
+							"UPDATE memory_stage_attempts SET state='expired' WHERE stage_key=? AND state='sending'",
+						).run(turnOneSend.stageKey);
+						telemetry.status = "noop";
+						telemetry.failureReason = "carrier_expired";
+						return;
+					}
+					const request = JSON.parse(stored.request_json);
+					authorizationRequest = request;
+					historianSystemPrompt = request.system;
+					chunk = request.chunk;
+					counterKey = turnOneCounterKey(
+						authorizationRequest,
+						sessionId,
+						chunk.lines[0]?.messageId ?? `ordinal:${chunk.startIndex}`,
+					);
+					recoveredResult = JSON.parse(stored.reply_json);
+					recoveredOptions = request.answerOptions;
+				}
+				if (turnOneLane === "enabled" && !turnOneSend.recovery) {
+					persistTurnOneAuthorization(
+						db,
+						turnOneSend.stageKey,
+						authorizationRequest,
+					);
+					db.prepare(
+						"UPDATE memory_stage_attempts SET request_json=json_set(request_json,'$.prompt',?,'$.chunk',json(?)) WHERE stage_key=?",
+					).run(
+						`${prompt}\n\n${authorizationRequest.formatInstruction}`,
+						JSON.stringify(chunk),
+						turnOneSend.stageKey,
+					);
+				}
 			} catch (error) {
 				if (!isTransientSqliteError(error)) throw error;
 				// The store stayed busy past its timeout before anything was sent. This
@@ -1202,19 +1345,44 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 									...options,
 									tokenBudget: Number.MAX_SAFE_INTEGER,
 								};
+								db.prepare(
+									"UPDATE memory_stage_attempts SET state='sending' WHERE stage_key=? AND state='dispatched'",
+								).run(turnOneSend.stageKey);
 								const reply = await rpcRunner.runRetainedHistorian(
 									guarded,
 									turnOneSend.stageKey,
 								);
+								if (
+									reply.result.ok &&
+									options.accountingSubagent === "historian"
+								) {
+									db.prepare(
+										"UPDATE memory_stage_attempts SET state='replied',reply_json=?,request_json=json_set(request_json,'$.answerOptions',json(?)) WHERE stage_key=? AND state='sending'",
+									).run(
+										JSON.stringify(reply.result),
+										JSON.stringify({ model: guarded.model }),
+										turnOneSend.stageKey,
+									);
+								} else
+									db.prepare(
+										"UPDATE memory_stage_attempts SET state='dispatched' WHERE stage_key=? AND state='sending'",
+									).run(turnOneSend.stageKey);
 								if (reply.child && reply.result.ok) {
+									const child = reply.child;
 									retained = {
-										child: reply.child,
+										child: {
+											...child,
+											close: registerTurnOneChild(child.id, () =>
+												child.close(),
+											),
+										},
 										options: guarded,
 										text: reply.result.assistantText,
 									};
-									db.prepare(
-										"UPDATE memory_stage_attempts SET child_session_id=? WHERE stage_key=?",
-									).run(reply.child.id, turnOneSend.stageKey);
+									if (options.accountingSubagent === "historian")
+										db.prepare(
+											"UPDATE memory_stage_attempts SET child_session_id=? WHERE stage_key=?",
+										).run(reply.child.id, turnOneSend.stageKey);
 								} else await reply.child?.close();
 								return reply.result;
 							},
@@ -1222,34 +1390,40 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					: runner;
 
 			// First pass.
-			if (!forceDrainQuota) {
+			if (!recoveredResult && !forceDrainQuota) {
 				shouldWaitForNewHistorianHistory(boundarySnapshot, {
 					emergency: getOverflowState(db, sessionId).needsEmergencyRecovery,
 					claim: true,
 				});
 			}
-			const firstResult = await runHistorianSubagentWithTransientRetries({
-				runner: publicationRunner,
-				sessionId,
-				passLabel: "first",
-				retryBackoffMs,
-				options: {
-					agent: HISTORIAN_AGENT_NAME,
-					systemPrompt: historianSystemPrompt,
-					userMessage: prompt,
-					model: historianModel,
-					timeoutMs: historianTimeoutMs,
-					cwd: directory,
-					signal,
-					thinkingLevel,
-					temperature,
-					maxOutputTokens,
-					onProgress: buildProgressLogger("first"),
-					accountingSessionId: sessionId,
-					accountingSubagent: "historian",
-					accountingModelConfigKey: deps.modelConfigKey,
-				},
-			});
+			const firstResult =
+				recoveredResult ??
+				(await runHistorianSubagentWithTransientRetries({
+					runner: publicationRunner,
+					sessionId,
+					passLabel: "first",
+					retryBackoffMs,
+					options: {
+						agent: HISTORIAN_AGENT_NAME,
+						systemPrompt: historianSystemPrompt,
+						userMessage:
+							prompt +
+							(turnOneLane === "enabled"
+								? `\n\n${authorizationRequest.formatInstruction}`
+								: ""),
+						model: historianModel,
+						timeoutMs: historianTimeoutMs,
+						cwd: directory,
+						signal,
+						thinkingLevel,
+						temperature,
+						maxOutputTokens,
+						onProgress: buildProgressLogger("first"),
+						accountingSessionId: sessionId,
+						accountingSubagent: "historian",
+						accountingModelConfigKey: deps.modelConfigKey,
+					},
+				}));
 
 			let validatedPass = await validateHistorianResult(
 				firstResult,
@@ -1257,7 +1431,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				chunk,
 				priorCompartments,
 				sequenceOffset,
+				turnOneLane === "enabled",
 			);
+			let answeringResult = firstResult;
 			// Track which subagent run actually produced the validated
 			// draft. This matters for the optional two-pass editor refinement
 			// below: when first-pass validation fails but repair succeeds,
@@ -1272,7 +1448,10 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			let fallbackPrompt = prompt;
 
 			// Repair retry on validation failure (mirrors OpenCode behavior).
-			if (validatedPass.kind === "validation-failed") {
+			if (
+				turnOneLane !== "enabled" &&
+				validatedPass.kind === "validation-failed"
+			) {
 				sessionLog(
 					sessionId,
 					`historian: first pass validation failed, retrying with repair prompt: ${validatedPass.error}`,
@@ -1332,6 +1511,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			);
 			if (
 				validatedPass.kind !== "ok" &&
+				(turnOneLane !== "enabled" || validatedPass.kind === "spawn-failed") &&
 				!(
 					validatedPass.kind === "spawn-failed" &&
 					validatedPass.reason === "abort"
@@ -1352,7 +1532,11 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						options: {
 							agent: HISTORIAN_AGENT_NAME,
 							systemPrompt: historianSystemPrompt,
-							userMessage: fallbackPrompt,
+							userMessage:
+								fallbackPrompt +
+								(turnOneLane === "enabled"
+									? `\n\n${authorizationRequest.formatInstruction}`
+									: ""),
 							model: candidate.model,
 							timeoutMs: historianTimeoutMs,
 							cwd: directory,
@@ -1374,7 +1558,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						chunk,
 						priorCompartments,
 						sequenceOffset,
+						turnOneLane === "enabled",
 					);
+					answeringResult = fbResult;
 					if (fbPass.kind === "ok") {
 						validatedPass = fbPass;
 						if (fbResult.ok) validatedDraftText = fbResult.assistantText;
@@ -1384,10 +1570,54 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						validatedPass = fbPass;
 						break;
 					}
+					if (turnOneLane === "enabled" && fbPass.kind !== "spawn-failed") {
+						validatedPass = fbPass;
+						break;
+					}
 				}
 			}
 
+			if (turnOneLane === "enabled") {
+				const current = retained as { options: SubagentRunOptions } | null;
+				const actual = reportedProfile(
+					answeringResult,
+					current?.options ??
+						recoveredOptions ??
+						({ model: historianModel } as SubagentRunOptions),
+					lifecycleTextHash(historianSystemPrompt),
+					authorizationRequest.formatInstruction,
+				);
+				if (actual) {
+					const frozen = db
+						.prepare(
+							"SELECT reported_profile_json FROM memory_stage_attempts WHERE stage_key=?",
+						)
+						.get(turnOneSend.stageKey) as {
+						reported_profile_json: string | null;
+					};
+					if (!frozen.reported_profile_json)
+						freezeTurnOneProfile(db, turnOneSend.stageKey, actual);
+				}
+				if (deps.turnTwo === "off" || deps.turnTwoIsEnabled?.() === false) {
+					await sweep();
+					return;
+				}
+				if (
+					validatedPass.kind !== "ok" &&
+					validatedPass.kind !== "spawn-failed"
+				)
+					recordTurnOneCounter(db, {
+						projectPath,
+						key: counterKey,
+						harness,
+						carrier: PI_RPC_CARRIER,
+						state: "parse_failed",
+					});
+			}
 			if (validatedPass.kind !== "ok") {
+				db.prepare(
+					"UPDATE memory_stage_attempts SET state='dispatched' WHERE stage_key=? AND state='replied'",
+				).run(turnOneSend.stageKey);
 				const errorMsg =
 					validatedPass.kind === "validation-failed"
 						? validatedPass.error
@@ -1495,7 +1725,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 							// Keep the validated draft's compartments and facts when the editor fails.
 						}
 					} finally {
-						if (editorAccepted)
+						if (editorAccepted && turnOneLane !== "enabled")
 							await (
 								draftRetained as { child: PiRpcHistorianChild } | null
 							)?.child.close();
@@ -1735,6 +1965,13 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 							: [],
 					candidateFacts,
 					honourAnchors: turnOneLane === "enabled",
+				});
+				recordTurnOneCounter(db, {
+					projectPath,
+					key: counterKey,
+					harness,
+					carrier: turnOneLane === "enabled" ? PI_RPC_CARRIER : "pi-subagent",
+					state: "counter_reset",
 				});
 				if (turnOnePublication.candidatesInserted > 0) {
 					sessionLog(
@@ -2022,7 +2259,28 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				telemetry.importanceAvg = imp.avg;
 				telemetry.discardedLast = discardedLast;
 			}
-			if (published && retained && rpcRunner) {
+			const retainedOptions = (
+				retained as { options: SubagentRunOptions } | null
+			)?.options;
+			const actual = retainedOptions
+				? reportedProfile(
+						answeringResult,
+						retainedOptions,
+						lifecycleTextHash(historianSystemPrompt),
+						authorizationRequest.formatInstruction,
+					)
+				: null;
+			if (
+				published &&
+				retained &&
+				rpcRunner &&
+				turnOneProfileAuthorized(
+					authorizationRequest,
+					actual ?? undefined,
+					selection.validatedProfiles,
+					deps.trialAuthorization,
+				)
+			) {
 				const child = retained as {
 					child: PiRpcHistorianChild;
 					options: SubagentRunOptions;
@@ -2035,11 +2293,25 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					sessionId,
 					child: child.child,
 					runner: rpcRunner,
-					options: child.options,
+					options: {
+						...child.options,
+						model: actual
+							? `${actual.provider}/${actual.modelId}`
+							: child.options.model,
+					},
 					turnOneText: child.text,
 					memoryEnabled: memoryEnabled !== false,
 					autoPromote: autoPromote !== false,
-					validatedProfiles: deps.validatedProfiles ?? [],
+					validatedProfiles: selection.validatedProfiles,
+					trialAuthorization: deps.trialAuthorization,
+					formatInstructions: authorizationRequest.formatInstruction,
+					beforeResolve: async () => {
+						if (deps.turnTwo === "off" || deps.turnTwoIsEnabled?.() === false) {
+							await sweep();
+							return false;
+						}
+						return true;
+					},
 					readExcerpt: (sourceSession, from, to) =>
 						sourceSession === sessionId
 							? withRawMessageProvider(sessionId, provider, () =>
@@ -2200,6 +2472,7 @@ async function validateHistorianResult(
 	chunk: Parameters<typeof validateHistorianOutput>[2],
 	priorCompartments: Parameters<typeof validateHistorianOutput>[3],
 	sequenceOffset: number,
+	turnTwoEnabled = false,
 ): Promise<ValidationOutcome> {
 	if (!result.ok) {
 		return {
@@ -2213,8 +2486,21 @@ async function validateHistorianResult(
 		return { kind: "no-output" };
 	}
 
+	const xml = turnTwoEnabled
+		? parseEnabledTurnOne(result.assistantText)
+		: result.assistantText;
+	if (
+		xml === null ||
+		result.meta?.lengthCapped === true ||
+		(turnTwoEnabled && hasHistorianToolActivity(result.meta))
+	)
+		return {
+			kind: "validation-failed",
+			error: "Invalid turn-one envelope",
+			rawText: result.assistantText,
+		};
 	const validation = validateHistorianOutput(
-		result.assistantText,
+		xml,
 		sessionId,
 		chunk,
 		priorCompartments,

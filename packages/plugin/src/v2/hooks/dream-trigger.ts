@@ -62,9 +62,9 @@ export function startDreamTrigger(
         projectIdentity: () => string;
         /** The project's `memory.enabled`; `false` leaves its project-memory tasks unscheduled. */
         projectMemoryEnabled?: boolean;
+        memoryInjectionBudgetTokens?: number;
         language?: string;
         mural?: { enabled: boolean };
-        memoryInjectionBudgetTokens?: number;
         retinaHandoff?: boolean;
         /** Native source boundary; injectable for scheduler-only tests. */
         openReader?: () => Pick<V2StoreReader, "rootSessionActivity" | "close">;
@@ -126,11 +126,11 @@ export function startDreamTrigger(
                             hiddenCompletionExecutor: args.executor,
                             parentSessionId: event.data.sessionID,
                             sessionDirectory: context.location.directory,
+                            memoryInjectionBudgetTokens: args.memoryInjectionBudgetTokens,
                             openOpenCodeDb: () => null,
                             retrospectiveRawProvider: (db) => new V2RetrospectiveRawProvider(db),
                             language: args.language,
                             mural: sampled?.mural ?? args.mural,
-                            memoryInjectionBudgetTokens: args.memoryInjectionBudgetTokens,
                             retinaHandoff: args.retinaHandoff,
                             smartNotesEnabled: args.smartNotesEnabled,
                         }),

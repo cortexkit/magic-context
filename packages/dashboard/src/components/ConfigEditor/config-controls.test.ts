@@ -7,10 +7,28 @@ import { CONFIG_HELP, docsUrl } from "./config-help";
 import { configDefault, defaultLabel } from "./config-schema";
 import { LANGUAGE_CODES, LANGUAGE_OPTIONS } from "./languages";
 import { editRoute } from "./route-edit";
+import { structuredConfigSaveContent } from "./structured-save";
 import { editToolDescription, normalizeToolDescriptions } from "./tool-description-config";
 import { qualifierOptions } from "./variant-options";
 
 describe("config controls", () => {
+  it("historian verification is on by default and on/off edits preserve JSONC siblings", () => {
+    expect(configDefault("historian.turn_two")).toBe("on");
+    const source = readFileSync(resolve(import.meta.dir, "ConfigEditor.tsx"), "utf8");
+    expect(source).toContain('handleFieldChange("historian.turn_two", e.currentTarget.value)');
+    const original =
+      '{\n // Keep sampling\n "historian": { "maxTokens": 64000, "two_pass": false },\n "unknown": 7\n}';
+    for (const turn_two of ["off", "on"]) {
+      const saved = structuredConfigSaveContent(original, {
+        historian: { maxTokens: 64000, two_pass: false, turn_two },
+      });
+      expect(saved).toContain("// Keep sampling");
+      expect(JSON.parse(saved.replace("// Keep sampling", ""))).toEqual({
+        historian: { maxTokens: 64000, two_pass: false, turn_two },
+        unknown: 7,
+      });
+    }
+  });
   it("every help link includes the deployment base and targets an existing docs page", () => {
     const tree = resolve(import.meta.dir, "../../../../docs/src/content/docs");
     expect(Object.keys(CONFIG_HELP)).toHaveLength(7);

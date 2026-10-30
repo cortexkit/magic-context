@@ -96,6 +96,1426 @@
     }
   },
   {
+    "name": "rerank-timeout-0",
+    "user": {
+      "rerank": {}
+    },
+    "effective": {
+      "enabled": true,
+      "allow_home_project": false,
+      "mural": {
+        "enabled": false
+      },
+      "transform_mode": "ts",
+      "rust_pipeline": "full_request",
+      "signed_thinking_hold": "off",
+      "rust_provider_preparation": false,
+      "rust_background_enabled": false,
+      "smart_notes": {
+        "enabled": true,
+        "retina_handoff": false
+      },
+      "cache_ttl": "5m",
+      "prompt_surface": {
+        "default": "full"
+      },
+      "toast_duration_ms": 5000,
+      "execute_threshold_percentage": 65,
+      "history_budget_percentage": 0.15,
+      "historian_timeout_ms": 600000,
+      "commit_cluster_trigger": {
+        "enabled": true,
+        "min_clusters": 3
+      },
+      "system_prompt_injection": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
+      },
+      "sqlite": {
+        "cache_size_mb": 64,
+        "mmap_size_mb": 0
+      },
+      "storage": {
+        "enforce_private_permissions": true
+      },
+      "rerank": {
+        "provider": "synapse",
+        "timeout_ms": 1500,
+        "top_n": 20
+      },
+      "embedding": {
+        "provider": "local",
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "local_runtime": "auto"
+      },
+      "shadow_embedding": {
+        "enabled": false
+      },
+      "temporal_awareness": true,
+      "keep_subagents": false,
+      "debug_rpc": false,
+      "fail_closed_blocking": true,
+      "compaction": {
+        "enabled": true
+      },
+      "todowrite": {
+        "enabled": false,
+        "overlay": true
+      },
+      "protected_tools": {
+        "todowrite": 1,
+        "ctx_reduce": 3
+      },
+      "caveman_text_compression": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "memory": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      }
+    },
+    "warnings": [],
+    "warningMessages": [],
+    "trust": {
+      "user": "ok",
+      "project": "ok",
+      "outcome": "ok",
+      "trusted": true,
+      "cacheTtlConfigured": false
+    }
+  },
+  {
+    "name": "rerank-timeout-1",
+    "user": {
+      "rerank": {
+        "timeout_ms": -1
+      }
+    },
+    "effective": {
+      "enabled": true,
+      "allow_home_project": false,
+      "mural": {
+        "enabled": false
+      },
+      "transform_mode": "ts",
+      "rust_pipeline": "full_request",
+      "signed_thinking_hold": "off",
+      "rust_provider_preparation": false,
+      "rust_background_enabled": false,
+      "smart_notes": {
+        "enabled": true,
+        "retina_handoff": false
+      },
+      "cache_ttl": "5m",
+      "prompt_surface": {
+        "default": "full"
+      },
+      "toast_duration_ms": 5000,
+      "execute_threshold_percentage": 65,
+      "history_budget_percentage": 0.15,
+      "historian_timeout_ms": 600000,
+      "commit_cluster_trigger": {
+        "enabled": true,
+        "min_clusters": 3
+      },
+      "system_prompt_injection": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
+      },
+      "sqlite": {
+        "cache_size_mb": 64,
+        "mmap_size_mb": 0
+      },
+      "storage": {
+        "enforce_private_permissions": true
+      },
+      "rerank": {
+        "provider": "synapse",
+        "timeout_ms": 50,
+        "top_n": 20
+      },
+      "embedding": {
+        "provider": "local",
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "local_runtime": "auto"
+      },
+      "shadow_embedding": {
+        "enabled": false
+      },
+      "temporal_awareness": true,
+      "keep_subagents": false,
+      "debug_rpc": false,
+      "fail_closed_blocking": true,
+      "compaction": {
+        "enabled": true
+      },
+      "todowrite": {
+        "enabled": false,
+        "overlay": true
+      },
+      "protected_tools": {
+        "todowrite": 1,
+        "ctx_reduce": 3
+      },
+      "caveman_text_compression": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "memory": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      }
+    },
+    "warnings": [],
+    "warningMessages": [],
+    "trust": {
+      "user": "ok",
+      "project": "ok",
+      "outcome": "ok",
+      "trusted": true,
+      "cacheTtlConfigured": false
+    }
+  },
+  {
+    "name": "rerank-timeout-2",
+    "user": {
+      "rerank": {
+        "timeout_ms": 50
+      }
+    },
+    "effective": {
+      "enabled": true,
+      "allow_home_project": false,
+      "mural": {
+        "enabled": false
+      },
+      "transform_mode": "ts",
+      "rust_pipeline": "full_request",
+      "signed_thinking_hold": "off",
+      "rust_provider_preparation": false,
+      "rust_background_enabled": false,
+      "smart_notes": {
+        "enabled": true,
+        "retina_handoff": false
+      },
+      "cache_ttl": "5m",
+      "prompt_surface": {
+        "default": "full"
+      },
+      "toast_duration_ms": 5000,
+      "execute_threshold_percentage": 65,
+      "history_budget_percentage": 0.15,
+      "historian_timeout_ms": 600000,
+      "commit_cluster_trigger": {
+        "enabled": true,
+        "min_clusters": 3
+      },
+      "system_prompt_injection": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
+      },
+      "sqlite": {
+        "cache_size_mb": 64,
+        "mmap_size_mb": 0
+      },
+      "storage": {
+        "enforce_private_permissions": true
+      },
+      "rerank": {
+        "provider": "synapse",
+        "timeout_ms": 50,
+        "top_n": 20
+      },
+      "embedding": {
+        "provider": "local",
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "local_runtime": "auto"
+      },
+      "shadow_embedding": {
+        "enabled": false
+      },
+      "temporal_awareness": true,
+      "keep_subagents": false,
+      "debug_rpc": false,
+      "fail_closed_blocking": true,
+      "compaction": {
+        "enabled": true
+      },
+      "todowrite": {
+        "enabled": false,
+        "overlay": true
+      },
+      "protected_tools": {
+        "todowrite": 1,
+        "ctx_reduce": 3
+      },
+      "caveman_text_compression": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "memory": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      }
+    },
+    "warnings": [],
+    "warningMessages": [],
+    "trust": {
+      "user": "ok",
+      "project": "ok",
+      "outcome": "ok",
+      "trusted": true,
+      "cacheTtlConfigured": false
+    }
+  },
+  {
+    "name": "rerank-timeout-3",
+    "user": {
+      "rerank": {
+        "timeout_ms": 1500
+      }
+    },
+    "effective": {
+      "enabled": true,
+      "allow_home_project": false,
+      "mural": {
+        "enabled": false
+      },
+      "transform_mode": "ts",
+      "rust_pipeline": "full_request",
+      "signed_thinking_hold": "off",
+      "rust_provider_preparation": false,
+      "rust_background_enabled": false,
+      "smart_notes": {
+        "enabled": true,
+        "retina_handoff": false
+      },
+      "cache_ttl": "5m",
+      "prompt_surface": {
+        "default": "full"
+      },
+      "toast_duration_ms": 5000,
+      "execute_threshold_percentage": 65,
+      "history_budget_percentage": 0.15,
+      "historian_timeout_ms": 600000,
+      "commit_cluster_trigger": {
+        "enabled": true,
+        "min_clusters": 3
+      },
+      "system_prompt_injection": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
+      },
+      "sqlite": {
+        "cache_size_mb": 64,
+        "mmap_size_mb": 0
+      },
+      "storage": {
+        "enforce_private_permissions": true
+      },
+      "rerank": {
+        "provider": "synapse",
+        "timeout_ms": 1500,
+        "top_n": 20
+      },
+      "embedding": {
+        "provider": "local",
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "local_runtime": "auto"
+      },
+      "shadow_embedding": {
+        "enabled": false
+      },
+      "temporal_awareness": true,
+      "keep_subagents": false,
+      "debug_rpc": false,
+      "fail_closed_blocking": true,
+      "compaction": {
+        "enabled": true
+      },
+      "todowrite": {
+        "enabled": false,
+        "overlay": true
+      },
+      "protected_tools": {
+        "todowrite": 1,
+        "ctx_reduce": 3
+      },
+      "caveman_text_compression": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "memory": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      }
+    },
+    "warnings": [],
+    "warningMessages": [],
+    "trust": {
+      "user": "ok",
+      "project": "ok",
+      "outcome": "ok",
+      "trusted": true,
+      "cacheTtlConfigured": false
+    }
+  },
+  {
+    "name": "rerank-timeout-4",
+    "user": {
+      "rerank": {
+        "timeout_ms": 15000
+      }
+    },
+    "effective": {
+      "enabled": true,
+      "allow_home_project": false,
+      "mural": {
+        "enabled": false
+      },
+      "transform_mode": "ts",
+      "rust_pipeline": "full_request",
+      "signed_thinking_hold": "off",
+      "rust_provider_preparation": false,
+      "rust_background_enabled": false,
+      "smart_notes": {
+        "enabled": true,
+        "retina_handoff": false
+      },
+      "cache_ttl": "5m",
+      "prompt_surface": {
+        "default": "full"
+      },
+      "toast_duration_ms": 5000,
+      "execute_threshold_percentage": 65,
+      "history_budget_percentage": 0.15,
+      "historian_timeout_ms": 600000,
+      "commit_cluster_trigger": {
+        "enabled": true,
+        "min_clusters": 3
+      },
+      "system_prompt_injection": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
+      },
+      "sqlite": {
+        "cache_size_mb": 64,
+        "mmap_size_mb": 0
+      },
+      "storage": {
+        "enforce_private_permissions": true
+      },
+      "rerank": {
+        "provider": "synapse",
+        "timeout_ms": 15000,
+        "top_n": 20
+      },
+      "embedding": {
+        "provider": "local",
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "local_runtime": "auto"
+      },
+      "shadow_embedding": {
+        "enabled": false
+      },
+      "temporal_awareness": true,
+      "keep_subagents": false,
+      "debug_rpc": false,
+      "fail_closed_blocking": true,
+      "compaction": {
+        "enabled": true
+      },
+      "todowrite": {
+        "enabled": false,
+        "overlay": true
+      },
+      "protected_tools": {
+        "todowrite": 1,
+        "ctx_reduce": 3
+      },
+      "caveman_text_compression": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "memory": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      }
+    },
+    "warnings": [],
+    "warningMessages": [],
+    "trust": {
+      "user": "ok",
+      "project": "ok",
+      "outcome": "ok",
+      "trusted": true,
+      "cacheTtlConfigured": false
+    }
+  },
+  {
+    "name": "rerank-timeout-5",
+    "user": {
+      "rerank": {
+        "timeout_ms": 99999
+      }
+    },
+    "effective": {
+      "enabled": true,
+      "allow_home_project": false,
+      "mural": {
+        "enabled": false
+      },
+      "transform_mode": "ts",
+      "rust_pipeline": "full_request",
+      "signed_thinking_hold": "off",
+      "rust_provider_preparation": false,
+      "rust_background_enabled": false,
+      "smart_notes": {
+        "enabled": true,
+        "retina_handoff": false
+      },
+      "cache_ttl": "5m",
+      "prompt_surface": {
+        "default": "full"
+      },
+      "toast_duration_ms": 5000,
+      "execute_threshold_percentage": 65,
+      "history_budget_percentage": 0.15,
+      "historian_timeout_ms": 600000,
+      "commit_cluster_trigger": {
+        "enabled": true,
+        "min_clusters": 3
+      },
+      "system_prompt_injection": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
+      },
+      "sqlite": {
+        "cache_size_mb": 64,
+        "mmap_size_mb": 0
+      },
+      "storage": {
+        "enforce_private_permissions": true
+      },
+      "rerank": {
+        "provider": "synapse",
+        "timeout_ms": 15000,
+        "top_n": 20
+      },
+      "embedding": {
+        "provider": "local",
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "local_runtime": "auto"
+      },
+      "shadow_embedding": {
+        "enabled": false
+      },
+      "temporal_awareness": true,
+      "keep_subagents": false,
+      "debug_rpc": false,
+      "fail_closed_blocking": true,
+      "compaction": {
+        "enabled": true
+      },
+      "todowrite": {
+        "enabled": false,
+        "overlay": true
+      },
+      "protected_tools": {
+        "todowrite": 1,
+        "ctx_reduce": 3
+      },
+      "caveman_text_compression": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "memory": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      }
+    },
+    "warnings": [],
+    "warningMessages": [],
+    "trust": {
+      "user": "ok",
+      "project": "ok",
+      "outcome": "ok",
+      "trusted": true,
+      "cacheTtlConfigured": false
+    }
+  },
+  {
+    "name": "historian-turn-two-default",
+    "user": {
+      "historian": {}
+    },
+    "effective": {
+      "enabled": true,
+      "allow_home_project": false,
+      "mural": {
+        "enabled": false
+      },
+      "transform_mode": "ts",
+      "rust_pipeline": "full_request",
+      "signed_thinking_hold": "off",
+      "rust_provider_preparation": false,
+      "rust_background_enabled": false,
+      "historian": {
+        "two_pass": false,
+        "turn_two": "on",
+        "disallowed_tools": []
+      },
+      "smart_notes": {
+        "enabled": true,
+        "retina_handoff": false
+      },
+      "cache_ttl": "5m",
+      "prompt_surface": {
+        "default": "full"
+      },
+      "toast_duration_ms": 5000,
+      "execute_threshold_percentage": 65,
+      "history_budget_percentage": 0.15,
+      "historian_timeout_ms": 600000,
+      "commit_cluster_trigger": {
+        "enabled": true,
+        "min_clusters": 3
+      },
+      "system_prompt_injection": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
+      },
+      "sqlite": {
+        "cache_size_mb": 64,
+        "mmap_size_mb": 0
+      },
+      "storage": {
+        "enforce_private_permissions": true
+      },
+      "embedding": {
+        "provider": "local",
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "local_runtime": "auto"
+      },
+      "shadow_embedding": {
+        "enabled": false
+      },
+      "temporal_awareness": true,
+      "keep_subagents": false,
+      "debug_rpc": false,
+      "fail_closed_blocking": true,
+      "compaction": {
+        "enabled": true
+      },
+      "todowrite": {
+        "enabled": false,
+        "overlay": true
+      },
+      "protected_tools": {
+        "todowrite": 1,
+        "ctx_reduce": 3
+      },
+      "caveman_text_compression": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "memory": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      }
+    },
+    "warnings": [],
+    "warningMessages": [],
+    "trust": {
+      "user": "ok",
+      "project": "ok",
+      "outcome": "ok",
+      "trusted": true,
+      "cacheTtlConfigured": false
+    }
+  },
+  {
+    "name": "historian-turn-two-on",
+    "user": {
+      "historian": {
+        "turn_two": "on",
+        "two_pass": true
+      }
+    },
+    "effective": {
+      "enabled": true,
+      "allow_home_project": false,
+      "mural": {
+        "enabled": false
+      },
+      "transform_mode": "ts",
+      "rust_pipeline": "full_request",
+      "signed_thinking_hold": "off",
+      "rust_provider_preparation": false,
+      "rust_background_enabled": false,
+      "historian": {
+        "two_pass": true,
+        "turn_two": "on",
+        "disallowed_tools": []
+      },
+      "smart_notes": {
+        "enabled": true,
+        "retina_handoff": false
+      },
+      "cache_ttl": "5m",
+      "prompt_surface": {
+        "default": "full"
+      },
+      "toast_duration_ms": 5000,
+      "execute_threshold_percentage": 65,
+      "history_budget_percentage": 0.15,
+      "historian_timeout_ms": 600000,
+      "commit_cluster_trigger": {
+        "enabled": true,
+        "min_clusters": 3
+      },
+      "system_prompt_injection": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
+      },
+      "sqlite": {
+        "cache_size_mb": 64,
+        "mmap_size_mb": 0
+      },
+      "storage": {
+        "enforce_private_permissions": true
+      },
+      "embedding": {
+        "provider": "local",
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "local_runtime": "auto"
+      },
+      "shadow_embedding": {
+        "enabled": false
+      },
+      "temporal_awareness": true,
+      "keep_subagents": false,
+      "debug_rpc": false,
+      "fail_closed_blocking": true,
+      "compaction": {
+        "enabled": true
+      },
+      "todowrite": {
+        "enabled": false,
+        "overlay": true
+      },
+      "protected_tools": {
+        "todowrite": 1,
+        "ctx_reduce": 3
+      },
+      "caveman_text_compression": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "memory": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      }
+    },
+    "warnings": [],
+    "warningMessages": [],
+    "trust": {
+      "user": "ok",
+      "project": "ok",
+      "outcome": "ok",
+      "trusted": true,
+      "cacheTtlConfigured": false
+    }
+  },
+  {
+    "name": "historian-turn-two-off",
+    "user": {
+      "historian": {
+        "turn_two": "off",
+        "two_pass": false
+      }
+    },
+    "effective": {
+      "enabled": true,
+      "allow_home_project": false,
+      "mural": {
+        "enabled": false
+      },
+      "transform_mode": "ts",
+      "rust_pipeline": "full_request",
+      "signed_thinking_hold": "off",
+      "rust_provider_preparation": false,
+      "rust_background_enabled": false,
+      "historian": {
+        "two_pass": false,
+        "turn_two": "off",
+        "disallowed_tools": []
+      },
+      "smart_notes": {
+        "enabled": true,
+        "retina_handoff": false
+      },
+      "cache_ttl": "5m",
+      "prompt_surface": {
+        "default": "full"
+      },
+      "toast_duration_ms": 5000,
+      "execute_threshold_percentage": 65,
+      "history_budget_percentage": 0.15,
+      "historian_timeout_ms": 600000,
+      "commit_cluster_trigger": {
+        "enabled": true,
+        "min_clusters": 3
+      },
+      "system_prompt_injection": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
+      },
+      "sqlite": {
+        "cache_size_mb": 64,
+        "mmap_size_mb": 0
+      },
+      "storage": {
+        "enforce_private_permissions": true
+      },
+      "embedding": {
+        "provider": "local",
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "local_runtime": "auto"
+      },
+      "shadow_embedding": {
+        "enabled": false
+      },
+      "temporal_awareness": true,
+      "keep_subagents": false,
+      "debug_rpc": false,
+      "fail_closed_blocking": true,
+      "compaction": {
+        "enabled": true
+      },
+      "todowrite": {
+        "enabled": false,
+        "overlay": true
+      },
+      "protected_tools": {
+        "todowrite": 1,
+        "ctx_reduce": 3
+      },
+      "caveman_text_compression": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "memory": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      }
+    },
+    "warnings": [],
+    "warningMessages": [],
+    "trust": {
+      "user": "ok",
+      "project": "ok",
+      "outcome": "ok",
+      "trusted": true,
+      "cacheTtlConfigured": false
+    }
+  },
+  {
+    "name": "historian-turn-two-invalid-0",
+    "user": {
+      "historian": {
+        "turn_two": false,
+        "two_pass": true,
+        "opencode": {
+          "model": "provider/historian"
+        }
+      }
+    },
+    "effective": {
+      "enabled": true,
+      "allow_home_project": false,
+      "mural": {
+        "enabled": false
+      },
+      "transform_mode": "ts",
+      "rust_pipeline": "full_request",
+      "signed_thinking_hold": "off",
+      "rust_provider_preparation": false,
+      "rust_background_enabled": false,
+      "historian": {
+        "opencode": {
+          "model": "provider/historian"
+        },
+        "two_pass": true,
+        "turn_two": "off",
+        "disallowed_tools": []
+      },
+      "smart_notes": {
+        "enabled": true,
+        "retina_handoff": false
+      },
+      "cache_ttl": "5m",
+      "prompt_surface": {
+        "default": "full"
+      },
+      "toast_duration_ms": 5000,
+      "execute_threshold_percentage": 65,
+      "history_budget_percentage": 0.15,
+      "historian_timeout_ms": 600000,
+      "commit_cluster_trigger": {
+        "enabled": true,
+        "min_clusters": 3
+      },
+      "system_prompt_injection": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
+      },
+      "sqlite": {
+        "cache_size_mb": 64,
+        "mmap_size_mb": 0
+      },
+      "storage": {
+        "enforce_private_permissions": true
+      },
+      "embedding": {
+        "provider": "local",
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "local_runtime": "auto"
+      },
+      "shadow_embedding": {
+        "enabled": false
+      },
+      "temporal_awareness": true,
+      "keep_subagents": false,
+      "debug_rpc": false,
+      "fail_closed_blocking": true,
+      "compaction": {
+        "enabled": true
+      },
+      "todowrite": {
+        "enabled": false,
+        "overlay": true
+      },
+      "protected_tools": {
+        "todowrite": 1,
+        "ctx_reduce": 3
+      },
+      "caveman_text_compression": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "memory": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      }
+    },
+    "warnings": [
+      "invalid_leaf"
+    ],
+    "warningMessages": [
+      "[user config] \"historian\": invalid nested field(s) \"historian.turn_two\", using \"off\" for \"historian.turn_two\" and defaults for other invalid fields."
+    ],
+    "trust": {
+      "user": "ok",
+      "project": "ok",
+      "outcome": "schema-recovery",
+      "trusted": false,
+      "cacheTtlConfigured": false
+    }
+  },
+  {
+    "name": "historian-turn-two-invalid-1",
+    "user": {
+      "historian": {
+        "turn_two": "Off",
+        "two_pass": true,
+        "opencode": {
+          "model": "provider/historian"
+        }
+      }
+    },
+    "effective": {
+      "enabled": true,
+      "allow_home_project": false,
+      "mural": {
+        "enabled": false
+      },
+      "transform_mode": "ts",
+      "rust_pipeline": "full_request",
+      "signed_thinking_hold": "off",
+      "rust_provider_preparation": false,
+      "rust_background_enabled": false,
+      "historian": {
+        "opencode": {
+          "model": "provider/historian"
+        },
+        "two_pass": true,
+        "turn_two": "off",
+        "disallowed_tools": []
+      },
+      "smart_notes": {
+        "enabled": true,
+        "retina_handoff": false
+      },
+      "cache_ttl": "5m",
+      "prompt_surface": {
+        "default": "full"
+      },
+      "toast_duration_ms": 5000,
+      "execute_threshold_percentage": 65,
+      "history_budget_percentage": 0.15,
+      "historian_timeout_ms": 600000,
+      "commit_cluster_trigger": {
+        "enabled": true,
+        "min_clusters": 3
+      },
+      "system_prompt_injection": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
+      },
+      "sqlite": {
+        "cache_size_mb": 64,
+        "mmap_size_mb": 0
+      },
+      "storage": {
+        "enforce_private_permissions": true
+      },
+      "embedding": {
+        "provider": "local",
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "local_runtime": "auto"
+      },
+      "shadow_embedding": {
+        "enabled": false
+      },
+      "temporal_awareness": true,
+      "keep_subagents": false,
+      "debug_rpc": false,
+      "fail_closed_blocking": true,
+      "compaction": {
+        "enabled": true
+      },
+      "todowrite": {
+        "enabled": false,
+        "overlay": true
+      },
+      "protected_tools": {
+        "todowrite": 1,
+        "ctx_reduce": 3
+      },
+      "caveman_text_compression": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "memory": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      }
+    },
+    "warnings": [
+      "invalid_leaf"
+    ],
+    "warningMessages": [
+      "[user config] \"historian\": invalid nested field(s) \"historian.turn_two\", using \"off\" for \"historian.turn_two\" and defaults for other invalid fields."
+    ],
+    "trust": {
+      "user": "ok",
+      "project": "ok",
+      "outcome": "schema-recovery",
+      "trusted": false,
+      "cacheTtlConfigured": false
+    }
+  },
+  {
+    "name": "historian-turn-two-invalid-2",
+    "user": {
+      "historian": {
+        "turn_two": "none",
+        "two_pass": true,
+        "opencode": {
+          "model": "provider/historian"
+        }
+      }
+    },
+    "effective": {
+      "enabled": true,
+      "allow_home_project": false,
+      "mural": {
+        "enabled": false
+      },
+      "transform_mode": "ts",
+      "rust_pipeline": "full_request",
+      "signed_thinking_hold": "off",
+      "rust_provider_preparation": false,
+      "rust_background_enabled": false,
+      "historian": {
+        "opencode": {
+          "model": "provider/historian"
+        },
+        "two_pass": true,
+        "turn_two": "off",
+        "disallowed_tools": []
+      },
+      "smart_notes": {
+        "enabled": true,
+        "retina_handoff": false
+      },
+      "cache_ttl": "5m",
+      "prompt_surface": {
+        "default": "full"
+      },
+      "toast_duration_ms": 5000,
+      "execute_threshold_percentage": 65,
+      "history_budget_percentage": 0.15,
+      "historian_timeout_ms": 600000,
+      "commit_cluster_trigger": {
+        "enabled": true,
+        "min_clusters": 3
+      },
+      "system_prompt_injection": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
+      },
+      "sqlite": {
+        "cache_size_mb": 64,
+        "mmap_size_mb": 0
+      },
+      "storage": {
+        "enforce_private_permissions": true
+      },
+      "embedding": {
+        "provider": "local",
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "local_runtime": "auto"
+      },
+      "shadow_embedding": {
+        "enabled": false
+      },
+      "temporal_awareness": true,
+      "keep_subagents": false,
+      "debug_rpc": false,
+      "fail_closed_blocking": true,
+      "compaction": {
+        "enabled": true
+      },
+      "todowrite": {
+        "enabled": false,
+        "overlay": true
+      },
+      "protected_tools": {
+        "todowrite": 1,
+        "ctx_reduce": 3
+      },
+      "caveman_text_compression": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "memory": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      }
+    },
+    "warnings": [
+      "invalid_leaf"
+    ],
+    "warningMessages": [
+      "[user config] \"historian\": invalid nested field(s) \"historian.turn_two\", using \"off\" for \"historian.turn_two\" and defaults for other invalid fields."
+    ],
+    "trust": {
+      "user": "ok",
+      "project": "ok",
+      "outcome": "schema-recovery",
+      "trusted": false,
+      "cacheTtlConfigured": false
+    }
+  },
+  {
+    "name": "historian-turn-two-invalid-3",
+    "user": {
+      "historian": {
+        "turn_two": 1,
+        "two_pass": true,
+        "opencode": {
+          "model": "provider/historian"
+        }
+      }
+    },
+    "effective": {
+      "enabled": true,
+      "allow_home_project": false,
+      "mural": {
+        "enabled": false
+      },
+      "transform_mode": "ts",
+      "rust_pipeline": "full_request",
+      "signed_thinking_hold": "off",
+      "rust_provider_preparation": false,
+      "rust_background_enabled": false,
+      "historian": {
+        "opencode": {
+          "model": "provider/historian"
+        },
+        "two_pass": true,
+        "turn_two": "off",
+        "disallowed_tools": []
+      },
+      "smart_notes": {
+        "enabled": true,
+        "retina_handoff": false
+      },
+      "cache_ttl": "5m",
+      "prompt_surface": {
+        "default": "full"
+      },
+      "toast_duration_ms": 5000,
+      "execute_threshold_percentage": 65,
+      "history_budget_percentage": 0.15,
+      "historian_timeout_ms": 600000,
+      "commit_cluster_trigger": {
+        "enabled": true,
+        "min_clusters": 3
+      },
+      "system_prompt_injection": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
+      },
+      "sqlite": {
+        "cache_size_mb": 64,
+        "mmap_size_mb": 0
+      },
+      "storage": {
+        "enforce_private_permissions": true
+      },
+      "embedding": {
+        "provider": "local",
+        "model": "Xenova/all-MiniLM-L6-v2",
+        "local_runtime": "auto"
+      },
+      "shadow_embedding": {
+        "enabled": false
+      },
+      "temporal_awareness": true,
+      "keep_subagents": false,
+      "debug_rpc": false,
+      "fail_closed_blocking": true,
+      "compaction": {
+        "enabled": true
+      },
+      "todowrite": {
+        "enabled": false,
+        "overlay": true
+      },
+      "protected_tools": {
+        "todowrite": 1,
+        "ctx_reduce": 3
+      },
+      "caveman_text_compression": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "memory": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      }
+    },
+    "warnings": [
+      "invalid_leaf"
+    ],
+    "warningMessages": [
+      "[user config] \"historian\": invalid nested field(s) \"historian.turn_two\", using \"off\" for \"historian.turn_two\" and defaults for other invalid fields."
+    ],
+    "trust": {
+      "user": "ok",
+      "project": "ok",
+      "outcome": "schema-recovery",
+      "trusted": false,
+      "cacheTtlConfigured": false
+    }
+  },
+  {
     "name": "user-only",
     "user": {
       "cache_ttl": "17m",
@@ -188,6 +1608,7 @@
           "variant": "low"
         },
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "smart_notes": {
@@ -534,6 +1955,7 @@
           "variant": "high"
         },
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "dreamer": {
@@ -698,6 +2120,7 @@
           "model": "pi/cheap"
         },
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "smart_notes": {
@@ -1032,6 +2455,7 @@
           "model": "pi/ok"
         },
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "smart_notes": {
@@ -2474,6 +3898,9 @@
   {
     "name": "project-user-only",
     "user": {
+      "historian": {
+        "turn_two": "off"
+      },
       "language": "en",
       "compaction": {
         "enabled": false
@@ -2533,6 +3960,7 @@
         "guidance_override_path": "../../evil"
       },
       "historian": {
+        "turn_two": "on",
         "runner": "evil",
         "host_runner": "evil",
         "opencode": {
@@ -2580,6 +4008,7 @@
         "omp": {},
         "broca": {},
         "two_pass": false,
+        "turn_two": "off",
         "disallowed_tools": []
       },
       "dreamer": {
@@ -2724,7 +4153,7 @@
       "[project config] Ignoring subc from project config (security: daemon routing and developer-only embedding traffic are user-level settings).",
       "[project config] Ignoring shadow_embedding from project config (security: daemon routing and developer-only embedding traffic are user-level settings).",
       "[project config] Ignoring embedding.endpoint/provider/query_instruction/document_prefix from project config (security: a repository cannot choose where or how private text is embedded).",
-      "[project config] Ignoring historian.runner, historian.host_runner, historian.opencode.model, historian.opencode.fallback_models, historian.opencode.variant, historian.pi.model, historian.pi.thinking_level, historian.omp.model, historian.omp.thinking_level, historian.broca.model, historian.broca.fallback_models, historian.broca.variant from project config (security: historian model selection is user-level only; a repository cannot force extra compaction cost).",
+      "[project config] Ignoring historian.runner, historian.host_runner, historian.turn_two, historian.opencode.model, historian.opencode.fallback_models, historian.opencode.variant, historian.pi.model, historian.pi.thinking_level, historian.omp.model, historian.omp.thinking_level, historian.broca.model, historian.broca.fallback_models, historian.broca.variant from project config (security: historian model selection is user-level only; a repository cannot force extra compaction cost).",
       "[project config] Ignoring dreamer.runner from project config (security: which process and provider account run dreamer completions is a user-level setting)."
     ],
     "trust": {
@@ -2803,6 +4232,7 @@
       "historian": {
         "pi": {},
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "dreamer": {
@@ -2816,7 +4246,11 @@
             }
           ],
           "tasks": {
-            "verify": {}
+            "verify": {
+              "model": {
+                "model": "oc/verify"
+              }
+            }
           }
         },
         "tasks": {
@@ -2945,7 +4379,7 @@
       "[project config] Ignoring dreamer.prompt, dreamer.opencode.model.permission, dreamer.opencode.model.tools, dreamer.opencode.fallback_models.0.prompt, dreamer.opencode.tasks.verify.prompt from project config (security: a repository cannot reprogram or re-permission hidden agents).",
       "[project config] Ignoring historian.pi.model from project config (security: historian model selection is user-level only; a repository cannot force extra compaction cost).",
       "[project config] \"historian\": invalid nested field(s) \"historian.pi.system_prompt\", using defaults for those. Unrecognized key: \"system_prompt\"",
-      "[project config] \"dreamer\": invalid nested field(s) \"dreamer.opencode.tasks.verify.model\", \"dreamer.tasks.verify.system_prompt\", using defaults for those. Unrecognized key: \"system_prompt\""
+      "[project config] \"dreamer\": invalid nested field(s) \"dreamer.opencode.tasks.verify.model.system_prompt\", \"dreamer.tasks.verify.system_prompt\", using defaults for those. Unrecognized key: \"system_prompt\""
     ],
     "trust": {
       "user": "ok",
@@ -3585,6 +5019,7 @@
           "model": "pi/model"
         },
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "smart_notes": {
@@ -4429,6 +5864,7 @@
           ]
         },
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "dreamer": {
@@ -4818,6 +6254,7 @@
       "rust_background_enabled": false,
       "historian": {
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "smart_notes": {
@@ -4936,6 +6373,7 @@
           "model": "p/model"
         },
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "smart_notes": {
@@ -5058,6 +6496,7 @@
           }
         },
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "smart_notes": {
@@ -5169,6 +6608,7 @@
           "model": "p/model"
         },
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "smart_notes": {
@@ -8346,6 +9786,7 @@
           "bash": false
         },
         "two_pass": true,
+        "turn_two": "on",
         "disallowed_tools": [
           "read"
         ]
@@ -8459,6 +9900,7 @@
           "okay": "${output}"
         },
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "smart_notes": {
@@ -9447,11 +10889,15 @@
       "rust_background_enabled": false,
       "historian": {
         "pi": {
+          "model": {
+            "model": "pi/model"
+          },
           "fallback_models": [
             "pi/fallback"
           ]
         },
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "smart_notes": {
@@ -9531,7 +10977,7 @@
       "invalid_leaf"
     ],
     "warningMessages": [
-      "[user config] \"historian\": invalid nested field(s) \"historian.pi.model\", using defaults for those."
+      "[user config] \"historian\": invalid nested field(s) \"historian.pi.model.unknown\", using defaults for those. Unrecognized key: \"unknown\""
     ],
     "trust": {
       "user": "ok",
@@ -9578,6 +11024,7 @@
           "model": "p/old"
         },
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "dreamer": {
@@ -11729,6 +13176,7 @@
       "rust_background_enabled": false,
       "historian": {
         "two_pass": false,
+        "turn_two": "on",
         "disallowed_tools": []
       },
       "smart_notes": {

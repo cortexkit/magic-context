@@ -43,6 +43,7 @@ function canonicalSnapshot(raw: Record<string, unknown>): Record<string, unknown
         importance: "importance",
         scope: "scope",
         shareable: "shareable",
+        safetyCritical: "safety_critical",
         sourceSessionId: "source_session_id",
         sourceType: "source_type",
         seenCount: "seen_count",

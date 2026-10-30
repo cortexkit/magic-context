@@ -21,7 +21,7 @@ const { Database } = await import(join(root, "packages/plugin/src/shared/sqlite.
 const { ensureColumn } = await import(join(root, "packages/plugin/src/features/magic-context/storage-schema-helpers.ts"));
 const { MIGRATIONS, runMigrations, LATEST_MIGRATION_VERSION: head } = await import(join(root, "packages/plugin/src/features/magic-context/migrations.ts"));
 const { splitLkgSlotPrefixes, splitReplayDecisions, LKG_SLOT_CHUNKS_DDL, LKG_SLOTS_DDL } = await import(join(root, "packages/plugin/src/features/magic-context/migration-v94-write-split.ts"));
-const { insertMemory } = await import(join(root, "packages/plugin/src/features/magic-context/memory/storage-memory.ts"));
+const { computeNormalizedHash } = await import(join(root, "packages/plugin/src/features/magic-context/memory/normalize-hash.ts"));
 const { addNote } = await import(join(root, "packages/plugin/src/features/magic-context/storage-notes.ts"));
 const { insertTag } = await import(join(root, "packages/plugin/src/features/magic-context/storage-tags.ts"));
 const { writeReplayDocument } = await import(join(root, "packages/plugin/src/features/magic-context/storage-replay-document.ts"));
@@ -106,7 +106,11 @@ if (process.argv[3] === "--assets") {
 function populate(db: Db): void {
     insertTag(db, "session-main", "message-user", "user", 80, 1);
     insertTag(db, "session-main", "message-assistant", "assistant", 160, 2);
-    insertMemory(db, { projectPath: "/fixture/project", category: "CONSTRAINTS", content: "Retain Unicode 東京 🧠 and the exact original bytes.", sourceType: "agent", sourceSessionId: "session-main" });
+    // The current reader requires columns added after v87; seed the historical
+    // memory layout directly so the migration, not fixture setup, adds them.
+    const memoryContent = "Retain Unicode 東京 🧠 and the exact original bytes.";
+    db.prepare(`INSERT INTO memories(project_path,category,content,normalized_hash,source_type,source_session_id,first_seen_at,created_at,updated_at,last_seen_at)
+        VALUES('/fixture/project','CONSTRAINTS',?,?,'agent','session-main',?,?,?,?)`).run(memoryContent, computeNormalizedHash(memoryContent), now, now, now, now);
     addNote(db, "session", { sessionId: "session-main", content: "Preserve this follow-up", anchorOrdinal: 2 });
     addNote(db, "smart", { sessionId: "session-main", projectPath: "/fixture/project", content: "Conditional follow-up", surfaceCondition: "After the build passes" });
     writeReplayDocument(db, "session-main", { version: 2, trailingBlank: { "message-assistant": "keep:3" }, piNative: { retained: "opaque" } });

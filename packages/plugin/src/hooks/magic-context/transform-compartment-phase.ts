@@ -126,6 +126,10 @@ interface RunCompartmentPhaseArgs {
     experimentalTemporalAwareness?: boolean;
     /** When true, run a second editor pass after historian to clean U: lines. */
     historianTwoPass?: boolean;
+    /** `historian.turn_two`: the memory-lifecycle off switch. Absent means "on". */
+    historianTurnTwo?: "on" | "off";
+    /** Re-reads the switch from current config after provider replies. */
+    historianTurnTwoIsEnabled?: () => boolean;
     historianExpandTools?: Record<string, string | false>;
     /** Cross-session memory feature gate (`memory.enabled`). Issue #44. */
     memoryEnabled?: boolean;
@@ -438,6 +442,8 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                     experimentalUserMemories: args.experimentalUserMemories,
                     userObservationsRequested: args.userObservationsRequested,
                     historianTwoPass: args.historianTwoPass,
+                    historianTurnTwo: args.historianTurnTwo,
+                    historianTurnTwoIsEnabled: args.historianTurnTwoIsEnabled,
                     historianExpandTools: args.historianExpandTools,
                     memoryEnabled: args.memoryEnabled,
                     autoPromote: args.autoPromote,
@@ -503,6 +509,8 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                 experimentalUserMemories: args.experimentalUserMemories,
                 userObservationsRequested: args.userObservationsRequested,
                 historianTwoPass: args.historianTwoPass,
+                historianTurnTwo: args.historianTurnTwo,
+                historianTurnTwoIsEnabled: args.historianTurnTwoIsEnabled,
                 historianExpandTools: args.historianExpandTools,
                 memoryEnabled: args.memoryEnabled,
                 autoPromote: args.autoPromote,

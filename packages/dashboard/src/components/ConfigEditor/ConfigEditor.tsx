@@ -1183,6 +1183,26 @@ function ConfigForm(props: {
                   </For>
                 </div>
                 <Show when={backgroundHarness() === "opencode"}>{manualModelHint()}</Show>
+                <Show when={isUserScope()}>
+                  <label class="config-field">
+                    <span class="config-field-label">Historian memory verification</span>
+                    <span class="config-field-key">historian.turn_two</span>
+                    <span class="config-field-desc">
+                      Verify and reconcile memories in a second turn on every model; off uses the
+                      one-pass historian, not editor polish.
+                    </span>
+                    <select
+                      class="config-input"
+                      value={String(getNestedValue(formData(), "historian.turn_two") ?? "on")}
+                      onChange={(e) =>
+                        handleFieldChange("historian.turn_two", e.currentTarget.value)
+                      }
+                    >
+                      <option value="on">On (default)</option>
+                      <option value="off">Off</option>
+                    </select>
+                  </label>
+                </Show>
                 <div class="config-agent-grid">
                   <For each={["historian", "dreamer"] as const}>
                     {(agent) => (

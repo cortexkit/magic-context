@@ -18,23 +18,22 @@ const mod = (await import(
     resolve("./src/hooks/magic-context/historian-prompt.generated")
 )) as Record<string, unknown>;
 
-const candidates = Object.entries(mod).filter(
-    ([, v]) => typeof v === "string" && (v as string).length > 10_000,
-);
-if (candidates.length !== 1) {
-    throw new Error(
-        `expected exactly one large prompt export, found: ${candidates.map(([k]) => k).join(", ") || "none"}`,
-    );
-}
-const prompt = candidates[0][1] as string;
-
-const path = join(import.meta.dir, "..", "testdata", "historian-system-prompt.txt");
-if (process.argv.includes("--check")) {
-    if (!existsSync(path) || readFileSync(path, "utf8") !== prompt) {
-        throw new Error(
-            "historian system prompt drift; run bun crates/mc-module/gen/gen-historian-system-prompt.ts",
-        );
+for (const [name, artifact] of [
+    ["COMPARTMENT_AGENT_SYSTEM_PROMPT", "historian-system-prompt.txt"],
+    ["COMPARTMENT_AGENT_COMBINED_SYSTEM_PROMPT", "historian-system-prompt-combined.txt"],
+]) {
+    const prompt = mod[name];
+    if (typeof prompt !== "string" || prompt.length < 10_000)
+        throw new Error(`missing historian rendering: ${name}`);
+    const path = join(import.meta.dir, "..", "testdata", artifact);
+    if (process.argv.includes("--check")) {
+        if (!existsSync(path) || readFileSync(path, "utf8") !== prompt) {
+            throw new Error(
+                `historian system prompt drift (${artifact}); run bun crates/mc-module/gen/gen-historian-system-prompt.ts`,
+            );
+        }
+    } else {
+        writeFileSync(path, prompt);
     }
-} else {
-    writeFileSync(path, prompt);
 }
+console.log("historian system prompts: 2 renderings checked");

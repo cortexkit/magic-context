@@ -39,6 +39,7 @@ export const RENDERED_PREFIXES: readonly string[] = [
   // Historian
   "history_budget_percentage",
   "historian_timeout_ms",
+  "historian.turn_two",
   // Background models: only execution fields, not arbitrary agent metadata.
   ...["historian", "dreamer"].flatMap((agent) =>
     ["opencode", "pi", "omp"].flatMap((harness) =>

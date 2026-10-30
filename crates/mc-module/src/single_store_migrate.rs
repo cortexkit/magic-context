@@ -367,6 +367,7 @@ const MEMORY_COLUMNS: &[&str] = &[
     "mural_cue_hash",
     "mural_cue_at",
     "mural_cue_rejection_count",
+    "safety_critical",
 ];
 const MEMORY_CONTENT: usize = 2;
 

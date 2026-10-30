@@ -50,6 +50,8 @@ export interface Memory {
     scope: MemoryScope;
     /** SQLite INTEGER boolean: 1 = shareable, 0 = private. */
     shareable: number;
+    /** SQLite INTEGER boolean; NULL means the classifier has not assessed safety. */
+    safetyCritical: number | null;
     sourceSessionId: string | null;
     sourceType: MemorySourceType;
     seenCount: number;

@@ -5707,6 +5707,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dormant_xml_artifact_still_parses_and_promotes() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_store = store(dir.path());
+        seed_prior_compartment(&main_store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model-a".to_string()];
+        let text = historian_xml("XML publication").replace("</output>",
+            "<facts><CONSTRAINTS>\n* Uploads are capped at 64 KiB.\n</CONSTRAINTS></facts></output>");
+        let mut producer = ScriptedProducer::default()
+            .with_start(Ok(run_handle("dormant-xml")))
+            .with_output(Ok(producer_output(text)));
+        let mut request = fire_request(&main_store, "placeholder prompt", &models, &chunk, &prior);
+        request.system = Cow::Borrowed(crate::historian_prompt::historian_system_prompt(false));
+        request.validate_options.memory_enabled = true;
+        request.validate_options.auto_promote = true;
+        let outcome = run_historian_firing(&mut producer, request).await.unwrap();
+        assert!(matches!(outcome, HistorianDriveOutcome::Completed(_)));
+        assert_eq!(
+            producer.observed_systems,
+            vec![crate::historian_prompt::HISTORIAN_SYSTEM_PROMPT]
+        );
+        assert_eq!(main_store.load_compartments("ses").unwrap().len(), 2);
+        let memories = main_store.load_active_memories(FIRE_PROJECT, 0).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].content, "Uploads are capped at 64 KiB.");
+    }
+
+    #[tokio::test]
     async fn wired_historian_happy_path_sends_validates_and_publishes() {
         let dir = tempfile::tempdir().unwrap();
         let main_store = store(dir.path());
@@ -8287,6 +8316,7 @@ mod tests {
                     content: "gated fact".into(),
                     origin_compartment_index: None,
                     source_range: None,
+                    source_ranges: Vec::new(),
                 }],
                 events: vec![crate::historian_validate::ParsedEvent {
                     kind: "causal_incident".into(),

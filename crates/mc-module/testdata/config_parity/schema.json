@@ -1439,6 +1439,18 @@
               },
               "value": false
             },
+            "turn_two": {
+              "type": "default",
+              "userOnly": true,
+              "inner": {
+                "type": "enum",
+                "values": [
+                  "on",
+                  "off"
+                ]
+              },
+              "value": "on"
+            },
             "disallowed_tools": {
               "type": "default",
               "inner": {
@@ -3575,6 +3587,104 @@
         },
         "value": {
           "enforce_private_permissions": true
+        }
+      },
+      "rerank": {
+        "type": "optional",
+        "inner": {
+          "type": "object",
+          "shape": {
+            "provider": {
+              "type": "default",
+              "inner": {
+                "type": "enum",
+                "values": [
+                  "synapse",
+                  "remote",
+                  "off"
+                ]
+              },
+              "value": "synapse"
+            },
+            "endpoint": {
+              "type": "optional",
+              "inner": {
+                "type": "string",
+                "checks": [
+                  {
+                    "check": "trim"
+                  }
+                ]
+              }
+            },
+            "model": {
+              "type": "optional",
+              "inner": {
+                "type": "string",
+                "checks": [
+                  {
+                    "check": "trim"
+                  }
+                ]
+              }
+            },
+            "api_key": {
+              "type": "optional",
+              "inner": {
+                "type": "string"
+              }
+            },
+            "timeout_ms": {
+              "type": "default",
+              "inner": {
+                "type": "transform",
+                "rule": "rerank.timeout_ms",
+                "inner": {
+                  "type": "number",
+                  "checks": [
+                    {
+                      "type": "number",
+                      "check": "number_format",
+                      "abort": false,
+                      "format": "safeint"
+                    }
+                  ]
+                }
+              },
+              "value": 1500
+            },
+            "top_n": {
+              "type": "default",
+              "inner": {
+                "type": "number",
+                "checks": [
+                  {
+                    "type": "number",
+                    "check": "number_format",
+                    "abort": false,
+                    "format": "safeint"
+                  },
+                  {
+                    "check": "greater_than",
+                    "value": 1,
+                    "inclusive": true
+                  },
+                  {
+                    "check": "less_than",
+                    "value": 20,
+                    "inclusive": true
+                  }
+                ]
+              },
+              "value": 20
+            }
+          },
+          "checks": [
+            {
+              "check": "custom",
+              "rule": "rerank"
+            }
+          ]
         }
       },
       "embedding": {

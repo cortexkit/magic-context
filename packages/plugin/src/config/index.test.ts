@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import configParityGolden from "../../../../crates/mc-module/testdata/config_parity/golden.json";
 import { resolveEpochFloorForPass } from "../features/magic-context/storage-meta-persisted";
 import { buildOpenCodeConfigWarningBanner } from "../shared/config-warning-surface";
 import * as logger from "../shared/logger";
@@ -918,7 +919,11 @@ describe("loadPluginConfig — legacy agent enabled migration", () => {
             }),
         );
 
-        expect(result.historian).toEqual({ two_pass: false, disallowed_tools: [] });
+        expect(result.historian).toEqual({
+            two_pass: false,
+            turn_two: "on",
+            disallowed_tools: [],
+        });
         expect(result.dreamer?.disable).toBe(true);
         expect(result.configWarnings?.join("\n")).toContain(
             'Removed invalid "historian.enabled" in-memory (run doctor to persist).',
@@ -1013,6 +1018,38 @@ describe("loadPluginConfig — variable expansion scope", () => {
 });
 
 describe("loadPluginConfig — user-only settings", () => {
+    it("loads malformed historian.turn_two as off and reports the error", () => {
+        const vectors = (configParityGolden as { name: string; user?: unknown }[]).filter((row) =>
+            row.name.startsWith("historian-turn-two-invalid-"),
+        );
+        expect(vectors).toHaveLength(4);
+        for (const vector of vectors) {
+            const config = loadWithUserConfig(JSON.stringify(vector.user));
+            expect(config.historian).toMatchObject({
+                turn_two: "off",
+                two_pass: true,
+                opencode: { model: "provider/historian" },
+            });
+            expect(config.configWarnings?.join("\n")).toContain('"historian.turn_two"');
+            expect(config.configWarnings?.join("\n")).toContain('using "off"');
+        }
+    });
+
+    it("ignores project turn_two overrides while retaining project editor polish", () => {
+        for (const [user, project] of [
+            ["off", "on"],
+            ["on", "off"],
+        ]) {
+            const config = loadWithUserAndProjectConfig(
+                JSON.stringify({ historian: { turn_two: user, two_pass: false } }),
+                JSON.stringify({ historian: { turn_two: project, two_pass: true } }),
+            );
+            expect(config.historian).toMatchObject({ turn_two: user, two_pass: true });
+            expect(config.configWarnings?.join("\n")).toContain("historian.turn_two");
+            expect(config.configWarnings?.join("\n")).toContain("from project config");
+        }
+    });
+
     it("allows user config to disable auto_update", () => {
         const result = loadWithUserConfig(JSON.stringify({ auto_update: false }));
 

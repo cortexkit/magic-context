@@ -9,7 +9,6 @@ import { fileURLToPath } from "node:url";
 import { acquireCompartmentLease } from "@magic-context/core/features/magic-context/compartment-lease";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { CHECK_SYSTEM_PROMPTS } from "@magic-context/core/features/magic-context/memory/lifecycle-gates";
-import { lifecycleTextHash } from "@magic-context/core/features/magic-context/memory/lifecycle-text";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	getMemoryById,
@@ -25,6 +24,7 @@ import {
 	TurnTwoOutcomeUnknownError,
 } from "@magic-context/core/features/magic-context/memory/turn-two";
 import { closeTurnTwoChild } from "@magic-context/core/features/magic-context/memory/turn-two-children";
+import { authorizationFixture } from "@magic-context/core/features/magic-context/memory/turn-two-test-fixtures.test";
 import { runMessageFtsRowidMapBackfill } from "@magic-context/core/features/magic-context/message-fts-rowid-map";
 import {
 	closeDatabase,
@@ -54,6 +54,19 @@ import { createTestDb } from "./test-utils.test";
 
 const enabled = process.env.MC_S8_REVIEW === "1";
 const projectPath = resolveProjectIdentity(process.cwd());
+const authorization = authorizationFixture(
+	{
+		lane: "pi",
+		carrier: "pi-historian-rpc",
+		provider: "test",
+		modelId: "model",
+		variant: null,
+		temperature: null,
+		thinkingLevel: null,
+	},
+	COMPARTMENT_AGENT_SYSTEM_PROMPT,
+	[],
+);
 if (!projectPath) throw new Error("Review fixtures require a project identity");
 const xml =
 	'<compartment start="1" end="2" title="Review"><p1>Updated the rule.</p1></compartment>\n<CONSTRAINTS>\n* [at_compartment=1 messages=1-1] New rule.\n</CONSTRAINTS>';
@@ -306,7 +319,16 @@ function rpcHarness(holdSecond = false) {
 								text: first
 									? xml
 									: JSON.stringify({
-											decisions: [{ fact_id: 1, action: "new" }],
+											result: {
+												step: "turn_two",
+												decisions: [
+													{
+														fact_id: 1,
+														check: "Audit fixture.",
+														action: "new",
+													},
+												],
+											},
 										}),
 							},
 						],
@@ -355,6 +377,7 @@ describe.skipIf(!enabled)("S8 independent review", () => {
 			chunkStart: 1,
 			chunkEnd: 2,
 		});
+		authorization.persist(db, send.stageKey);
 		db.transaction(() =>
 			commitTurnOnePublication(db, {
 				send,
@@ -589,8 +612,19 @@ describe.skipIf(!enabled)("S8 independent review", () => {
 					ok: true,
 					durationMs: 1,
 					assistantText: JSON.stringify({
-						decisions: [{ fact_id: 1, action, target_id: memory.id }],
+						result: {
+							step: "turn_two",
+							decisions: [
+								{
+									fact_id: 1,
+									check: "Audit fixture.",
+									action,
+									target_id: memory.id,
+								},
+							],
+						},
 					}),
+					meta: { reportedProvider: "test", reportedModel: "model" },
 				}),
 			};
 			const runner: PiRpcHistorianRunner = {
@@ -605,6 +639,7 @@ describe.skipIf(!enabled)("S8 independent review", () => {
 			};
 			try {
 				schedulePiHistorianTurnTwo({
+					formatInstructions: authorization.request.formatInstruction,
 					db,
 					projectPath,
 					publicationId: send.publicationId,
@@ -614,13 +649,13 @@ describe.skipIf(!enabled)("S8 independent review", () => {
 					options: {
 						agent: "historian",
 						model: "test/model",
-						systemPrompt: "system",
+						systemPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
 						userMessage: "first",
 					},
 					turnOneText: xml,
 					memoryEnabled: true,
 					autoPromote: true,
-					validatedProfiles: [],
+					validatedProfiles: authorization.rows,
 					log: (line) => logs.push(line),
 				});
 				await settlePiHistorianTurnTwoRuns();
@@ -745,26 +780,30 @@ describe.skipIf(!enabled)("S8 independent review", () => {
 				ok: true,
 				durationMs: 1,
 				assistantText: JSON.stringify({
-					decisions: [
-						{
-							fact_id: 1,
-							action: "edit",
-							target_id: memory.id,
-							revision: 1,
-							removed: [],
-							replaced: [
-								{
-									memory_id: memory.id,
-									clause: 1,
-									block: 1,
-									excerpt: "New rule.",
-								},
-							],
-							kept: [{ memory_id: memory.id, clause: 2 }],
-							added: [{ text: "New rule. ", block: 1, excerpt: "New rule." }],
-							final_text: "New rule. Keep rule.",
-						},
-					],
+					result: {
+						step: "turn_two",
+						decisions: [
+							{
+								fact_id: 1,
+								check: "Audit fixture.",
+								action: "edit",
+								target_id: memory.id,
+								revision: 1,
+								removed: [],
+								replaced: [
+									{
+										memory_id: memory.id,
+										clause: 1,
+										block: 1,
+										excerpt: "New rule.",
+									},
+								],
+								kept: [{ memory_id: memory.id, clause: 2 }],
+								added: [{ text: "New rule. ", block: 1, excerpt: "New rule." }],
+								final_text: "New rule. Keep rule.",
+							},
+						],
+					},
 				}),
 				meta: { reportedProvider: "test", reportedModel: "model" },
 			}),
@@ -825,16 +864,8 @@ describe.skipIf(!enabled)("S8 independent review", () => {
 			memoryEnabled: true,
 			autoPromote: true,
 			log: () => {},
-			validatedProfiles: [
-				COMPARTMENT_AGENT_SYSTEM_PROMPT,
-				...Object.values(CHECK_SYSTEM_PROMPTS),
-			].map((system) => ({
-				provider: "test",
-				modelId: "model",
-				temperature: 0,
-				variant: null,
-				systemHash: lifecycleTextHash(system),
-			})),
+			validatedProfiles: authorization.rows,
+			formatInstructions: authorization.request.formatInstruction,
 		});
 		try {
 			await waiting;

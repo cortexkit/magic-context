@@ -713,7 +713,7 @@ export type DreamerConfig = z.infer<typeof DreamerConfigSchema>;
 
 /**
  * Historian metadata remains harness-independent. Model resolution moves to strict
- * per-harness blocks; two_pass and disallowed_tools stay here. TypeScript hosts do
+ * per-harness blocks; two_pass, turn_two and disallowed_tools stay here. TypeScript hosts do
  * not resolve models from historian.broca, but validate the block for ck-mc sessions.
  */
 export const HistorianConfigSchema = AgentMetadataSchema.extend({
@@ -760,6 +760,13 @@ export const HistorianConfigSchema = AgentMetadataSchema.extend({
         .default(false)
         .describe(
             "Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per historian run. Useful for models without extended thinking support. (default: false)",
+        ),
+    turn_two: z
+        .enum(["on", "off"])
+        .default("on")
+        .meta({ "x-mc-user-only": true })
+        .describe(
+            'User-level config only. Verify and reconcile memories in a second historian turn on every model and supported host. "off" disables memory verification. Invalid values are reported and treated as "off". Independent of two_pass, the legacy editor-polish pass, which keeps memory verification dormant while enabled. (default: "on")',
         ),
     disallowed_tools: z
         .array(z.enum(["*", "read", "aft_outline", "aft_zoom", "aft_search"]))
@@ -1767,6 +1774,7 @@ export const LIVE_RELOAD_CONFIG_PATHS = [
     "historian.broca.fallback_models",
     "historian.broca.variant",
     "historian.two_pass",
+    "historian.turn_two",
     "historian.expand_tools",
     "historian.maxTokens",
     "historian_timeout_ms",

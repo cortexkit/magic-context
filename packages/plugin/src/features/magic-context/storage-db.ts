@@ -182,7 +182,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastUnconfirmedMigrationHolders = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 104;
+export const LATEST_SUPPORTED_VERSION = 105;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1412,6 +1412,7 @@ export function initializeDatabase(
       mural_cue_hash TEXT,
       mural_cue_at INTEGER,
       mural_cue_rejection_count INTEGER NOT NULL DEFAULT 0,
+      safety_critical INTEGER CHECK (safety_critical IN (0, 1)),
       UNIQUE(project_path, category, normalized_hash)
     );
 
@@ -2612,6 +2613,14 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // An upgrade changes indexes/triggers only inside the migration transaction.
     // Fresh/current schemas share the same installer, without rescanning FTS on open.
     const version = getPersistedSchemaVersion(db);
+    if (version === 0 || version >= 105) {
+        ensureColumn(
+            db,
+            "memories",
+            "safety_critical",
+            "INTEGER CHECK (safety_critical IN (0, 1))",
+        );
+    }
     // Fresh stores include the v95 temporal decision table. Older stores wait
     // for the same migration step rather than installing a new schema lane.
     if (version === 0 || version >= 95) installV95PerfSchema(db, false, version === 0);

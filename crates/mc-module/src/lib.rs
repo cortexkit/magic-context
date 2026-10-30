@@ -318,6 +318,7 @@ pub mod historian_runner;
 pub mod historian_stage;
 pub mod historian_tool_template;
 pub mod historian_validate;
+pub mod historian_wire;
 pub mod host_store;
 mod image_tokens;
 pub mod injection;
@@ -5161,6 +5162,8 @@ impl McHandler {
         );
         let failure_started_at_ms = firing.now_ms;
         let configured_failure_backoff_at_ms = firing.failure_backoff_at_ms;
+        // Mode 3 keeps the persona-rendered one-pass contract. Its two-pass
+        // lifecycle remains compiled off until the runner continuation is built.
         if runner == HistorianRunnerKind::Host && session_runner.is_none() {
             // A firing for the host runner with no session runner has nowhere to go:
             // the `historian.pending|claim|heartbeat|complete` routes are retired, so
@@ -7252,6 +7255,12 @@ impl McHandler {
             let Some(hash) = row.get("content_hash_at_prompt").and_then(Value::as_str) else {
                 return invalid_params_error("classification row requires content_hash_at_prompt");
             };
+            if row
+                .get("safety_critical")
+                .is_some_and(|value| !value.is_boolean())
+            {
+                return invalid_params_error("classification safety_critical must be boolean");
+            }
             updates.push(mc_store::ClassificationUpdate {
                 memory_id,
                 content_hash_at_prompt: hash.to_string(),
@@ -7264,6 +7273,7 @@ impl McHandler {
                     .and_then(Value::as_str)
                     .map(ToString::to_string),
                 shareable: row.get("shareable").and_then(Value::as_bool),
+                safety_critical: row.get("safety_critical").and_then(Value::as_bool),
             });
         }
         #[cfg(test)]
@@ -18963,6 +18973,130 @@ mod tests {
         .await;
         let note_revision_after_dismiss = store.max_note_status_version(project).unwrap();
         assert!(note_revision_after_dismiss > note_revision_after_update);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn safety_critical_classify_selects_module_owned_scored_legacy_and_open_rules() {
+        use mc_store::memory_lifecycle::scoring::ItemScore;
+        use rusqlite::params;
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        let route = project.to_str().unwrap();
+        let identity = "git:safety-module";
+        handler.bind_route(7, binding(route, "token"));
+        activate_module_authority(&store, "context", identity, route, "memories");
+        let ids: Vec<i64> = (0..10)
+            .map(|index| {
+                insert_memory(
+                    &store,
+                    identity,
+                    "PROJECT_RULES",
+                    &if index < 3 {
+                        format!("Never push without approval: rule {index}.")
+                    } else {
+                        format!("Ordinary fact {index}.")
+                    },
+                    1,
+                )
+            })
+            .collect();
+        store.with_context_conn_for_test(|conn| {
+            conn.execute("UPDATE memories SET scope='ecosystem',shareable=0,source_type='historian'", [])?;
+            conn.execute("UPDATE memories SET importance=95,classified_at=1 WHERE id=?1", [ids[1]])?;
+            for id in [ids[0], ids[2]] {
+                conn.execute("INSERT INTO memory_classification_items(project_path,memory_id,saved_revision,source_session_id,tool_call_part_id,save_ordinal,excerpt) VALUES(?1,?2,1,'ses',?3,1,'excerpt')", params![identity, id, format!("part-{id}")])?;
+            }
+            Ok(())
+        }).unwrap();
+        store
+            .record_memory_item_scores(
+                &[1],
+                &[ItemScore {
+                    item: 1,
+                    importance: 40,
+                    proposed_class: "durable".into(),
+                }],
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            store.get_memory_full(ids[0]).unwrap().unwrap().importance,
+            Some(40)
+        );
+        let selected: Value = serde_json::from_str(include_str!(
+            "../testdata/safety_critical_classify_selection.json"
+        ))
+        .unwrap();
+        // TypeScript's fixture test runs the classifier selector. Rust checks the active-memory
+        // read and applies the shared fixture rows through the real classification RPC.
+        let mut prompted: Vec<i64> = store
+            .load_active_memories(identity, 3)
+            .unwrap()
+            .into_iter()
+            .map(|memory| memory.id)
+            .collect();
+        prompted.sort_unstable();
+        assert_eq!(json!(prompted), selected["prompted"]);
+        let scored_inputs = ids.iter().map(|id| {
+            let row = store.get_memory_full(*id).unwrap().unwrap();
+            json!({"memory_id": row.id, "importance": row.importance, "classified_at": row.classified_at})
+        }).collect::<Vec<_>>();
+        assert_eq!(json!(scored_inputs), selected["scored_inputs"]);
+        let mut submitted: Vec<i64> = selected["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["memory_id"].as_i64().unwrap())
+            .collect();
+        submitted.sort_unstable();
+        assert_eq!(submitted, ids);
+        for id in &ids[..3] {
+            let row = selected["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["memory_id"] == *id)
+                .expect("safety-only row selected");
+            assert_eq!(row["safety_critical"], true);
+            assert!(
+                row.get("importance").is_none()
+                    && row.get("scope").is_none()
+                    && row.get("shareable").is_none()
+            );
+        }
+        let outcome = call_facade(
+            &handler,
+            "memory.set_classification",
+            json!({ "memory_project": identity, "rows": selected["rows"] }),
+        )
+        .await;
+        let HandlerOutcome::Response(response) = outcome else {
+            panic!("classification RPC failed: {outcome:?}")
+        };
+        let response: Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response["accepted"].as_array().unwrap().len(), 10);
+        for (id, importance) in [(ids[0], 80), (ids[1], 95), (ids[2], 80)] {
+            let row = store.get_memory_full(id).unwrap().unwrap();
+            assert_eq!(
+                (
+                    row.safety_critical,
+                    row.importance,
+                    row.scope.as_str(),
+                    row.shareable
+                ),
+                (Some(true), Some(importance), "ecosystem", 0)
+            );
+        }
+        for id in &ids[3..] {
+            let row = store.get_memory_full(*id).unwrap().unwrap();
+            assert_eq!(
+                (row.importance, row.safety_critical),
+                (Some(1), Some(false))
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

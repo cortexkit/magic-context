@@ -107,6 +107,8 @@ export interface HiddenRunHandle {
 
 export interface HiddenCompletion {
     text: string | null;
+    /** Transport-observed tool activity, including calls refused by a guard. */
+    toolActivity?: boolean;
     reasoning?: string | null;
     usage: TokenTotals & { reasoning?: number };
     lengthCapped: boolean;
@@ -119,6 +121,8 @@ export interface HiddenCompletion {
     attemptedModel?: string;
     modelConfigKey?: string;
     hostError?: unknown;
+    /** Tool names in the context-hook draft, in sent order; absent when not observed. */
+    observedToolSurface?: readonly string[];
 }
 
 export interface HiddenCompletionExecutor {
@@ -222,12 +226,12 @@ export interface CompartmentRunnerDeps<
      * memories explicitly via `ctx_memory write`. Issue #44.
      */
     autoPromote?: boolean;
-    /**
-     * Which historian turn one this lane runs (see `TurnOneLane`). Unset means
-     * `dormant`, the only production value: `enabled` needs a transport that makes
-     * the provider enforce a JSON response schema, and none does yet.
-     */
+    /** Test-only lane override; application still checks the frozen answering identity. */
     memoryLifecycleLane?: TurnOneLane;
+    historianTurnTwo?: "on" | "off";
+    /** Reads the current switch after asynchronous replies, including config reloads. */
+    historianTurnTwoIsEnabled?: () => boolean;
+    memoryLifecycleTrialAuthorization?: import("../../features/magic-context/memory/turn-two-profile").TurnTwoTrialAuthorization;
     /**
      * Historian and check model profiles (`ReportedProfile`) that a recorded replay
      * validated for turn two. None is validated yet, so on an enabled lane every
@@ -320,10 +324,12 @@ export interface RetainedHistorianChild {
     /** The model the provider reported for turn one, when the carrier exposes it. */
     providerId?: string;
     modelId?: string;
+    reportedProfile?: import("../../features/magic-context/memory/lifecycle-gates").ReportedProfile;
     close(): Promise<void>;
 }
 
 export interface HistorianRunResult {
+    reportedProfile?: import("../../features/magic-context/memory/lifecycle-gates").ReportedProfile;
     /** Set only when the caller asked to retain the child and the run succeeded. */
     retained?: RetainedHistorianChild;
     refusal?: HiddenCompletionRefusal;
@@ -362,11 +368,13 @@ export type ValidatedHistorianPassResult =
           invocationId?: number | null;
           /** The child that produced the published reply, kept open for turn two. */
           retainedChild?: RetainedHistorianChild;
+          reportedProfile?: import("../../features/magic-context/memory/lifecycle-gates").ReportedProfile;
       }
     | {
           ok: false;
           error: string;
           failureReason?: string;
+          reportedProfile?: import("../../features/magic-context/memory/lifecycle-gates").ReportedProfile;
           invocationId?: number | null;
       };
 

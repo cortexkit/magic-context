@@ -37,6 +37,7 @@ fn classify_memory(id: i64, content: &str, unclassified: bool) -> classify::Memo
         importance: Some(50),
         scope: Some("project".into()),
         shareable: true,
+        safety_critical: Some(false),
         unclassified,
         open_classification: false,
         unmapped: true,

@@ -5,6 +5,7 @@
 pub mod applier;
 pub mod authority;
 pub mod constants;
+pub mod scoring;
 pub mod text;
 
 #[cfg(test)]

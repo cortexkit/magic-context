@@ -1619,6 +1619,11 @@ export interface PiHistorianOptions {
 	 *  clean low-signal U: lines and cross-compartment duplicates. Mirrors
 	 *  OpenCode's `historian.two_pass` config. */
 	twoPass?: boolean;
+	/** The `historian.turn_two` switch. Absent means "on". */
+	turnTwo?: "on" | "off";
+	/** Re-reads the switch from current config; the runner asks after each
+	 *  provider reply, so turning turn two off mid-flight revokes it. */
+	turnTwoIsEnabled?: () => boolean;
 	expandTools?: Record<string, string | false>;
 	/** Pi only: explicit thinking level for historian/compressor subagent
 	 *  invocations (passed as --thinking <level>). When unset, Pi's own
@@ -7783,6 +7788,8 @@ function spawnPiHistorianRun(args: {
 					temperature: historian.temperature,
 					maxOutputTokens: historian.maxOutputTokens,
 					twoPass: historian.twoPass,
+					turnTwo: historian.turnTwo,
+					turnTwoIsEnabled: historian.turnTwoIsEnabled,
 					expandTools: historian.expandTools,
 					thinkingLevel: historian.thinkingLevel,
 					memoryEnabled: historian.memoryEnabled,

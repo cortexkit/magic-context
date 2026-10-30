@@ -1,3 +1,4 @@
+import { CHECK_SCHEMA_CONTRACT } from "./historian-schema";
 import { KEPT_CHECK_INPUT_MAX, NARROW_CHECK_CALL_CEILING } from "./lifecycle-constants";
 import {
     type EvidenceBlock,
@@ -7,14 +8,20 @@ import {
     scanConcreteTokens,
     splitMemoryClauses,
 } from "./lifecycle-text";
+import { matchesReportedProfile } from "./turn-two-profile";
 
 export type CheckKind = "disproof" | "support" | "kept-clause" | "compatibility";
 export interface ReportedProfile {
+    lane?: string | null;
+    carrier?: string | null;
     provider: string;
     modelId: string;
     variant: string | null;
     temperature: number | null;
+    thinkingLevel?: string | null;
     systemHash: string;
+    schemaHash?: string | null;
+    toolHash?: string | null;
 }
 export interface ClauseCitation {
     blockStartOrdinal: number;
@@ -49,7 +56,8 @@ export interface RevisionDecision {
 }
 export interface GateContext {
     enabled: boolean;
-    enforcedJson: boolean;
+    /** Accepted for older callers, but ignored: provider enforcement does not authorize an edit. */
+    enforcedJson?: boolean;
     memoryEnabled: boolean;
     autoPromote: boolean;
     anchorKnown: boolean;
@@ -99,7 +107,7 @@ export function compatibilityPair(left: CheckOperand, right: CheckOperand): Chec
 export function planMemoryRevision(decision: RevisionDecision, context: GateContext): GatePlan {
     if (!context.memoryEnabled) return refused("memory_disabled");
     if (!context.autoPromote) return refused("auto_promote_disabled");
-    if (!context.enabled || !context.enforcedJson) return refused("lane_dormant");
+    if (!context.enabled) return refused("lane_dormant");
     if (
         !Array.isArray(decision.changes) ||
         !Array.isArray(decision.added) ||
@@ -301,20 +309,27 @@ export function planMemoryRevision(decision: RevisionDecision, context: GateCont
     return { ok: true, checks, kept, spans };
 }
 
-export const CHECK_SYSTEM_PROMPTS: Record<CheckKind, string> = {
+const CHECK_QUESTIONS: Record<CheckKind, string> = {
     disproof:
-        "Does the evidence disprove each statement? Return exactly one identity-keyed verdict (yes, no, unclear) per operand.",
+        "Does the evidence disprove each statement? Return exactly one identity-keyed verdict per operand.",
     support:
-        "Does the evidence support each statement? Return exactly one identity-keyed verdict (yes, no, unclear) per operand.",
+        "Does the evidence support each statement? Return exactly one identity-keyed verdict per operand.",
     "kept-clause":
-        "Do the stored blocks disprove any kept statement? Return exactly one identity-keyed verdict (yes, no, unclear) per operand.",
+        "Do the stored blocks disprove any kept statement? Return exactly one identity-keyed verdict per operand.",
     compatibility:
-        "Do the statements in each pair contradict each other? Return exactly one identity-keyed verdict (yes, no, unclear) per pair.",
+        "Do the statements in each pair contradict each other? Return exactly one identity-keyed verdict per pair.",
 };
+export const CHECK_SYSTEM_PROMPTS = Object.fromEntries(
+    Object.entries(CHECK_QUESTIONS).map(([kind, question]) => [
+        kind,
+        `${question}\n\n${CHECK_SCHEMA_CONTRACT}`,
+    ]),
+) as Record<CheckKind, string>;
 export interface CheckReply {
     verdicts: Array<{ id: string; verdict: "yes" | "no" | "unclear" }>;
     profile: ReportedProfile;
     usage: unknown;
+    toolActivity?: boolean;
 }
 export interface CheckRequest {
     key: string;
@@ -345,14 +360,12 @@ export function sameInferenceTuple(a: ReportedProfile, b: ReportedProfile): bool
         a.provider === b.provider &&
         a.modelId === b.modelId &&
         a.variant === b.variant &&
-        a.temperature === b.temperature
+        a.temperature === b.temperature &&
+        a.thinkingLevel === b.thinkingLevel
     );
 }
 function validated(profile: ReportedProfile, profiles: ReportedProfile[]): boolean {
-    return profiles.some(
-        (candidate) =>
-            sameInferenceTuple(candidate, profile) && candidate.systemHash === profile.systemHash,
-    );
+    return profiles.some((candidate) => matchesReportedProfile(profile, candidate));
 }
 export function makeCheckRequest(
     decisionKey: string,
@@ -394,7 +407,20 @@ export async function runMemoryChecks(
         };
     for (const check of plan.checks) {
         const request = makeCheckRequest(key, check, context.historianProfile);
-        const expectedProfile = { ...context.historianProfile, systemHash: request.systemHash };
+        const checkRow = context.validatedProfiles.find(
+            (candidate) =>
+                candidate.lane === context.historianProfile.lane &&
+                candidate.carrier === context.historianProfile.carrier &&
+                sameInferenceTuple(candidate, context.historianProfile) &&
+                candidate.systemHash === request.systemHash &&
+                candidate.schemaHash === lifecycleTextHash(CHECK_SCHEMA_CONTRACT),
+        );
+        const expectedProfile = {
+            ...context.historianProfile,
+            systemHash: request.systemHash,
+            schemaHash: lifecycleTextHash(CHECK_SCHEMA_CONTRACT),
+            toolHash: checkRow?.toolHash,
+        };
         if (
             request.systemHash === context.historianProfile.systemHash ||
             !validated(expectedProfile, context.validatedProfiles)
@@ -409,8 +435,11 @@ export async function runMemoryChecks(
         }
         if (
             !reply?.profile ||
+            reply.profile.lane !== context.historianProfile.lane ||
+            reply.profile.carrier !== context.historianProfile.carrier ||
             !sameInferenceTuple(reply.profile, context.historianProfile) ||
             reply.profile.systemHash !== request.systemHash ||
+            !matchesReportedProfile(reply.profile, expectedProfile) ||
             !validated(reply.profile, context.validatedProfiles)
         )
             return {
@@ -424,8 +453,16 @@ export async function runMemoryChecks(
                 ? check.pairs.map((pair) => pair.id)
                 : check.operands.map((operand) => operand.id);
         if (
+            reply.toolActivity ||
             !Array.isArray(reply.verdicts) ||
             reply.verdicts.length !== expected.length ||
+            reply.verdicts.some(
+                (entry) =>
+                    !entry ||
+                    typeof entry !== "object" ||
+                    typeof entry.id !== "string" ||
+                    !["yes", "no"].includes(entry.verdict),
+            ) ||
             new Set(reply.verdicts.map((entry) => entry.id)).size !== expected.length ||
             reply.verdicts.some((entry) => !expected.includes(entry.id))
         )

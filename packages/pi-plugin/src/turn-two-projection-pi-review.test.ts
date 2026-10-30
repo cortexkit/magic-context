@@ -8,12 +8,7 @@
  * the next genuine HARD fold, with no mutation-log row.
  */
 import { expect, test } from "bun:test";
-import {
-	CHECK_SYSTEM_PROMPTS,
-	type CheckRequest,
-	type ReportedProfile,
-} from "@magic-context/core/features/magic-context/memory/lifecycle-gates";
-import { lifecycleTextHash } from "@magic-context/core/features/magic-context/memory/lifecycle-text";
+import type { CheckRequest } from "@magic-context/core/features/magic-context/memory/lifecycle-gates";
 import {
 	getMemoryById,
 	insertMemory,
@@ -23,17 +18,24 @@ import {
 	commitTurnOnePublication,
 } from "@magic-context/core/features/magic-context/memory/turn-one-publication";
 import { runTurnTwo } from "@magic-context/core/features/magic-context/memory/turn-two";
+import { authorizationFixture } from "@magic-context/core/features/magic-context/memory/turn-two-test-fixtures.test";
 import { createProjectionFixture } from "@magic-context/core/shared/memory-projection-fixtures.test";
 import { injectM0M1Pi, materializeM0Pi } from "./inject-compartments-pi";
 import { createTestDb } from "./test-utils.test";
 
-const PROFILE: ReportedProfile = {
-	provider: "test",
-	modelId: "validated-model",
-	variant: null,
-	temperature: 0,
-	systemHash: lifecycleTextHash("historian system prompt"),
-};
+const authorization = authorizationFixture(
+	{
+		lane: "pi",
+		carrier: "pi-historian-rpc",
+		provider: "test",
+		modelId: "validated-model",
+		variant: null,
+		temperature: 0,
+		thinkingLevel: null,
+	},
+	"historian system prompt",
+);
+const PROFILE = authorization.profile;
 
 function textOf(message: unknown): string {
 	const content = (message as { content?: unknown }).content;
@@ -94,6 +96,7 @@ test("review probe: an applied turn-two edit is invisible on Pi SOFT and defer p
 			chunkStart: 1,
 			chunkEnd: 50,
 		});
+		authorization.persist(f.db, send.stageKey);
 		f.db.transaction(() =>
 			commitTurnOnePublication(f.db, {
 				send,
@@ -149,26 +152,30 @@ test("review probe: an applied turn-two edit is invisible on Pi SOFT and defer p
 					);
 					return {
 						text: JSON.stringify({
-							decisions: ids.map((id) => ({
-								fact_id: id,
-								action: "edit",
-								target_id: memory.id,
-								revision: 1,
-								removed: [],
-								replaced: [
-									{
-										memory_id: memory.id,
-										clause: 1,
-										block: 42,
-										excerpt: "New rule.",
-									},
-								],
-								kept: [{ memory_id: memory.id, clause: 2 }],
-								added: [
-									{ text: "New rule. ", block: 42, excerpt: "New rule." },
-								],
-								final_text: "New rule. Keep rule.",
-							})),
+							result: {
+								step: "turn_two",
+								decisions: ids.map((id) => ({
+									fact_id: id,
+									check: "Audit fixture.",
+									action: "edit",
+									target_id: memory.id,
+									revision: 1,
+									removed: [],
+									replaced: [
+										{
+											memory_id: memory.id,
+											clause: 1,
+											block: 42,
+											excerpt: "New rule.",
+										},
+									],
+									kept: [{ memory_id: memory.id, clause: 2 }],
+									added: [
+										{ text: "New rule. ", block: 42, excerpt: "New rule." },
+									],
+									final_text: "New rule. Keep rule.",
+								})),
+							},
 						}),
 						lengthCapped: false,
 						profile: PROFILE,
@@ -187,20 +194,14 @@ test("review probe: an applied turn-two edit is invisible on Pi SOFT and defer p
 							id: operand.id,
 							verdict: passing as "yes" | "no",
 						})),
-						profile: { ...PROFILE, systemHash: request.systemHash },
+						profile: authorization.checkProfile(request.systemHash),
 						usage: null,
 					};
 				},
 			},
 			memoryEnabled: true,
 			autoPromote: true,
-			validatedProfiles: [
-				PROFILE,
-				...Object.values(CHECK_SYSTEM_PROMPTS).map((system) => ({
-					...PROFILE,
-					systemHash: lifecycleTextHash(system),
-				})),
-			],
+			validatedProfiles: authorization.rows,
 		});
 		expect(result.status).toBe("resolved");
 		expect(getMemoryById(f.db, memory.id)?.content).toBe(

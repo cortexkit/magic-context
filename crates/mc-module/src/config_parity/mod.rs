@@ -135,6 +135,32 @@ mod tests {
         });
         assert!(serde_json::from_value::<BridgeConfig>(bridge).is_err());
     }
+
+    #[test]
+    fn union_recovery_prunes_unknown_model_leaves_without_losing_valid_siblings() {
+        let descriptor = json!({
+            "type": "union",
+            "options": [
+                {"type": "string"},
+                {"type": "object", "shape": {"model": {"type": "string"}},
+                    "catchall": {"type": "never"}}
+            ]
+        });
+        for leaf in ["unknown", "system_prompt"] {
+            let mut raw = json!({"entry": {"model": "provider/model"}});
+            raw["entry"][leaf] = json!("unrecognized");
+            let (_, issues) = schema_parse(&descriptor, raw.get("entry"), "entry");
+            assert_eq!(issues, vec![format!("entry.{leaf}")]);
+            assert!(prune(&mut raw, &issues[0]));
+            let (entry, remaining) = schema_parse(&descriptor, raw.get("entry"), "entry");
+            assert!(remaining.is_empty());
+            assert_eq!(entry, Some(json!({"model": "provider/model"})));
+        }
+        assert_eq!(
+            schema_parse(&descriptor, Some(&json!(false)), "entry").1,
+            vec!["entry"]
+        );
+    }
 }
 
 /// Host UI and transport choices (such as toast lifetime) are carried to the bridge,
@@ -598,6 +624,7 @@ fn validate(raw: &Value, tool_order: &[String], warnings: &mut Vec<Warning>) -> 
     profiles::migrate(&mut migrated, warnings);
     let (parsed, issues) = schema_parse(&schema()["config"], Some(&migrated), "");
     let recovered = !issues.is_empty();
+    let invalid_turn_two = issues.iter().any(|path| path == "historian.turn_two");
     let mut effective = if !recovered {
         parsed.unwrap()
     } else {
@@ -615,7 +642,12 @@ fn validate(raw: &Value, tool_order: &[String], warnings: &mut Vec<Warning>) -> 
             if nested {
                 let mut complete = true;
                 for path in paths {
-                    complete &= prune(&mut patched, &path);
+                    if path == "historian.turn_two" {
+                        // Removing the invalid leaf would re-enable the allowlist default.
+                        set_path(&mut patched, &path, json!("off"));
+                    } else {
+                        complete &= prune(&mut patched, &path);
+                    }
                 }
                 if !complete {
                     remove_path(&mut patched, &key);
@@ -623,7 +655,7 @@ fn validate(raw: &Value, tool_order: &[String], warnings: &mut Vec<Warning>) -> 
             } else {
                 remove_path(&mut patched, &key);
             }
-            warnings.push(Warning::new("invalid_leaf", "Invalid config value; valid siblings are retained and invalid leaves use defaults."));
+            warnings.push(Warning::new("invalid_leaf", "Invalid config value; valid siblings are retained. Invalid historian.turn_two uses off; other invalid leaves use defaults."));
         }
         tool_input = patched.get("protected_tools").cloned();
         profiles::migrate(&mut patched, warnings);
@@ -636,7 +668,12 @@ fn validate(raw: &Value, tool_order: &[String], warnings: &mut Vec<Warning>) -> 
                 "recovery_failed",
                 "Config recovery failed; using all defaults.",
             ));
-            schema_parse(&schema()["config"], Some(&json!({})), "")
+            let defaults = if invalid_turn_two {
+                json!({"historian": {"turn_two": "off"}})
+            } else {
+                json!({})
+            };
+            schema_parse(&schema()["config"], Some(&defaults), "")
                 .0
                 .unwrap()
         }
@@ -783,11 +820,33 @@ pub(crate) fn schema_parse(
             }
         }
         "union" => {
+            let child_prefix = format!("{path}.");
+            let mut nested_issues = Vec::new();
+            let mut nested_depth = 0;
             for option in node["options"].as_array().unwrap() {
                 let (value, option_issues) = schema_parse(option, Some(input), path);
                 if option_issues.is_empty() {
                     return (value, vec![]);
                 }
+                // A matching object arm can identify a bad leaf even when the
+                // union also accepts strings. Preserve that detail so recovery
+                // removes only the bad leaf, as the TypeScript loader does.
+                let depth = option_issues
+                    .iter()
+                    .map(|issue| issue.split('.').count())
+                    .min()
+                    .unwrap_or(0);
+                if depth > nested_depth
+                    && option_issues.iter().all(|issue| {
+                        issue != path && (path.is_empty() || issue.starts_with(&child_prefix))
+                    })
+                {
+                    nested_depth = depth;
+                    nested_issues = option_issues;
+                }
+            }
+            if !nested_issues.is_empty() {
+                return (None, nested_issues);
             }
             false
         }
@@ -890,6 +949,7 @@ fn transform(rule: &str, value: Value) -> Value {
             &trust::protected_tools(&value),
         ),
         "subc.connection_file" => value,
+        "rerank.timeout_ms" => json!(value.as_i64().unwrap_or(1500).clamp(50, 15_000)),
         "embedding" => {
             let provider = value["provider"].as_str().unwrap_or("local");
             if provider == "off" {

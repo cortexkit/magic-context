@@ -9,9 +9,8 @@ import {
     applyMemoryAdmission,
     getMemoryRevision,
 } from "../features/magic-context/memory/lifecycle-applier";
-import { CHECK_SYSTEM_PROMPTS } from "../features/magic-context/memory/lifecycle-gates";
-import { lifecycleTextHash } from "../features/magic-context/memory/lifecycle-text";
 import { getMemoryById, insertMemory } from "../features/magic-context/memory/storage-memory";
+import { authorizationFixture } from "../features/magic-context/memory/turn-two-test-fixtures.test";
 import {
     createProjectionFixture,
     type ProjectionDriver,
@@ -55,13 +54,19 @@ async function automate(f: ProjectionFixture, kind: number, step: number) {
         const target = getMemoryById(f.db, 3)!;
         const oldClause = target.content.split(". ")[0]!;
         const newClause = `Revised ${"very ".repeat(step + 1)}claim`;
-        const profile = {
-            provider: "review",
-            modelId: "review",
-            variant: null,
-            temperature: 0,
-            systemHash: "historian",
-        };
+        const authorization = authorizationFixture(
+            {
+                lane: "opencode-1",
+                carrier: "hidden-completion",
+                provider: "review",
+                modelId: "review",
+                variant: null,
+                temperature: 0,
+                thinkingLevel: null,
+            },
+            "historian",
+        );
+        const profile = authorization.profile;
         const evidence = { blockStartOrdinal: 42, excerpt: `${newClause}.` };
         const receipt = await applyHistorianRevision(
             f.db,
@@ -92,17 +97,11 @@ async function automate(f: ProjectionFixture, kind: number, step: number) {
                 ],
                 sources: [{ ...target, revision: getMemoryRevision(f.db, 3)! }],
                 historianProfile: profile,
-                validatedProfiles: [
-                    profile,
-                    ...Object.values(CHECK_SYSTEM_PROMPTS).map((system) => ({
-                        ...profile,
-                        systemHash: lifecycleTextHash(system),
-                    })),
-                ],
+                validatedProfiles: authorization.rows,
             },
             { sessionId: session, harness: "review" },
             async (request) => ({
-                profile: { ...profile, systemHash: request.systemHash },
+                profile: authorization.checkProfile(request.systemHash),
                 usage: { tokens: 1 },
                 verdicts: (request.kind === "compatibility" ? request.pairs : request.operands).map(
                     (operand) => ({

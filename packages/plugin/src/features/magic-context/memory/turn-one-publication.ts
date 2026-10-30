@@ -2,6 +2,226 @@ import { randomUUID } from "node:crypto";
 import type { Database } from "../../../shared/sqlite";
 import { PROMOTABLE_CATEGORIES } from "./constants";
 import { tsOwnsMemory } from "./lifecycle-applier";
+import type { ReportedProfile } from "./lifecycle-gates";
+import { sweepTurnTwoStages, type TurnOneAuthorizationRequest, trialRootMatches } from "./turn-two";
+import { closeTurnTwoChild, retainedTurnTwoChild } from "./turn-two-children";
+import {
+    expandTurnTwoEntry,
+    matchesReportedProfile,
+    matchesTurnTwoEntry,
+    matchesTurnTwoSelection,
+    type TurnOneFailureKey,
+    type TurnOneFailureRow,
+    type TurnTwoTrialAuthorization,
+    turnOneFailureCount,
+    turnOneFailureProfileHash,
+    turnOneFailurePublicationId,
+} from "./turn-two-profile";
+
+/** Persisted once and appended unchanged to the first request; turn two retains its history. */
+export const HISTORIAN_FORMAT_INSTRUCTION =
+    'Reply with exactly one JSON object with a result object. On turn one use {"result":{"step":"turn_one","xml":"the complete compartment XML"}}. On turn two use {"result":{"step":"turn_two","decisions":[],"scores":[]}} with the decisions and scores described in the system contract. Do not call tools.';
+
+const turnOneChildren = new Map<string, () => Promise<void>>();
+
+/** Share a release guard between a live send and a dormant firing that revokes it. */
+export function registerTurnOneChild(id: string, close: () => Promise<void>): () => Promise<void> {
+    let closed = false;
+    const release = async () => {
+        if (closed) return;
+        closed = true;
+        turnOneChildren.delete(id);
+        await close();
+    };
+    turnOneChildren.set(id, release);
+    return release;
+}
+
+/** Revocation must close live children too; normal recovery deliberately treats them as busy. */
+export async function sweepDormantTurnTwo(
+    db: Database,
+    projectPath: string,
+    close?: (childId: string) => Promise<void>,
+): Promise<void> {
+    await sweepTurnTwoStages(db, {
+        projectPath,
+        resolver: (record) => ({
+            check: async () => {
+                throw new Error("Revoked stage cannot run checks");
+            },
+            reattach: async () => ({ kind: "unknown" }),
+            close: async () => {
+                if (!record.childSessionId) return;
+                if (retainedTurnTwoChild(record.childSessionId))
+                    await closeTurnTwoChild(record.childSessionId);
+                else await close?.(record.childSessionId);
+            },
+        }),
+    });
+    const sends = db
+        .prepare(
+            "SELECT stage_key,child_session_id FROM memory_stage_attempts WHERE project_path=? AND stage='turn_one' AND state IN ('sending','replied')",
+        )
+        .all(projectPath) as Array<{ stage_key: string; child_session_id: string | null }>;
+    for (const send of sends) {
+        const changed = db
+            .prepare(
+                "UPDATE memory_stage_attempts SET state='revoked' WHERE stage_key=? AND state IN ('sending','replied')",
+            )
+            .run(send.stage_key).changes;
+        if (changed && send.child_session_id) {
+            const release = turnOneChildren.get(send.child_session_id);
+            if (release) await release();
+            else await close?.(send.child_session_id);
+        }
+    }
+}
+
+export function parseEnabledTurnOne(text: string): string | null {
+    try {
+        const parsed = JSON.parse(text);
+        return parsed?.result?.step === "turn_one" && typeof parsed.result.xml === "string"
+            ? parsed.result.xml
+            : null;
+    } catch {
+        return null;
+    }
+}
+
+/** Trial evidence is exclusive: a malformed trial cannot fall through to normal execution. */
+export function selectTurnOneExecution(
+    db: Database,
+    input: {
+        projectPath: string;
+        request: TurnOneAuthorizationRequest;
+        override?: TurnOneLane;
+        turnTwo?: "on" | "off";
+        twoPass?: boolean;
+        canContinue: boolean;
+        hasUI?: boolean;
+        validatedProfiles?: readonly ReportedProfile[];
+        trialAuthorization?: TurnTwoTrialAuthorization;
+    },
+): { lane: TurnOneLane; refused: boolean; validatedProfiles?: readonly ReportedProfile[] } {
+    const { request, trialAuthorization: trial } = input;
+    if (
+        trial &&
+        (!trialRootMatches(db, trial) ||
+            !matchesTurnTwoSelection(request.requestedIdentity, trial.candidate))
+    )
+        return { lane: "dormant", refused: true };
+    const eligible =
+        input.turnTwo !== "off" &&
+        input.canContinue &&
+        // Reconciliation runs detached after turn one publishes. A headless parent
+        // can exit before its retained child's second turn completes.
+        input.hasUI !== false &&
+        (input.override === "enabled" || (!input.twoPass && input.override !== "dormant"));
+    return {
+        lane: eligible ? "enabled" : "dormant",
+        refused: !!trial && !eligible,
+        validatedProfiles: input.validatedProfiles,
+    };
+}
+
+export function turnOneProfileAuthorized(
+    request: TurnOneAuthorizationRequest,
+    actual: ReportedProfile | undefined,
+    profiles?: readonly ReportedProfile[],
+    trial?: TurnTwoTrialAuthorization,
+): boolean {
+    if (!actual) return false;
+    const identity = {
+        ...request.requestedIdentity,
+        lane: actual.lane,
+        carrier: actual.carrier,
+        provider: actual.provider,
+        modelId: actual.modelId,
+        variant: actual.variant,
+        temperature: actual.temperature,
+        thinkingLevel: actual.thinkingLevel,
+    };
+    const rows = expandTurnTwoEntry(identity as typeof request.requestedIdentity);
+    if (rows.length !== 5 || !matchesReportedProfile(actual, rows[0])) return false;
+    if (trial) return matchesTurnTwoEntry(identity, trial.candidate);
+    if (profiles !== undefined)
+        return rows.every((row) =>
+            profiles.some((candidate) => matchesReportedProfile(row, candidate)),
+        );
+    return true;
+}
+
+export function turnOneCounterKey(
+    request: TurnOneAuthorizationRequest,
+    parentSessionId: string,
+    firstMessageId: string,
+): TurnOneFailureKey {
+    const identity = request.requestedIdentity;
+    return {
+        parentSessionId,
+        firstMessageId,
+        profileHash: turnOneFailureProfileHash(identity),
+        renderingHash: identity.historianSystemHash,
+        schemaHash: identity.combinedSchemaHash,
+        toolHash: identity.historianToolHash,
+    };
+}
+
+export function readTurnOneFailureCount(
+    db: Database,
+    projectPath: string,
+    key: TurnOneFailureKey,
+): number {
+    const id = turnOneFailurePublicationId(key);
+    return turnOneFailureCount(
+        id,
+        db
+            .prepare(
+                "SELECT publication_id,stage,run_attempt,state FROM memory_stage_attempts WHERE project_path=? AND publication_id=?",
+            )
+            .all(projectPath, id) as TurnOneFailureRow[],
+    );
+}
+
+/** Counter rows are independent of publications, so growing chunks and restarts keep the budget. */
+export function recordTurnOneCounter(
+    db: Database,
+    input: {
+        projectPath: string;
+        key: TurnOneFailureKey;
+        harness: string;
+        carrier: string;
+        state: "parse_failed" | "counter_reset";
+    },
+): void {
+    db.transaction(() => {
+        if (
+            input.state === "counter_reset" &&
+            readTurnOneFailureCount(db, input.projectPath, input.key) === 0
+        )
+            return;
+        const id = turnOneFailurePublicationId(input.key);
+        const prior = db
+            .prepare(
+                "SELECT COALESCE(MAX(run_attempt),0) AS n FROM memory_stage_attempts WHERE project_path=? AND publication_id=?",
+            )
+            .get(input.projectPath, id) as { n: number };
+        const attempt = prior.n + 1;
+        db.prepare(`INSERT INTO memory_stage_attempts(stage_key,project_path,publication_id,run_attempt,stage,session_id,harness,carrier,state,request_json,started_at)
+            VALUES(?,?,?,?,'turn_one',?,?,?,?,?,?)`).run(
+            `${id}:${attempt}`,
+            input.projectPath,
+            id,
+            attempt,
+            input.key.parentSessionId,
+            input.harness,
+            input.carrier,
+            input.state,
+            JSON.stringify(input.key),
+            Date.now(),
+        );
+    }).immediate();
+}
 
 /**
  * How a historian lane (one transport path to the historian model: the OpenCode host
@@ -17,13 +237,8 @@ import { tsOwnsMemory } from "./lifecycle-applier";
 export type TurnOneLane = "enabled" | "dormant";
 
 /**
- * A lane may run the `enabled` turn one only when its transport sends a response
- * schema the provider enforces (so a reply is either schema-valid JSON or an error,
- * never free text that could be misparsed into an automatic memory edit) and the
- * model profile the provider reports has passed a recorded replay of the trial
- * corpus. No transport (OpenCode host prompt, OpenCode 2 hidden completion, Pi
- * subagent, Rust host or Broca) sends such a field yet, so every production lane is
- * `dormant`. The override exists for tests that exercise the enabled contract.
+ * Publication helpers default to one-pass XML when called without a lane.
+ * Host runners select the enabled contract before dispatch and retain that choice.
  */
 export function resolveTurnOneLane(override?: TurnOneLane): TurnOneLane {
     return override ?? "dormant";
@@ -31,6 +246,7 @@ export function resolveTurnOneLane(override?: TurnOneLane): TurnOneLane {
 
 /** The record persisted before turn one is dispatched. */
 export interface TurnOneSend {
+    recovery?: boolean;
     publicationId: string;
     runAttempt: number;
     stageKey: string;
@@ -58,6 +274,30 @@ export interface TurnOneSendInput {
 export function allocateTurnOneSend(db: Database, input: TurnOneSendInput): TurnOneSend {
     return db
         .transaction((): TurnOneSend => {
+            const unknown =
+                input.lane === "enabled"
+                    ? (db
+                          .prepare(`SELECT stage_key,publication_id,run_attempt FROM memory_stage_attempts
+                WHERE project_path=? AND session_id=? AND harness=? AND carrier=? AND stage='turn_one' AND state IN ('sending','replied') ORDER BY started_at DESC LIMIT 1`)
+                          .get(
+                              input.projectPath,
+                              input.sessionId,
+                              input.harness,
+                              input.carrier,
+                          ) as {
+                          stage_key: string;
+                          publication_id: string;
+                          run_attempt: number;
+                      } | null)
+                    : null;
+            if (unknown)
+                return {
+                    publicationId: unknown.publication_id,
+                    runAttempt: unknown.run_attempt,
+                    stageKey: unknown.stage_key,
+                    lane: input.lane,
+                    recovery: true,
+                };
             const reusable = db
                 .prepare(
                     `SELECT p.publication_id FROM memory_publications p
@@ -159,6 +399,7 @@ export interface TurnOneFactAnchor {
     compartmentIndex: number;
     startOrdinal?: number;
     endOrdinal?: number;
+    ranges?: Array<{ startOrdinal: number; endOrdinal: number }>;
 }
 
 export interface TurnOneFact {
@@ -248,27 +489,42 @@ export function resolveTurnOneFactAnchor(
     anchor: TurnOneFactAnchor | undefined,
     compartments: readonly TurnOneCompartmentRange[],
     blocks: ReadonlyArray<{ startOrdinal: number; endOrdinal: number }>,
+    chunk: { startOrdinal?: number; endOrdinal?: number } = {
+        startOrdinal: compartments[0]?.startMessage,
+        endOrdinal: compartments.at(-1)?.endMessage,
+    },
 ): ResolvedFactAnchor | null {
     if (!anchor || anchor.startOrdinal === undefined || anchor.endOrdinal === undefined) {
         return null;
     }
-    const { compartmentIndex, startOrdinal, endOrdinal } = anchor;
+    const { compartmentIndex } = anchor;
+    const ranges = anchor.ranges ?? [
+        { startOrdinal: anchor.startOrdinal, endOrdinal: anchor.endOrdinal },
+    ];
+    if (ranges.length === 0 || ranges.length > 3) return null;
     if (compartmentIndex < 1 || compartmentIndex > compartments.length) return null;
-    if (startOrdinal > endOrdinal) return null;
     const compartment = compartments[compartmentIndex - 1];
-    if (startOrdinal < compartment.startMessage || endOrdinal > compartment.endMessage) {
-        return null;
-    }
     const blockIndexes: number[] = [];
-    blocks.forEach((block, index) => {
-        if (block.startOrdinal >= startOrdinal && block.endOrdinal <= endOrdinal) {
-            blockIndexes.push(index);
+    for (const { startOrdinal, endOrdinal } of ranges) {
+        // A whole-chunk citation cannot distinguish this fact from unrelated evidence.
+        if (startOrdinal === chunk.startOrdinal && endOrdinal === chunk.endOrdinal) return null;
+        if (startOrdinal > endOrdinal) return null;
+        if (startOrdinal < compartment.startMessage || endOrdinal > compartment.endMessage) {
+            return null;
         }
-    });
-    if (blockIndexes.length === 0) return null;
-    const first = blocks[blockIndexes[0]];
-    const last = blocks[blockIndexes[blockIndexes.length - 1]];
-    if (first.startOrdinal !== startOrdinal || last.endOrdinal !== endOrdinal) return null;
+        const rangeIndexes: number[] = [];
+        blocks.forEach((block, index) => {
+            if (block.startOrdinal >= startOrdinal && block.endOrdinal <= endOrdinal) {
+                rangeIndexes.push(index);
+            }
+        });
+        if (rangeIndexes.length === 0) return null;
+        const first = blocks[rangeIndexes[0]];
+        const last = blocks[rangeIndexes[rangeIndexes.length - 1]];
+        if (first.startOrdinal !== startOrdinal || last.endOrdinal !== endOrdinal) return null;
+        blockIndexes.push(...rangeIndexes);
+    }
+    if (new Set(blockIndexes).size !== blockIndexes.length) return null;
     return { compartmentIndex, blockIndexes };
 }
 
@@ -355,7 +611,20 @@ export function commitTurnOnePublication(
     db: Database,
     input: TurnOnePublicationInput,
 ): TurnOnePublicationResult {
+    const stage = db
+        .prepare("SELECT state,request_json FROM memory_stage_attempts WHERE stage_key=?")
+        .get(input.send.stageKey) as { state: string; request_json: string } | null;
+    if (stage?.state === "revoked" || stage?.state === "expired")
+        throw new Error("Turn-one send was released before publication");
     const now = Date.now();
+    const request = JSON.parse(stage?.request_json ?? "{}") as {
+        chunkStart?: number;
+        chunkEnd?: number;
+    };
+    const chunkRange =
+        request.chunkStart !== undefined && request.chunkEnd !== undefined
+            ? { startOrdinal: request.chunkStart, endOrdinal: request.chunkEnd }
+            : undefined;
     const committed = db
         .prepare(
             `UPDATE memory_publications
@@ -396,6 +665,10 @@ export function commitTurnOnePublication(
         startMessage: row.startMessage,
         endMessage: row.endMessage,
     }));
+    // Published compartments are contiguous; their outer bounds describe the
+    // full published range, including citations that span compartment boundaries.
+    const publishedStart = Math.min(...ranges.map((range) => range.startMessage));
+    const publishedEnd = Math.max(...ranges.map((range) => range.endMessage));
     const insertFact = db.prepare(
         `INSERT OR IGNORE INTO memory_pending_facts(project_path,publication_id,fact_index,compartment_id,category,content,anchor_known,state,fact_attempts,reason)
          VALUES(?,?,?,?,?,?,?,'retryable',0,?)`,
@@ -414,10 +687,25 @@ export function commitTurnOnePublication(
     let blocksStored = 0;
     input.candidateFacts.forEach((fact, position) => {
         if (!isPromotableFact(fact)) return;
+        // A compartment label cannot authorize evidence from an unpublished tail.
+        // Unanchored facts still follow the caller's existing publication policy.
+        const sourceRanges =
+            fact.anchor?.ranges ??
+            (fact.anchor?.startOrdinal !== undefined && fact.anchor?.endOrdinal !== undefined
+                ? [{ startOrdinal: fact.anchor.startOrdinal, endOrdinal: fact.anchor.endOrdinal }]
+                : []);
+        if (
+            input.honourAnchors &&
+            sourceRanges.some(
+                ({ startOrdinal: start, endOrdinal: end }) =>
+                    Math.min(start, end) < publishedStart || Math.max(start, end) > publishedEnd,
+            )
+        )
+            return;
         const factIndex = fact.factIndex ?? position;
         const resolved =
             input.honourAnchors && bound
-                ? resolveTurnOneFactAnchor(fact.anchor, ranges, input.blocks)
+                ? resolveTurnOneFactAnchor(fact.anchor, ranges, input.blocks, chunkRange)
                 : null;
         const compartmentId = resolved
             ? input.compartments[resolved.compartmentIndex - 1].id
@@ -437,8 +725,27 @@ export function commitTurnOnePublication(
         if (!resolved) return;
         anchoredCandidates += 1;
         const factId = Number(inserted.lastInsertRowid);
-        for (const blockIndex of resolved.blockIndexes) {
-            const block = input.blocks[blockIndex];
+        const groupedBlocks = sourceRanges.map((range) => {
+            const selected = resolved.blockIndexes
+                .map((index) => input.blocks[index])
+                .filter(
+                    (block) =>
+                        block.startOrdinal >= range.startOrdinal &&
+                        block.endOrdinal <= range.endOrdinal,
+                );
+            const role = selected.every((block) => block.role === selected[0].role)
+                ? selected[0].role
+                : "mixed";
+            const parts =
+                role === "mixed"
+                    ? selected.map(
+                          (block) =>
+                              `[${block.startOrdinal === block.endOrdinal ? block.startOrdinal : `${block.startOrdinal}-${block.endOrdinal}`}] ${block.role}: ${block.parts.join(" / ")}`,
+                      )
+                    : selected.flatMap((block) => block.parts);
+            return { ...range, role, parts };
+        });
+        for (const block of groupedBlocks) {
             blocksStored += insertBlock.run(
                 input.send.publicationId,
                 input.sessionId,

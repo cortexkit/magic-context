@@ -20,11 +20,11 @@ const oracleSources = [
   ],
   [
     "packages/plugin/src/features/magic-context/memory/lifecycle-applier.ts",
-    "153a1a0290238b321567c2443f59a77df41071d53b71415c645d14097bd210ab",
+    "48cd5cca96a35dcbe1750ccf3e291bcca6b33a67f1ccb1c1c7ff148212cefdd5",
   ],
   [
     "packages/plugin/src/features/magic-context/memory/storage-memory.ts",
-    "61c45628a632bc6e4c32f554ab5864641d8dae979e1eb6f28f717ad47fe95a77",
+    "586bd410cef2922e841142f9055df9e3a653b30b7932acc9122634de44645f6e",
   ],
   [
     "packages/plugin/src/features/magic-context/dreamer/curate-memory-safety.ts",

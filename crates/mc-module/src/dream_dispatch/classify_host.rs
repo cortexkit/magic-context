@@ -88,6 +88,7 @@ where
                     importance: row.memory.importance,
                     scope: Some(row.memory.scope),
                     shareable: row.memory.shareable != 0,
+                    safety_critical: row.memory.safety_critical,
                     unclassified: row.unclassified,
                     open_classification: row.open_classification,
                     unmapped: row.files.is_empty() && !row.has_sentinel,
@@ -443,7 +444,7 @@ mod tests {
 
         fn carrier(&self) -> FakeCarrier {
             let answer = if self.context.task == TaskName::Classify {
-                format!("<classify>{}</classify>", (1..=10).map(|id| format!("<memory id=\"{id}\" importance=\"80\" scope=\"project\" shareable=\"false\" />")).collect::<String>())
+                format!("<classify>{}</classify>", (1..=10).map(|id| format!("<memory id=\"{id}\" importance=\"80\" scope=\"project\" shareable=\"false\" safety_critical=\"false\" />")).collect::<String>())
             } else {
                 format!(
                     "<mappings>{}</mappings>",
@@ -534,6 +535,68 @@ mod tests {
             assert_eq!(request.directory, fixture.context.config.directory);
             assert!(!request.prompt.contains("Memory 11"));
         }
+    }
+
+    #[tokio::test]
+    async fn safety_only_classification_reaches_the_runner_and_real_store_without_rescoring() {
+        let fixture = Fixture::new(TaskName::Classify);
+        fixture.store.with_context_conn_for_test(|db| {
+            db.execute("UPDATE memories SET scope='ecosystem',shareable=0,importance=50", [])?;
+            db.execute("UPDATE memories SET importance=40,classified_at=2 WHERE id=1", [])?;
+            db.execute("UPDATE memories SET importance=95,classified_at=1 WHERE id=2", [])?;
+            db.execute("INSERT INTO memory_classification_items(project_path,memory_id,saved_revision,source_session_id,tool_call_part_id,save_ordinal,excerpt) VALUES('project',3,1,'session','part',1,'excerpt')", [])?;
+            Ok(())
+        }).unwrap();
+        let mut carrier = fixture.carrier();
+        carrier.answer = format!("<classify>{}</classify>", (1..=10).map(|id|
+            format!(r#"<memory id="{id}" importance="1" scope="universe" shareable="true" safety_critical="{}"/>"#, id <= 3)
+        ).collect::<String>());
+        let mut host = ClassifyHost::new(carrier, fixture.store.clone(), fixture.context.clone());
+        let outcome = host.run(&SensitiveContext::default()).await.unwrap();
+        let Outcome::Classify(Some(result)) = outcome else {
+            panic!("classifier did not run")
+        };
+        assert_eq!(result.classified, 10);
+        assert!(result.complete);
+        assert_eq!(host.carrier.requests.len(), 1);
+        for id in 1..=10 {
+            assert!(host.carrier.requests[0].prompt.contains(&format!("[{id}]")));
+            let memory = fixture.store.get_memory_full(id).unwrap().unwrap();
+            if id <= 3 {
+                assert_eq!(memory.safety_critical, Some(true));
+                assert_eq!(memory.importance, Some(if id == 2 { 95 } else { 80 }));
+                assert_eq!(memory.scope, "ecosystem");
+                assert_eq!(memory.shareable, 0);
+                assert_eq!(
+                    memory.classified_at,
+                    match id {
+                        1 => Some(2),
+                        2 => Some(1),
+                        _ => None,
+                    }
+                );
+            } else {
+                assert_eq!(memory.safety_critical, Some(false));
+                assert_eq!(memory.importance, Some(1));
+                assert_eq!(memory.scope, "universe");
+                assert_eq!(memory.shareable, 1);
+                assert!(memory.classified_at.is_some());
+            }
+        }
+        host.run(&SensitiveContext::default()).await.unwrap();
+        assert_eq!(host.carrier.requests.len(), 1);
+        assert_eq!(
+            fixture.scalar(
+                "SELECT project_memory_epoch FROM project_state WHERE project_path='project'"
+            ),
+            7
+        );
+        assert_eq!(fixture.scalar("SELECT COUNT(*) FROM memory_history"), 0);
+        assert_eq!(
+            fixture.scalar("SELECT COUNT(*) FROM memory_mutation_log"),
+            0
+        );
+        assert_eq!(fixture.scalar("SELECT COUNT(*) FROM session_meta WHERE served_prefix IN ('frozen prefix','other prefix')"), 2);
     }
 
     #[tokio::test]

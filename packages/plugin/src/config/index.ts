@@ -470,7 +470,16 @@ export function parsePluginConfig(
     // Invalid nested leaves are pruned from agent blocks; only root-level or
     // unreachable agent errors drop the block, because guessing a model config
     // could run an expensive unintended model or fail silently.
-    const defaults = MagicContextConfigSchema.parse({});
+    const invalidTurnTwo = parsed.error.issues.some(
+        (issue) =>
+            issue.path.length === 2 &&
+            issue.path[0] === "historian" &&
+            issue.path[1] === "turn_two",
+    );
+    // Even whole-config recovery must preserve the fail-closed switch after a malformed value.
+    const defaults = MagicContextConfigSchema.parse(
+        invalidTurnTwo ? { historian: { turn_two: "off" } } : {},
+    );
     const warnings: string[] = [];
 
     // Build a patched copy of rawConfig, replacing invalid fields with undefined
@@ -533,6 +542,11 @@ export function parsePluginConfig(
             };
             const prunedLeaves: string[] = [];
             for (const p of issuePaths) {
+                if (key === "historian" && p.length === 2 && p[1] === "turn_two") {
+                    prunedBlock.turn_two = "off";
+                    prunedLeaves.push("turn_two");
+                    continue;
+                }
                 // p is the full Zod issue path ([key, ...nested]); prune the
                 // DEEPEST invalid leaf, not just the first child (p[1]), so a
                 // 3-level path like memory.git_commit_indexing.since_days drops
@@ -548,8 +562,12 @@ export function parsePluginConfig(
                 patched[key] = prunedBlock;
                 recoveredFieldPaths.push(...prunedLeaves.map((leaf) => `${key}.${leaf}`));
                 const reason = customMessagesByKey.get(key);
+                const fallback =
+                    key === "historian" && prunedLeaves.includes("turn_two")
+                        ? 'using "off" for "historian.turn_two" and defaults for other invalid fields'
+                        : "using defaults for those";
                 warnings.push(
-                    `"${key}": invalid nested field(s) ${prunedLeaves.map((leaf) => `"${key}.${leaf}"`).join(", ")}, using defaults for those.${reason ? ` ${reason}` : ""}`,
+                    `"${key}": invalid nested field(s) ${prunedLeaves.map((leaf) => `"${key}.${leaf}"`).join(", ")}, ${fallback}.${reason ? ` ${reason}` : ""}`,
                 );
                 continue;
             }

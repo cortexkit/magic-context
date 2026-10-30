@@ -75,17 +75,24 @@ impl McStore {
                     continue;
                 }
                 if update.scope.as_deref().is_some_and(|scope| !matches!(scope, "project" | "ecosystem" | "universe")) { continue; }
-                let importance = update.importance.map(|v| v.clamp(1, 100)).or(memory.importance);
+                let safety = update.safety_critical.or(memory.safety_critical);
+                let mut importance = update.importance.map(|v| v.clamp(1, 100)).or(memory.importance);
+                if safety == Some(true) {
+                    importance = Some(importance.unwrap_or(50).max(80).max(
+                        if memory.safety_critical != Some(true) { memory.importance.unwrap_or(0) } else { 0 }
+                    ));
+                }
                 let scope = update.scope.as_deref().unwrap_or(&memory.scope);
                 let shareable = update.shareable.unwrap_or(memory.shareable != 0);
-                let classified = memory.classified_at.is_some();
-                let changed = importance != memory.importance || scope != memory.scope || shareable != (memory.shareable != 0);
+                let has_metadata = update.importance.is_some() || update.scope.is_some() || update.shareable.is_some();
+                let classified = memory.classified_at.is_some() || !has_metadata;
+                let changed = importance != memory.importance || scope != memory.scope || shareable != (memory.shareable != 0) || safety != memory.safety_critical;
                 result.accepted.push(memory.id);
                 if classified && !changed { continue; }
                 // Leave cached session prompts untouched. Updated metadata,
                 // including visibility, is read when a prompt is rebuilt normally;
                 // no mutation-log correction should force an earlier refresh.
-                tx.execute("UPDATE memories SET importance=?2,scope=?3,shareable=?4,classified_at=?5,updated_at=?5 WHERE id=?1", params![memory.id, importance, scope, shareable, now_ms])?;
+                tx.execute("UPDATE memories SET importance=?2,scope=?3,shareable=?4,safety_critical=?5,classified_at=CASE WHEN ?6 THEN ?7 ELSE classified_at END,updated_at=CASE WHEN ?6 THEN ?7 ELSE updated_at END WHERE id=?1", params![memory.id, importance, scope, shareable, safety, has_metadata, now_ms])?;
                 enqueue(tx, &memory)?;
                 result.changed += usize::from(changed);
             }

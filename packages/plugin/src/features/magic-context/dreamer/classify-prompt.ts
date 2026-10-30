@@ -63,13 +63,14 @@ Keep \`shareable="false"\` only for what is tied to the USER or their machine ra
 
 const OUTPUT_CONTRACT = `Output ONE XML manifest at the very end and NOTHING else — no narration, no per-memory commentary, no reasoning:
 <classify>
-<memory id="N" importance="75" scope="project" shareable="true"/>
-<memory id="M" importance="20" scope="universe" shareable="false"/>
+<memory id="N" importance="80" scope="project" shareable="true" safety_critical="true"/>
+<memory id="M" importance="20" scope="universe" shareable="false" safety_critical="false"/>
 </classify>
 
 Rules:
 - Every memory in the pool below MUST appear exactly once.
-- importance is an integer 1-100; scope is one of project|ecosystem|universe; shareable is true|false.`;
+- importance is an integer 1-100; scope is one of project|ecosystem|universe; shareable is true|false.
+- Set safety_critical to true for the operating rules covered by the hard floor above, false otherwise.`;
 
 export const CLASSIFY_SYSTEM_PROMPT = `You are a memory classifier for the magic-context system. You classify project memories by metadata only. You do NOT rewrite, merge, archive, verify, or create memories, and you do NOT read code — you judge each memory from its own text.
 
@@ -122,6 +123,7 @@ export interface ParsedClassification {
     importance?: number;
     scope?: "project" | "ecosystem" | "universe";
     shareable?: boolean;
+    safety_critical?: boolean;
 }
 
 const SCOPES = new Set(["project", "ecosystem", "universe"]);
@@ -166,7 +168,18 @@ export function parseClassifyManifest(text: string): ParsedClassification[] {
             const v = shareMatch[1].toLowerCase();
             entry.shareable = v === "true" || v === "1";
         }
-        if (entry.importance === undefined && !entry.scope && entry.shareable === undefined) {
+        const safetyMatch = attrs.match(/\bsafety_critical\s*=\s*"([^"]*)"/i);
+        if (safetyMatch) {
+            if (!/^(true|false)$/i.test(safetyMatch[1]))
+                throw new Error(`classify manifest invalid safety_critical ${safetyMatch[1]}`);
+            entry.safety_critical = safetyMatch[1].toLowerCase() === "true";
+        }
+        if (
+            entry.importance === undefined &&
+            !entry.scope &&
+            entry.shareable === undefined &&
+            entry.safety_critical === undefined
+        ) {
             throw new Error(`classify manifest entry ${id} missing classification fields`);
         }
         out.push(entry);
