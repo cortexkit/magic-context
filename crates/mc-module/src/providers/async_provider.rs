@@ -2691,15 +2691,16 @@ impl McHandler {
                 .filter(|state| !offline_first_pass::adopted(state))
             {
                 let mismatch = offline_first_pass::setup_mismatch(state, binding, &request)
-                    .is_some()
-                    || live_describe.as_ref().is_some_and(|describe| {
-                        offline_first_pass::describe_mismatch(state, describe).is_some()
+                    .or_else(|| {
+                        live_describe.as_ref().and_then(|describe| {
+                            offline_first_pass::describe_mismatch(state, describe)
+                        })
                     });
-                if mismatch {
-                    return bytes(&moved_session::setup_refusal(
+                if let Some(reason) = mismatch {
+                    return bytes(&moved_session::moved_unprepared_refusal(
+                        &reference,
                         &request.request_id,
-                        "moved_session_unprepared",
-                        "Setup differs from the preparation; rerun `ck-mc offline first-pass` with this Setup.",
+                        reason,
                     ));
                 }
             }
@@ -2894,11 +2895,13 @@ impl McHandler {
                 .map(|reason| (state.generation, reason));
             live_describe = Some(describe);
         }
-        if preparation.is_none() && standalone_move.is_some() && discarded.is_some() {
-            return bytes(&moved_session::setup_refusal(
+        if let Some((_, reason)) =
+            discarded.filter(|_| preparation.is_none() && standalone_move.is_some())
+        {
+            return bytes(&moved_session::moved_unprepared_refusal(
+                &reference,
                 &request.request_id,
-                "moved_session_unprepared",
-                "Setup differs from the preparation; rerun `ck-mc offline first-pass` with this Setup.",
+                reason,
             ));
         }
         // A record discarded for a fresh generation keeps the floor it stored.

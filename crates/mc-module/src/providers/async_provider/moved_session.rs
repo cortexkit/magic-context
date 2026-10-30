@@ -178,6 +178,25 @@ pub(super) fn checkpoint(record: &MoveRecord) -> contract::setup::SetupCheckpoin
         .with_message_checkpoint(record.message_count, certified_head(record))
 }
 
+/// A moved session's Setup that does not match its offline preparation. The
+/// refusal and its log line name which half differs: `setup_differs` (the
+/// request) or `runner_describe_differs` (the runner's `role.describe`), so an
+/// operator knows whether to re-export the Setup or the runner's describe.
+pub(super) fn moved_unprepared_refusal(reference: &str, request_id: &str, why: &str) -> Value {
+    tracing::warn!(
+        session_ref = %reference,
+        why,
+        "moved session Setup refused: it differs from the offline preparation"
+    );
+    setup_refusal(
+        request_id,
+        "moved_session_unprepared",
+        &format!(
+            "Setup differs from the preparation ({why}); rerun `ck-mc offline first-pass` with this Setup and the live runner's role.describe."
+        ),
+    )
+}
+
 pub(super) fn setup_refusal(request_id: &str, code: &str, reason: &str) -> Value {
     serde_json::to_value(contract::setup::SetupAnswer::refuse(
         request_id,
