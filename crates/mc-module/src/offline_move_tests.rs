@@ -1529,8 +1529,13 @@ fn plan_flag_prints_the_certification_inputs_without_writing() {
         paths: parsed,
         session,
         mode,
+        shared_context,
     } = parse_args(&args).unwrap();
     assert_eq!(mode, CliMode::Plan);
+    assert!(
+        !shared_context,
+        "exclusive holder check unless the operator opts in"
+    );
     let before = all_store_bytes(&paths);
     let Outcome::Planned(plan) = run(&parsed, &session, true, &NoHolders, None).unwrap() else {
         panic!("--plan wrote")

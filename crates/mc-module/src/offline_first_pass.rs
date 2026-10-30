@@ -499,9 +499,11 @@ fn report(outcome: &OfflineOutcome, checked: &Checked, started: Instant) -> Valu
 }
 
 const USAGE: &str = "usage: ck-mc offline first-pass --session <id> --pages <jsonl> \
-     --setup <json> --opencode-db <path> --context-db <path> --store-db <path>";
+     --setup <json> --opencode-db <path> --context-db <path> --store-db <path> \
+     [--shared-context-db]";
 
-fn parse_args(args: &[String]) -> Result<Args, String> {
+fn parse_args(args: &[String]) -> Result<(Args, bool), String> {
+    let mut shared_context = false;
     let (mut session, mut pages, mut setup) = (None, None, None);
     let (mut opencode_db, mut context_db, mut store_db) = (None, None, None);
     let mut iter = args.iter();
@@ -518,6 +520,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--opencode-db" => opencode_db = Some(PathBuf::from(value()?)),
             "--context-db" => context_db = Some(PathBuf::from(value()?)),
             "--store-db" => store_db = Some(PathBuf::from(value()?)),
+            "--shared-context-db" => shared_context = true,
             other => return Err(format!("unknown argument {other:?}; {USAGE}")),
         }
     }
@@ -529,24 +532,27 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             Some(opencode_db),
             Some(context_db),
             Some(store_db),
-        ) => Ok(Args {
-            paths: StorePaths {
-                opencode_db,
-                context_db,
-                store_db,
+        ) => Ok((
+            Args {
+                paths: StorePaths {
+                    opencode_db,
+                    context_db,
+                    store_db,
+                },
+                session,
+                pages,
+                setup,
             },
-            session,
-            pages,
-            setup,
-        }),
+            shared_context,
+        )),
         _ => Err(USAGE.into()),
     }
 }
 
 /// `ck-mc offline first-pass <args>`.
 pub fn cli_main(args: &[String]) -> i32 {
-    let args = match parse_args(args) {
-        Ok(args) => args,
+    let (args, shared_context) = match parse_args(args) {
+        Ok(parsed) => parsed,
         Err(usage) => {
             println!(
                 "{}",
@@ -556,7 +562,12 @@ pub fn cli_main(args: &[String]) -> i32 {
         }
     };
     let session = args.session.clone();
-    match run(&args, &Lsof) {
+    // See `SharedContextLsof`: only the host copy and store.db need exclusivity then.
+    let shared = crate::offline_move::SharedContextLsof {
+        context_db: args.paths.context_db.clone(),
+    };
+    let holders: &dyn HolderCheck = if shared_context { &shared } else { &Lsof };
+    match run(&args, holders) {
         Ok(report) => {
             let verdict = if report["status"] == "unchanged" {
                 "SESSION UNCHANGED"
