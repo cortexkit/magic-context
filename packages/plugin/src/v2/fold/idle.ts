@@ -27,7 +27,7 @@ export class HostFoldIdle {
         try {
             ttl = parseCacheTtl(cacheTtl);
         } catch {
-            // Match the context scheduler's fallback for invalid persisted TTLs.
+            // Use five minutes when a persisted cache lifetime is invalid.
             ttl = 5 * 60 * 1000;
         }
         if (!Number.isFinite(ttl) || lastResponseTime <= 0) return;
@@ -46,8 +46,8 @@ export class HostFoldIdle {
                 void this.fold(sessionID, eligible).then(release, release);
                 return;
             }
-            // Node clamps longer delays to 1ms. Chunk them, and keep the strict
-            // greater-than boundary used by the context scheduler.
+            // Node clamps longer delays to 1ms. Chunk long waits, while
+            // keeping the fold deadline strictly past the cache lifetime.
             const remaining = Math.max(1, lastResponseTime + ttl - this.now() + 1);
             window.timer = this.timers.setTimeout(wake, Math.min(remaining, 2_147_483_647));
             window.timer.unref?.();

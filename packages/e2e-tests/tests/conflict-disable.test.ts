@@ -14,12 +14,12 @@ import {
  * When OpenCode 1 has auto-compaction enabled, or a conflicting plugin is
  * installed, magic-context MUST self-disable. OpenCode 2 instead exposes a
  * compaction hook that Magic Context answers without a competing model call. This prevents double-compaction
- * behavior and guarantees that the plugin is a no-op in environments where
- * another system owns history management.
+ * behavior. A real conflicting plugin disables Magic Context on either host.
  *
- * We force conflict by setting `compaction: { auto: true }` in opencode.json.
- * Then we send a normal turn and verify the plugin never created its DB —
- * the cleanest proof that no plugin machinery ran for this session.
+ * We set `compaction: { auto: true }` in opencode.json. On v1 this is a
+ * conflict, so no plugin DB should be created. On v2 Magic Context still
+ * owns compaction through the host hook, so folding must leave the provider's
+ * frozen summary and system prompt unchanged.
  */
 
 forEachHost(import.meta.url, "conflict detection", (host) => {

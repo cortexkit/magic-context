@@ -20,7 +20,7 @@ export interface SessionContext {
     system: Array<Record<string, unknown>>;
     tools: Record<string, { description: string; input: unknown }>;
     options: Record<string, unknown>;
-    result?: { summary: string };
+    result?: { summary: string; metadata?: { keepID?: string } };
 }
 export interface V2AgentEditor {
     update(

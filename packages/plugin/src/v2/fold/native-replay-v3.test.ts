@@ -10,6 +10,7 @@ import type { StoreRow, V2StoreReader } from "../store-reader";
 import { nativeFoldCache } from "./memory-cache";
 import { NativeFoldReplay } from "./native-replay";
 import { IMPORTED_MC_SUMMARY } from "./native-replay-v3";
+import { foldDigest } from "./owner";
 
 const databases: Database[] = [];
 afterEach(() => {
@@ -59,7 +60,7 @@ function fixture(count = 2, imported = 0) {
     const reader = {
         close() {},
         hostIdentity: () => "private-host",
-        latestSequence: () => Math.max(count, running?.seq ?? 0, completed?.seq ?? 0),
+        latestSequence: () => Math.max(...rows.map((row) => row.seq), running?.seq ?? 0),
         latestCompaction: () => completed,
         latestRunningCompaction: () => running,
         sequenceForId: (_s: string, id: string) => rows.find((row) => row.id === id)?.seq,
@@ -96,6 +97,21 @@ function fixture(count = 2, imported = 0) {
         remove: async (key: string) => {
             kv.delete(key);
         },
+        scan: async ({
+            prefix,
+            after,
+            limit,
+        }: {
+            prefix: string;
+            after?: string;
+            limit: number;
+        }) => {
+            const keys = [...kv.keys()]
+                .sort()
+                .filter((key) => key.startsWith(prefix) && (!after || key > after));
+            const entries = keys.slice(0, limit).map((key) => ({ key, value: kv.get(key) }));
+            return { entries, ...(keys.length > limit ? { next: entries.at(-1)!.key } : {}) };
+        },
     };
     const logs: string[] = [];
     const cache = nativeFoldCache(db);
@@ -108,12 +124,13 @@ function fixture(count = 2, imported = 0) {
         protocol: 3,
         log: (_sid, line) => logs.push(line),
     });
+    let cuts = 0;
     const begin = () => {
         running = {
-            id: "native-cut",
+            id: ++cuts === 1 ? "native-cut" : `native-cut-${cuts}`,
             session_id: "s",
             type: "compaction",
-            seq: count + 1,
+            seq: Math.max(...rows.map((row) => row.seq)) + 1,
             data: { status: "running" },
         };
     };
@@ -288,4 +305,192 @@ test("the v2 admission reader never accepts a v3 record or nominates from it", a
     expect(await old.admits("s", cut, f.reader)).toBe(false);
     expect(await old.canReplay("s", f.reader)).toBe(false);
     expect(await old.canFold("s", f.reader)).toBe(false);
+});
+
+async function oldReceipt(f: ReturnType<typeof fixture>, summary = "head") {
+    const old = f.make(2);
+    const raw = f.rows
+        .filter((row) => row.type === "user")
+        .map((row) => message(row.id, row.data.text as string));
+    await old.capture(context([message(HEAD_IDS[0], summary), ...raw]), raw);
+    f.begin();
+    expect(await old.supply({ draft: context([]), reader: f.reader, summary })).toBe(true);
+    const cut = f.finish(summary);
+    const bytes = JSON.stringify(f.kv.get("native-fold/v2/s"));
+    return { raw, cut, bytes };
+}
+
+test("a V2 receipt upgrades once from the host's proven kept range without changing V2 bytes", async () => {
+    const f = fixture(3);
+    const { cut, bytes } = await oldReceipt(f, "summary covering message 1");
+    cut.data.metadata = { keepID: "u2" };
+    let hard = 0;
+    const draft = context([
+        message(cut.id, "host checkpoint"),
+        message("u2", "message 2"),
+        message("u3", "message 3"),
+    ]);
+    f.loads.length = 0;
+    expect(
+        await f.replay.prepareLegacyUpgrade({
+            draft,
+            cut,
+            reader: f.reader,
+            onHard: () => {
+                hard++;
+            },
+        }),
+    ).toBe(true);
+    expect(hard).toBe(1);
+    expect(JSON.stringify(f.kv.get("native-fold/v2/s"))).toBe(bytes);
+    const cold = f.make();
+    expect(
+        await cold.prepareLegacyUpgrade({
+            draft,
+            cut,
+            reader: f.reader,
+            onHard: () => {
+                hard++;
+            },
+        }),
+    ).toBe(false);
+    expect(await cold.admits("s", cut, f.reader)).toBe(true);
+    expect((await cold.restore("s", cut, "p/m", { bounded: true }))?.map((row) => row.id)).toEqual([
+        "u2",
+        "u3",
+    ]);
+    expect(f.loads.every((load) => load.after >= 1)).toBe(true);
+    expect(hard).toBe(1);
+    expect(f.logs.filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(1);
+    expect(f.logs.join("\n")).toContain("mode=bounded");
+});
+
+test("a V2 receipt without a proven floor keeps the host checkpoint across restart and the next fold", async () => {
+    const f = fixture(3);
+    const { raw, cut, bytes } = await oldReceipt(f);
+    cut.data.recent = raw.map((row) => row.content[0]!.text).join("\n");
+    let hard = 0;
+    const draft = context([message(cut.id, "host checkpoint")]);
+    f.loads.length = 0;
+    expect(
+        await f.replay.prepareLegacyUpgrade({
+            draft,
+            cut,
+            reader: f.reader,
+            onHard: () => {
+                hard++;
+            },
+        }),
+    ).toBe(true);
+    expect(hard).toBe(1);
+    const carrier = await f.replay.checkpointForReplay("s", f.reader);
+    expect(carrier?.rendered.id).toBe(cut.id);
+    for (const row of raw)
+        expect(JSON.stringify(carrier?.rendered)).toContain(row.content[0]!.text as string);
+    expect(await f.replay.admits("s", cut, f.reader)).toBe(true);
+    expect(await f.replay.restore("s", cut, "p/m", { bounded: true })).toEqual([]);
+    const cold = f.make();
+    expect(
+        await cold.prepareLegacyUpgrade({
+            draft,
+            cut,
+            reader: f.reader,
+            onHard: () => {
+                hard++;
+            },
+        }),
+    ).toBe(false);
+    expect(await cold.checkpointForReplay("s", f.reader)).toEqual(carrier);
+    expect(await cold.admits("s", cut, f.reader)).toBe(true);
+    expect(await cold.restore("s", cut, "p/m", { bounded: true })).toEqual([]);
+    f.rows.push({
+        id: "next",
+        session_id: "s",
+        type: "user",
+        seq: 5,
+        data: { text: "new turn after fallback" },
+    });
+    const next = message("next", "new turn after fallback");
+    await cold.capture(context([message(HEAD_IDS[0], "head"), next]), [next]);
+    expect(await cold.canFold("s", f.reader)).toBe(true);
+    f.begin();
+    expect(await cold.supply({ draft: context([]), reader: f.reader, summary: "head" })).toBe(true);
+    const nextCut = f.finish();
+    const restarted = f.make();
+    expect(await restarted.admits("s", nextCut, f.reader)).toBe(true);
+    const restored = await restarted.restore("s", nextCut, "p/m", { bounded: true });
+    expect(restored?.map((row) => row.id)).toEqual(["next"]);
+    expect(await restarted.checkpointForReplay("s", f.reader)).toEqual(carrier);
+    expect(f.loads.every((load) => load.after >= cut.seq - 1)).toBe(true);
+    expect(JSON.stringify(f.kv.get("native-fold/v2/s"))).toBe(bytes);
+    expect(hard).toBe(1);
+    expect(f.logs.filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(1);
+    expect(f.logs.join("\n")).toContain("mode=host-checkpoint");
+});
+
+test("a session without a V2 receipt never takes the upgrade fallback", async () => {
+    const f = fixture();
+    f.begin();
+    const cut = f.finish("ordinary host checkpoint");
+    let hard = 0;
+    expect(
+        await f.replay.prepareLegacyUpgrade({
+            draft: context([]),
+            cut,
+            reader: f.reader,
+            onHard: () => {
+                hard++;
+            },
+        }),
+    ).toBe(false);
+    expect(hard).toBe(0);
+    expect(f.logs.filter((line) => line.includes("upgrade-state HARD"))).toEqual([]);
+    expect(f.kv.size).toBe(0);
+});
+
+test("a revoked V1 receipt stays untouched and unadmitted until cleanup", async () => {
+    const f = fixture();
+    f.begin();
+    const cut = f.finish();
+    const key = `native-fold/v1/${foldDigest(f.reader.hostIdentity())}/s`;
+    const payload = JSON.stringify({
+        source: f.reader.hostIdentity(),
+        sessionID: "s",
+        admissionID: cut.id,
+        summary: "head",
+    });
+    const receipt = { payload, digest: foldDigest(payload) };
+    f.kv.set(key, receipt);
+    expect(await f.make(2).admits("s", cut, f.reader)).toBe(false);
+    expect(await f.replay.admits("s", cut, f.reader)).toBe(false);
+    expect(
+        await f.replay.prepareLegacyUpgrade({
+            draft: context([]),
+            cut,
+            reader: f.reader,
+            onHard: () => {
+                throw new Error("V1 must not upgrade");
+            },
+        }),
+    ).toBe(false);
+    expect(f.kv.get(key)).toEqual(receipt);
+    await f.replay.forget("s");
+    expect(f.kv.has(key)).toBe(false);
+});
+
+test("an unsupported effort control blocks a new fold but not a V2 upgrade turn", async () => {
+    const f = fixture();
+    const { cut } = await oldReceipt(f);
+    const draft = context([
+        { role: "system", content: [{ type: "effort", effort: "future-private-effort" }] },
+        message(cut.id, "host checkpoint"),
+    ]);
+    const before = JSON.stringify(draft);
+    expect(await f.replay.prepareLegacyUpgrade({ draft, cut, reader: f.reader, onHard() {} })).toBe(
+        true,
+    );
+    expect(JSON.stringify(draft)).toBe(before);
+    expect(await f.replay.checkpointForReplay("s", f.reader)).toBeDefined();
+    expect(await f.replay.canFold("s", f.reader)).toBe(false);
+    expect(f.logs.filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(1);
 });

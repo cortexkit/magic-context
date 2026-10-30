@@ -18,6 +18,7 @@ import {
     controlsThrough,
     effortPart,
     floorFor,
+    hostCheckpointCarrier,
     importedFloor,
     insertControls,
     type ReplayFloor,
@@ -25,7 +26,7 @@ import {
     validControls,
     validFloor,
 } from "./native-replay-v3";
-import { foldDigest } from "./owner";
+import { foldDigest, stripCheckpointRecentContext } from "./owner";
 import { restoreRow } from "./restore";
 
 interface NativeTail {
@@ -261,7 +262,7 @@ export class NativeFoldReplay {
             if (row) floor = floorFor(row, "start");
         }
         return floor
-            ? { floor, controls: existing?.controls ?? [], blocked: existing?.blocked }
+            ? { ...existing, floor, controls: existing?.controls ?? [], blocked: existing?.blocked }
             : undefined;
     }
     private async readV3(sessionID: string): Promise<AdmissionV3 | undefined> {
@@ -286,9 +287,20 @@ export class NativeFoldReplay {
         const cached = readSessionMeta(this.storage.db, draft.sessionID).cachedM0Bytes?.toString(
             "utf8",
         );
+        const checkpointID =
+            this.tail(draft.sessionID)?.replay?.floor.kind === "host-checkpoint"
+                ? this.tail(draft.sessionID)?.replay?.floor.id
+                : undefined;
         return cached &&
             draft.messages.some((message) =>
-                message.content.some((part) => part.type === "text" && part.text === cached),
+                message.content.some(
+                    (part) =>
+                        part.type === "text" &&
+                        (part.text === cached ||
+                            (message.id === checkpointID &&
+                                typeof part.text === "string" &&
+                                part.text.includes(`<summary>\n${cached}\n</summary>`))),
+                ),
             )
             ? cached
             : undefined;
@@ -331,9 +343,13 @@ export class NativeFoldReplay {
     }
     async restorationFloor(
         sessionID: string,
-        cut: StoreRow<"compaction">,
+        _cut: StoreRow<"compaction">,
         reader: V2StoreReader,
     ): Promise<number | undefined> {
+        // V2 records have no replay floor. A healthy writer pass upgrades only
+        // from a proven host boundary, or replaces the frozen history prefix
+        // once with the host checkpoint during upgrade, before calling this method.
+        // Read-only recovery must never guess an origin for an old receipt.
         if (this.options.protocol !== 3) return undefined;
         const replay = await this.floorState(sessionID, reader);
         if (replay) return replay.floor.after;
@@ -346,6 +362,148 @@ export class NativeFoldReplay {
             throw new NativeReplayUnavailable("Host checkpoint replay boundary is unavailable");
         }
         return undefined;
+    }
+
+    async prepareLegacyUpgrade(args: {
+        draft: SessionContext;
+        cut: StoreRow<"compaction">;
+        reader: V2StoreReader;
+        onHard(): void;
+    }): Promise<boolean> {
+        const { draft, cut, reader } = args;
+        const admissions = this.admissions;
+        if (this.options.protocol !== 3 || !admissions || !isLocalCheckpoint(cut)) return false;
+        if (await this.readV3(draft.sessionID)) return false;
+        const receipt = (await this.admissions?.get(admissionKey(draft.sessionID))) as
+            | { payload?: string; digest?: string }
+            | undefined;
+        if (!receipt?.payload || receipt.digest !== foldDigest(receipt.payload)) return false;
+        let legacy: DurableSnapshot;
+        try {
+            legacy = JSON.parse(receipt.payload) as DurableSnapshot;
+        } catch {
+            return false;
+        }
+        if (
+            legacy.sourceDigest !== foldDigest(reader.hostIdentity()) ||
+            legacy.sessionID !== draft.sessionID ||
+            legacy.admissionID !== cut.id ||
+            legacy.summaryDigest !== foldDigest(cut.data.summary ?? "") ||
+            !/^[a-f0-9]{64}$/.test(legacy.historyDigest)
+        )
+            return false;
+
+        // The host's kept range is authoritative. On legacy hosts the exact
+        // persisted summary can instead bind its source boundary; never use an
+        // unrelated cached head merely because it happens to have a coordinate.
+        let floor: ReplayFloor | undefined;
+        const metadata = cut.data.metadata as { keepID?: string } | undefined;
+        const keepID = metadata?.keepID ?? cut.data.keepID;
+        const keepSeq =
+            typeof keepID === "string" ? reader.sequenceForId(draft.sessionID, keepID) : undefined;
+        if (keepSeq !== undefined && keepSeq < cut.seq) {
+            const row = reader
+                .range(draft.sessionID, keepSeq - 1, keepSeq)
+                .find((row) => row.id === keepID && conversational(row));
+            if (row) floor = floorFor(row, "start");
+        }
+        if (!floor) {
+            const candidate = await this.floorState(draft.sessionID, reader);
+            const cached = readSessionMeta(
+                this.storage.db,
+                draft.sessionID,
+            ).cachedM0Bytes?.toString("utf8");
+            if (
+                candidate &&
+                (candidate.floor.kind === "checkpoint" ||
+                    (candidate.floor.kind === "summary" && cached === cut.data.summary))
+            )
+                floor = candidate.floor;
+        }
+        const mode = floor ? "bounded" : "host-checkpoint";
+        floor ??= floorFor(cut, "host-checkpoint");
+        let controls: ReturnType<typeof captureControls> = [];
+        let blocked = false;
+        try {
+            controls = captureControls(
+                draft,
+                nativeRowID,
+                new Set(draft.messages.flatMap((message) => nativeRowID(message) ?? [])),
+            );
+        } catch (error) {
+            if (!(error instanceof ControlMetadataUnavailable)) throw error;
+            // Keep serving the host's controls, but do not nominate a new fold
+            // until a later capture can preserve all of them.
+            blocked = true;
+        }
+        const replay: ReplayStateV3 = {
+            floor,
+            controls,
+            ...(blocked ? { blocked } : {}),
+            upgrade: { admissionID: cut.id, mode },
+        };
+        const value: AdmissionV3 = {
+            version: 3,
+            replay,
+            proof: {
+                sourceDigest: legacy.sourceDigest,
+                sessionID: draft.sessionID,
+                admissionID: cut.id,
+                summaryDigest: legacy.summaryDigest,
+                historyDigest: historyDigest(reader, draft.sessionID, cut.seq - 1, floor.after),
+            },
+        };
+        // Clear the old cached head before recording the transition. A crash
+        // after the receipt write still permits building a fresh history head,
+        // without clearing a frozen head again on restart or a later defer pass.
+        args.onHard();
+        const payload = JSON.stringify(value);
+        await admissions.set(this.admissionKey(draft.sessionID), {
+            payload,
+            digest: foldDigest(payload),
+        });
+        await this.retainReplay(
+            draft.sessionID,
+            replay,
+            `${draft.model.providerID}/${draft.model.id}`,
+            cut.seq - 1,
+        );
+        this.report(draft.sessionID, `V2 upgrade-state HARD mode=${mode} checkpoint=${cut.id}`);
+        return true;
+    }
+
+    async checkpointForReplay(sessionID: string, reader: V2StoreReader) {
+        if (this.options.protocol !== 3) return undefined;
+        const replay = await this.floorState(sessionID, reader);
+        if (replay?.floor.kind !== "host-checkpoint") return undefined;
+        const row = reader
+            .range(sessionID, replay.floor.seq - 1, replay.floor.seq)
+            .find((row) => row.id === replay.floor.id && row.type === "compaction");
+        if (!row || !isLocalCheckpoint(row)) return undefined;
+        const rendered = hostCheckpointCarrier(row);
+        if (replay.withoutRecentContext)
+            stripCheckpointRecentContext(rendered, row.data.summary ?? "");
+        return { row, rendered, submitted: row.data.summary ?? "" };
+    }
+
+    async checkpointCovered(sessionID: string, checkpointID: string): Promise<void> {
+        const admissions = this.admissions;
+        if (!admissions) return;
+        const value = await this.readV3(sessionID);
+        if (
+            value?.replay.floor.kind !== "host-checkpoint" ||
+            value.replay.floor.id !== checkpointID ||
+            value.replay.withoutRecentContext
+        )
+            return;
+        value.replay.withoutRecentContext = true;
+        const payload = JSON.stringify(value);
+        await admissions.set(this.admissionKey(sessionID), {
+            payload,
+            digest: foldDigest(payload),
+        });
+        const tail = this.tail(sessionID);
+        if (tail) await this.retainReplay(sessionID, value.replay, tail.model, tail.sourceSeq);
     }
     private async removeAdmission(key: string): Promise<void> {
         if (this.admissions?.remove) await this.admissions.remove(key);
@@ -743,6 +901,7 @@ export class NativeFoldReplay {
                             ids,
                         ),
                     };
+                    const replayAfter = replay.floor.after;
                     captured = native.filter((message) => {
                         if (effortPart(message)) return false;
                         const id = nativeRowID(message);
@@ -757,7 +916,7 @@ export class NativeFoldReplay {
                                 )
                             );
                         const seq = reader.sequenceForId(draft.sessionID, id);
-                        return seq === undefined || seq > replay!.floor.after;
+                        return seq === undefined || seq > replayAfter;
                     });
                 }
                 let rows = this.records(draft.sessionID, captured, reader, replay?.floor.after);

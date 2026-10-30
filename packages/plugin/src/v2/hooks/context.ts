@@ -161,7 +161,7 @@ import {
     nativeRowID,
 } from "../fold/native-replay";
 import { controlKey, effortPart, rememberedControlKey } from "../fold/native-replay-v3";
-import { FoldOwner, foldDigest } from "../fold/owner";
+import { FoldOwner, foldDigest, stripCheckpointRecentContext } from "../fold/owner";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
@@ -174,7 +174,12 @@ import {
 } from "../hidden-completion";
 import { HiddenModelActivity } from "../hidden-model-activity";
 import { V2MessageTimesCache } from "../message-times";
-import { gaDatabasePath, type V2StoreReader, V2StoreReaderPool } from "../store-reader";
+import {
+    gaDatabasePath,
+    RAW_MESSAGE_TYPES,
+    type V2StoreReader,
+    V2StoreReaderPool,
+} from "../store-reader";
 import {
     clearSyntheticCandidates,
     deliverPendingChannel2,
@@ -238,7 +243,13 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
     const { checkpoint, submitted } = head;
     const first = draft.messages.find((message) => message.id === HEAD_IDS[0]);
     const baseline = first?.content.find((part) => part.type === "text")?.text;
-    if (typeof baseline !== "string") return false;
+    if (typeof baseline !== "string") {
+        // A migrated host window may contain only its checkpoint. With no raw
+        // tail the shared transform has no head to replace, but the checkpoint
+        // is still the only account of the earlier conversation.
+        draft.messages.unshift(checkpoint);
+        return true;
+    }
     for (const part of checkpoint.content)
         if (part.type === "text" && typeof part.text === "string") {
             part.text = part.text.replace(
@@ -279,8 +290,9 @@ function restoreNativeCheckpointInput(
     }
     const hidden = restored.filter((message) => {
         const key = rememberedControlKey(message);
-        if (key && (currentControls.get(key) ?? 0) > 0) {
-            currentControls.set(key, currentControls.get(key)! - 1);
+        const count = key ? (currentControls.get(key) ?? 0) : 0;
+        if (key && count > 0) {
+            currentControls.set(key, count - 1);
             return false;
         }
         const id = nativeRowID(message);
@@ -288,6 +300,32 @@ function restoreNativeCheckpointInput(
     });
     const at = messages.indexOf(incoming);
     return [...messages.slice(0, at), ...hidden, ...messages.slice(at + 1)];
+}
+
+function estimateCheckpointRequest(draft: SessionContext) {
+    let toolDefinitionTokens = 0;
+    for (const tool of Object.values(draft.tools)) {
+        const schema = JSON.stringify(tool.input);
+        if (schema === undefined)
+            throw new Error("Checkpoint request has an unserializable tool schema");
+        toolDefinitionTokens += estimateTokens(tool.description) + estimateTokens(schema);
+    }
+    const estimateDraft = {
+        ...draft,
+        // These are already rendered heads, not slots for adaptPayload to replace.
+        messages: draft.messages.map((message) =>
+            HEAD_IDS.some((id) => message.id === id) ? { ...message, id: undefined } : message,
+        ),
+    };
+    return estimateFinalWireInputTokens({
+        messages: adaptPayload(estimateDraft).messages,
+        toolDefinitionTokens,
+        systemPromptTokens: estimateTokens(JSON.stringify(draft.system)),
+        providerID: draft.model.providerID,
+        modelID: draft.model.id,
+        agentName: draft.agent,
+        sessionId: draft.sessionID,
+    });
 }
 
 // The event stream can trail the terminal store row by a scheduler tick; keep failure surfacing fast.
@@ -1668,7 +1706,7 @@ export async function registerContext(context: V2Context) {
         // the child with a model call and lose the marker.
         const hiddenSummary = hiddenChildHook.compactionSummary(draft.sessionID, draft.agent);
         if (hiddenSummary !== undefined) {
-            draft.result = { summary: hiddenSummary };
+            draft.result = { summary: hiddenSummary, metadata: { keepID: undefined } };
             return;
         }
         // Leaving `result` unset hands the request back to the host, exactly as if
@@ -1724,7 +1762,7 @@ export async function registerContext(context: V2Context) {
                             summary,
                         })
                     ) {
-                        draft.result = { summary };
+                        draft.result = { summary, metadata: { keepID: undefined } };
                         return;
                     }
                 } catch (error) {
@@ -1747,7 +1785,17 @@ export async function registerContext(context: V2Context) {
             // host's rate and ours are separate facts, and only reading both
             // explains a session's checkpoint cadence.
             sessionLog(draft.sessionID, `v2 compaction hook: fired answered=true source=${source}`);
-            draft.result = { summary: fold.submitted };
+            // OpenCode 2.1+ otherwise appends raw stored history as recent-context.
+            // restoreAfterCheckpoint restores every row after the frozen history
+            // baseline through the host cut, so no unsummarized messages
+            // depend on that second copy. The own
+            // undefined key overrides the host's default kept range before JSON
+            // storage omits it; the native replay path above needs it as well.
+            // In 2.0.22 recent is a separate host-owned result field, not hook
+            // metadata. That version stores the transcript; the context hook
+            // removes it only when the shared transform permits a cache rewrite.
+            // A checkpoint request still over the model limit is refused before egress.
+            draft.result = { summary: fold.submitted, metadata: { keepID: undefined } };
         } catch (cause) {
             await refuseBeforeProvider(context.session, draft.sessionID, "compaction-fold", cause);
             throw new V2ContextRefusal("Magic Context could not preserve the host checkpoint.", {
@@ -1891,6 +1939,8 @@ export async function registerContext(context: V2Context) {
     // Construct retained callbacks outside the request scope. Even callbacks that
     // only read instance state can keep a shared closure environment alive, along
     // with replay helpers that hold the request's messages and attachments.
+    const checkpointPassPermissions = new Map<string, boolean>();
+    const checkpointInputEstimates = new Map<string, { tokens: number; pressureTokens: number }>();
     const initializeTransform = (database: NonNullable<typeof db>) =>
         (transform ??= createTransform({
             ...createV2TransformFeatureDeps(
@@ -1906,6 +1956,10 @@ export async function registerContext(context: V2Context) {
             tagger,
             ...createV2ThresholdDeps(config),
             contextUsageMap: usage,
+            hostInputEstimate: (sessionID) => checkpointInputEstimates.get(sessionID),
+            onPassPermission: (sessionID, permission) => {
+                checkpointPassPermissions.set(sessionID, permission);
+            },
             compactionOff,
             // OpenCode 2 reads `session_message`, which numbers the same
             // conversation differently from the v1 tables a converted store
@@ -2420,6 +2474,7 @@ export async function registerContext(context: V2Context) {
             const reader = openStoreReader();
             let checkpoint: SessionContext["messages"][number] | undefined;
             let submitted: string | undefined;
+            let upgradeCheckpointSequence: number | undefined;
             try {
                 const candidates = syntheticCandidates(
                     context,
@@ -2465,6 +2520,46 @@ export async function registerContext(context: V2Context) {
                 if (localCut && !incoming)
                     throw new Error("The host checkpoint disappeared from the context draft");
                 checkpointAtEntry = incoming || null;
+                if (localCut && nativeFoldReplay) {
+                    await nativeFoldReplay.prepareLegacyUpgrade({
+                        draft,
+                        cut: localCut,
+                        reader,
+                        onHard: () => {
+                            clearCachedM0(storage.require(), draft.sessionID);
+                            restoredRows.forget(draft.sessionID);
+                            historyRefreshSessions.add(draft.sessionID);
+                            requestPendingMaterialization(
+                                pendingMaterializationSessions,
+                                draft.sessionID,
+                                "host_compaction",
+                            );
+                        },
+                    });
+                    const carrier = await nativeFoldReplay.checkpointForReplay(
+                        draft.sessionID,
+                        reader,
+                    );
+                    if (carrier) {
+                        const identity = await folds.observe({
+                            sessionID: draft.sessionID,
+                            cutSeq: carrier.row.seq,
+                            summary: carrier.submitted,
+                            rendered: carrier.rendered,
+                            onHard: () => {
+                                historyRefreshSessions.add(draft.sessionID);
+                                requestPendingMaterialization(
+                                    pendingMaterializationSessions,
+                                    draft.sessionID,
+                                    "host_compaction",
+                                );
+                            },
+                        });
+                        checkpoint = structuredClone(identity.rendered ?? carrier.rendered);
+                        submitted = identity.renderedSummary ?? carrier.submitted;
+                        upgradeCheckpointSequence = carrier.row.seq;
+                    }
+                }
                 let nativeRestored: V2Message[] | undefined;
                 // Validate fold provenance before the cache path or its raw-row
                 // fallback can invisibly replace the checkpoint. Without a valid
@@ -2598,6 +2693,25 @@ export async function registerContext(context: V2Context) {
             }
             const mapped = adaptPayload(draft, admitted, messageTimes, anchorTimesOnly);
             bindSystemDateRequestIdentity(mapped, draft);
+            checkpointPassPermissions.delete(draft.sessionID);
+            checkpointInputEstimates.delete(draft.sessionID);
+            if (checkpoint && submitted !== undefined) {
+                const projected = structuredClone(checkpoint);
+                if (stripCheckpointRecentContext(projected, submitted)) {
+                    // The checkpoint replaces the frozen history-head message
+                    // after the shared transform. Measure it with the restored
+                    // tail now so the scheduler can reduce an over-window
+                    // request before it is sent.
+                    const estimate = estimateCheckpointRequest({
+                        ...draft,
+                        messages: [checkpoint, ...draft.messages],
+                    });
+                    checkpointInputEstimates.set(draft.sessionID, {
+                        tokens: estimate.tokens,
+                        pressureTokens: estimate.pressureTokens ?? estimate.tokens,
+                    });
+                }
+            }
             await createMessagesTransformHandler({
                 magicContext: { "experimental.chat.messages.transform": transform },
                 compactionOff,
@@ -2611,6 +2725,47 @@ export async function registerContext(context: V2Context) {
                 >[1],
             );
             mapped.commit();
+            const checkpointPermission = checkpointPassPermissions.get(draft.sessionID);
+            checkpointPassPermissions.delete(draft.sessionID);
+            checkpointInputEstimates.delete(draft.sessionID);
+            if (checkpoint?.id && checkpointPermission && replayHead === undefined) {
+                let covered = upgradeCheckpointSequence === undefined;
+                if (upgradeCheckpointSequence !== undefined) {
+                    const boundary = db
+                        .prepare(
+                            "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id=?",
+                        )
+                        .get(draft.sessionID) as { id: string | null } | undefined;
+                    const source = openStoreReader();
+                    try {
+                        const through = upgradeCheckpointSequence - 1;
+                        const last = source
+                            .rowStampsThrough(draft.sessionID, through)
+                            .filter((row) =>
+                                (RAW_MESSAGE_TYPES as readonly string[]).includes(row.type),
+                            )
+                            .at(-1)?.seq;
+                        const end = boundary?.id
+                            ? source.sequenceForId(draft.sessionID, boundary.id)
+                            : undefined;
+                        covered = last === undefined || (end !== undefined && end >= last);
+                    } finally {
+                        source.close();
+                    }
+                }
+                if (covered) {
+                    const checkpointID = checkpoint.id;
+                    const stripped = await folds.stripRecentContext(draft.sessionID, checkpointID);
+                    if (stripped?.rendered) {
+                        checkpoint = structuredClone(stripped.rendered);
+                        if (upgradeCheckpointSequence !== undefined)
+                            await nativeFoldReplay?.checkpointCovered(
+                                draft.sessionID,
+                                checkpointID,
+                            );
+                    }
+                }
+            }
             // Keep the transform decision this pass staged (if any) together with
             // the store sequence captured before the request; the next pass binds it
             // to the reply written after that sequence.
@@ -2636,7 +2791,7 @@ export async function registerContext(context: V2Context) {
                       : null;
             const servedHead = head && structuredClone(head);
             const headApplied = head ? applyCheckpointHead(draft, head) : false;
-            if (nativeMessages && !checkpoint) {
+            if (nativeMessages && (!checkpoint || upgradeCheckpointSequence !== undefined)) {
                 try {
                     const state = db && getOrCreateSessionMeta(db, draft.sessionID);
                     const boundary = db
@@ -2786,11 +2941,49 @@ export async function registerContext(context: V2Context) {
             }
         }
     };
+    const refuseOversizedCheckpoint = async (draft: SessionContext) => {
+        const hasCheckpoint = draft.messages.some((message) =>
+            message.content.some(
+                (part) =>
+                    part.type === "text" &&
+                    typeof part.text === "string" &&
+                    part.text.startsWith("<conversation-checkpoint>"),
+            ),
+        );
+        const limit = draft.model.limit?.input ?? draft.model.limit?.context;
+        // Removing a checkpoint's duplicated transcript does not ensure the request
+        // fits: a generate hook can append a large user question after replay.
+        // Size every request that contains a checkpoint, even without recent-context.
+        if (!hasCheckpoint || !limit) return;
+        let estimate: ReturnType<typeof estimateCheckpointRequest>;
+        try {
+            estimate = estimateCheckpointRequest(draft);
+        } catch (cause) {
+            await refuseBeforeProvider(
+                context.session,
+                draft.sessionID,
+                "checkpoint-fit-estimate",
+                cause,
+            );
+            throw new V2ContextRefusal("Magic Context could not size the host checkpoint.", {
+                cause,
+            });
+        }
+        if (estimate.tokens <= limit) return;
+        await refuseBeforeProvider(context.session, draft.sessionID, "checkpoint-over-window");
+        throw new V2ContextRefusal("Magic Context refused an oversized host checkpoint.");
+    };
     await context.session.hook("context", (draft) =>
         withSqliteTransformPass(async () => {
             hostFoldIdle?.active(draft.sessionID);
             const anchor = generateReplayAnchor(draft.messages);
-            await runManagedContext(draft);
+            try {
+                await runManagedContext(draft);
+                if (!compactionOff) await refuseOversizedCheckpoint(draft);
+            } finally {
+                checkpointInputEstimates.delete(draft.sessionID);
+                checkpointPassPermissions.delete(draft.sessionID);
+            }
             // The shared last-good-request slot is saved before m[0] is replaced
             // by a host checkpoint message. Save the final message array here
             // so side questions reuse the exact history handed back to the host.
@@ -2800,7 +2993,10 @@ export async function registerContext(context: V2Context) {
         }),
     );
     await context.session.hook("generate", async (draft) => {
-        if (!compactionOff && !deletedSessions.has(draft.sessionID)) generateReplay.apply(draft);
+        if (!compactionOff && !deletedSessions.has(draft.sessionID)) {
+            generateReplay.apply(draft);
+            await refuseOversizedCheckpoint(draft);
+        }
     });
     // Warm eagerly for cold sidebar/status reads; a failed startup warm releases
     // its latch and the context hook above retries after the host catalog settles.
