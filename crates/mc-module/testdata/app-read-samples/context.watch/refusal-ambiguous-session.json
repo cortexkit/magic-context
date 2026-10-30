@@ -1,0 +1,20 @@
+{
+  "name": "ambiguous session is refused before streaming",
+  "refusal": {
+    "code": "session_ambiguous",
+    "detail": null,
+    "message": "More than one conversation matches the session."
+  },
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  }
+}

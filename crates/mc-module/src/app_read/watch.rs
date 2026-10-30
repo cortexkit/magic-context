@@ -795,64 +795,20 @@ impl Drop for Hub {
 }
 
 #[cfg(test)]
-pub(super) fn samples() -> Vec<(&'static str, Value, Result<Value, HandlerOutcome>)> {
+pub(super) struct Sample {
+    pub name: &'static str,
+    pub file: &'static str,
+    pub params: Value,
+    pub result: Result<Value, HandlerOutcome>,
+}
+
+#[cfg(test)]
+pub(super) fn samples() -> Vec<Sample> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async {
-            let dir = tempfile::tempdir().unwrap();
-            let store = super::tests_support::open_store(dir.path());
-            super::tests_support::apply_sql(
-                &dir.path().join("context.db"),
-                "INSERT INTO session_meta(session_id,harness) VALUES('s','opencode');",
-            );
-            let ctx = AppReadContext::from_parts(
-                Some(store),
-                Arc::default(),
-                Vec::new(),
-                1_700_000_000_000,
-            );
-            let mut hub = Hub::default();
-            hub.epoch = "abc".into();
-            let hub = Arc::new(hub);
-            let params =
-                json!({"sessions":[{"runner":"opencode","harness":"opencode","session":"s"}]});
-            let mut subscriptions = Vec::new();
-            for channel in 0..PER_CALLER {
-                subscriptions.push(
-                    hub.subscribe(
-                        "direct".into(),
-                        (channel as u16, 1),
-                        Request::parse(params.as_object().unwrap())
-                            .unwrap_or_else(|e| panic!("{e:?}")),
-                        &ctx,
-                    )
-                    .unwrap_or_else(|e| panic!("{e:?}")),
-                );
-            }
-            let resync = subscriptions[0].rx.recv().await.unwrap();
-            super::tests_support::apply_sql(
-                &dir.path().join("context.db"),
-                "UPDATE session_meta SET compartment_in_progress=1 WHERE session_id='s'",
-            );
-            hub.refresh(Arc::clone(ctx.store.as_ref().unwrap()));
-            let changes = subscriptions[0].rx.recv().await.unwrap();
-            let refusal = hub
-                .subscribe(
-                    "direct".into(),
-                    (99, 1),
-                    Request::parse(params.as_object().unwrap()).unwrap_or_else(|e| panic!("{e:?}")),
-                    &ctx,
-                )
-                .err()
-                .expect("quota refusal");
-            vec![
-                ("resync", params.clone(), Ok(resync)),
-                ("changes", params.clone(), Ok(changes)),
-                ("refusal", params, Err(refusal)),
-            ]
-        })
+        .block_on(transport_tests::sample_fixtures::samples())
 }
 
 #[cfg(test)]
