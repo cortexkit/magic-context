@@ -588,11 +588,18 @@ export function persistCachedM0(
 export function clearCachedM0M1(db: Database, sessionId: string): void {
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
-        if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'session_render_cache'").get())
-            // Cache eviction must not discard session-scoped repair work stored beside the payloads.
-            db.prepare(
-                `DELETE FROM session_render_cache WHERE session_id=? AND cache_key IN (${SESSION_RENDER_CACHE_COLUMNS.map(() => "?").join(",")})`,
-            ).run(sessionId, ...SESSION_RENDER_CACHE_COLUMNS);
+        if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'session_render_cache'").get()) {
+            // Leave queued summary-repair requests intact. Clear render payloads through
+            // writeSessionRenderCache so failures roll back the enclosing history mutation.
+            for (const column of SESSION_RENDER_CACHE_COLUMNS) {
+                writeSessionRenderCache(
+                    db,
+                    sessionId,
+                    column,
+                    column === "memory_block_cache" ? "" : null,
+                );
+            }
+        }
         const existingColumns = new Set(
             (db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>).map(
                 (column) => column.name,

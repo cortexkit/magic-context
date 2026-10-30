@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, expect, it } from "bun:test";
 import { promoteRecompStagingWithM0Mutation } from "../../hooks/magic-context/compartment-runner-recomp";
 import { Database } from "../../shared/sqlite";
+import {
+    clearSessionMetaFixtureFault,
+    rejectSessionRenderCacheWrites,
+} from "./__tests__/session-meta-faults";
 import { acquireCompartmentLease } from "./compartment-lease";
 import { saveRecompStagingPass } from "./compartment-storage";
 import {
@@ -356,5 +360,25 @@ it("a failed drain revokes detached publication authority while the next drain i
             return false;
         }),
     ).toBe(false);
+    expect(getHistoryHealQueue(db, sessionId)).toEqual([work]);
+});
+
+it("cache eviction preserves its payload failure boundary and rolls back without dropping repair work", () => {
+    writeSessionRenderCache(db, sessionId, "cached_m0_bytes", Buffer.from("frozen m0"));
+    writeSessionRenderCache(db, sessionId, "cached_m1_bytes", Buffer.from("frozen m1"));
+    setHistoryHealQueue(db, sessionId, [work]);
+    rejectSessionRenderCacheWrites(db, "cached_m1_bytes", "refuse_payload_clear", {
+        error: "cache clear refused",
+    });
+    expect(() => clearCachedM0M1(db, sessionId)).toThrow("cache clear refused");
+    const state = getOrCreateSessionMeta(db, sessionId);
+    expect(Buffer.from(state.cachedM0Bytes!).toString()).toBe("frozen m0");
+    expect(Buffer.from(state.cachedM1Bytes!).toString()).toBe("frozen m1");
+    expect(getHistoryHealQueue(db, sessionId)).toEqual([work]);
+    clearSessionMetaFixtureFault(db, "refuse_payload_clear");
+    clearCachedM0M1(db, sessionId);
+    const cleared = getOrCreateSessionMeta(db, sessionId);
+    expect(cleared.cachedM0Bytes).toBeNull();
+    expect(cleared.cachedM1Bytes).toBeNull();
     expect(getHistoryHealQueue(db, sessionId)).toEqual([work]);
 });
