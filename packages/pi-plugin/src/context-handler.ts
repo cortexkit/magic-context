@@ -1106,8 +1106,9 @@ function buildPiTextIdentityPlan(
 				return legacyReminderMatches;
 			});
 		if (!vectorMatches) driftedMessageIds.add(messageId);
-		// Cold reuse requires stored, normalized-exact sources. Legacy reminder
-		// compatibility keeps the original source-insertion and repair path.
+		// Reuse text tags only when every stored source matches the current text
+		// after removing tag prefixes and leading temporal markers. Matches that
+		// strip legacy reminders still need source insertion and reminder repair.
 		else if (
 			!messageId.startsWith("pi-msg-") &&
 			legacyRows.every(
@@ -10449,8 +10450,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let routineCleanupApplied = false;
 	let heuristicsResult: PiHeuristicCleanupResult | null = null;
 	const tActiveTags = performance.now();
-	// Pin one canonical projection before heuristics change statuses. Historical
-	// rows retain only the identity/accounting used by protection and attribution.
+	// Read one immutable snapshot of the session's tags before heuristics change
+	// their statuses. Active tags have full rows; other tags keep only the identity
+	// and size/token fields needed to protect tags and match them to request parts.
 	const allTagsForPass = getPiPassTagSnapshotView(args.db, args.sessionId);
 	// Same rows as filtering allTagsForPass by status, kept current from changed
 	// rows instead of walking every tag the session ever had.

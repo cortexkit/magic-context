@@ -661,8 +661,9 @@ function attributionProjection(
 		if (numbers.has(tag.tagNumber)) return true;
 		const owner = messageIdForTag(tag);
 		if (owner !== null && owners.has(owner)) return true;
-		// Keep ownerless tool tags from every status in the session for each visible
-		// call; attribution must still reject multiple matching ownerless rows.
+		// For each visible call ID, keep all tool tags in the session whose
+		// toolOwnerMessageId is null, regardless of status. Otherwise filtering could
+		// hide duplicate rows and make attributeTags() treat the match as unique.
 		return (
 			tag.type === "tool" &&
 			tag.toolOwnerMessageId === null &&

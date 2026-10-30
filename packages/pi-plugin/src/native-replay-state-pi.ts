@@ -358,8 +358,9 @@ export function preparePiToolRemovalChecks(args: {
 			continue;
 		requested.push(row.callId);
 	}
-	// A bare call ID can repeat under another owner. Such arcs retain per-call
-	// authorization; the batch must not use authorization associated with another owner.
+	// A call belongs to its containing assistant message, recorded in
+	// tags.tool_owner_message_id. Batch authorization uses only toolCall.id, so
+	// repeated IDs need per-call checks to avoid sharing one message's permission.
 	if (requested.length) args.prepare(requested);
 }
 

@@ -5,7 +5,9 @@ import {
 import type { Transcript } from "@magic-context/core/shared/transcript";
 import type { PiTagMetadata } from "./tag-snapshot-pi";
 
-/** Select replay rows from the same pinned generation, including duplicate-number groups. */
+/** Select dropped tags matching the transcript from the supplied tag snapshot.
+ * Include every dropped row with a matching tag number, even duplicate numbers.
+ */
 export function projectPiReplayDrops(
 	transcript: Transcript,
 	metadata: readonly PiTagMetadata[],

@@ -393,7 +393,8 @@ test("provider differential edges retain identity signed holds stale reads and r
 			["owner-1", "dropped"],
 			["owner-2", "active"],
 		]);
-		// A producer may rename duplicate IDs when both owners are on the wire.
+		// The Pi provider SDK may rename duplicate tool-call IDs when both assistant
+		// messages containing those calls are on the wire.
 		// Compare the same fail-closed outcome as well as any admitted request bytes.
 		await reused.call("owner-call-full-raw", reuseInput, reuseIds, {
 			allowRefusal: true,
@@ -669,8 +670,9 @@ test("provider differential edges retain identity signed holds stale reads and r
 				"UPDATE tags SET status='dropped', drop_mode='skeleton_real' WHERE session_id=? AND type='tool'",
 			)
 			.run(lkg.sessionId);
-		// The second applied pass captures the producer observations obtained at
-		// the first real SDK boundary, rather than assuming an unmeasured fit.
+		// The warm pass saves system-prompt and tool-definition token estimates and
+		// serialized sizes learned from the first SDK request, so last-known-good
+		// replay can check request size instead of assuming it fits.
 		await lkg.call("lkg-good-warm", lkgInput, lkgIds);
 		const readMeta = metaStorage.getOrCreateSessionMeta;
 		let rejectedBeforeSnapshot = false;

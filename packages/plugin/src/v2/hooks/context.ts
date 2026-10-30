@@ -266,7 +266,9 @@ function estimateCheckpointRequest(draft: SessionContext) {
     }
     const estimateDraft = {
         ...draft,
-        // These are already rendered heads, not slots for adaptPayload to replace.
+        // HEAD_IDS identify the two synthetic context messages. adaptPayload
+        // excludes messages with those IDs, so clear them only in this estimation
+        // copy to count the synthetic content already in the request.
         messages: draft.messages.map((message) =>
             HEAD_IDS.some((id) => message.id === id) ? { ...message, id: undefined } : message,
         ),

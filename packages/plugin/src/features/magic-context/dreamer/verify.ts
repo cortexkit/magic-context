@@ -94,10 +94,12 @@ export const VERIFY_TOKENS_PER_MEMORY = 100_000;
 export const VERIFY_RUN_TOKEN_BUDGET = 2_500_000;
 /**
  * Default batch window, not a run deadline. On 2026-10-20 live data, five-memory
- * batches finished in 64 s at the median, 90 s at p90 and 96 s at worst; batches
- * under the 500k token envelope finished in 103 s at p95. Four minutes leaves
- * headroom for those batches, while a longer configured timeout can give slower
- * models more time through computeVerifyBatchSliceMs.
+ * batches finished in 64 s at the median, 90 s at the 90th percentile and 96 s at
+ * worst. Batches spending at most 500k prompt tokens across all requests in one
+ * verifier child session (including cache reads and writes) finished in 103 s at
+ * the 95th percentile. Four minutes leaves headroom for those batches, while a
+ * longer configured timeout can give slower models more time through
+ * computeVerifyBatchSliceMs.
  */
 export const VERIFY_BATCH_DEFAULT_MS = 240_000;
 
