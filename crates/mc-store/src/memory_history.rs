@@ -696,7 +696,7 @@ fn plan(
     })
 }
 fn epoch_identity(project: &str) -> String {
-    if project.starts_with("git:") || project.starts_with("dir:") {
+    if crate::is_resolved_project_id(project) {
         return project.to_owned();
     }
     let input = std::path::Path::new(project);
@@ -1414,4 +1414,50 @@ pub fn validate_write_request(method: &str, request: &Value) -> Result<Value, St
 
 pub fn refused_write(request: &Value, reason: &str) -> Value {
     receipt(request, "refused", Some(reason), None, json!([]), json!([]))
+}
+
+#[cfg(test)]
+mod resolved_project_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn epoch_identity_preserves_resolved_ids() {
+        for project in ["git:root", "dir:0123456789ab", "pj-history"] {
+            assert!(crate::is_resolved_project_id(project));
+            assert_eq!(epoch_identity(project), project);
+        }
+        for path in ["", "/repo/project", "relative/project", "/repo/pj-project"] {
+            assert!(!crate::is_resolved_project_id(path));
+        }
+        assert!(epoch_identity("/repo/project").starts_with("dir:"));
+    }
+
+    #[test]
+    fn dashboard_edit_bumps_pj_project_epoch() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("context.db");
+        crate::single_store_domain::create_test_context_db(&path).unwrap();
+        let mut conn = Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT INTO memories(project_path,category,content,normalized_hash,source_type,importance,scope,shareable,status,first_seen_at,created_at,updated_at,last_seen_at) VALUES('pj-history','CONFIG_VALUES',?1,?2,'agent',50,'project',0,'active',1,1,1,1)",
+            rusqlite::params!["cache_ttl=5m", normalized_hash("cache_ttl=5m")],
+        ).unwrap();
+        let request = json!({
+            "projectPath": "pj-history", "operationId": "edit-pj",
+            "expectedRevisions": [{"memoryId": 1, "revision": 1}],
+            "changes": [{"memoryId": 1, "content": "cache_ttl=10m"}]
+        });
+        let receipt = local_write(&mut conn, &request, 1000).unwrap();
+        assert_eq!(receipt["state"], "applied");
+        assert_eq!(local_write(&mut conn, &request, 2000).unwrap(), receipt);
+        let epochs: Vec<(String, i64)> = conn
+            .prepare("SELECT project_path, project_memory_epoch FROM project_state")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(epochs, vec![("pj-history".to_owned(), 1)]);
+    }
 }

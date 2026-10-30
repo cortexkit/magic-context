@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
+import { isResolvedProjectId } from "../../../shared/resolved-project-id";
 import type { Database } from "../../../shared/sqlite";
 import { bumpProjectMemoryEpoch } from "../storage-project-state";
 import { invalidateMemory } from "./embedding-cache";
@@ -733,10 +734,9 @@ function applyPlannedWrite(
             `dashboard:${key}`,
         );
     }
-    const epochProject =
-        projectPath.startsWith("git:") || projectPath.startsWith("dir:")
-            ? projectPath
-            : `dir:${createHash("md5").update(resolve(projectPath)).digest("hex").slice(0, 12)}`;
+    const epochProject = isResolvedProjectId(projectPath)
+        ? projectPath
+        : `dir:${createHash("md5").update(resolve(projectPath)).digest("hex").slice(0, 12)}`;
     const identities = new Set([epochProject]);
     if (db.prepare("SELECT 1 FROM sqlite_master WHERE name='workspace_members'").get())
         for (const member of db

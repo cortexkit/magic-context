@@ -20,6 +20,7 @@ import { accessSync, constants, existsSync, realpathSync, statSync } from "node:
 import { homedir } from "node:os";
 import path from "node:path";
 import { log } from "../../../shared/logger";
+import { isResolvedProjectId } from "../../../shared/resolved-project-id";
 import {
     invalidateGitCheckoutMetadata,
     readCachedGitCheckoutMetadata,
@@ -930,12 +931,12 @@ export function resolveProjectIdentityForSession(
 /**
  * Normalize a stored project path or legacy raw filesystem path.
  *
- * Already-resolved `git:` / `dir:` identities are returned byte-for-byte. Raw filesystem paths are
+ * Already-resolved `git:`, `dir:` and `pj-` identities are returned byte-for-byte. Raw filesystem paths are
  * resolved through the production wrapper. Unresolved paths remain unchanged so a transient
  * git failure cannot manufacture a new project identity during an ownership check.
  */
 export function normalizeStoredProjectPath(rawOrStored: string): string {
-    if (rawOrStored.startsWith("git:") || rawOrStored.startsWith("dir:")) {
+    if (isResolvedProjectId(rawOrStored)) {
         return rawOrStored;
     }
 
@@ -950,7 +951,7 @@ export function normalizeStoredProjectPath(rawOrStored: string): string {
 /**
  * Ownership check for a memory row against the current session's resolved
  * project identity. A memory's stored `project_path` may be a raw filesystem
- * path (legacy) OR an already-normalized `git:`/`dir:` identity; either must
+ * path (legacy) OR an already-normalized `git:`, `dir:` or `pj-` identity; either must
  * match the current identity after normalization. Used by ctx_memory
  * delete/update/archive/merge so a session can still manage memories stored
  * under a legacy raw path that normalizes to the same project (shared by both

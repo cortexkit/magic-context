@@ -15,6 +15,7 @@ import {
     describeUnresolvedProjectIdentity,
     isLinkedGitWorktree,
     type LiveProjectIdentityAnswer,
+    normalizeStoredProjectPath,
     rememberResolvedProjectIdentity,
     resolveProjectIdentity,
     resolveProjectIdentityForSession,
@@ -61,6 +62,22 @@ afterEach(async () => {
     if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalDataHome;
     rmSync(testRoot, { recursive: true, force: true });
+});
+
+test.each([
+    "git:root",
+    "dir:0123456789ab",
+    "pj-7a213b44",
+])("normalizeStoredProjectPath preserves resolved id %s", (identity) => {
+    const previousCwd = process.cwd();
+    // A same-named directory must not turn an already-resolved key into a path.
+    mkdirSync(join(testRoot, "pj-7a213b44"));
+    try {
+        process.chdir(testRoot);
+        expect(normalizeStoredProjectPath(identity)).toBe(identity);
+    } finally {
+        process.chdir(previousCwd);
+    }
 });
 
 describe("linked Git worktree detection", () => {
