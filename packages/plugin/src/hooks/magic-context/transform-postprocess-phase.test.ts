@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import todoRideGolden from "../../../../../crates/mc-module/testdata/todo-ride-only.json";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
+import { v2ToolDefinitionsHash } from "../../features/magic-context/request-tool-definitions";
 import * as embeddingModule from "../../features/magic-context/memory/embedding";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
@@ -4776,6 +4777,71 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             hardSignals: BASE_HARD,
         });
     }
+
+    it("independent tool witness: force band drains held drops once, and a same-turn tool removal folds once more", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "independent-tool-force";
+        materializeBaseline(sessionId);
+        const identity = (temporary: boolean) =>
+            v2ToolDefinitionsHash({
+                read: { description: "Read a file", input: {} },
+                ...(temporary ? { temporary: { description: "A temporary tool", input: {} } } : {}),
+            });
+        updateSessionMeta(db, sessionId, {
+            cachedM0UpgradeState: withCachedM0ToolDefinitionsHash(
+                getOrCreateSessionMeta(db, sessionId).cachedM0UpgradeState,
+                identity(false),
+            ),
+        });
+        insertTag(db, sessionId, "drop-call", "tool", 1000, 1, 0, "bash", 0, "drop-owner");
+        padRecentToolSkeletonWindow(sessionId, 1);
+        queuePendingOp(db, sessionId, 1, "drop");
+        registerActiveCompartmentRun(sessionId, new Promise<void>(() => {}));
+        db.exec(`CREATE TEMP TABLE force_head_writes (n INTEGER);
+            CREATE TEMP TRIGGER count_force_head AFTER UPDATE OF cached_m0_bytes ON session_meta
+            BEGIN INSERT INTO force_head_writes VALUES (1); END`);
+        const run = async (percentage: number, temporary = true) => {
+            const message = makeToolMessage("drop-owner");
+            const messages = [message];
+            const targets = new Map([[1, makeDropTarget(message)]]);
+            applyFlushedStatuses(sessionId, db, targets, getTagsBySession(db, sessionId));
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    targets,
+                    canRunCompartments: true,
+                    schedulerDecision: "defer",
+                    currentTurnId: "one-user-turn",
+                    contextUsage: { percentage, inputTokens: 110_000 },
+                    m0M1: {
+                        projectPath: FOLD_PROJECT,
+                        projectDirectory: FOLD_PROJECT,
+                        historyBudgetTokens: 98_000,
+                        hardSignals: { ...BASE_HARD, toolDefinitionsHash: identity(temporary) },
+                    },
+                }),
+            );
+            return { result, wire: JSON.stringify(messages) };
+        };
+        const folded = await run(86);
+        expect(folded.result.materialized).toBe(true);
+        expect(getPendingOps(db, sessionId)).toHaveLength(0);
+        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status).toBe(
+            "dropped",
+        );
+        expect(db.query("SELECT COUNT(*) AS n FROM force_head_writes").get()).toEqual({ n: 1 });
+        const replay = await run(40);
+        expect(replay.result.materialized).toBe(false);
+        expect(replay.wire).toBe(folded.wire);
+        expect(db.query("SELECT COUNT(*) AS n FROM force_head_writes").get()).toEqual({ n: 1 });
+        const removed = await run(40, false);
+        expect(removed.result.materialized).toBe(true);
+        expect(db.query("SELECT COUNT(*) AS n FROM force_head_writes").get()).toEqual({ n: 2 });
+        const stable = await run(40, false);
+        expect(stable.result.materialized).toBe(false);
+        expect(stable.wire).toBe(removed.wire);
+        expect(db.query("SELECT COUNT(*) AS n FROM force_head_writes").get()).toEqual({ n: 2 });
+    });
 
     it("consumes an OpenCode flush on a hard fold and replays the next defer byte-identically", async () => {
         db = new Database(":memory:");

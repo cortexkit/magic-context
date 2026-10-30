@@ -140,6 +140,96 @@ afterEach(() => {
 });
 
 describe("m[0]/m[1] materialization taxonomy", () => {
+    it.each([
+        "ttl",
+        "model",
+        "refold pressure",
+    ] as const)("independent tool witness: %s plus a tool change commits one head and replays after reload", (trigger) => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const identity = (description: string) =>
+            v2ToolDefinitionsHash({
+                read: { description, input: {} },
+            });
+        const initial = { ...BASE_HARD, toolDefinitionsHash: identity("Read a file") };
+        appendCompartments(db, SESSION_ID, [compartment(0, "A", "Frozen baseline")]);
+        pass({ projectDirectory, isCacheBustingPass: true, hard: initial });
+        appendCompartments(db, SESSION_ID, [compartment(1, "B", "Large delta ".repeat(18000))]);
+        db.exec(`CREATE TEMP TABLE head_writes (n INTEGER);
+                CREATE TEMP TRIGGER count_head AFTER UPDATE OF cached_m0_bytes ON session_meta
+                BEGIN INSERT INTO head_writes VALUES (1); END`);
+        const hard = { ...initial, toolDefinitionsHash: identity("Read the entire file") };
+        if (trigger === "model") hard.modelKey = "anthropic/sonnet";
+        if (trigger === "ttl") {
+            db.query(
+                "UPDATE session_meta SET cached_m0_materialized_at = 1 WHERE session_id = ?",
+            ).run(SESSION_ID);
+            hard.cacheExpired = true;
+            hard.lastResponseTime = 2;
+        }
+        // The signal-triggered fold must consume the pending history so an
+        // oversized delta cannot trigger a second head write on the same pass.
+        const folded = pass({ projectDirectory, isCacheBustingPass: true, hard });
+        expect(folded.rematerialized).toBe(true);
+        expect(folded.reason).toBe(trigger === "model" ? "model_change" : "tool_definitions");
+        expect(folded.m0).toContain("Large delta");
+        expect(db.query("SELECT COUNT(*) AS n FROM head_writes").get()).toEqual({ n: 1 });
+        clearInjectionCache(SESSION_ID);
+        const replay = pass({ projectDirectory, isCacheBustingPass: false, hard });
+        expect(replay.rematerialized).toBe(false);
+        expect([replay.m0, replay.m1]).toEqual([folded.m0, folded.m1]);
+        expect(db.query("SELECT COUNT(*) AS n FROM head_writes").get()).toEqual({ n: 1 });
+    });
+
+    it("independent tool witness: subagent requests do not materialize the primary history head", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        appendCompartments(db, SESSION_ID, [compartment(0, "A", "Frozen baseline")]);
+        pass({ projectDirectory, isCacheBustingPass: true });
+        const state = getOrCreateSessionMeta(db, SESSION_ID);
+        const before = state.cachedM0UpgradeState;
+        state.isSubagent = true;
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: false,
+            hardSignals: {
+                ...BASE_HARD,
+                toolDefinitionsHash: v2ToolDefinitionsHash({
+                    childOnly: { description: "A child tool", input: {} },
+                }),
+            },
+        });
+        expect(result.decision.reason).toBe("skipped");
+        expect(result.m0RematerializedThisPass).toBe(false);
+        expect(getOrCreateSessionMeta(db, SESSION_ID).cachedM0UpgradeState).toBe(before);
+    });
+
+    it("independent tool witness: losing the entire upgrade marker is a renderer repair, not silent tool adoption", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const hard = {
+            ...BASE_HARD,
+            toolDefinitionsHash: v2ToolDefinitionsHash({
+                read: { description: "Read a file", input: {} },
+            }),
+        };
+        appendCompartments(db, SESSION_ID, [compartment(0, "A", "Frozen baseline")]);
+        pass({ projectDirectory, isCacheBustingPass: true, hard });
+        db.query("UPDATE session_meta SET cached_m0_upgrade_state = NULL WHERE session_id = ?").run(
+            SESSION_ID,
+        );
+        const repaired = pass({ projectDirectory, isCacheBustingPass: false, hard });
+        expect(repaired.rematerialized).toBe(true);
+        expect(repaired.reason).toBe("compartment_render_epoch");
+        expect(pass({ projectDirectory, isCacheBustingPass: false, hard }).rematerialized).toBe(
+            false,
+        );
+    });
+
     it("request identity adoption is one metadata write, not an upgrade-state fold, across defer and restart", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();

@@ -18,6 +18,92 @@ type Body = { tools?: unknown; system?: unknown; messages: unknown[] };
 const wire = (value: unknown) => JSON.stringify(value, (key, item) => key === "cache_control" ? undefined : item);
 const filler = "alpha bravo charlie delta echo foxtrot golf hotel india juliet ".repeat(400);
 
+test.each([
+    ["transient duplicate names", "Café reads files", "Café reads files", true, true],
+    ["leading/trailing whitespace", "Café reads files", "  Café reads files  ", false, true],
+    ["Unicode normalization", "Café reads files", "Cafe\u0301 reads files", false, true],
+    ["line ending normalization", "Café reads\nfiles", "Café reads\r\nfiles", false, true],
+    ["unregistered request tool", "Café reads files", "Read the entire file", false, false],
+] as const)("OC2 independent tool witness: %s follows provider bytes", async (label, beforeDescription, afterDescription, transient, registered) => {
+    const fixture = isolation();
+    const control = join(fixture.root, "identity-control.json");
+    writeFileSync(control, JSON.stringify({ description: beforeDescription, transient: false }));
+    const plugin = join(fixture.root, "identity-review");
+    mkdirSync(plugin);
+    writeFileSync(join(fixture.cwd, "ARCHITECTURE.md"), "# Frozen normalized tools witness\n".repeat(20));
+    writeFileSync(join(plugin, "server.js"), `
+        import { readFileSync } from "node:fs";
+        export default { id: "identity-review", async setup(context) {
+            if (${JSON.stringify(registered)}) await context.tool.transform(editor => editor.add({
+                name: "issue819_probe", description: ${JSON.stringify(beforeDescription)},
+                input: { type: "object", properties: {} }, options: { codemode: false },
+                async execute() { return { content: "probe" }; }
+            }));
+            await context.session.hook("context", draft => {
+                const value = JSON.parse(readFileSync(${JSON.stringify(control)}, "utf8"));
+                const definition = { description: value.description, input: { type: "object", properties: {} } };
+                draft.tools.issue819_probe = definition;
+                if (value.transient) {
+                    draft.tools.issue819_probe = { ...definition, description: "Shadowed duplicate" };
+                    draft.tools.issue819_probe = definition;
+                    draft.tools.issue819_transient = definition;
+                    delete draft.tools.issue819_transient;
+                }
+            });
+        }};
+    `);
+    const host = await spawnOpencode2({ existingIsolation: fixture, prePlugin: plugin,
+        providerID: "anthropic", defaultModelID: "claude-sonnet-5-5",
+        modelContextLimit: 200_000, modelOutputLimit: 1024, compactionAuto: false,
+        magicContextConfig: { cache_ttl: "13h", protected_tokens: 4000,
+            historian: { disable: true }, dreamer: { disable: true } },
+    });
+    const db = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+    db.exec("PRAGMA busy_timeout = 10000");
+    try {
+        const client = OpenCode.make({ baseUrl: host.url,
+            headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
+        const session = await client.session.create({ location: { directory: host.cwd },
+            model: { providerID: "anthropic", id: "claude-sonnet-5-5" } });
+        await waitForPluginActive(client, host.cwd);
+        const turn = async (): Promise<Body> => {
+            const before = host.mock.requests().length;
+            await client.session.prompt({ sessionID: session.id, text: "Observe the effective tool map." });
+            await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
+            const requests = host.mock.requests().slice(before).filter(request => request.body.model === "claude-sonnet-5-5");
+            expect(requests).toHaveLength(1);
+            return requests[0]!.body as Body;
+        };
+        await turn();
+        const previous = await turn();
+        if (registered) {
+            expect(wire(previous.tools)).toContain("issue819_probe");
+            expect((previous.tools as Array<{ name: string; description: string }>).find(tool => tool.name === "issue819_probe")?.description).toBe(beforeDescription);
+        } else {
+            expect(wire(previous.tools)).not.toContain("issue819_probe");
+        }
+        expect(wire(previous.messages)).toContain("Frozen normalized tools witness");
+        const since = readPluginLog(host.env).length;
+        writeFileSync(join(fixture.cwd, "ARCHITECTURE.md"), "# New docs require a genuine tool bust\n".repeat(20));
+        writeFileSync(control, JSON.stringify({ description: afterDescription, transient }));
+        const changed = await turn();
+        const sameTools = wire(changed.tools) === wire(previous.tools);
+        const folds = readPluginLog(host.env).slice(since).split("\n").filter(line =>
+            line.includes(`[${session.id}]`) && line.includes("m[0] HARD fold decision:") && line.includes("executed=true"));
+        const publishedNewDocs = wire(changed.messages).includes("New docs require a genuine tool bust");
+        console.log("TOOL_CACHE_DESCRIPTION_WITNESS", JSON.stringify({ label, sameTools, folds, publishedNewDocs }));
+        expect(folds).toHaveLength(sameTools ? 0 : 1);
+        expect(publishedNewDocs).toBe(!sameTools);
+        if (!sameTools) expect(folds[0]).toContain("reason=tool_definitions");
+        const replay = await turn();
+        expect(wire(replay.tools)).toBe(wire(changed.tools));
+        expect(wire(replay.messages.slice(0, changed.messages.length))).toBe(wire(changed.messages));
+    } finally {
+        db.close();
+        await host.stop();
+    }
+}, 180_000);
+
 test("OC2 session request tools fold once, draining held drops on the changed request without affecting another session", async () => {
     const fixture = isolation();
     fixture.env.TMPDIR = join(fixture.root, "tmp");
