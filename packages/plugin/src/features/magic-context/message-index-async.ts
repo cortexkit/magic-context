@@ -27,6 +27,16 @@ import type { IndexWorkerMeasurements } from "./message-index-bounded";
 // Session teardown prevents queued indexing from starting; workers check cancellation before COMMIT.
 const indexCancellations = new Map<string, Set<Int32Array>>();
 const sessionEpochs = new Map<string, number>();
+const rebuildingSessions = new Set<string>();
+
+/** Changes whenever queued raw-message work belongs to an obsolete history. */
+export function getMessageIndexEpoch(sessionId: string): number {
+    return sessionEpochs.get(sessionId) ?? 0;
+}
+
+export function isMessageIndexSearchable(sessionId: string): boolean {
+    return !rebuildingSessions.has(sessionId);
+}
 const workerMeasurements = new WeakMap<Database, Map<string, IndexWorkerMeasurements>>();
 export function getIndexWorkerMeasurements(
     db: Database,
@@ -244,6 +254,7 @@ async function reconcileSessionIndex(
     db: Database,
     sessionId: string,
     readMessages: MessageReconciliationSource,
+    epoch = getMessageIndexEpoch(sessionId),
 ): Promise<boolean> {
     // Wait for the warm-up outside the session lock, so live indexing of this
     // session is not held behind it.
@@ -252,6 +263,7 @@ async function reconcileSessionIndex(
         return false;
     }
     await runWithSessionLock(sessionId, async () => {
+        if (getMessageIndexEpoch(sessionId) !== epoch) return;
         if (!readMessages.getRevision && heapHolder.reconciledSessions.has(sessionId)) return;
 
         let fallbackSnapshot: RawMessage[] | null = null;
@@ -278,6 +290,7 @@ async function reconcileSessionIndex(
             let after = cursor === previous?.count ? previous.after : undefined;
 
             while (cursor < finalWatermark) {
+                if (getMessageIndexEpoch(sessionId) !== epoch) return;
                 const pageEnd = Math.min(finalWatermark, cursor + RECONCILIATION_BATCH_SIZE);
                 const messages = readMessages.readPage
                     ? readMessages.readPage(
@@ -293,6 +306,7 @@ async function reconcileSessionIndex(
                 const retainedMessages = fallbackSnapshot ?? messages;
                 heapHolder.activeReconcilerBuffers.set(sessionId, retainedMessages);
 
+                if (getMessageIndexEpoch(sessionId) !== epoch) return;
                 withSqliteBackgroundWriter(() =>
                     indexMessagesAfterOrdinal(db, sessionId, messages, cursor, pageEnd),
                 );
@@ -315,8 +329,10 @@ async function reconcileSessionIndex(
                 }
             }
 
+            if (getMessageIndexEpoch(sessionId) !== epoch) return;
             if (isMessageIndexReconciledThrough(db, sessionId, finalWatermark)) {
                 heapHolder.reconciledSessions.add(sessionId);
+                rebuildingSessions.delete(sessionId);
                 if (revision !== undefined) {
                     // A rebase may already cover the entire store. Capture its last
                     // row once so later appends start with a keyset seek, not OFFSET.
@@ -351,6 +367,14 @@ export function scheduleReconciliation(
     sessionId: string,
     readMessages: MessageReconciliationSource,
 ): void {
+    if (rebuildingSessions.has(sessionId)) {
+        // A normal append reconciliation must not certify the old watermark
+        // while an authoritative clear is still queued or needs a retry.
+        if (!heapHolder.clearAndReindexScheduledSessions.has(sessionId))
+            scheduleClearAndReindex(db, sessionId, readMessages);
+        return;
+    }
+    const epoch = getMessageIndexEpoch(sessionId);
     if (
         (!readMessages.getRevision && heapHolder.reconciledSessions.has(sessionId)) ||
         heapHolder.reconciliationScheduledSessions.has(sessionId)
@@ -363,8 +387,10 @@ export function scheduleReconciliation(
         defer(() => {
             let appendedDuringReconciliation = false;
             const previousSnapshot = heapHolder.reconciledSnapshots.get(sessionId);
-            void reconcileSessionIndex(db, sessionId, readMessages)
+            if (getMessageIndexEpoch(sessionId) !== epoch) return;
+            void reconcileSessionIndex(db, sessionId, readMessages, epoch)
                 .then((ran) => {
+                    if (getMessageIndexEpoch(sessionId) !== epoch) return;
                     if (ran) {
                         const snapshot = heapHolder.reconciledSnapshots.get(sessionId);
                         // A failed catch-up keeps the old snapshot. Wait for another
@@ -385,6 +411,7 @@ export function scheduleReconciliation(
                     ).unref?.();
                 })
                 .catch((error) => {
+                    if (getMessageIndexEpoch(sessionId) !== epoch) return;
                     logReconciliationStall(
                         sessionId,
                         error instanceof Error ? error.message : String(error),
@@ -398,6 +425,7 @@ export function scheduleReconciliation(
                         ).unref();
                 })
                 .finally(() => {
+                    if (getMessageIndexEpoch(sessionId) !== epoch) return;
                     heapHolder.reconciliationScheduledSessions.delete(sessionId);
                     if (appendedDuringReconciliation)
                         scheduleReconciliation(db, sessionId, readMessages);
@@ -542,9 +570,13 @@ export function scheduleClearAndReindex(
     sessionId: string,
     readMessages: MessageReconciliationSource,
 ): void {
+    // Block search before yielding: the durable clear may wait behind boot quiet
+    // or a writer, and old FTS rows must not leak during that interval.
+    rebuildingSessions.add(sessionId);
+    invalidateIncrementalWork(sessionId);
     heapHolder.reconciledSessions.delete(sessionId);
     heapHolder.reconciledSnapshots.delete(sessionId);
-    heapHolder.reconciliationScheduledSessions.delete(sessionId);
+    heapHolder.reconciliationScheduledSessions.add(sessionId);
     clearCompletedIncrementalKeys(sessionId);
 
     const existing = heapHolder.clearAndReindexScheduledSessions.get(sessionId);
@@ -558,8 +590,12 @@ export function scheduleClearAndReindex(
     scheduleAfterBootQuiet(() => {
         defer(() => {
             let cleared = false;
+            let ownsSchedule = false;
+            let epoch = getMessageIndexEpoch(sessionId);
             void runWithSessionLock(sessionId, () => {
                 if (heapHolder.clearAndReindexScheduledSessions.get(sessionId) !== pending) return;
+                ownsSchedule = true;
+                epoch = getMessageIndexEpoch(sessionId);
                 // Coalesce removals only until the clear starts. A removal during
                 // paged reconciliation must schedule another authoritative rebuild.
                 heapHolder.clearAndReindexScheduledSessions.delete(sessionId);
@@ -573,13 +609,20 @@ export function scheduleClearAndReindex(
                 cleared = true;
             })
                 .then(() =>
-                    cleared ? reconcileSessionIndex(db, sessionId, pending.source) : undefined,
+                    cleared && getMessageIndexEpoch(sessionId) === epoch
+                        ? reconcileSessionIndex(db, sessionId, pending.source, epoch)
+                        : undefined,
                 )
                 .catch((error) => {
+                    if (getMessageIndexEpoch(sessionId) !== epoch) return;
                     heapHolder.reconciledSessions.delete(sessionId);
                     if (heapHolder.clearAndReindexScheduledSessions.get(sessionId) === pending)
                         heapHolder.clearAndReindexScheduledSessions.delete(sessionId);
                     logIndexingError(sessionId, "clear and reindex", error);
+                })
+                .finally(() => {
+                    if (ownsSchedule && getMessageIndexEpoch(sessionId) === epoch)
+                        heapHolder.reconciliationScheduledSessions.delete(sessionId);
                 });
         });
     });
@@ -624,9 +667,7 @@ export function isSessionReconciled(sessionId: string): boolean {
 }
 
 export function clearSessionTracking(sessionId: string): void {
-    sessionEpochs.set(sessionId, (sessionEpochs.get(sessionId) ?? 0) + 1);
-    for (const cancellation of indexCancellations.get(sessionId) ?? [])
-        Atomics.store(cancellation, 0, 1);
+    invalidateIncrementalWork(sessionId);
     heapHolder.clearAndReindexScheduledSessions.delete(sessionId);
     heapHolder.reconciledSessions.delete(sessionId);
     heapHolder.reconciledSnapshots.delete(sessionId);
@@ -634,6 +675,12 @@ export function clearSessionTracking(sessionId: string): void {
     heapHolder.reconciliationScheduledSessions.delete(sessionId);
     heapHolder.sessionLocks.delete(sessionId);
     heapHolder.activeReconcilerBuffers.delete(sessionId);
+}
+
+function invalidateIncrementalWork(sessionId: string): void {
+    sessionEpochs.set(sessionId, (sessionEpochs.get(sessionId) ?? 0) + 1);
+    for (const cancellation of indexCancellations.get(sessionId) ?? [])
+        Atomics.store(cancellation, 0, 1);
 
     const prefix = `${sessionId}\u0000`;
     for (const [key, timer] of heapHolder.incrementalTimers) {
@@ -655,6 +702,7 @@ export function clearSessionTracking(sessionId: string): void {
 
 export function __resetMessageIndexAsyncForTests(): void {
     for (const sessionId of indexCancellations.keys()) clearSessionTracking(sessionId);
+    rebuildingSessions.clear();
     heapHolder.clearAndReindexScheduledSessions.clear();
     for (const timer of heapHolder.incrementalTimers.values()) {
         clearTimeout(timer);

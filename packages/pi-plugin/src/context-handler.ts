@@ -49,6 +49,7 @@ import {
 } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	clearSessionTracking,
+	scheduleClearAndReindex,
 	scheduleIncrementalIndex,
 	scheduleReconciliation,
 } from "@magic-context/core/features/magic-context/message-index-async";
@@ -4299,6 +4300,38 @@ export function registerPiContextHandler(
 		}
 		return s;
 	};
+
+	pi.on("session_tree", (event, ctx) => {
+		if (event.oldLeafId === event.newLeafId) return;
+		const sessionId = resolveSessionId(ctx);
+		if (!sessionId) return;
+		// Pi and Oh My Pi emit session_tree after committing the new leaf. Read
+		// that branch in the background instead of data captured by the previous turn.
+		let entries: readonly unknown[] = [];
+		let offset = 0;
+		scheduleClearAndReindex(baseOptions.db, sessionId, {
+			prepare: async () => {
+				if (resolveSessionId(ctx) !== sessionId) return false;
+				entries = ctx.sessionManager.getBranch();
+				const alignment = resolvePiOrdinalAlignment(
+					baseOptions.db,
+					sessionId,
+					entries,
+				);
+				offset = alignment.offset;
+				return !isPiOrdinalAlignmentUnanchored(alignment);
+			},
+			getCount: () => countPiRawMessages(entries, offset),
+			readPage: (_session, after, limit, watermark) =>
+				convertEntriesToRawMessagePage(
+					entries,
+					after,
+					limit,
+					watermark,
+					offset,
+				),
+		});
+	});
 
 	pi.on("thinking_level_select", async (event, ctx) => {
 		if (event.previousLevel === event.level) return;

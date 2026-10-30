@@ -321,4 +321,100 @@ export default function(pi) {
 			else process.env.TMPDIR = previousTmp;
 		}
 	}, 120000);
+
+	it(`${host}: raw search excludes the abandoned tree branch but keeps the active archive`, async () => {
+		const fixture = createE2ETempDir(`${host}-tree-search-`);
+		const snapshotPath = join(fixture, "tree.json");
+		const eventPath = join(fixture, "tree-event.json");
+		const extension = join(fixture, "tree-search-probe.mjs");
+		writeFileSync(extension, `
+import { writeFileSync } from "node:fs";
+export default function(pi) {
+    pi.registerCommand("e2e-tree-snapshot", { description: "Capture active path", handler(_args, ctx) {
+        writeFileSync(${JSON.stringify(snapshotPath)}, JSON.stringify({ leaf: ctx.sessionManager.getLeafId(), branch: ctx.sessionManager.getBranch() }));
+    }});
+    pi.registerCommand("e2e-tree-goto", { description: "Use the host tree navigation API", async handler(id, ctx) {
+        await ctx.navigateTree(id.trim(), { summarize: false });
+    }});
+    pi.on("session_tree", (event, ctx) => {
+        writeFileSync(${JSON.stringify(eventPath)}, JSON.stringify({ ...event, actualLeaf: ctx.sessionManager.getLeafId() }));
+    });
+}
+`);
+		let h: PiTestHarness | undefined;
+		try {
+			h = await PiTestHarness.create({
+				host, extensionsBeforeMagicContext: [extension],
+				magicContextConfig: { execute_threshold_percentage: 95, protected_tokens: 4000 },
+			});
+			const harness = h;
+			const session = await h.createSession();
+			const db = h.contextDb();
+			const opened = execFileSync("lsof", ["-Fn", "-p", String(h.hostPid)], { encoding: "utf8" });
+			writeFileSync(join(fixture, "lsof.txt"), opened);
+			const stores = opened.split("\n").filter((line) => line.startsWith("n/") && /\.db(?:-wal|-shm)?$/.test(line));
+			expect(stores.length).toBeGreaterThan(0);
+			expect(stores.every((line) => line.slice(1).startsWith(`${harness.env.baseDir}/`))).toBe(true);
+			const abandoned = "abandonedzephyr807";
+			const legitimate = "survivorquartz807";
+			h.mock.addMatcher((body) => {
+				if (!JSON.stringify(body.system).includes("the hippocampus of a long-running coding agent")) return null;
+				const range = findHistorianOrdinalRange(body);
+				if (!range) throw new Error("Historian range missing");
+				return { text: buildMockHistorianPayload({ start: range.start, end: range.end, title: "Active archive", body: "Completed work on the active path." }), usage: { input_tokens: 500, output_tokens: 200 } };
+			});
+			for (let i = 0; i < 8; i++)
+				await h.sendPrompt(session, `${i === 0 ? legitimate : i === 4 ? abandoned : `original_${i}`} ${h.ballast(1500)}`);
+			await h.invokeExtensionCommand("e2e-tree-snapshot");
+			const original = JSON.parse(readFileSync(snapshotPath, "utf8"));
+			const target = original.branch.filter((entry: any) => entry.message?.role === "assistant")[2].id;
+			const abandonedEntry = original.branch.find((entry: any) => JSON.stringify(entry.message?.content ?? "").includes(abandoned));
+			const oldRow = () => db.prepare("SELECT message_id, CAST(message_ordinal AS INTEGER) AS ordinal FROM message_history_fts WHERE session_id = ? AND message_history_fts MATCH ?").get(session, abandoned) as { message_id: string; ordinal: number } | null;
+			// Production indexing waits for its fixed two-minute boot quiet period.
+			await h.waitFor(() => oldRow() !== null, { timeoutMs: 150000, label: "abandoned phrase indexed before rewind" });
+			const indexed = oldRow()!;
+			expect(indexed.message_id).toBe(abandonedEntry.id);
+			await h.invokeExtensionCommand(`e2e-tree-goto ${target}`);
+			await h.invokeExtensionCommand("e2e-tree-snapshot");
+			const jumped = JSON.parse(readFileSync(snapshotPath, "utf8"));
+			const event = JSON.parse(readFileSync(eventPath, "utf8"));
+			expect(event.oldLeafId).toBe(original.leaf);
+			expect(event.newLeafId).toBe(target);
+			expect(event.actualLeaf).toBe(jumped.leaf);
+			expect(jumped.branch.some((entry: any) => entry.id === indexed.message_id)).toBe(false);
+			for (let i = 0; i < 12; i++) await h.sendPrompt(session, `replacement_${i} ${h.ballast(1500)}`);
+			await h.invokeExtensionCommand("ctx-wrapup 2");
+			const cutoff = () => (db.prepare("SELECT MAX(end_message) AS n FROM compartments WHERE session_id = ? AND rebase_status != 'unresolved'").get(session) as { n: number | null }).n ?? 0;
+			await h.waitFor(() => cutoff() >= indexed.ordinal, { timeoutMs: 30000, label: "active summary covers the reused abandoned ordinal" });
+			expect(cutoff()).toBeGreaterThanOrEqual(indexed.ordinal);
+
+			const search = async (query: string) => {
+				const id = `toolu_search_${crypto.randomUUID().replaceAll("-", "")}`;
+				harness.mock.script([{ content: [{ type: "tool_use", id, name: "ctx_search", input: { query, sources: ["message"] } }], stop_reason: "tool_use", usage: { input_tokens: 500, output_tokens: 20 } }]);
+				await harness.sendPrompt(session, "Search the archived conversation.");
+				for (const request of [...harness.mock.requests()].reverse()) {
+					for (const message of (request.body.messages ?? []) as Array<{ content?: unknown }>) {
+						if (!Array.isArray(message.content)) continue;
+						for (const block of message.content) if (block.type === "tool_result" && block.tool_use_id === id) return JSON.stringify(block.content);
+					}
+				}
+				throw new Error(`ctx_search result missing for ${id}`);
+			};
+			const abandonedResult = await search(abandoned);
+			const legitimateResult = await search(legitimate);
+			const invocation = resolvePiHostInvocation(host);
+			writeFileSync(join(fixture, "observations.json"), JSON.stringify({ host, version: JSON.parse(readFileSync(invocation.packageJson, "utf8")).version, indexed, cutoff: cutoff(), event, abandonedResult, legitimateResult }, null, 2));
+			console.log(`${host} tree search evidence ${fixture}: old ordinal ${indexed.ordinal}, cutoff ${cutoff()}`);
+			expect(abandonedResult).toContain("No results");
+			expect(legitimateResult).toContain(legitimate);
+			expect(legitimateResult).toContain("ctx_expand");
+			h.assertHistorianRequestsUseMock();
+		} finally {
+			if (h) {
+				writeFileSync(join(fixture, "diagnostics.txt"), h.diagnostics());
+				writeFileSync(join(fixture, "requests.json"), JSON.stringify(h.mock.requests()));
+			}
+			await h?.dispose();
+		}
+	}, 240000);
 });
