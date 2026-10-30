@@ -2831,6 +2831,69 @@ mod tests {
         }
     }
 
+    #[test]
+    fn review_async_chunks_match_full_walk_across_noise_and_slice_boundaries() {
+        let mut checks = 0;
+        for seed in 0..256u64 {
+            let mut state = seed + 1;
+            let mut messages = Vec::new();
+            let mut cache = async_cache::ChunkCache::default();
+            for ordinal in 1..=12 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let message = match state % 6 {
+                    0 => text_msg(ordinal, Role::User, "question"),
+                    1 => text_msg(ordinal, Role::Assistant, "Committed abc1234: complete"),
+                    2 => text_msg(ordinal, Role::Assistant, "answer"),
+                    3 => text_msg(
+                        ordinal,
+                        Role::User,
+                        "<system-reminder>noise</system-reminder>",
+                    ),
+                    4 => tool_call_msg(ordinal, "call"),
+                    _ => tool_result_msg(ordinal, "call", "result"),
+                };
+                cache.append(std::slice::from_ref(&message), &mut estimate_tokens);
+                messages.push(message);
+                for start in 1..=ordinal {
+                    for end in start + 1..=ordinal + 1 {
+                        if let Some(actual) = cache.estimate(
+                            &messages,
+                            start,
+                            Some(end),
+                            f64::INFINITY,
+                            &mut estimate_tokens,
+                        ) {
+                            let expected = chunked_message_estimate_with_estimator(
+                                &messages,
+                                start,
+                                Some(end),
+                                f64::INFINITY,
+                                &mut estimate_tokens,
+                            );
+                            assert_eq!(
+                                (
+                                    actual.tokens,
+                                    actual.message_count,
+                                    actual.commit_cluster_count,
+                                    actual.has_more
+                                ),
+                                (
+                                    expected.tokens,
+                                    expected.message_count,
+                                    expected.commit_cluster_count,
+                                    expected.has_more
+                                ),
+                                "seed {seed}, prefix {ordinal}, range {start}..{end}"
+                            );
+                            checks += 1;
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("independent chunk/oracle comparisons={checks}");
+    }
+
     fn tool_call_msg(ord: u64, arc_id: &str) -> BoundaryMsg {
         BoundaryMsg {
             message_ordinal: ord,

@@ -74,6 +74,83 @@ fn request(state: &State, codec: codec::Codec) -> TransformRequest {
 }
 
 #[tokio::test]
+async fn review_historian_cache_caps_large_tool_fanout_frontiers() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(dir.path()).await;
+    let store = rig.h.store.get().unwrap();
+    let mut state = rig.state();
+    let calls = 1024u64;
+    let content = (0..calls)
+        .map(|index| {
+            json!({"type":"tool_call","tool_call_id":format!("call-{index}"),
+                "tool_name":"read","input":{"path":"file"}})
+        })
+        .collect::<Vec<_>>();
+    let first = ReadMessage::new(0, "fanout", json!({"role":"assistant","content":content}))
+        .with_tags(
+            (0..calls)
+                .map(|index| {
+                    tags::PartTag::tagged(index.to_string(), format!("§{}§", 100_000 + index))
+                })
+                .collect(),
+        );
+    state
+        .entries
+        .insert(0, Arc::new(HeldEntry::from_read(&first).unwrap()));
+    for index in 0..calls {
+        let result = ReadMessage::new(
+            index + 1,
+            format!("result-{index}"),
+            json!({
+                "role":"tool","content":[{"type":"tool_result",
+                    "tool_call_id":format!("call-{index}"),
+                    "output":{"kind":"text","text":"result"},"is_error":false}]
+            }),
+        )
+        .with_tags(vec![tags::PartTag::tagged(
+            "0",
+            format!("§{}§", 200_000 + index),
+        )]);
+        state
+            .entries
+            .insert(index + 1, Arc::new(HeldEntry::from_read(&result).unwrap()));
+    }
+    state.save(store, &[]).unwrap();
+    let window = historian_tail::InputWindow {
+        from: 0,
+        ordinal_base: 0,
+        through: Some(calls),
+    };
+    let codec = codec::Codec::OwnedBroca;
+    let mut parsed = request(&state, codec);
+    let mut cache = input_cache::Cache::default();
+    let input = cache
+        .prepare(
+            input_cache::Source {
+                store,
+                reference: &state.reference(),
+                window,
+                codec,
+                echoes: &state.reminder_echoes,
+                prelude: None,
+                stamp: input_cache::Stamp::of(&state, codec, window).unwrap(),
+            },
+            &mut parsed,
+        )
+        .unwrap();
+    cache.finish(input, &mut parsed, None);
+    let accounted = cache.retained_bytes();
+    let projection = cache.projection_bytes();
+    eprintln!("fanout={calls} accounted_bytes={accounted} projection_bytes={projection}");
+    // The projection retains a cloned tool-pairing state after every message.
+    // Those owned allocations alone must fit the per-session cache cap.
+    assert!(
+        projection <= 128 * 1024 * 1024,
+        "retained projection alone exceeds 128 MiB: {projection}; LRU charged only {accounted}"
+    );
+}
+
+#[tokio::test]
 async fn historian_cache_matches_uncached_inputs_across_notice_lifecycle() {
     for codec in [
         codec::Codec::OwnedBroca,

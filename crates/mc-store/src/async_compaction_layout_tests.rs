@@ -51,6 +51,59 @@ fn legacy_counts(store: &McStore, reference: &str) -> Vec<u64> {
 }
 
 #[test]
+fn review_migration_serializes_with_an_inflight_legacy_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(store(dir.path()));
+    seed_legacy(&store, "concurrent");
+    let mut writer = rusqlite::Connection::open(dir.path().join("store.db")).unwrap();
+    let tx = writer
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    tx.execute("UPDATE main.mc_async_compaction SET state_json=json_set(state_json,'$.initial.writer','committed') WHERE session_ref='concurrent'", []).unwrap();
+    tx.execute("INSERT INTO main.mc_async_compaction_entries(session_ref,session,ordinal,entry_json,index_json,mid) VALUES('concurrent','concurrent',1,'{\"ordinal\":1,\"mid\":\"m1\"}','[]','m1')", []).unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let migrating = std::sync::Arc::clone(&store);
+    let task = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        done_tx
+            .send(migrating.load_async_compaction_rows("concurrent"))
+            .unwrap();
+    });
+    started_rx.recv().unwrap();
+    // A busy refusal is safe, but a successful migration while another writer
+    // still owns the transaction would have copied stale state.
+    let early = done_rx.recv_timeout(std::time::Duration::from_millis(100));
+    if let Ok(result) = &early {
+        assert!(
+            result.is_err(),
+            "migration committed while a legacy writer held SQLite's writer lock"
+        );
+    }
+    tx.commit().unwrap();
+    if early.is_err() {
+        let _ = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+    }
+    task.join().unwrap();
+    let migrated = store
+        .load_async_compaction_rows("concurrent")
+        .unwrap()
+        .unwrap();
+    assert_eq!(migrated.entries.len(), 2);
+    let initial = store
+        .load_async_compaction_baseline("concurrent", "setup-initial")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&initial).unwrap()["writer"],
+        "committed"
+    );
+    assert_eq!(legacy_counts(&store, "concurrent"), vec![0, 0, 0, 0]);
+}
+
+#[test]
 fn placement_lookup_selects_one_layout_and_keeps_two_index_searches() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());
