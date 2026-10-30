@@ -25,6 +25,7 @@ import {
 	createPiTagSnapshotCandidate,
 	drainPiTagSnapshotSession,
 	ensurePiTagSnapshotReady,
+	getPiPassTagSnapshotView,
 	getPiTagSnapshotView,
 	loadPiTagSnapshotCandidate,
 	PI_FALLBACK_ROW_COLUMNS,
@@ -284,7 +285,8 @@ it("candidate matches the independent synchronous process oracle including fallb
 			oracle.exited,
 		]);
 		expect({ exit, error }).toEqual({ exit: 0, error: "" });
-		const { estimatedBytes, ...candidate } = await assemble(db, []);
+		const { estimatedBytes, allocatedBytes, reusedBytes, ...candidate } =
+			await assemble(db, []);
 		expect(JSON.stringify(candidate)).toBe(output.trim());
 		expect(candidate.tags.map((row) => row.tagNumber)).toEqual([2, 5, 8, 11]);
 		expect(candidate.tags.at(-1)).toMatchObject({
@@ -313,7 +315,7 @@ it("hydration reuses every unchanged frozen row", async () => {
 			else expect(candidate.tags[index]).toBe(old[index]);
 			expect(Object.isFrozen(candidate.tags[index])).toBe(true);
 		}
-		expect(candidate.active[0]).toBe(candidate.tags[2]);
+		expect(candidate.tags[2]).toBe(candidate.active[0]);
 	} finally {
 		close();
 	}
@@ -538,9 +540,9 @@ it("worker hydrates full active and fallback projections with bounded credited p
 		await job.released;
 		expect(result.candidate.tags).toEqual(getTagsBySession(db, "s"));
 		expect(result.candidate.tags[0]?.toolName).toBe(longName);
-		expect(result.candidate.active).toEqual(
+		expect(
 			result.candidate.tags.filter((tag) => tag.status === "active"),
-		);
+		).toEqual(result.candidate.active);
 		expect(result.candidate.fallback.map((tag) => tag.tag_number)).toEqual([
 			2, 8,
 		]);
@@ -966,6 +968,47 @@ it("hydration accepts packets for the current lifetime", async () => {
 		packetCount: 0,
 	});
 	expect(candidate?.tags).toEqual([]);
+});
+
+it("full transaction views retain historical fields from a hydrated pass projection", async () => {
+	const { db, close } = fixture();
+	try {
+		seed(db);
+		db.exec(
+			"UPDATE tags SET input_byte_size = 37 WHERE session_id = 's' AND tag_number = 2",
+		);
+		await ensurePiTagSnapshotReady(db, "s", new PiContextBudget(), "pass");
+		const before = getPiPassTagSnapshotView(db, "s");
+		expect(
+			before.find((row) => row.tagNumber === 2)?.inputByteSize,
+		).toBeUndefined();
+		expect(() =>
+			db
+				.transaction(() => {
+					expect(
+						getPiTagSnapshotView(db, "s").find((row) => row.tagNumber === 2)
+							?.inputByteSize,
+					).toBe(37);
+					db.exec(
+						"UPDATE tags SET input_byte_size = 91 WHERE session_id = 's' AND tag_number = 2",
+					);
+					expect(
+						getPiTagSnapshotView(db, "s").find((row) => row.tagNumber === 2)
+							?.inputByteSize,
+					).toBe(91);
+					throw new Error("rollback full view");
+				})
+				.immediate(),
+		).toThrow("rollback full view");
+		expect(getPiPassTagSnapshotView(db, "s")).toEqual(before);
+		expect(
+			getPiTagSnapshotView(db, "s").find((row) => row.tagNumber === 2)
+				?.inputByteSize,
+		).toBe(37);
+	} finally {
+		await drainPiTagSnapshotSession("s");
+		close();
+	}
 });
 
 it("paired edits read journaled tags without publishing uncommitted snapshot rows", async () => {

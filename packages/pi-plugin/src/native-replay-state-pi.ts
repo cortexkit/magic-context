@@ -2,6 +2,7 @@ import type { ContextDatabase } from "@magic-context/core/features/magic-context
 import {
 	addNativeReasoningIds,
 	saveNativeToolInputs,
+	withNativeReplayWriteBarrier,
 } from "@magic-context/core/features/magic-context/storage-native-replay";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
@@ -17,6 +18,120 @@ type ReplayArgs = {
 	sessionId: string;
 	messages: unknown[];
 };
+
+type RemovalBatch = {
+	saved: Map<string, string> | undefined;
+	planned: Map<string, string>;
+	requested: Map<string, string>;
+	pending: Map<string, string>;
+	flushed: boolean;
+	flush: () => void;
+	persistPending: () => void;
+};
+const removalBatches = new WeakMap<
+	ContextDatabase,
+	Map<string, RemovalBatch>
+>();
+
+export class PiToolRemovalBatchError extends Error {
+	constructor(cause: unknown) {
+		super("Native tool removal batch could not be persisted", { cause });
+	}
+}
+
+/**
+ * Authorize against a private, ordered overlay, then merge the native tool inputs
+ * once alongside selected tool tags' status updates and pending-operation
+ * deletions, unless another native writer needs the earlier keys published first.
+ * The caller owns the transaction and must flush before recording which
+ * provider-signed reasoning blocks were omitted. Publish the permission map only
+ * after that caller returns successfully; outer transactions register restoration
+ * on rollback.
+ */
+export function withPiToolRemovalBatch<T>(
+	args: {
+		db: ContextDatabase;
+		sessionId: string;
+		saved: Map<string, string> | undefined;
+		rollbackObservations?: (() => void)[];
+	},
+	edit: (flush: () => void) => T,
+): T {
+	let sessions = removalBatches.get(args.db);
+	const enclosing = sessions?.get(args.sessionId);
+	if (enclosing) return edit(enclosing.flush);
+	if (!sessions) {
+		sessions = new Map();
+		removalBatches.set(args.db, sessions);
+	}
+	let publishing = false;
+	const batch: RemovalBatch = {
+		saved: args.saved,
+		planned: new Map(args.saved),
+		requested: new Map(),
+		pending: new Map(),
+		flushed: false,
+		flush() {
+			if (batch.flushed) return;
+			batch.persistPending();
+			batch.flushed = true;
+		},
+		persistPending() {
+			if (publishing || batch.pending.size === 0) return;
+			const connection = args.db as unknown as {
+				inTransaction?: boolean;
+				isTransaction?: boolean;
+			};
+			if (
+				connection.inTransaction !== true &&
+				connection.isTransaction !== true
+			)
+				throw new Error(
+					"Native removal publication requires a caller-owned transaction",
+				);
+			try {
+				publishing = true;
+				saveNativeToolInputs(args.db, args.sessionId, batch.pending);
+				batch.pending.clear();
+			} catch (cause) {
+				// The edit callback may have changed its private transcript. Cleanup
+				// must not expose those edits after the transaction rolls back.
+				throw new PiToolRemovalBatchError(cause);
+			} finally {
+				publishing = false;
+			}
+		},
+	};
+	sessions.set(args.sessionId, batch);
+	try {
+		const result = withNativeReplayWriteBarrier(
+			args.db,
+			args.sessionId,
+			batch.persistPending,
+			() => edit(batch.flush),
+		);
+		if (batch.requested.size > 0 && !batch.flushed)
+			throw new Error(
+				"Native removal markers were not flushed in the caller's transaction",
+			);
+		const saved = args.saved;
+		if (saved && batch.requested.size > 0) {
+			const prior = new Map(
+				[...batch.requested.keys()].map((id) => [id, saved.get(id)]),
+			);
+			args.rollbackObservations?.push(() => {
+				for (const [id, value] of prior) {
+					if (value === undefined) saved.delete(id);
+					else saved.set(id, value);
+				}
+			});
+			for (const [id, marker] of batch.requested) saved.set(id, marker);
+		}
+		return result;
+	} finally {
+		sessions.delete(args.sessionId);
+	}
+}
 
 /** Replay frozen inputs first; publish new native bytes only after their write succeeds. */
 export function applyNativeToolInputReplayPi(
@@ -172,6 +287,12 @@ export function preparePiToolRemovalMeasurements(args: {
 	canApply: boolean;
 }): void {
 	if (!args.saved || !args.canApply) return;
+	const batch = removalBatches.get(args.db)?.get(args.sessionId);
+	if (batch?.saved === args.saved) {
+		for (const callId of args.callIds)
+			authorizePiToolRemoval({ ...args, callId });
+		return;
+	}
 	const requested = new Map<string, string>();
 	for (const callId of args.callIds) {
 		if (args.saved.get(callId) !== NATIVE_TOOL_REMOVAL_MARKER)
@@ -191,6 +312,58 @@ export function preparePiToolRemovalMeasurements(args: {
 	}
 }
 
+/**
+ * Batch only within a caller-owned rendering transaction. Without that boundary,
+ * retain per-call authorization so an interrupted renderer cannot authorize calls
+ * it never reached. The caller must also restore its permission map on rollback.
+ */
+export function preparePiToolRemovalChecks(args: {
+	db?: ContextDatabase;
+	rows: readonly { tagNumber: number; callId: string | null }[];
+	targets: ReadonlyMap<number, TagTarget>;
+	messages: readonly unknown[];
+	prepare: (callIds: readonly string[]) => void;
+}): void {
+	if (!args.db?.inTransaction || args.rows.length === 0) return;
+	const occurrences = new Map<string, number>();
+	for (const raw of args.messages) {
+		if (!raw || typeof raw !== "object") continue;
+		const message = raw as { role?: string; content?: unknown };
+		if (message.role !== "assistant" || !Array.isArray(message.content))
+			continue;
+		for (const rawPart of message.content) {
+			if (!rawPart || typeof rawPart !== "object") continue;
+			const part = rawPart as { type?: string; id?: unknown };
+			if (part.type === "toolCall" && typeof part.id === "string")
+				occurrences.set(part.id, (occurrences.get(part.id) ?? 0) + 1);
+		}
+	}
+	const requested: string[] = [];
+	for (const row of args.rows) {
+		if (row.callId === null || occurrences.get(row.callId) !== 1) continue;
+		const target = args.targets.get(row.tagNumber);
+		if (target?.requiresToolArcSkeleton || target?.canDrop?.() !== true)
+			continue;
+		if (
+			!target.mutationParts?.some(
+				({ part }) =>
+					part !== null &&
+					typeof part === "object" &&
+					"kind" in part &&
+					part.kind === "tool_use" &&
+					"id" in part &&
+					part.id === row.callId,
+			)
+		)
+			continue;
+		requested.push(row.callId);
+	}
+	// A call belongs to its containing assistant message, recorded in
+	// tags.tool_owner_message_id. Batch authorization uses only toolCall.id, so
+	// repeated IDs need per-call checks to avoid sharing one message's permission.
+	if (requested.length) args.prepare(requested);
+}
+
 /** Freeze structural removal before touching either half of a Pi tool arc. */
 export function authorizePiToolRemoval(args: {
 	db: ContextDatabase;
@@ -200,6 +373,18 @@ export function authorizePiToolRemoval(args: {
 	canApply: boolean;
 }): boolean | "defer" {
 	if (!args.saved) return false;
+	const batch = removalBatches.get(args.db)?.get(args.sessionId);
+	if (batch?.saved === args.saved) {
+		if (batch.planned.get(args.callId) === NATIVE_TOOL_REMOVAL_MARKER)
+			return true;
+		if (!args.canApply) return false;
+		if (batch.flushed)
+			throw new Error("Tool removal requested after lane publication");
+		batch.planned.set(args.callId, NATIVE_TOOL_REMOVAL_MARKER);
+		batch.requested.set(args.callId, NATIVE_TOOL_REMOVAL_MARKER);
+		batch.pending.set(args.callId, NATIVE_TOOL_REMOVAL_MARKER);
+		return true;
+	}
 	if (args.saved.get(args.callId) === NATIVE_TOOL_REMOVAL_MARKER) return true;
 	if (!args.canApply) return false;
 	try {
@@ -225,3 +410,5 @@ export function authorizePiToolRemoval(args: {
 		return priorDrop ? false : "defer";
 	}
 }
+
+import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";

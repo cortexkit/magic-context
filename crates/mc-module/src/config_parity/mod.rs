@@ -135,6 +135,75 @@ mod tests {
         });
         assert!(serde_json::from_value::<BridgeConfig>(bridge).is_err());
     }
+
+    #[test]
+    fn union_recovery_prunes_unknown_model_leaves_without_losing_valid_siblings() {
+        let descriptor = json!({
+            "type": "union",
+            "options": [
+                {"type": "string"},
+                {"type": "object", "shape": {"model": {"type": "string"}},
+                    "catchall": {"type": "never"}}
+            ]
+        });
+        for leaf in ["unknown", "system_prompt"] {
+            let mut raw = json!({"entry": {"model": "provider/model"}});
+            raw["entry"][leaf] = json!("unrecognized");
+            let (_, issues) = schema_parse(&descriptor, raw.get("entry"), "entry");
+            assert_eq!(issues, vec![format!("entry.{leaf}")]);
+            assert!(prune(&mut raw, &issues[0]));
+            let (entry, remaining) = schema_parse(&descriptor, raw.get("entry"), "entry");
+            assert!(remaining.is_empty());
+            assert_eq!(entry, Some(json!({"model": "provider/model"})));
+        }
+        assert_eq!(
+            schema_parse(&descriptor, Some(&json!(false)), "entry").1,
+            vec!["entry"]
+        );
+    }
+
+    #[test]
+    fn rerank_timeout_accepts_integer_valued_json_numbers() {
+        let input = json!({"rerank": {"timeout_ms": 100.0}});
+        let (parsed, issues) = schema_parse(&schema()["config"], Some(&input), "");
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(parsed.unwrap()["rerank"]["timeout_ms"], json!(100));
+    }
+
+    #[test]
+    fn rerank_timeout_clamps_out_of_range_values() {
+        for (timeout, expected) in [(-1, 50), (1, 50), (90_000, 15_000)] {
+            let input = json!({"rerank": {"timeout_ms": timeout}});
+            let (parsed, issues) = schema_parse(&schema()["config"], Some(&input), "");
+            assert!(issues.is_empty(), "{issues:?}");
+            assert_eq!(parsed.unwrap()["rerank"]["timeout_ms"], json!(expected));
+        }
+    }
+
+    #[test]
+    fn rerank_remote_refinement_requires_endpoint_and_model() {
+        let valid = json!({"rerank": {"provider": "remote", "endpoint": "https://example.invalid/rerank", "model": "reranker"}});
+        let (_, issues) = schema_parse(&schema()["config"], Some(&valid), "");
+        assert!(issues.is_empty(), "{issues:?}");
+        for (rerank, expected) in [
+            (
+                json!({"provider": "remote", "model": "reranker"}),
+                vec!["rerank.endpoint"],
+            ),
+            (
+                json!({"provider": "remote", "endpoint": "https://example.invalid/rerank", "model": " "}),
+                vec!["rerank.model"],
+            ),
+            (
+                json!({"provider": "remote"}),
+                vec!["rerank.endpoint", "rerank.model"],
+            ),
+        ] {
+            let (_, issues) =
+                schema_parse(&schema()["config"], Some(&json!({"rerank": rerank})), "");
+            assert_eq!(issues, expected);
+        }
+    }
 }
 
 /// Host UI and transport choices (such as toast lifetime) are carried to the bridge,
@@ -783,11 +852,33 @@ pub(crate) fn schema_parse(
             }
         }
         "union" => {
+            let child_prefix = format!("{path}.");
+            let mut nested_issues = Vec::new();
+            let mut nested_depth = 0;
             for option in node["options"].as_array().unwrap() {
                 let (value, option_issues) = schema_parse(option, Some(input), path);
                 if option_issues.is_empty() {
                     return (value, vec![]);
                 }
+                // A matching object arm can identify a bad leaf even when the
+                // union also accepts strings. Preserve that detail so recovery
+                // removes only the bad leaf, as the TypeScript loader does.
+                let depth = option_issues
+                    .iter()
+                    .map(|issue| issue.split('.').count())
+                    .min()
+                    .unwrap_or(0);
+                if depth > nested_depth
+                    && option_issues.iter().all(|issue| {
+                        issue != path && (path.is_empty() || issue.starts_with(&child_prefix))
+                    })
+                {
+                    nested_depth = depth;
+                    nested_issues = option_issues;
+                }
+            }
+            if !nested_issues.is_empty() {
+                return (None, nested_issues);
             }
             false
         }
@@ -853,13 +944,15 @@ pub(crate) fn schema_parse(
                 }
                 "custom" => {
                     let rule = check["rule"].as_str().unwrap();
-                    if rule == "embedding" {
+                    if rule == "embedding" || rule == "rerank" {
                         let provider = if output["provider"] == "synapse" {
                             output["fallback_provider"].as_str()
                         } else {
                             output["provider"].as_str()
                         };
-                        if provider == Some("openai-compatible") {
+                        if (rule == "embedding" && provider == Some("openai-compatible"))
+                            || (rule == "rerank" && provider == Some("remote"))
+                        {
                             for field in ["endpoint", "model"] {
                                 if output
                                     .get(field)
@@ -890,6 +983,7 @@ fn transform(rule: &str, value: Value) -> Value {
             &trust::protected_tools(&value),
         ),
         "subc.connection_file" => value,
+        "rerank.timeout_ms" => json!(value.as_f64().unwrap_or(1500.0).clamp(50.0, 15_000.0) as i64),
         "embedding" => {
             let provider = value["provider"].as_str().unwrap_or("local");
             if provider == "off" {

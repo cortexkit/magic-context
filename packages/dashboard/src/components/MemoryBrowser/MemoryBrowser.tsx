@@ -1,4 +1,4 @@
-import { createEffect, createResource, createSignal, For, Show } from "solid-js";
+import { createEffect, createResource, createSignal, For, onCleanup, Show } from "solid-js";
 
 import {
   archiveMemory,
@@ -24,7 +24,6 @@ import type {
   MemoryCategory,
   MemoryEditReceipt,
   MemoryHistoryDecision,
-  MuralManifest,
 } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
 import FilterSelect from "../shared/FilterSelect";
@@ -38,6 +37,15 @@ import {
   editOutcome,
   HISTORY_PAGE_SIZE,
 } from "./memory-history";
+import {
+  categoryCountText,
+  DEFAULT_STATUS_SELECTION,
+  memoryListQuery,
+  memoryStatsQuery,
+  showingLabel,
+  visibleCategoryCounts,
+} from "./memory-pages";
+import { muralDisplaySrc } from "./mural-image";
 import UndoDialog from "./UndoDialog";
 
 // LocalStorage key for persisted collapsed-category state. Versioned so future
@@ -64,18 +72,6 @@ function saveCollapsedCategories(set: Set<string>): void {
   }
 }
 
-function muralImageSrc(mural: MuralManifest): string {
-  if (typeof mural.image === "string") {
-    return mural.image.startsWith("data:") ? mural.image : `data:image/png;base64,${mural.image}`;
-  }
-  let binary = "";
-  // Chunk the conversion so large PNGs do not overflow the call stack.
-  for (let offset = 0; offset < mural.image.length; offset += 0x8000) {
-    binary += String.fromCharCode(...mural.image.slice(offset, offset + 0x8000));
-  }
-  return `data:image/png;base64,${btoa(binary)}`;
-}
-
 interface MemoryBrowserProps {
   /** When set, the browser is locked to this project: the project + workspace
    *  pickers are hidden and the breadcrumb is owned by the ProjectDetail shell. */
@@ -86,7 +82,7 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
   const embedded = () => props.project != null;
   const [projectFilter, setProjectFilter] = createSignal<string>("");
   const [workspaceFilter, setWorkspaceFilter] = createSignal<number | "">("");
-  const [statusFilter, setStatusFilter] = createSignal<string>("");
+  const [statusFilter, setStatusFilter] = createSignal<string>(DEFAULT_STATUS_SELECTION);
   const [categoryFilter, setCategoryFilter] = createSignal<string>("");
   const [searchQuery, setSearchQuery] = createSignal<string>("");
   const [selectedMemory, setSelectedMemory] = createSignal<Memory | null>(null);
@@ -107,51 +103,136 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
     () => props.project?.identity,
     (project) => (project ? getMural(project) : Promise.resolve(null)),
   );
+  const [muralSrc, setMuralSrc] = createSignal<string | null>(null);
   const [muralCollapsed, setMuralCollapsed] = createSignal(false);
+  // A data URL of a full-size mural is blocked by the desktop content policy
+  // and can also exceed the webview's URL length. Paint a blob URL instead,
+  // and drop it when the manifest changes.
+  createEffect(() => {
+    const entry = mural();
+    const shown = entry ? muralDisplaySrc(entry.image) : null;
+    setMuralSrc(shown?.src ?? null);
+    onCleanup(() => shown?.revoke());
+  });
 
-  const fetchParams = () => {
-    // Embedded in a project: lock to that identity, ignore workspace filter.
+  const listScope = () => {
     if (props.project) {
       return {
         project: props.project.identity,
-        workspaceId: undefined,
-        status: statusFilter() || undefined,
-        category: categoryFilter() || undefined,
+        workspaceId: undefined as number | undefined,
+        statusSelection: statusFilter(),
         search: searchQuery() || undefined,
-        limit: 200,
-        offset: 0,
       };
     }
-    const ws = workspaceFilter();
+    const workspace = workspaceFilter();
     return {
-      project: ws === "" ? projectFilter() || undefined : undefined,
-      workspaceId: ws === "" ? undefined : ws,
-      status: statusFilter() || undefined,
-      category: categoryFilter() || undefined,
+      project: workspace === "" ? projectFilter() || undefined : undefined,
+      workspaceId: workspace === "" ? undefined : workspace,
+      statusSelection: statusFilter(),
       search: searchQuery() || undefined,
-      limit: 200,
-      offset: 0,
     };
   };
 
-  const [memories, { refetch: refetchMemories }] = createResource(fetchParams, getMemories);
-  const [stats, { refetch: refetchStats }] = createResource(fetchParams, (params) =>
-    getMemoryStats({
-      project: params.project,
-      workspaceId: params.workspaceId,
-    }),
-  );
+  const statsParams = () => memoryStatsQuery(listScope());
+  const [stats, { refetch: refetchStats }] = createResource(statsParams, getMemoryStats);
+  const categoryHeaders = () => visibleCategoryCounts(stats()?.categories ?? [], categoryFilter());
 
-  // Group memories by category (stable alphabetical order).
-  const groupedMemories = () => {
-    const m = memories() ?? [];
-    const groups: Record<string, Memory[]> = {};
-    for (const mem of m) {
-      if (!groups[mem.category]) groups[mem.category] = [];
-      groups[mem.category].push(mem);
+  type CategoryPage = { rows: Memory[]; complete: boolean };
+  const [pages, setPages] = createSignal<Record<string, CategoryPage>>({});
+  const [loadingCategories, setLoadingCategories] = createSignal<Set<string>>(new Set());
+  const [failedCategories, setFailedCategories] = createSignal<Set<string>>(new Set());
+  const requestTokens = new Map<string, number>();
+  let requestSerial = 0;
+  let activeListKey = "";
+  const listKey = () =>
+    JSON.stringify({
+      ...listScope(),
+      category: categoryFilter(),
+    });
+
+  const [error, setError] = createSignal<string | null>(null);
+
+  const loadCategory = async (category: string, key: string, offset: number, loadedCount = 0) => {
+    const token = ++requestSerial;
+    requestTokens.set(category, token);
+    setLoadingCategories((prev) => {
+      const next = new Set(prev);
+      next.add(category);
+      return next;
+    });
+    setFailedCategories((prev) => {
+      if (!prev.has(category)) return prev;
+      const next = new Set(prev);
+      next.delete(category);
+      return next;
+    });
+    try {
+      const query = memoryListQuery({ ...listScope(), category, offset });
+      query.limit = Math.max(query.limit, loadedCount);
+      const rows = await getMemories(query);
+      if (requestTokens.get(category) !== token || listKey() !== key) return;
+      setPages((prev) => {
+        const existing = offset === 0 ? [] : (prev[category]?.rows ?? []);
+        if (offset !== 0 && existing.length !== offset) return prev;
+        return {
+          ...prev,
+          [category]: {
+            rows: [...existing, ...rows],
+            complete: rows.length < query.limit,
+          },
+        };
+      });
+      return rows;
+    } catch (e: unknown) {
+      if (requestTokens.get(category) !== token || listKey() !== key) return;
+      setFailedCategories((prev) => new Set(prev).add(category));
+      setError(`Failed to load ${category}: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      if (requestTokens.get(category) === token) {
+        setLoadingCategories((prev) => {
+          const next = new Set(prev);
+          next.delete(category);
+          return next;
+        });
+      }
     }
-    return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
   };
+
+  const refetchMemories = async () => {
+    const loaded = pages();
+    const key = listKey();
+    const rows = await Promise.all(
+      categoryHeaders().map((header) =>
+        loadCategory(header.category, key, 0, loaded[header.category]?.rows.length ?? 0),
+      ),
+    );
+    return rows.flatMap((page) => page ?? []);
+  };
+
+  // Expanded categories load their own pages. A filter change drops every page
+  // so a stale offset cannot be appended onto a new search.
+  createEffect(() => {
+    const key = listKey();
+    if (key !== activeListKey) {
+      activeListKey = key;
+      requestTokens.clear();
+      setPages({});
+      setLoadingCategories(new Set<string>());
+      setFailedCategories(new Set<string>());
+    }
+    const collapsed = collapsedCategories();
+    for (const header of categoryHeaders()) {
+      if (collapsed.has(header.category)) continue;
+      if (
+        pages()[header.category] ||
+        loadingCategories().has(header.category) ||
+        failedCategories().has(header.category)
+      ) {
+        continue;
+      }
+      void loadCategory(header.category, key, 0);
+    }
+  });
 
   // Reset selection whenever the filtered list changes — leaving stale IDs in
   // the selection set would produce a confusing "12 selected" count when only
@@ -164,8 +245,6 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
     searchQuery();
     setSelectedIds(new Set<number>());
   });
-
-  const [error, setError] = createSignal<string | null>(null);
 
   // ── Audited edits ────────────────────────────────────────────
   // Each edit carries the revision the panel displayed. The backend records
@@ -320,7 +399,17 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
     });
   };
 
-  const allVisibleMemoryIds = (): number[] => (memories() ?? []).map((m) => m.id);
+  const categoryRows = (category: string): Memory[] => pages()[category]?.rows ?? [];
+
+  const allVisibleMemoryIds = (): number[] => {
+    const collapsed = collapsedCategories();
+    const ids: number[] = [];
+    for (const header of categoryHeaders()) {
+      if (collapsed.has(header.category)) continue;
+      for (const row of categoryRows(header.category)) ids.push(row.id);
+    }
+    return ids;
+  };
 
   const allVisibleSelectionState = (): "none" | "some" | "all" => {
     const visible = allVisibleMemoryIds();
@@ -361,8 +450,7 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
   };
 
   const collapseAll = () => {
-    const categories = groupedMemories().map(([c]) => c);
-    setCollapsedCategories(new Set(categories));
+    setCollapsedCategories(new Set(categoryHeaders().map((header) => header.category)));
   };
 
   const expandAll = () => {
@@ -373,7 +461,9 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
 
   const handleBulkArchive = async () => {
     const ids = new Set(selectedIds());
-    const rows = (memories() ?? []).filter((m) => ids.has(m.id));
+    const rows = Object.values(pages())
+      .flatMap((page) => page.rows)
+      .filter((m) => ids.has(m.id));
     if (rows.length === 0) return;
     const projectPath = bulkProject(rows);
     if (projectPath == null) {
@@ -533,21 +623,28 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
             </button>
             <Show when={!muralCollapsed()}>
               <div class="card" style={{ padding: "12px" }}>
-                <img
-                  src={muralImageSrc(entry())}
-                  alt="Memory mural"
-                  width={entry().width}
-                  height={entry().height}
-                  decoding="async"
-                  style={{
-                    display: "block",
-                    width: "100%",
-                    height: "auto",
-                    "max-height": "70vh",
-                    "object-fit": "contain",
-                    "border-radius": "var(--radius-sm)",
-                  }}
-                />
+                <Show
+                  when={muralSrc()}
+                  fallback={<div class="empty-state">Mural image is unavailable.</div>}
+                >
+                  {(src) => (
+                    <img
+                      src={src()}
+                      alt="Memory mural"
+                      width={entry().width}
+                      height={entry().height}
+                      decoding="async"
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        height: "auto",
+                        "max-height": "70vh",
+                        "object-fit": "contain",
+                        "border-radius": "var(--radius-sm)",
+                      }}
+                    />
+                  )}
+                </Show>
                 <div class="card-meta" style={{ "margin-top": "8px" }}>
                   <span>Rendered {formatDateTime(entry().rendered_at)}</span>
                   <span>·</span>
@@ -654,9 +751,10 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
           <FilterSelect
             value={statusFilter()}
             onChange={setStatusFilter}
-            placeholder="All status"
+            placeholder="Not archived"
             options={[
-              { value: "", label: "All status" },
+              { value: DEFAULT_STATUS_SELECTION, label: "Not archived" },
+              { value: "any", label: "All status" },
               { value: "active", label: "Active" },
               { value: "permanent", label: "Permanent" },
               { value: "archived", label: "Archived" },
@@ -727,7 +825,7 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
         </Show>
 
         {/* Expand/collapse controls — small link-style buttons above the list. */}
-        <Show when={!memories.loading && (memories() ?? []).length > 0}>
+        <Show when={!stats.loading && categoryHeaders().length > 0}>
           <div class="memory-controls">
             <button type="button" class="bulk-action-link" onClick={expandAll}>
               Expand all
@@ -741,40 +839,50 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
 
         <div class="scroll-area">
           <Show
-            when={!memories.loading}
+            when={!stats.loading || categoryHeaders().length > 0}
             fallback={<div class="empty-state">Loading memories...</div>}
           >
             <Show
-              when={(memories() ?? []).length > 0}
+              when={categoryHeaders().length > 0}
               fallback={
                 <div class="empty-state">
                   <span class="empty-state-icon">🧠</span>
-                  <span>No memories found</span>
+                  <span>{stats.error ? "Couldn't load memory counts." : "No memories found"}</span>
                 </div>
               }
             >
               <div class="list-gap">
-                <For each={groupedMemories()}>
-                  {([category, mems]) => {
-                    const collapsed = () => collapsedCategories().has(category);
+                <For each={categoryHeaders()}>
+                  {(header) => {
+                    const collapsed = () => collapsedCategories().has(header.category);
+                    const page = () => pages()[header.category];
+                    const mems = () => page()?.rows ?? [];
+                    const loading = () => loadingCategories().has(header.category);
+                    const failed = () => failedCategories().has(header.category);
+                    const truncated = () => {
+                      const loaded = page();
+                      if (!loaded || loaded.complete) return null;
+                      return showingLabel(loaded.rows.length, header.count);
+                    };
                     return (
                       <>
                         <button
                           type="button"
                           class="category-header clickable"
-                          onClick={() => toggleCategoryCollapse(category)}
+                          onClick={() => toggleCategoryCollapse(header.category)}
                         >
                           {/* Tri-state checkbox: clicking stops propagation so it
-                            doesn't also collapse the category. */}
+                              doesn't also collapse the category. It covers loaded
+                              rows only; unloaded pages are not selected. */}
                           <span style={{ display: "flex", "align-items": "center" }}>
                             <TriStateCheckbox
-                              state={categorySelectionState(mems)}
-                              onToggle={() => toggleCategorySelection(mems)}
-                              ariaLabel={`Toggle all in ${category}`}
+                              state={categorySelectionState(mems())}
+                              onToggle={() => toggleCategorySelection(mems())}
+                              ariaLabel={`Toggle loaded memories in ${header.category}`}
                             />
                           </span>
-                          <span>{category}</span>
-                          <span class="category-count">({mems.length})</span>
+                          <span>{header.category}</span>
+                          <span class="category-count">{categoryCountText(header.count)}</span>
                           <span class="category-divider" />
                           <span
                             class="category-chevron"
@@ -785,7 +893,19 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
                           </span>
                         </button>
                         <Show when={!collapsed()}>
-                          <For each={mems}>
+                          <Show when={loading() && !page()}>
+                            <div class="empty-state">Loading {header.category}...</div>
+                          </Show>
+                          <Show when={failed() && !page()}>
+                            <button
+                              type="button"
+                              class="bulk-action-link"
+                              onClick={() => void loadCategory(header.category, listKey(), 0)}
+                            >
+                              Retry {header.category}
+                            </button>
+                          </Show>
+                          <For each={mems()}>
                             {(mem) => {
                               const isSelected = () => selectedIds().has(mem.id);
                               return (
@@ -869,6 +989,21 @@ export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
                               );
                             }}
                           </For>
+                          <Show when={truncated()}>
+                            <div class="category-page-status">
+                              <span class="category-count">{truncated()}</span>
+                              <button
+                                type="button"
+                                class="bulk-action-link"
+                                disabled={loading()}
+                                onClick={() =>
+                                  void loadCategory(header.category, listKey(), mems().length)
+                                }
+                              >
+                                {loading() ? "Loading…" : "Load more"}
+                              </button>
+                            </div>
+                          </Show>
                         </Show>
                       </>
                     );

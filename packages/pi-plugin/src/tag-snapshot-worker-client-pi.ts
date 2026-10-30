@@ -7,7 +7,7 @@ import { decodePiHydrationOperation } from "./tag-snapshot-codec-pi";
 import {
 	createPiTagSnapshotCandidate,
 	type PiFallbackTagRow,
-	type PiSnapshotTag,
+	type PiPassTag,
 	type PiTagSnapshotCandidate,
 } from "./tag-snapshot-pi";
 
@@ -22,6 +22,8 @@ export interface PiHydrationRequest {
 	connectionEpoch: number;
 	sessionEpoch: number;
 	jobId: number;
+	/** Passes retain full active rows and narrow historical identity/accounting. */
+	projection?: "pass";
 	/** Internal fixture controls; production callers leave these unset. */
 	test?: {
 		openDelayMs?: number;
@@ -63,7 +65,7 @@ export type PiHydrationMessage = {
 );
 
 export type PiHydrationOperation =
-	| { type: "row"; value: PiSnapshotTag | PiFallbackTagRow }
+	| { type: "row"; value: PiPassTag | PiFallbackTagRow }
 	| {
 			type: "field";
 			key: string;
@@ -99,10 +101,15 @@ export interface PiHydrationTelemetry {
 /** One credited packet at a time; incomplete arrays never leave this consumer. */
 export function createPiHydrationPacketConsumer(
 	request: PiHydrationRequest,
-	cached: readonly PiSnapshotTag[] = [],
+	cached: readonly PiPassTag[] = [],
 	byteLimit?: number,
+	cachedFallback: readonly PiFallbackTagRow[] = [],
 ) {
-	const assembly = createPiTagSnapshotCandidate(cached, byteLimit);
+	const assembly = createPiTagSnapshotCandidate(
+		cached,
+		byteLimit,
+		cachedFallback,
+	);
 	let sequence = 0;
 	let generation: PiHydrationGeneration | undefined;
 	let busy = false;
@@ -189,8 +196,8 @@ export function createPiHydrationPacketConsumer(
 			busy = true;
 			let started = performance.now();
 			let packetRows = 0;
-			const append = (row: PiSnapshotTag | PiFallbackTagRow) => {
-				if (stream === "tags") assembly.appendTag(row as PiSnapshotTag);
+			const append = (row: PiPassTag | PiFallbackTagRow) => {
+				if (stream === "tags") assembly.appendTag(row as PiPassTag);
 				else assembly.appendFallback(row as PiFallbackTagRow);
 				streamRows++;
 				packetRows++;
@@ -262,7 +269,7 @@ export function createPiHydrationPacketConsumer(
 						} else fragment[operation.key] = value;
 					} else if (operation.type === "row-end") {
 						if (!fragment) return fail("row end without fields");
-						append(fragment as unknown as PiSnapshotTag);
+						append(fragment as unknown as PiPassTag);
 						fragment = undefined;
 						byteOffsets.clear();
 					} else return fail("unknown frame");
@@ -296,7 +303,8 @@ export function createPiHydrationPacketConsumer(
 export function startPiTagSnapshotWorker(
 	request: PiHydrationRequest,
 	options: {
-		cached?: readonly PiSnapshotTag[];
+		cached?: readonly PiPassTag[];
+		cachedFallback?: readonly PiFallbackTagRow[];
 		byteLimit?: number;
 		deadlineMs?: number;
 		entry?: URL;
@@ -316,6 +324,7 @@ export function startPiTagSnapshotWorker(
 		request,
 		options.cached,
 		options.byteLimit,
+		options.cachedFallback,
 	);
 	const worker = inRootAsyncContext(
 		() => new Worker(entry, { workerData: request }),

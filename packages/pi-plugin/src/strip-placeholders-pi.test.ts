@@ -12,6 +12,71 @@ import {
 import { assistantMessage, createTestDb, userMessage } from "./test-utils.test";
 
 describe("stripPiDroppedPlaceholderMessages", () => {
+	for (const text of [
+		"[dropped ]",
+		"[dropped  ]",
+		"[dropped 42]",
+		"[dropped\t]",
+		"[dropped\n]",
+		"[dropped §§]",
+		"§775§ [dropped ]",
+		"§775§ [dropped ]\n[dropped §12§]",
+	]) {
+		it(`removes a model-written blank or numeric dropped marker: ${JSON.stringify(text)}`, () => {
+			const db = createTestDb();
+			try {
+				const messages = [
+					userMessage("continue", 1),
+					assistantMessage(text, 2),
+				];
+				expect(
+					stripPiDroppedPlaceholderMessages({
+						db,
+						sessionId: "ses-blank-tag",
+						messages,
+						isCacheBusting: true,
+					}),
+				).toEqual({ removed: 1, discovered: 1 });
+				expect(messages).toEqual([userMessage("continue", 1)]);
+				expect(isPiMarkerOnlyText(text)).toBe(true);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+	}
+
+	for (const content of [
+		[{ type: "text", text: "Done. [dropped ]" }],
+		[{ type: "text", text: "```\n[dropped ]\n```" }],
+		[
+			{ type: "text", text: "[dropped ]" },
+			{ type: "toolCall", id: "call", name: "run", arguments: {} },
+		],
+		[
+			{ type: "text", text: "[dropped ]" },
+			{ type: "thinking", thinking: "Let me check the source." },
+		],
+	]) {
+		it(`keeps blank dropped markers accompanied by content: ${JSON.stringify(content)}`, () => {
+			const db = createTestDb();
+			try {
+				const messages = [assistantMessage("keep", 2, { content })];
+				const wire = JSON.stringify(messages);
+				expect(
+					stripPiDroppedPlaceholderMessages({
+						db,
+						sessionId: "ses-keep-blank-tag",
+						messages,
+						isCacheBusting: true,
+					}),
+				).toEqual({ removed: 0, discovered: 0 });
+				expect(JSON.stringify(messages)).toBe(wire);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+	}
+
 	it("classifies the shared marker-only parity examples", () => {
 		for (const text of markerParity.positive)
 			expect(isPiMarkerOnlyText(text)).toBe(true);
@@ -22,10 +87,10 @@ describe("stripPiDroppedPlaceholderMessages", () => {
 	it("removes shared blank and marker part combinations", () => {
 		const db = createTestDb();
 		try {
-			for (const [
-				index,
-				parts,
-			] of markerParity.positivePartCombinations.entries()) {
+			for (const [index, parts] of [
+				...markerParity.positivePartCombinations,
+				...markerParity.positive.map((text) => [text]),
+			].entries()) {
 				const assistant = assistantMessage("marker", index + 2, {
 					content: parts.map((text) => ({ type: "text", text })),
 				});
@@ -88,7 +153,7 @@ describe("stripPiDroppedPlaceholderMessages", () => {
 		}
 	});
 
-	it("discovers marker-only final replies on a bust and replays only frozen ids on defer", () => {
+	it("defers a new blank-tag marker byte-identically until the next rebuild", () => {
 		const db = createTestDb();
 		try {
 			const first = [
@@ -102,10 +167,12 @@ describe("stripPiDroppedPlaceholderMessages", () => {
 				isCacheBusting: true,
 			});
 			expect(bust).toEqual({ removed: 1, discovered: 1 });
+			const appended = assistantMessage("§775§ [dropped ]", 3);
+			const deferWire = JSON.stringify([...first, appended]);
 			const replay = [
 				userMessage("continue", 1),
 				assistantMessage("§672§ [dropped §672§]", 2),
-				assistantMessage("§655§ [cleared]", 3),
+				structuredClone(appended),
 			];
 			const prefix = JSON.stringify(first);
 			const defer = stripPiDroppedPlaceholderMessages({
@@ -116,7 +183,25 @@ describe("stripPiDroppedPlaceholderMessages", () => {
 			});
 			expect(defer).toEqual({ removed: 1, discovered: 0 });
 			expect(JSON.stringify(replay.slice(0, first.length))).toBe(prefix);
+			expect(JSON.stringify(replay)).toBe(deferWire);
 			expect(replay).toHaveLength(2);
+			expect(getStrippedPlaceholderIds(db, "ses-marker").size).toBe(1);
+
+			const rebuilt = [
+				userMessage("continue", 1),
+				assistantMessage("§672§ [dropped §672§]", 2),
+				structuredClone(appended),
+			];
+			expect(
+				stripPiDroppedPlaceholderMessages({
+					db,
+					sessionId: "ses-marker",
+					messages: rebuilt,
+					isCacheBusting: true,
+				}),
+			).toEqual({ removed: 2, discovered: 1 });
+			expect(rebuilt).toEqual(first);
+			expect(getStrippedPlaceholderIds(db, "ses-marker").size).toBe(2);
 		} finally {
 			closeQuietly(db);
 		}

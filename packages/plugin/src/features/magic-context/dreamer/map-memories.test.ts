@@ -87,16 +87,21 @@ function scriptedMapClient(manifestFor: (promptCall: number, ids: number[]) => s
     client: unknown;
     promptCalls: () => number;
     promptIds: () => number[][];
+    promptModels: () => unknown[];
 } {
     let promptCalls = 0;
     let lastIds: number[] = [];
     const promptedIds: number[][] = [];
+    const promptedModels: unknown[] = [];
     return {
         client: {
             session: {
                 create: async () => ({ data: { id: "map-child" } }),
-                prompt: async (args: { body?: { parts?: Array<{ text?: string }> } }) => {
+                prompt: async (args: {
+                    body?: { parts?: Array<{ text?: string }>; model?: unknown };
+                }) => {
                     promptCalls += 1;
+                    promptedModels.push(args.body?.model);
                     const prompt = args.body?.parts?.[0]?.text ?? "";
                     lastIds = [...prompt.matchAll(/^\[(\d+)\]/gm)].map((match) => Number(match[1]));
                     promptedIds.push(lastIds);
@@ -110,6 +115,7 @@ function scriptedMapClient(manifestFor: (promptCall: number, ids: number[]) => s
         },
         promptCalls: () => promptCalls,
         promptIds: () => promptedIds,
+        promptModels: () => promptedModels,
     };
 }
 
@@ -722,8 +728,6 @@ describe("mapMemories disposition", () => {
             // for backoff rather than immediately blocking the next scheduled run.
             expect(retryPrompt).toEqual([second.id]);
             expect(firstResult).toEqual({
-                failure: expect.any(Error),
-                failureStage: "prompt",
                 mapped: 0,
                 independent: 1,
                 batches: 1,
@@ -883,6 +887,78 @@ describe("mapMemories disposition", () => {
 });
 
 describe("mapMemories retry-time validation", () => {
+    test.each([
+        "client",
+        "pi",
+    ] as const)("a closed empty manifest completes on the primary model and backs off uncertain ids (%s)", async (harness) => {
+        const db = freshDb();
+        try {
+            const projectIdentity = `git:map-empty-${harness}`;
+            const dir = tempProject();
+            const memoryIds = Array.from(
+                { length: 5 },
+                (_, index) =>
+                    insertMemory(db, {
+                        projectPath: projectIdentity,
+                        category: "ARCHITECTURE",
+                        content: `Uncertain fact ${index}.`,
+                        sourceSessionId: "ses",
+                    }).id,
+            );
+            const args = mapArgs(db, dir, projectIdentity);
+            const primary = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
+            args.model = "anthropic/claude-sonnet-4-6";
+            args.fallbackModels = ["openai/gpt-5"];
+            const manifest = "<mappings>\n</mappings>";
+            const scripted = scriptedMapClient(() => manifest);
+            const hiddenModels: unknown[] = [];
+            if (harness === "client") {
+                args.client = scripted.client as never;
+            } else {
+                args.hiddenCompletionExecutor = {
+                    capabilities: { tools: true, harness: "pi" },
+                    open: async () => ({ id: "empty-map-child" }),
+                    attempt: async (_handle, request) => {
+                        hiddenModels.push(request.body.model);
+                    },
+                    collect: async () => ({
+                        text: manifest,
+                        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                        lengthCapped: false,
+                    }),
+                    close: async () => {},
+                };
+            }
+
+            const result = await mapMemories(args);
+
+            // Omission handling retries once on the primary, not the fallback model.
+            expect(harness === "client" ? scripted.promptModels() : hiddenModels).toEqual([
+                primary,
+                primary,
+            ]);
+            expect(result).toEqual({
+                mapped: 0,
+                independent: 0,
+                batches: 0,
+                remaining: 5,
+                complete: false,
+            });
+            expect(
+                getSubagentInvocations(db, "ses-parent").map((invocation) => invocation.status),
+            ).toEqual(["completed", "completed"]);
+            expect(getMemoryVerifications(db, memoryIds).size).toBe(0);
+            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toEqual([]);
+            expect(
+                selectMapMemoryInputs(db, projectIdentity, dir, true)
+                    .map((memory) => memory.id)
+                    .sort((a, b) => a - b),
+            ).toEqual(memoryIds);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("wrong-but-rooted empty parse fires the fallback model", async () => {
         const db = freshDb();
         try {

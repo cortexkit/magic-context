@@ -211,10 +211,33 @@ describe("extractMemoryCandidatePaths", () => {
 });
 
 describe("validateMapMemoriesManifest", () => {
-    it("rejects an empty parse against a non-empty batch", () => {
-        expect(() => validateMapMemoriesManifest(`<mappings></mappings>`, new Set([1]))).toThrow(
-            /parsed zero entries; expected <mappings> with <memory> entries/,
-        );
+    it.each([
+        "<mappings>\n</mappings>\n\nI couldn't confirm backing files for any of the five memories, so none are mapped. …",
+        "<mappings>\n</mappings>\n\nI couldn't map any of the five memories, so I'm leaving all of them unmapped rather than guessing. …",
+        "<mappings>\n</mappings>",
+        "<mappings></mappings>",
+    ])("accepts a closed empty manifest when every memory is uncertain: %j", (text) => {
+        expect(parseMapMemoriesManifest(text)).toEqual([]);
+        expect(validateMapMemoriesManifest(text, new Set([1, 2, 3, 4, 5]))).toEqual([]);
+    });
+
+    it.each([
+        ["<map>…</map>", "root <map> unrecognized; expected <mappings> with <memory> entries"],
+        [
+            '[{ "id": 1, "files": ["a.ts"] }]',
+            "JSON array unrecognized; expected <mappings> with <memory> entries",
+        ],
+        [
+            '<mappings><mapping id="1"/></mappings>',
+            "root <mapping> unrecognized; expected <mappings> with <memory> entries",
+        ],
+        ["<mappings>", "mappings manifest missing closing root tag"],
+        [
+            '<mappings><memory files="a.ts"/></mappings>',
+            "mappings manifest entry missing numeric id",
+        ],
+    ])("rejects malformed output with its existing error: %s", (text, message) => {
+        expect(() => validateMapMemoriesManifest(text, new Set([1]))).toThrow(message);
     });
 
     it("accepts a closed subset and unknown ids for apply-time filtering", () => {

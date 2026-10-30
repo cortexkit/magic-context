@@ -165,7 +165,7 @@ import {
     NativeFoldReplay,
     nativeRowID,
 } from "../fold/native-replay";
-import { FoldOwner } from "../fold/owner";
+import { FoldOwner, stripCheckpointRecentContext } from "../fold/owner";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
@@ -177,6 +177,7 @@ import {
     type V2HiddenCompletionExecutor,
 } from "../hidden-completion";
 import { HiddenModelActivity } from "../hidden-model-activity";
+import { V2MessageTimesCache } from "../message-times";
 import { gaDatabasePath, type V2StoreReader, V2StoreReaderPool } from "../store-reader";
 import {
     clearSyntheticCandidates,
@@ -257,6 +258,34 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
         ...draft.messages.filter((message) => message !== first),
     );
     return true;
+}
+
+function estimateCheckpointRequest(draft: SessionContext) {
+    let toolDefinitionTokens = 0;
+    for (const tool of Object.values(draft.tools)) {
+        const schema = JSON.stringify(tool.input);
+        if (schema === undefined)
+            throw new Error("Checkpoint request has an unserializable tool schema");
+        toolDefinitionTokens += estimateTokens(tool.description) + estimateTokens(schema);
+    }
+    const estimateDraft = {
+        ...draft,
+        // HEAD_IDS identify the two synthetic context messages. adaptPayload
+        // excludes messages with those IDs, so clear them only in this estimation
+        // copy to count the synthetic content already in the request.
+        messages: draft.messages.map((message) =>
+            HEAD_IDS.some((id) => message.id === id) ? { ...message, id: undefined } : message,
+        ),
+    };
+    return estimateFinalWireInputTokens({
+        messages: adaptPayload(estimateDraft).messages,
+        toolDefinitionTokens,
+        systemPromptTokens: estimateTokens(JSON.stringify(draft.system)),
+        providerID: draft.model.providerID,
+        modelID: draft.model.id,
+        agentName: draft.agent,
+        sessionId: draft.sessionID,
+    });
 }
 
 // The event stream can trail the terminal store row by a scheduler tick; keep failure surfacing fast.
@@ -694,6 +723,7 @@ function coveredInstructionRows(
 export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
     const config = loadPluginConfigDetailed(directory).config;
+    log(`[magic-context] OpenCode 2 keep_subagents=${config.keep_subagents === true}`);
     setHomeProjectPermission(config.allow_home_project);
     if (!config.enabled) return;
     const nativeRemove = nativeSessionRemove(context.session);
@@ -919,6 +949,7 @@ export async function registerContext(context: V2Context) {
     });
     let hiddenAgentsReady: Promise<void> | undefined;
     const readerPool = new V2StoreReaderPool();
+    const messageTimesCache = new V2MessageTimesCache();
     const openStoreReader = () =>
         readerPool.open(gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"));
     const createHiddenExecutor = async (database: NonNullable<typeof db>) => {
@@ -1394,7 +1425,7 @@ export async function registerContext(context: V2Context) {
                     if (usageController.signal.aborted) break;
                     const event = value as {
                         type?: string;
-                        data?: { sessionID?: string; error?: unknown };
+                        data?: { sessionID?: string; assistantMessageID?: string; error?: unknown };
                     };
                     try {
                         hiddenModelActivity.observe(event);
@@ -1421,6 +1452,16 @@ export async function registerContext(context: V2Context) {
                         ) {
                             nativeFoldReplay?.onEvent(event);
                             restoredRows.forget(sessionID);
+                            messageTimesCache.delete(sessionID);
+                        }
+                        if (
+                            event.type === "session.step.started" ||
+                            event.type === "session.step.ended" ||
+                            event.type === "session.step.failed"
+                        ) {
+                            const messageID = event.data.assistantMessageID;
+                            if (typeof messageID === "string")
+                                messageTimesCache.deleteMessage(sessionID, messageID);
                         }
                         if (
                             event.type === "session.error" ||
@@ -1469,6 +1510,7 @@ export async function registerContext(context: V2Context) {
                                 rawProviders.get(sessionID)?.();
                                 rawProviders.delete(sessionID);
                                 usage.delete(sessionID);
+                                messageTimesCache.delete(sessionID);
                                 hiddenSessionErrors.delete(sessionID);
                                 storageNoticeBySession.delete(sessionID);
                                 liveModels.delete(sessionID);
@@ -1614,7 +1656,7 @@ export async function registerContext(context: V2Context) {
         // the child with a model call and lose the marker.
         const hiddenSummary = hiddenChildHook.compactionSummary(draft.sessionID, draft.agent);
         if (hiddenSummary !== undefined) {
-            draft.result = { summary: hiddenSummary };
+            draft.result = { summary: hiddenSummary, metadata: { keepID: undefined } };
             return;
         }
         // Leaving `result` unset hands the request back to the host, exactly as if
@@ -1655,7 +1697,7 @@ export async function registerContext(context: V2Context) {
                                 summary,
                             })
                         ) {
-                            draft.result = { summary };
+                            draft.result = { summary, metadata: { keepID: undefined } };
                             return;
                         }
                     }
@@ -1682,7 +1724,17 @@ export async function registerContext(context: V2Context) {
                 draft.sessionID,
                 "v2 compaction hook: fired answered=true source=typescript",
             );
-            draft.result = { summary: fold.submitted };
+            // OpenCode 2.1+ otherwise appends raw stored history as recent-context.
+            // restoreAfterCheckpoint restores every row after the frozen history
+            // baseline through the host cut, so no unsummarized messages
+            // depend on that second copy. The own
+            // undefined key overrides the host's default kept range before JSON
+            // storage omits it; the native replay path above needs it as well.
+            // In 2.0.22 recent is a separate host-owned result field, not hook
+            // metadata. That version stores the transcript; the context hook
+            // removes it only when the shared transform permits a cache rewrite.
+            // A checkpoint request still over the model limit is refused before egress.
+            draft.result = { summary: fold.submitted, metadata: { keepID: undefined } };
         } catch (cause) {
             await refuseBeforeProvider(context.session, draft.sessionID, "compaction-fold", cause);
             throw new V2ContextRefusal("Magic Context could not preserve the host checkpoint.", {
@@ -1805,6 +1857,8 @@ export async function registerContext(context: V2Context) {
     // Construct retained callbacks outside the request scope. Even callbacks that
     // only read instance state can keep a shared closure environment alive, along
     // with replay helpers that hold the request's messages and attachments.
+    const checkpointPassPermissions = new Map<string, boolean>();
+    const checkpointInputEstimates = new Map<string, { tokens: number; pressureTokens: number }>();
     const initializeTransform = (database: NonNullable<typeof db>) =>
         (transform ??= createTransform({
             ...createV2TransformFeatureDeps(
@@ -1820,6 +1874,10 @@ export async function registerContext(context: V2Context) {
             tagger,
             ...createV2ThresholdDeps(config),
             contextUsageMap: usage,
+            hostInputEstimate: (sessionID) => checkpointInputEstimates.get(sessionID),
+            onPassPermission: (sessionID, permission) => {
+                checkpointPassPermissions.set(sessionID, permission);
+            },
             compactionOff,
             // OpenCode 2 reads `session_message`, which numbers the same
             // conversation differently from the v1 tables a converted store
@@ -1966,23 +2024,11 @@ export async function registerContext(context: V2Context) {
         // The host's messages as this pass received them. A replay rebuilds the
         // transform input from these, never from a draft a failed pass reshaped.
         const hostMessagesAtEntry = [...draft.messages];
-        // Stored message times read during this pass, by id. They do not change
-        // while a pass runs, so the writer retries and the managed pass after
-        // them read each id from the store once.
-        const passTimes = new Map<string, { created?: number; completed?: number } | null>();
+        // Retries share one timing snapshot. Across passes, settled rows reuse
+        // their times only after a current membership and revision check.
+        const cachedTimes = messageTimesCache.pass(draft.sessionID);
         const readTimes = (reader: V2StoreReader, messages: readonly V2Message[]) => {
-            const ids = timeIds(messages);
-            const missing = ids.filter((id) => !passTimes.has(id));
-            if (missing.length > 0) {
-                const read = reader.messageTimes(draft.sessionID, missing);
-                for (const id of missing) passTimes.set(id, read.get(id) ?? null);
-            }
-            const times = new Map<string, { created?: number; completed?: number }>();
-            for (const id of ids) {
-                const time = passTimes.get(id);
-                if (time) times.set(id, time);
-            }
-            return times;
+            return cachedTimes(reader, timeIds(messages));
         };
         liveModels.set(draft.sessionID, {
             providerID: draft.model.providerID,
@@ -2462,6 +2508,25 @@ export async function registerContext(context: V2Context) {
                 `${draft.model.providerID}/${draft.model.id}`,
                 latestLkgResponseIds.get(draft.sessionID),
             );
+            checkpointPassPermissions.delete(draft.sessionID);
+            checkpointInputEstimates.delete(draft.sessionID);
+            if (checkpoint && submitted !== undefined) {
+                const projected = structuredClone(checkpoint);
+                if (stripCheckpointRecentContext(projected, submitted)) {
+                    // The checkpoint replaces the frozen history-head message
+                    // after the shared transform. Measure it with the restored
+                    // tail now so the scheduler can reduce an over-window
+                    // request before it is sent.
+                    const estimate = estimateCheckpointRequest({
+                        ...draft,
+                        messages: [checkpoint, ...draft.messages],
+                    });
+                    checkpointInputEstimates.set(draft.sessionID, {
+                        tokens: estimate.tokens,
+                        pressureTokens: estimate.pressureTokens ?? estimate.tokens,
+                    });
+                }
+            }
             await createMessagesTransformHandler({
                 magicContext: { "experimental.chat.messages.transform": transform },
                 compactionOff,
@@ -2474,6 +2539,13 @@ export async function registerContext(context: V2Context) {
                 >[1],
             );
             mapped.commit();
+            const checkpointPermission = checkpointPassPermissions.get(draft.sessionID);
+            checkpointPassPermissions.delete(draft.sessionID);
+            checkpointInputEstimates.delete(draft.sessionID);
+            if (checkpoint?.id && checkpointPermission && replayHead === undefined) {
+                const stripped = await folds.stripRecentContext(draft.sessionID, checkpoint.id);
+                if (stripped?.rendered) checkpoint = structuredClone(stripped.rendered);
+            }
             // Keep the transform decision this pass staged (if any) together with
             // the store sequence captured before the request; the next pass binds it
             // to the reply written after that sequence.
@@ -2635,6 +2707,38 @@ export async function registerContext(context: V2Context) {
             }
         }
     };
+    const refuseOversizedCheckpoint = async (draft: SessionContext) => {
+        const hasCheckpoint = draft.messages.some((message) =>
+            message.content.some(
+                (part) =>
+                    part.type === "text" &&
+                    typeof part.text === "string" &&
+                    part.text.startsWith("<conversation-checkpoint>"),
+            ),
+        );
+        const limit = draft.model.limit?.input ?? draft.model.limit?.context;
+        // Removing a checkpoint's duplicated transcript does not ensure the request
+        // fits: a generate hook can append a large user question after replay.
+        // Size every request that contains a checkpoint, even without recent-context.
+        if (!hasCheckpoint || !limit) return;
+        let estimate: ReturnType<typeof estimateCheckpointRequest>;
+        try {
+            estimate = estimateCheckpointRequest(draft);
+        } catch (cause) {
+            await refuseBeforeProvider(
+                context.session,
+                draft.sessionID,
+                "checkpoint-fit-estimate",
+                cause,
+            );
+            throw new V2ContextRefusal("Magic Context could not size the host checkpoint.", {
+                cause,
+            });
+        }
+        if (estimate.tokens <= limit) return;
+        await refuseBeforeProvider(context.session, draft.sessionID, "checkpoint-over-window");
+        throw new V2ContextRefusal("Magic Context refused an oversized host checkpoint.");
+    };
     await context.session.hook("context", (draft) =>
         withSqliteTransformPass(async () => {
             // Resumed sessions have no creation event. Settle their shared decision
@@ -2642,7 +2746,13 @@ export async function registerContext(context: V2Context) {
             if (!deletedSessions.has(draft.sessionID))
                 await prepareSessionIdentity(draft.sessionID);
             const anchor = generateReplayAnchor(draft.messages);
-            await runManagedContext(draft);
+            try {
+                await runManagedContext(draft);
+                if (!compactionOff) await refuseOversizedCheckpoint(draft);
+            } finally {
+                checkpointInputEstimates.delete(draft.sessionID);
+                checkpointPassPermissions.delete(draft.sessionID);
+            }
             // The shared last-good-request slot is saved before m[0] is replaced
             // by a host checkpoint message. Save the final message array here
             // so side questions reuse the exact history handed back to the host.
@@ -2652,7 +2762,10 @@ export async function registerContext(context: V2Context) {
         }),
     );
     await context.session.hook("generate", async (draft) => {
-        if (!compactionOff && !deletedSessions.has(draft.sessionID)) generateReplay.apply(draft);
+        if (!compactionOff && !deletedSessions.has(draft.sessionID)) {
+            generateReplay.apply(draft);
+            await refuseOversizedCheckpoint(draft);
+        }
     });
     // Warm eagerly for cold sidebar/status reads; a failed startup warm releases
     // its latch and the context hook above retries after the host catalog settles.
@@ -2817,6 +2930,7 @@ export async function registerContext(context: V2Context) {
     );
     return {
         async dispose() {
+            messageTimesCache.clear();
             usageController.abort();
             // OpenCode 2 runs this disposer before it removes this instance's hooks
             // (scope finalizers run in reverse registration order, and the disposer

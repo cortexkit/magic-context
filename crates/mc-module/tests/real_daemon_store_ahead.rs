@@ -159,7 +159,7 @@ async fn a_module_on_a_store_ahead_of_it_refuses_on_health_and_on_a_session_requ
     if !daemon_checkout::available(&workspace) {
         return;
     }
-    let subconscious = workspace.parent().unwrap().join("subconscious");
+    let subconscious = daemon_checkout::root(&workspace);
     let daemon_bin = ensure_binary(
         &subconscious,
         subconscious.join("target/debug/ck-subc"),
@@ -417,7 +417,8 @@ fn call_options() -> CallOptions {
 }
 
 fn ensure_binary(manifest_dir: &Path, path: PathBuf, cargo_args: &[&str]) -> PathBuf {
-    if path.file_name().is_some_and(|name| name == "ck-subc") {
+    let is_daemon = path.file_name().is_some_and(|name| name == "ck-subc");
+    if is_daemon {
         if let Some(binary) = std::env::var_os("MC_TEST_CK_SUBC_BIN") {
             let binary = PathBuf::from(binary);
             assert!(
@@ -433,7 +434,11 @@ fn ensure_binary(manifest_dir: &Path, path: PathBuf, cargo_args: &[&str]) -> Pat
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    let output = Command::new("cargo")
+    let mut command = Command::new("cargo");
+    if is_daemon {
+        daemon_checkout::configure_daemon_cargo(&mut command);
+    }
+    let output = command
         .args(cargo_args)
         .current_dir(manifest_dir)
         .output()

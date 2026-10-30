@@ -43,8 +43,10 @@ test("native session API release pins agree across CI, Docker and packages", () 
     for (const name of ["@opencode/ai", "@opencode/client"]) expect(e2e[name], name).toBe("2.0.22");
     const ci = read(".github/workflows/ci.yml");
     expect(ci).toContain("version: [2.0.22, 2.1.0]");
-    expect(ci).toContain("if (version !== 'opencode v' + process.env.MC_E2E_OPENCODE2_VERSION)");
-    expect(ci).toContain('select-host-shard.ts opencode2 "${{ matrix.shard }}/2"');
+    expect(ci).toContain("bash scripts/ci/e2e-host-opencode2-verify-the-ga-host-binary.sh");
+    expect(read("scripts/ci/e2e-host-opencode2-verify-the-ga-host-binary.sh")).toContain("if (version !== 'opencode v' + process.env.MC_E2E_OPENCODE2_VERSION)");
+    expect(ci).toContain('bash scripts/ci/e2e-host-opencode2-run-host-e2e-suite-opencode-2-tests-from-mode-manifest.sh "${{ matrix.shard }}"');
+    expect(read("scripts/ci/e2e-host-opencode2-run-host-e2e-suite-opencode-2-tests-from-mode-manifest.sh")).toContain('select-host-shard.ts opencode2 "${1:?missing workflow argument}/2"');
     expect(ci).not.toContain("OpenCode 2.0.15");
     const docker = read("tests/docker/opencode2/Dockerfile");
     expect(docker).toContain("ARG OPENCODE2_VERSION=2.0.22");

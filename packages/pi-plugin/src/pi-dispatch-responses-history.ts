@@ -235,7 +235,10 @@ export function piResponsesAssistantTexts(
 				)
 					return texts;
 				unsigned = true;
-				rewrittenText ||= part.text !== stripped && part.text !== block.text;
+				// Reapplying the echoed ordinal can restore the original bytes, but
+				// the hook still removed the signature. Native replay owns the phase
+				// even when the prepared text now equals the cached output text.
+				rewrittenText ||= part.text !== stripped;
 			}
 			bound++;
 			itemTexts.push(part.text);

@@ -257,7 +257,7 @@ async function harness(
     mkdirSync(dirname(hostPath), { recursive: true });
     const store = new Database(hostPath);
     store.exec(`
-        CREATE TABLE IF NOT EXISTS session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT);
+        CREATE TABLE IF NOT EXISTS session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER NOT NULL, data TEXT);
         CREATE TABLE IF NOT EXISTS session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
     `);
     store.close();
@@ -503,7 +503,10 @@ test("v2 compaction materializes the session decision instead of the launch dire
         projectDirectory: directory,
         memoryEnabled: true,
     });
-    expect(input.result).toEqual({ summary: "session checkpoint" });
+    expect(input.result).toEqual({
+        summary: "session checkpoint",
+        metadata: { keepID: undefined },
+    });
     expect(fake.calls).toHaveLength(0);
 });
 
