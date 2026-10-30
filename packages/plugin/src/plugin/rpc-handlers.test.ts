@@ -32,10 +32,14 @@ import {
 } from "../features/magic-context/storage-meta-persisted";
 import * as toolDefinitions from "../features/magic-context/tool-definition-tokens";
 import type { HiddenCompletionExecutor } from "../hooks/magic-context/compartment-runner-types";
-import { persistHostTokenBreakdown } from "../hooks/magic-context/host-token-breakdown";
+import {
+    persistHostTokenBreakdown,
+    scheduleHostTokenBreakdown,
+} from "../hooks/magic-context/host-token-breakdown";
 import { createLiveSessionState } from "../hooks/magic-context/live-session-state";
 import * as m0Attribution from "../hooks/magic-context/m0-token-breakdown";
 import { setRawMessageProvider } from "../hooks/magic-context/read-session-chunk";
+import * as sessionDb from "../hooks/magic-context/read-session-db";
 import { closeReadOnlySessionDb } from "../hooks/magic-context/read-session-db";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import { buildOpenCodeTokenAttribution } from "../hooks/magic-context/session-token-attribution";
@@ -147,6 +151,79 @@ test("calibrated saved breakdown matches the byte-pinned sidebar attribution", (
 });
 
 type TestRpcHandler = (params: Record<string, unknown>) => Promise<Record<string, unknown>>;
+
+test("deferred attribution recovers calibration without mutating live routes; only sidebar polls warm them", async () => {
+    const db = createTestDb();
+    const session = "ses-read-only-deferred-attribution";
+    const model = { providerID: "anthropic", modelID: "claude-fable-5-1" };
+    const recovered = { ...model, agent: "build" };
+    const recovery = spyOn(sessionDb, "findLastAssistantModelFromOpenCodeDb").mockReturnValue(
+        recovered,
+    );
+    const tools = spyOn(toolDefinitions, "getMeasuredToolDefinitionTokens").mockReturnValue(21445);
+    const live = createLiveSessionState();
+    live.liveModelBySession.set("other-session", { providerID: "other", modelID: "other" });
+    live.agentBySession.set("other-session", "other-agent");
+    const beforeModels = [...live.liveModelBySession];
+    const beforeAgents = [...live.agentBySession];
+    const meta = {
+        session_id: session,
+        last_input_tokens: 448000,
+        system_prompt_tokens: 18000,
+        conversation_tokens: 16500,
+        tool_call_tokens: 10000,
+    };
+    let attributionCalls = 0;
+    try {
+        seedSessionMeta(db, meta);
+        expect(
+            scheduleHostTokenBreakdown(db, session, {
+                measuredAt: 123,
+                prefixChanged: false,
+                projectIdentity: undefined,
+                readAttribution: (blocks) => {
+                    attributionCalls++;
+                    return buildOpenCodeTokenAttribution(
+                        db,
+                        session,
+                        meta,
+                        { projectIdentity: undefined },
+                        live,
+                        blocks,
+                    ).buckets;
+                },
+            }),
+        ).toBeUndefined();
+        expect(attributionCalls).toBe(0);
+        expect(recovery).not.toHaveBeenCalled();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(attributionCalls).toBe(1);
+        expect(recovery).toHaveBeenCalledWith(session);
+        expect([...live.liveModelBySession]).toEqual(beforeModels);
+        expect([...live.agentBySession]).toEqual(beforeAgents);
+        const saved = JSON.parse(
+            (
+                db
+                    .prepare(
+                        "SELECT value FROM session_render_cache WHERE session_id=? AND cache_key='host_token_breakdown'",
+                    )
+                    .get(session) as { value: string }
+            ).value,
+        );
+        expect(saved.parts.system_prompt).toBe(27207);
+        expect(saved.parts.tool_definitions).toBe(33275);
+
+        const sidebar = buildSidebarSnapshot(db, session, process.cwd(), live);
+        expect(live.liveModelBySession.get(session)).toEqual(model);
+        expect(live.agentBySession.get(session)).toBe("build");
+        expect(sidebar.systemPromptTokens).toBe(saved.parts.system_prompt);
+        expect(sidebar.toolDefinitionTokens).toBe(saved.parts.tool_definitions);
+    } finally {
+        recovery.mockRestore();
+        tools.mockRestore();
+        db.close();
+    }
+});
 
 function registeredRpcMethods(
     debugRpc: boolean,

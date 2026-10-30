@@ -1,12 +1,14 @@
 import { getMeasuredToolDefinitionTokens } from "../../features/magic-context/tool-definition-tokens";
 import type { Database } from "../../shared/sqlite";
-import type { LiveSessionState } from "./live-session-state";
 import { computeM0BlockTokens, type M0BlockTokens } from "./m0-token-breakdown";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { calibrateBuckets, resolveModelCalibration } from "./tokenizer-calibration";
 
 export type TokenAttribution = ReturnType<typeof calibrateBuckets>;
-export type AttributionRoute = Pick<LiveSessionState, "liveModelBySession" | "agentBySession">;
+export interface AttributionRoute {
+    liveModelBySession: ReadonlyMap<string, { providerID: string; modelID: string }>;
+    agentBySession: ReadonlyMap<string, string>;
+}
 
 export interface AttributionPrefix {
     projectIdentity: string | undefined;
@@ -35,7 +37,10 @@ export function readAttributionBlocks(
     });
 }
 
-/** The sidebar and deferred persistence share both local inputs and provider calibration. */
+/**
+ * Share display inputs and calibration without changing the routes used by transform decisions.
+ * Only the sidebar caller may cache recovered model/agent hints for subsequent polls.
+ */
 export function buildOpenCodeTokenAttribution(
     db: Database,
     sessionId: string,
@@ -47,6 +52,8 @@ export function buildOpenCodeTokenAttribution(
     let measuredToolDefTokens = 0;
     let activeProviderID: string | undefined;
     let activeModelID: string | undefined;
+    let recoveredModel: { providerID: string; modelID: string } | undefined;
+    let recoveredAgent: string | undefined;
     if (route) {
         let model = route.liveModelBySession.get(sessionId);
         let agent = route.agentBySession.get(sessionId);
@@ -54,12 +61,13 @@ export function buildOpenCodeTokenAttribution(
             const recovered = findLastAssistantModelFromOpenCodeDb(sessionId);
             if (recovered) {
                 if (!model) {
-                    model = { providerID: recovered.providerID, modelID: recovered.modelID };
-                    route.liveModelBySession.set(sessionId, model);
+                    model = recoveredModel = {
+                        providerID: recovered.providerID,
+                        modelID: recovered.modelID,
+                    };
                 }
                 if (!agent && recovered.agent) {
-                    agent = recovered.agent;
-                    route.agentBySession.set(sessionId, agent);
+                    agent = recoveredAgent = recovered.agent;
                 }
             }
         }
@@ -94,7 +102,7 @@ export function buildOpenCodeTokenAttribution(
         toolCallsLocal: Math.max(0, Number(meta?.tool_call_tokens ?? 0)),
         calibration: resolveModelCalibration(activeProviderID, activeModelID),
     });
-    return { buckets, activeProviderID, activeModelID };
+    return { buckets, activeProviderID, activeModelID, recoveredModel, recoveredAgent };
 }
 
 /** Keep the phone's existing part names; the last user message is already in conversation. */

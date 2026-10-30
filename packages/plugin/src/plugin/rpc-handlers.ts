@@ -320,6 +320,8 @@ export function buildSidebarSnapshot(
             buckets: calibrated,
             activeProviderID,
             activeModelID,
+            recoveredModel,
+            recoveredAgent,
         } = buildOpenCodeTokenAttribution(
             db,
             sessionId,
@@ -327,6 +329,11 @@ export function buildSidebarSnapshot(
             { projectIdentity, injectionBudgetTokens },
             liveSessionState,
         );
+        // Sidebar polls retain their cold-start route cache; background attribution is read-only.
+        if (liveSessionState) {
+            if (recoveredModel) liveSessionState.liveModelBySession.set(sessionId, recoveredModel);
+            if (recoveredAgent) liveSessionState.agentBySession.set(sessionId, recoveredAgent);
+        }
 
         let lastDreamerRunAt: number | null = null;
         let dreamerBacklog: DreamTaskBacklogMap | undefined;
