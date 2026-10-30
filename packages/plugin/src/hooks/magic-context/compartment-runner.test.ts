@@ -22,6 +22,7 @@ import {
     replaceAllCompartments,
 } from "../../features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import * as sessionIdentity from "../../features/magic-context/memory/session-identity-decision";
 import {
     getMemoriesByProject,
     insertMemory,
@@ -43,6 +44,7 @@ import { rebaseSessionCoordinates } from "../../features/magic-context/store-gen
 import { createTagger } from "../../features/magic-context/tagger";
 import type { PluginContext } from "../../plugin/types";
 import * as shared from "../../shared";
+import * as logger from "../../shared/logger";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import { refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { Database, withPrivilegedWriter, withSqliteTransformPass } from "../../shared/sqlite";
@@ -57,6 +59,7 @@ import {
     startCompartmentAgent as startCompartmentAgentImpl,
 } from "./compartment-runner";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
+import type { HiddenCompletionExecutor } from "./compartment-runner-types";
 import { resolveHistorianProducerWindow } from "./historian-prompt-fit";
 import { renderHistorianMemoryBlock } from "./inject-compartments";
 import { producerPromptFailureReason } from "./producer-window-guard";
@@ -1722,6 +1725,173 @@ describe("runCompartmentAgent", () => {
                 )
                 .get(sessionId),
         ).toEqual({ discarded_last: 0 });
+    });
+
+    for (const harness of ["opencode", "opencode2"] as const) {
+        for (const lane of ["dormant", "enabled"] as const) {
+            it(`${harness} unproven-owner historian publishes without memory and logs the reason (${lane})`, async () => {
+                useTempDataHome("compartment-runner-unproven-owner-");
+                const sessionId = `ses-unproven-${harness}-${lane}`;
+                createOpenCodeDb(sessionId, [
+                    { id: "m-1", role: "user", text: "First eligible message" },
+                    { id: "m-2", role: "assistant", text: "Second eligible message" },
+                    ...Array.from({ length: 5 }, (_, i) => ({
+                        id: `m-${i + 3}`,
+                        role: "user",
+                        text: `Protected message ${i}`,
+                    })),
+                ]);
+                const db = openDatabase();
+                updateSessionMeta(db, sessionId, {
+                    cachedM0Bytes: Buffer.from("unattributed legacy memory context"),
+                    cachedM0ProjectIdentity: null,
+                });
+                const projectDirectory = process.env.XDG_DATA_HOME!;
+                const identity = resolveProjectIdentity(projectDirectory);
+                insertMemory(db, {
+                    projectPath: identity,
+                    category: "PROJECT_RULES",
+                    content: "PRIVATE_MEMORY_SENTINEL",
+                });
+                const output = `<compartment start="1" end="2" title="Published"><p1>Summary</p1></compartment>
+<PROJECT_RULES>\n* Do not promote this unowned fact.\n</PROJECT_RULES>
+<user_observations>\n* Do not store this observation.\n</user_observations>`;
+                const prompts: string[] = [];
+                const prompt = mock(async (request: unknown) => {
+                    prompts.push(JSON.stringify(request));
+                    return {};
+                });
+                const client = {
+                    session: {
+                        get: mock(async () => ({ data: { directory: projectDirectory } })),
+                        create: mock(async () => ({ data: { id: "ses-child-unproven" } })),
+                        prompt,
+                        messages: mock(async () => ({
+                            data: [
+                                {
+                                    info: { role: "assistant", time: { created: 1 } },
+                                    parts: [{ type: "text", text: output }],
+                                },
+                            ],
+                        })),
+                        delete: mock(async () => ({})),
+                    },
+                } as unknown as PluginContext["client"];
+                const executor: HiddenCompletionExecutor = {
+                    capabilities: { tools: false, harness },
+                    open: async () => ({
+                        id: "hidden-unproven",
+                        childSessionId: "ses-child-unproven",
+                    }),
+                    attempt: async (_handle, request) => {
+                        prompts.push(JSON.stringify(request));
+                    },
+                    collect: async () => ({
+                        text: output,
+                        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                        lengthCapped: false,
+                    }),
+                    close: async () => {},
+                };
+                const onPublished = mock(() => undefined);
+                const ensureProjectRegistered = mock(async () => {});
+                const log = spyOn(logger, "sessionLog").mockImplementation(() => {});
+                try {
+                    await runCompartmentAgentWithLease({
+                        client,
+                        db,
+                        sessionId,
+                        directory: projectDirectory,
+                        historianChunkTokens: 10_000,
+                        memoryEnabled: true,
+                        autoPromote: true,
+                        experimentalUserMemories: true,
+                        userObservationsRequested: true,
+                        memoryLifecycleLane: lane,
+                        hiddenCompletionExecutor: harness === "opencode2" ? executor : undefined,
+                        ensureProjectRegistered,
+                        onCompartmentStatePublished: onPublished,
+                    });
+                    expect(getCompartments(db, sessionId)).toHaveLength(1);
+                    expect(loadProtectedTailMeta(db, sessionId).priorBoundaryOrdinal).toBe(3);
+                    expect(onPublished).toHaveBeenCalledWith(sessionId);
+                    expect(prompts).toHaveLength(1);
+                    expect(prompts[0]).not.toContain("PRIVATE_MEMORY_SENTINEL");
+                    expect(prompts[0]).toContain("<fact_extraction>disabled</fact_extraction>");
+                    expect(getMemoriesByProject(db, identity).map((row) => row.content)).toEqual([
+                        "PRIVATE_MEMORY_SENTINEL",
+                    ]);
+                    for (const table of [
+                        "memory_pending_facts",
+                        "user_memory_candidates",
+                        "primer_candidates",
+                    ]) {
+                        expect(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({
+                            count: 0,
+                        });
+                    }
+                    expect(ensureProjectRegistered).not.toHaveBeenCalled();
+                    expect(
+                        log.mock.calls.filter(
+                            ([id, message]) =>
+                                id === sessionId &&
+                                message.includes("reason=unproven_cached_project_owner"),
+                        ),
+                    ).toHaveLength(1);
+                    expect(getHistorianFailureState(db, sessionId).failureCount).toBe(0);
+                } finally {
+                    log.mockRestore();
+                }
+            });
+        }
+    }
+
+    it("still fails the historian when project identity throws a different error", async () => {
+        useTempDataHome("compartment-runner-identity-error-");
+        const sessionId = "ses-identity-error";
+        createOpenCodeDb(
+            sessionId,
+            Array.from({ length: 7 }, (_, i) => ({
+                id: `m-${i + 1}`,
+                role: i === 1 ? "assistant" : "user",
+                text: `Source message ${i}`,
+            })),
+        );
+        const db = openDatabase();
+        const create = mock(async () => ({ data: { id: "unused-child" } }));
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: process.env.XDG_DATA_HOME! } })),
+                create,
+            },
+        } as unknown as PluginContext["client"];
+        const identity = spyOn(sessionIdentity, "resolveSessionProjectIdentity").mockRejectedValue(
+            new Error("identity storage unavailable"),
+        );
+        const log = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        try {
+            await runCompartmentAgentWithLease({
+                client,
+                db,
+                sessionId,
+                directory: process.env.XDG_DATA_HOME!,
+                historianChunkTokens: 10_000,
+            });
+            expect(getCompartments(db, sessionId)).toHaveLength(0);
+            expect(create).not.toHaveBeenCalled();
+            expect(getHistorianFailureState(db, sessionId)).toMatchObject({
+                failureCount: 1,
+                lastError: expect.stringContaining("identity storage unavailable"),
+            });
+            expect(
+                log.mock.calls.some(([, message]) =>
+                    message.includes("reason=unproven_cached_project_owner"),
+                ),
+            ).toBe(false);
+        } finally {
+            identity.mockRestore();
+            log.mockRestore();
+        }
     });
 
     it("keeps a committed publish succeeded and signaled when post-commit project registration throws", async () => {

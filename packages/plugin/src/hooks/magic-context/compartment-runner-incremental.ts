@@ -15,7 +15,10 @@ import {
 } from "../../features/magic-context/memory";
 import { tsOwnsMemory } from "../../features/magic-context/memory/lifecycle-applier";
 import { shouldSkipHomeProjectMemory } from "../../features/magic-context/memory/project-identity";
-import { resolveSessionProjectIdentity } from "../../features/magic-context/memory/session-identity-decision";
+import {
+    resolveSessionProjectIdentity,
+    UnprovenCachedProjectOwnerError,
+} from "../../features/magic-context/memory/session-identity-decision";
 import {
     getMemoriesByProject,
     ModuleMemoryAuthorityError,
@@ -749,22 +752,37 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             { preferResponseOnMissingData: true },
         );
         const sessionDirectory = parentSession?.directory ?? directory;
-        const projectPath =
-            ("projectIdentity" in deps
-                ? deps.projectIdentity
-                : await resolveSessionProjectIdentity(
-                      sessionId,
-                      sessionDirectory || process.cwd(),
-                      {
-                          db,
-                      },
-                  )) ?? "";
+        let projectPath = "";
+        let memoryOwnerAvailable = true;
+        try {
+            projectPath =
+                ("projectIdentity" in deps
+                    ? deps.projectIdentity
+                    : await resolveSessionProjectIdentity(
+                          sessionId,
+                          sessionDirectory || process.cwd(),
+                          { db },
+                      )) ?? "";
+        } catch (error) {
+            if (!(error instanceof UnprovenCachedProjectOwnerError)) throw error;
+            // Pause memory, not history compaction, when the cached memory block's
+            // owner cannot be proven. The current directory cannot prove who owned it.
+            memoryOwnerAvailable = false;
+            sessionLog(
+                sessionId,
+                "historian memory paused: reason=unproven_cached_project_owner; compartments publish without memory reads, extraction or promotion",
+            );
+        }
+        const memoryEnabled = deps.memoryEnabled !== false && memoryOwnerAvailable;
+        const userObservationsRequested = memoryOwnerAvailable
+            ? deps.userObservationsRequested
+            : false;
         // On an `enabled` turn-one lane (see `TurnOneLane`) with memory on, the
         // historian gets no project-memory block and anchors every fact to its source
         // lines; the anchor is stored with the fact's candidate row, and a later
         // reconcile step compares the fact with existing memory instead.
         const turnOneLane = resolveTurnOneLane(deps.memoryLifecycleLane);
-        const anchoredFacts = turnOneLane === "enabled" && deps.memoryEnabled !== false;
+        const anchoredFacts = turnOneLane === "enabled" && memoryEnabled;
         // Every configured attempt sends this same prompt, so size it for each
         // of their windows too, resolved as their pre-send check resolves them.
         const fallbackWindows = [
@@ -790,12 +808,12 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 priorCompartments,
             ),
             memories: () =>
-                anchoredFacts || !projectPath
+                !memoryEnabled || anchoredFacts || !projectPath
                     ? []
                     : getMemoriesByProject(db, projectPath, ["active", "permanent"]),
-            memoryEnabled: deps.memoryEnabled !== false,
+            memoryEnabled,
             anchoredFacts,
-            userObservationsRequested: deps.userObservationsRequested,
+            userObservationsRequested,
         });
         if (!promptFit.ok) {
             telemetry.failureReason = promptFit.reason;
@@ -1001,9 +1019,9 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             sessionReferences: promptFit.sessionReferences,
             projectMemory: anchoredFacts ? "" : promptFit.projectMemory,
             inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunkText}`,
-            memoryEnabled: deps.memoryEnabled !== false,
+            memoryEnabled,
             anchoredFacts,
-            userObservationsRequested: deps.userObservationsRequested,
+            userObservationsRequested,
         });
 
         // Persist turn one's send record, with the publication id the compartment
@@ -1232,8 +1250,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         //    memory feature AND auto_promote (a user who disabled auto-promotion
         //    still wants search/embedding, just not auto-written memories).
         const embeddingActive = !!promotionDirectory && !!projectPath;
-        const promotionActive =
-            embeddingActive && deps.memoryEnabled !== false && deps.autoPromote !== false;
+        const promotionActive = embeddingActive && memoryEnabled && deps.autoPromote !== false;
         const promotionProjectIdentity = projectPath;
 
         // discard-last: drop events anchored to the discarded provisional
@@ -1378,7 +1395,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             );
             const candidateFacts =
                 turnOneLane === "enabled"
-                    ? deps.memoryEnabled !== false
+                    ? memoryEnabled
                         ? keptFacts
                         : []
                     : promotionActive && !memoryAuthorityHere
@@ -1656,6 +1673,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         // tail has weak lookahead; token-capped chunks still promote observations
         // so facts from a never-re-read persisted range are not lost.
         if (
+            memoryOwnerAvailable &&
             deps.experimentalUserMemories === true &&
             !skipUnanchoredPromotion &&
             validatedPass.userObservations &&
@@ -1757,7 +1775,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 child,
                 harness: deps.hiddenCompletionExecutor?.capabilities.harness ?? "opencode",
                 carrier: deps.hiddenCompletionExecutor ? "hidden-completion" : "opencode-session",
-                memoryEnabled: deps.memoryEnabled !== false,
+                memoryEnabled,
                 autoPromote: deps.autoPromote !== false,
                 timeoutMs: historianTimeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
                 validatedProfiles: deps.memoryLifecycleValidatedProfiles,
