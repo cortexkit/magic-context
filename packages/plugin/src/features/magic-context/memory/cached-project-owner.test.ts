@@ -705,7 +705,7 @@ describe("history-only background exception", () => {
         expect(start).toHaveBeenCalledTimes(1);
     });
 
-    test("an unproven historian pauses without clearing intent or blocking other sessions", async () => {
+    test("an unproven owner does not pause summaries or block other sessions", async () => {
         const common = {
             db,
             canRunCompartments: true,
@@ -730,23 +730,26 @@ describe("history-only background exception", () => {
             () => {},
         );
         cleanups.push(() => start.mockRestore());
-        const paused = await runCompartmentPhase({
+        await runCompartmentPhase({
             ...common,
             sessionId: "paused-historian",
             resolvedSessionId: "paused-historian",
             projectOwnerUnavailable: true,
         });
-        expect(start).not.toHaveBeenCalled();
-        expect(paused.compartmentInProgress).toBe(true);
-        expect(readSessionMeta(db, "paused-historian").compartmentInProgress).toBe(true);
+        // Summaries continue while memory pauses. Let the runner check ownership
+        // instead of handing it the current directory's unproven project identity.
+        expect(start).toHaveBeenCalledTimes(1);
+        expect(start.mock.calls[0]?.[0].sessionId).toBe("paused-historian");
+        expect(start.mock.calls[0]?.[0]).not.toHaveProperty("projectIdentity");
         await runCompartmentPhase({
             ...common,
             sessionId: "healthy-historian",
             resolvedSessionId: "healthy-historian",
             projectOwnerUnavailable: false,
         });
-        expect(start).toHaveBeenCalledTimes(1);
-        expect(start.mock.calls[0]?.[0].sessionId).toBe("healthy-historian");
+        expect(start).toHaveBeenCalledTimes(2);
+        expect(start.mock.calls[1]?.[0].sessionId).toBe("healthy-historian");
+        expect(start.mock.calls[1]?.[0].projectIdentity).toBe(A);
     });
 });
 

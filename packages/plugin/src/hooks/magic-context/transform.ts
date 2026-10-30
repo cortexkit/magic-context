@@ -1317,7 +1317,6 @@ export function createTransform(deps: TransformDeps) {
             fullFeatureMode &&
             !compactionOff &&
             historianRunnable &&
-            !projectOwnerUnavailable &&
             (deps.client !== undefined || deps.hiddenCompletionExecutor !== undefined) &&
             compartmentDirectory.length > 0;
         const fallbackModelId = deps.getFallbackModelId?.(sessionId);
@@ -1359,7 +1358,6 @@ export function createTransform(deps: TransformDeps) {
                 fullFeatureMode &&
                 !compactionOff &&
                 historianRunnable &&
-                !projectOwnerUnavailable &&
                 (deps.client !== undefined || deps.hiddenCompletionExecutor !== undefined) &&
                 compartmentDirectory.length > 0;
             logTransformTiming(sessionId, "tagOwners.prepare", tOwners);
