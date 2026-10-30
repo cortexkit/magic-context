@@ -12,6 +12,7 @@ import { createTransform } from "../hooks/magic-context/transform";
 import { BRIDGED_SESSIONS_KEY } from "../shared/bridged-sessions";
 import { drainNotifications } from "../shared/rpc-notifications";
 import { MagicContextRpcServer } from "../shared/rpc-server";
+import { scaleTest, slowLane } from "../shared/slow-test";
 import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import {
     BRIDGED_SESSION_RPC_ERROR,
@@ -560,65 +561,78 @@ describe("standDownForBridgedSessions: real messages transform", () => {
 });
 
 describe("standDownForBridgedSessions: real transform differential", () => {
-    test("200 randomized passes of unenrolled sessions match the unwrapped real pipeline byte for byte", async () => {
-        useTempDataHome("bridged-real-differential-");
-        const seed = 0xd1ff_0001;
-        const random = mulberry32(seed);
-        const passes = 200;
-        const ids = Array.from({ length: passes }, (_, pass) => [
-            `ses-diff-${pass}-base`,
-            `ses-diff-${pass}-wrap`,
-        ]).flat();
-        const { rawRun, run } = realPipeline(ids);
-        const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)];
-        const words = ["Plan this", "Implemented", "§9§ looks tagged", "ünïcødé", "x".repeat(300)];
+    // Each pass is a fresh session's first transform, so 200 passes sit near a
+    // minute on CI's 2-core runners. The unit lane runs the same oracle on the
+    // seed's first 40 passes; the scheduled slow lane runs all 200.
+    scaleTest(
+        "randomized passes of unenrolled sessions match the unwrapped real pipeline byte for byte",
+        async (slow) => {
+            useTempDataHome("bridged-real-differential-");
+            const seed = 0xd1ff_0001;
+            const random = mulberry32(seed);
+            const passes = slow ? 200 : 40;
+            const ids = Array.from({ length: passes }, (_, pass) => [
+                `ses-diff-${pass}-base`,
+                `ses-diff-${pass}-wrap`,
+            ]).flat();
+            const { rawRun, run } = realPipeline(ids);
+            const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)];
+            const words = [
+                "Plan this",
+                "Implemented",
+                "§9§ looks tagged",
+                "ünïcødé",
+                "x".repeat(300),
+            ];
 
-        for (let pass = 0; pass < passes; pass += 1) {
-            // Half the passes publish a bridged-sessions map that enrolls some
-            // other session; the rest remove the map entirely.
-            if (random() < 0.5) enroll(`ses-elsewhere-${pass}`);
-            else Reflect.deleteProperty(slot, BRIDGED_SESSIONS_KEY);
+            for (let pass = 0; pass < passes; pass += 1) {
+                // Half the passes publish a bridged-sessions map that enrolls some
+                // other session; the rest remove the map entirely.
+                if (random() < 0.5) enroll(`ses-elsewhere-${pass}`);
+                else Reflect.deleteProperty(slot, BRIDGED_SESSIONS_KEY);
 
-            const make = (sessionId: string): TestMessage[] => {
-                const count = 1 + Math.floor(random() * 3);
-                return Array.from({ length: count }, (_, index) => ({
-                    info: {
-                        id: `${sessionId}-m${index}`,
-                        role: index % 2 === 0 ? "user" : "assistant",
-                        sessionID: sessionId,
-                    },
-                    parts:
-                        index % 2 === 0
-                            ? [{ type: "text", text: pick(words) }]
-                            : [
-                                  { type: "text", text: pick(words) },
-                                  {
-                                      type: "tool",
-                                      callID: `${sessionId}-c${index}`,
-                                      state: { output: pick(words) },
-                                  },
-                              ],
-                }));
-            };
-            const baseId = `ses-diff-${pass}-base`;
-            const wrapId = `ses-diff-${pass}-wrap`;
-            // Same random draws for both copies: build once, then rename.
-            const template = make("SESSION");
-            const rename = (id: string): TestMessage[] =>
-                JSON.parse(JSON.stringify(template).replaceAll("SESSION", id));
-            const baseMessages = rename(baseId);
-            const wrapMessages = rename(wrapId);
+                const make = (sessionId: string): TestMessage[] => {
+                    const count = 1 + Math.floor(random() * 3);
+                    return Array.from({ length: count }, (_, index) => ({
+                        info: {
+                            id: `${sessionId}-m${index}`,
+                            role: index % 2 === 0 ? "user" : "assistant",
+                            sessionID: sessionId,
+                        },
+                        parts:
+                            index % 2 === 0
+                                ? [{ type: "text", text: pick(words) }]
+                                : [
+                                      { type: "text", text: pick(words) },
+                                      {
+                                          type: "tool",
+                                          callID: `${sessionId}-c${index}`,
+                                          state: { output: pick(words) },
+                                      },
+                                  ],
+                    }));
+                };
+                const baseId = `ses-diff-${pass}-base`;
+                const wrapId = `ses-diff-${pass}-wrap`;
+                // Same random draws for both copies: build once, then rename.
+                const template = make("SESSION");
+                const rename = (id: string): TestMessage[] =>
+                    JSON.parse(JSON.stringify(template).replaceAll("SESSION", id));
+                const baseMessages = rename(baseId);
+                const wrapMessages = rename(wrapId);
 
-            await rawRun(baseMessages);
-            await run(wrapMessages);
-            // The base really was managed, so equality is not two untouched copies.
-            expect(baseMessages[0].parts[0].text).toStartWith("§1§ ");
-            expect(
-                JSON.stringify(wrapMessages).replaceAll(wrapId, "SESSION"),
-                `seed=${seed} pass=${pass}`,
-            ).toBe(JSON.stringify(baseMessages).replaceAll(baseId, "SESSION"));
-        }
-    }, 60_000);
+                await rawRun(baseMessages);
+                await run(wrapMessages);
+                // The base really was managed, so equality is not two untouched copies.
+                expect(baseMessages[0].parts[0].text).toStartWith("§1§ ");
+                expect(
+                    JSON.stringify(wrapMessages).replaceAll(wrapId, "SESSION"),
+                    `seed=${seed} pass=${pass}`,
+                ).toBe(JSON.stringify(baseMessages).replaceAll(baseId, "SESSION"));
+            }
+        },
+        slowLane ? 180_000 : 60_000,
+    );
 });
 
 describe("plugin entry wiring", () => {
