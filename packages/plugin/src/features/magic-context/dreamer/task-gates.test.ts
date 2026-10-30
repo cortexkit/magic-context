@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,6 +63,47 @@ function indexedSession(
 }
 
 describe("dream task backlog probes", () => {
+    test("display polls reuse counts across unrelated writes and expire within sixty seconds", () => {
+        db = freshDb();
+        const project = "git:display-backlog";
+        indexedSession(db, "display-session", "opencode", project, 1);
+        const clock = spyOn(Date, "now").mockReturnValue(100_000);
+        const prepare = spyOn(db, "prepare");
+        const read = (display = true) =>
+            getDreamTaskBacklogs(db!, project, ["maintain-docs", "retrospective"], { display });
+        const countQueries = () =>
+            prepare.mock.calls.filter(([sql]) =>
+                /SELECT COUNT\(\*\) AS cnt\s+FROM (compartments c|session_projects)/.test(sql),
+            ).length;
+        try {
+            expect(read()["maintain-docs"]?.total).toBe(0);
+            for (let poll = 0; poll < 10; poll++) {
+                db.prepare(
+                    "INSERT OR REPLACE INTO schema_migrations_meta(key, value) VALUES ('unrelated', ?)",
+                ).run(String(poll));
+                clock.mockReturnValue(100_000 + poll * 1_000);
+                expect(read()["maintain-docs"]?.total).toBe(0);
+            }
+            expect(countQueries()).toBe(3);
+            db.prepare(
+                "INSERT INTO compartments (session_id, sequence, start_message, end_message, title, content, created_at) VALUES (?, 1, 1, 1, 'new', 'summary', 1)",
+            ).run("display-session");
+            // Scheduling is exact even while a display snapshot is still fresh.
+            expect(read(false)["maintain-docs"]?.total).toBe(1);
+            clock.mockReturnValue(159_999);
+            const snapshot = read();
+            expect(snapshot["maintain-docs"]?.total).toBe(0);
+            snapshot["maintain-docs"]!.total = 999;
+            expect(read()["maintain-docs"]?.total).toBe(0);
+            clock.mockReturnValue(160_000);
+            expect(read()["maintain-docs"]?.total).toBe(1);
+            expect(countQueries()).toBe(9);
+        } finally {
+            prepare.mockRestore();
+            clock.mockRestore();
+        }
+    });
+
     test("an empty task registry returns without requiring memory tables", () => {
         db = new Database(":memory:");
         expect(getDreamTaskBacklogs(db, "empty", [])).toEqual({});

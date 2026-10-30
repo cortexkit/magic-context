@@ -13,6 +13,7 @@ import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { createChunkEmbeddingWriter } from "./chunk-embedding-writer";
+import { readChunkScopeRepairRevision } from "./chunk-scope-repair-revision";
 import {
     buildCanonicalChunkTextFromFts,
     buildCompartmentSummaryFallbackText,
@@ -957,6 +958,7 @@ function recordScopeActiveIdentity(
 }
 
 const legacyDiscoveryComplete = new WeakMap<Database, Set<string>>();
+const chunkScopeRepairComplete = new WeakMap<Database, Map<string, string>>();
 
 function recordActiveEmbeddingIdentity(
     db: Database,
@@ -1000,7 +1002,22 @@ function recordActiveEmbeddingIdentity(
                 scope,
             ) as Array<{ model_id: string }>,
         }));
-    const repairIds = findMisScopedCompartmentChunkEmbeddingIdsForProject(db, projectIdentity);
+    const repairKey = JSON.stringify([projectIdentity, currentChunkIdentity]);
+    const repairRevision = readChunkScopeRepairRevision(db);
+    let completed = chunkScopeRepairComplete.get(db);
+    if (!completed) {
+        completed = new Map();
+        chunkScopeRepairComplete.set(db, completed);
+    }
+    if (repairRevision === null) completed.clear();
+    const repairIds =
+        repairRevision !== null && completed.get(repairKey) === repairRevision
+            ? []
+            : findMisScopedCompartmentChunkEmbeddingIdsForProject(db, projectIdentity);
+    if (repairIds.length === 0 && repairRevision !== null) {
+        if (completed.size >= 256) completed.delete(completed.keys().next().value as string);
+        completed.set(repairKey, repairRevision);
+    }
     if (
         legacy.every(({ rows }) => rows.length === 0) &&
         scopes.every(([scope, model]) => active.get(projectIdentity, scope, model)) &&

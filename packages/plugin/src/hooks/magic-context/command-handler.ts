@@ -339,9 +339,10 @@ function readDreamTaskBacklogsSafely(
     db: Database,
     projectPath: string,
     tasks: readonly DreamTaskName[],
+    display = false,
 ) {
     try {
-        return getDreamTaskBacklogs(db, projectPath, tasks);
+        return getDreamTaskBacklogs(db, projectPath, tasks, { display });
     } catch {
         // Command handling must remain available while an older/empty database is migrating.
         return {};
@@ -768,6 +769,7 @@ export function createMagicContextCommandHandler(deps: {
                                                   deps.smartNotesEnabled !== false ||
                                                   task !== "evaluate-smart-notes",
                                           ),
+                                          true,
                                       ),
                                       progress: deps.getDreamerProgress?.() ?? null,
                                       skipped: readSkippedDreamTasksSafely(

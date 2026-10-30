@@ -526,6 +526,7 @@ export function buildSidebarSnapshot(
                     CANONICAL_DREAM_TASKS.filter(
                         (task) => smartNotesEnabled || task !== "evaluate-smart-notes",
                     ),
+                    { display: true },
                 );
             } catch {
                 // A pre-Dreamer-V2 database may not have all task tables yet.

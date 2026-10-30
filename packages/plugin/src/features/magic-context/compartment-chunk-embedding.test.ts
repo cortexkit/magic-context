@@ -24,6 +24,7 @@ import {
     loadUnembeddedCompartmentChunkCandidates,
     loadUnembeddedSessionChunkCandidates,
     loadUnembeddedSessionChunkCandidatesPolite,
+    MESSAGE_FTS_CHUNK_LOAD_SQL,
     recordChunkEmbedBackoff,
     replaceCompartmentChunkEmbeddings,
 } from "./compartment-chunk-embedding";
@@ -983,6 +984,82 @@ describe("compartment chunk embedding core", () => {
 });
 
 describe("issue 564 coverage catch-up", () => {
+    test("coverage reuses canonical FTS text only while its range and database revision are unchanged", async () => {
+        const db = createDb();
+        const session = "ses-source-memo";
+        const project = "git:source-memo";
+        const model = "mock:source-memo";
+        const prepare = spyOn(db, "prepare");
+        try {
+            recordSessionProjectIdentity(db, session, project);
+            appendCompartments(db, session, [
+                {
+                    sequence: 0,
+                    startMessage: 1,
+                    endMessage: 1,
+                    startMessageId: "u1",
+                    endMessageId: "u1",
+                    title: "Memo",
+                    content: "Memo",
+                    p1: "Memo",
+                },
+            ]);
+            insertFtsRow(db, session, 1, "user", "Original transcript");
+            const compartmentId = getCompartments(db, session)[0].id;
+            const text = buildCanonicalChunkTextFromFts(db, session, 1, 1)!;
+            replaceCompartmentChunkEmbeddings(
+                db,
+                chunkCanonicalText(text, 1, 1, 512).map((window) => ({
+                    compartmentId,
+                    sessionId: session,
+                    projectPath: project,
+                    modelId: model,
+                    window,
+                    vector: new Float32Array([1, 0]),
+                })),
+                chunkWindowSourceKey(text, 1, 1, 512),
+            );
+            const count = () =>
+                countSessionCompartmentEmbedCoveragePolite(db, project, session, model);
+            expect(await count()).toEqual({ embedded: 1, total: 1 });
+            const index = prepare.mock.calls.findIndex(
+                ([sql]) => sql === MESSAGE_FTS_CHUNK_LOAD_SQL,
+            );
+            expect(index).toBeGreaterThanOrEqual(0);
+            const loads = spyOn(prepare.mock.results[index].value, "all");
+            try {
+                expect(await count()).toEqual({ embedded: 1, total: 1 });
+                expect(loads).toHaveBeenCalledTimes(0);
+                db.prepare(
+                    "UPDATE message_history_fts SET content = 'Reindexed transcript' WHERE session_id = ?",
+                ).run(session);
+                expect(await count()).toEqual({ embedded: 0, total: 1 });
+                expect(loads).toHaveBeenCalledTimes(1);
+                db.prepare("UPDATE compartments SET end_message = 2 WHERE id = ?").run(
+                    compartmentId,
+                );
+                insertFtsRow(db, session, 2, "assistant", "Extended transcript");
+                expect(await count()).toEqual({ embedded: 0, total: 1 });
+                expect(loads).toHaveBeenCalledTimes(2);
+                db.exec("BEGIN");
+                db.prepare(
+                    "UPDATE message_history_fts SET content = 'Rolled back' WHERE session_id = ?",
+                ).run(session);
+                await count();
+                db.exec("ROLLBACK");
+                await count();
+                expect(loads).toHaveBeenCalledTimes(4);
+                await count();
+                expect(loads).toHaveBeenCalledTimes(4);
+            } finally {
+                loads.mockRestore();
+            }
+        } finally {
+            prepare.mockRestore();
+            closeQuietly(db);
+        }
+    });
+
     test("steady-state coverage and count do not re-tokenize unchanged compartments", async () => {
         const db = createDb();
         const sessionId = "ses-coverage-memo";

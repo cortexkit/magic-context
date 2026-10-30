@@ -488,22 +488,68 @@ const backlogCaches = new WeakMap<
     }
 >();
 
+const displayBacklogCaches = new WeakMap<
+    Database,
+    Map<string, { expiresAt: number; value: DreamTaskBacklogMap }>
+>();
+const DISPLAY_BACKLOG_MAX_AGE_MS = 60_000;
+
 /** Read the complete backlog breakdown in the caller's requested registry order. */
 export function getDreamTaskBacklogs(
     db: Database,
     projectPath: string,
     tasks: readonly DreamTaskName[] = CANONICAL_DREAM_TASKS,
-    options: { lastRunAt?: number | null; retrospectiveWatermarkMs?: number | null } = {},
+    options: {
+        lastRunAt?: number | null;
+        retrospectiveWatermarkMs?: number | null;
+        /** Status displays may lag by one minute; scheduling callers must leave this unset. */
+        display?: boolean;
+    } = {},
 ): DreamTaskBacklogMap {
     if (tasks.length === 0) return {};
     if (!isKnownAutocommit(db)) {
         // A rollback leaves every revision counter unchanged, so a backlog read
         // inside a transaction must never be cached or served from the cache.
         backlogCaches.delete(db);
+        displayBacklogCaches.delete(db);
         const result: DreamTaskBacklogMap = {};
         for (const task of tasks)
             result[task] = getDreamTaskBacklog(db, projectPath, task, options);
         return result;
+    }
+    if (options.display) {
+        let entries = displayBacklogCaches.get(db);
+        if (!entries) {
+            entries = new Map();
+            displayBacklogCaches.set(db, entries);
+        }
+        const optionKey = (value: number | null | undefined) =>
+            value === undefined ? "omitted" : value === null ? "null" : `number:${value}`;
+        const key = JSON.stringify([
+            projectPath,
+            tasks,
+            optionKey(options.lastRunAt),
+            optionKey(options.retrospectiveWatermarkMs),
+        ]);
+        const now = Date.now();
+        const cached = entries.get(key);
+        if (
+            cached &&
+            now < cached.expiresAt &&
+            now >= cached.expiresAt - DISPLAY_BACKLOG_MAX_AGE_MS
+        )
+            return structuredClone(cached.value);
+        // Do not key display freshness on writes: message transforms update the
+        // shared context store on every pass, even for other projects. Exact
+        // scheduling reads use the cache below.
+        const value: DreamTaskBacklogMap = {};
+        for (const task of tasks) value[task] = getDreamTaskBacklog(db, projectPath, task, options);
+        if (entries.size >= 256) entries.delete(entries.keys().next().value as string);
+        entries.set(key, {
+            expiresAt: now + DISPLAY_BACKLOG_MAX_AGE_MS,
+            value: structuredClone(value),
+        });
+        return value;
     }
     let cache = backlogCaches.get(db);
     if (!cache) {
