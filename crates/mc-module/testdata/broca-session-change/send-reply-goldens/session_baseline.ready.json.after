@@ -1,0 +1,1 @@
+{"state":"ready","baseline":{"items":[],"tool_names":["read"],"accepted_generation":0,"applied_generation":0,"rungs":{"tools":["on_prefix_rebuild","immediately"],"system_text":["on_prefix_rebuild","immediately"]}}}

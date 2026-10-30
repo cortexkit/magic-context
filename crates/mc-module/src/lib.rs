@@ -31,6 +31,8 @@ macro_rules! profile_end {
     };
 }
 #[cfg(test)]
+mod broca_session_change_tests;
+#[cfg(test)]
 mod per_pass_profile;
 #[cfg(test)]
 mod private_permissions_source_test;
