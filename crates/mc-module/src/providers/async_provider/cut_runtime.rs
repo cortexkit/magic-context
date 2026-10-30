@@ -711,7 +711,10 @@ impl AsyncRecord {
         "pending-cut-stage"
     }
 
-    pub(super) fn cleanup_pending_cut_stage(&self, store: &McStore) -> Result<(), HandlerOutcome> {
+    pub(super) fn cleanup_pending_cut_stage(
+        &mut self,
+        store: &McStore,
+    ) -> Result<(), HandlerOutcome> {
         let Some(raw) = store
             .load_async_compaction_baseline(&self.reference(), Self::stage_slot())
             .map_err(transient)?
@@ -741,14 +744,18 @@ impl AsyncRecord {
     }
 
     fn save_stage_intent(
-        &self,
+        &mut self,
         store: &McStore,
         stage: Option<(&str, u64)>,
     ) -> Result<(), HandlerOutcome> {
+        let payloads = self.setup_payload_writes()?;
         let record = serde_json::to_string(self).map_err(transient)?;
         let reference = self.reference();
         let key = self.key.store_key().conversation_key();
         let mut save = store.async_compaction_save(&reference, &key, &self.key.session, &record);
+        for (slot, json) in payloads {
+            save.baseline(slot, Some(json));
+        }
         save.baseline(
             Self::stage_slot(),
             stage
@@ -889,10 +896,14 @@ impl AsyncRecord {
                 .map_err(transient)?;
         }
         let tags = tag_rows_for(self.entries.range(first..).map(|(_, entry)| entry), codec)?;
+        let payloads = self.setup_payload_writes()?;
         let record = serde_json::to_string(&*self).map_err(transient)?;
         let reference = self.reference();
         let key = self.key.store_key().conversation_key();
         let mut save = store.async_compaction_save(&reference, &key, &self.key.session, &record);
+        for (slot, json) in payloads {
+            save.baseline(slot, Some(json));
+        }
         save.tags(&namespace, &tags);
         save.commit().map_err(transient)?;
         #[cfg(test)]
@@ -967,6 +978,7 @@ impl McHandler {
         let Some(mut state) = existing else {
             return unknown();
         };
+        state.load_setup_payloads(store)?;
         self.authorize_async(binding, &state)?;
         if state.setup.params != request.params
             || state.setup.composition != request.composition
@@ -1087,6 +1099,7 @@ impl McHandler {
                         }
                         answer = answer.with_accepts(old.accepts().to_vec());
                         state.initial = serde_json::to_value(answer).map_err(transient)?;
+                        state.initial_stored = false;
                         state.initial["serializer_profile"] = json!(codec.wire_id());
                         // Same tail state as the first attempt would have
                         // committed: the parent history forwards on the next
@@ -1181,11 +1194,15 @@ impl McHandler {
             // These source-identified edits can reappear after undo. Archive
             // each message separately; Setup reads only its current window,
             // and a later read looks up only the surviving window's ids.
+            let payloads = state.setup_payload_writes()?;
             let record = serde_json::to_string(&state).map_err(transient)?;
             let reference = state.reference();
             let key = state.key.store_key().conversation_key();
             let mut save =
                 store.async_compaction_save(&reference, &key, &state.key.session, &record);
+            for (slot, json) in payloads {
+                save.baseline(slot, Some(json));
+            }
             for (mid, current) in
                 frozen_edits::FrozenEdits::from_json(&edits)?.message_snapshots()?
             {
@@ -1303,6 +1320,7 @@ impl McHandler {
         // The descent keeps the session's pruning permission as it was.
         answer = answer.with_accepts(old.accepts().to_vec());
         state.initial = serde_json::to_value(answer).map_err(transient)?;
+        state.initial_stored = false;
         state.initial["serializer_profile"] = json!(codec.wire_id());
         state.save(store, &[])?;
         self.provider_store
@@ -1551,6 +1569,7 @@ impl McHandler {
         )?;
         state.begin_at_cut(store, seed, cut_seed::CutStart::Fresh)?;
         state.initial["initial"]["range"] = json!({"from":first,"to":first});
+        state.initial_stored = false;
         Ok(())
     }
 }

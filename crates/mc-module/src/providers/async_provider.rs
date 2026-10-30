@@ -25,6 +25,7 @@ pub(crate) mod reminder_echoes;
 mod resident;
 #[cfg(test)]
 mod scaling_tests;
+mod setup_payloads;
 #[cfg(test)]
 mod tests;
 mod tool_arcs;
@@ -346,7 +347,20 @@ pub(crate) struct AsyncRecord {
     runner_identity: session_resolver::RunnerBindIdentity,
     runner_module: String,
     setup: compact::setup::SetupRequest,
+    /// Setup's answer is cold, immutable between Setup/pruning changes. Keep it
+    /// in a baseline slot, not in the record rewritten by every notice. Older
+    /// records still deserialize their inline answer and split it on next save.
+    #[serde(default, skip_serializing)]
     initial: Value,
+    /// Clear after replacing or editing `initial`; save writes its slot once.
+    #[serde(default)]
+    initial_stored: bool,
+    /// Readiness is needed by header-only adoption checks without loading the
+    /// cold answer. Save updates it atomically with the answer's slot.
+    #[serde(default)]
+    initial_ready: bool,
+    #[serde(skip)]
+    setup_payload_bytes: (usize, usize),
     #[serde(default)]
     cache_policy: contract_policy::CachePolicy,
     /// Only the engine's fixed-size counters are in this record; its produced
@@ -1046,8 +1060,12 @@ impl State {
         }
         let reference = self.reference();
         let key = self.key.store_key().conversation_key();
+        let payloads = self.setup_payload_writes()?;
         let header = serde_json::to_string(self).map_err(transient)?;
         let mut save = store.async_compaction_save(&reference, &key, &self.key.session, &header);
+        for (slot, json) in payloads {
+            save.baseline(slot, Some(json));
+        }
         save.immutable_baseline(slot, serde_json::to_string(&record).map_err(transient)?);
         save.commit().map_err(transient)?;
         Ok(())
@@ -1426,8 +1444,12 @@ impl State {
         }
         let reference = self.reference();
         let key = self.key.store_key().conversation_key();
+        let payloads = self.setup_payload_writes()?;
         let state = serde_json::to_string(self).map_err(transient)?;
         let mut save = store.async_compaction_save(&reference, &key, &self.key.session, &state);
+        for (slot, json) in payloads {
+            save.baseline(slot, Some(json));
+        }
         save.retain_cut_facts(self.cut_first_ordinal);
         save.tags(&namespace, tag_rows);
         save.forget_tags_of(self.journal.forget_tags_of.clone());
@@ -1850,6 +1872,8 @@ impl State {
         let cache_state = self.cache_state.as_ref().map_or(0, |cached| cached.bytes);
         bytes
             + entries
+            + self.setup_payload_bytes.0
+            + self.setup_payload_bytes.1
             + self.tag_index.len() * TAG_ADDRESS
             + self.mid_index.len() * 96
             + cache_state
@@ -2291,6 +2315,7 @@ fn load(store: &McStore, reference: &str) -> Result<Option<State>, HandlerOutcom
         .baselines
         .into_iter()
         .collect::<BTreeMap<String, String>>();
+    state.restore_setup_payloads(|slot| Ok(stored.remove(slot)))?;
     let mut resolve = |slot: &str, baseline: Baseline| match baseline {
         Baseline::Absent => Ok(None),
         Baseline::Published(version) => state
@@ -2652,6 +2677,9 @@ impl McHandler {
         }
         let reference = key.reference();
         let mut existing = load_head(store, &reference)?;
+        if let Some(state) = &mut existing {
+            state.load_setup_payloads(store)?;
+        }
         if existing
             .as_ref()
             .is_some_and(|state| !offline_first_pass::proof_version_matches(state))
@@ -3114,6 +3142,9 @@ impl McHandler {
             runner_module,
             setup: request.clone(),
             initial: Value::Null,
+            initial_stored: false,
+            initial_ready: false,
+            setup_payload_bytes: (0, 0),
             cache_policy: contract_policy::CachePolicy::freeze(
                 &self.effective_config(&binding.project_root),
             ),
@@ -3241,6 +3272,7 @@ impl McHandler {
             answer = answer.with_ride_wait_ms(10_000.min(cap));
         }
         state.initial = serde_json::to_value(answer).map_err(transient)?;
+        state.initial_stored = false;
         state.initial["serializer_profile"] = json!(codec.wire_id());
         // A moved lineage begins at its cut, not at zero: re-anchor the head
         // insertion this pass rendered. The bytes are the imported history head.

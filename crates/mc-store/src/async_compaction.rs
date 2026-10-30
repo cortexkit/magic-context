@@ -617,7 +617,7 @@ impl McStore {
                 // Equality probes use the existing (session_ref, slot) key.
                 // Excluding archive prefixes would still visit every cold key.
                 let baselines = conn
-                    .prepare("SELECT slot,view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot IN ('applied','produced','frozen_edits','retired_native_edits','pending-cut-stage')")?
+                    .prepare("SELECT slot,view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot IN ('applied','produced','frozen_edits','retired_native_edits','pending-cut-stage','setup-initial','moved-bound-drops')")?
                     .query_map([session_ref], |row| Ok((row.get(0)?, row.get(1)?)))?
                     .collect::<rusqlite::Result<_>>()?;
                 Ok(Some(AsyncCompactionRows {

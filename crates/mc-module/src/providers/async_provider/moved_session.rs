@@ -28,8 +28,11 @@ pub(super) struct StandaloneMove {
     /// Drops already bound to a served `(mid, part, digest)`. The pending queue
     /// lives per engine namespace (one per generation), so a fresh generation
     /// replays these instead of reading the move record again.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing)]
     pub bound_drops: Vec<BoundDrop>,
+    /// Cleared by binding so the next save stores the new durable bindings.
+    #[serde(default)]
+    pub bound_drops_stored: bool,
 }
 
 /// One drop the first read bound to the runner's served part, kept so a later
@@ -161,6 +164,7 @@ impl StandaloneMove {
             head_cut: certified_head(&record),
             pending: Some(record),
             bound_drops: Vec::new(),
+            bound_drops_stored: false,
         }
     }
 }
@@ -372,6 +376,7 @@ impl AsyncRecord {
             .is_some_and(|moved| moved.pending.is_some());
         pending
             && self.cut_first_ordinal.is_some()
+            && !self.initial_ready
             && !self
                 .initial
                 .get("answer")
@@ -487,6 +492,7 @@ impl AsyncRecord {
         if let Some(moved) = &mut self.standalone_move {
             moved.pending = None;
             moved.bound_drops = bound;
+            moved.bound_drops_stored = false;
         }
         Ok(())
     }

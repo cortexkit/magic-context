@@ -20,6 +20,7 @@ mod plain_head_tools;
 mod pruned_reasoning_review;
 mod pruned_reasoning_tests;
 mod published_contract;
+mod quiet_notice;
 mod read_outcomes;
 mod read_resume;
 mod reminder_replay;

@@ -222,6 +222,7 @@ impl AsyncRecord {
             .ok_or_else(|| transient("adoption Setup omitted its history head"))?;
         replacement.extend(suffix.rendered);
         self.initial["initial"]["range"] = json!({"from":first,"to":suffix.to});
+        self.initial_stored = false;
         Ok(())
     }
 }
