@@ -31,6 +31,7 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { readSessionMeta } from "../../features/magic-context/storage-meta-session";
+import { persistCachedM0 } from "../../features/magic-context/storage-meta-shared";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { PluginContext } from "../../plugin/types";
 import { __resetNotificationStateForTests } from "../../shared/rpc-notifications";
@@ -254,6 +255,38 @@ const REPLY_WITH_FACTS = `<output><compartments>
 </output>`;
 
 describe("historian turn one on a dormant lane (production default)", () => {
+    it("review: an unproven memory owner must not prevent history-only summarization", async () => {
+        useTempDataHome("review-historian-unproven-");
+        const sessionId = "ses-review-historian-unproven";
+        const directory = join(process.env.XDG_DATA_HOME!, "project");
+        mkdirSync(directory);
+        createOpenCodeSession(sessionId);
+        const db = openDatabase();
+        seedPriorCompartment(db, sessionId);
+        persistCachedM0(db, sessionId, {
+            m0Bytes: Buffer.from("<project-memory>Unattributed legacy memory</project-memory>"),
+            m1Bytes: Buffer.from("<session-history-since>(none)</session-history-since>"),
+            projectIdentity: undefined,
+            projectMemoryEpoch: 0,
+            projectUserProfileVersion: 0,
+            maxCompartmentSeq: 0,
+            maxMemoryId: 0,
+            maxMutationId: 0,
+            projectDocsHash: "fixture-docs",
+            materializedAt: Date.now(),
+            sessionFactsVersion: 0,
+            upgradeState: null,
+        });
+        const { client, prompt } = historianClient(directory, () => REPLY_WITH_FACTS);
+        await runHistorian(db, sessionId, client, directory, {
+            memoryEnabled: false,
+            autoPromote: false,
+        });
+        expect(getCompartments(db, sessionId).map((row) => row.title)).toContain("Upload cap");
+        expect(sentPrompts(prompt).length).toBeGreaterThan(0);
+        expect(pendingFacts(db)).toEqual([]);
+    });
+
     it("review witness: a blocking historian on a move pass promotes into the served block's project", async () => {
         useTempDataHome("review-historian-move-");
         const sessionId = "ses-review-historian-move";

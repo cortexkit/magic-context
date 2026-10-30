@@ -673,6 +673,38 @@ describe("history-only background exception", () => {
         ).toBeUndefined();
     });
 
+    test("review: unknown memory ownership must not suppress the history-only compartment phase", async () => {
+        const start = spyOn(compartmentRunner, "startCompartmentAgent").mockImplementation(
+            () => {},
+        );
+        cleanups.push(() => start.mockRestore());
+        await runCompartmentPhase({
+            db,
+            sessionId: "review-history-only-phase",
+            resolvedSessionId: "review-history-only-phase",
+            canRunCompartments: true,
+            fullFeatureMode: true,
+            sessionMeta: { compartmentInProgress: true },
+            contextUsage: { percentage: 20 },
+            boundaryContextLimit: 128000,
+            boundaryExecuteThresholdPercentage: 65,
+            boundaryUsage: { percentage: 20, inputTokens: 1000 },
+            boundaryUsageSource: "live",
+            client: { session: {} } as never,
+            historianChunkTokens: 10000,
+            compartmentDirectory: temp.dir,
+            messages: [],
+            coveredInstructions: [],
+            pendingCompartmentInjection: null,
+            deferredHistoryRefreshSessions: new Set<string>(),
+            projectOwnerUnavailable: true,
+            projectIdentity: undefined,
+            memoryEnabled: false,
+            autoPromote: false,
+        });
+        expect(start).toHaveBeenCalledTimes(1);
+    });
+
     test("an unproven historian pauses without clearing intent or blocking other sessions", async () => {
         const common = {
             db,

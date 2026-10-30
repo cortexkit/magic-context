@@ -1698,6 +1698,64 @@ mod pin_tests {
     }
 
     #[test]
+    fn review_persisted_publication_observes_external_replacement() {
+        let (_temp, resolver, sidecars, main, worktree) = borrowed_cache_fixture();
+        resolver.pin_live_answer(&main, "pj-OLD", Some(&main));
+        resolver.flush_pins();
+        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-OLD");
+        let destination = sidecar_path(&sidecars, &main);
+        let replacement = destination.with_extension("replacement");
+        std::fs::write(
+            &replacement,
+            serde_json::to_vec(&serde_json::json!({
+                "directory": project_directory_key(&main), "identity": "pj-NEW"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::rename(replacement, destination).unwrap();
+        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-NEW");
+    }
+
+    #[test]
+    fn review_in_place_legacy_upgrade_invalidates_borrow_miss() {
+        let (_temp, resolver, sidecars, main, worktree) = borrowed_cache_fixture();
+        cache_fixture_pin(&sidecars, &main, "git:abcdef123");
+        assert!(resolver.resolve(&worktree).unwrap().starts_with("git:"));
+        assert!(resolver.borrowed_identity(&worktree).is_none());
+        cache_fixture_pin(&sidecars, &main, "pj-NEW");
+        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-NEW");
+    }
+
+    #[test]
+    fn review_recreated_worktree_revalidates_topology() {
+        let (_temp, resolver, sidecars, main, worktree) = borrowed_cache_fixture();
+        cache_fixture_pin(&sidecars, &main, "pj-FIRST");
+        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-FIRST");
+        std::fs::remove_dir_all(&worktree).unwrap();
+        std::fs::create_dir(&worktree).unwrap();
+        let second = main.with_file_name("second-main");
+        let gitdir = second.join(".git/worktrees/linked");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        cache_fixture_pin(&sidecars, &second, "pj-SECOND");
+        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-SECOND");
+    }
+
+    #[test]
+    fn review_worktree_exact_pin_does_not_override_parent() {
+        let (_temp, resolver, sidecars, main, worktree) = borrowed_cache_fixture();
+        cache_fixture_pin(&sidecars, &main, "pj-PARENT");
+        cache_fixture_pin(&sidecars, &worktree, "pj-WORKTREE");
+        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-PARENT");
+    }
+
+    #[test]
     fn borrowed_cache_observes_directory_changes_pin_replacements_and_exact_pins() {
         let (_temp, resolver, sidecars, main, worktree) = borrowed_cache_fixture();
         assert!(resolver.resolve(&worktree).unwrap().starts_with("git:"));
