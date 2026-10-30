@@ -35,7 +35,7 @@ const cut = (extra = {}): StoreRow<"compaction"> => ({
     data: { status: "completed", summary: "summary", ...extra },
 });
 
-async function fixture(checkpoint: StoreRow<"compaction">, invisible: boolean) {
+async function fixture(checkpoint: StoreRow<"compaction">) {
     const parent = join(tmpdir(), "magic-context", "oc21b");
     mkdirSync(parent, { recursive: true });
     const dir = createTestTempDirFromPath(join(parent, "checkpoint-unit-"));
@@ -61,8 +61,6 @@ async function fixture(checkpoint: StoreRow<"compaction">, invisible: boolean) {
         cache_ttl: "never",
         subc: { connection_file: join(dir, "run", "subc-connection.json") },
     });
-    const old = process.env.MC_OC2_INVISIBLE_FOLD;
-    process.env.MC_OC2_INVISIBLE_FOLD = invisible ? "1" : "0";
     const load = spyOn(configLoader, "loadPluginConfigDetailed").mockReturnValue({
         config,
     } as ReturnType<typeof configLoader.loadPluginConfigDetailed>);
@@ -126,8 +124,6 @@ async function fixture(checkpoint: StoreRow<"compaction">, invisible: boolean) {
             load.mockRestore();
             gate.mockRestore();
             path.mockRestore();
-            if (old === undefined) delete process.env.MC_OC2_INVISIBLE_FOLD;
-            else process.env.MC_OC2_INVISIBLE_FOLD = old;
             source.close();
             closeDatabase();
             resetLkgSlotsForTest();
@@ -141,7 +137,7 @@ test("provider windows stay host-owned and invisible replay requires a valid loc
     for (const data of [{ providerContext: { messages: [] } }, { native: { messages: [] } }]) {
         const checkpoint = cut(data);
         expect(isLocalCheckpoint(checkpoint)).toBe(false);
-        const f = await fixture(checkpoint, true);
+        const f = await fixture(checkpoint);
         try {
             for (const target of [
                 model,
@@ -161,7 +157,7 @@ test("provider windows stay host-owned and invisible replay requires a valid loc
             await f.close();
         }
     }
-    const f = await fixture(cut(), true);
+    const f = await fixture(cut());
     try {
         const cache = nativeFoldCache(f.db);
         const checkpoint = cut();
@@ -251,7 +247,7 @@ test("provider windows stay host-owned and invisible replay requires a valid loc
 
 test("keepID and legacy recent checkpoints restore missing rows before the host-kept tail exactly once", async () => {
     for (const metadata of [{ keepID: "u3" }, { recent: "u3 and a4" }]) {
-        const f = await fixture(cut({ metadata }), false);
+        const f = await fixture(cut({ metadata }));
         try {
             const messages = await f.run([
                 {

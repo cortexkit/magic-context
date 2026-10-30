@@ -6,7 +6,6 @@ import { isolation, inspectOpenFiles, spawnOpencode2, waitForPluginActive } from
 
 test("real host KV deletion revokes digest-only provenance before any restarted context pass", async () => {
     const fixture = isolation();
-    fixture.env.MC_OC2_INVISIBLE_FOLD = "1";
     fixture.env.MC_OC2_HOST_FOLD_ROWS = "999999";
     const options = {
         existingIsolation: fixture, compactionAuto: false, modelContextLimit: 100000, modelOutputLimit: 1024,
@@ -47,7 +46,6 @@ test("real host KV deletion revokes digest-only provenance before any restarted 
         expect(saved.payload).not.toContain("PRIVATE_RAW_");
         sample();
         await host.stopHost();
-        fixture.env.MC_OC2_INVISIBLE_FOLD = "0";
         host = await spawnOpencode2(options);
         client = clientFor();
         await waitForPluginActive(client, fixture.cwd);

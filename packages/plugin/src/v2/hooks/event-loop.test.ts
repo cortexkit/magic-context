@@ -513,8 +513,6 @@ test("v2 deletion completes while the session's auto-search backfill is running"
 });
 
 test("v2 arms host folding without a capture from the served response's frozen TTL and cancels it at turn start", async () => {
-    const flag = process.env.MC_OC2_INVISIBLE_FOLD;
-    process.env.MC_OC2_INVISIBLE_FOLD = "1";
     const ready = Promise.withResolvers<void>();
     let consumed = false;
     const arm = spyOn(HostFoldIdle.prototype, "idle").mockImplementation(() => {});
@@ -542,7 +540,5 @@ test("v2 arms host folding without a capture from the served response's frozen T
         baseline.mockRestore();
         active.mockRestore();
         arm.mockRestore();
-        if (flag === undefined) delete process.env.MC_OC2_INVISIBLE_FOLD;
-        else process.env.MC_OC2_INVISIBLE_FOLD = flag;
     }
 });

@@ -82,17 +82,14 @@ export async function oc2ContextFixture(
         "MAGIC_CONTEXT_STORAGE_DIR",
         "MAGIC_CONTEXT_LOG_PATH",
         "OPENCODE_DB",
-        "MC_OC2_INVISIBLE_FOLD",
     ];
     const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
-    for (const key of keys.filter((key) => key !== "MC_OC2_INVISIBLE_FOLD"))
-        process.env[key] = join(root, key);
-    delete process.env.MC_OC2_INVISIBLE_FOLD;
+    for (const key of keys) process.env[key] = join(root, key);
     const start = 1770000000000 + seed * 100000000;
     let nowClock = start;
     const clock = spyOn(Date, "now").mockImplementation(() => nowClock);
     for (const key of keys.filter(
-        (key) => !["MAGIC_CONTEXT_LOG_PATH", "OPENCODE_DB", "MC_OC2_INVISIBLE_FOLD"].includes(key),
+        (key) => !["MAGIC_CONTEXT_LOG_PATH", "OPENCODE_DB"].includes(key),
     ))
         mkdirSync(process.env[key]!, { recursive: true });
     resetOpenCodeDbPathStateForTesting();

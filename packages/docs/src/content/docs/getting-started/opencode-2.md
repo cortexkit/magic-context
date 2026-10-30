@@ -97,6 +97,14 @@ Fresh OpenCode 2 sessions, Pi sessions, and project memory are not affected.
 
 If you downgrade OpenCode, keep Magic Context on the current version. Older Magic Context releases refuse the upgraded database; see [Storage unavailable / schema fence error](/help/troubleshooting/#storage-unavailable--schema-fence-error).
 
+## Idle checkpoints for long sessions
+
+Magic Context automatically asks OpenCode to checkpoint a long session after it has been idle past the served request's cache lifetime. This is on by default when Magic Context compaction is enabled; there is no extra setting to turn on. It also works with the built-in `compaction.auto: false` configuration written by setup.
+
+OpenCode otherwise loads the history since its last host checkpoint on every step, even when Magic Context sends only a small prompt to the model. After at least 1,000 stored history rows, an idle checkpoint moves that starting point forward. It runs between turns, not while the model is answering, and waits until the existing prompt cache has expired. With `cache_ttl: "never"`, no automatic idle checkpoint is scheduled.
+
+The checkpoint uses Magic Context's own summary, without another model summarization call. OpenCode retains the source history; the next turn still receives the Magic Context summary and unsummarized tail, including after a restart. If the optional replay cache has been evicted, Magic Context restores the needed rows from the host store instead of dropping messages.
+
 ## Known limits on OpenCode 2
 
 These come from what the OpenCode 2 host lets a plugin do.

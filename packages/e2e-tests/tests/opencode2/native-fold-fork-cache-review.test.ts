@@ -6,7 +6,6 @@ import { isolation, inspectOpenFiles, spawnOpencode2, waitForPluginActive } from
 
 test("a fork of an invisible fold renders inherited compartments without reviving checkpoint recent-context", async () => {
     const fixture = isolation();
-    fixture.env.MC_OC2_INVISIBLE_FOLD = "1";
     fixture.env.MC_OC2_HOST_FOLD_ROWS = "999999";
     const host = await spawnOpencode2({
         existingIsolation: fixture,

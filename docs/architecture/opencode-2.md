@@ -45,13 +45,23 @@ A turn is refused before the provider with `session.interrupt`; the host records
 
 ## Fold ownership
 
-OpenCode 2 compacts by asking a `compaction` hook for a summary and writing a checkpoint row. Magic Context answers that hook with its own `m[0]` (`folds.supply` in `context.ts`), so the host checkpoint carries the Magic Context baseline instead of a separate model summary. `FoldOwner` (`fold/owner.ts`) persists the fold's identity in the host's plugin storage: the watermark it was cut at, the summary submitted and its hash, and once seen, the rendered checkpoint row. The host assigns the checkpoint's sequence after the hook returns, so the owner stores a provisional watermark and binds the real row when it appears.
+### Idle host checkpoints
+
+Automatic host folding is enabled whenever Magic Context compaction is enabled. Keeping the provider prompt small does not stop OpenCode from loading every stored row since its last checkpoint before the context hook runs. Once at least 1,000 rows remain after that checkpoint, `fold/idle.ts` and `fold/policy.ts` nominate a host checkpoint only between turns and strictly after the last successful response's frozen `cacheTtl`. A new turn, interruption, failure, deletion or disposal cancels the idle deadline; `cache_ttl: "never"` does not create one. There is no separate opt-in setting.
+
+The policy rechecks idle eligibility after asynchronous admission work, then calls `session.compact({ sessionID, id, delivery: "queue" })` with a deduplicated admission ID. The tested 2.0.22, 2.1.0 and 2.2.2 hosts drain an idle queued compaction without another user turn. This moves the host's loading boundary forward after the provider cache has already expired, rather than interrupting a turn or causing an extra cache rebuild.
+
+`fold/native-replay.ts` preserves the host's rendered message objects, including attachment objects and provider metadata, around the checkpoint. Its process-local cache retains only raw rows after the persisted summary boundary when that summary is the history-head message (`m[0]`) actually sent to the provider; the existing 16 MiB per-session budget is unchanged. Eviction does not veto a fold: an admission without a capture restores the required rows from the host store and logs `capture=absent`. Durable provenance contains store, summary and history digests, not a second copy of the transcript. A restart or an invalidated capture rebuilds from source rows, while provider-owned checkpoints remain host-owned.
+
+### Supplying and restoring checkpoints
+
+OpenCode 2 compacts by asking a `compaction` hook for a summary and writing a checkpoint row. Magic Context answers with the served module baseline, captured `m[0]`, or persisted `m[0]`, so the host receives Magic Context's account of the session instead of asking a model for a second summary. Native replay admits the running checkpoint by ID and persists digest-only provenance. If native admission cannot be supplied, `FoldOwner` (`fold/owner.ts`) remains the fallback: it lazily materializes a baseline and records the highest source sequence covered and the submitted summary rather than leaving the host hook unanswered. That sequence is provisional because the host has not yet assigned the checkpoint row's final sequence.
 
 On later passes, when the store reader finds a checkpoint in the draft, the adapter:
 
-- verifies the checkpoint is ours (`folds.observe`), forcing a HARD materialization if the host re-rendered it or cut before our watermark;
-- restores the raw rows between the last `m[0]` baseline boundary and the checkpoint cut from the store (`fold/restore.ts`), because the host hides everything before its checkpoint while Magic Context still needs the unsummarized part of that range in the tail. A boundary on a row the host never serves by id (an instruction update) is moved back to the nearest served row;
-- after the transform, swaps the checkpoint's summary text for the current `m[0]` baseline so the provider sees the Magic Context rendering.
+- distinguishes local checkpoints from provider-owned windows, and validates native admission against the store, summary and pre-cut history;
+- restores native carriers from the bounded cache or source rows between the end of the history already represented by `m[0]` and the checkpoint cut. An unadmitted local checkpoint uses ordinary source reconstruction (`fold/restore.ts`) and the existing `FoldOwner` carrier identity, including its metadata. A boundary on a row the host never serves by id (an instruction update) is moved back to the nearest served row;
+- runs the shared transform over that history. Admitted native folds serve Magic Context's summary head messages (`m[0]` and the incremental `m[1]`) and the unsummarized raw tail instead of the host's raw checkpoint wrapper. Legacy carriers keep their frozen identity until the ordinary permitted-rebuild policy updates them; retiring an old serialized recent-context block belongs to that same policy. Source edits invalidate cached history and use the shared scheduler's ordinary permitted cache-rebuilding decision (`HARD`), rather than rewriting a served prefix in place.
 
 Attachments on restored rows must be instances of the host's own `Media.Asset` class on OpenCode 2.0.15 and later. `fold/host-media.ts` obtains the constructor from an asset the host already put in a draft, or from the host's schema; when neither works, the attachment is replaced by a short deterministic note so the replay stays byte-stable.
 

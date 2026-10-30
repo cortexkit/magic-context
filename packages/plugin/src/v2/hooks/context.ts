@@ -742,15 +742,10 @@ export async function registerContext(context: V2Context) {
         resolveProjectIdentityForSession(directory, config.allow_home_project),
     );
     const folds = new FoldOwner(context.storage);
-    // Experimental and opt-in (MC_OC2_INVISIBLE_FOLD=1). After OpenCode folds the
-    // history, the provider request bytes must stay identical to the ones sent
-    // before the fold, so the provider's prompt cache still matches. That has not
-    // yet been verified across providers and plugin restarts, so automatic host
-    // folding stays off by default.
-    const nativeFoldMemory =
-        !compactionOff && process.env.MC_OC2_INVISIBLE_FOLD === "1"
-            ? nativeFoldCache(() => storage.require())
-            : undefined;
+    // The host store owns history; this bounded cache only accelerates replay.
+    // Idle folding waits out the served response's frozen cache lifetime, and
+    // missing captures are restored from the source store rather than lost.
+    const nativeFoldMemory = compactionOff ? undefined : nativeFoldCache(() => storage.require());
     const nativeFoldReplay = nativeFoldMemory
         ? new NativeFoldReplay(nativeFoldMemory, () => openStoreReader(), context.storage)
         : undefined;
