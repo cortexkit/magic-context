@@ -25,7 +25,7 @@ import {
 	userMessage,
 } from "./test-utils.test";
 
-test("review witness: whole-pass rollback also undoes an earlier successful queued lane", async () => {
+test("review witness: failed heuristic group preserves an earlier successful queued group", async () => {
 	const root = createTestTempDirFromPath(
 		join(tmpdir(), "native-batch-cross-lane-review-"),
 	);
@@ -159,12 +159,16 @@ test("review witness: whole-pass rollback also undoes an earlier successful queu
 				cleanupCalls: cleanupSpy.mock.calls.length,
 			}),
 		);
-		// The queued-operation group committed before the separate heuristic-cleanup group failed.
-		expect(dropped).toHaveLength(0);
-		if (returned)
-			expect(JSON.stringify(returned.messages)).toBe(
-				JSON.stringify(before?.messages),
+		// Rollback is per group: the earlier queued drop survives the failed heuristic group.
+		expect(dropped).toHaveLength(1);
+		if (returned) {
+			expect(JSON.stringify(next?.messages)).toBe(
+				JSON.stringify(returned.messages),
 			);
+			expect(JSON.stringify(restarted?.messages)).toBe(
+				JSON.stringify(returned.messages),
+			);
+		}
 	} finally {
 		cleanupSpy?.mockRestore();
 		clearContextHandlerSession(id);

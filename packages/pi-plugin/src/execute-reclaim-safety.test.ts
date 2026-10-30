@@ -6,7 +6,7 @@ import {
 	queuePendingOp,
 	updateSessionMeta,
 } from "../../plugin/src/features/magic-context/storage";
-import * as sessionCollections from "../../plugin/src/features/magic-context/storage-session-collections";
+import * as replayDocument from "../../plugin/src/features/magic-context/storage-replay-document";
 import * as executeModule from "../../plugin/src/hooks/magic-context/execute-reclaim";
 import {
 	__test,
@@ -356,7 +356,7 @@ for (const [count, busy] of [
 			const prepare = db.prepare.bind(db);
 			const document = () =>
 				prepare(
-					`SELECT ${sessionCollections.sessionMetaCollectionSelect("trailing_blank_decisions", "trailing_blank_decisions", db)} FROM session_meta WHERE session_id=?`,
+					"SELECT trailing_blank_decisions FROM session_meta WHERE session_id=?",
 				).get(id);
 			const before = document();
 			const observation = {
@@ -380,19 +380,14 @@ for (const [count, busy] of [
 				if (sql === "COMMIT") observation.commits++;
 				return exec(sql);
 			}) as typeof db.exec;
-			const updateCollection = sessionCollections.updateSessionMetaCollection;
-			// Count logical publications, independent of inline or chunked storage.
+			const updateDocument = replayDocument.updateReplayDocument;
+			// Count the native document merge rather than individual SQL statements.
 			const writeSpy = spyOn(
-				sessionCollections,
-				"updateSessionMetaCollection",
-			).mockImplementation((target, sessionId, column, value, expected) => {
-				if (
-					target === db &&
-					sessionId === id &&
-					column === "trailing_blank_decisions"
-				)
-					observation.writes++;
-				return updateCollection(target, sessionId, column, value, expected);
+				replayDocument,
+				"updateReplayDocument",
+			).mockImplementation((target, sessionId, mutate) => {
+				if (target === db && sessionId === id) observation.writes++;
+				return updateDocument(target, sessionId, mutate);
 			});
 			const start = performance.now();
 			try {

@@ -10552,7 +10552,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 										passAlreadyPriced: independentMutationBeforeHeuristics,
 									}
 								: undefined,
-						caveman: args.isSubagent ? undefined : args.heuristics.caveman,
+						caveman: args.isSubagent ? undefined : args.heuristics?.caveman,
 					},
 					activeTags,
 					stableIdResolver,
@@ -10577,7 +10577,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 							routine: true,
 							staleReduceStripEnabled: true,
 							onStaleReduceEdit: recordStaleReduceEdit,
-							caveman: args.isSubagent ? undefined : args.heuristics.caveman,
+							caveman: args.isSubagent ? undefined : args.heuristics?.caveman,
 						},
 						getActiveTagsBySession(args.db, args.sessionId),
 						stableIdResolver,

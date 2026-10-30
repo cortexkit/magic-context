@@ -5,7 +5,6 @@ import {
 } from "@magic-context/core/features/magic-context/storage-native-replay";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
-import { isSqliteTransactionOpen } from "@magic-context/core/shared/sqlite";
 import {
 	clearNativeReasoning,
 	NATIVE_TOOL_REMOVAL_MARKER,
@@ -68,7 +67,14 @@ export function withPiToolRemovalBatch<T>(
 		flushed: false,
 		flush() {
 			if (batch.flushed) return;
-			if (!isSqliteTransactionOpen(args.db))
+			const connection = args.db as unknown as {
+				inTransaction?: boolean;
+				isTransaction?: boolean;
+			};
+			if (
+				connection.inTransaction !== true &&
+				connection.isTransaction !== true
+			)
 				throw new Error(
 					"Native removal publication requires a caller-owned transaction",
 				);

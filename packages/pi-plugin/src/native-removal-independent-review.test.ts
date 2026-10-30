@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import { convertResponsesMessages } from "@earendil-works/pi-ai/api/openai-responses-shared";
 import {
@@ -11,11 +11,6 @@ import {
 	getNativeReplayState,
 	saveNativeToolInputs,
 } from "@magic-context/core/features/magic-context/storage-native-replay";
-import * as collections from "@magic-context/core/features/magic-context/storage-session-collections";
-import {
-	sessionMetaCollectionSelect,
-	updateSessionMetaCollection,
-} from "@magic-context/core/features/magic-context/storage-session-collections";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { applyPendingOperations } from "@magic-context/core/hooks/magic-context/apply-operations";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
@@ -68,12 +63,9 @@ function fixture(legacy: boolean, anthropic: boolean) {
 				},
 				trailingBlank: { old: "keep" },
 			});
-	updateSessionMetaCollection(
-		db,
-		sessionId,
-		"trailing_blank_decisions",
-		initial,
-	);
+	db.prepare(
+		"UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ?",
+	).run(initial, sessionId);
 	const model = {
 		provider: anthropic ? "anthropic" : "openai",
 		api: anthropic ? "anthropic-messages" : "openai-responses",
@@ -172,7 +164,7 @@ function fixture(legacy: boolean, anthropic: boolean) {
 		(
 			db
 				.prepare(
-					`SELECT ${sessionMetaCollectionSelect("trailing_blank_decisions")} FROM session_meta WHERE session_id=?`,
+					"SELECT trailing_blank_decisions FROM session_meta WHERE session_id=?",
 				)
 				.get(sessionId) as { trailing_blank_decisions: string }
 		).trailing_blank_decisions;
@@ -299,7 +291,6 @@ test("review witness: a native input write between queued removals preserves sto
 for (const failure of ["tag", "queue", "marker", "thinking"] as const) {
 	test(`independent rollback: ${failure} failure leaves no permissions for a later defer`, () => {
 		const lane = fixture(false, false);
-		let publicationSpy: ReturnType<typeof spyOn> | undefined;
 		// Index 39 is last in the 70-target queue permutation, after the first 64 operations.
 		const last = lane.tools[39];
 		if (!last) throw new Error("fault target missing");
@@ -313,12 +304,9 @@ for (const failure of ["tag", "queue", "marker", "thinking"] as const) {
 					`CREATE TEMP TRIGGER review_fault BEFORE DELETE ON pending_ops WHEN OLD.tag_id=${last.tagNumber} BEGIN SELECT RAISE(ABORT,'review queue fault'); END`,
 				);
 			if (failure === "marker")
-				publicationSpy = spyOn(
-					collections,
-					"updateSessionMetaCollection",
-				).mockImplementation(() => {
-					throw new Error("review marker fault");
-				});
+				lane.db.exec(
+					"CREATE TEMP TRIGGER review_marker_fault BEFORE UPDATE OF trailing_blank_decisions ON session_meta BEGIN SELECT RAISE(ABORT,'review marker fault'); END",
+				);
 			expect(() =>
 				lane.batch(false, () => {
 					if (failure === "thinking") throw new Error("review thinking fault");
@@ -340,7 +328,6 @@ for (const failure of ["tag", "queue", "marker", "thinking"] as const) {
 				getNativeReplayState(lane.db, sessionId).toolInputs.get("call-0"),
 			).not.toBe(NATIVE_TOOL_REMOVAL_MARKER);
 		} finally {
-			publicationSpy?.mockRestore();
 			lane.db.close();
 		}
 	});

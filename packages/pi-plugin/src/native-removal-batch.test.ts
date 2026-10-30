@@ -8,10 +8,6 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import { getNativeReplayState } from "@magic-context/core/features/magic-context/storage-native-replay";
 import * as replayDocument from "@magic-context/core/features/magic-context/storage-replay-document";
-import {
-	sessionMetaCollectionSelect,
-	updateSessionMetaCollection,
-} from "@magic-context/core/features/magic-context/storage-session-collections";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { applyPendingOperations } from "@magic-context/core/hooks/magic-context/apply-operations";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
@@ -51,12 +47,9 @@ function fixture(legacy = false) {
 				},
 				trailingBlank: { blank: "keep" },
 			});
-	updateSessionMetaCollection(
-		db,
-		sessionId,
-		"trailing_blank_decisions",
-		initial,
-	);
+	db.prepare(
+		"UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ?",
+	).run(initial, sessionId);
 	const source = [
 		userMessage("start", 1),
 		...Array.from({ length: 70 }, (_, index) => {
@@ -137,7 +130,7 @@ function fixture(legacy = false) {
 		(
 			db
 				.prepare(
-					`SELECT ${sessionMetaCollectionSelect("trailing_blank_decisions")} FROM session_meta WHERE session_id = ?`,
+					"SELECT trailing_blank_decisions FROM session_meta WHERE session_id = ?",
 				)
 				.get(sessionId) as { trailing_blank_decisions: string }
 		).trailing_blank_decisions;
