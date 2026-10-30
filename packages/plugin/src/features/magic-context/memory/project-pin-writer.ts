@@ -39,8 +39,8 @@ export class ProjectPinWriter {
     ) {}
 
     publish(destination: string, record: ProjectIdentityRecord): void {
-        // Keep the original record if later resolutions propose a different identity
-        // for this destination, even while its first write is still pending.
+        // Keep the original record while persistence is pending, even if a later
+        // resolution proposes another identity for the same destination.
         const existing = this.pins.get(destination);
         if (!existing) this.revision++;
         const pin = existing ?? {
@@ -71,14 +71,14 @@ export class ProjectPinWriter {
 
     lookup(destination: string): ProjectIdentityRecord | undefined {
         const pin = this.pins.get(destination);
-        if (!pin) return undefined;
+        if (!pin || pin.persisted) return undefined;
         this.schedule(pin);
         return { ...pin.record };
     }
 
     records(sidecarDirectory: string): ProjectIdentityRecord[] {
         return [...this.pins.values()]
-            .filter((pin) => dirname(pin.destination) === sidecarDirectory)
+            .filter((pin) => !pin.persisted && dirname(pin.destination) === sidecarDirectory)
             .map((pin) => ({ ...pin.record }));
     }
 
@@ -117,6 +117,9 @@ export class ProjectPinWriter {
             .then(
                 () => {
                     pin.persisted = true;
+                    // Retain a completed destination only to reject late publications;
+                    // lookups now yield to durable state, including other processes' writes.
+                    if (this.pins.get(pin.destination) === pin) this.revision++;
                 },
                 (error) => {
                     pin.awaitingDecision = true;

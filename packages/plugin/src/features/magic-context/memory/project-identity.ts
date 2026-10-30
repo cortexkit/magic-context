@@ -31,8 +31,8 @@ import {
     projectDirectoryKey,
     projectIdentityPinGeneration,
     readBorrowedProjectIdentity,
+    readPinnedProjectIdentity,
     readRememberedGitIdentity,
-    readRememberedProjectIdentity,
     rememberGitIdentity,
     rememberPinnedProjectIdentity,
     removeStaleWorktreeIdentity,
@@ -588,8 +588,8 @@ function pinForUsableDirectory(
         // a remembered pin must not bypass the directory usability check.
         return undefined;
     }
-    const pinned = readRememberedProjectIdentity(canonical)?.identity;
-    return isPinnedProjectIdentity(pinned)
+    const pinned = readPinnedProjectIdentity(canonical);
+    return pinned
         ? pinned
         : readCachedGitCheckoutMetadata(canonical)?.linkedWorktree
           ? borrowedProjectIdentity(canonical, cleanup)
@@ -633,8 +633,19 @@ export function rememberResolvedProjectIdentity(
         // Use fresh topology: a cached non-worktree result must not authorize a pin after a checkout changes.
         const linked =
             metadata?.gitCommonDir === undefined ? hasGitDir(canonical) : metadata.linkedWorktree;
-        if (linked) return;
-        rememberPinnedProjectIdentity(canonical, answer.projectId, metadata?.gitCommonDir);
+        const registeredRoot =
+            linked &&
+            answer.via === "root" &&
+            answer.canonicalRoot !== null &&
+            projectDirectoryKey(realpathSync.native(answer.canonicalRoot)) ===
+                projectDirectoryKey(realpathSync.native(canonical));
+        if (linked && !registeredRoot) return;
+        rememberPinnedProjectIdentity(
+            canonical,
+            answer.projectId,
+            metadata?.gitCommonDir,
+            linked && registeredRoot ? "root" : undefined,
+        );
         if (metadata && answer.canonicalRoot !== null) {
             // A separately registered subfolder must not claim its containing checkout.
             const answerRoot = projectDirectoryKey(realpathSync.native(answer.canonicalRoot));

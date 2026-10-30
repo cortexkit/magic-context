@@ -523,6 +523,19 @@ struct IdentityRecord {
     identity: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     git_common_dir: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "read_pin_via",
+        skip_serializing_if = "Option::is_none"
+    )]
+    via: Option<String>,
+}
+
+fn read_pin_via<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(value.as_str().map(str::to_owned))
 }
 
 fn sidecar_path(sidecar_dir: &Path, directory: &Path) -> PathBuf {
@@ -596,14 +609,27 @@ pub struct GitCheckout {
 }
 
 pub fn git_checkout(directory: &Path) -> Option<GitCheckout> {
+    git_checkout_watched(directory, &mut |_| {})
+}
+
+fn git_checkout_watched(directory: &Path, watch: &mut dyn FnMut(&Path)) -> Option<GitCheckout> {
     #[cfg(test)]
     IDENTITY_IO.with(|io| {
         let mut count = io.get();
         count.topology += 1;
         io.set(count);
     });
-    let root = git_root_directory(directory)?;
-    let (common_dir, worktree) = git_common_path(&root)?;
+    watch(directory);
+    let root = git_root_directory(directory);
+    for ancestor in directory.ancestors() {
+        watch(&ancestor.join(".git"));
+        if root.as_deref() == Some(ancestor) {
+            break;
+        }
+    }
+    let root = root?;
+    let (common_dir, worktree) = git_common_path(&root, watch)?;
+    watch(&common_dir);
     Some(GitCheckout {
         root,
         git_common_dir: project_directory_key(&std::fs::canonicalize(common_dir).ok()?),
@@ -611,7 +637,7 @@ pub fn git_checkout(directory: &Path) -> Option<GitCheckout> {
     })
 }
 
-fn git_common_path(root: &Path) -> Option<(PathBuf, bool)> {
+fn git_common_path(root: &Path, watch: &mut dyn FnMut(&Path)) -> Option<(PathBuf, bool)> {
     let dot_git = root.join(".git");
     if dot_git.is_dir() {
         return Some((dot_git, false));
@@ -622,7 +648,10 @@ fn git_common_path(root: &Path) -> Option<(PathBuf, bool)> {
         return None;
     }
     let git_dir = root.join(target);
+    watch(&git_dir);
+    watch(&git_dir.join("gitdir"));
     let common_file = git_dir.join("commondir");
+    watch(&common_file);
     if common_file.exists() {
         let common = identity_read_text(&common_file).ok()?;
         if common.trim().is_empty() {
@@ -720,6 +749,13 @@ struct Borrowed {
     generation: u64,
     record: Option<IdentityRecord>,
     source: Option<(PathBuf, Option<FileStamp>)>,
+    candidates: Vec<(PathBuf, Option<FileStamp>)>,
+}
+
+#[derive(Clone)]
+struct CachedCheckout {
+    checkout: Option<GitCheckout>,
+    evidence: Vec<(PathBuf, Option<FileStamp>)>,
 }
 
 /// Resolves and remembers identities for the life of the process.
@@ -731,7 +767,7 @@ pub struct ProjectIdentityResolver {
     /// The host's remembered-identity sidecar directory. `None` reads no sidecars.
     sidecar_dir: Option<PathBuf>,
     pin_writer: Arc<pin_writer::PinWriter>,
-    topology: Mutex<HashMap<PathBuf, Option<GitCheckout>>>,
+    topology: Mutex<HashMap<PathBuf, CachedCheckout>>,
     records: Mutex<HashMap<PathBuf, CachedRecord>>,
     borrowed: Mutex<HashMap<PathBuf, Borrowed>>,
     cleaned_worktrees: Mutex<HashSet<PathBuf>>,
@@ -844,7 +880,7 @@ impl ProjectIdentityResolver {
         let sidecars = self.sidecar_dir.as_deref()?;
         let path = sidecar_path(sidecars, directory);
         if let Some(record) = self.pin_writer.lookup(&path) {
-            return is_project_pin(&record.identity).then_some(record.identity);
+            return self.usable_pin(directory, record);
         }
         let stamp = file_stamp(&path);
         let cached = self.records.lock().unwrap().get(&path).cloned();
@@ -861,18 +897,44 @@ impl ProjectIdentityResolver {
             );
             record
         }?;
-        is_project_pin(&record.identity).then_some(record.identity)
+        self.usable_pin(directory, record)
+    }
+
+    fn usable_pin(&self, directory: &Path, record: IdentityRecord) -> Option<String> {
+        if !is_project_pin(&record.identity)
+            || (record.via.as_deref() != Some("root")
+                && self
+                    .checkout(directory)
+                    .is_some_and(|checkout| checkout.worktree))
+        {
+            return None;
+        }
+        Some(record.identity)
     }
 
     fn checkout(&self, directory: &Path) -> Option<GitCheckout> {
-        // Live registration authorization deliberately keeps using fresh topology;
-        // only fallback lookups reuse this process-local directory description.
-        self.topology
-            .lock()
-            .unwrap()
-            .entry(node_path_resolve(directory))
-            .or_insert_with(|| git_checkout(directory))
-            .clone()
+        let key = node_path_resolve(directory);
+        let mut topology = self.topology.lock().unwrap();
+        if let Some(cached) = topology.get(&key).filter(|cached| {
+            cached
+                .evidence
+                .iter()
+                .all(|(path, stamp)| file_stamp(path) == *stamp)
+        }) {
+            return cached.checkout.clone();
+        }
+        let mut evidence = Vec::new();
+        let checkout = git_checkout_watched(&key, &mut |path| {
+            evidence.push((path.to_path_buf(), file_stamp(path)));
+        });
+        topology.insert(
+            key,
+            CachedCheckout {
+                checkout: checkout.clone(),
+                evidence,
+            },
+        );
+        checkout
     }
 
     /// A pin found through a shared git common directory is used only for this session;
@@ -894,10 +956,19 @@ impl ProjectIdentityResolver {
                     .source
                     .as_ref()
                     .is_none_or(|(path, stamp)| file_stamp(path) == *stamp)
+                && cached
+                    .candidates
+                    .iter()
+                    .all(|(path, stamp)| file_stamp(path) == *stamp)
         }) {
             return cached.record.map(|record| record.identity);
         }
-        let record = self.find_common_dir_pin(sidecars, &common, checkout.worktree);
+        let mut candidates = Vec::new();
+        let record =
+            self.find_common_dir_pin(sidecars, &common, checkout.worktree, &mut candidates);
+        if record.is_some() {
+            candidates.clear();
+        }
         let source = record.as_ref().map(|record| {
             let path = sidecar_path(sidecars, Path::new(&record.directory));
             let stamp = file_stamp(&path);
@@ -912,6 +983,7 @@ impl ProjectIdentityResolver {
                 generation,
                 record: record.clone(),
                 source,
+                candidates,
             },
         );
         record.map(|record| record.identity)
@@ -922,6 +994,7 @@ impl ProjectIdentityResolver {
         sidecars: &Path,
         common: &str,
         worktree: bool,
+        candidates: &mut Vec<(PathBuf, Option<FileStamp>)>,
     ) -> Option<IdentityRecord> {
         let mut records = self.pin_writer.records(sidecars);
         let mut identities = HashMap::new();
@@ -939,11 +1012,21 @@ impl ProjectIdentityResolver {
             {
                 continue;
             }
+            // A miss must also watch legacy or damaged files that could be upgraded in place.
+            candidates.push((entry.path(), file_stamp(&entry.path())));
             if let Some(record) = read_record_file(&entry.path()) {
                 records.entry(record.directory.clone()).or_insert(record);
             }
         }
         for record in records.into_values() {
+            if is_project_pin(&record.identity)
+                && record.via.as_deref() != Some("root")
+                && self
+                    .checkout(Path::new(&record.directory))
+                    .is_some_and(|checkout| checkout.worktree)
+            {
+                continue;
+            }
             if worktree
                 && is_project_pin(&record.identity)
                 && self
@@ -974,19 +1057,38 @@ impl ProjectIdentityResolver {
         }
     }
 
-    /// Persist only a live registered answer, never a worktree or an existing pin.
+    /// Callers without explicit root-registration evidence cannot pin a worktree.
     /// A nested registration authorizes its own directory, not its checkout's parent.
+    #[cfg(test)]
     pub(crate) fn pin_live_answer(
         &self,
         directory: &Path,
         identity: &str,
         canonical_root: Option<&Path>,
     ) {
+        self.pin_live_answer_with_root(directory, identity, canonical_root, false);
+    }
+
+    pub(crate) fn pin_live_answer_with_root(
+        &self,
+        directory: &Path,
+        identity: &str,
+        canonical_root: Option<&Path>,
+        root_registered: bool,
+    ) {
         if !is_project_pin(identity) {
             return;
         }
         let checkout = git_checkout(directory);
-        if is_linked_worktree(directory) {
+        let linked = is_linked_worktree(directory);
+        let exact_root = root_registered
+            && canonical_root
+                .and_then(realpath)
+                .zip(realpath(directory))
+                .is_some_and(|(root, folder)| {
+                    project_directory_key(&root) == project_directory_key(&folder)
+                });
+        if linked && !exact_root {
             return;
         }
         let Some(sidecar_dir) = self.sidecar_dir.as_deref() else {
@@ -1002,6 +1104,7 @@ impl ProjectIdentityResolver {
                 git_common_dir: checkout
                     .as_ref()
                     .map(|checkout| checkout.git_common_dir.clone()),
+                via: (linked && exact_root).then(|| "root".to_string()),
             };
             let private = crate::config::private_storage_permissions_enabled();
             self.pin_writer.publish(sidecar_dir, record, private);
@@ -1124,7 +1227,7 @@ impl ProjectIdentityResolver {
     }
 
     /// Use the checkout's registered identity for this decision without saving a
-    /// worktree pin. Remove its stale git record with the pin writer only if the
+    /// worktree pin. Remove its stale unregistered record with the pin writer only if the
     /// bytes still match the record read here.
     pub(crate) fn borrowed_identity(&self, directory: &Path) -> Option<String> {
         let pin = self.common_dir_pin(directory)?;
@@ -1144,7 +1247,9 @@ impl ProjectIdentityResolver {
                             .ok()
                             .is_some_and(|record| {
                                 record.directory == project_directory_key(folder)
-                                    && record.identity.starts_with("git:")
+                                    && (record.identity.starts_with("git:")
+                                        || (is_project_pin(&record.identity)
+                                            && record.via.as_deref() != Some("root")))
                             })
                         {
                             self.pin_writer.remove_if_unchanged(path, bytes);
@@ -1698,6 +1803,64 @@ mod pin_tests {
     }
 
     #[test]
+    fn review_persisted_publication_observes_external_replacement() {
+        let (_temp, resolver, sidecars, main, worktree) = borrowed_cache_fixture();
+        resolver.pin_live_answer(&main, "pj-OLD", Some(&main));
+        resolver.flush_pins();
+        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-OLD");
+        let destination = sidecar_path(&sidecars, &main);
+        let replacement = destination.with_extension("replacement");
+        std::fs::write(
+            &replacement,
+            serde_json::to_vec(&serde_json::json!({
+                "directory": project_directory_key(&main), "identity": "pj-NEW"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::rename(replacement, destination).unwrap();
+        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-NEW");
+    }
+
+    #[test]
+    fn review_in_place_legacy_upgrade_invalidates_borrow_miss() {
+        let (_temp, resolver, sidecars, main, worktree) = borrowed_cache_fixture();
+        cache_fixture_pin(&sidecars, &main, "git:abcdef123");
+        assert!(resolver.resolve(&worktree).unwrap().starts_with("git:"));
+        assert!(resolver.borrowed_identity(&worktree).is_none());
+        cache_fixture_pin(&sidecars, &main, "pj-NEW");
+        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-NEW");
+    }
+
+    #[test]
+    fn review_recreated_worktree_revalidates_topology() {
+        let (_temp, resolver, sidecars, main, worktree) = borrowed_cache_fixture();
+        cache_fixture_pin(&sidecars, &main, "pj-FIRST");
+        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-FIRST");
+        std::fs::remove_dir_all(&worktree).unwrap();
+        std::fs::create_dir(&worktree).unwrap();
+        let second = main.with_file_name("second-main");
+        let gitdir = second.join(".git/worktrees/linked");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        cache_fixture_pin(&sidecars, &second, "pj-SECOND");
+        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-SECOND");
+    }
+
+    #[test]
+    fn review_worktree_exact_pin_does_not_override_parent() {
+        let (_temp, resolver, sidecars, main, worktree) = borrowed_cache_fixture();
+        cache_fixture_pin(&sidecars, &main, "pj-PARENT");
+        cache_fixture_pin(&sidecars, &worktree, "pj-WORKTREE");
+        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-PARENT");
+    }
+
+    #[test]
     fn borrowed_cache_observes_directory_changes_pin_replacements_and_exact_pins() {
         let (_temp, resolver, sidecars, main, worktree) = borrowed_cache_fixture();
         assert!(resolver.resolve(&worktree).unwrap().starts_with("git:"));
@@ -1707,7 +1870,8 @@ mod pin_tests {
         cache_fixture_pin(&sidecars, &main, "pj-OTHER");
         assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-OTHER");
         cache_fixture_pin(&sidecars, &worktree, "pj-EXACT");
-        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-EXACT");
+        // Only explicit Entorhinal root-registration evidence lets a linked folder keep its own pin.
+        assert_eq!(resolver.resolve(&worktree).unwrap(), "pj-OTHER");
     }
 
     #[test]
@@ -1815,9 +1979,56 @@ mod pin_tests {
             )
             .unwrap();
         }
-        let before = sidecar_bytes(&sidecars);
         let resolver = ProjectIdentityResolver::with_sidecar_dir(sidecars.clone());
         let directory = Path::new(case["directory"].as_str().unwrap());
+        if let Some(transition) = case.get("cacheTransition") {
+            if let Some(publication) = transition.get("publication") {
+                resolver.pin_writer.publish(
+                    &sidecars,
+                    serde_json::from_value(publication.clone()).unwrap(),
+                    false,
+                );
+            }
+            resolver.flush_pins();
+            assert_eq!(
+                resolver.resolve(directory).unwrap(),
+                transition["warmIdentity"].as_str().unwrap(),
+                "{name}: warm identity"
+            );
+            resolver.flush_pins();
+            resolver.common_dir_pin(directory);
+            if let Some(fixture_name) = transition["recreateFromFixture"].as_str() {
+                let next_fixture = &table["fixtures"][fixture_name];
+                setup_fixture(&table, next_fixture);
+                std::fs::remove_dir_all(directory).unwrap();
+                let main = Path::new(next_fixture["repositories"][0]["root"].as_str().unwrap());
+                git_input(
+                    main,
+                    &[
+                        "worktree",
+                        "add",
+                        "--detach",
+                        directory.to_str().unwrap(),
+                        "HEAD",
+                    ],
+                    b"",
+                );
+            }
+            for record in transition["sidecars"].as_array().unwrap() {
+                let file =
+                    sidecar_path(&sidecars, Path::new(record["directory"].as_str().unwrap()));
+                let destination = if transition["atomic"] == true {
+                    file.with_extension("replacement")
+                } else {
+                    file.clone()
+                };
+                std::fs::write(&destination, serde_json::to_vec(record).unwrap()).unwrap();
+                if destination != file {
+                    std::fs::rename(destination, file).unwrap();
+                }
+            }
+        }
+        let before = sidecar_bytes(&sidecars);
         let calls = std::cell::Cell::new(0);
         let logs = LogCapture(Arc::default());
         let sink = logs.clone();
@@ -1988,6 +2199,15 @@ mod pin_tests {
     }
 
     parity_tests! {
+        cache_external_replacement => "cache-external-replacement",
+        cache_in_place_upgrade => "cache-in-place-upgrade",
+        cache_recreated_topology => "cache-recreated-topology",
+        worktree_exact_pin_without_root_evidence => "worktree-exact-pin-without-root-evidence",
+        worktree_exact_pin_with_root_evidence => "worktree-exact-pin-with-root-evidence",
+        worktree_exact_pin_with_nonroot_evidence => "worktree-exact-pin-with-nonroot-evidence",
+        worktree_exact_pin_with_malformed_evidence => "worktree-exact-pin-with-malformed-evidence",
+        registered_linked_root => "registered-linked-root",
+        nonroot_linked_equal_canonical_root => "nonroot-linked-equal-canonical-root",
         worktree_checkout_pin_absent_endpoint => "worktree-checkout-pin-absent-endpoint",
         worktree_checkout_pin_without_common_dir => "worktree-checkout-pin-without-common-dir",
         worktree_stale_git_sidecar_retired => "worktree-stale-git-sidecar-retired",

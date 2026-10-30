@@ -20,6 +20,10 @@ import {
 	closeDatabase,
 	openDatabase,
 } from "@magic-context/core/features/magic-context/storage";
+import {
+	readSessionMeta,
+	updateSessionMeta,
+} from "@magic-context/core/features/magic-context/storage-meta-session";
 import * as logger from "@magic-context/core/shared/logger";
 import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
 import {
@@ -180,6 +184,89 @@ async function runtime(directory: string) {
 }
 
 describe("Pi session identity decisions", () => {
+	it("review: Pi memory writes must follow the served prefix rather than a pending directory move", async () => {
+		const a = folder("served-project");
+		const b = folder("pending-project");
+		const host = await runtime(a);
+		const sessionId = "pi-review-served-owner";
+		const ctx = context(sessionId, a);
+		await host.start(ctx);
+		await host.tools.get("ctx_memory")!.execute(
+			"review-baseline-write",
+			{
+				action: "write",
+				category: "PROJECT_RULES",
+				content: "The served project keeps upload limits in its gateway.",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		await host.pass(ctx);
+		const db = openDatabase()!;
+		const served = readSessionMeta(db, sessionId);
+		expect(served.cachedM0ProjectIdentity).toBe(registeredProjectId);
+		expect(served.cachedM0Bytes).not.toBeNull();
+		expect(served.cachedM0Bytes!.toString()).toContain(
+			"The served project keeps upload limits in its gateway.",
+		);
+		rememberPinnedProjectIdentity(b, "pj-PENDING");
+		await host.tools
+			.get("ctx_memory")!
+			.execute(
+				"review-move-write",
+				{
+					action: "write",
+					category: "PROJECT_RULES",
+					content: "Pi served-owner witness",
+				},
+				undefined,
+				undefined,
+				context(sessionId, b),
+			);
+		expect(readSessionMeta(db, sessionId).cachedM0Bytes).toEqual(
+			served.cachedM0Bytes,
+		);
+		const saved = db
+			.prepare("SELECT project_path FROM memories WHERE content = ?")
+			.get("Pi served-owner witness") as { project_path: string } | null;
+		expect(saved).not.toBeNull();
+		expect(saved!.project_path).toBe(registeredProjectId);
+	});
+
+	it("review: Pi memory writes must refuse an unproven upgraded prefix", async () => {
+		const directory = folder("legacy-project");
+		const host = await runtime(directory);
+		const sessionId = "pi-review-unproven-owner";
+		const ctx = context(sessionId, directory);
+		await host.start(ctx);
+		await host.pass(ctx);
+		const db = openDatabase()!;
+		updateSessionMeta(db, sessionId, { cachedM0ProjectIdentity: null });
+		db.prepare("DELETE FROM memory_applied_snapshots WHERE session_id = ?").run(
+			sessionId,
+		);
+		expect(readSessionMeta(db, sessionId).cachedM0Bytes).not.toBeNull();
+		const result = await host.tools
+			.get("ctx_memory")!
+			.execute(
+				"review-unproven-write",
+				{
+					action: "write",
+					category: "PROJECT_RULES",
+					content: "Pi unknown-owner witness",
+				},
+				undefined,
+				undefined,
+				ctx,
+			);
+		const saved = db
+			.prepare("SELECT project_path FROM memories WHERE content = ?")
+			.get("Pi unknown-owner witness");
+		expect(saved).toBeNull();
+		expect(JSON.stringify(result)).toContain("ctx_memory write refused");
+	});
+
 	it("keeps A's git decision after B rebuilds the same directory's config cache", async () => {
 		const directory = folder("shared");
 		const host = await runtime(directory);
