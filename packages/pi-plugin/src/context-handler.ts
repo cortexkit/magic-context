@@ -80,7 +80,10 @@ import {
 	sessionDecisionCalibration,
 	transitionSessionHygieneUnits,
 } from "@magic-context/core/features/magic-context/session-decision-calibration";
-import { recordSessionProjectIdentity } from "@magic-context/core/features/magic-context/session-project-storage";
+import {
+	getServedSessionProjectIdentity,
+	recordSessionProjectIdentity,
+} from "@magic-context/core/features/magic-context/session-project-storage";
 import {
 	adoptPiFallbackMessageTag,
 	adoptPiFallbackToolOwnerTag,
@@ -6057,13 +6060,17 @@ export function registerPiContextHandler(
 				}
 			})();
 			const tNoteNudges = performance.now();
+			const servedProjectIdentity =
+				result.materialized || sessionMeta.cachedM0Bytes === null
+					? projectIdentity
+					: (getServedSessionProjectIdentity(sessionMeta) ?? "");
 			try {
 				if (!options.compactionOff) {
 					outputMessages = applyNoteNudges({
 						sessionId,
 						db: options.db,
 						messages: outputMessages,
-						projectIdentity,
+						projectIdentity: servedProjectIdentity,
 						entryIds: strictEntryIds,
 						// Use the map produced after commits and splices because those operations
 						// can change the final message-reference to entry-ID mapping.

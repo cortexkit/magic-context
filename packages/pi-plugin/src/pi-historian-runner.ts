@@ -56,7 +56,11 @@ import {
 } from "@magic-context/core/features/magic-context/memory";
 import { tsOwnsMemory } from "@magic-context/core/features/magic-context/memory/lifecycle-applier";
 import type { ReportedProfile } from "@magic-context/core/features/magic-context/memory/lifecycle-gates";
-import { resolveProjectIdentityForSession } from "@magic-context/core/features/magic-context/memory/project-identity";
+import {
+	backgroundSessionProjectIdentity,
+	resolveSessionProjectIdentity,
+	UnprovenCachedProjectOwnerError,
+} from "@magic-context/core/features/magic-context/memory/session-identity-decision";
 import { getMemoriesByProject } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
 	allocateTurnOneSend,
@@ -91,6 +95,7 @@ import {
 	tallyFactsByCategory,
 } from "@magic-context/core/features/magic-context/storage-historian-runs";
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
+import { readSessionMeta } from "@magic-context/core/features/magic-context/storage-meta-session";
 import { insertPrimerCandidates } from "@magic-context/core/features/magic-context/storage-primers";
 import { getLatestHistorianInvocationId } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
 import { insertUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
@@ -807,20 +812,41 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// reading the chunk: the fixed prompt parts and the output reserve come
 			// off the window first, and the chunk gets what is left. The window is
 			// resolved the way the dispatch guard resolves it for the primary model.
-			const projectPath = resolveProjectIdentityForSession(
-				directory,
-				allowHomeProject,
-			);
+			let projectPath: string | undefined;
+			let historyProjectPath: string | undefined;
+			try {
+				projectPath = await resolveSessionProjectIdentity(
+					sessionId,
+					directory,
+					{
+						db,
+						allowHomeProject,
+					},
+				);
+				historyProjectPath = projectPath;
+			} catch (error) {
+				if (!(error instanceof UnprovenCachedProjectOwnerError)) throw error;
+				sessionLog(sessionId, error.refusal("historian", "memory extraction"));
+				historyProjectPath = backgroundSessionProjectIdentity(
+					db,
+					sessionId,
+					readSessionMeta(db, sessionId),
+					memoryEnabled,
+					error.nonMemoryProjectIdentity,
+				);
+			}
+			// History publication is session-local; only project-memory work needs an owner.
+			const projectMemoryEnabled =
+				projectPath !== undefined && memoryEnabled !== false;
 			// On an `enabled` turn-one lane (see `TurnOneLane`) with memory on, the
 			// historian gets no project-memory block and anchors every fact to its
 			// source lines; the anchor is stored with the fact's candidate row, and a
 			// later reconcile step compares the fact with existing memory instead.
 			const rpcRunner = isPiRpcHistorianRunner(runner) ? runner : null;
 			const turnOneLane = resolveTurnOneLane(
-				rpcRunner ? deps.memoryLifecycleLane : "dormant",
+				rpcRunner && projectPath ? deps.memoryLifecycleLane : "dormant",
 			);
-			const anchoredFacts =
-				turnOneLane === "enabled" && memoryEnabled !== false;
+			const anchoredFacts = turnOneLane === "enabled" && projectMemoryEnabled;
 			const fitModelKey = piModelRefToCanonical(historianModel ?? "");
 			const fitContext = fitModelKey
 				? resolveProducerContextLimit(fitModelKey)
@@ -870,12 +896,14 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					priorCompartments,
 				),
 				memories: () =>
-					projectPath && !anchoredFacts
+					projectMemoryEnabled && projectPath && !anchoredFacts
 						? getMemoriesByProject(db, projectPath, ["active", "permanent"])
 						: [],
-				memoryEnabled: memoryEnabled !== false,
+				memoryEnabled: projectMemoryEnabled,
 				anchoredFacts,
-				userObservationsRequested,
+				userObservationsRequested: projectPath
+					? userObservationsRequested
+					: false,
 			});
 			if (!promptFit.ok) {
 				telemetry.failureReason = promptFit.reason;
@@ -996,13 +1024,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				return;
 			}
 
-			if (!projectPath) {
-				telemetry.status = "noop";
-				telemetry.failureReason = "project path unavailable";
-				rollbackDrainReservation();
-				return;
-			}
-
 			// v2 (E6 parity): bounded reference blocks replace the unbounded
 			// existing-state dump: 3 seeds + 3 diverse older + 4 recent session
 			// examples. Recent scores are hidden to prevent anchoring in
@@ -1064,9 +1085,11 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				sessionReferences: promptFit.sessionReferences,
 				projectMemory: anchoredFacts ? "" : promptFit.projectMemory,
 				inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunkText}`,
-				memoryEnabled: memoryEnabled !== false,
+				memoryEnabled: projectMemoryEnabled,
 				anchoredFacts,
-				userObservationsRequested,
+				userObservationsRequested: projectPath
+					? userObservationsRequested
+					: false,
 			});
 
 			// Defensive: use MAX(sequence) + 1 over .length to survive any old
@@ -1154,17 +1177,18 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// fails before publishing leaves the id for the session's next run, so one
 			// chunk's candidates and activity are published under one id however many
 			// sends it takes.
-			let turnOneSend: TurnOneSend;
+			let turnOneSend: TurnOneSend | undefined;
 			try {
-				turnOneSend = allocateTurnOneSend(db, {
-					projectPath,
-					sessionId,
-					harness: resolvePiHarnessKind(),
-					carrier: turnOneLane === "enabled" ? PI_RPC_CARRIER : "pi-subagent",
-					lane: turnOneLane,
-					chunkStart: chunk.startIndex,
-					chunkEnd: chunk.endIndex,
-				});
+				if (projectPath)
+					turnOneSend = allocateTurnOneSend(db, {
+						projectPath,
+						sessionId,
+						harness: resolvePiHarnessKind(),
+						carrier: turnOneLane === "enabled" ? PI_RPC_CARRIER : "pi-subagent",
+						lane: turnOneLane,
+						chunkStart: chunk.startIndex,
+						chunkEnd: chunk.endIndex,
+					});
 			} catch (error) {
 				if (!isTransientSqliteError(error)) throw error;
 				// The store stayed busy past its timeout before anything was sent. This
@@ -1187,8 +1211,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				deps.language,
 				{ preserveUserQuotes: true },
 			);
+			const turnOneStageKey = turnOneSend?.stageKey;
 			const publicationRunner: SubagentRunner =
-				turnOneLane === "enabled" && rpcRunner
+				turnOneLane === "enabled" && rpcRunner && turnOneStageKey
 					? {
 							harness: runner.harness,
 							run: async (options) => {
@@ -1204,7 +1229,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 								};
 								const reply = await rpcRunner.runRetainedHistorian(
 									guarded,
-									turnOneSend.stageKey,
+									turnOneStageKey,
 								);
 								if (reply.child && reply.result.ok) {
 									retained = {
@@ -1214,7 +1239,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 									};
 									db.prepare(
 										"UPDATE memory_stage_attempts SET child_session_id=? WHERE stage_key=?",
-									).run(reply.child.id, turnOneSend.stageKey);
+									).run(reply.child.id, turnOneStageKey);
 								} else await reply.child?.close();
 								return reply.result;
 							},
@@ -1604,7 +1629,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// Writing facts as memories requires the memory feature AND auto_promote
 			// (parity with OpenCode). History embedding below is NOT gated here: it
 			// depends only on the embedding provider, which the embed call checks.
-			const promotionActive = memoryEnabled !== false && autoPromote !== false;
+			const promotionActive = projectMemoryEnabled && autoPromote !== false;
 
 			// Events: stored, NOT rendered. Best-effort. discard-last: drop events
 			// anchored to the discarded provisional compartment.
@@ -1699,7 +1724,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				//   in the same transaction as the protected-tail publication floor, so
 				//   both commit or both roll back. A promoted memory reaches the agent at
 				//   the session's next HARD rebuild of its memory block.
-				const memoryAuthorityHere = tsOwnsMemory(db, projectPath);
+				const memoryAuthorityHere = projectPath
+					? tsOwnsMemory(db, projectPath)
+					: false;
 				const keptFacts: TurnOneFact[] = publishedFacts(
 					validatedPass.facts ?? [],
 					newCompartments.length,
@@ -1708,41 +1735,45 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				);
 				const candidateFacts =
 					turnOneLane === "enabled"
-						? memoryEnabled !== false
+						? projectMemoryEnabled
 							? keptFacts
 							: []
 						: promotionActive && !memoryAuthorityHere
 							? keptFacts
 							: [];
-				const turnOnePublication = commitTurnOnePublication(db, {
-					send: turnOneSend,
-					projectPath,
-					sessionId,
-					compartments: durableRows.map((row, index) => ({
-						id: row.id,
-						startMessage: row.startMessage,
-						endMessage: row.endMessage,
-						replyStartMessage: newCompartments[index]?.startMessage ?? -1,
-						replyEndMessage: newCompartments[index]?.endMessage ?? -1,
-					})),
-					blocks:
-						turnOneLane === "enabled"
-							? blocksSentToHistorian(
-									chunk.printedBlocks,
-									chunk.text,
-									chunkText,
-								)
-							: [],
-					candidateFacts,
-					honourAnchors: turnOneLane === "enabled",
-				});
-				if (turnOnePublication.candidatesInserted > 0) {
+				const turnOnePublication =
+					projectPath && turnOneSend
+						? commitTurnOnePublication(db, {
+								send: turnOneSend,
+								projectPath,
+								sessionId,
+								compartments: durableRows.map((row, index) => ({
+									id: row.id,
+									startMessage: row.startMessage,
+									endMessage: row.endMessage,
+									replyStartMessage: newCompartments[index]?.startMessage ?? -1,
+									replyEndMessage: newCompartments[index]?.endMessage ?? -1,
+								})),
+								blocks:
+									turnOneLane === "enabled"
+										? blocksSentToHistorian(
+												chunk.printedBlocks,
+												chunk.text,
+												chunkText,
+											)
+										: [],
+								candidateFacts,
+								honourAnchors: turnOneLane === "enabled",
+							})
+						: undefined;
+				if (turnOnePublication && turnOnePublication.candidatesInserted > 0) {
 					sessionLog(
 						sessionId,
 						`historian turn one: recorded ${turnOnePublication.candidatesInserted} candidate fact(s) (${turnOnePublication.anchoredCandidates} anchored, ${turnOnePublication.blocksStored} block(s))${turnOnePublication.authorityElsewhere ? "; memory authority is the module" : ""}`,
 					);
 				}
 				if (
+					projectPath &&
 					turnOneLane === "dormant" &&
 					memoryAuthorityHere &&
 					promotionActive &&
@@ -1856,6 +1887,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// Gated on the user-memory feature so opted-out users never have
 			// behavioral candidates persisted (privacy parity with OpenCode).
 			if (
+				projectPath &&
 				userMemoriesEnabled === true &&
 				!skipUnanchoredPromotion &&
 				validatedPass.userObservations?.length
@@ -1943,7 +1975,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// Raw chunk embeddings: the ctx_search semantic substrate over session
 			// history. Fire-and-forget, best-effort, gated only by the embedding
 			// provider (`memory.enabled` does not affect it).
-			if (newCompartments.length > 0) {
+			if (historyProjectPath && newCompartments.length > 0) {
 				const chunksToEmbed = newCompartments
 					.map((c, i) => ({
 						id: persistedIds[i],
@@ -1963,12 +1995,13 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						);
 					}
 					try {
-						await embedPromotedFacts(
-							db,
-							sessionId,
-							projectPath,
-							promotedFactRefs,
-						);
+						if (projectPath)
+							await embedPromotedFacts(
+								db,
+								sessionId,
+								projectPath,
+								promotedFactRefs,
+							);
 					} catch (error) {
 						sessionLog(
 							sessionId,
@@ -1980,7 +2013,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						await embedAndStoreCompartmentChunks(
 							db,
 							sessionId,
-							projectPath,
+							historyProjectPath,
 							chunksToEmbed,
 						);
 					} catch (error) {
@@ -2022,7 +2055,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				telemetry.importanceAvg = imp.avg;
 				telemetry.discardedLast = discardedLast;
 			}
-			if (published && retained && rpcRunner) {
+			if (published && retained && rpcRunner && projectPath && turnOneSend) {
 				const child = retained as {
 					child: PiRpcHistorianChild;
 					options: SubagentRunOptions;
@@ -2037,7 +2070,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					runner: rpcRunner,
 					options: child.options,
 					turnOneText: child.text,
-					memoryEnabled: memoryEnabled !== false,
+					memoryEnabled: projectMemoryEnabled,
 					autoPromote: autoPromote !== false,
 					validatedProfiles: deps.validatedProfiles ?? [],
 					readExcerpt: (sourceSession, from, to) =>

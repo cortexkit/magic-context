@@ -5,6 +5,7 @@ import type { UnifiedSearchResult } from "@magic-context/core/features/magic-con
 import {
 	appendAutoSearchHintDecision,
 	getAutoSearchHintDecisions,
+	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import {
 	createAutoSearchReplayFixture,
@@ -42,6 +43,43 @@ const baseOptions = {
 	embeddingEnabled: false,
 	gitCommitsEnabled: false,
 };
+
+for (const owner of ["pj-SERVED", null]) {
+	it(`automatic recall uses ${owner ?? "history-only scope for an unknown owner"} instead of pending memory`, async () => {
+		const db = createTestDb();
+		const sessionId = `pi-recall-owner-${owner}`;
+		updateSessionMeta(db, sessionId, {
+			cachedM0Bytes: Buffer.from("served prefix"),
+			cachedM0ProjectIdentity: owner,
+		});
+		const snapshot = spyOn(
+			embeddingModule,
+			"getProjectEmbeddingSnapshot",
+		).mockReturnValue(autoSearchTestSnapshot(owner ?? "pj-PENDING"));
+		const search = spyOn(searchModule, "searchAutoHint").mockResolvedValue([]);
+		try {
+			await runAutoSearchHintForPi({
+				db,
+				sessionId,
+				messages: [userMessage(replayPrompt, 1)],
+				entryIds: ["new-user"],
+				options: { ...baseOptions, projectPath: "pj-PENDING" },
+			});
+			expect(search).toHaveBeenCalledTimes(1);
+			const [, , projectPath, , options] = search.mock.calls[0];
+			expect(projectPath).toBe(owner ?? "pj-PENDING");
+			expect(options.memoryEnabled).toBe(owner !== null);
+			expect(options.sources).toEqual(
+				owner ? ["memory", "message", "git_commit"] : ["message", "git_commit"],
+			);
+		} finally {
+			clearAutoSearchForPiSession(sessionId);
+			search.mockRestore();
+			snapshot.mockRestore();
+			closeQuietly(db);
+		}
+	});
+}
 
 function memoryResult(
 	score = 0.9,

@@ -661,7 +661,7 @@ export interface PiM0SnapshotMarkers {
 	systemHash: string;
 	modelKey: string;
 	// Pi sessions can switch projects in-process (`/cd`). NULL on legacy cached
-	// rows means unknown/lazy-adopted and must not force a HARD fold by itself.
+	// rows means unknown and must not force a HARD fold by itself.
 	projectIdentity: string | null;
 	muralEnabled: boolean;
 	renderBudgetIdentity: string;
@@ -1334,7 +1334,7 @@ export function mustMaterializePi(
 		);
 	}
 	// Pi can switch projects within the same session (`/cd`). Legacy cached rows
-	// have a NULL marker: treat that as unknown/MATCH for lazy adoption so the
+	// have a NULL marker: treat that as unknown/MATCH so the
 	// first post-upgrade no-switch pass does not HARD-fold existing sessions.
 	if (
 		meta.cachedM0ProjectIdentity !== null &&
@@ -2723,18 +2723,6 @@ function cachedPiRowMatchesSnapshot(args: {
 	);
 }
 
-function adoptCachedPiProjectIdentity(
-	db: ContextDatabase,
-	state: PiM0M1State,
-): void {
-	// A fully cached prefix outside a project must not acquire a writer just to
-	// replace its NULL identity with another NULL identity during defer replay.
-	if (state.projectIdentity == null) return;
-	db.prepare(
-		"UPDATE session_meta SET cached_m0_project_identity = ? WHERE session_id = ? AND cached_m0_project_identity IS NULL",
-	).run(state.projectIdentity, state.sessionId);
-}
-
 function decodeCachedM1(row: CachedPiM0M1Row, sessionId: string): string {
 	if (!row.cached_m1_bytes) {
 		throw new PiMaterializeContentionError(
@@ -2861,7 +2849,13 @@ function softRefreshCachedM1Pi(args: {
 			markers.maxMemoryId,
 		);
 		const m0Text = decodeCachedM0(row.cached_m0_bytes) ?? "";
-		const projectPath = memoryProjectPath(args.state);
+		const softState = {
+			...args.state,
+			projectIdentity: markers.projectIdentity ?? "",
+			memoryEnabled:
+				markers.projectIdentity !== null && args.state.memoryEnabled !== false,
+		};
+		const projectPath = memoryProjectPath(softState);
 		// A cached pair with no applied tuple for these m[0] bytes (written before
 		// projections existed) replays its own cached memory blocks; nothing is
 		// reconstructed from memory rows.
@@ -2879,7 +2873,7 @@ function softRefreshCachedM1Pi(args: {
 				decodeCachedM0(row.cached_m1_bytes) ?? "",
 			);
 		const soft = renderSoftM1Pi(
-			args.state,
+			softState,
 			args.db,
 			markers,
 			projection,
@@ -3286,11 +3280,6 @@ export function injectM0M1Pi(
 			`missing m[0] markers for ${state.sessionId}`,
 		);
 	}
-	if (!materialized && markers.projectIdentity === null) {
-		adoptCachedPiProjectIdentity(db, state);
-		markers = { ...markers, projectIdentity: state.projectIdentity };
-	}
-
 	if (materialized) {
 		// m[1] was rendered and persisted atomically inside materializeM0Pi.
 	} else if (contentionExhausted && freshFallbackRenderedMemoryIds) {
