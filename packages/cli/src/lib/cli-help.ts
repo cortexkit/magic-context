@@ -73,6 +73,8 @@ export const DOCTOR_HELP = [
     "    merge-identities            Preview or explicitly merge split identities",
     "    project-ids plan            Plan registered project identity cutover online",
     "    project-ids apply --check   Check cutover preconditions offline (no writes)",
+    "    history heal plan          Plan standalone OpenCode 1 history repairs (read-only)",
+    "    history heal apply         Apply a checked plan with hosts stopped and paired backups",
     "    repair-db                   Back up and salvage a corrupted shared database",
     "    git-fts-map                 Diagnose git FTS inventory; --repair backs up both stores offline",
     "    list-hidden-sessions        List Magic Context OpenCode 2 roots",
@@ -138,6 +140,19 @@ export const PROJECT_IDS_HELP = [
     "",
 ].join("\n");
 
+export const HISTORY_HEAL_HELP = [
+    "",
+    "  Usage: magic-context doctor history heal plan [--session id]... [--db context.db] --host-db opencode.db",
+    "         magic-context doctor history heal apply [--check] <plan>",
+    "",
+    "  Repair standalone OpenCode 1 history; never relaxes ck-mc move admission.",
+    "  Plan writes a JSON manifest beside context.db, with before/after values and named refusals.",
+    "  Apply requires closed hosts, ck-mc and dashboard, and backs up BOTH stores first.",
+    "  --check re-plans without writes. Reapplying an unchanged completed plan is a no-op.",
+    "  Gap repairs queue partial recomp work for the next normal historian run.",
+    "",
+].join("\n");
+
 /**
  * The help text for `argv` when it asks for help, or null when it does not or
  * when the named subcommand prints its own help.
@@ -152,6 +167,7 @@ export function subcommandHelp(argv: readonly string[]): string | null {
         return "Usage: magic-context doctor store init\n\nCreate context.db at the current schema fence. Existing stores are reported without changes.\nHonours XDG_DATA_HOME and MAGIC_CONTEXT_STORAGE_DIR; no harness is required.";
     if (subcommand === "single-store") return SINGLE_STORE_HELP;
     if (subcommand === "project-ids") return PROJECT_IDS_HELP;
+    if (subcommand === "history") return HISTORY_HEAL_HELP;
     if (subcommand === "merge-identity" || subcommand === "merge-identities")
         return MERGE_IDENTITY_HELP;
     if (subcommand === "list-hidden-sessions") return LIST_HIDDEN_SESSIONS_HELP;

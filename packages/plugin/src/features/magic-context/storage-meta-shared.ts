@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { getHarness, type HarnessId } from "../../shared/harness";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { type Database, prepareCachedStatement, type Statement } from "../../shared/sqlite";
-import { clearSessionRenderCache, writeSessionRenderCache } from "./storage-session-cache";
+import { SESSION_RENDER_CACHE_COLUMNS, writeSessionRenderCache } from "./storage-session-cache";
 import { writeSessionMetaCollection } from "./storage-session-collections";
 import type { SessionMeta } from "./types";
 
@@ -589,7 +589,10 @@ export function clearCachedM0M1(db: Database, sessionId: string): void {
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
         if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'session_render_cache'").get())
-            clearSessionRenderCache(db, sessionId);
+            // Cache eviction must not discard session-scoped repair work stored beside the payloads.
+            db.prepare(
+                `DELETE FROM session_render_cache WHERE session_id=? AND cache_key IN (${SESSION_RENDER_CACHE_COLUMNS.map(() => "?").join(",")})`,
+            ).run(sessionId, ...SESSION_RENDER_CACHE_COLUMNS);
         const existingColumns = new Set(
             (db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>).map(
                 (column) => column.name,

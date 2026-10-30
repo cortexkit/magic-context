@@ -27,7 +27,7 @@ import { updateCompactionMarkerAfterPublication } from "./compaction-marker-mana
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
 import { promoteRecompStagingWithM0Mutation } from "./compartment-runner-recomp";
-import type { CandidateCompartment, CompartmentRunnerDeps } from "./compartment-runner-types";
+import type { CandidateCompartment, HiddenCompartmentRunnerDeps } from "./compartment-runner-types";
 import {
     getReducedRecompTokenBudget,
     validateChunkCoverage,
@@ -135,8 +135,9 @@ function compartmentToInput(c: Compartment, newSequence: number): CompartmentInp
 }
 
 export async function executePartialRecompInternal(
-    deps: CompartmentRunnerDeps,
+    deps: HiddenCompartmentRunnerDeps,
     range: PartialRecompRange,
+    options: { preserveCachedPrefix?: boolean } = {},
 ): Promise<string> {
     const {
         client,
@@ -322,7 +323,9 @@ export async function executePartialRecompInternal(
             // Save a final staging pass containing prior + new + tail. Promote
             // replaces the real tables atomically with this set.
             saveRecompStagingPass(db, sessionId, passCount + 1, merged, stagedFacts);
-            const promoted = promoteRecompStagingWithM0Mutation(db, sessionId, leaseHolderId);
+            const promoted = promoteRecompStagingWithM0Mutation(db, sessionId, leaseHolderId, {
+                preserveCachedM0M1: options.preserveCachedPrefix,
+            });
             if (!promoted) {
                 log("[magic-context] partial recomp promote returned null");
                 return null;
@@ -333,7 +336,10 @@ export async function executePartialRecompInternal(
             // Reset depth counters for rebuilt range so fresh compartments start
             // at depth 0. Prior/tail depth is preserved.
             clearCompressionDepthRange(db, sessionId, snapStart, snapEnd);
-            if (deps.preserveInjectionCacheUntilConsumed !== true) {
+            if (
+                !options.preserveCachedPrefix &&
+                deps.preserveInjectionCacheUntilConsumed !== true
+            ) {
                 clearInjectionCache(sessionId);
             }
             deps.onCompartmentStatePublished?.(sessionId);
@@ -372,7 +378,7 @@ export async function executePartialRecompInternal(
             // the marker directly here AND CAS-clear any stale pending blob a
             // prior in-flight incremental publish may have left behind — partial
             // recomp now owns the boundary up to lastEnd.
-            if (lastEnd > 0) {
+            if (lastEnd > 0 && !options.preserveCachedPrefix) {
                 const markerUpdated = (
                     deps.compactionMarkerStrategy?.publish ?? updateCompactionMarkerAfterPublication
                 )(db, sessionId, lastEnd, deps.directory);
