@@ -4,11 +4,13 @@ import { createHash } from "node:crypto";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getMagicContextStorageDir } from "../../../shared/data-path";
+import { setHarness } from "../../../shared/harness";
 import { Database } from "../../../shared/sqlite";
 import { createTestTempDir } from "../../../shared/test-temp-dir";
 import { createCtxMemoryTools } from "../../../tools/ctx-memory";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
+import { updateSessionMeta } from "../storage-meta-session";
 import {
     __resetProjectIdentityForTests,
     __setProjectIdentityTestHooks,
@@ -22,14 +24,18 @@ import {
     __resetSessionIdentityDecisionsForTests,
     resolveSessionProjectIdentity,
 } from "./session-identity-decision";
+import { getMemoryById, insertMemory } from "./storage-memory";
 
 let temp: ReturnType<typeof createTestTempDir>;
 let db: Database;
 let storage: string;
+let previousCwd: string;
 const originalDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 const originalDataHome = process.env.XDG_DATA_HOME;
 
 beforeEach(() => {
+    setHarness("opencode");
+    previousCwd = process.cwd();
     temp = createTestTempDir("mc-identity-review-");
     process.env.MAGIC_CONTEXT_TEST_DATA_DIR = temp.dir;
     process.env.XDG_DATA_HOME = temp.dir;
@@ -44,6 +50,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+    process.chdir(previousCwd);
     await __setProjectPinWriterForTests();
     __resetProjectIdentityForTests();
     __resetSessionIdentityDecisionsForTests();
@@ -103,6 +110,60 @@ async function writeProject(directory: string, sessionID: string): Promise<strin
     expect(row, result).not.toBeNull();
     return row!.project_path;
 }
+
+test.each([
+    "update",
+    "archive",
+] as const)("OpenCode 1 ctx_memory %s logs the served pj- owner", async (action) => {
+    const projectPath = "pj-served-owner";
+    const sessionID = `ses-served-${action}`;
+    // Make accidental path resolution observable instead of a caught missing-path error.
+    mkdirSync(join(temp.dir, projectPath));
+    process.chdir(temp.dir);
+    db.exec(`
+        INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (1, 'served-owner', 1, 1);
+        INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+        VALUES (1, 'pj-served-owner', 'Served', '/served', 1), (1, 'pj-other-owner', 'Other', '/other', 1);
+    `);
+    updateSessionMeta(db, sessionID, {
+        cachedM0Bytes: Buffer.from("<project-memory>Served memory block</project-memory>"),
+        cachedM0ProjectIdentity: projectPath,
+        cachedM0MaterializedAt: 1,
+    });
+    expect(await resolveSessionProjectIdentity(sessionID, temp.dir, { db })).toBe(projectPath);
+    const memory = insertMemory(db, {
+        projectPath,
+        category: "USER_DIRECTIVES",
+        content: "Original served memory.",
+    });
+    const tool = createCtxMemoryTools({
+        db,
+        resolveProjectPath: (folder, session) =>
+            resolveSessionProjectIdentity(session, folder, { db }),
+        memoryEnabled: true,
+        embeddingEnabled: false,
+    }).ctx_memory!;
+    const result = await tool.execute(
+        {
+            action,
+            ids: [memory.id],
+            ...(action === "update" ? { content: "Updated served memory." } : {}),
+        },
+        { sessionID, directory: temp.dir, agent: "build" } as never,
+    );
+    expect(result).not.toStartWith("Error:");
+    expect(getMemoryById(db, memory.id)?.projectPath).toBe(projectPath);
+    if (action === "update")
+        expect(getMemoryById(db, memory.id)?.content).toBe("Updated served memory.");
+    expect(getMemoryById(db, memory.id)?.status).toBe(action === "archive" ? "archived" : "active");
+    expect(
+        db
+            .prepare(
+                "SELECT project_path, mutation_type, target_memory_id FROM memory_mutation_log",
+            )
+            .all(),
+    ).toEqual([{ project_path: projectPath, mutation_type: action, target_memory_id: memory.id }]);
+});
 
 test("review: a persisted local publication must not shadow another process's replacement for new writes", async () => {
     const { main, worktree } = linked("main");

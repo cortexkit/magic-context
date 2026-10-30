@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
+import { isResolvedProjectId } from "../../../shared/resolved-project-id";
 import type { Database } from "../../../shared/sqlite";
 import { loadAllEmbeddings, type StoredMemoryEmbedding } from "./storage-memory-embeddings";
 
@@ -48,10 +49,9 @@ export function getProjectEmbeddings(
     // Checking it reloads vectors changed by another process without treating unrelated
     // database writes as a reason to reload. Other processes' automated edits and
     // re-embedding expire via the 60-second TTL; local writes evict affected vectors directly.
-    const epochProject =
-        projectPath.startsWith("git:") || projectPath.startsWith("dir:")
-            ? projectPath
-            : `dir:${createHash("md5").update(resolve(projectPath)).digest("hex").slice(0, 12)}`;
+    const epochProject = isResolvedProjectId(projectPath)
+        ? projectPath
+        : `dir:${createHash("md5").update(resolve(projectPath)).digest("hex").slice(0, 12)}`;
     const { projectMemoryEpoch } = db
         .prepare(PROJECT_EMBEDDING_CACHE_EPOCH_SQL)
         .get(epochProject) as { projectMemoryEpoch: number };

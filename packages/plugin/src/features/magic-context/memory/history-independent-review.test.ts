@@ -19,14 +19,13 @@ import { applyCurateMemoryMutation } from "./lifecycle-applier";
 import { insertMemory } from "./storage-memory";
 import { saveEmbedding } from "./storage-memory-embeddings";
 
-function fixture() {
+function fixture(projectPath = "git:independent-review") {
     const { dir, cleanup } = createTestTempDir("independent-history-review-");
     const path = join(dir, "context.db");
     const db = new Database(path);
     initializeDatabase(db);
     runMigrations(db);
     db.exec("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE");
-    const projectPath = "git:independent-review";
     const row = insertMemory(db, {
         projectPath,
         category: "CONFIG_VALUES",
@@ -171,8 +170,11 @@ test("review SIGKILL between canonical writes and receipt leaves a retryable ato
     }
 });
 
-test("review dashboard epoch advances exactly once per edit and not on replay or automation", () => {
-    const f = fixture();
+test.each([
+    "git:independent-review",
+    "pj-independent-review",
+])("review dashboard epoch for %s advances exactly once per edit and not on replay or automation", (projectPath) => {
+    const f = fixture(projectPath);
     try {
         const epoch = () =>
             (

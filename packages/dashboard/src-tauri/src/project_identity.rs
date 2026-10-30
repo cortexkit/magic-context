@@ -71,7 +71,7 @@ pub fn normalize_stored_project_path(raw_or_stored: &str) -> String {
 }
 
 pub fn is_project_identity(value: &str) -> bool {
-    value.starts_with("git:") || value.starts_with("dir:") || value.starts_with("pj-")
+    mc_store::is_resolved_project_id(value)
 }
 
 pub fn basename(path: &str) -> String {

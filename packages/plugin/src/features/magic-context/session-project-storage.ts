@@ -1,5 +1,6 @@
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getHarness, type HarnessId } from "../../shared/harness";
+import { isResolvedProjectId } from "../../shared/resolved-project-id";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { isUserHomeDirectory } from "./memory/project-identity";
 import type { SessionMeta } from "./types";
@@ -177,13 +178,7 @@ export function recordSessionProjectIdentity(
     // A session started exactly at the user's home directory is not a project.
     // The guard is repeated here because background backfills can call this
     // function without passing through the transform resolver.
-    if (
-        !projectPath.startsWith("git:") &&
-        !projectPath.startsWith("dir:") &&
-        !projectPath.startsWith("pj-") &&
-        isUserHomeDirectory(projectPath)
-    )
-        return;
+    if (!isResolvedProjectId(projectPath) && isUserHomeDirectory(projectPath)) return;
     const now = Date.now();
     let previousProjectPath: string | undefined;
     db.transaction(() => {
