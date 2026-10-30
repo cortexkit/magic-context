@@ -365,9 +365,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-llm-runner"
-version = "0.7.28"
+version = "0.7.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "535fe35dc1653b9885d054b98086c0ccdafab7a0951228189d049ef7f748d40f"
+checksum = "545892e9828d7bd613ec8f026381750f4f0f53b368acf3945524caf7c23512a3"
 dependencies = [
  "cortexkit-rich-ui-syntax",
  "serde",
@@ -378,9 +378,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-llm-runner-conformance"
-version = "0.15.32"
+version = "0.15.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a271c811565d93a3be81efaef6aefdaf1570ad08615988691ce352be9a3e083"
+checksum = "869bb3d1521c9a0756d13e08420c487bb43c91880a964d6eba8a4d60ee73fbae"
 dependencies = [
  "async-trait",
  "base64",
@@ -598,7 +598,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1597,7 +1597,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2142,7 +2142,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2555,7 +2555,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
