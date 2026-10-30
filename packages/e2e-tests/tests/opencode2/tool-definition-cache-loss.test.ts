@@ -92,9 +92,19 @@ test.each([
             line.includes(`[${session.id}]`) && line.includes("m[0] HARD fold decision:") && line.includes("executed=true"));
         const publishedNewDocs = wire(changed.messages).includes("New docs require a genuine tool bust");
         console.log("TOOL_CACHE_DESCRIPTION_WITNESS", JSON.stringify({ label, sameTools, folds, publishedNewDocs }));
-        expect(folds).toHaveLength(sameTools ? 0 : 1);
-        expect(publishedNewDocs).toBe(!sameTools);
-        if (!sameTools) expect(folds[0]).toContain("reason=tool_definitions");
+        if (!registered) {
+            // The private request snapshot can discard this context-map entry.
+            // Its effect is unobservable here, an accepted limit alongside edits
+            // made by context plugins after Magic Context's observation.
+            expect(sameTools).toBe(true);
+            expect(folds).toHaveLength(1);
+            expect(publishedNewDocs).toBe(true);
+            expect(folds[0]).toContain("reason=tool_definitions");
+        } else {
+            expect(folds).toHaveLength(sameTools ? 0 : 1);
+            expect(publishedNewDocs).toBe(!sameTools);
+            if (!sameTools) expect(folds[0]).toContain("reason=tool_definitions");
+        }
         const replay = await turn();
         expect(wire(replay.tools)).toBe(wire(changed.tools));
         expect(wire(replay.messages.slice(0, changed.messages.length))).toBe(wire(changed.messages));

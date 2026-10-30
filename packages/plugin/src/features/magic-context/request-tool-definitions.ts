@@ -14,8 +14,10 @@ const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value
  * The cache policy observes only the context hook's set of tool names and
  * descriptions. Schemas and tool ordering do not grant a rebuild opportunity:
  * the host may normalize schemas, and registration order is not a tool change.
- * Changes made by later context hooks are outside this observation window; that
- * limit is intentionally accepted rather than guessing their final output.
+ * OpenCode's per-request acceptance set is private; tool.list() exposes the
+ * unfiltered registry, not that snapshot. Plugin-injected entries later dropped
+ * by the host can therefore still change this identity. That limit, like changes
+ * made by later context hooks, is an accepted observation-window boundary.
  * Store per-tool digests beside the aggregate hash (never whole definitions), so
  * even after a restart the fold log can identify the first differing tool.
  */

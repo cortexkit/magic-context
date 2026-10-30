@@ -7,7 +7,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import todoRideGolden from "../../../../../crates/mc-module/testdata/todo-ride-only.json";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
-import { v2ToolDefinitionsHash } from "../../features/magic-context/request-tool-definitions";
 import * as embeddingModule from "../../features/magic-context/memory/embedding";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
@@ -16,6 +15,7 @@ import {
     getProtectionWindowForSession,
 } from "../../features/magic-context/protection-window";
 import { protectedToolTagNumbers } from "../../features/magic-context/reclaim-protection";
+import { v2ToolDefinitionsHash } from "../../features/magic-context/request-tool-definitions";
 import {
     addNote,
     addProcessedImageStrippedIds,
