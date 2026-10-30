@@ -105,6 +105,16 @@ test("host folding is disabled at zero, below threshold or without the native ca
     expect(f.logs).toEqual([]);
 });
 
+test("an evicted native capture still folds after idle expiry and reports capture absent", async () => {
+    const f = fixture();
+    f.deps.canReplay = async () => false;
+    await new HostFoldPolicy(f.deps).idle("s");
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]!.delivery).toBe("queue");
+    expect(f.logs).toHaveLength(1);
+    expect(f.logs[0]).toContain("capture=absent status=completed");
+});
+
 test("a failed host fold retains its in-process attempt and retries with a new id", async () => {
     const f = fixture();
     f.fail(true);

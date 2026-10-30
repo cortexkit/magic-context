@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { runMigrations } from "../../features/magic-context/migrations";
+import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
 import { nativeFoldCache } from "./memory-cache";
@@ -292,7 +293,7 @@ test("native input copies detach nested tool arguments and message metadata befo
     expect(input[0]!.content[0]!.input).toEqual({ nested: { value: "original" } });
 });
 
-test("an unencodable native asset leaves a servable draft alone and inhibits automatic folding", async () => {
+test("an unencodable native asset leaves a servable draft alone and marks its capture unavailable", async () => {
     const f = fixture();
     const replay = new NativeFoldReplay(f.storage, () => f.reader);
     const native = [user("u", "served")];
@@ -307,4 +308,123 @@ test("an unencodable native asset leaves a servable draft alone and inhibits aut
     await expect(replay.capture(delivered, native)).resolves.toBeUndefined();
     expect(JSON.stringify(delivered)).toBe(before);
     expect(await replay.canReplay("s", f.reader)).toBe(false);
+});
+
+for (const count of [3, 25_000]) {
+    test(`bounded native capture serves the same post-fold bytes as full capture for ${count} rows`, async () => {
+        const f = fixture();
+        f.rows.splice(
+            0,
+            f.rows.length,
+            ...Array.from({ length: count }, (_, i) => ({
+                id: `u${i}`,
+                seq: i + 1,
+                session_id: "s",
+                type: "user" as const,
+                data: { text: `source message ${i}` },
+            })),
+        );
+        f.cut.seq = count + 1;
+        const summary = "already served summary";
+        const native = f.rows.map((row) => user(row.id, row.data.text as string));
+        // The reference retains the complete capture to compare bytes, not to
+        // change the production retention budget of the bounded cache.
+        const fullStorage = nativeFoldCache(f.db, {
+            maxSessionBytes: 256 * 1024 * 1024,
+            maxSessions: 1,
+        });
+        const full = new NativeFoldReplay(fullStorage, () => f.reader);
+        await full.capture(context([user(HEAD_IDS[0], summary), ...native]), native);
+        getOrCreateSessionMeta(f.db, "s");
+        const boundary = count - 2;
+        f.db
+            .prepare(
+                "UPDATE session_meta SET cached_m0_bytes=?, cached_m0_last_baseline_end_message_id=? WHERE session_id=?",
+            )
+            .run(Buffer.from(summary), `u${boundary}`, "s");
+        const bounded = new NativeFoldReplay(f.storage, () => f.reader);
+        await bounded.capture(context([user(HEAD_IDS[0], summary), ...native]), native, {
+            id: `u${boundary}`,
+            summary,
+        });
+        expect(await bounded.baseline("s")).toBe(summary);
+        expect(await bounded.canReplay("s", f.reader)).toBe(true);
+        expect(f.storage.rows("s", -1, count).map((row) => row.id)).toEqual([`u${count - 1}`]);
+        expect(f.storage.usage().bytes).toBeLessThan(16 * 1024 * 1024);
+        for (const replay of [full, bounded]) {
+            await replay.supply({ draft: context([]), reader: f.reader, summary });
+        }
+        const fullRequest = await full.restore("s", f.cut, "p/m", { bounded: true });
+        const boundedRequest = await bounded.restore("s", f.cut, "p/m", { bounded: true });
+        expect(JSON.stringify(boundedRequest)).toBe(JSON.stringify(fullRequest));
+        expect(boundedRequest).toEqual([user(`u${count - 1}`, `source message ${count - 1}`)]);
+        // Rows replaced by the head are still recoverable after an edit or revert.
+        expect((await bounded.restore("s", f.cut, "p/m"))?.map((row) => row.id)).toEqual(
+            native.map((row) => row.id),
+        );
+    });
+}
+
+test("a checkpoint without a native capture restores every source message without loss", async () => {
+    const f = fixture();
+    const replay = new NativeFoldReplay(f.storage, () => f.reader);
+    expect(await replay.baseline("s")).toBeUndefined();
+    const original = JSON.stringify(f.rows);
+    expect(
+        await replay.supply({ draft: context([]), reader: f.reader, summary: "folded source" }),
+    ).toBe(true);
+    const restored = await replay.restore("s", f.cut, "p/m", { bounded: true });
+    expect(restored).toEqual([
+        { id: "u", role: "user", content: [{ type: "text", text: "served" }], metadata: {} },
+        {
+            id: "a",
+            role: "assistant",
+            content: [{ type: "text", text: "unseen final answer" }],
+        },
+    ]);
+    expect(JSON.stringify(f.rows)).toBe(original);
+});
+
+test("an unsummarized tail exceeding the native budget folds and restores without retaining partial history", async () => {
+    const f = fixture();
+    const replay = new NativeFoldReplay(f.storage, () => f.reader);
+    const text = "x".repeat(9 * 1024 * 1024);
+    f.rows[0]!.data.text = text;
+    const native = [user("u", text)];
+    await replay.capture(context([user(HEAD_IDS[0], "head"), ...native]), native);
+    expect(await replay.baseline("s")).toBeUndefined();
+    expect(f.storage.usage().bytes).toBe(0);
+    expect(await replay.supply({ draft: context([]), reader: f.reader, summary: "head" })).toBe(
+        true,
+    );
+    const restored = await replay.restore("s", f.cut, "p/m", { bounded: true });
+    expect(restored?.map((row) => row.id)).toEqual(["u", "a"]);
+    expect(restored?.[0]?.content[0]?.text).toBe(text);
+    expect(restored?.[1]?.content[0]?.text).toBe("unseen final answer");
+    expect(f.storage.usage().bytes).toBe(0);
+});
+
+test("bounded replay closes its source reader when resolving an uncached boundary fails", async () => {
+    const f = fixture();
+    getOrCreateSessionMeta(f.db, "s");
+    f.db
+        .prepare(
+            "UPDATE session_meta SET cached_m0_last_baseline_end_message_id='u' WHERE session_id='s'",
+        )
+        .run();
+    let closed = 0;
+    const reader = {
+        ...f.reader,
+        sequenceForId: () => {
+            throw new Error("source unavailable");
+        },
+        close: () => {
+            closed++;
+        },
+    } as V2StoreReader;
+    const replay = new NativeFoldReplay(f.storage, () => reader);
+    await expect(replay.restore("s", f.cut, "p/m", { bounded: true })).rejects.toThrow(
+        "source unavailable",
+    );
+    expect(closed).toBe(1);
 });

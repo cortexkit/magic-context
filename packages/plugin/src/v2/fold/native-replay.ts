@@ -302,7 +302,11 @@ export class NativeFoldReplay {
         }
         return [...grouped].map(([row, messages]) => this.record(row, messages));
     }
-    async capture(draft: SessionContext, native: readonly V2Message[]): Promise<void> {
+    async capture(
+        draft: SessionContext,
+        native: readonly V2Message[],
+        boundary?: { id: string; summary: string },
+    ): Promise<void> {
         // Capture is optional and runs after a servable transform. Cache trouble
         // cannot undo that transform or turn a usable request into an interruption.
         const release = this.storage.hold(draft.sessionID);
@@ -310,11 +314,20 @@ export class NativeFoldReplay {
             rememberHostMedia(native);
             const reader = this.openReader(draft.sessionID);
             try {
-                const rows = this.records(draft.sessionID, native, reader);
+                let rows = this.records(draft.sessionID, native, reader);
                 const baseline = draft.messages
                     .find((message) => message.id === HEAD_IDS[0])
                     ?.content.find((part) => part.type === "text")?.text;
                 const through = Math.max(-1, ...rows.map((row) => row.seq));
+                // The served history head already replaces these rows. Keep only
+                // its raw tail; edits and cold restores still read the host store.
+                if (boundary && baseline === boundary.summary) {
+                    const after = reader.sequenceForId(draft.sessionID, boundary.id);
+                    if (after !== undefined) {
+                        rows = rows.filter((row) => row.seq > after);
+                        this.storage.replaceRows(draft.sessionID, through, rows);
+                    }
+                }
                 const tail: NativeTail = {
                     model: `${draft.model.providerID}/${draft.model.id}`,
                     sourceSeq: through,
@@ -369,11 +382,16 @@ export class NativeFoldReplay {
         const tail = this.tail(draft.sessionID);
         const running = reader.latestRunningCompaction(draft.sessionID);
         const id = running?.id;
-        if (!id || !tail || tail.model !== `${draft.model.providerID}/${draft.model.id}`)
-            return false;
+        const model = `${draft.model.providerID}/${draft.model.id}`;
+        if (!id || (tail && tail.model !== model)) return false;
         const through = reader.latestSequence(draft.sessionID);
-        const after = this.dirty.has(draft.sessionID) ? -1 : tail.sourceSeq;
-        const fresh = reader.range(draft.sessionID, after, through).filter(conversational);
+        const after = this.dirty.has(draft.sessionID) ? -1 : (tail?.sourceSeq ?? through);
+        // An evicted capture is not missing history: the host store remains the
+        // source of truth. Admit the checkpoint without copying the whole session
+        // back into the cache; restore reads the required rows on the next turn.
+        const fresh = tail
+            ? reader.range(draft.sessionID, after, through).filter(conversational)
+            : [];
         const records = fresh.map((row) => this.record(row, this.rendered(row, draft.model)));
         if (this.dirty.has(draft.sessionID))
             this.storage.replaceRows(draft.sessionID, through, records);
@@ -381,7 +399,9 @@ export class NativeFoldReplay {
             draft.sessionID,
             JSON.stringify({
                 ...tail,
-                sourceSeq: Math.max(tail.sourceSeq, ...fresh.map((row) => row.seq)),
+                model,
+                baseline: tail?.baseline ?? summary,
+                sourceSeq: Math.max(tail?.sourceSeq ?? through, ...fresh.map((row) => row.seq)),
             }),
             records,
         );
@@ -445,27 +465,33 @@ export class NativeFoldReplay {
         const tail = this.tail(sessionID);
         if (tail && tail.model !== model) this.invalidate(sessionID);
         let after = options.after ?? -1;
-        if (options.bounded && options.after === undefined && !this.changed.has(sessionID)) {
-            const state = getOrCreateSessionMeta(this.storage.db, sessionID);
-            const max = this.storage.db
-                .prepare("SELECT COALESCE(MAX(id),0) AS id FROM m0_mutation_log WHERE session_id=?")
-                .get(sessionID) as { id: number };
-            const boundary = (
-                this.storage.db
-                    .prepare(
-                        "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id=?",
-                    )
-                    .get(sessionID) as { id: string | null } | undefined
-            )?.id;
-            if (max.id <= (state.cachedM0MaxMutationId ?? 0) && boundary)
-                after = this.storage.sequenceForID(sessionID, boundary) ?? -1;
-        }
-        const through = cut.seq - 1;
         let reader: V2StoreReader | undefined;
         try {
+            if (options.bounded && options.after === undefined && !this.changed.has(sessionID)) {
+                const state = getOrCreateSessionMeta(this.storage.db, sessionID);
+                const max = this.storage.db
+                    .prepare(
+                        "SELECT COALESCE(MAX(id),0) AS id FROM m0_mutation_log WHERE session_id=?",
+                    )
+                    .get(sessionID) as { id: number };
+                const boundary = (
+                    this.storage.db
+                        .prepare(
+                            "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id=?",
+                        )
+                        .get(sessionID) as { id: string | null } | undefined
+                )?.id;
+                if (max.id <= (state.cachedM0MaxMutationId ?? 0) && boundary) {
+                    after =
+                        this.storage.sequenceForID(sessionID, boundary) ??
+                        (reader = this.openReader(sessionID)).sequenceForId(sessionID, boundary) ??
+                        -1;
+                }
+            }
+            const through = cut.seq - 1;
             let metadata = this.metadata.get(sessionID);
             if (!metadata || (this.metadataThrough.get(sessionID) ?? -1) < through) {
-                reader = this.openReader(sessionID);
+                reader ??= this.openReader(sessionID);
                 metadata = reader.rowStampsThrough(sessionID, through).filter(conversational);
                 this.metadata.set(sessionID, metadata);
                 this.metadataThrough.set(sessionID, through);

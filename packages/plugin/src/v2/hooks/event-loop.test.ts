@@ -29,9 +29,9 @@ import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-pat
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { getWorkerShutdownStats } from "../../shared/worker-shutdown";
-import { V2MessageTimesCache } from "../message-times";
 import { HostFoldIdle } from "../fold/idle";
 import { NativeFoldReplay } from "../fold/native-replay";
+import { V2MessageTimesCache } from "../message-times";
 import { registerContext } from "./context";
 import * as storageGate from "./storage-gate";
 import type { SessionContext, V2Context } from "./types";
@@ -512,14 +512,14 @@ test("v2 deletion completes while the session's auto-search backfill is running"
     }
 });
 
-test("v2 arms host folding from the served response's frozen TTL and cancels it at turn start", async () => {
+test("v2 arms host folding without a capture from the served response's frozen TTL and cancels it at turn start", async () => {
     const flag = process.env.MC_OC2_INVISIBLE_FOLD;
     process.env.MC_OC2_INVISIBLE_FOLD = "1";
     const ready = Promise.withResolvers<void>();
     let consumed = false;
     const arm = spyOn(HostFoldIdle.prototype, "idle").mockImplementation(() => {});
     const active = spyOn(HostFoldIdle.prototype, "active");
-    const baseline = spyOn(NativeFoldReplay.prototype, "baseline").mockResolvedValue("head");
+    const baseline = spyOn(NativeFoldReplay.prototype, "baseline").mockResolvedValue(undefined);
     const f = await fixture(async function* (signal) {
         await ready.promise;
         yield succeeded;

@@ -12,6 +12,7 @@ interface Attempt {
     id: string;
     before: number;
     started: number;
+    capture: boolean;
 }
 
 /** Process-local queue admissions. Only the claimant in this plugin instance can
@@ -85,7 +86,8 @@ export class HostFoldPolicy {
                 }
                 const after = cut?.seq ?? -1;
                 const before = reader.storedRowsAfter(sessionID, after);
-                if (before < threshold || !(await this.deps.canReplay(sessionID, reader))) return;
+                if (before < threshold) return;
+                const capture = await this.deps.canReplay(sessionID, reader);
                 const retry =
                     old?.after === after
                         ? old.attempt +
@@ -104,6 +106,7 @@ export class HostFoldPolicy {
                     attempt: retry,
                     id,
                     started: now(),
+                    capture,
                 };
                 claimed = await storage.claim(
                     sessionID,
@@ -148,7 +151,7 @@ export class HostFoldPolicy {
                 if (await storage.finish(sessionID, attempt.id, this.owner, "completed", now()))
                     this.deps.log(
                         sessionID,
-                        `v2 host fold: rows_before=${attempt.before} rows_after=${after} duration_ms=${now() - attempt.started} reason=row_threshold id=${cut.id} status=completed`,
+                        `v2 host fold: rows_before=${attempt.before} rows_after=${after} duration_ms=${now() - attempt.started} reason=row_threshold id=${cut.id} capture=${attempt.capture ? "present" : "absent"} status=completed`,
                     );
             } finally {
                 settled.close();

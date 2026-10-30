@@ -1535,10 +1535,7 @@ export async function registerContext(context: V2Context) {
                             });
                             // Use the TTL already frozen by the served request, not
                             // a live config edit made while its cache is still warm.
-                            if (
-                                !compactionOff &&
-                                typeof (await nativeFoldReplay?.baseline(sessionID)) === "string"
-                            ) {
+                            if (!compactionOff) {
                                 if (db) {
                                     const meta = getOrCreateSessionMeta(db, sessionID);
                                     hostFoldIdle?.idle(
@@ -1681,24 +1678,22 @@ export async function registerContext(context: V2Context) {
                   : "module";
             if (nativeFoldReplay) {
                 try {
-                    if (await nativeFoldReplay.canReplay(draft.sessionID, reader)) {
-                        const state = getOrCreateSessionMeta(storage.require(), draft.sessionID);
-                        const summary =
-                            moduleBaseline ??
-                            (await nativeFoldReplay.baseline(draft.sessionID)) ??
-                            state.cachedM0Bytes?.toString("utf8") ??
-                            "<session-history></session-history>";
-                        if (
-                            await nativeFoldReplay.supply({
-                                draft,
-                                reader,
-                                previousCut: reader.latestCompaction(draft.sessionID),
-                                summary,
-                            })
-                        ) {
-                            draft.result = { summary };
-                            return;
-                        }
+                    const state = getOrCreateSessionMeta(storage.require(), draft.sessionID);
+                    const summary =
+                        moduleBaseline ??
+                        (await nativeFoldReplay.baseline(draft.sessionID)) ??
+                        state.cachedM0Bytes?.toString("utf8") ??
+                        "<session-history></session-history>";
+                    if (
+                        await nativeFoldReplay.supply({
+                            draft,
+                            reader,
+                            previousCut: reader.latestCompaction(draft.sessionID),
+                            summary,
+                        })
+                    ) {
+                        draft.result = { summary };
+                        return;
                     }
                 } catch (error) {
                     nativeFoldReplay.invalidate(draft.sessionID, true);
@@ -2591,7 +2586,19 @@ export async function registerContext(context: V2Context) {
             const headApplied = head ? applyCheckpointHead(draft, head) : false;
             if (nativeMessages && !checkpoint) {
                 try {
-                    await nativeFoldReplay?.capture(draft, nativeMessages);
+                    const state = db && getOrCreateSessionMeta(db, draft.sessionID);
+                    const boundary = db
+                        ?.prepare(
+                            "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id=?",
+                        )
+                        .get(draft.sessionID) as { id: string | null } | undefined;
+                    await nativeFoldReplay?.capture(
+                        draft,
+                        nativeMessages,
+                        boundary?.id && state?.cachedM0Bytes
+                            ? { id: boundary.id, summary: state.cachedM0Bytes.toString("utf8") }
+                            : undefined,
+                    );
                 } catch (error) {
                     nativeFoldReplay?.invalidate(draft.sessionID, true);
                     sessionLog(
