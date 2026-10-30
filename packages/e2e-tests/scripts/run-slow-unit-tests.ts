@@ -17,6 +17,7 @@ export const slowUnits = [
         "ordinal differential: invalidating destinations of session moves restores parity",
     ]],
     ["plugin", "src/v2/hooks/storage-gate.test.ts", ["boot wait gives up on an unresolved open after its deadline"]],
+    ["plugin", "src/plugin/bridged-session-guard.test.ts", ["randomized passes of unenrolled sessions match the unwrapped real pipeline byte for byte"]],
     ["pi-plugin", "src/queued-drop-batch.test.ts", ["pi", "oc1", "oc2"].map((host) => `queued batch ${host}: 160 drops have three bounded commits`)],
 ] as const;
 
@@ -56,7 +57,7 @@ async function run(dry: boolean) {
             }
         }
     }
-    console.log(dry ? `Dry selection passed: ${selected} registrations (20 normal, 22 slow), no test bodies executed` : "Slow unit lane passed");
+    console.log(dry ? `Dry selection passed: ${selected} registrations (21 normal, 23 slow), no test bodies executed` : "Slow unit lane passed");
 }
 
 if (import.meta.main) {
