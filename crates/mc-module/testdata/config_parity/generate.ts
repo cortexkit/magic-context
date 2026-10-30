@@ -93,6 +93,10 @@ type Fixture = { name: string; user?: unknown; project?: unknown; userText?: str
 const fixtures: Fixture[] = [
     { name: "defaults" },
     ...[undefined, -1, 50, 1500, 15000, 99999].map((timeout_ms, i) => ({ name: `rerank-timeout-${i}`, user: { rerank: { timeout_ms } } })),
+    { name: "rerank-timeout-integer-float", userText: '{"rerank":{"timeout_ms":100.0}}' },
+    { name: "rerank-timeout-invalid", user: { rerank: { timeout_ms: "bad" } } },
+    { name: "rerank-timeout-remote", user: { rerank: { provider: "remote", endpoint: "https://example.invalid/rerank", model: "reranker", timeout_ms: 99999 } } },
+    { name: "rerank-remote-incomplete", user: { rerank: { provider: "remote", timeout_ms: 100 } } },
     { name: "historian-turn-two-default", user: { historian: {} } },
     { name: "historian-turn-two-on", user: { historian: { turn_two: "on", two_pass: true } } },
     { name: "historian-turn-two-off", user: { historian: { turn_two: "off", two_pass: false } } },

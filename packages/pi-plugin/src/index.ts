@@ -44,6 +44,7 @@ import type {
 } from "@magic-context/core/config/schema/magic-context";
 import {
 	summarizeDreamSchedule,
+	userMemoryCollectionEnabled,
 	userObservationCollectionEnabled,
 	userObservationsRequested,
 } from "@magic-context/core/features/magic-context/dreamer/task-config";
@@ -1140,7 +1141,8 @@ export function resolveHistorianFromConfig(
 		twoPass: historian?.two_pass === true,
 		// The memory-lifecycle off switch. The historian block is optional, so a
 		// missing key takes "on" here, the value the schema gives a
-		// configured block; the runner then matches only the shipped allowlist.
+		// configured block. The runner must keep the same child process alive
+		// for both historian turns.
 		// Pi's context handler additionally re-reads the switch from fresh config
 		// for replies still in flight (see resolveContextOptionsForProject).
 		turnTwo: historian?.turn_two ?? "on",

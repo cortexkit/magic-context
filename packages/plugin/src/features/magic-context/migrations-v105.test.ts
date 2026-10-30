@@ -10,6 +10,13 @@ describe("migration 105", () => {
         try {
             initializeDatabase(db);
             db.exec("ALTER TABLE memories DROP COLUMN safety_critical");
+            for (const table of [
+                "memory_placement",
+                "memory_ops",
+                "memory_outbox",
+                "memory_sync_state",
+            ])
+                db.exec(`DROP TABLE ${table}`);
             db.exec(
                 "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, description TEXT, applied_at INTEGER)",
             );
@@ -36,6 +43,9 @@ describe("migration 105", () => {
                 version: 103,
             });
             expect(enforceSchemaFence(db, ":previous-binary:", 103)).toBe(true);
+            expect(
+                db.prepare("SELECT name FROM sqlite_master WHERE name='memory_placement'").get(),
+            ).toBeNull();
 
             const later = MIGRATIONS.splice(MIGRATIONS.findIndex((entry) => entry.version === 105));
             try {

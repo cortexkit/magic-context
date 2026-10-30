@@ -599,7 +599,7 @@
             },
             {
               "method": "max_rowid",
-              "rows": 104,
+              "rows": 105,
               "table": "schema_migrations"
             },
             {
@@ -728,7 +728,7 @@
               "table": "workspaces"
             }
           ],
-          "schema_version": 104,
+          "schema_version": 105,
           "shm_bytes": 32768,
           "wal_bytes": 0
         },

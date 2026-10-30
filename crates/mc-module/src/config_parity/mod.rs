@@ -912,13 +912,15 @@ pub(crate) fn schema_parse(
                 }
                 "custom" => {
                     let rule = check["rule"].as_str().unwrap();
-                    if rule == "embedding" {
+                    if rule == "embedding" || rule == "rerank" {
                         let provider = if output["provider"] == "synapse" {
                             output["fallback_provider"].as_str()
                         } else {
                             output["provider"].as_str()
                         };
-                        if provider == Some("openai-compatible") {
+                        if (rule == "embedding" && provider == Some("openai-compatible"))
+                            || (rule == "rerank" && provider == Some("remote"))
+                        {
                             for field in ["endpoint", "model"] {
                                 if output
                                     .get(field)
@@ -949,7 +951,7 @@ fn transform(rule: &str, value: Value) -> Value {
             &trust::protected_tools(&value),
         ),
         "subc.connection_file" => value,
-        "rerank.timeout_ms" => json!(value.as_i64().unwrap_or(1500).clamp(50, 15_000)),
+        "rerank.timeout_ms" => json!(value.as_f64().unwrap_or(1500.0).clamp(50.0, 15_000.0) as i64),
         "embedding" => {
             let provider = value["provider"].as_str().unwrap_or("local");
             if provider == "off" {
