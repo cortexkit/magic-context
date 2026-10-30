@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -55,7 +55,7 @@ test("R36 automatic pressure schedules one historian generate on real GA without
         host.mock.setDefault({ text: "normal turn", usage: { input_tokens: 100, output_tokens: 10 } });
         const before = host.mock.requests().length;
         await turn("Observe organic historian");
-        const db = new Database(join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"));
+        const db = openTestDb(join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"));
         db.exec("PRAGMA busy_timeout = 5000");
         await eventually(() => (db.prepare("SELECT count(*) AS n FROM historian_runs WHERE session_id = ? AND status = 'success'").get(session.id) as { n: number }).n > 0);
         expect(hidden).toBe(1);
@@ -74,7 +74,7 @@ test("R22 automatic execution-ended event dispatches due classify through real G
     try {
         host.mock.setDefault({ text: "normal turn", usage: { input_tokens: 100, output_tokens: 10 } });
         await turn("Initialize project");
-        const db = new Database(join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"));
+        const db = openTestDb(join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"));
         db.exec("PRAGMA busy_timeout = 5000");
         const project = resolveProjectIdentity(host.cwd)!;
         for (let index = 0; index < 10; index++) insertMemory(db as never, { projectPath: project, category: "ARCHITECTURE", content: `Unique project architecture fact ${index}`, sourceSessionId: session.id });

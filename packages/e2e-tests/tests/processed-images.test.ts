@@ -1,3 +1,4 @@
+import { openTestDb } from "../src/test-db";
 import { expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -38,7 +39,7 @@ test("issue 699 OpenCode 1 wire image bytes drop after an admitted positive-wate
             protected_tokens: 4000,
         },
     });
-    const db = new Database(join(host.env.dataDir, "cortexkit", "magic-context", "context.db"));
+    const db = openTestDb(join(host.env.dataDir, "cortexkit", "magic-context", "context.db"), undefined, Database);
     db.exec("PRAGMA busy_timeout = 5000");
     try {
         const health = (await fetch(`${host.url}/global/health`).then((response) =>

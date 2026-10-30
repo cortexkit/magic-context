@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -145,7 +146,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         await v2.stopHost();
         v2 = undefined;
         seedConvertedTail(fixture.openCodeDbPath, sessionID);
-        const contextDb = new Database(fixture.contextDbPath);
+        const contextDb = openTestDb(fixture.contextDbPath, undefined, Database);
         try {
             const row = contextDb.prepare(`SELECT ${sessionMetaFieldSelect("cached_m0_upgrade_state", "upgrade")} FROM session_meta WHERE session_id = ?`)
                 .get(sessionID) as { upgrade: string | null } | undefined;
@@ -162,7 +163,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         // The stale-reading guard correctly refuses to record its copied 820k
         // usage again. Check the provider-proven reading saved before the
         // restart, before the host starts again.
-        const usageDb = new Database(fixture.contextDbPath, { readonly: true });
+        const usageDb = openTestDb(fixture.contextDbPath, { readonly: true }, Database);
         try {
             const usage = usageDb.prepare(`SELECT last_input_tokens AS inputTokens,
                 last_usage_context_limit AS contextLimit, last_context_percentage AS percentage
@@ -186,7 +187,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         const previousUsageEvents = (existsSync(usageLogPath)
             ? readFileSync(usageLogPath, "utf8").match(/v2 usage: inputTokens=820000/g) ?? []
             : []).length;
-        const usageBeforeDb = new Database(fixture.contextDbPath, { readonly: true });
+        const usageBeforeDb = openTestDb(fixture.contextDbPath, { readonly: true }, Database);
         let responseTimeBefore: number;
         try {
             const row = usageBeforeDb.prepare(
@@ -202,7 +203,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         const usageDeadline = Date.now() + 15_000;
         let recordedFreshUsage = false;
         while (!recordedFreshUsage && Date.now() < usageDeadline) {
-            const usageDb = new Database(fixture.contextDbPath, { readonly: true });
+            const usageDb = openTestDb(fixture.contextDbPath, { readonly: true }, Database);
             try {
                 const row = usageDb.prepare(`SELECT last_response_time AS responseTime,
                     last_input_tokens AS inputTokens, last_context_percentage AS percentage
@@ -231,7 +232,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         }
         expect(loggedFreshUsage).toBe(true);
         mock.setDefault({ text: "ok", usage: { input_tokens: 1_200, output_tokens: 20 } });
-        const pendingDb = new Database(fixture.contextDbPath);
+        const pendingDb = openTestDb(fixture.contextDbPath, undefined, Database);
         try {
             pendingDb.exec("PRAGMA busy_timeout=5000");
             const tag = pendingDb.prepare("SELECT tag_number FROM tags WHERE session_id = ? AND status = 'active' ORDER BY tag_number LIMIT 1")
@@ -262,7 +263,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         expect(schemaPasses.length).toBeGreaterThanOrEqual(2);
         const milestones = log.split("\n").filter((line) => /v2 usage:|emergency tiered drop:|heuristic cleanup:|pending ops WILL APPLY|prefix trim:|rematerialized=true/.test(line));
         console.log("REPORTER_V2_USAGE", milestones.filter((line) => line.includes("v2 usage:")).join("\n"));
-        const drained = new Database(fixture.contextDbPath, { readonly: true });
+        const drained = openTestDb(fixture.contextDbPath, { readonly: true }, Database);
         try {
             expect(drained.prepare("SELECT tag_id FROM pending_ops WHERE session_id = ?").all(sessionID)).toHaveLength(0);
         } finally { drained.close(); }

@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -51,7 +52,7 @@ test("OC2 commits complete 80-character, incremental and replacement mapping rep
         expect(model.variants.map(variant => variant.id)).toContain("high");
         console.log(`${version} model API variants=${JSON.stringify(model.variants)}`);
         const parent = await client.session.create({ title: "mapping owner", location: { directory: host.cwd }, model: { providerID: "openai", id: "mock-model" } });
-        db = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+        db = openTestDb(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), undefined, Database);
         db.exec("PRAGMA busy_timeout=10000");
         const project = resolveProjectIdentityForSession(host.cwd)!;
         const runs = () => db!.prepare("SELECT id, tasks_json FROM dream_runs ORDER BY id").all() as Array<{ id: number; tasks_json: string }>;

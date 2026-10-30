@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -165,7 +166,7 @@ let evidence: Evidence;
 const cleanup: Array<() => Promise<void>> = [];
 
 function contextRows<T>(fixture: ConversionFixture, sql: string, ...params: unknown[]): T[] {
-    const db = new Database(fixture.contextDbPath, { readonly: true, fileMustExist: true });
+    const db = openTestDb(fixture.contextDbPath, { readonly: true, fileMustExist: true }, Database);
     try {
         return db.prepare(sql).all(...params) as T[];
     } finally {
@@ -241,7 +242,7 @@ function placeSyntheticSplitBetweenCompartments(
     const next = projection.find((message) => message.ordinal === (split?.ordinal ?? 0) + 1);
     if (!split || !next) throw new Error("the synthetic split source has no following v1 message");
 
-    const db = new Database(fixture.contextDbPath);
+    const db = openTestDb(fixture.contextDbPath, undefined, Database);
     try {
         // The OpenCode 1 host is still running and writes tags and session state
         // to this database after each turn, so wait for its short write
@@ -313,7 +314,7 @@ function startCompartmentAtMarkerBoundary(
     const before = projection.find((message) => message.ordinal === (boundary?.ordinal ?? 0) - 1);
     if (!boundary || !before) throw new Error("the marker boundary has no preceding v1 message");
 
-    const db = new Database(fixture.contextDbPath);
+    const db = openTestDb(fixture.contextDbPath, undefined, Database);
     try {
         db.exec("PRAGMA busy_timeout = 30000");
         const rows = db
@@ -966,7 +967,7 @@ beforeAll(async () => {
     // session_meta records the v2 projection, but the converted synthetic row is
     // still between stored compartment ranges. The latest compartment end is the
     // tail cache's lower bound, and it sits above the synthetic row in this arm.
-    const gapDb = new Database(fixture.contextDbPath);
+    const gapDb = openTestDb(fixture.contextDbPath, undefined, Database);
     try {
         gapDb.exec("PRAGMA busy_timeout = 30000");
         // Bun's run().changes includes the v93 history-trigger write as well as

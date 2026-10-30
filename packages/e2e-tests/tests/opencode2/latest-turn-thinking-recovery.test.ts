@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 /**
  * The provider rejection of edited latest-turn thinking, on a real OpenCode 2
  * host against a mock that enforces Anthropic's latest-turn rule from the
@@ -77,7 +78,7 @@ test("OC2 arms thinking recovery for the rejected turn from its event stream and
 		headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },
 	});
 	const contextDb = () => {
-		const db = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+		const db = openTestDb(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
 		db.exec("PRAGMA busy_timeout = 10000");
 		return db;
 	};

@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -148,7 +149,7 @@ test("a tool-result image reaches the provider as the host's own image block, an
 	try {
 		const readBodies = await run.turn("READ-IMAGE please look at pixel.png");
 		expect(run.readIssued()).toBe(true);
-		const mc = new Database(join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+		const mc = openTestDb(join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), undefined, Database);
 		mc.exec("PRAGMA busy_timeout = 5000");
 		const logStart = log().length;
 		// A stale m[0] system hash makes the next pass priced: it rebuilds the cached prefix.
@@ -272,7 +273,7 @@ test("issue 699 OpenCode 2 strips aged read images on a rewrite and replays the 
         await run.turn("IMAGE-AGE-TOOLS read the three ballast files");
         expect(aged).toBe(true);
         await run.turn("IMAGE-DROP-TAG");
-        const mc = new Database(join(run.host().env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+        const mc = openTestDb(join(run.host().env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), undefined, Database);
         try {
             mc.exec("PRAGMA busy_timeout = 5000");
             const tag = mc.prepare("SELECT MAX(tag_number) AS n FROM tags WHERE session_id = ? AND type = 'message'").get(run.session.id) as { n: number };
@@ -299,7 +300,7 @@ test("issue 699 OpenCode 2 native user assets strip to text without invalidating
         const first = (await run.turn("NATIVE-USER-IMAGE inspect this", [{ uri: `data:image/png;base64,${data}`, name: "pixel.png" }])).at(-1)!;
         expect(JSON.stringify(first)).toContain(data);
         await run.turn("NATIVE-USER-AGE");
-        const mc = new Database(join(run.host().env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+        const mc = openTestDb(join(run.host().env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), undefined, Database);
         try {
             mc.exec("PRAGMA busy_timeout = 5000");
             const tag = mc.prepare("SELECT MAX(tag_number) AS n FROM tags WHERE session_id = ? AND type = 'message'").get(run.session.id) as { n: number };
@@ -337,7 +338,7 @@ test("independent frozen user and tool images survive an OC2 checkpoint and proc
         } finally { reader.close(); }
         // Seed an already committed non-empty freeze to isolate replay from new
         // discovery. The host's raw store still contains both original images.
-        const mc = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+        const mc = openTestDb(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), undefined, Database);
         try {
             mc.exec("PRAGMA busy_timeout = 5000");
             writeSessionMetaField(mc, run.session.id, "processed_image_stripped_ids", JSON.stringify({ ids, textMarkerIds: ids }));

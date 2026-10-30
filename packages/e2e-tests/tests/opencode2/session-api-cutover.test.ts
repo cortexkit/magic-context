@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
@@ -18,7 +19,7 @@ async function eventually<T>(read: () => T | undefined, timeoutMs = 30000): Prom
     }
 }
 function withDB<T>(path: string, read: (db: Database) => T): T {
-    const db = new Database(path);
+    const db = openTestDb(path, undefined, Database);
     db.exec("PRAGMA busy_timeout = 5000");
     try { return read(db); } finally { db.close(); }
 }

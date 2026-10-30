@@ -1,3 +1,4 @@
+import { openTestDb } from "../src/test-db";
 /// <reference types="bun-types" />
 
 import { afterAll, expect, test } from "bun:test";
@@ -5,7 +6,6 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Database } from "bun:sqlite";
 import { createOpencodeClient } from "@opencode-ai/sdk";
 import { buildMockHistorianPayload, findHistorianOrdinalRange } from "../src/mock-historian";
 import { MockProvider } from "../src/mock-provider/server";
@@ -78,7 +78,7 @@ for (const allowHomeProject of [true, false]) {
             await prompt("turn 12: next transform pass");
 
             const dbPath = join(env.dataDir, "cortexkit", "magic-context", "context.db");
-            const db = new Database(dbPath, { readonly: true });
+            const db = openTestDb(dbPath, { readonly: true });
             const count = () => (db.prepare("SELECT COUNT(*) as count FROM compartments WHERE session_id = ?").get(sessionId) as { count: number }).count;
             try {
                 if (allowHomeProject) {

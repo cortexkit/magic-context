@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 /**
  * A session whose last provider reading is past its usable window must still get a
  * Magic Context pass on the next turn, and the turn must reach the provider when that
@@ -221,7 +222,7 @@ test("a converted session over its usable window gets a reducing pass and reache
 		expect(log).toContain("transform: blocking at 128.4% until compartment agent completes");
 		expect(log).toMatch(/historian publish stage: stage=publish-txn status=completed .*compartments=1/);
 		expect(log).toMatch(/emergency tiered drop: tiered drop: [1-9]\d* tags/);
-		const contextDb = new Database(fixture.contextDbPath);
+		const contextDb = openTestDb(fixture.contextDbPath, undefined, Database);
 		try {
 			const row = contextDb
 				.prepare("SELECT COUNT(*) AS count FROM compartments WHERE session_id = ?")

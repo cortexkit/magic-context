@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -78,7 +79,7 @@ for (const operation of ["session_move", "offline row deletion"] as const) {
             const boundary = raw.at(-1)!;
             expect(boundary.type).toBe("assistant");
             await host.stopHost();
-            const db = new Database(context);
+            const db = openTestDb(context, undefined, Database);
             try { appendCompartments(db, session.id, [{ sequence: 0, startMessage: 1, endMessage: raw.length,
                 startMessageId: raw[0]!.id, endMessageId: boundary.id, title: "Recorded history", content: "Three older turns recorded durable history." }]); }
             finally { db.close(); }

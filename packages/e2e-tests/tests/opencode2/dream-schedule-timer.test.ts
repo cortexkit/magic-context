@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
@@ -44,7 +45,7 @@ function contextDbPath(env: NodeJS.ProcessEnv): string {
 }
 
 function withContextDb<T>(env: NodeJS.ProcessEnv, use: (db: Database) => T): T {
-	const db = new Database(contextDbPath(env), { readwrite: true, fileMustExist: true });
+	const db = openTestDb(contextDbPath(env), { readwrite: true, fileMustExist: true }, Database);
 	try {
 		db.exec("PRAGMA busy_timeout = 5000");
 		return use(db);

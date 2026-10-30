@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -89,7 +89,7 @@ test("OpenCode 2 TUI shows feedback for server-registered /ctx-* commands", asyn
 		const storageDir = host.env.MAGIC_CONTEXT_STORAGE_DIR;
 		if (!storageDir)
 			throw new Error("throwaway Magic Context storage path is missing");
-		const db = new Database(join(storageDir, "context.db"));
+		const db = openTestDb(join(storageDir, "context.db"));
 		try {
 			db.prepare(
 				"INSERT INTO pending_ops (session_id, tag_id, operation, queued_at) VALUES (?, ?, 'drop', ?)",

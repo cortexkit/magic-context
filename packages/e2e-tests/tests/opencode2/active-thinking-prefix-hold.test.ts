@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -77,7 +77,7 @@ test.skipIf(!supportedHost)(
 			headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },
 		});
 		const contextDb = () => {
-			const db = new Database(
+			const db = openTestDb(
 				join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"),
 			);
 			db.exec("PRAGMA busy_timeout = 10000");

@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -63,7 +64,7 @@ function hostDbPath(host: { env: NodeJS.ProcessEnv }): string {
 }
 
 function readRows<T>(path: string, sql: string, ...params: unknown[]): T[] {
-	const db = new Database(path, { readonly: true, fileMustExist: true });
+	const db = openTestDb(path, { readonly: true, fileMustExist: true }, Database);
 	try {
 		return db.prepare(sql).all(...params) as T[];
 	} finally {

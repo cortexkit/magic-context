@@ -1,3 +1,4 @@
+import { openTestDb } from "../src/test-db";
 /// <reference types="bun-types" />
 
 /**
@@ -10,7 +11,6 @@
  * shared context.db could name its sessions. The whole run lives under a
  * throwaway root; `lsof` on the host process shows which databases it holds.
  */
-import { Database } from "bun:sqlite";
 import { afterAll, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
@@ -63,7 +63,7 @@ describe("pi started in the home directory", () => {
             // waiting for their timestamps, which the boot backfill fills from
             // OpenCode's store. Only an OpenCode process may do that.
             prepareContextDatabase(dataDir);
-            const seed = new Database(join(dataDir, "cortexkit", "magic-context", "context.db"));
+            const seed = openTestDb(join(dataDir, "cortexkit", "magic-context", "context.db"));
             try {
                 const insertFts = seed.prepare(
                     "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, 'user', ?)",
@@ -142,7 +142,7 @@ describe("pi started in the home directory", () => {
             expect(log).not.toContain("registered embedding config for project");
             expect(log).not.toContain("[dreamer] registered project");
 
-            const contextDb = new Database(pi.contextDbPath(), { readonly: true });
+            const contextDb = openTestDb(pi.contextDbPath(), { readonly: true });
             try {
                 const blank = contextDb
                     .prepare("SELECT COUNT(*) AS count FROM session_projects WHERE TRIM(project_path) = ''")

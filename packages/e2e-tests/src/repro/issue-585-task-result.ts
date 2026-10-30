@@ -1,3 +1,4 @@
+import { openTestDb } from "../test-db";
 /** Real OpenCode 1.x probe; all host state and provider traffic stay in a disposable root.
  * Usage: bun <this file> --opencode <binary> --plugin <entry> --out <temp root>
  *   --pressure 85|98 --size small|large --subagent
@@ -74,7 +75,7 @@ function lookup() {
 	const parts = host
 		.query("SELECT message_id, data FROM part WHERE session_id = ?")
 		.all(parentId) as Array<{ message_id: string; data: string }>;
-	const mc = new Database(join(storage, "context.db"), { readonly: true });
+	const mc = openTestDb(join(storage, "context.db"), { readonly: true });
 	const tags = mc
 		.query("SELECT * FROM tags WHERE session_id = ? ORDER BY tag_number")
 		.all(parentId) as Array<Record<string, any>>;

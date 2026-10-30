@@ -1,3 +1,4 @@
+import { openTestDb } from "../src/test-db";
 // Point MC_E2E_OPENCODE2_CLI at an OpenCode 2 binary. To test an older plugin,
 // point MC_554_SOURCE_ROOT at its extracted packages/plugin/src directory.
 // Host stores, logs, and the shared context.db stay beneath this run's temporary root.
@@ -336,7 +337,7 @@ try {
 	if (process.env.MC_554_WARM_LKG === "1") {
 		await drive("warm");
 		await Bun.sleep(100);
-		const reader = new Database(dbPath, { readonly: true });
+		const reader = openTestDb(dbPath, { readonly: true });
 		for (let i = 0; i < 7; i++)
 			warmProof.push({
 				index: i,
@@ -346,7 +347,7 @@ try {
 			});
 		reader.close();
 	}
-	lock = new Database(dbPath);
+	lock = openTestDb(dbPath);
 	lock.exec("BEGIN IMMEDIATE");
 	const lockTurn = drive("locked");
 	await poll("locked", Number(process.env.MC_554_LOCK_SECONDS ?? 10));
@@ -416,7 +417,7 @@ try {
 				.filter(Boolean)
 				.map((line) => JSON.parse(line))
 		: [];
-	const migrationReader = new Database(dbPath, { readonly: true });
+	const migrationReader = openTestDb(dbPath, { readonly: true });
 	const startupMigration = migrationReader
 		.prepare("SELECT MAX(version) AS version FROM schema_migrations")
 		.get();

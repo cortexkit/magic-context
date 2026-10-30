@@ -1,5 +1,4 @@
 import { expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -13,6 +12,7 @@ import {
 import { PiTestHarness } from "../src/pi-harness";
 import { resolvePiHostInvocation } from "../src/pi-runner/spawn";
 import { createE2ETempDir } from "../src/temp-dir";
+import { openTestDb } from "../src/test-db";
 
 interface Entry {
 	type: string;
@@ -118,7 +118,7 @@ export default function(pi) {
 			broken.branch.filter((entry) => entry.type === "compaction"),
 		).toHaveLength(108);
 		expect(broken.branch.at(-1)?.firstKeptEntryId).toBe(400);
-		const db = new Database(h.contextDbPath());
+		const db = openTestDb(h.contextDbPath());
 		try {
 			appendCompartments(db as never, session, [
 				{

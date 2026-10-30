@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { expectedOpenCode2Version } from "../../src/opencode2-runner/cli-resolution";
 import { spawnSync } from "node:child_process";
@@ -55,7 +56,7 @@ for (const mode of ["manual", "scheduled"] as const) {
                 await client.session.prompt({ sessionID: session.id, text: `RETROSPECTIVE_REAL_USER_${index}: That rule is wrong, please correct it.` });
                 await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(20000) });
             }
-            contextDb = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+            contextDb = openTestDb(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), undefined, Database);
             contextDb.exec(`PRAGMA busy_timeout=${BOOT_SQLITE_BUSY_TIMEOUT_MS}`);
             const reschedule = (project: string) => {
                 // Own the writer before changing the fixture's schedule; a completed

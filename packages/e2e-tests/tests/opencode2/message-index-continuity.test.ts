@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
@@ -25,7 +26,7 @@ test("OpenCode 2 real host advances the raw index after a new post-rebase messag
 		await host.stop();
 		throw new Error("Host did not supply its isolated storage and PID");
 	}
-	const db = new Database(join(storage, "context.db"));
+	const db = openTestDb(join(storage, "context.db"), undefined, Database);
 	const client = OpenCode.make({
 		baseUrl: host.url,
 		headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },

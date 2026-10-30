@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { spawnOpencode } from "../src/opencode-runner/spawn";
 import { MockProvider } from "../src/mock-provider/server";
 import { sessionMetaFieldSelect, writeSessionMetaField } from "../src/session-meta-fields";
@@ -88,7 +88,7 @@ async function turn(id: string, n: number) {
 	const logPath = join(host.env.dataDir, "cortexkit", "magic-context-e2e.log");
 	const logOffset = readFileSync(logPath, "utf8").length;
 	const before = mock.requests().length;
-	const snapshotDb = new Database(
+	const snapshotDb = openTestDb(
 		join(host.env.dataDir, "cortexkit", "magic-context", "context.db"),
 	);
 	const snapshot = () =>
@@ -210,7 +210,7 @@ try {
 	).json()) as { id: string };
 	const seedMessageId = await turn(session.id, 0);
 	if (!seedMessageId) throw new Error("seed response has no message id");
-	const db = new Database(
+	const db = openTestDb(
 		join(host.env.dataDir, "cortexkit", "magic-context", "context.db"),
 	);
 	appendCompartments(

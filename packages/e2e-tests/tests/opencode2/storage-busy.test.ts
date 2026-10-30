@@ -213,9 +213,10 @@ test("OpenCode 2 background contention releases the server after one busy timeou
     const dbPath = join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!,"context.db");
     writeFileSync(join(probe,"server.js"), `
         import { Database } from ${JSON.stringify(new URL("../../../plugin/src/shared/sqlite.ts", import.meta.url).pathname)};
+        import { openTestDb } from ${JSON.stringify(new URL("../../src/test-db.ts", import.meta.url).pathname)};
         import { existsSync, writeFileSync } from 'node:fs';
         export default { id:'background-contention-probe', async setup() {
-            const db = new Database(${JSON.stringify(dbPath)});
+            const db = openTestDb(${JSON.stringify(dbPath)}, undefined, Database);
             db.exec('PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS scope_background_probe(value INTEGER)');
             const timer = setInterval(() => {
                 if (!existsSync(${JSON.stringify(trigger)})) return;

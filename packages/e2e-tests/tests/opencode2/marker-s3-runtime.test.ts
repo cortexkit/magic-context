@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -110,7 +110,7 @@ test("I10 real-host counters: v2 fold plus historian publication plus ten turns 
         await turn("Host fold then prime historian");
         host.mock.setDefault({ text: "normal", usage });
         await turn("Organic historian publication");
-        const db = new Database(join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"));
+        const db = openTestDb(join(host.env.XDG_DATA_HOME!, "cortexkit/magic-context/context.db"));
         await until(() => (db.prepare("SELECT count(*) AS n FROM compartments WHERE session_id = ?").get(session.id) as {n:number}).n > 0);
         const reader = new V2StoreReader(gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env));
         expect(reader.latestCompaction(session.id)).toBeDefined(); reader.close();
@@ -165,7 +165,7 @@ test("I10 real-host counters: v2 fold plus historian publication plus ten turns 
         await waitForWriterDrain(fixture.writerTrace, session, terminalIds);
         // Exercise the same short ownership overlap on every platform. A tool
         // error is not a successful positive control merely because HTTP finished.
-        const leaseControl = new Database(v1.contextDbPath());
+        const leaseControl = openTestDb(v1.contextDbPath());
         try {
             leaseControl.prepare(`INSERT INTO compartment_state_lease
                 (session_id, holder_id, owner_pid, acquired_at, expires_at) VALUES (?, ?, ?, ?, ?)`)

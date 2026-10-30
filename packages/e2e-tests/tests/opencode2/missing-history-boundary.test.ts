@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -61,7 +62,7 @@ function hostDbPath(host: { env: NodeJS.ProcessEnv }): string {
 }
 
 function readRows<T>(path: string, sql: string, ...params: unknown[]): T[] {
-	const db = new Database(path, { readonly: true, fileMustExist: true });
+	const db = openTestDb(path, { readonly: true, fileMustExist: true }, Database);
 	try {
 		return db.prepare(sql).all(...params) as T[];
 	} finally {
@@ -71,7 +72,7 @@ function readRows<T>(path: string, sql: string, ...params: unknown[]): T[] {
 
 function writeRows(path: string, sql: string, ...params: unknown[]): number {
 	if (!existsSync(path)) throw new Error(`missing store ${path}`);
-	const db = new Database(path);
+	const db = openTestDb(path, undefined, Database);
 	try {
 		db.prepare(sql).run(...params);
 		// Count the target rows, not the history-version trigger's additional writes.

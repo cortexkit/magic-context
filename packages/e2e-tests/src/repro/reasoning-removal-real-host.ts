@@ -1,3 +1,4 @@
+import { openTestDb } from "../test-db";
 /** Real-host wire proof for Magic Context's old-reasoning removal (age lane and drop lane).
  *
  * Usage:
@@ -21,7 +22,6 @@
  *          on the first pass and keep the newest tool result. worker-control is the same
  *          session with the age lane idle, for the size comparison.
  */
-import { Database } from "bun:sqlite";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -291,7 +291,7 @@ async function runScenario(name: "age" | "drop" | "worker" | "worker-control", r
         await prompt("pass-1");
         await prompt("pass-2");
         if (name === "drop") {
-            const db = new Database(contextDb);
+            const db = openTestDb(contextDb);
             // The host may still hold a write lock from the previous pass.
             db.exec("PRAGMA busy_timeout = 15000");
             const tag = db

@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 /// <reference types="bun-types" />
 
 /**
@@ -33,7 +34,7 @@ test.skipIf(!copy)(
 		for (const suffix of ["", "-wal", "-shm"])
 			if (existsSync(`${copy}${suffix}`))
 				renameSync(`${copy}${suffix}`, `${dbPath}${suffix}`);
-		const before = new Database(dbPath, { readonly: true });
+		const before = openTestDb(dbPath, { readonly: true }, Database);
 		const sessionsBefore = (
 			before.prepare("SELECT COUNT(*) AS n FROM session_meta").get() as {
 				n: number;
@@ -102,7 +103,7 @@ test.skipIf(!copy)(
 		} finally {
 			await host.stop();
 		}
-		const after = new Database(dbPath, { readonly: true });
+		const after = openTestDb(dbPath, { readonly: true }, Database);
 		try {
 			const sessionsAfter = (
 				after.prepare("SELECT COUNT(*) AS n FROM session_meta").get() as {

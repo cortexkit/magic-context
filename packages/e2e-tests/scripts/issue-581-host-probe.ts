@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openTestDb } from "../src/test-db";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -161,7 +161,7 @@ try {
 		throw new Error(
 			"real OpenCode 1 emergency retains answered question - FAILED",
 		);
-	const db = new Database(
+	const db = openTestDb(
 		join(env.dataDir, "cortexkit/magic-context/context.db"),
 		{ readonly: true },
 	);

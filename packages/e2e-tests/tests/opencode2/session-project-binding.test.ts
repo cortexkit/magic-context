@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
@@ -66,7 +67,7 @@ async function runTurns(gitRepo: boolean) {
 		} finally {
 			hostStore.close();
 		}
-		const db = new Database(
+		const db = openTestDb(
 			join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"),
 			{ readonly: true },
 		);

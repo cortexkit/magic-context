@@ -1,3 +1,4 @@
+import { openTestDb } from "../src/test-db";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -5,7 +6,6 @@ import { join, resolve } from "node:path";
 import { MockProvider } from "../src/mock-provider/server";
 import { PI_CLI, PI_PACKAGE_JSON } from "../src/pi-runner/spawn";
 import { sessionMetaFieldSelect } from "../src/session-meta-fields";
-import { Database } from "bun:sqlite";
 
 const handoff = process.argv.includes("--handoff");
 
@@ -92,7 +92,7 @@ try {
     let oldPrefix: unknown;
     if (handoff) {
         child.kill(); await child.exited; await stderrTask;
-        const db = new Database(join(root, "storage/context.db"), { readonly: true });
+        const db = openTestDb(join(root, "storage/context.db"), { readonly: true });
         if (db.query("SELECT name FROM sqlite_master WHERE name='temporal_decisions'").get()) throw new Error("Old host unexpectedly installed temporal decisions");
         if ((db.query("SELECT MAX(version) AS v FROM schema_migrations WHERE version<10000").get() as { v: number }).v !== 94) throw new Error("Old host did not create the pre-v95 schema");
         oldPrefix = db.query(`SELECT ${sessionMetaFieldSelect("cached_m0_bytes", "cached_m0_bytes", db)},${sessionMetaFieldSelect("cached_m1_bytes", "cached_m1_bytes", db)} FROM session_meta WHERE session_id=?`).get(sessionId);
@@ -119,7 +119,7 @@ try {
     if (!handoff && !raw.some((entry) => entry.type === "compaction" && entry.fromHook && entry.firstKeptEntryId === "seed0308")) throw new Error("No physical marker drain occurred");
     if (JSON.stringify(drain) !== JSON.stringify(replay)) throw new Error(handoff ? "Old/new handoff wire prefix changed" : "Drain/defer wire prefix changed");
     if (handoff) {
-        const db = new Database(join(root, "storage/context.db"), { readonly: true });
+        const db = openTestDb(join(root, "storage/context.db"), { readonly: true });
         const after = db.query(`SELECT ${sessionMetaFieldSelect("cached_m0_bytes", "cached_m0_bytes", db)},${sessionMetaFieldSelect("cached_m1_bytes", "cached_m1_bytes", db)} FROM session_meta WHERE session_id=?`).get(sessionId);
         if ((db.query("SELECT MAX(version) AS v FROM schema_migrations WHERE version<10000").get() as { v: number }).v !== 95) throw new Error("New host did not migrate the schema to v95");
         db.close();

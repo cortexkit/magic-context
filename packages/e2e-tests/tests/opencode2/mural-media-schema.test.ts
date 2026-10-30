@@ -1,8 +1,8 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
-import { Database } from "bun:sqlite";
 import { isolation, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 import { sessionMetaFieldSelect, writeSessionMetaField } from "../../src/session-meta-fields";
 
@@ -44,7 +44,7 @@ test("a persisted project mural reaches the vision-capable host as Media on pric
         await host.stopHost();
         host = undefined;
         const contextPath = join(fixture.env.XDG_DATA_HOME!, "cortexkit", "magic-context", "context.db");
-        const db = new Database(contextPath);
+        const db = openTestDb(contextPath);
         try {
             const metadata = db.prepare(`SELECT ${sessionMetaFieldSelect("cached_m0_upgrade_state", "upgrade")} FROM session_meta WHERE session_id = ?`)
                 .get(session.id) as { upgrade: string | null } | undefined;

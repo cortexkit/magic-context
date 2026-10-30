@@ -1,3 +1,4 @@
+import { openTestDb } from "../../src/test-db";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -138,7 +139,7 @@ test("v2 measures tool definitions from the request draft without moving a serve
             "magic-context",
             "context.db",
         );
-        const db = new Database(contextDb, { readonly: true, fileMustExist: true });
+        const db = openTestDb(contextDb, { readonly: true, fileMustExist: true }, Database);
         let meta: { hash: string | null; materializedAt: number | null };
         try {
             const row = db
