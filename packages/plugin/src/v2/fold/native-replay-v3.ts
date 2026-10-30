@@ -39,6 +39,83 @@ export interface AdmissionV3 {
     replay: ReplayStateV3;
 }
 
+const object = (value: unknown): value is Record<string, unknown> =>
+    !!value && typeof value === "object" && !Array.isArray(value);
+const keys = (value: Record<string, unknown>, allowed: string[]) =>
+    Object.keys(value).every((key) => allowed.includes(key));
+const identity = (value: unknown): value is string =>
+    typeof value === "string" && value.length > 0 && Buffer.byteLength(value) <= 1024;
+const digest = (value: unknown): value is string =>
+    typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+
+export function validReplayState(value: unknown): value is ReplayStateV3 {
+    if (
+        !object(value) ||
+        !keys(value, ["floor", "controls", "blocked", "upgrade", "withoutRecentContext"])
+    )
+        return false;
+    const floor = value.floor;
+    const upgrade = value.upgrade;
+    return (
+        object(floor) &&
+        keys(floor, ["kind", "id", "seq", "after", "digest"]) &&
+        ["start", "summary", "checkpoint", "host-checkpoint"].includes(floor.kind as string) &&
+        identity(floor.id) &&
+        typeof floor.seq === "number" &&
+        typeof floor.after === "number" &&
+        Number.isSafeInteger(floor.seq) &&
+        Number.isSafeInteger(floor.after) &&
+        floor.after ===
+            (floor.kind === "start" || floor.kind === "host-checkpoint"
+                ? floor.seq - 1
+                : floor.seq) &&
+        digest(floor.digest) &&
+        validControls(value.controls) &&
+        (value.blocked === undefined || typeof value.blocked === "boolean") &&
+        (value.withoutRecentContext === undefined ||
+            typeof value.withoutRecentContext === "boolean") &&
+        (upgrade === undefined ||
+            (object(upgrade) &&
+                keys(upgrade, ["admissionID", "mode"]) &&
+                identity(upgrade.admissionID) &&
+                ["bounded", "host-checkpoint", "source-repair"].includes(upgrade.mode as string)))
+    );
+}
+
+export function validAdmissionV3(value: unknown): value is AdmissionV3 {
+    if (
+        !object(value) ||
+        !keys(value, ["version", "proof", "replay"]) ||
+        value.version !== 3 ||
+        !object(value.proof)
+    )
+        return false;
+    const proof = value.proof;
+    return (
+        keys(proof, [
+            "sourceDigest",
+            "sessionID",
+            "admissionID",
+            "summaryDigest",
+            "historyDigest",
+        ]) &&
+        identity(proof.sessionID) &&
+        identity(proof.admissionID) &&
+        digest(proof.sourceDigest) &&
+        digest(proof.summaryDigest) &&
+        digest(proof.historyDigest) &&
+        validReplayState(value.replay)
+    );
+}
+
+/** Only bounded control values, source identities and digests may cross the
+ * durable admission boundary. Reject extra fields instead of copying them.
+ */
+export function encodeAdmissionV3(value: AdmissionV3): string {
+    if (!validAdmissionV3(value)) throw new Error("Unsupported native fold admission metadata");
+    return JSON.stringify(value);
+}
+
 export function floorFor(row: StoreRow, kind: ReplayFloor["kind"]): ReplayFloor {
     return {
         kind,
@@ -136,10 +213,11 @@ export function validControls(value: unknown): value is EffortControl[] {
             (control) =>
                 control &&
                 typeof control === "object" &&
+                !Array.isArray(control) &&
                 Object.keys(control).every((key) =>
                     ["after", "effort", "previous"].includes(key),
                 ) &&
-                (control.after === undefined || typeof control.after === "string") &&
+                (control.after === undefined || identity(control.after)) &&
                 (control.effort === undefined || efforts.has(control.effort)) &&
                 (control.previous === undefined || efforts.has(control.previous)),
         )

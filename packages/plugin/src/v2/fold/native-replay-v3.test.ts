@@ -9,7 +9,7 @@ import type { SessionContext, V2Message } from "../hooks/types";
 import type { StoreRow, V2StoreReader } from "../store-reader";
 import { nativeFoldCache } from "./memory-cache";
 import { NativeFoldReplay } from "./native-replay";
-import { IMPORTED_MC_SUMMARY } from "./native-replay-v3";
+import { encodeAdmissionV3, IMPORTED_MC_SUMMARY, validAdmissionV3 } from "./native-replay-v3";
 import { foldDigest } from "./owner";
 
 const databases: Database[] = [];
@@ -585,4 +585,107 @@ test("a legacy-only full repair retries after interruption and persists only its
     ).toEqual(["u7", "u8"]);
     expect(f.loads.every((load) => load.after >= 5)).toBe(true);
     expect(hard).toBe(2);
+});
+
+test("an edited start row retains its proven coordinate and refreshes provenance only after the shared rebuild", async () => {
+    const f = fixture(3);
+    const raw = f.rows.map((row) => message(row.id, row.data.text as string));
+    await f.replay.capture(context([message(HEAD_IDS[0], "head"), ...raw]), raw);
+    f.begin();
+    expect(await f.replay.supply({ draft: context([]), reader: f.reader, summary: "head" })).toBe(
+        true,
+    );
+    const cut = f.finish();
+    const before = JSON.stringify(f.kv.get("native-fold/v3/s"));
+    f.rows[0]!.data.text = "edited first source row";
+    const cold = f.make();
+    expect(await cold.admits("s", cut, f.reader)).toBe(false);
+    expect(cold.sourceChanged("s")).toBe(true);
+    expect(cold.needsHeadRebuild("s")).toBe(true);
+    expect(await cold.restorationFloor("s", cut, f.reader)).toBe(0);
+    expect(JSON.stringify(f.kv.get("native-fold/v3/s"))).toBe(before);
+    const current = await cold.restoreRead("s", cut, context([]).model);
+    expect(current[0]!.content[0]!.text).toBe("edited first source row");
+    await cold.capture(context([message(HEAD_IDS[0], "head"), ...current]), current);
+    expect(JSON.stringify(f.kv.get("native-fold/v3/s"))).toBe(before);
+    expect(await cold.commitEditedAdmission("s")).toBe(true);
+    expect(cold.sourceChanged("s")).toBe(false);
+    const restarted = f.make();
+    expect(await restarted.admits("s", cut, f.reader)).toBe(true);
+    expect(
+        (await restarted.restore("s", cut, "p/m", { bounded: true }))?.[0]?.content[0]?.text,
+    ).toBe("edited first source row");
+});
+
+test("a missing or replaced start coordinate cannot be healed as a content edit", async () => {
+    const f = fixture();
+    const raw = f.rows.map((row) => message(row.id, row.data.text as string));
+    await f.replay.capture(context([message(HEAD_IDS[0], "head"), ...raw]), raw);
+    f.begin();
+    expect(await f.replay.supply({ draft: context([]), reader: f.reader, summary: "head" })).toBe(
+        true,
+    );
+    const cut = f.finish();
+    const before = JSON.stringify(f.kv.get("native-fold/v3/s"));
+    f.rows[0] = { ...f.rows[0]!, id: "replacement-at-the-same-sequence" };
+    const cold = f.make();
+    expect(await cold.admits("s", cut, f.reader)).toBe(false);
+    expect(cold.sourceChanged("s")).toBe(false);
+    expect(await cold.commitEditedAdmission("s")).toBe(false);
+    expect(await cold.canFold("s", f.reader)).toBe(false);
+    expect(JSON.stringify(f.kv.get("native-fold/v3/s"))).toBe(before);
+});
+
+test("V3 readers and writers reject conversation fields at every metadata level", async () => {
+    const f = fixture();
+    const raw = f.rows.map((row) => message(row.id, row.data.text as string));
+    await f.replay.capture(context([message(HEAD_IDS[0], "head"), ...raw]), raw);
+    f.begin();
+    expect(await f.replay.supply({ draft: context([]), reader: f.reader, summary: "head" })).toBe(
+        true,
+    );
+    const cut = f.finish();
+    const saved = f.kv.get("native-fold/v3/s") as { payload: string };
+    const original = JSON.parse(saved.payload);
+    const mutations = [
+        (value: typeof original) => {
+            value.conversation = "PRIVATE_CONVERSATION";
+        },
+        (value: typeof original) => {
+            value.proof.conversation = "PRIVATE_CONVERSATION";
+        },
+        (value: typeof original) => {
+            value.replay.conversation = "PRIVATE_CONVERSATION";
+        },
+        (value: typeof original) => {
+            value.replay.floor.conversation = "PRIVATE_CONVERSATION";
+        },
+        (value: typeof original) => {
+            value.replay.controls = [[]];
+        },
+        (value: typeof original) => {
+            value.replay.controls = [{ effort: "high", conversation: "PRIVATE_CONVERSATION" }];
+        },
+        (value: typeof original) => {
+            value.replay.upgrade = {
+                admissionID: cut.id,
+                mode: "bounded",
+                conversation: "PRIVATE_CONVERSATION",
+            };
+        },
+        (value: typeof original) => {
+            value.replay.blocked = { conversation: "PRIVATE_CONVERSATION" };
+        },
+    ];
+    for (const mutate of mutations) {
+        const value = structuredClone(original);
+        mutate(value);
+        expect(validAdmissionV3(value)).toBe(false);
+        expect(() => encodeAdmissionV3(value)).toThrow(
+            "Unsupported native fold admission metadata",
+        );
+        const payload = JSON.stringify(value);
+        f.kv.set("native-fold/v3/s", { payload, digest: foldDigest(payload) });
+        expect(await f.make().admits("s", cut, f.reader)).toBe(false);
+    }
 });

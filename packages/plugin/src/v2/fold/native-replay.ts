@@ -17,14 +17,16 @@ import {
     captureControls,
     controlsThrough,
     effortPart,
+    encodeAdmissionV3,
     floorFor,
     hostCheckpointCarrier,
     importedFloor,
     insertControls,
     type ReplayFloor,
     type ReplayStateV3,
-    validControls,
+    validAdmissionV3,
     validFloor,
+    validReplayState,
 } from "./native-replay-v3";
 import { foldDigest, stripCheckpointRecentContext } from "./owner";
 import { restoreRow } from "./restore";
@@ -138,6 +140,13 @@ export class NativeFoldReplay {
     private readonly loaded = new Map<string, number>();
     private readonly sources = new Map<string, string>();
     private readonly staleHeads = new Set<string>();
+    private readonly editedAdmissions = new Map<
+        string,
+        {
+            original: AdmissionV3;
+            replay: ReplayStateV3;
+        }
+    >();
     private readonly legacyUpgrades = new Map<
         string,
         {
@@ -214,9 +223,7 @@ export class NativeFoldReplay {
     ): Promise<ReplayStateV3 | undefined> {
         const retained = this.tail(sessionID)?.replay;
         const memory =
-            retained &&
-            validControls(retained.controls) &&
-            validFloor(reader, sessionID, retained.floor)
+            retained && validReplayState(retained) && validFloor(reader, sessionID, retained.floor)
                 ? retained
                 : undefined;
         const cut = reader.latestCompaction(sessionID);
@@ -277,14 +284,16 @@ export class NativeFoldReplay {
         const saved = (await this.admissions?.get(this.admissionKey(sessionID))) as
             | { payload?: string; digest?: string }
             | undefined;
-        if (!saved?.payload || saved.digest !== foldDigest(saved.payload)) return undefined;
-        const value = JSON.parse(saved.payload) as AdmissionV3;
-        return value.version === 3 &&
-            value.proof?.sessionID === sessionID &&
-            value.replay &&
-            validControls(value.replay.controls)
-            ? value
-            : undefined;
+        if (typeof saved?.payload !== "string" || saved.digest !== foldDigest(saved.payload))
+            return undefined;
+        try {
+            const value: unknown = JSON.parse(saved.payload);
+            return validAdmissionV3(value) && value.proof.sessionID === sessionID
+                ? value
+                : undefined;
+        } catch {
+            return undefined;
+        }
     }
     private servedBaseline(draft: SessionContext): string | undefined {
         const identified = draft.messages
@@ -530,7 +539,7 @@ export class NativeFoldReplay {
                 ),
             },
         };
-        const payload = JSON.stringify(value);
+        const payload = encodeAdmissionV3(value);
         await admissions.set(this.admissionKey(sessionID), {
             payload,
             digest: foldDigest(payload),
@@ -573,7 +582,7 @@ export class NativeFoldReplay {
         )
             return;
         value.replay.withoutRecentContext = true;
-        const payload = JSON.stringify(value);
+        const payload = encodeAdmissionV3(value);
         if (!pending)
             await admissions.set(this.admissionKey(sessionID), {
                 payload,
@@ -601,10 +610,47 @@ export class NativeFoldReplay {
             if (
                 proof.sourceDigest !== foldDigest(reader.hostIdentity()) ||
                 proof.admissionID !== cut.id ||
-                proof.summaryDigest !== foldDigest(cut.data.summary ?? "") ||
-                !validFloor(reader, sessionID, saved.replay.floor)
+                proof.summaryDigest !== foldDigest(cut.data.summary ?? "")
             ) {
                 this.report(sessionID, "replay refused: invalid checkpoint floor or provenance");
+                return false;
+            }
+            let replay = saved.replay;
+            if (!validFloor(reader, sessionID, replay.floor)) {
+                const floor = replay.floor;
+                // Editing the inclusive start row changes its content digest,
+                // not its proven position. Preserve that coordinate for the
+                // shared history rebuild; a missing/replaced row is not a floor.
+                const anchor =
+                    floor?.kind === "start" &&
+                    Number.isSafeInteger(floor.seq) &&
+                    floor.after === floor.seq - 1
+                        ? reader
+                              .range(sessionID, floor.seq - 1, floor.seq)
+                              .find(
+                                  (row) =>
+                                      row.id === floor.id &&
+                                      row.session_id === sessionID &&
+                                      conversational(row),
+                              )
+                        : undefined;
+                if (!anchor) {
+                    this.report(
+                        sessionID,
+                        "replay refused: invalid checkpoint floor or provenance",
+                    );
+                    return false;
+                }
+                replay = { ...replay, floor: floorFor(anchor, "start") };
+                this.editedAdmissions.set(sessionID, { original: saved, replay });
+                this.staleHeads.add(sessionID);
+                this.invalidate(sessionID);
+                await this.retainReplay(
+                    sessionID,
+                    replay,
+                    this.tail(sessionID)?.model ?? "",
+                    cut.seq - 1,
+                );
                 return false;
             }
             await this.retainReplay(
@@ -619,7 +665,7 @@ export class NativeFoldReplay {
             ) {
                 this.staleHeads.add(sessionID);
                 this.invalidate(sessionID);
-                await this.removeAdmission(this.admissionKey(sessionID));
+                this.editedAdmissions.set(sessionID, { original: saved, replay });
                 await this.retainReplay(
                     sessionID,
                     saved.replay,
@@ -682,6 +728,59 @@ export class NativeFoldReplay {
         } catch {
             return false;
         }
+    }
+
+    async commitEditedAdmission(sessionID: string): Promise<boolean> {
+        const pending = this.editedAdmissions.get(sessionID);
+        const admissions = this.admissions;
+        if (!pending || !admissions) return false;
+        const current = await this.readV3(sessionID);
+        // An explicit revocation or a newer writer wins over this prepared pass.
+        if (JSON.stringify(current) !== JSON.stringify(pending.original)) return false;
+        const reader = this.openReader(sessionID);
+        try {
+            const cut = reader.latestCompaction(sessionID);
+            const proof = pending.original.proof;
+            const replay = this.tail(sessionID)?.replay ?? pending.replay;
+            if (
+                !cut ||
+                cut.id !== proof.admissionID ||
+                !isLocalCheckpoint(cut) ||
+                proof.sourceDigest !== foldDigest(reader.hostIdentity()) ||
+                proof.summaryDigest !== foldDigest(cut.data.summary ?? "") ||
+                !validFloor(reader, sessionID, replay.floor)
+            )
+                return false;
+            const value: AdmissionV3 = {
+                ...pending.original,
+                replay: {
+                    ...replay,
+                    controls: controlsThrough(replay.controls, reader, sessionID, cut.seq - 1),
+                },
+                proof: {
+                    ...proof,
+                    historyDigest: historyDigest(
+                        reader,
+                        sessionID,
+                        cut.seq - 1,
+                        replay.floor.after,
+                    ),
+                },
+            };
+            const payload = encodeAdmissionV3(value);
+            await admissions.set(this.admissionKey(sessionID), {
+                payload,
+                digest: foldDigest(payload),
+            });
+            this.editedAdmissions.delete(sessionID);
+            return true;
+        } finally {
+            reader.close();
+        }
+    }
+
+    cancelEditedAdmission(sessionID: string): void {
+        this.editedAdmissions.delete(sessionID);
     }
     /** Prove checkpoint input when another process holds context.db's write lock.
      * Recovery must not change durable provenance, and mismatched native
@@ -1075,6 +1174,7 @@ export class NativeFoldReplay {
                 const cut = reader.latestCompaction(draft.sessionID);
                 if (
                     saved &&
+                    !this.editedAdmissions.has(draft.sessionID) &&
                     cut?.id === saved.proof.admissionID &&
                     replay.floor.after > saved.replay.floor.after &&
                     boundary &&
@@ -1101,7 +1201,7 @@ export class NativeFoldReplay {
                             ),
                         },
                     };
-                    const payload = JSON.stringify(value);
+                    const payload = encodeAdmissionV3(value);
                     await this.admissions?.set(this.admissionKey(draft.sessionID), {
                         payload,
                         digest: foldDigest(payload),
@@ -1194,7 +1294,7 @@ export class NativeFoldReplay {
                     ),
                 },
             };
-            const payload = JSON.stringify(value);
+            const payload = encodeAdmissionV3(value);
             await this.admissions?.set(this.admissionKey(draft.sessionID), {
                 payload,
                 digest: foldDigest(payload),
@@ -1426,10 +1526,10 @@ export class NativeFoldReplay {
         }
     }
     sourceChanged(sessionID: string): boolean {
-        return this.changed.has(sessionID);
+        return this.changed.has(sessionID) || this.editedAdmissions.has(sessionID);
     }
     needsHeadRebuild(sessionID: string): boolean {
-        return this.staleHeads.has(sessionID);
+        return this.staleHeads.has(sessionID) || this.editedAdmissions.has(sessionID);
     }
     private clear(sessionID: string): void {
         this.sources.delete(sessionID);
@@ -1445,6 +1545,7 @@ export class NativeFoldReplay {
     }
     async forget(sessionID: string): Promise<void> {
         this.cancelLegacyUpgrade(sessionID);
+        this.cancelEditedAdmission(sessionID);
         // The session id locates the v2 key and matching legacy keys without any
         // prior source observation. Real hosts remove rows instead of leaving tombstones.
         if (this.admissions) await forgetNativeFoldProvenance(this.admissions, sessionID);

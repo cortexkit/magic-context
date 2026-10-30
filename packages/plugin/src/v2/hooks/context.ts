@@ -1941,7 +1941,7 @@ export async function registerContext(context: V2Context) {
     // with replay helpers that hold the request's messages and attachments.
     const checkpointPassPermissions = new Map<string, boolean>();
     const checkpointInputEstimates = new Map<string, { tokens: number; pressureTokens: number }>();
-    const legacyUpgradePasses = new Set<string>();
+    const admissionRebuildPasses = new Set<string>();
     const initializeTransform = (database: NonNullable<typeof db>) =>
         (transform ??= createTransform({
             ...createV2TransformFeatureDeps(
@@ -2826,7 +2826,7 @@ export async function registerContext(context: V2Context) {
                         headApplied)) &&
                 replayHead === undefined
             )
-                legacyUpgradePasses.add(draft.sessionID);
+                admissionRebuildPasses.add(draft.sessionID);
             const capturedSlot = getSlot(draft.sessionID);
             if (
                 capturedSlot &&
@@ -2994,12 +2994,15 @@ export async function registerContext(context: V2Context) {
                 if (!compactionOff) await refuseOversizedCheckpoint(draft);
                 if (
                     !deletedSessions.has(draft.sessionID) &&
-                    legacyUpgradePasses.has(draft.sessionID)
-                )
+                    admissionRebuildPasses.has(draft.sessionID)
+                ) {
                     await nativeFoldReplay?.commitLegacyUpgrade(draft.sessionID);
+                    await nativeFoldReplay?.commitEditedAdmission(draft.sessionID);
+                }
             } finally {
-                legacyUpgradePasses.delete(draft.sessionID);
+                admissionRebuildPasses.delete(draft.sessionID);
                 nativeFoldReplay?.cancelLegacyUpgrade(draft.sessionID);
+                nativeFoldReplay?.cancelEditedAdmission(draft.sessionID);
                 checkpointInputEstimates.delete(draft.sessionID);
                 checkpointPassPermissions.delete(draft.sessionID);
             }
