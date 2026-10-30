@@ -53,11 +53,19 @@ function openReadOnly(path: string, context: boolean): Database {
     if (!db) throw new Error(`Database does not exist: ${path}`);
     return db;
 }
-function openForApply(path: string): Database {
+function openNonInitializingWriter(path: string): Database {
     // This raw existing-file open performs no migration, journal-mode change or UUID initialization.
     const db = openExistingDatabase(path, { readonly: false });
     if (!db) throw new Error(`Database does not exist: ${path}`);
     return db;
+}
+function releaseBackupLock(db: Database | undefined): void {
+    if (!db) return;
+    try {
+        if (db.inTransaction) db.exec("ROLLBACK");
+    } finally {
+        db.close();
+    }
 }
 export function buildHistoryHealPlan(
     db: Database,
@@ -236,34 +244,70 @@ function authorizeSession(db: Database, host: Database, s: HealSession): Authori
     return { session: s, authorized, contextDone, hostDone, observed };
 }
 
+function snapshotPairUnderWriterLocks(
+    plan: HistoryHealPlan,
+    states: AuthorizedSession[],
+    backup: string,
+): void {
+    const contextLock = openNonInitializingWriter(plan.dbPath);
+    let hostLock: Database | undefined;
+    try {
+        contextLock.exec("BEGIN IMMEDIATE");
+        hostLock = openNonInitializingWriter(plan.hostDbPath);
+        hostLock.exec("BEGIN IMMEDIATE");
+        // Open readers only after both writers are excluded, then keep exclusion through
+        // both logical copies and verification. Exclusion protects unselected sessions too.
+        const context = openReadOnly(plan.dbPath, true);
+        let host: Database | undefined;
+        try {
+            host = openReadOnly(plan.hostDbPath, false);
+            context.prepare("VACUUM main INTO ?").run(join(backup, "context.db"));
+            host.prepare("VACUUM main INTO ?").run(join(backup, "opencode.db"));
+            const savedContext = openImmutableDatabase(join(backup, "context.db"));
+            let savedHost: Database | undefined;
+            try {
+                savedHost = openImmutableDatabase(join(backup, "opencode.db"));
+                for (const state of states)
+                    if (
+                        fingerprint(savedContext, state.session) !== state.observed.context ||
+                        fingerprint(savedHost, state.session, true) !== state.observed.host
+                    )
+                        throw new Error(`stale_plan: ${state.session.title} changed before backup`);
+            } finally {
+                try {
+                    savedHost?.close();
+                } finally {
+                    savedContext.close();
+                }
+            }
+        } finally {
+            try {
+                host?.close();
+            } finally {
+                context.close();
+            }
+        }
+    } finally {
+        try {
+            releaseBackupLock(hostLock);
+        } finally {
+            releaseBackupLock(contextLock);
+        }
+    }
+}
 function backupBeforeMutation(
     plan: HistoryHealPlan,
     states: AuthorizedSession[],
     deps: Partial<HistoryHealDeps>,
 ): void {
-    const context = openReadOnly(plan.dbPath, true),
-        host = openReadOnly(plan.hostDbPath, false);
     const backup = mkdtempSync(join(dirname(plan.dbPath), "history-heal-backup-"));
     const mask = process.umask(0o077);
     try {
         held(plan, deps);
-        // VACUUM INTO takes a consistent read-only SQLite snapshot, including committed WAL frames.
-        context.prepare("VACUUM main INTO ?").run(join(backup, "context.db"));
-        host.prepare("VACUUM main INTO ?").run(join(backup, "opencode.db"));
+        snapshotPairUnderWriterLocks(plan, states, backup);
+        // The frozen pair is complete. Any later source changes are still checked under
+        // the separate per-session apply locks before executing derived writes.
         held(plan, deps);
-        const savedContext = openImmutableDatabase(join(backup, "context.db"));
-        const savedHost = openImmutableDatabase(join(backup, "opencode.db"));
-        try {
-            for (const state of states)
-                if (
-                    fingerprint(savedContext, state.session) !== state.observed.context ||
-                    fingerprint(savedHost, state.session, true) !== state.observed.host
-                )
-                    throw new Error(`stale_plan: ${state.session.title} changed before backup`);
-        } finally {
-            savedHost.close();
-            savedContext.close();
-        }
         writeStorageFileAtomicSync(
             join(backup, "manifest.json"),
             JSON.stringify(
@@ -283,11 +327,12 @@ function backupBeforeMutation(
         );
     } catch (error) {
         rmSync(backup, { recursive: true, force: true });
-        throw error;
+        throw new Error(
+            `backup_failed: paired snapshots were not completed: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+        );
     } finally {
         process.umask(mask);
-        host.close();
-        context.close();
     }
 }
 export function applyHistoryHealPlan(
@@ -331,8 +376,8 @@ export function applyHistoryHealPlan(
     if (!Number.isFinite(free) || free < bytes * 1.1)
         throw new Error(`insufficient_space: paired backup needs ${Math.ceil(bytes * 1.1)} bytes`);
     backupBeforeMutation(plan, states, deps);
-    const writable = openForApply(plan.dbPath),
-        writableHost = openForApply(plan.hostDbPath);
+    const writable = openNonInitializingWriter(plan.dbPath),
+        writableHost = openNonInitializingWriter(plan.hostDbPath);
     try {
         for (const state of work) {
             const s = state.session;

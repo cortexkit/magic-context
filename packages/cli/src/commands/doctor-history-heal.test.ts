@@ -1292,3 +1292,61 @@ describe("independent fix-round review", () => {
         expect(() => apply(p)).toThrow("Invalid text key");
     });
 });
+
+it("holds both non-initializing writers through both snapshots without changing journal modes", () => {
+    db.exec("PRAGMA journal_mode=DELETE");
+    host.exec("PRAGMA journal_mode=DELETE");
+    db.exec("DELETE FROM context_store_meta WHERE key='store_uuid'");
+    marker(2, 1);
+    const journalModes = [
+        db.prepare("PRAGMA journal_mode").get(),
+        host.prepare("PRAGMA journal_mode").get(),
+    ];
+    const prepare = Database.prototype.prepare;
+    const exclusions: boolean[][] = [];
+    const intercepted = spyOn(Database.prototype, "prepare").mockImplementation(function (
+        this: Database,
+        sql: string,
+    ) {
+        const statement = prepare.call(this, sql);
+        if (sql !== "VACUUM main INTO ?") return statement;
+        const run = statement.run.bind(statement);
+        statement.run = (...args: Parameters<typeof statement.run>) => {
+            exclusions.push(
+                [dbPath, hostPath].map((path) => {
+                    const competitor = new Database(path);
+                    let blocked = false;
+                    try {
+                        competitor.exec("PRAGMA busy_timeout=0");
+                        competitor.exec("BEGIN IMMEDIATE");
+                    } catch (error) {
+                        expect(String(error)).toMatch(/locked|busy/i);
+                        blocked = true;
+                    } finally {
+                        if (competitor.inTransaction) competitor.exec("ROLLBACK");
+                        competitor.close();
+                    }
+                    return blocked;
+                }),
+            );
+            return run(...args);
+        };
+        return statement;
+    });
+    try {
+        expect(apply()).toBe(0);
+        expect(exclusions).toEqual([
+            [true, true],
+            [true, true],
+        ]);
+        expect([
+            db.prepare("PRAGMA journal_mode").get(),
+            host.prepare("PRAGMA journal_mode").get(),
+        ]).toEqual(journalModes);
+        expect(db.prepare("SELECT * FROM context_store_meta WHERE key='store_uuid'").all()).toEqual(
+            [],
+        );
+    } finally {
+        intercepted.mockRestore();
+    }
+});
