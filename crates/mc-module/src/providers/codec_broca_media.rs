@@ -2,6 +2,10 @@
 //! when a provider cannot carry media, never the referenced payload or full digest.
 use super::*;
 use crate::ck_wire::{CkOutputKind, MediaBlock, MediaKind, ResultBlock, ResultBlockKind};
+use cortexkit_role_llm_runner::tags::{
+    image_label, media_label, numbered_block_index, render_counted_text, tool_result_kind,
+    PartKind, ToolResultBlock,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -18,7 +22,7 @@ fn unreadable(member: &str, rule: &str) -> HandlerOutcome {
 fn constraint() -> HandlerOutcome {
     error(
         "provider_constraint",
-        "media reference must equal a captured reference",
+        "media occurrence must retain its captured reference and position",
     )
 }
 
@@ -78,7 +82,7 @@ pub(super) fn decode_ref(value: &Value) -> Result<MediaBlock, HandlerOutcome> {
             {
                 return Err(unreadable(member, "image requires u32"));
             }
-        } else if value.get(member).is_some() {
+        } else if value.get(member).is_some_and(|value| !value.is_null()) {
             return Err(unreadable(member, "only permitted on image"));
         }
     }
@@ -202,18 +206,20 @@ pub(crate) fn prepend_parts_tag(output: &mut CkOutputKind, number: i64) -> Optio
     let (CkOutputKind::Content { blocks } | CkOutputKind::ErrorContent { blocks }) = output else {
         return None;
     };
-    for block in blocks.iter_mut() {
-        if let ResultBlockKind::Text { text } = &mut block.kind {
-            let next = format!("§{number}§ {text}");
-            *text = next;
-            return Some(true);
-        }
+    let number = u64::try_from(number).ok()?;
+    let (kind, index) = parts_numbering(blocks);
+    if let Some(index) = index {
+        let ResultBlockKind::Text { text } = &mut blocks[index].kind else {
+            return None;
+        };
+        let next = render_counted_text(number, text);
+        let changed = *text != next;
+        *text = next;
+        return Some(changed);
     }
-    if blocks.is_empty() {
+    let Some(text) = numbered_media_label(kind, number) else {
         return Some(false);
-    }
-    let label = if blocks.iter().all(|block| matches!(&block.kind, ResultBlockKind::Media { media } if media.kind == MediaKind::Image)) { "[image]" } else { "[media]" };
-    let text = format!("§{number}§ {label}");
+    };
     blocks.insert(
         0,
         ResultBlock {
@@ -222,6 +228,28 @@ pub(crate) fn prepend_parts_tag(output: &mut CkOutputKind, number: i64) -> Optio
         },
     );
     Some(true)
+}
+
+fn parts_numbering(blocks: &[ResultBlock]) -> (PartKind, Option<usize>) {
+    let parts: Vec<_> = blocks
+        .iter()
+        .map(|block| match &block.kind {
+            ResultBlockKind::Text { text } => ToolResultBlock::Text(text),
+            ResultBlockKind::Media { media } if media.kind == MediaKind::Image => {
+                ToolResultBlock::Image
+            }
+            _ => ToolResultBlock::Media,
+        })
+        .collect();
+    (tool_result_kind(&parts), numbered_block_index(&parts))
+}
+
+fn numbered_media_label(kind: PartKind, number: u64) -> Option<String> {
+    match kind {
+        PartKind::ToolResultImageOnly => Some(image_label(number)),
+        PartKind::ToolResultMediaOnly => Some(media_label(number)),
+        _ => None,
+    }
 }
 
 pub(super) fn encode_parts(blocks: &[ResultBlock]) -> Result<Value, HandlerOutcome> {
@@ -302,135 +330,198 @@ pub(super) fn encode_block(
     Ok(raw.clone())
 }
 
-fn references(message: &Value) -> Vec<Value> {
-    let mut refs = Vec::new();
-    for block in message["content"].as_array().into_iter().flatten() {
-        if block["type"] == "media" || block["type"] == "media_ref" {
-            let mut media = block.clone();
-            media.as_object_mut().expect("media object").remove("type");
-            media.as_object_mut().expect("media object").remove("part");
-            refs.push(media);
+fn media_occurrences(block: &Value) -> Vec<(usize, Value)> {
+    let normalize = |reference: &Value| {
+        let mut reference = reference.clone();
+        if let Some(object) = reference.as_object_mut() {
+            object.remove("type");
+            object.remove("part");
         }
-        if block["type"] == "tool_result"
-            && block.pointer("/output/kind").and_then(Value::as_str) == Some("parts")
-        {
-            for part in block["output"]["parts"].as_array().into_iter().flatten() {
-                if part["kind"] == "media" {
-                    let mut media = part["media"].clone();
-                    if media["type"] == "media_ref" {
-                        media
-                            .as_object_mut()
-                            .expect("media reference")
-                            .remove("type");
-                    }
-                    refs.push(media);
-                }
-            }
-        }
+        reference
+    };
+    if matches!(block["type"].as_str(), Some("media" | "media_ref")) {
+        return vec![(0, normalize(block))];
     }
-    refs
+    if block["type"] == "tool_result"
+        && block.pointer("/output/kind").and_then(Value::as_str) == Some("parts")
+    {
+        return block["output"]["parts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, part)| part["kind"] == "media")
+            .map(|(index, part)| (index, normalize(&part["media"])))
+            .collect();
+    }
+    Vec::new()
+}
+
+fn has_inserted_media_label(original: &Value, changed: &Value) -> bool {
+    let Some(before) = original.pointer("/output/parts").and_then(Value::as_array) else {
+        return false;
+    };
+    let Some(after) = changed.pointer("/output/parts").and_then(Value::as_array) else {
+        return false;
+    };
+    if after.len() != before.len() + 1 || after[0]["kind"] != "text" {
+        return false;
+    }
+    let Some(text) = after[0]["text"].as_str() else {
+        return false;
+    };
+    let Some((tag, _)) = text.split_once(' ') else {
+        return false;
+    };
+    let Some(number) = cortexkit_role_llm_runner::tags::parse_tag(tag) else {
+        return false;
+    };
+    let Ok(parts) = serde_json::from_value::<Vec<NativePart>>(Value::Array(before.clone())) else {
+        return false;
+    };
+    let Ok(CkOutputKind::Content { blocks }) = decode_parts(parts, false) else {
+        return false;
+    };
+    let (kind, index) = parts_numbering(&blocks);
+    index.is_none() && numbered_media_label(kind, number).as_deref() == Some(text)
+}
+
+fn validate_block_occurrences(changed: &Value, original: &Value) -> Result<(), HandlerOutcome> {
+    let before = media_occurrences(original);
+    let after = media_occurrences(changed);
+    if before.is_empty() && after.is_empty() {
+        return Ok(());
+    }
+    if original["type"] == "tool_result" {
+        if changed["type"] != "tool_result" || changed["tool_call_id"] != original["tool_call_id"] {
+            return Err(error(
+                "provider_constraint",
+                "media tool_call_id must retain its captured pair",
+            ));
+        }
+        // Dropping the complete output is allowed; deleting individual media children is not.
+        if changed.pointer("/output/kind").and_then(Value::as_str) == Some("text")
+            && after.is_empty()
+        {
+            return Ok(());
+        }
+        if changed.pointer("/output/kind").and_then(Value::as_str) != Some("parts") {
+            return Err(constraint());
+        }
+    } else if !matches!(changed["type"].as_str(), Some("media" | "media_ref")) {
+        return Err(constraint());
+    }
+    if before == after {
+        return Ok(());
+    }
+    // Broca may insert one numbered label before an otherwise media-only output.
+    if has_inserted_media_label(original, changed)
+        && before
+            .iter()
+            .map(|(index, reference)| (index + 1, reference))
+            .eq(after.iter().map(|(index, reference)| (*index, reference)))
+    {
+        return Ok(());
+    }
+    Err(constraint())
+}
+
+fn message_media_origins(
+    message: &Value,
+    ck: &crate::ck_wire::CkWireMessage,
+    original: Option<&Value>,
+) -> Result<Vec<usize>, HandlerOutcome> {
+    let mut origins = Vec::new();
+    for (block, retained) in message["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .zip(&ck.content)
+    {
+        let extras = retained.provider_extras.get("mc-provider");
+        let raw = extras.and_then(|extras| extras.get("native_block"));
+        let remains = !media_occurrences(block).is_empty();
+        if !remains && raw.is_none_or(|raw| media_occurrences(raw).is_empty()) {
+            continue;
+        }
+        let raw = raw.ok_or_else(constraint)?;
+        validate_block_occurrences(block, raw)?;
+        if !remains {
+            continue;
+        }
+        let index = extras
+            .and_then(|extras| extras.get("native_index"))
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or_else(constraint)?;
+        let captured = original
+            .and_then(|message| message["content"].as_array())
+            .and_then(|blocks| blocks.get(index))
+            .ok_or_else(constraint)?;
+        if captured != raw || origins.last().is_some_and(|previous| *previous >= index) {
+            return Err(constraint());
+        }
+        validate_block_occurrences(block, captured)?;
+        origins.push(index);
+    }
+    Ok(origins)
 }
 
 pub(super) fn validate_message(
     message: &Value,
+    ck: &crate::ck_wire::CkWireMessage,
     original: Option<&Value>,
 ) -> Result<(), HandlerOutcome> {
-    let captured = original.map(references).unwrap_or_default();
-    if references(message)
-        .iter()
-        .any(|reference| !captured.contains(reference))
-    {
-        return Err(constraint());
-    }
-    Ok(())
+    message_media_origins(message, ck, original).map(|_| ())
 }
 
-/// Check references against the source messages, not extras retained by the edited view.
+/// Check each surviving occurrence against its source message, block, and child position.
 pub(super) fn validate_view<'a>(
     outbound: &codec::OutboundMessage,
     view: &transform::compaction::View,
     sources: impl Iterator<Item = (u64, &'a Value)>,
 ) -> Result<(), HandlerOutcome> {
     let sources: Vec<_> = sources.collect();
-    let captured: Vec<_> = sources
-        .iter()
-        .flat_map(|(_, message)| references(message))
-        .collect();
+    let mut previous = None;
     for (message, ck) in outbound.replacement.iter().zip(&view.replacement) {
-        if references(message)
+        let source = sources
             .iter()
-            .any(|reference| !captured.contains(reference))
-        {
-            return Err(constraint());
+            .find(|(ordinal, _)| Some(*ordinal) == ck.meta.ordinal);
+        let origins = message_media_origins(message, ck, source.map(|(_, original)| *original))?;
+        for index in origins {
+            let origin = (source.ok_or_else(constraint)?.0, index);
+            if previous.is_some_and(|previous| previous >= origin) {
+                return Err(constraint());
+            }
+            previous = Some(origin);
         }
-        if let Some((_, original)) = sources
-            .iter()
-            .find(|(ordinal, _)| Some(*ordinal) == ck.meta.ordinal)
-        {
-            for (block, retained) in message["content"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .zip(&ck.content)
+        for block in message["content"].as_array().into_iter().flatten() {
+            if block["type"] != "tool_result" || media_occurrences(block).is_empty() {
+                continue;
+            }
+            let id = &block["tool_call_id"];
+            let call_is_covered = sources.iter().any(|(ordinal, source)| {
+                *ordinal >= view.range.from
+                    && *ordinal < view.range.to
+                    && source["content"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|block| block["type"] == "tool_call" && &block["tool_call_id"] == id)
+            });
+            if call_is_covered
+                && !outbound.replacement.iter().any(|message| {
+                    message["content"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|block| block["type"] == "tool_call" && &block["tool_call_id"] == id)
+                })
             {
-                let refs = references(&json!({"content":[block]}));
-                if refs.is_empty() {
-                    continue;
-                }
-                let raw = retained
-                    .provider_extras
-                    .get("mc-provider")
-                    .and_then(|extras| extras.get("native_block"))
-                    .ok_or_else(constraint)?;
-                if !original["content"]
-                    .as_array()
-                    .is_some_and(|blocks| blocks.contains(raw))
-                {
-                    return Err(constraint());
-                }
-                let captured_part = references(&json!({"content":[raw]}));
-                if refs
-                    .iter()
-                    .any(|reference| !captured_part.contains(reference))
-                {
-                    return Err(constraint());
-                }
-                if block["type"] == "tool_result" {
-                    if block["tool_call_id"] != raw["tool_call_id"] {
-                        return Err(error(
-                            "provider_constraint",
-                            "media tool_call_id must retain its captured pair",
-                        ));
-                    }
-                    let id = &block["tool_call_id"];
-                    let call_is_covered = sources.iter().any(|(ordinal, source)| {
-                        *ordinal >= view.range.from
-                            && *ordinal < view.range.to
-                            && source["content"]
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .any(|block| {
-                                    block["type"] == "tool_call" && &block["tool_call_id"] == id
-                                })
-                    });
-                    if call_is_covered
-                        && !outbound.replacement.iter().any(|message| {
-                            message["content"]
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .any(|block| {
-                                    block["type"] == "tool_call" && &block["tool_call_id"] == id
-                                })
-                        })
-                    {
-                        return Err(error(
-                            "provider_constraint",
-                            "media tool_result requires its tool_call pair",
-                        ));
-                    }
-                }
+                return Err(error(
+                    "provider_constraint",
+                    "media tool_result requires its tool_call pair",
+                ));
             }
         }
     }

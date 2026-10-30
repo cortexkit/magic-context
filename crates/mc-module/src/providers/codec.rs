@@ -479,7 +479,23 @@ pub fn decode_message(
     let parsed = native(&message.message)?;
     let mut content = Vec::new();
     for (index, block) in parsed.content.into_iter().enumerate() {
-        let raw = message.message["content"][index].clone();
+        let carries_parts = matches!(
+            &block,
+            NativeBlock::ToolResult {
+                output: NativeOutput::Parts { .. },
+                ..
+            }
+        );
+        let retain_raw = carries_parts
+            || matches!(
+                &block,
+                NativeBlock::Media { .. } | NativeBlock::MediaRef { .. }
+            );
+        let raw = if retain_raw {
+            message.message["content"][index].clone()
+        } else {
+            serde_json::to_value(&block).map_err(transient)?
+        };
         let kind = match block {
             NativeBlock::Media { .. } => CkKind::Media(media::decode_ref(&raw)?),
             NativeBlock::MediaRef { part, .. } => {
@@ -548,10 +564,11 @@ pub fn decode_message(
             }
         };
         let mut extras = ProviderExtras::new();
-        extras.insert(
-            "mc-provider".into(),
-            BTreeMap::from([("native_block".into(), raw)]),
-        );
+        let mut native_extras = BTreeMap::from([("native_block".into(), raw)]);
+        if retain_raw {
+            native_extras.insert("native_index".into(), json!(index));
+        }
+        extras.insert("mc-provider".into(), native_extras);
         content.push(CkWireBlock::with_provider_extras(kind, extras));
     }
     let mut extras = ProviderExtras::new();
@@ -731,7 +748,7 @@ pub fn encode_message(message: &ck_wire::CkWireMessage) -> Result<Value, Handler
         .provider_extras
         .get("mc-provider")
         .and_then(|v| v.get("native_message"));
-    media::validate_message(&json!({"content":content}), original)?;
+    media::validate_message(&json!({"content":content}), message, original)?;
     if let Some(original) = original {
         if original.get("role") == Some(&json!(message.role))
             && original.get("content") == Some(&json!(content))

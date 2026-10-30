@@ -659,3 +659,144 @@ fn review_broca_legacy_null_member_rendering_matches_base() {
     ]});
     assert_eq!(codec::encode_message(&message).unwrap(), expected);
 }
+
+#[test]
+fn broca_media_ordered_occurrences_refuse_partial_removal_duplication_and_reordering() {
+    for capture in [
+        ON,
+        include_str!("../../testdata/broca-media-set2/on-session-read-descriptors.jsonl"),
+    ] {
+        let entries: Vec<_> = rows(capture).iter().map(entry).collect();
+        for edit in [
+            "retarget",
+            "swap",
+            "duplicate",
+            "remove",
+            "move-text",
+            "replace-with-text",
+        ] {
+            let mut changed = view(&entries);
+            let CkKind::ToolResult { output, .. } = &mut changed.replacement[4].content[0].kind
+            else {
+                panic!("result")
+            };
+            let CkOutputKind::Content { blocks } = &mut output.kind else {
+                panic!("parts")
+            };
+            match edit {
+                "retarget" => blocks[1] = blocks[2].clone(),
+                "swap" => blocks.swap(1, 2),
+                "duplicate" => blocks.insert(2, blocks[1].clone()),
+                "remove" => {
+                    blocks.remove(1);
+                }
+                "move-text" => {
+                    let text = blocks.remove(0);
+                    blocks.push(text);
+                }
+                "replace-with-text" => blocks[1] = blocks[0].clone(),
+                _ => unreachable!(),
+            }
+            let refused = Codec::OwnedBroca
+                .render_view(&changed, "ordered-media", &entries)
+                .unwrap_err();
+            assert!(
+                format!("{refused:?}").contains("provider_constraint"),
+                "{edit}: {refused:?}"
+            );
+        }
+        let mut retargeted = entries.clone();
+        retargeted[4].message["content"][0]["output"]["parts"]
+            .as_array_mut()
+            .unwrap()
+            .swap(1, 2);
+        let refused = Codec::OwnedBroca
+            .render_view(&view(&retargeted), "ordered-media", &entries)
+            .unwrap_err();
+        assert!(format!("{refused:?}").contains("provider_constraint"));
+    }
+}
+
+#[test]
+fn broca_media_empty_text_media_only_labels_keep_occurrence_positions() {
+    use cortexkit_role_llm_runner::tags::{image_label, media_label};
+    for image_only in [false, true] {
+        let mut entries: Vec<_> = rows(ON).iter().map(entry).collect();
+        let parts = entries[4].message["content"][0]["output"]["parts"]
+            .as_array_mut()
+            .unwrap();
+        parts[0]["text"] = json!("");
+        parts[3]["text"] = json!("");
+        if image_only {
+            parts.remove(2);
+        }
+        let original = entries[4].message["content"][0]["output"]["parts"].clone();
+        let mut changed = view(&entries);
+        assert!(crate::transform::apply_tag_prefix_to_block(
+            "tool",
+            &mut changed.replacement[4].content[0],
+            crate::transform::TaggableKind::ToolResult,
+            8
+        ));
+        let rendered = Codec::OwnedBroca
+            .render_view(&changed, "media-label", &entries)
+            .unwrap();
+        let parts = rendered.replacement[4]["content"][0]["output"]["parts"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            parts[0],
+            json!({"kind":"text","text":if image_only { image_label(8) } else { media_label(8) }})
+        );
+        assert_eq!(&parts[1..], original.as_array().unwrap());
+    }
+}
+
+#[test]
+fn broca_media_whole_output_drop_preserves_other_occurrence_identities() {
+    let mut entries: Vec<_> = rows(ON).iter().map(entry).collect();
+    let mut call = entries[3].message["content"][0].clone();
+    call["tool_call_id"] = json!("second");
+    entries[3].message["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(call);
+    let mut result = entries[4].message["content"][0].clone();
+    result["tool_call_id"] = json!("second");
+    entries[4].message["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(result.clone());
+    let mut changed = view(&entries);
+    changed.replacement[4].content[0] =
+        crate::ck_wire::reduced_block(&changed.replacement[4].content[0], "[dropped §8§]");
+    let rendered = Codec::OwnedBroca
+        .render_view(&changed, "media-drop", &entries)
+        .unwrap();
+    assert_eq!(
+        rendered.replacement[4]["content"][0]["output"],
+        json!({"kind":"text","text":"[dropped §8§]"})
+    );
+    assert_eq!(rendered.replacement[4]["content"][1], result);
+}
+
+#[test]
+fn broca_media_standalone_occurrences_cannot_be_reordered_or_duplicated() {
+    let mut entries: Vec<_> = rows(ON).iter().map(entry).collect();
+    let first = entries[2].message["content"][1].clone();
+    let mut second = first.clone();
+    second["sha256"] = json!("a".repeat(64));
+    entries[2].message["content"] = json!([first, second]);
+    for duplicate in [false, true] {
+        let mut changed = view(&entries);
+        if duplicate {
+            changed.replacement[2].content[0] = changed.replacement[2].content[1].clone();
+        } else {
+            changed.replacement[2].content.swap(0, 1);
+        }
+        let refused = Codec::OwnedBroca
+            .render_view(&changed, "standalone-media", &entries)
+            .unwrap_err();
+        assert!(format!("{refused:?}").contains("provider_constraint"));
+    }
+}
