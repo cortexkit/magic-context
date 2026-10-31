@@ -1,6 +1,11 @@
 import { log } from "../../shared/logger";
-import { cleanSearchText, keywordRelevance, matchedSearchSnippet } from "../../shared/search-text";
+import { matchedSearchSnippet } from "../../shared/search-text";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import {
+    type AutoSearchDiagnostics,
+    autoSearchRelevance,
+    recordAutoSearchLane,
+} from "./auto-search-diagnostics";
 import {
     loadCompartmentChunkEmbeddingsForSearch,
     peekCompartmentChunkSearchPool,
@@ -137,6 +142,9 @@ export function createUnifiedSearchDiagnostics(): UnifiedSearchDiagnostics {
 }
 
 export interface UnifiedSearchOptions {
+    /** Privacy-safe automatic-hint aggregates, also published between search stages. */
+    autoSearchDiagnostics?: AutoSearchDiagnostics;
+    onAutoSearchDiagnostics?: () => void;
     limit?: number;
     /** For automatic hints, score the share of query terms present instead of their relative FTS rank. */
     autoHint?: boolean;
@@ -1774,13 +1782,19 @@ async function searchCompartmentChunks(args: {
     warmOnly?: boolean;
     signal?: AbortSignal;
     timings?: UnifiedSearchStepTimings;
+    diagnostics?: AutoSearchDiagnostics;
+    reportDiagnostics?: () => void;
 }): Promise<CompartmentSearchResult[]> {
     if (args.limit <= 0 || !args.modelId || args.modelId === "off") {
         if (args.timings) args.timings.chunkPool = "off";
+        if (args.diagnostics) args.diagnostics.pool = "off";
+        args.reportDiagnostics?.();
         return [];
     }
     if (!args.queryEmbedding) {
         if (args.timings) args.timings.chunkPool = "no-vector";
+        if (args.diagnostics) args.diagnostics.pool = "no-vector";
+        args.reportDiagnostics?.();
         // A late query vector is common for automatic hints. Warm the pool now
         // anyway, so a later turn whose vector does arrive finds it ready.
         if (args.warmOnly)
@@ -1801,9 +1815,15 @@ async function searchCompartmentChunks(args: {
             args.projectPath,
             args.modelId,
             args.dateRange,
+            args.diagnostics,
         );
         if (warm === null) {
             if (args.timings) args.timings.chunkPool = "cold";
+            if (args.diagnostics) {
+                args.diagnostics.pool = "cold";
+                args.diagnostics.poolRows = 0;
+            }
+            args.reportDiagnostics?.();
             // Never throws. It runs between this thread's later work, which
             // already yields between pages and batches.
             void warmCompartmentChunkSearchPool(
@@ -1815,6 +1835,11 @@ async function searchCompartmentChunks(args: {
             return [];
         }
         if (args.timings) args.timings.chunkPool = "warm";
+        if (args.diagnostics) {
+            args.diagnostics.pool = "warm";
+            args.diagnostics.poolRows = warm.length;
+        }
+        args.reportDiagnostics?.();
         rows = warm;
     } else {
         try {
@@ -2432,6 +2457,13 @@ export async function unifiedSearch(
         );
         if (lanes) lanes.message_fts = (outcome.laneResults ?? outcome.results).slice(0, 25);
         if (timings) timings.messageMs = performance.now() - stepStartedAt;
+        recordAutoSearchLane(
+            options.autoSearchDiagnostics,
+            "messages",
+            trimmedQuery,
+            messageResults,
+        );
+        options.onAutoSearchDiagnostics?.();
     }
 
     // Wait for the single embed call (if any) and then run the two
@@ -2460,6 +2492,8 @@ export async function unifiedSearch(
         embeddingSnapshot?.chunkModelId;
     stepStartedAt = performance.now();
     if (timings) timings.chunkPool = "off";
+    if (options.autoSearchDiagnostics && !runCompartmentChunks)
+        options.autoSearchDiagnostics.pool = "off";
     const compartmentResults = runCompartmentChunks
         ? await searchCompartmentChunks({
               db,
@@ -2473,8 +2507,18 @@ export async function unifiedSearch(
               warmOnly: options.chunkPoolWarmOnly,
               signal: options.signal,
               timings,
+              diagnostics: options.autoSearchDiagnostics,
+              reportDiagnostics: options.onAutoSearchDiagnostics,
           })
         : [];
+    if (runCompartmentChunks)
+        recordAutoSearchLane(
+            options.autoSearchDiagnostics,
+            "summaries",
+            trimmedQuery,
+            compartmentResults,
+        );
+    options.onAutoSearchDiagnostics?.();
     if (timings && runCompartmentChunks) timings.chunkMs = performance.now() - stepStartedAt;
     stepStartedAt = performance.now();
     if (lanes) lanes.chunk_vector = compartmentResults.slice(0, 25);
@@ -2551,6 +2595,16 @@ export async function unifiedSearch(
     ]);
 
     if (timings) timings.otherLanesMs = performance.now() - stepStartedAt;
+    if (runMemory)
+        recordAutoSearchLane(
+            options.autoSearchDiagnostics,
+            "memory",
+            trimmedQuery,
+            memoryOutcome.results,
+        );
+    if (runGitCommits)
+        recordAutoSearchLane(options.autoSearchDiagnostics, "git", trimmedQuery, gitCommitResults);
+    options.onAutoSearchDiagnostics?.();
     if (options.diagnostics) {
         options.diagnostics.suppressedVisibleMemoryIds = memoryOutcome.suppressedVisibleIds;
     }
@@ -2641,16 +2695,7 @@ export async function unifiedSearch(
     if (options.autoHint) {
         return results.map((result) => ({
             ...result,
-            relevanceScore:
-                cleanSearchText(result.source === "compartment" ? result.title : result.content)
-                    .length === 0
-                    ? 0
-                    : result.source === "message" ||
-                        ("matchType" in result &&
-                            result.source !== "compartment" &&
-                            result.matchType !== "semantic")
-                      ? keywordRelevance(trimmedQuery, result.content)
-                      : result.score,
+            relevanceScore: autoSearchRelevance(trimmedQuery, result),
         }));
     }
     return results;

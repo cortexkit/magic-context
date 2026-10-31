@@ -4402,6 +4402,23 @@ export async function runPostTransformPhase(
             autoSearchCompletedThisPass &&
             countAutoSearchHints(args.db, args.sessionId) !== autoSearchHintsBefore;
         logTransformTiming(args.sessionId, "pp.autoSearchHint", tAutoSearch);
+    } else if (
+        args.fullFeatureMode &&
+        args.autoSearch &&
+        !args.autoSearch.enabled &&
+        args.projectPath
+    ) {
+        await runAutoSearchHint({
+            sessionId: args.sessionId,
+            db: args.db,
+            messages: args.messages,
+            options: {
+                enabled: false,
+                scoreThreshold: args.autoSearch.scoreThreshold,
+                minPromptChars: args.autoSearch.minPromptChars,
+                projectPath: args.projectPath,
+            },
+        });
     }
 
     if (args.fullFeatureMode && canEditWholePrefix) {
