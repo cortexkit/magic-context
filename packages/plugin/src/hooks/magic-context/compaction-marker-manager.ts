@@ -21,22 +21,17 @@ import {
     listSessionCompactionMarkers,
     removeCompactionMarker,
     removeForeignCompactionMarker,
-    replaceCompactionMarker,
 } from "../../features/magic-context/compaction-marker";
 import {
     getCompartmentsByEndMessageId,
     getUncoveredCompartmentEndsThrough,
 } from "../../features/magic-context/compartment-storage";
 import {
+    getCompactionMarkerPublicationState,
     getPersistedCompactionMarkerState,
     type PendingCompactionMarker,
-    type PersistedCompactionMarkerState,
     setPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
-import {
-    getTagNumberByMessageId,
-    updateTagStatus,
-} from "../../features/magic-context/storage-tags";
 import { getHarness } from "../../shared/harness";
 import { log, sessionLog } from "../../shared/logger";
 import {
@@ -47,33 +42,11 @@ import {
 import type { Database } from "../../shared/sqlite";
 import { Database as SqliteDb } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
+import { publishRecoverableCompactionMarker } from "./compaction-marker-publication";
 
 /** Static placeholder. The real session-history comes from transform injection. */
 export const MARKER_SUMMARY_TEXT =
     "[Compacted by magic-context — session history is managed by the plugin]";
-
-function dropMarkerSummaryTag(db: Database, sessionId: string, summaryMessageId: string): void {
-    const tagNumber = getTagNumberByMessageId(db, sessionId, `${summaryMessageId}:p0`);
-    if (tagNumber !== null) updateTagStatus(db, sessionId, tagNumber, "dropped");
-}
-
-function persistMarkerStateAndDropReplacedTag(
-    db: Database,
-    sessionId: string,
-    state: PersistedCompactionMarkerState | null,
-    replacedSummaryMessageId: string | null,
-): void {
-    let transactionStartedAt = 0;
-    db.transaction(() => {
-        transactionStartedAt = performance.now();
-        setPersistedCompactionMarkerState(db, sessionId, state);
-        if (replacedSummaryMessageId !== null) {
-            dropMarkerSummaryTag(db, sessionId, replacedSummaryMessageId);
-        }
-    }).immediate();
-    logSlowWriteTransaction("marker-drain", transactionStartedAt);
-}
 
 /**
  * Result of draining one persisted marker request.
@@ -317,7 +290,7 @@ export function applyDeferredCompactionMarker(
     directory?: string,
     trustedBoundary?: TrustedMaterializedCompactionBoundary,
 ): MarkerUpdateOutcome {
-    let cut: "definitely-no-cut" | "uncertain" = "definitely-no-cut";
+    let cut: "definitely-no-cut" | "uncertain" = "uncertain";
     // Step timings for the applied-drain log line. The drain reads both stores
     // and writes OpenCode's under its lock; one slow step must be attributable.
     let stepStartedAt = performance.now();
@@ -328,6 +301,22 @@ export function applyDeferredCompactionMarker(
         stepStartedAt = now;
     };
     try {
+        cut = getCompactionMarkerPublicationState(db, sessionId).pending
+            ? "uncertain"
+            : "definitely-no-cut";
+        const unresolvedIntentFailure = (): MarkerUpdateOutcome | null => {
+            const alreadyUncertain = cut === "uncertain";
+            cut = "uncertain";
+            if (getCompactionMarkerPublicationState(db, sessionId).pending || alreadyUncertain) {
+                return {
+                    kind: "retryable-failure",
+                    cut,
+                    error: new Error("unresolved marker publication intent; retaining retry state"),
+                };
+            }
+            cut = "definitely-no-cut";
+            return null;
+        };
         // Rust may fence the target with the exact durable boundary returned by the
         // materializing response. Other callers validate against local compartment rows.
         // Validation failures happen before any marker state mutation.
@@ -342,6 +331,8 @@ export function applyDeferredCompactionMarker(
             : validatePendingTarget(db, sessionId, pending);
         endStep("validate");
         if (validation !== "ok") {
+            const unresolved = unresolvedIntentFailure();
+            if (unresolved) return unresolved;
             sessionLog(
                 sessionId,
                 `compaction-marker drain: stale-skip (${validation}) for ordinal ${pending.ordinal} endMessageId=${pending.endMessageId}`,
@@ -359,8 +350,8 @@ export function applyDeferredCompactionMarker(
                 pending.endMessageId,
             )
         ) {
-            // Marker already at this boundary (or further). Nothing to do.
-            return { kind: "already-current" };
+            // The finalized marker's coverage does not resolve ownership of pending host rows.
+            if (!unresolvedIntentFailure()) return { kind: "already-current" };
         }
 
         // Resolve the replacement boundary BEFORE removing the existing marker.
@@ -371,13 +362,15 @@ export function applyDeferredCompactionMarker(
         // Covers the existing-marker coverage check above and this lookup.
         endStep("boundary");
         if (!boundary) {
-            return {
-                kind: "retryable-failure",
-                cut: "definitely-no-cut",
-                error: new Error(
-                    `no user boundary found at or before endMessageId ${pending.endMessageId} (ordinal ${pending.ordinal}); preserving existing marker`,
-                ),
-            };
+            return (
+                unresolvedIntentFailure() ?? {
+                    kind: "retryable-failure",
+                    cut: "definitely-no-cut",
+                    error: new Error(
+                        `no user boundary found at or before endMessageId ${pending.endMessageId} (ordinal ${pending.ordinal}); preserving existing marker`,
+                    ),
+                }
+            );
         }
 
         // Keep the user at or before a partly summarized message so its entire tool
@@ -385,6 +378,8 @@ export function applyDeferredCompactionMarker(
         // not covered by a following summary. Rust records the final block of fully
         // summarized messages too; a block index alone does not prove missing coverage.
         if (boundaryWouldDiscardUncoveredMessage(db, sessionId, pending.ordinal, boundary.id)) {
+            const unresolved = unresolvedIntentFailure();
+            if (unresolved) return unresolved;
             sessionLog(
                 sessionId,
                 `compaction-marker drain: stale-skip (partial-message-boundary) for ordinal ${pending.ordinal} endMessageId=${pending.endMessageId}`,
@@ -395,16 +390,22 @@ export function applyDeferredCompactionMarker(
 
         // Replace both host-store row sets under one BEGIN IMMEDIATE. A busy
         // store fails before deletion; any later failure rolls the deletion back.
-        const removedSummaryMessageId = existing?.summaryMessageId ?? null;
         cut = "uncertain";
-        const replacement = replaceCompactionMarker(existing, {
-            sessionId,
-            endOrdinal: pending.ordinal,
-            endMessageId: pending.endMessageId,
-            summaryText: MARKER_SUMMARY_TEXT,
-            directory: directory ?? process.cwd(),
-            resolvedBoundary: boundary,
-        });
+        const replacement = publishRecoverableCompactionMarker(
+            db,
+            {
+                sessionId,
+                endOrdinal: pending.ordinal,
+                endMessageId: pending.endMessageId,
+                summaryText: MARKER_SUMMARY_TEXT,
+                directory: directory ?? process.cwd(),
+                resolvedBoundary: boundary,
+            },
+            () =>
+                JSON.stringify(getPersistedCompactionMarkerState(db, sessionId)) ===
+                    JSON.stringify(existing) &&
+                (responseFencesTarget || validatePendingTarget(db, sessionId, pending) === "ok"),
+        );
         endStep("replace");
         if (replacement.kind === "deferred")
             return { kind: "deferred", reason: "candidate-preparation" };
@@ -415,23 +416,8 @@ export function applyDeferredCompactionMarker(
                 error: replacement.error,
             };
         }
-        const result = replacement.marker;
-
-        persistMarkerStateAndDropReplacedTag(
-            db,
-            sessionId,
-            {
-                ...result,
-                boundaryOrdinal: pending.ordinal,
-                targetEndMessageId: pending.endMessageId,
-            },
-            removedSummaryMessageId,
-        );
         endStep("persist");
-        sessionLog(
-            sessionId,
-            `compaction-marker drain: applied at ordinal ${pending.ordinal}, boundary user msg ${result.boundaryMessageId} ${stepMs.join(" ")}`,
-        );
+        sessionLog(sessionId, `compaction-marker drain timings: ${stepMs.join(" ")}`);
         return {
             kind: "applied",
             markerOrdinal: pending.ordinal,
@@ -494,9 +480,8 @@ export function updateCompactionMarkerAfterPublication(
     }
 
     const existing = getPersistedCompactionMarkerState(db, sessionId);
-    const removedSummaryMessageId = existing?.summaryMessageId ?? null;
 
-    if (existing) {
+    if (existing && !getCompactionMarkerPublicationState(db, sessionId).pending) {
         if (
             existingMarkerAlreadyCoversTarget(
                 sessionId,
@@ -527,31 +512,24 @@ export function updateCompactionMarkerAfterPublication(
         return false;
     }
 
-    const replacement = replaceCompactionMarker(existing, {
-        sessionId,
-        endOrdinal: lastCompartmentEnd,
-        endMessageId: targetEndMessageId,
-        summaryText: MARKER_SUMMARY_TEXT,
-        directory: directory ?? process.cwd(),
-        resolvedBoundary: boundary,
-    });
+    const replacement = publishRecoverableCompactionMarker(
+        db,
+        {
+            sessionId,
+            endOrdinal: lastCompartmentEnd,
+            endMessageId: targetEndMessageId,
+            summaryText: MARKER_SUMMARY_TEXT,
+            directory: directory ?? process.cwd(),
+            resolvedBoundary: boundary,
+        },
+        () =>
+            JSON.stringify(getPersistedCompactionMarkerState(db, sessionId)) ===
+                JSON.stringify(existing) &&
+            getCompartmentEndMessageIdForOrdinal(db, sessionId, lastCompartmentEnd) ===
+                targetEndMessageId,
+    );
 
     if (replacement.kind === "committed") {
-        const result = replacement.marker;
-        persistMarkerStateAndDropReplacedTag(
-            db,
-            sessionId,
-            {
-                ...result,
-                boundaryOrdinal: lastCompartmentEnd,
-                targetEndMessageId,
-            },
-            removedSummaryMessageId,
-        );
-        sessionLog(
-            sessionId,
-            `compaction-marker: injected at ordinal ${lastCompartmentEnd}, boundary user msg ${result.boundaryMessageId}`,
-        );
         return true;
     }
     // Injection failed after boundary preflight (e.g. OpenCode DB write error).
@@ -626,19 +604,20 @@ export interface OrphanMarkerReconcileResult {
  * Removal is idempotent (plain DELETEs) so concurrent processes racing on the
  * same orphan converge on the same end state; the only guarded invariant is
  * never deleting our own marker, re-checked against freshly-read persisted
- * state below.
+ * state under the host writer lock below. An unresolved publication intent
+ * protects its entire row set until publication verifies or retires it.
  *
- * Cost gate: callers invoke this only when degraded mode fires (never on every
- * pass), so steady state pays nothing. Any failure is swallowed and reported
- * via the result so the next degraded pass retries.
+ * Cost gate: callers invoke this only on rebuilding degraded passes, never on
+ * cached-request replay. Failures can retry on the next rebuilding degraded pass.
  */
 export function reconcileForkOrphanedCompactionMarkers(
     db: Database,
     sessionId: string,
+    isCacheBusting: boolean,
 ): OrphanMarkerReconcileResult {
     // Markers live in opencode.db; Pi writes its native marker via a separate
     // path and has no rows here to reconcile.
-    if (getHarness() !== "opencode") {
+    if (!isCacheBusting || getHarness() !== "opencode") {
         return { removed: 0, failed: false };
     }
 
@@ -646,7 +625,7 @@ export function reconcileForkOrphanedCompactionMarkers(
         // Our own marker must exist in durable state; without it we have no
         // ownership anchor to diff against (and nothing to defend).
         const owned = getPersistedCompactionMarkerState(db, sessionId);
-        if (!owned) {
+        if (!owned || getCompactionMarkerPublicationState(db, sessionId).pending) {
             return { removed: 0, failed: false };
         }
 
@@ -686,11 +665,37 @@ export function reconcileForkOrphanedCompactionMarkers(
                 continue;
             }
 
+            let protectedByState = false;
             const ok = removeForeignCompactionMarker(
                 sessionId,
                 marker,
                 currentOwned.summaryMessageId,
+                () =>
+                    db
+                        .transaction(() => {
+                            // Publication stages intent under the same host lock. Re-read
+                            // ownership so a stale scan cannot delete a new compaction part
+                            // or its summary message and text part.
+                            const publication = getCompactionMarkerPublicationState(db, sessionId);
+                            const latestOwned = getPersistedCompactionMarkerState(db, sessionId);
+                            protectedByState = Boolean(
+                                publication.pending ||
+                                    !latestOwned ||
+                                    marker.compactionPartId === latestOwned.compactionPartId ||
+                                    marker.summaryMessageIds.includes(
+                                        latestOwned.summaryMessageId,
+                                    ) ||
+                                    compareOpenCodeMessagesByCanonicalOrder(
+                                        sessionId,
+                                        marker.boundaryMessageId,
+                                        latestOwned.boundaryMessageId,
+                                    ) !== 1,
+                            );
+                            return !protectedByState;
+                        })
+                        .deferred(),
             );
+            if (protectedByState) continue;
             if (ok) {
                 removed += 1;
                 sessionLog(

@@ -2431,7 +2431,11 @@ function parsePersistedCompactionMarkerState(
                       ? parsed.targetEndMessageId
                       : null;
             return {
-                ...(parsed as Omit<PersistedCompactionMarkerState, "targetEndMessageId">),
+                boundaryMessageId: parsed.boundaryMessageId,
+                summaryMessageId: parsed.summaryMessageId,
+                compactionPartId: parsed.compactionPartId,
+                summaryPartId: parsed.summaryPartId,
+                boundaryOrdinal: parsed.boundaryOrdinal,
                 targetEndMessageId,
             };
         }
@@ -2457,6 +2461,64 @@ export function getPersistedCompactionMarkerState(
         row?.compaction_marker_state,
         row?.compaction_marker_target_end_message_id,
     );
+}
+
+/** Publication intent shares the marker JSON, but ordinary readers never emit it into model requests. */
+export function getCompactionMarkerPublicationState(
+    db: Database,
+    sessionId: string,
+): {
+    raw: string;
+    pending: PersistedCompactionMarkerState | null;
+} {
+    const row = db
+        .prepare("SELECT compaction_marker_state FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as { compaction_marker_state: string | null } | undefined;
+    const raw = row?.compaction_marker_state ?? "";
+    let pending: PersistedCompactionMarkerState | null = null;
+    try {
+        pending = parsePersistedCompactionMarkerState(JSON.stringify(JSON.parse(raw).pending));
+    } catch {
+        // Empty or malformed old state has no recoverable publication intent.
+    }
+    return { raw, pending };
+}
+
+/** Compare the whole envelope so a retry cannot overwrite a newer publisher or clear. */
+export function compareAndSetCompactionMarkerPublicationState(
+    db: Database,
+    sessionId: string,
+    expectedRaw: string,
+    state: PersistedCompactionMarkerState | null,
+    pending: PersistedCompactionMarkerState | null,
+): string {
+    return db
+        .transaction(() => {
+            ensureSessionMetaRow(db, sessionId);
+            // Preserve the existing JSON, including a cleared marker retained for replay,
+            // while publication is pending. Replace the marker only when regenerating
+            // the cached model request, rather than replaying its existing bytes.
+            let envelope: Record<string, unknown> = {};
+            if (pending) {
+                try {
+                    const parsed = JSON.parse(expectedRaw);
+                    if (parsed && typeof parsed === "object") envelope = parsed;
+                } catch {
+                    // A malformed record cannot provide a usable publication-state envelope.
+                }
+            }
+            const raw = JSON.stringify(pending ? { ...envelope, pending } : state);
+            const result = db
+                .prepare(
+                    `UPDATE session_meta SET compaction_marker_state = ?, compaction_marker_target_end_message_id = ?
+             WHERE session_id = ? AND COALESCE(compaction_marker_state, '') = ?`,
+                )
+                .run(raw, state?.targetEndMessageId ?? null, sessionId, expectedRaw);
+            if (result.changes !== 1)
+                throw new Error("marker publication state changed concurrently");
+            return raw;
+        })
+        .immediate();
 }
 
 export function setPersistedCompactionMarkerState(

@@ -442,7 +442,14 @@ for (const contentChange of [false, true]) {
                     index * 1000,
                     JSON.stringify({
                         role,
-                        ...(id === oldSummary ? { summary: true } : {}),
+                        ...(id === oldSummary
+                            ? {
+                                  summary: true,
+                                  parentID: oldBoundary,
+                                  providerID: "magic-context",
+                                  modelID: "magic-context",
+                              }
+                            : {}),
                         ...(role === "assistant" ? { finish: "stop" } : {}),
                     }),
                 );

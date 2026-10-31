@@ -3013,7 +3013,14 @@ describe("deferred compaction marker advance representation", () => {
             sessionId,
             1_001,
             1_001,
-            JSON.stringify({ role: "assistant", summary: true, finish: "stop" }),
+            JSON.stringify({
+                role: "assistant",
+                parentID: "old-boundary",
+                summary: true,
+                finish: "stop",
+                providerID: "magic-context",
+                modelID: "magic-context",
+            }),
         );
         opencodeDb
             .prepare(

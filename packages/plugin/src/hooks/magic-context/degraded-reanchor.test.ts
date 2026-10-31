@@ -252,7 +252,7 @@ describe("Layer A — fork-orphan marker hygiene (#263)", () => {
         };
         setPersistedCompactionMarkerState(db, SESSION_ID, owned);
 
-        const result = reconcileForkOrphanedCompactionMarkers(db, SESSION_ID);
+        const result = reconcileForkOrphanedCompactionMarkers(db, SESSION_ID, true);
         expect(result.removed).toBe(1);
         expect(result.failed).toBe(false);
 
@@ -306,7 +306,7 @@ describe("Layer A — fork-orphan marker hygiene (#263)", () => {
         };
         setPersistedCompactionMarkerState(db, SESSION_ID, owned);
 
-        const result = reconcileForkOrphanedCompactionMarkers(db, SESSION_ID);
+        const result = reconcileForkOrphanedCompactionMarkers(db, SESSION_ID, true);
         expect(result.removed).toBe(0);
 
         const remaining = listSessionCompactionMarkers(SESSION_ID);
@@ -396,7 +396,7 @@ describe("Layer A — fork-orphan marker hygiene (#263)", () => {
         const reversed = listSessionCompactionMarkers(SESSION_ID);
         expect(normalizedMarkerSet(reversed)).toEqual(normalizedMarkerSet(legacy));
 
-        const result = reconcileForkOrphanedCompactionMarkers(db, SESSION_ID);
+        const result = reconcileForkOrphanedCompactionMarkers(db, SESSION_ID, true);
         expect(result).toEqual({ removed: 1, failed: false });
         expect(
             normalizedMarkerSet(listSessionCompactionMarkers(SESSION_ID)).some((key) =>
@@ -444,7 +444,7 @@ describe("Layer A — fork-orphan marker hygiene (#263)", () => {
             BEFORE DELETE ON part WHEN OLD.id = 'prt_failing_compaction'
             BEGIN SELECT RAISE(ABORT, 'simulated removal failure'); END`);
 
-        expect(reconcileForkOrphanedCompactionMarkers(db, SESSION_ID)).toEqual({
+        expect(reconcileForkOrphanedCompactionMarkers(db, SESSION_ID, true)).toEqual({
             removed: 0,
             failed: true,
         });
@@ -494,6 +494,23 @@ describe("Layer A — fork-orphan marker hygiene (#263)", () => {
             boundaryOrdinal: 5,
             targetEndMessageId: "msg_comp_end",
         });
+
+        db.prepare(`UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = ?,
+            cached_m0_last_baseline_end_message_id = 'msg_comp_end' WHERE session_id = ?`).run(
+            Buffer.from("<session-history>frozen baseline</session-history>"),
+            Buffer.from("<session-history>frozen delta</session-history>"),
+            SESSION_ID,
+        );
+        const beforeDefer = listSessionCompactionMarkers(SESSION_ID);
+        prepareCompartmentInjection(
+            db,
+            SESSION_ID,
+            [userMessage("msg_later_1", "later one")],
+            false,
+            [],
+        );
+        expect(listSessionCompactionMarkers(SESSION_ID)).toEqual(beforeDefer);
+        clearInjectionCache(SESSION_ID);
 
         // Pass 1: the orphan cuts the window above our boundary, so the visible
         // array does NOT contain msg_comp_end. Injection degrades and runs hygiene.
