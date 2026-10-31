@@ -26,6 +26,7 @@ mod read_resume;
 mod reminder_replay;
 mod reminders;
 mod reply_shape;
+mod resync_replay;
 mod route_identity_vectors;
 mod setup_checkpoint;
 mod thin_view;
