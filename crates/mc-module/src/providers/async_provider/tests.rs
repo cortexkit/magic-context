@@ -2568,6 +2568,34 @@ async fn any_bind_harness_resolves_the_async_conversation_first() {
     );
 }
 
+/// `ctx_expand` by tag or by message on a runner session reads ck-mc's held
+/// messages. It never reads the standalone chunk transcripts, which hold no
+/// runner session's messages (WERNI: "Tag 15109's original block is no longer
+/// in stored history").
+#[tokio::test]
+async fn ctx_expand_by_tag_and_message_reads_the_held_lineage() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::open(
+        dir.path(),
+        "thalamus",
+        "claude-code",
+        json!({"serializer_profile":"anthropic-messages"}),
+    )
+    .await;
+    *rig.runner.entries.lock().unwrap() = anthropic_transcript(12);
+    rig.notice(1, 1_000, None).await;
+    let by_tag = rig
+        .tool(7, "ctx_expand", json!({"tag": anthropic_tag(9, 1)}))
+        .await;
+    let text = by_tag.to_string();
+    assert!(text.contains("reading file 9"), "{by_tag}");
+    assert!(!text.contains("no longer in stored history"), "{by_tag}");
+    let by_message = rig.tool(7, "ctx_expand", json!({"message": 8})).await;
+    let text = by_message.to_string();
+    assert!(text.contains("message 8"), "{by_message}");
+    assert!(!text.contains("no longer recoverable"), "{by_message}");
+}
+
 /// With no asynchronous conversation for the bind's session, a non-runner
 /// bind keeps its own path: the harness's session resolver is asked, and
 /// the answer is the one that path gives.

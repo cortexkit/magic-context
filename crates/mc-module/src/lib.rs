@@ -8755,10 +8755,16 @@ impl McHandler {
             Err(refusal) => return refusal.into_facade_outcome(),
         };
         let session_id = facade_scope.conversation_key.as_str();
-        let expand_mode = match resolve_ctx_expand_mode(args) {
+        let mut expand_mode = match resolve_ctx_expand_mode(args) {
             Ok(mode) => mode,
             Err(error) => return tool_error_result(error),
         };
+        // A runner session's messages are held by ck-mc, never in the standalone
+        // chunk transcripts the fallbacks below read.
+        let runner_binding = facade_scope
+            .async_conversation
+            .then(|| self.facade_binding(channel).ok())
+            .flatten();
         if let CtxExpandMode::Tag(number) = expand_mode {
             let tags = match store.load_tags_for_session(session_id) {
                 Ok(tags) => tags,
@@ -8767,6 +8773,17 @@ impl McHandler {
             let Some(tag) = tags.iter().find(|tag| tag.tag_number == number) else {
                 return mcp_text_result(format!("no tag {number} in this session; if {number} came from a <session-history> heading or a ctx_search hit, it is an ordinal: use message={number}"), false);
             };
+            if let (Some(binding), Some((mid, _))) =
+                (&runner_binding, ck_wire::split_block_id(&tag.block_id))
+            {
+                match self.async_held_expand(binding, session_id, |_, held| held == mid) {
+                    Ok(Some(messages)) if !messages.is_empty() => {
+                        return mcp_text_result(render_tag_expand(tag, &messages), false);
+                    }
+                    Ok(_) => {}
+                    Err(outcome) => return outcome,
+                }
+            }
             let transcripts = match store.load_chunk_transcripts_for_range(session_id, 0, i64::MAX)
             {
                 Ok(rows) => rows,
@@ -8774,6 +8791,24 @@ impl McHandler {
             };
             let messages = durable_expand_messages(&transcripts);
             return mcp_text_result(render_tag_expand(tag, &messages), false);
+        }
+        if let (CtxExpandMode::Message(message), Some(binding)) = (&expand_mode, &runner_binding) {
+            let message = *message;
+            let wanted = u64::try_from(message).ok();
+            match self.async_held_expand(binding, session_id, |ordinal, _| Some(ordinal) == wanted)
+            {
+                Ok(Some(messages)) if !messages.is_empty() => {
+                    return mcp_text_result(render_cached_message_expand(&messages[0]), false);
+                }
+                Ok(_) => {}
+                Err(outcome) => return outcome,
+            }
+            // Not held: folded history, which only the runner's history serves.
+            expand_mode = CtxExpandMode::Range {
+                start: message,
+                end: message,
+                verbose: false,
+            };
         }
         if let CtxExpandMode::Message(message) = expand_mode {
             return match store.load_chunk_transcript_for_message(session_id, message) {
