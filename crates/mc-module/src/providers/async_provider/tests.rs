@@ -2596,6 +2596,56 @@ async fn ctx_expand_by_tag_and_message_reads_the_held_lineage() {
     assert!(!text.contains("no longer recoverable"), "{by_message}");
 }
 
+/// An OpenCode message holding reasoning, a tool part (its call and result in
+/// one part) and a Magic Context reminder that rode the tool result as the
+/// next part. Each tag expands to the part the runner's tag rows name, so a
+/// riding reminder never answers for its carrier's tag.
+#[tokio::test]
+async fn ctx_expand_tag_finds_a_tool_result_carrying_a_reminder_on_opencode() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(dir.path()).await;
+    let mut entries = (0..4u64)
+        .map(|n| {
+            ReadMessage::new(
+                n,
+                format!("m{n}"),
+                json!({"info":{"id":format!("m{n}"),"role":if n % 2 == 0 {"user"} else {"assistant"},"time":{"created":1}},
+                       "parts":[{"id":format!("p{n}"),"type":"text","text":format!("message {n} ")+&"durable words ".repeat(16)}]}),
+            )
+            .with_tags(vec![tags::PartTag::tagged("0", format!("§{}§", 100 + n))])
+        })
+        .collect::<Vec<_>>();
+    entries.push(
+        ReadMessage::new(
+            4,
+            "m4".to_string(),
+            json!({"info":{"id":"m4","role":"assistant","time":{"created":1}},"parts":[
+                {"id":"r4","type":"reasoning","text":"thinking about the search"},
+                {"id":"t4","type":"tool","tool":"grep","callID":"call4","state":{"status":"completed","input":{"pattern":"project_root"},"output":"grep found project_root here"}},
+                {"id":"x4","type":"text","synthetic":true,"text":"<system-reminder>Your next step: call ctx_reduce</system-reminder>"}
+            ]}),
+        )
+        .with_tags(vec![
+            tags::PartTag::untagged("0"),
+            tags::PartTag::tagged("1", "§15109§"),
+            tags::PartTag::tagged("2", "§15110§"),
+        ]),
+    );
+    *rig.runner.entries.lock().unwrap() = entries;
+    rig.notice(1, 1_000, None).await;
+    let tool = rig
+        .tool(7, "ctx_expand", json!({"tag": 15109}))
+        .await
+        .to_string();
+    assert!(tool.contains("grep found project_root here"), "{tool}");
+    assert!(!tool.contains("Your next step"), "{tool}");
+    let reminder = rig
+        .tool(7, "ctx_expand", json!({"tag": 15110}))
+        .await
+        .to_string();
+    assert!(reminder.contains("Your next step"), "{reminder}");
+}
+
 /// With no asynchronous conversation for the bind's session, a non-runner
 /// bind keeps its own path: the harness's session resolver is asked, and
 /// the answer is the one that path gives.
