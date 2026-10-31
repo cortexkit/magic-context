@@ -343,9 +343,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-compaction-provider"
-version = "0.7.9"
+version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "efa86f80ca70f6d8bb78cb1673c983ffa1ee53c6afcb5a7f939dffdbd5989bea"
+checksum = "cbedfb1b9e3d8b0318ddd627a09f4cd6a50d4e4bd6340b95d586f0f3c3f9ff29"
 dependencies = [
  "cortexkit-role-llm-runner",
  "serde",
@@ -365,9 +365,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-llm-runner"
-version = "0.7.30"
+version = "0.7.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "545892e9828d7bd613ec8f026381750f4f0f53b368acf3945524caf7c23512a3"
+checksum = "42d280e6394ee18d53aaf701d4eb628b7c2a45f8f8b4b6a7976c1f800cbf7b53"
 dependencies = [
  "cortexkit-rich-ui-syntax",
  "serde",
@@ -378,9 +378,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-llm-runner-conformance"
-version = "0.15.34"
+version = "0.15.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "869bb3d1521c9a0756d13e08420c487bb43c91880a964d6eba8a4d60ee73fbae"
+checksum = "5cca2943eb8f89376ca20a079047894433accdebd97134864f17a436a639ea3d"
 dependencies = [
  "async-trait",
  "base64",
@@ -598,7 +598,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1597,7 +1597,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2142,7 +2142,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2555,7 +2555,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -51,8 +51,8 @@ rusqlite = { workspace = true, features = ["hooks", "blob"] }
 cortexkit-role-tool-provider = "=0.10.4"
 cortexkit-role-agent-data = "0.2.4"
 # Runner-owned tags and context-ceiling details for async compaction.
-cortexkit-role-llm-runner = "=0.7.30"
-cortexkit-role-compaction-provider = "=0.7.9"
+cortexkit-role-llm-runner = "=0.7.31"
+cortexkit-role-compaction-provider = "=0.7.10"
 # RFC 8785 (JCS) canonical JSON for tool.catalog's answer bytes and digests: the
 # same canonicaliser the role crate uses, so floats and non-ASCII keys in a
 # caller's composition hash exactly as the runner hashes them.
@@ -99,7 +99,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 cortexkit-role-agent-data = { version = "0.2.4", features = ["test-vectors"] }
 # llm-runner's packaged vectors (archive pruning, head members) for the
 # decode-path tests of members newer than the contract ck-mc was built on.
-cortexkit-role-llm-runner = { version = "=0.7.30", features = ["test-vectors"] }
+cortexkit-role-llm-runner = { version = "=0.7.31", features = ["test-vectors"] }
 cpu-time = "1"
 subc-core = { workspace = true }
 # Embedded real-daemon coverage of HELLO_ACK/open versus the first plan fetch.
@@ -124,8 +124,8 @@ nkeys = { version = "=0.4.5", default-features = false }
 # The role's conformance suite, run in-process against tool.catalog and
 # role.describe (src/tests/tool_catalog_conformance.rs).
 cortexkit-role-tool-provider-conformance = "=0.10.0"
-cortexkit-role-llm-runner-conformance = "=0.15.34"
+cortexkit-role-llm-runner-conformance = "=0.15.36"
 # compaction-provider's focused probe: a session reaches the same state through
 # every spelling of its project folder, and another runner reaches other state
 # (src/providers/async_provider/tests/conversation_identity_probe.rs).
-cortexkit-role-compaction-provider = { version = "=0.7.9", features = ["conformance"] }
+cortexkit-role-compaction-provider = { version = "=0.7.10", features = ["conformance"] }
