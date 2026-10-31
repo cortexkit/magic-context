@@ -398,9 +398,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-step-transform-provider"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d192b91d15d547908ccdb9d7588b71d75446e59d0854d30cb5fe068f757da745"
+checksum = "d3077cc319f069ab37713ef96a52fae682f551c949c3d712a5690cf30fe62845"
 dependencies = [
  "cortexkit-role-llm-runner",
  "serde",
