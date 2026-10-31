@@ -872,7 +872,7 @@ fn parse_response(
         .collect()
 }
 
-fn validate_endpoint(endpoint: &str) -> Result<(), EmbeddingError> {
+pub(crate) fn validate_endpoint(endpoint: &str) -> Result<(), EmbeddingError> {
     let endpoint = trim(endpoint);
     let (_, rest) = endpoint
         .split_once("://")
