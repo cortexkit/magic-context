@@ -283,6 +283,10 @@ pub(super) fn reissue_applied(
         None => {
             // Setup is the applied rendering until the runner acknowledges a
             // published view. Its native replacement is already stored verbatim.
+            // A header-only checkout leaves that stored answer unloaded.
+            if state.initial.is_null() {
+                state.load_setup_payloads(store)?;
+            }
             let initial: contract::message::CompactionMessage = decode(&state.initial["initial"])?;
             let (last, entry) = state
                 .entries

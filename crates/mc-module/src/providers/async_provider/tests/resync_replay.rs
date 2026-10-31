@@ -476,7 +476,9 @@ async fn an_announced_legacy_applied_snapshot_refuses_once_and_recovers_once() {
     let generation = before.generation;
     let core_version = store.load(&before.namespace()).unwrap().row_version;
     let mut request = before.setup.clone();
-    let conn = rusqlite::Connection::open(dir.path().join("store.db")).unwrap();
+    // Views live in the per-session layout; the inspection connection exposes
+    // them under their legacy table names.
+    let conn = crate::providers::async_provider::inspection_sql(dir.path().join("store.db"));
     assert_eq!(conn.execute("UPDATE mc_async_compaction_views SET engine_json=NULL,announced=1 WHERE session_ref=?1 AND version=?2",
         rusqlite::params![rig.reference, applied]).unwrap(), 1);
     rig.h.resident_cache().forget(&rig.reference);
