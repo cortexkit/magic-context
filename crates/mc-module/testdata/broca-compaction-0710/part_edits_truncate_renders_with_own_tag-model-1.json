@@ -1,0 +1,14 @@
+[
+  {
+    "content": "§1§ first prompt",
+    "role": "user"
+  },
+  {
+    "content": "§2§ [dropped §2§]",
+    "role": "assistant"
+  },
+  {
+    "content": "§3§ next prompt",
+    "role": "user"
+  }
+]

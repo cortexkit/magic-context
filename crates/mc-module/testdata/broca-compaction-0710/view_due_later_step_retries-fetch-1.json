@@ -1,0 +1,30 @@
+{
+  "answer": {
+    "answer": "view",
+    "view": {
+      "covers_through": {
+        "mid": "m0",
+        "ordinal": 0
+      },
+      "digest": "948369f0f3480138c7f0f91120cccc1572a8c849f72d51b02f3efa8a5094c84f",
+      "lineage_id": "7e064141-0dcf-4317-ac24-25ea92b00715",
+      "ranges": [
+        {
+          "bytes": "[{\"content\":[{\"text\":\"cf-due-1177-published-view\",\"type\":\"text\"}],\"role\":\"user\"}]",
+          "from": 0,
+          "kind": "replace",
+          "to": 1
+        }
+      ],
+      "session_ref": "8e424b6ee3845911edafb0f3f748e337",
+      "view_version": 1
+    }
+  },
+  "request": {
+    "method": "view.get",
+    "params": {
+      "session_ref": "8e424b6ee3845911edafb0f3f748e337",
+      "view_version": 1
+    }
+  }
+}
