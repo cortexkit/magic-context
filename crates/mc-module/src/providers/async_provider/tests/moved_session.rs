@@ -187,10 +187,22 @@ pub(super) async fn prepare_for_live(h: &McHandler, dir: &Path, request: Value) 
 }
 
 async fn moved_rig_stage(dir: &Path, run_move: bool, prepare: bool) -> (Rig, Value) {
+    moved_rig_stage_with_data(dir, run_move, prepare, false).await
+}
+
+pub(super) async fn moved_rig_stage_with_data(
+    dir: &Path,
+    run_move: bool,
+    prepare: bool,
+    seed_data: bool,
+) -> (Rig, Value) {
     let session = fixture::fixture_session();
     // The move's apply step refuses with `source_changed` unless the marker is
     // on the selected cut, so the fixture stores put it there before each move.
     let paths = fixture::write_moved_session_stores(dir);
+    if seed_data {
+        super::session_carry::seed_host_data(&paths.context_db, &session, dir);
+    }
     // One standalone chunk embedding, which the import copies instead of
     // computing it again.
     rusqlite::Connection::open(&paths.context_db)
