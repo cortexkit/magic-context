@@ -791,13 +791,18 @@ impl McStore {
     ) -> Result<Option<u64>, McStoreError> {
         self.inner
             .with_read(|conn| {
-                let entry: Option<String> = conn
-                    .query_row(
-                        "SELECT entry_json FROM mc_async_compaction_entries WHERE session_ref=?1 ORDER BY ordinal DESC LIMIT 1",
-                        [session_ref],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
+                // A conversation's entries live in the versioned layout once it
+                // has moved, or still in the legacy table before its first save.
+                let entry: Option<String> = match layout::newest_entry(conn, session_ref)? {
+                    Some(entry) => Some(entry.entry_json),
+                    None => conn
+                        .query_row(
+                            "SELECT entry_json FROM main.mc_async_compaction_entries WHERE session_ref=?1 ORDER BY ordinal DESC LIMIT 1",
+                            [session_ref],
+                            |row| row.get(0),
+                        )
+                        .optional()?,
+                };
                 Ok(entry
                     .and_then(|entry| serde_json::from_str::<serde_json::Value>(&entry).ok())
                     .and_then(|entry| entry.get("written_at").and_then(serde_json::Value::as_u64)))

@@ -223,6 +223,20 @@ pub(super) fn entries(
     rows.collect()
 }
 
+/// The newest held entry of a conversation in the versioned layout. Entry
+/// sections carry a zero-padded ordinal, so the last one in key order is the
+/// newest; this reads one row, not the window.
+pub(super) fn newest_entry(conn: &Connection, reference: &str) -> rusqlite::Result<Option<Entry>> {
+    let lower = ENTRY.to_owned();
+    let upper = format!("{ENTRY}~");
+    conn.query_row(
+        "SELECT body FROM main.mc_cache_sections WHERE session_id=?1 AND section>=?2 AND section<?3 ORDER BY section DESC LIMIT 1",
+        params![owner(reference), lower, upper],
+        |row| decode::<Entry>(&row.get::<_, String>(0)?),
+    )
+    .optional()
+}
+
 pub(super) fn truncate_entries(
     conn: &Connection,
     reference: &str,
