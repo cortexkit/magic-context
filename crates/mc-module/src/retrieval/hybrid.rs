@@ -334,11 +334,7 @@ impl RerankClient for SubcRerankClient<'_> {
         let bytes = SubcConsumer::call(
             self.consumer,
             self.target.clone(),
-            BindIdentity::new(
-                options.identity.project_root,
-                options.identity.harness,
-                options.identity.session,
-            ),
+            BindIdentity::new(options.identity.harness, options.identity.session),
             serde_json::to_vec(&json!({"method":method,"params":params}))
                 .map_err(|e| e.to_string())?,
             CallOptions {

@@ -141,6 +141,40 @@ async fn account_change_ride_without_a_valid_account_is_refused_by_member() {
     assert_eq!(rig.newest(), None, "a refused ride rebuilds nothing");
 }
 
+#[tokio::test]
+async fn service_tier_change_ride_folds_like_model_change() {
+    let model_dir = tempfile::tempdir().unwrap();
+    let tier_dir = tempfile::tempdir().unwrap();
+    let model = rig_with_pending_cleanup(model_dir.path()).await;
+    let tier = rig_with_pending_cleanup(tier_dir.path()).await;
+    let model_answer = ride_with(
+        &model,
+        json!({"session_ref":model.reference,"cause":"model_change","deadline_ms":10_000}),
+    )
+    .await;
+    let tier_answer = ride_with(&tier, json!({"session_ref":tier.reference,"cause":"service_tier_change","service_tier":"fast","deadline_ms":10_000})).await;
+    assert_eq!(model_answer["answer"], "view", "{model_answer}");
+    assert_eq!(tier_answer["answer"], "view", "{tier_answer}");
+    let model_view: view::CompactionView = decode(&model_answer["view"]).unwrap();
+    let tier_view: view::CompactionView = decode(&tier_answer["view"]).unwrap();
+    assert_eq!(tier_view.ranges, model_view.ranges);
+    assert_eq!(tier.render(&tier_view), model.render(&model_view));
+    assert_eq!(tier_answer["cache_ttl"], model_answer["cache_ttl"]);
+}
+
+#[tokio::test]
+async fn service_tier_change_without_tier_refuses_service_tier() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = rig_with_pending_cleanup(dir.path()).await;
+    let outcome = rig.h.dispatch_value(7, json!({"method":"compaction.ride","params":{"session_ref":rig.reference,"cause":"service_tier_change","deadline_ms":10_000}})).await;
+    let HandlerOutcome::ErrorWithDetail { code, detail, .. } = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(code, "invalid_params");
+    assert_eq!(detail, json!({"field":"service_tier"}));
+    assert_eq!(rig.newest(), None);
+}
+
 /// compaction-provider 0.7.2: the `account_change:<account>` notice event
 /// reports a switch the runner learned only after the new account's cache
 /// was written. ck-mc records it with the notice and never rebuilds for it:

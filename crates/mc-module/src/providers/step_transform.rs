@@ -111,6 +111,15 @@ impl McHandler {
         } else if binding.session != call.session {
             return None;
         }
+        let route = crate::route_binding::RouteIdentity {
+            principal: binding.principal.clone(),
+            scope: binding.scope.clone(),
+            harness: binding.harness.clone(),
+            session: binding.session.clone(),
+        };
+        if let Some(project) = self.stored_async_project(&route).ok()? {
+            binding = self.project_binding(&route, &project);
+        }
         let text = blocks.join("\n");
         // A message that is only system reminders (a notice, a reminder) or
         // empty is not something the person wrote: no marker, no hint.

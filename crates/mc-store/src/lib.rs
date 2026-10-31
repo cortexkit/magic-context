@@ -9125,6 +9125,20 @@ impl McStore {
         session_id: &str,
         project_path: &str,
     ) -> Result<usize, McStoreError> {
+        self.delete_session_with_project(session_id, Some(project_path))
+    }
+
+    /// Delete session-only state when no durable project association exists.
+    /// Notes belonging to a project are deliberately left untouched.
+    pub fn delete_session_without_project(&self, session_id: &str) -> Result<usize, McStoreError> {
+        self.delete_session_with_project(session_id, None)
+    }
+
+    fn delete_session_with_project(
+        &self,
+        session_id: &str,
+        project_path: Option<&str>,
+    ) -> Result<usize, McStoreError> {
         self.check_session_not_moving(session_id)?;
         // The session's history rows in context.db first, then every store.db cache row.
         let mut deleted = self.context_write(

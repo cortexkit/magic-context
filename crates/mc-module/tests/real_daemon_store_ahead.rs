@@ -347,11 +347,7 @@ async fn wait_for_refused_health(ck_bin: &Path, isolation: &Isolation, wait: Dur
 fn identity(isolation: &Isolation, session: &str) -> BindIdentity {
     let project = isolation.root.join("projects").join(session);
     fs::create_dir_all(&project).unwrap();
-    BindIdentity::new(
-        fs::canonicalize(&project).unwrap_or(project),
-        "mc-module-test",
-        session,
-    )
+    BindIdentity::new("mc-module-test", session)
 }
 
 async fn wait_for_module_registration(consumer: &SubcConsumer, wait: Duration) {
@@ -362,7 +358,7 @@ async fn wait_for_module_registration(consumer: &SubcConsumer, wait: Duration) {
                 RouteTarget::ToolProvider {
                     module_id: MODULE_ID.to_string(),
                 },
-                BindIdentity::new(std::env::temp_dir(), "mc-module-test", "registration-probe"),
+                BindIdentity::new("mc-module-test", "registration-probe"),
                 serde_json::to_vec(&json!({ "kind": "echo", "v": 1 })).unwrap(),
                 call_options(),
             )

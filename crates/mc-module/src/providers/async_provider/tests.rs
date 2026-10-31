@@ -36,6 +36,7 @@ mod resync_lineage_guard;
 mod resync_replay;
 mod rollback_layout;
 mod route_identity_vectors;
+mod scope_projects;
 mod setup_checkpoint;
 mod thin_view;
 mod user_commands_tests;

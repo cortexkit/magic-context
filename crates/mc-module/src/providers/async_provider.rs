@@ -2777,6 +2777,33 @@ fn apply_ride_overflow(state: &mut State, fact: OverflowFact) {
 }
 
 impl McHandler {
+    pub(super) fn binding_for_existing_setup(
+        &self,
+        binding: SessionBinding,
+        params: &Value,
+    ) -> Result<SessionBinding, HandlerOutcome> {
+        let Some(session) = params.get("session").and_then(Value::as_str) else {
+            return Ok(binding);
+        };
+        let Some(harness) = params.get("harness").and_then(Value::as_str) else {
+            return Ok(binding);
+        };
+        if !binding.session.is_empty() && binding.session != session {
+            return Ok(binding);
+        }
+        let Some(store) = self.store.get() else {
+            return Ok(binding);
+        };
+        let key = Key::new(&binding, session, harness)?;
+        let Some(state) = load_head(store, &key.reference())? else {
+            return Ok(binding);
+        };
+        let mut stored = self.async_binding(&state);
+        stored.principal = binding.principal;
+        stored.scope = binding.scope;
+        Ok(stored)
+    }
+
     /// Attach only to the durable provisioned by ck-bus. No local consumer or
     /// unauthenticated NATS fallback is created when bootstrap is unavailable.
     pub async fn start_compaction_bus<S: Stream + 'static>(
@@ -6577,7 +6604,7 @@ impl McHandler {
 
     pub(super) async fn async_view_get(
         &self,
-        binding: &SessionBinding,
+        principal: Option<&subc_protocol::Principal>,
         params: &Value,
     ) -> Result<Vec<u8>, HandlerOutcome> {
         let request: view::ViewGetRequest = decode(params)?;
@@ -6590,7 +6617,7 @@ impl McHandler {
                 &json!({"answer":"refuse","code":"unknown_session","reason":"Unknown async conversation"}),
             );
         };
-        self.authorize_async(binding, &state)?;
+        self.authorize_async_principal(principal, &state)?;
         if state.active_seed_is_unsafe(store)? {
             return bytes(
                 &json!({"answer":"refuse","code":"unsafe_cut_seed","reason":"Set up a fresh full lineage before reading views."}),
@@ -6624,9 +6651,18 @@ impl McHandler {
         binding: &SessionBinding,
         state: &State,
     ) -> Result<(), HandlerOutcome> {
+        self.authorize_async_principal(binding.principal.as_ref(), state)
+    }
+
+    fn authorize_async_principal(
+        &self,
+        principal: Option<&subc_protocol::Principal>,
+        state: &State,
+    ) -> Result<(), HandlerOutcome> {
         // Only the attested runner owns the conversation; the route's folder
         // spelling is metadata and may differ from the one Setup arrived on.
-        if records::attested_runner(binding) != Some(state.key.runner.as_str()) {
+        if !matches!(principal, Some(subc_protocol::Principal::Reserved { module_id }) if module_id == &state.key.runner)
+        {
             return Err(invalid_field(
                 "session_ref",
                 "async conversation is owned by another runner",
@@ -6637,7 +6673,7 @@ impl McHandler {
 
     pub(super) async fn async_ride(
         &self,
-        binding: &SessionBinding,
+        principal: Option<&subc_protocol::Principal>,
         params: &Value,
     ) -> Result<Vec<u8>, HandlerOutcome> {
         let request: ride::RideRequest = decode(params)?;
@@ -6668,7 +6704,7 @@ impl McHandler {
             let Some(mut state) = load_head(store, &request.session_ref)? else {
                 return bytes(&ride::RideAnswer::nothing());
             };
-            self.authorize_async(binding, &state)?;
+            self.authorize_async_principal(principal, &state)?;
             if let Some(failure) = state.failure.as_ref().filter(|failure| {
                 failure.state == FailureState::Failed && state.snapshot_unavailable.is_none()
             }) {
@@ -6738,9 +6774,9 @@ impl McHandler {
                 ride::RideCause::TtlExpired
                     | ride::RideCause::ChainReset
                     | ride::RideCause::ModelChange
+                    | ride::RideCause::ServiceTierChange
                     | ride::RideCause::AccountChange
                     | ride::RideCause::SurfaceChange
-                    | ride::RideCause::ServiceTierChange
             );
             let (view, pass) = tokio::task::spawn_blocking(move || {
                 let _serial = _serial;

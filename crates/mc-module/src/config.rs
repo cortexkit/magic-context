@@ -434,6 +434,17 @@ pub struct ConfigCache {
 }
 
 impl ConfigCache {
+    pub fn effective_user_only(&mut self) -> McModuleConfig {
+        let user_path = user_config_path();
+        let user = read_tier_cached(&mut self.user, user_path.clone());
+        let (mut effective, mut warnings) = merge_tiers_with_warnings(user.as_ref(), None);
+        effective.smart_notes_enabled = *self
+            .startup_smart_notes_enabled
+            .get_or_insert(effective.smart_notes_enabled);
+        resolve_user_guidance_override(&mut effective, user.as_ref(), &user_path, &mut warnings);
+        emit_warnings(warnings);
+        effective
+    }
     pub fn freeze_smart_notes_enabled(&mut self, enabled: bool) {
         self.startup_smart_notes_enabled = Some(enabled);
     }

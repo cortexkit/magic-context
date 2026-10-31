@@ -9,15 +9,17 @@ verified before inspecting the samples. The manifest's own SHA-256 is
 The tests in `src/providers/async_provider/tests/broca_compaction_0710.rs` use
 ck-mc's production dispatch, `providers::decode`, `AdvanceNotice::from_headers`,
 and the actual notice and view-get handlers. There is one test per named case,
-plus fixture-integrity and independent ck-mc publication witnesses. The crate
-pins `cortexkit-role-compaction-provider = 0.7.10` at the deployed ck-mc build's source commit
-`a2ba9a341f52318f48489a7c8ef66196f88b7e3a`. No compatibility shim or production
-behavior change accompanies these fixtures.
+plus fixture-integrity and independent ck-mc publication witnesses. The captured
+deployed build pinned `cortexkit-role-compaction-provider = 0.7.10` at source commit
+`a2ba9a341f52318f48489a7c8ef66196f88b7e3a`. The current replay uses 0.7.12,
+which recognizes the view-feature and truncate fields. The captured bytes are
+unchanged, and no compatibility shim accompanies them.
 
 ## Outcomes and boundaries
 
 - **Setup decoding passes:** `view_due_max_ms = 30000` is understood;
-  `view_features = ["truncate", "tag_bytes_edits"]` is ignored. There is **no
+  `view_features = ["truncate", "tag_bytes_edits"]` is now retained. A separate
+  synthetic unknown-field probe still checks lenient decoding. There is **no
   strict unknown-field decoding error**. The pinned crate's `CONTRACT.md` §14
   says: “**Lenient** (unknown fields ignored): `role.describe`, the Setup
   request, the fields of every answer, the fields of `view.get` and
@@ -38,10 +40,10 @@ behavior change accompanies these fixtures.
 - All six `view.get` requests decode and traverse the real handler. With no
   enrolled conversation, ck-mc produces `refuse / unknown_session`, which also
   decodes. Captured answers are from the **scripted provider**, not ck-mc.
-  Five captured answers also pass the pinned view validator. The truncate
-  answer decodes leniently (the unknown field is ignored), then fails
-  `CompactionView::check()` with `ViewProblem::EditAction`: 0.7.10 requires a
-  `bytes` or `drop` action. This is not an inbound ck-mc view or a ck-mc output.
+  All captured answers pass the current view validator, including the retained
+  `truncate: "placeholder"` action recognized by 0.7.12. At the captured 0.7.10
+  build that action was unknown and failed `ViewProblem::EditAction`. It is
+  still not an inbound ck-mc view or a ck-mc output.
 - No view is published for these literal failed Setups, hence none contains
   `truncate`. A separate supported `owned-broca` session witness uses
   a synthetic text transcript, queues a real reduction, fetches its

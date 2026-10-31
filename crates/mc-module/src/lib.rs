@@ -45,6 +45,7 @@ mod app_read_test_store;
 pub mod boundary;
 pub mod caveman;
 mod child_retention;
+pub mod child_scopes;
 pub mod ck_wire;
 pub mod classify;
 pub mod codec;
@@ -344,6 +345,7 @@ pub use transport_handler::McTransportHandler;
 pub mod edit_admission;
 pub mod engram_catalog;
 mod reclaim_distance;
+mod route_binding;
 pub mod route_targets;
 pub mod runner_choices;
 pub mod runner_reminders;
@@ -442,8 +444,10 @@ pub mod test_support;
 mod differential_goldens;
 use transform::{HistorianDiagnostics, SerializedOutputCache, TransformRequest};
 
-/// The per-route binding: the project, harness, session-slot value, and fallback render
-/// budget frozen at bind. Transform routes carry the durable session in `session`. Facade
+/// A project-bearing session binding. Its directory comes from the scope stamp for
+/// a new session, or the durable state created by the compaction.setup operation
+/// for an existing session.
+/// Project-free discovery routes keep only a RouteIdentity. Facade
 /// routes accept a runner-attested durable session, an observed OpenCode transform session,
 /// or a Claude Code wrapper instance token that must be resolved before its project memory
 /// is read.
@@ -1855,6 +1859,7 @@ struct RuntimeStoreError {
 /// The module handler. Holds the single store handle (opened once in `on_hello_ack`)
 /// and the per-route session bindings (route channel → {project, session}).
 pub struct McHandler {
+    child_scopes: Arc<child_scopes::ChildScopes>,
     agent_data: Option<agent_data::AgentDataService>,
     app_channels: Mutex<HashMap<u16, app_read::admission::AppCaller>>,
     context_watches: Arc<app_read::watch::Hub>,
@@ -1964,6 +1969,7 @@ pub struct McHandler {
     /// lock-free map) is appropriate because writes are rare (once per route open/close)
     /// and reads are one cheap lookup per transform.
     bindings: Mutex<HashMap<u16, SessionBinding>>,
+    route_identities: Mutex<HashMap<u16, route_binding::RouteIdentity>>,
     threshold_logged_routes: Mutex<HashSet<u16>>,
     /// Validated transform channel → (session, route root). The root is part of provenance;
     /// a cache row for the same session cannot authenticate a facade opened on another root.
@@ -2022,6 +2028,7 @@ pub(crate) fn session_runner_route(
 struct RealHistorianProducerFactory {
     connection_file: PathBuf,
     route_targets: RouteTargetConfig,
+    child_scopes: Arc<child_scopes::ChildScopes>,
 }
 
 fn session_runner_historian_config(
@@ -2046,8 +2053,19 @@ impl HistorianProducerFactory for RealHistorianProducerFactory {
         &self,
         project_root: &Path,
     ) -> Result<Box<dyn HistorianProducerDriver + Send>, HistorianProducerError> {
+        let child_scope = self
+            .child_scopes
+            .for_project(project_root)
+            .await
+            .map_err(|error| {
+                HistorianProducerError::Subc(historian_producer::ProducerErrorBody::untagged(
+                    error.code,
+                    error.message,
+                ))
+            })?;
         Ok(Box::new(
             HistorianProducer::connect(HistorianProducerConfig {
+                child_scope: Some(child_scope),
                 handshake_timeout: Duration::from_secs(2),
                 route_targets: self.route_targets.clone(),
                 ..HistorianProducerConfig::new(
@@ -2065,16 +2083,24 @@ impl HistorianProducerFactory for RealHistorianProducerFactory {
         identity: &session_resolver::RunnerBindIdentity,
         route: &SessionRunnerRoute,
     ) -> Result<Box<dyn HistorianProducerDriver + Send>, HistorianProducerError> {
+        let mut config = session_runner_historian_config(
+            self.connection_file.clone(),
+            self.route_targets.clone(),
+            identity,
+        );
+        config.child_scope = Some(
+            self.child_scopes
+                .for_project(&identity.project_root)
+                .await
+                .map_err(|error| {
+                    HistorianProducerError::Subc(historian_producer::ProducerErrorBody::untagged(
+                        error.code,
+                        error.message,
+                    ))
+                })?,
+        );
         Ok(Box::new(
-            HistorianProducer::connect_to_session_runner(
-                session_runner_historian_config(
-                    self.connection_file.clone(),
-                    self.route_targets.clone(),
-                    identity,
-                ),
-                route.clone(),
-            )
-            .await?,
+            HistorianProducer::connect_to_session_runner(config, route.clone()).await?,
         ))
     }
 }
@@ -2619,6 +2645,10 @@ impl McHandler {
         self.provider_runner.as_ref()
     }
 
+    pub fn child_scopes(&self) -> Arc<child_scopes::ChildScopes> {
+        Arc::clone(&self.child_scopes)
+    }
+
     pub fn new_with_connection_file(connection_file: Option<PathBuf>) -> Self {
         Self::new_with_connection_file_and_route_targets(
             connection_file,
@@ -2642,9 +2672,11 @@ impl McHandler {
         route_targets: RouteTargetConfig,
         module_id: String,
     ) -> Self {
+        let child_scopes = Arc::new(child_scopes::ChildScopes::new(module_id.clone()));
         let dream_runs = Arc::new(dream_dispatch::tick::DreamRuns::new(
             connection_file.clone(),
             &route_targets,
+            Arc::clone(&child_scopes),
         ));
         let retrieval_reranker = connection_file.as_ref().map(|path| {
             Arc::new(retrieval_store::RerankTransport {
@@ -2658,6 +2690,7 @@ impl McHandler {
             Some(path) => Arc::new(RealHistorianProducerFactory {
                 connection_file: path,
                 route_targets: route_targets.clone(),
+                child_scopes: Arc::clone(&child_scopes),
             }),
             None => Arc::new(MissingProducerFactory),
         };
@@ -2696,6 +2729,7 @@ impl McHandler {
             .lock()
             .expect("bus connection file") = bus_connection_file;
         McHandler {
+            child_scopes,
             agent_data,
             app_channels: Mutex::default(),
             context_watches: Arc::default(),
@@ -2768,6 +2802,7 @@ impl McHandler {
             classification_before_apply_hook: Mutex::new(None),
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
             bindings: Mutex::new(HashMap::new()),
+            route_identities: Mutex::default(),
             threshold_logged_routes: Mutex::new(HashSet::new()),
             transform_route_channels: Mutex::new(HashMap::new()),
             transform_session_roots: Mutex::new(HashMap::new()),
@@ -3119,6 +3154,7 @@ impl McHandler {
         config: McModuleConfig,
         session_resolver: Arc<dyn SessionResolver>,
     ) -> Self {
+        let child_scopes = Arc::new(child_scopes::ChildScopes::new(DEFAULT_MODULE_ID));
         let store = Arc::new(OnceLock::new());
         let provider_store = Arc::new(providers::Storage::new(Arc::clone(&store)));
         let move_visibility = Arc::new(agent_data::MoveVisibility::default());
@@ -3130,6 +3166,7 @@ impl McHandler {
             )
         });
         McHandler {
+            child_scopes: Arc::clone(&child_scopes),
             agent_data,
             move_visibility,
             registered_module_id: DEFAULT_MODULE_ID.into(),
@@ -3148,6 +3185,7 @@ impl McHandler {
             dream_runs: Arc::new(dream_dispatch::tick::DreamRuns::new(
                 None,
                 &RouteTargetConfig::default(),
+                child_scopes,
             )),
             runner_choices: Arc::new(Mutex::new(runner_choices::RunnerChoiceLog::default())),
             project_identities: Arc::new(project_identity::ProjectIdentityResolver::new()),
@@ -3196,6 +3234,7 @@ impl McHandler {
             classification_before_apply_hook: Mutex::new(None),
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
             bindings: Mutex::new(HashMap::new()),
+            route_identities: Mutex::default(),
             threshold_logged_routes: Mutex::new(HashSet::new()),
             transform_route_channels: Mutex::new(HashMap::new()),
             transform_session_roots: Mutex::new(HashMap::new()),
@@ -3258,6 +3297,10 @@ impl McHandler {
 
     /// Remove a route and evict process-local session state after its final binding closes.
     fn unbind_route(&self, channel: u16) {
+        self.route_identities
+            .lock()
+            .expect("route identities")
+            .remove(&channel);
         self.binding_projects
             .lock()
             .expect("binding project mutex")
@@ -3353,18 +3396,38 @@ impl McHandler {
         channel: u16,
         request_session: &str,
     ) -> Result<SessionBinding, BindingError> {
-        let map = self.bindings.lock().expect("bindings mutex");
-        let binding = map.get(&channel).ok_or(BindingError::Unbound)?;
+        let binding = self.facade_binding(channel)?;
         if binding.session != request_session {
             return Err(BindingError::SessionMismatch);
         }
-        Ok(binding.clone())
+        Ok(binding)
     }
 
     /// Return the channel binding without comparing a request session. OpenCode Rust facade
     /// routes bind a real session id, while Claude Code facade routes bind an instance token;
     /// `resolve_facade_scope` applies the corresponding identity mode before touching the store.
     fn facade_binding(&self, channel: u16) -> Result<SessionBinding, BindingError> {
+        if let Some(route) = self.route_identity(channel) {
+            if let Some(project) = self
+                .stored_async_project(&route)
+                .map_err(|_| BindingError::Unbound)?
+            {
+                return Ok(self.project_binding(&route, &project));
+            }
+            if !self
+                .bindings
+                .lock()
+                .expect("bindings mutex")
+                .contains_key(&channel)
+            {
+                if let Some(project) = self
+                    .stored_project(&route)
+                    .map_err(|_| BindingError::Unbound)?
+                {
+                    return Ok(self.project_binding(&route, &project));
+                }
+            }
+        }
         self.bindings
             .lock()
             .expect("bindings mutex")
@@ -3465,6 +3528,31 @@ impl McHandler {
         store: &McStore,
         binding: &SessionBinding,
     ) -> Result<RouteProject, HandlerOutcome> {
+        let route = route_binding::RouteIdentity {
+            principal: binding.principal.clone(),
+            scope: binding.scope.clone(),
+            harness: binding.harness.clone(),
+            session: binding.session.clone(),
+        };
+        let stored = self.stored_async_project(&route)?;
+        let scoped_id = if stored.is_none() {
+            route_binding::ScopedProject::from_stamp(binding.scope.as_ref())
+                .and_then(|project| project.project_id)
+        } else {
+            None
+        };
+        if let Some(project) = stored {
+            if let Some(key) = project.key {
+                self.active_project_roots
+                    .lock()
+                    .expect("active project roots mutex")
+                    .insert(binding.session.clone(), project.workdir);
+                let memory_paused = key.starts_with("unresolved:").then(|| {
+                    "Project identity was unavailable when this session was set up".to_string()
+                });
+                return Ok(RouteProject { key, memory_paused });
+            }
+        }
         let mut projects = self.binding_projects.lock().expect("binding project mutex");
         let mut internal = self
             .internal_binding_projects
@@ -3511,7 +3599,10 @@ impl McHandler {
             })?;
         let candidate = match row {
             Some(identity) => RouteProject::resolved(identity),
-            None => self.binding_fallback_project(store, binding, project)?,
+            None => match scoped_id {
+                Some(identity) => RouteProject::resolved(identity),
+                None => self.binding_fallback_project(store, binding, project)?,
+            },
         };
         if let Some(served) = &project.served {
             if served.key != candidate.key
@@ -5728,8 +5819,8 @@ impl McHandler {
     }
 
     fn handle_session_delete_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
-        let (session_id, binding) =
-            match self.management_binding(channel, request, "session.delete") {
+        let (session_id, _binding, project_key) =
+            match self.management_session_project(channel, request, "session.delete") {
                 Ok(scope) => scope,
                 Err(outcome) => return outcome,
             };
@@ -5737,7 +5828,11 @@ impl McHandler {
             Some(store) => store,
             None => return self.store_refusal(),
         };
-        match store.delete_session(&session_id, &binding.project_root.to_string_lossy()) {
+        let deleted = match project_key {
+            Some(project) => store.delete_session(&session_id, &project),
+            None => store.delete_session_without_project(&session_id),
+        };
+        match deleted {
             Ok(deleted_rows) => {
                 self.runtime_store_errors
                     .lock()
@@ -5800,15 +5895,22 @@ impl McHandler {
     /// [`subagent_invocations_read`] for the queries and their bounds.
     fn handle_subagent_invocations_read(&self, channel: u16, request: &Value) -> HandlerOutcome {
         // The caller is judged from the daemon's bind stamp, before any argument is read.
-        let admitted = match self.bindings.lock().expect("route bindings").get(&channel) {
-            Some(binding) => subagent_invocations_read::authorize_caller(
-                binding.principal.as_ref(),
-                binding.scope.as_ref(),
-            ),
-            None => Err(format!(
-                "{} on a channel with no binding",
-                subagent_invocations_read::METHOD
-            )),
+        let admitted = if let Some(route) = self.route_identity(channel) {
+            subagent_invocations_read::authorize_caller(
+                route.principal.as_ref(),
+                route.scope.as_ref(),
+            )
+        } else {
+            match self.bindings.lock().expect("route bindings").get(&channel) {
+                Some(binding) => subagent_invocations_read::authorize_caller(
+                    binding.principal.as_ref(),
+                    binding.scope.as_ref(),
+                ),
+                None => Err(format!(
+                    "{} on a channel with no binding",
+                    subagent_invocations_read::METHOD
+                )),
+            }
         };
         if let Err(message) = admitted {
             return HandlerOutcome::Error {
@@ -5836,8 +5938,8 @@ impl McHandler {
     }
 
     fn handle_session_status_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
-        let (session_id, binding) =
-            match self.management_binding(channel, request, "session.status") {
+        let (session_id, binding, project_key) =
+            match self.management_session_project(channel, request, "session.status") {
                 Ok(scope) => scope,
                 Err(outcome) => return outcome,
             };
@@ -5946,16 +6048,22 @@ impl McHandler {
         // Structured fields accompany the prose so reconciliation code can determine
         // completion without parsing the summary or issuing another operation: a retained
         // delivered-command record includes its coverage, row version, and current wrapup state.
-        let m1_signal = match crate::m1_compose::m1_revision_signal_parts_for_pass(
-            store,
-            &binding.project_root.to_string_lossy(),
-            &binding.project_root.to_string_lossy(),
-            &session_id,
-            loaded.meta.user_profile_version,
-            !loaded.meta.memory_disabled,
-            now_ms(),
-        ) {
-            Ok(signal) => Some(signal),
+        let m1_signal = match binding
+            .as_ref()
+            .map(|binding| {
+                crate::m1_compose::m1_revision_signal_parts_for_pass(
+                    store,
+                    project_key.as_deref().expect("project-bearing binding"),
+                    &binding.project_root.to_string_lossy(),
+                    &session_id,
+                    loaded.meta.user_profile_version,
+                    !loaded.meta.memory_disabled,
+                    now_ms(),
+                )
+            })
+            .transpose()
+        {
+            Ok(signal) => signal,
             Err(error) => {
                 return HandlerOutcome::Error {
                     code: "store_load_failed".to_string(),
@@ -6012,24 +6120,32 @@ impl McHandler {
         // Which runner this session's completions used and why. A session with no
         // completion in this process yet reports what its route resolves to now.
         let (historian_runner_status, dreamer_runner_status) = {
-            let config = self.effective_config(&binding.project_root);
+            let config = binding
+                .as_ref()
+                .map(|binding| binding.config.clone())
+                .unwrap_or_else(|| self.user_config());
+            let harness = binding
+                .as_ref()
+                .map(|binding| binding.harness.clone())
+                .or_else(|| self.route_identity(channel).map(|route| route.harness))
+                .unwrap_or_default();
             let log = self
                 .runner_choices
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let status = |role, resolved| match log.get(role, &session_id) {
                 Some(choice) => choice.to_value("last_completion"),
-                None => runner_choices::RunnerChoice::new(resolved, &binding.harness)
+                None => runner_choices::RunnerChoice::new(resolved, &harness)
                     .to_value("resolved_for_route"),
             };
             (
                 status(
                     runner_choices::RunnerRole::Historian,
-                    config.historian_runner_for(&binding.harness),
+                    config.historian_runner_for(&harness),
                 ),
                 status(
                     runner_choices::RunnerRole::Dreamer,
-                    config.dreamer_runner_for(&binding.harness),
+                    config.dreamer_runner_for(&harness),
                 ),
             )
         };
@@ -7576,19 +7692,33 @@ impl McHandler {
     /// `tool.catalog`: the catalog and guidance text for the request's plan item,
     /// resolved against the configuration of the project the route is bound to.
     async fn handle_tool_catalog_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
-        let Ok(binding) = self.facade_binding(channel) else {
+        if let Some(route) = self.route_identity(channel) {
+            if let Err(error) = self.stored_async_project(&route) {
+                return error;
+            }
+        }
+        let binding = self.facade_binding(channel).ok();
+        if binding.is_none() && self.route_identity(channel).is_none() {
             return HandlerOutcome::Error {
                 code: "route_unbound".to_string(),
                 message: "tool.catalog on a channel with no route binding".to_string(),
             };
-        };
-        let config = tool_catalog::CatalogConfig::from_module_config(&binding.config);
+        }
+        // An unscoped preflight cannot see project config. Callers needing the
+        // project's exact tool set must open under their parent session's scope,
+        // whose stamp carries that project's directory.
+        let config = binding
+            .as_ref()
+            .map(|binding| binding.config.clone())
+            .unwrap_or_else(|| self.user_config());
+        let config = tool_catalog::CatalogConfig::from_module_config(&config);
         let arguments = request.get("arguments").unwrap_or(&Value::Null);
         match tool_catalog::catalog_answer_bytes(arguments, &config) {
             Ok(bytes) => {
-                if arguments.get("composition").is_some_and(Value::is_object)
-                    && arguments.get("digest_only") != Some(&Value::Bool(true))
-                {
+                if let Some(binding) = binding.filter(|_| {
+                    arguments.get("composition").is_some_and(Value::is_object)
+                        && arguments.get("digest_only") != Some(&Value::Bool(true))
+                }) {
                     // These bytes were just produced by the catalog, not supplied
                     // by a caller. Retain only the facts needed to admit calls.
                     let answer: Value = serde_json::from_slice(&bytes).expect("catalog JSON");
@@ -9292,6 +9422,7 @@ impl ModuleHandler for McHandler {
     /// the path isn't known until the ACK lands. Opening runs off the request lane so a
     /// predecessor's live single-writer lease cannot block transform dispatch.
     async fn on_hello_ack(&self, ack: &ModuleHelloAckBody) {
+        self.child_scopes.reconnected();
         let (descriptor, origin) = resolve_descriptor_with_origin(ack.storage.as_ref());
         if let StorageBackend::Sqlite { path } = &descriptor.backend {
             let configured = match &self.agent_data {
@@ -9331,9 +9462,8 @@ impl ModuleHandler for McHandler {
         report
     }
 
-    /// Record the route's {project_root, session} so the transform path can resolve the
-    /// project from the daemon-controlled channel (never a per-pass request field). Accept
-    /// session routes. The independent app service authorizes its caller first.
+    /// Accept project-free discovery routes as well as scoped session routes.
+    /// Only the scope stamp or an existing session record can supply a project.
     async fn on_bind(&self, req: &RouteBindRequest) -> subc_client_rs::BindDecision {
         self.context_watches.remove_channel(req.handle.channel);
         self.app_channels
@@ -9414,61 +9544,71 @@ impl ModuleHandler for McHandler {
                     .insert(req.handle.channel);
             }
         }
-        let config = self.effective_config(&req.identity.project_root);
-        // Hosts record their project identity before opening the route. Without
-        // that row, resolve through Entorhinal once the store can check managed projects.
-        let host_identity = self.store.get().and_then(|store| {
-            store
-                .session_project_identity(&req.identity.session)
-                .ok()
-                .flatten()
-        });
-        let initial = match host_identity {
-            Some(identity) => Ok(identity),
-            None => {
-                if let Some(store) = self.store.get() {
-                    self.entorhinal
-                        .resolve_for_session(
-                            &self.project_identities,
-                            &req.identity.project_root,
-                            &req.identity.harness,
-                            &req.identity.session,
-                            Some(store.as_ref()),
-                        )
-                        .await
-                } else {
-                    // Without an open store we cannot read context.db's authority_managed
-                    // marker, which prevents identity merges until the single-store migration.
-                    // Keep the existing identity rather than authorizing a new pin.
-                    project_identity::log_once(
-                        format!("entorhinal-authority-unavailable:{}", req.identity.project_root.display()),
-                        "Keeping project identity; authority check unavailable until the store opens",
-                    );
-                    self.project_identities.resolve(&req.identity.project_root)
-                }
+        let route = route_binding::RouteIdentity {
+            principal: req.principal.clone(),
+            scope: req.scope.clone(),
+            harness: req.identity.harness.clone(),
+            session: req.identity.session.clone(),
+        };
+        let stored = match self.stored_project(&route) {
+            Ok(project) => project,
+            Err(HandlerOutcome::Error { code, .. }) if code == "session_unresolved" => None,
+            Err(_) => {
+                return subc_client_rs::BindDecision::reject(
+                    "session_unresolved",
+                    "session project is ambiguous or unavailable",
+                )
             }
         };
-        self.bind_route(
-            req.handle.channel,
-            SessionBinding {
-                principal: req.principal.clone(),
-                scope: req.scope.clone(),
-                project_root: req.identity.project_root.clone(),
-                harness: req.identity.harness.clone(),
-                session: req.identity.session.clone(),
-                model_key: None,
-                config,
-                // Use the default until a request supplies the history budget
-                // computed by the harness for that pass.
-                history_budget_tokens: memory_render::DEFAULT_HISTORY_BUDGET_TOKENS,
-            },
-        );
-        self.binding_projects
+        let scoped = route_binding::ScopedProject::from_stamp(route.scope.as_ref());
+        let async_project = self.stored_async_project(&route).ok().flatten();
+        let binding = async_project
+            .as_ref()
+            .map(|project| self.project_binding(&route, project))
+            .or_else(|| self.scoped_binding(&route))
+            .or_else(|| {
+                stored
+                    .as_ref()
+                    .map(|project| self.project_binding(&route, project))
+            });
+        self.unbind_route(req.handle.channel);
+        if let Some(binding) = binding {
+            let initial_key = stored.and_then(|project| project.key).or_else(|| {
+                if async_project.is_none() {
+                    scoped.and_then(|project| project.project_id)
+                } else {
+                    None
+                }
+            });
+            let initial = match initial_key {
+                Some(key) => Ok(key),
+                None => match self.store.get() {
+                    Some(store) => {
+                        self.entorhinal
+                            .resolve_for_session(
+                                &self.project_identities,
+                                &binding.project_root,
+                                &binding.harness,
+                                &binding.session,
+                                Some(store.as_ref()),
+                            )
+                            .await
+                    }
+                    None => self.project_identities.resolve(&binding.project_root),
+                },
+            };
+            self.bind_route(req.handle.channel, binding);
+            self.binding_projects
+                .lock()
+                .expect("binding project mutex")
+                .get_mut(&req.handle.channel)
+                .expect("newly bound route")
+                .initial = Some(initial);
+        }
+        self.route_identities
             .lock()
-            .expect("binding project mutex")
-            .get_mut(&req.handle.channel)
-            .expect("newly bound route")
-            .initial = Some(initial);
+            .expect("route identities")
+            .insert(req.handle.channel, route);
         self.record_route_role_versions(req.handle.channel, req.role_versions.as_ref());
         if let Ok(binding) = self.facade_binding(req.handle.channel) {
             if let Some(service) = &self.agent_data {
@@ -9663,11 +9803,12 @@ impl McHandler {
             .is_some_and(|method| app_read::APP_READ_METHODS.contains(&method))
         {
             return HandlerOutcome::Error {
-                code: if self
-                    .bindings
-                    .lock()
-                    .expect("route bindings")
-                    .contains_key(&channel)
+                code: if self.route_identity(channel).is_some()
+                    || self
+                        .bindings
+                        .lock()
+                        .expect("route bindings")
+                        .contains_key(&channel)
                 {
                     "app_caller_forbidden"
                 } else {
@@ -9716,6 +9857,11 @@ const FLOW_ROUTE_METHODS: &[&str] = &[subagent_invocations_read::METHOD];
 impl McHandler {
     /// Whether the daemon bound `channel` under a flow's scope (`flow_id` in the stamp).
     fn flow_scoped(&self, channel: u16) -> bool {
+        if let Some(route) = self.route_identity(channel) {
+            return route
+                .scope
+                .is_some_and(|scope| scope.attributes.flow_id.is_some());
+        }
         self.bindings
             .lock()
             .expect("route bindings")
@@ -9798,6 +9944,9 @@ impl McHandler {
                     request.get("params").unwrap_or(&Value::Null),
                 )
                 .await;
+        }
+        if let Some(refusal) = self.unscoped_project_refusal(channel, &request) {
+            return refusal;
         }
         let _move_pass = match self
             .move_visibility
@@ -13007,6 +13156,13 @@ pub fn manifest_with_route_targets(
 /// an MCP facade may bind a runner's conversation by its session alone.
 pub const MCP_CONVERSATION_BINDING_V1: &str = "mcp-conversation-binding/v1";
 
+pub(crate) fn project_bind_capabilities() -> Vec<String> {
+    vec![
+        subc_protocol::scope::BIND_NO_PROJECT_CAPABILITY.to_string(),
+        subc_protocol::scope::SCOPE_WORKDIR_CAPABILITY.to_string(),
+    ]
+}
+
 pub fn manifest_with_route_targets_and_smart_notes(
     module_id: &str,
     resolved_routes: &RouteTargetConfig,
@@ -13034,6 +13190,8 @@ pub fn manifest_with_route_targets_and_smart_notes(
         // kept by the dispatcher's flow fence and the op's caller check.
         subc_protocol::scope::FLOW_SCOPES_CAPABILITY.to_string(),
     ];
+    // The daemon omits scope project fields unless the receiver opts in.
+    capabilities.extend(project_bind_capabilities());
     let mut provides = vec![
         ProviderRole::ToolProvider {
             tools,
@@ -13190,6 +13348,10 @@ mod tests {
         per_pass_cost::fixed_clock()
     }
     mod catalog_startup;
+    #[path = "connection_project_source.rs"]
+    mod connection_project_source;
+    #[path = "scope_projects.rs"]
+    mod scope_projects;
     mod tool_catalog;
     mod tool_catalog_conformance;
     // The per-harness default runner, driven through real passes.
@@ -15123,6 +15285,7 @@ mod tests {
             "mcp-conversation-binding/v1".to_string(),
             "flow-scopes/v1".to_string(),
         ];
+        expected_capabilities.extend(project_bind_capabilities());
         if agent_data::ENABLED {
             expected_capabilities.push(cortexkit_role_agent_data::PROVIDES.to_string());
         }
@@ -15232,7 +15395,7 @@ mod tests {
                         key: key.clone(),
                         daemon_id,
                         pid: std::process::id(),
-                        daemon_ver: "fake".into(),
+                        daemon_ver: "0.39.0".into(),
                     },
                 )
                 .unwrap();
@@ -15351,16 +15514,22 @@ mod tests {
         }
 
         async fn bind(handler: &McHandler, project: &Path, channel: u16) {
-            let identity = serde_json::from_value(json!({
-                "project_root": project, "harness": "opencode", "session": "ses"
-            }))
-            .unwrap();
+            let identity = subc_protocol::BindIdentity::new("opencode", "ses");
             let request = RouteBindRequest::new(
                 RouteHandle::detached(channel, 1),
                 RouteTargetConfig::runner_module("magic-context")
                     .target(route_targets::RegisteredRoute::HistorianRunner)
                     .unwrap(),
                 identity,
+            )
+            .with_scope(
+                subc_protocol::scope::ScopeStamp::new(
+                    subc_protocol::Principal::Direct,
+                    "fixture",
+                    1,
+                    subc_protocol::scope::ScopeKind::Head,
+                )
+                .with_workdir(Some(project.to_string_lossy().into_owned())),
             );
             let _decision = handler.on_bind(&request).await;
             assert!(handler.bindings.lock().unwrap().contains_key(&channel));
@@ -16092,7 +16261,17 @@ mod tests {
     fn binding_with_harness(root: &str, harness: &str, session: &str) -> SessionBinding {
         SessionBinding {
             principal: None,
-            scope: None,
+            scope: (harness == "claude-code").then(|| {
+                subc_protocol::scope::ScopeStamp::new(
+                    subc_protocol::Principal::Reserved {
+                        module_id: "prefrontal-core".into(),
+                    },
+                    "claude-code-fixture",
+                    1,
+                    subc_protocol::scope::ScopeKind::Ephemeral,
+                )
+                .with_workdir(Some(root.to_owned()))
+            }),
             project_root: PathBuf::from(root),
             harness: harness.to_string(),
             session: session.to_string(),

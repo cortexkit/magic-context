@@ -464,6 +464,9 @@ mod tests {
                 crate::MCP_CONVERSATION_BINDING_V1.to_string(),
                 subc_protocol::scope::FLOW_SCOPES_CAPABILITY.to_string(),
             ]
+            .into_iter()
+            .chain(crate::project_bind_capabilities())
+            .collect::<Vec<_>>()
         );
         assert!(capabilities.requires.is_empty());
         assert!(capabilities.must_never_reach.is_empty());

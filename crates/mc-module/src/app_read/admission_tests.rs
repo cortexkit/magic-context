@@ -9,11 +9,7 @@ pub fn phone_bind() -> RouteBindRequest {
     RouteBindRequest::new(
         RouteHandle::detached(1, 1),
         crate::route_targets::app_read_target_for_test(crate::DEFAULT_MODULE_ID),
-        BindIdentity::new(
-            std::path::PathBuf::from("caller-chosen"),
-            "fed-phone:peer-key",
-            "ignored-session",
-        ),
+        BindIdentity::new("fed-phone:peer-key", "ignored-session"),
     )
     .with_principal(Principal::Reserved {
         module_id: "callosum".into(),

@@ -169,6 +169,18 @@ async fn call(h: &McHandler, method: &str, params: Value) -> HandlerOutcome {
     h.dispatch_value(CHANNEL, json!({"method":method,"params":params}))
         .await
 }
+fn project_scope() -> subc_protocol::scope::ScopeStamp {
+    subc_protocol::scope::ScopeStamp::new(
+        Principal::Reserved {
+            module_id: "prefrontal-core".into(),
+        },
+        "agent-data-fixture",
+        1,
+        subc_protocol::scope::ScopeKind::Ephemeral,
+    )
+    .with_workdir(Some(ROOT.into()))
+}
+
 async fn bind(h: &McHandler, channel: u16, harness: &str, session: &str, principal: Principal) {
     let target = if channel == CHANNEL {
         RouteTarget::InternalService {
@@ -180,12 +192,17 @@ async fn bind(h: &McHandler, channel: u16, harness: &str, session: &str, princip
             module_id: DEFAULT_MODULE_ID.into(),
         }
     };
-    let request = RouteBindRequest::new(
+    let mut request = RouteBindRequest::new(
         RouteHandle::detached(channel, 1),
         target,
-        BindIdentity::new(PathBuf::from(ROOT), harness, session),
+        BindIdentity::new(harness, session),
     )
     .with_principal(principal);
+    if channel != CHANNEL {
+        request.scope = Some(project_scope());
+    } else {
+        assert!(request.scope.is_none());
+    }
     let decision = h.on_bind(&request).await;
     assert!(format!("{decision:?}").contains("Accept"), "{decision:?}");
 }
@@ -281,7 +298,7 @@ async fn caller_admission_is_attested_and_precedes_decoding() {
             module_id: "broca".into(),
         }),
     ] {
-        h.bindings
+        h.route_identities
             .lock()
             .unwrap()
             .get_mut(&CHANNEL)
@@ -683,7 +700,7 @@ async fn daemon_target_and_manifest_stream_cannot_drift() {
             module_id: "other-module".into(),
             service_id: role::SERVICE_ID.into(),
         },
-        BindIdentity::new(PathBuf::from(ROOT), "agent-data", "move"),
+        BindIdentity::new("agent-data", "move"),
     )
     .with_principal(Principal::Reserved {
         module_id: "entorhinal".into(),

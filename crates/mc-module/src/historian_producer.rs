@@ -570,6 +570,7 @@ pub struct HistorianProducerConfig {
     pub handshake_timeout: Duration,
     pub request_timeout: Duration,
     pub await_timeout: Duration,
+    pub child_scope: Option<subc_protocol::scope::ScopeSelector>,
 }
 
 impl HistorianProducerConfig {
@@ -586,6 +587,7 @@ impl HistorianProducerConfig {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             await_timeout: DEFAULT_AWAIT_TIMEOUT,
+            child_scope: None,
         }
     }
 }
@@ -1600,16 +1602,16 @@ impl HistorianProducer {
         };
         let request = ClientControlRequest::RouteOpen {
             target,
-            identity: BindIdentity::new(
-                self.config.project_root.clone(),
-                self.config.harness.clone(),
-                session,
-            ),
+            identity: BindIdentity::new(self.config.harness.clone(), session),
             consumer_identity: consumer_identity_from_launch(),
             consumer_capabilities: None,
             admission_facts: None,
-            // Historian routes carry no session scope; they run under the module's own identity.
-            scope: None,
+            scope: Some(self.config.child_scope.clone().ok_or_else(|| {
+                HistorianProducerError::Subc(ProducerErrorBody::untagged(
+                    "child_scope_unavailable",
+                    "historian child requires a module-owned project scope",
+                ))
+            })?),
             // The historian runner is an llm-runner management surface.
             role_versions: Some(crate::session_resolver::llm_runner_role_versions()),
         };
@@ -2817,7 +2819,8 @@ pub(crate) mod tests {
 
     #[derive(Debug, Default)]
     struct ServerLog {
-        route_project_roots: Vec<String>,
+        route_identities: Vec<Value>,
+        route_scopes: Vec<Option<subc_protocol::scope::ScopeSelector>>,
         route_harnesses: Vec<String>,
         route_sessions: Vec<String>,
         route_targets: Vec<subc_protocol::RouteTarget>,
@@ -2942,6 +2945,18 @@ pub(crate) mod tests {
     }
 
     impl FakeServer {
+        pub(crate) async fn child_route_metadata(
+            &self,
+        ) -> Vec<(Value, Option<subc_protocol::scope::ScopeSelector>)> {
+            let log = self.log.lock().await;
+            assert_eq!(log.route_identities.len(), log.route_scopes.len());
+            log.route_identities
+                .iter()
+                .cloned()
+                .zip(log.route_scopes.iter().cloned())
+                .collect()
+        }
+
         pub(crate) async fn follow_counts(&self) -> (usize, usize) {
             let log = self.log.lock().await;
             (log.statuses.len(), log.results.len())
@@ -3059,7 +3074,7 @@ pub(crate) mod tests {
                 key: key.clone(),
                 daemon_id,
                 pid: std::process::id(),
-                daemon_ver: "fake".to_string(),
+                daemon_ver: "0.39.0".to_string(),
             },
         )
         .unwrap();
@@ -3103,6 +3118,7 @@ pub(crate) mod tests {
                                 identity,
                                 target,
                                 role_versions,
+                                scope,
                                 ..
                             } = req
                             {
@@ -3110,9 +3126,10 @@ pub(crate) mod tests {
                                 next_route += 1;
                                 route_sessions.insert(route, identity.session.clone());
                                 let mut log = log_task.lock().await;
-                                log.route_project_roots
-                                    .push(identity.project_root.to_string_lossy().into());
+                                log.route_identities
+                                    .push(serde_json::to_value(&identity).unwrap());
                                 log.route_harnesses.push(identity.harness);
+                                log.route_scopes.push(scope);
                                 log.route_sessions.push(identity.session);
                                 log.route_targets.push(target);
                                 log.route_role_versions.push(role_versions);
@@ -3402,6 +3419,9 @@ pub(crate) mod tests {
             handshake_timeout: Duration::from_secs(2),
             request_timeout: Duration::from_secs(2),
             await_timeout: Duration::from_secs(2),
+            child_scope: Some(crate::child_scopes::test_selector(
+                &std::env::current_dir().unwrap(),
+            )),
         })
         .await
         .unwrap()
@@ -3921,6 +3941,9 @@ pub(crate) mod tests {
                 request_timeout: Duration::from_secs(2),
                 await_timeout: Duration::from_secs(2),
                 route_targets: RouteTargetConfig::default(),
+                child_scope: Some(crate::child_scopes::test_selector(
+                    &std::env::current_dir().unwrap(),
+                )),
                 ..HistorianProducerConfig::new(
                     server.connection_file.clone(),
                     std::env::current_dir().unwrap(),
@@ -3948,6 +3971,7 @@ pub(crate) mod tests {
             request_timeout: Duration::from_secs(2),
             await_timeout: Duration::from_secs(2),
             route_targets: RouteTargetConfig::default(),
+            child_scope: Some(crate::child_scopes::test_selector(&identity.project_root)),
             ..HistorianProducerConfig::new(
                 server.connection_file.clone(),
                 identity.project_root.clone(),
@@ -3994,13 +4018,16 @@ pub(crate) mod tests {
             "a runner route declares it speaks llm-runner/v1"
         );
         assert_eq!(
-            log.route_project_roots,
-            vec![std::env::current_dir()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()]
+            log.route_identities,
+            vec![json!({"harness":"claude-code", "session":"mc-hist-1"})]
         );
         assert_eq!(log.route_harnesses, vec!["claude-code"]);
+        assert_eq!(
+            log.route_scopes,
+            vec![Some(crate::child_scopes::test_selector(
+                &std::env::current_dir().unwrap()
+            ))]
+        );
         assert_eq!(log.route_sessions, vec!["mc-hist-1".to_string()]);
         let send = &log.sends[0];
         assert!(send.get("parent").is_none(), "{send}");
@@ -4064,8 +4091,14 @@ pub(crate) mod tests {
             }]
         );
         assert_eq!(
-            log.route_project_roots,
-            vec![identity.project_root.to_string_lossy().into_owned()]
+            log.route_identities,
+            vec![json!({"harness":identity.harness, "session":identity.session})]
+        );
+        assert_eq!(
+            log.route_scopes,
+            vec![Some(crate::child_scopes::test_selector(
+                &identity.project_root
+            ))]
         );
         assert_eq!(log.route_harnesses, vec![identity.harness.clone()]);
         assert_eq!(log.route_sessions, vec![child_session.to_string()]);

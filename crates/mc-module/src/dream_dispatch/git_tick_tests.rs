@@ -89,7 +89,11 @@ impl Fixture {
             gate: (Mutex::new((false, false)), Condvar::new()),
         });
         let clock = Arc::new(TestClock(AtomicI64::new(NOW)));
-        let runs = Arc::new(DreamRuns::new(None, &RouteTargetConfig::default()));
+        let runs = Arc::new(DreamRuns::new(
+            None,
+            &RouteTargetConfig::default(),
+            Arc::new(crate::child_scopes::ChildScopes::new("magic-context")),
+        ));
         runs.use_resolver(resolver.clone());
         runs.use_clock(clock.clone());
         runs.record(

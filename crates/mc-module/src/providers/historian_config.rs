@@ -271,7 +271,7 @@ impl HistorianModelCatalog {
     async fn fetch(
         &self,
         lookup: CatalogLookup<'_>,
-        project_root: &Path,
+        _project_root: &Path,
         harness: &str,
     ) -> Result<CatalogModelLimits, String> {
         let connection_file = self
@@ -282,11 +282,7 @@ impl HistorianModelCatalog {
             .route_targets
             .target(RegisteredRoute::FusiformCatalog)
             .ok_or_else(|| "Fusiform catalog route is not registered".to_string())?;
-        let identity = BindIdentity::new(
-            project_root.to_path_buf(),
-            harness,
-            "ck-mc-historian-model-limits",
-        );
+        let identity = BindIdentity::new(harness, "ck-mc-historian-model-limits");
         let consumer_options = ConsumerOptions {
             handshake_timeout: FUSIFORM_LOOKUP_TIMEOUT,
             call_timeout: FUSIFORM_LOOKUP_TIMEOUT,
@@ -744,7 +740,7 @@ mod tests {
                 key: generate_key().unwrap(),
                 daemon_id: generate_daemon_id().unwrap(),
                 pid: std::process::id(),
-                daemon_ver: "historian-limits-test".into(),
+                daemon_ver: "0.39.0".into(),
             };
             write_atomic(&connection_file, &connection).unwrap();
             let connected = ConnectedClients::new();
