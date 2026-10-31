@@ -45,22 +45,26 @@ function modelMatchedProvenContextLimit(
     sessionID: string | undefined,
     modelKey: string | undefined,
 ): number | undefined {
-    const persisted = modelMatchedPersistedUsage(db, sessionID, modelKey);
-    return isSaneLimit(persisted?.observedSafeInputTokens)
-        ? persisted.observedSafeInputTokens
-        : undefined;
+    if (!db || !sessionID || !modelKey) return undefined;
+    try {
+        // Reload clears stale pressure, not the model's accepted-input proof.
+        // Read the floor independently of loadPersistedUsage's zero-usage gate.
+        const provenLimit = resolveOpenCodeProvenInputFloor(db, sessionID, modelKey);
+        return isSaneLimit(provenLimit) ? provenLimit : undefined;
+    } catch {
+        // Floor resolution is best-effort; catalog and overflow limits still apply.
+        return undefined;
+    }
 }
 
 function applySessionProvenFloor(
     geometry: NonNullable<ReturnType<typeof getSdkWindowGeometry>>,
-    persisted: NonNullable<ReturnType<typeof modelMatchedPersistedUsage>> | undefined,
+    provenLimit: number | undefined,
     ctx?: { db?: ContextDatabase; sessionID?: string },
 ) {
-    const provenLimit = isSaneLimit(persisted?.observedSafeInputTokens)
-        ? persisted.observedSafeInputTokens
-        : undefined;
     const result = applyProvenInputFloor(geometry, provenLimit);
     if (result.refused && ctx?.db && ctx.sessionID) {
+        const persisted = loadPersistedUsage(ctx.db, ctx.sessionID);
         const impossiblePressure = persisted?.usage.inputTokens
             ? persisted.usage.inputTokens > result.refused.absoluteWall
             : false;
@@ -106,7 +110,7 @@ export function resolveContextWindowGeometry(
     if (!geometry || detected !== undefined) return geometry;
     return applySessionProvenFloor(
         geometry,
-        modelMatchedPersistedUsage(ctx?.db, ctx?.sessionID, modelKey),
+        modelMatchedProvenContextLimit(ctx?.db, ctx?.sessionID, modelKey),
         ctx,
     );
 }
