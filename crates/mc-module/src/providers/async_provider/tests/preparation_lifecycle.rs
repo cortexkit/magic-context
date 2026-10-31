@@ -311,7 +311,7 @@ async fn a_due_view_setup_sends_only_the_head_and_the_view_gives_the_prepared_re
         panic!("{outcome:?}")
     };
     let runner = Served::new(prep.served.clone(), 7);
-    let mut arm = Arm::open(
+    let arm = Arm::open(
         store.path(),
         project.path(),
         &prep.session,
@@ -376,7 +376,7 @@ async fn a_due_view_setup_sends_only_the_head_and_the_view_gives_the_prepared_re
     let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
     let runner = Served::new(prep.served.clone(), 7);
-    let mut arm = Arm::open(
+    let arm = Arm::open(
         store.path(),
         project.path(),
         &prep.session,
