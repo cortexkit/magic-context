@@ -2179,6 +2179,16 @@ fn decide_producer_failure(
         };
     }
 
+    if err.refuses_model() {
+        // The runner cannot serve this model, which says nothing about the chunk
+        // or the other configured models: the next one may be one it serves.
+        return ProducerFailureDecision {
+            try_next_model: has_eligible_model(remaining_models, auth_blocked_providers),
+            failure_backoff_at_ms: default_failure_backoff_at_ms,
+            detail_prefix: None,
+        };
+    }
+
     if let Some(classification) = err.classification() {
         // The producer owns classification. Once a class tag is present, the consumer
         // branches only on that field and its structured retry-after sibling; provider
@@ -6152,6 +6162,50 @@ mod tests {
             .last_no_fire
             .as_deref()
             .is_some_and(|value| value.contains("stage=credential")));
+    }
+
+    /// THALAMUS's runner hosts enable only the `anthropic` provider and refuse a
+    /// send naming another one as `invalid_params {field: "model"}`. WERNI's
+    /// configured chain starts with two Google models and ends with Anthropic, so
+    /// the firing must walk on to the model the runner serves. The refusal stays
+    /// out of the shared cache, which every runner reads.
+    #[tokio::test]
+    async fn a_runner_model_refusal_moves_on_to_the_next_configured_model() {
+        let models = vec![
+            "google/first".to_string(),
+            "google/second".to_string(),
+            "anthropic/third".to_string(),
+        ];
+        let cache = HistorianRunnerRefusalCache::default();
+        let generation = cache.activate_chain(&models);
+        let refused = || {
+            HistorianProducerError::Subc(ProducerErrorBody::from_value(serde_json::json!({
+                "code": "invalid_params",
+                "message": "model provider google is not enabled on this runner",
+                "detail": {"field": "model"}
+            })))
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_compartment(&store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let mut producer = ScriptedProducer::default()
+            .with_start(Err(refused()))
+            .with_start(Err(refused()))
+            .with_start(Ok(run_handle("run-anthropic")))
+            .with_output(Ok(producer_output(historian_xml("anthropic summary"))));
+        let request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+        run_historian_firing_with_model_cache(&mut producer, request, Some(&cache), generation)
+            .await
+            .unwrap();
+        assert_eq!(producer.observed_starts.len(), 3);
+        assert!(
+            cache
+                .cached_durable_refusals(generation, &models)
+                .is_empty(),
+            "a per-runner model refusal must not enter the cache every runner shares"
+        );
     }
 
     #[tokio::test]

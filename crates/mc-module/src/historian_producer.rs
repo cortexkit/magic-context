@@ -383,7 +383,17 @@ impl ProducerErrorBody {
         self.class_field_present
     }
 
-    fn from_value(value: Value) -> Self {
+    /// The `detail.field` an `invalid_params` refusal names (llm-runner refusal
+    /// bodies carry every field but `code` and `message` inside `detail`).
+    fn detail_field(&self) -> Option<&str> {
+        self.retry_metadata
+            .as_ref()?
+            .get("detail")?
+            .get("field")?
+            .as_str()
+    }
+
+    pub(crate) fn from_value(value: Value) -> Self {
         let code = value
             .get("code")
             .and_then(Value::as_str)
@@ -766,6 +776,19 @@ impl HistorianProducerError {
         matches!(self, HistorianProducerError::Subc(body) if body.code == "expired")
     }
 
+    /// The runner cannot serve the model it was sent (`invalid_params` with
+    /// `detail.field: "model"`, as a runner whose hosts lack that provider
+    /// answers), so the firing moves on to the next configured model. It is not
+    /// a runner refusal for the shared cache: that cache is keyed by model
+    /// across every runner, and another runner may serve this model.
+    pub fn refuses_model(&self) -> bool {
+        matches!(
+            self,
+            HistorianProducerError::Subc(body)
+                if body.code == "invalid_params" && body.detail_field() == Some("model")
+        )
+    }
+
     /// Parse a route-open refusal while preserving the runner's code and message verbatim.
     pub fn runner_refusal(&self) -> Option<RunnerRefusal> {
         let HistorianProducerError::Subc(body) = self else {
@@ -985,7 +1008,9 @@ pub struct HistorianProducer {
 /// one way llm-runner §9 lets a runner decline a member no describe group
 /// declares.
 fn refuses_temperature(body: &ProducerErrorBody) -> bool {
-    body.code == "invalid_params" && body.message.contains("generation.temperature")
+    body.code == "invalid_params"
+        && (body.detail_field() == Some("generation.temperature")
+            || body.message.contains("generation.temperature"))
 }
 
 impl HistorianProducer {
