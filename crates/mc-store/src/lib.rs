@@ -39,6 +39,11 @@ pub use historian_claim::with_historian_claim_fixture_entropy;
 mod historian_telemetry;
 pub use historian_telemetry::{HistorianInvocation, HistorianRunTelemetry};
 mod async_compaction;
+pub use async_compaction::{engine_cache_digest, AsyncCacheReceipt, AsyncCacheRecovery};
+mod async_compaction_layout;
+pub const ASYNC_COMPACTION_ENTRY_LOOKUP_SQL: &str = async_compaction_layout::ENTRY_LOOKUP_SQL;
+pub const ASYNC_COMPACTION_EXISTS_FOR_SESSION_SQL: &str =
+    async_compaction_layout::EXISTS_FOR_SESSION_SQL;
 mod cut_head;
 pub use cut_head::NamespaceHead;
 pub mod memory_history;
@@ -11793,7 +11798,7 @@ impl McStore {
         request: TransformCommit<'_>,
         provider_policy: Option<&provider_records::ProviderEnginePolicy>,
     ) -> Result<u64, McStoreError> {
-        self.commit_transform_scoped(session_id, request, provider_policy, false, None)
+        self.commit_transform_scoped(session_id, request, provider_policy, false, None, None)
     }
 
     /// A certified logical-prefix pass read only its live identities. Preserve
@@ -11804,7 +11809,29 @@ impl McStore {
         request: TransformCommit<'_>,
         provider_policy: Option<&provider_records::ProviderEnginePolicy>,
     ) -> Result<u64, McStoreError> {
-        self.commit_transform_scoped(session_id, request, provider_policy, true, None)
+        self.commit_transform_scoped(session_id, request, provider_policy, true, None, None)
+    }
+
+    /// Couple an async provider's provenance receipt to the engine CAS. Other
+    /// transform callers retain the same commit and perform no provider writes.
+    pub fn commit_transform_with_async_recovery(
+        &self,
+        session_id: &str,
+        request: TransformCommit<'_>,
+        provider_policy: Option<&provider_records::ProviderEnginePolicy>,
+        recovery: Option<&AsyncCacheRecovery>,
+    ) -> Result<u64, McStoreError> {
+        self.commit_transform_scoped(session_id, request, provider_policy, false, None, recovery)
+    }
+
+    pub fn commit_logical_transform_with_async_recovery(
+        &self,
+        session_id: &str,
+        request: TransformCommit<'_>,
+        provider_policy: Option<&provider_records::ProviderEnginePolicy>,
+        recovery: Option<&AsyncCacheRecovery>,
+    ) -> Result<u64, McStoreError> {
+        self.commit_transform_scoped(session_id, request, provider_policy, true, None, recovery)
     }
 
     fn commit_transform_scoped(
@@ -11814,6 +11841,7 @@ impl McStore {
         provider_policy: Option<&provider_records::ProviderEnginePolicy>,
         partial_identities: bool,
         adopted_head: Option<&cut_head::NamespaceHead>,
+        async_recovery: Option<&AsyncCacheRecovery>,
     ) -> Result<u64, McStoreError> {
         let TransformCommit {
             expected,
@@ -12106,6 +12134,9 @@ impl McStore {
             };
             if let Some(head) = adopted_head {
                 head.write_overlays_tx(tx, session_id)?;
+            }
+            if let Some(recovery) = async_recovery {
+                async_compaction::save_engine_receipt_tx(tx, session_id, recovery, core, meta)?;
             }
             // Every accepted transform owns the current-pass value: stable passes write NULL
             // rather than leaving an older divergence looking like a present observation.

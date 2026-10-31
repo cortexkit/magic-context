@@ -1,7 +1,89 @@
 //! Async cursors and view versions are independent of the compatibility record.
 //! A legacy record save must never reset a notice-driven reader's progress.
-use crate::{McStore, McStoreError, McTagRow};
+use crate::async_compaction_layout as layout;
+use crate::{McStore, McStoreError, McTagRow, ModuleMeta};
+use cortexkit_cache_core::CoreState;
 use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub(crate) const ENGINE_CACHE_RECOVERY_SLOT: &str = "engine-cache-recovery";
+
+/// Trusted adapter context, never accepted from a transform's wire request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AsyncCacheRecovery {
+    pub session_ref: String,
+    pub checkpoint: Value,
+}
+
+/// Evidence written in the same transaction as an accepted engine cache.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AsyncCacheReceipt {
+    pub namespace: String,
+    pub cache_digest: String,
+    pub checkpoint: Value,
+}
+
+/// The provider witness deliberately excludes activity and identity-only rows.
+pub fn engine_cache_digest(
+    core: &CoreState,
+    meta: &ModuleMeta,
+) -> Result<String, serde_json::Error> {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(&(
+        core,
+        &meta.last_render_config,
+        &meta.served_output_fingerprint,
+        meta.coverage_ordinal,
+        meta.initialized,
+    ))?;
+    Ok(Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+pub(crate) fn save_engine_receipt_tx(
+    conn: &rusqlite::Connection,
+    namespace: &str,
+    recovery: &AsyncCacheRecovery,
+    core: &CoreState,
+    meta: &ModuleMeta,
+) -> rusqlite::Result<()> {
+    if recovery
+        .checkpoint
+        .get("replay_safe")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        // A pass allowed to change the served prefix needs a durable view, not
+        // merely cache provenance, before its outcome can be re-adopted.
+        layout::baseline(
+            conn,
+            &recovery.session_ref,
+            ENGINE_CACHE_RECOVERY_SLOT,
+            None,
+            false,
+        )?;
+        return Ok(());
+    }
+    let receipt = AsyncCacheReceipt {
+        namespace: namespace.into(),
+        cache_digest: engine_cache_digest(core, meta)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+        checkpoint: recovery.checkpoint.clone(),
+    };
+    let raw = serde_json::to_string(&receipt)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    layout::baseline(
+        conn,
+        &recovery.session_ref,
+        ENGINE_CACHE_RECOVERY_SLOT,
+        Some(&raw),
+        false,
+    )?;
+    Ok(())
+}
 
 /// Write accounting for one async conversation, compiled only for sibling-crate
 /// tests. It lets a test prove that a notice's write set does not grow with the
@@ -93,9 +175,9 @@ fn cut_history_roots(
     conn: &rusqlite::Connection,
     reference: &str,
 ) -> rusqlite::Result<Vec<String>> {
-    let mut roots = conn.prepare("SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'published-cut-root:*'
+    let mut roots = conn.prepare(&crate::async_compaction_layout::read_sql_at(conn, "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'published-cut-root:*'
         UNION ALL SELECT CASE WHEN json_valid(view_json) THEN json_quote(json_extract(view_json,'$.recovery_history_ref.root')) ELSE 'null' END
-        FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'cut:*'")?
+        FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'cut:*'")?)?
         .query_map([reference], |row| row.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
     roots.sort();
     Ok(roots)
@@ -134,9 +216,10 @@ fn cut_candidates(
     reference: &str,
     first: u64,
 ) -> rusqlite::Result<Vec<String>> {
-    conn.prepare(
+    conn.prepare(&crate::async_compaction_layout::read_sql_at(
+        conn,
         "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB ?2",
-    )?
+    )?)?
     .query_map(
         params![reference, format!("published-cut-candidate:{first:020}:*")],
         |row| row.get(0),
@@ -159,8 +242,7 @@ fn cut_history_objects(
         if !seen.insert(slot.clone()) {
             continue;
         }
-        let Some(raw) = conn.query_row("SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2",
-            params![reference,slot], |row| row.get::<_, String>(0)).optional()? else { return Ok(None) };
+        let Some(raw) = conn.query_row(&crate::async_compaction_layout::read_sql_at(conn, "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2")?, params![reference,slot], |row| row.get::<_, String>(0)).optional()? else { return Ok(None) };
         if slot.starts_with("cut-history:b:") {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(children) = value.get("Branch").and_then(|value| value.as_array()) {
@@ -180,24 +262,14 @@ fn cut_bundle(
     reference: &str,
     key: &str,
 ) -> rusqlite::Result<Option<AsyncCutBundle>> {
-    let metadata = conn
-        .query_row(
-            "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2",
-            params![reference, format!("published-cut-meta:{key}")],
-            |row| row.get::<_, String>(0),
-        )
+    let metadata = conn.query_row(&crate::async_compaction_layout::read_sql_at(conn, "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2")?, params![reference, format!("published-cut-meta:{key}")], |row| row.get::<_, String>(0))
         .optional()?;
     let suffix = metadata
         .as_ref()
         .and_then(|raw| serde_json::from_str::<CutSeedAlias>(raw).ok())
         .and_then(|alias| alias.seed_suffix)
         .unwrap_or_else(|| key.to_owned());
-    let seed = conn
-        .query_row(
-            "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2",
-            params![reference, format!("published-cut:{suffix}")],
-            |row| row.get::<_, String>(0),
-        )
+    let seed = conn.query_row(&crate::async_compaction_layout::read_sql_at(conn, "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2")?, params![reference, format!("published-cut:{suffix}")], |row| row.get::<_, String>(0))
         .optional()?;
     let Some(seed) = seed else { return Ok(None) };
     let root = serde_json::from_str::<CutArchiveRoot>(&seed)
@@ -215,6 +287,113 @@ fn cut_bundle(
 }
 
 impl McStore {
+    pub fn load_async_cache_receipt(
+        &self,
+        reference: &str,
+    ) -> Result<Option<AsyncCacheReceipt>, McStoreError> {
+        Ok(self
+            .load_async_compaction_baseline(reference, ENGINE_CACHE_RECOVERY_SLOT)?
+            .and_then(|raw| serde_json::from_str(&raw).ok()))
+    }
+
+    fn prepare_async_record(&self, reference: &str) -> Result<(), McStoreError> {
+        if self
+            .inner
+            .with_conn(|conn| layout::legacy_exists(conn, reference))?
+        {
+            self.inner
+                .with_conn_fenced(|conn| layout::migrate(conn, reference).map(|_| ()))?;
+        }
+        Ok(())
+    }
+
+    /// Install connection-local inspection views for the logical async rows.
+    /// This does not create or change persistent schema objects.
+    pub fn install_async_compaction_inspection(
+        conn: &rusqlite::Connection,
+    ) -> rusqlite::Result<()> {
+        layout::install_views(conn)
+    }
+
+    /// Expand legacy-shaped read SQL to include the versioned async KV family.
+    /// The result contains only SELECT CTEs and also works on query-only readers.
+    pub fn async_compaction_read_sql(sql: &str) -> std::borrow::Cow<'_, str> {
+        layout::read_sql(sql)
+    }
+
+    /// Expand provider reads for the schema admitted on this connection. A
+    /// historical migration checkpoint must continue to read its legacy shape.
+    pub fn async_compaction_read_sql_at<'a>(
+        conn: &rusqlite::Connection,
+        sql: &'a str,
+    ) -> rusqlite::Result<std::borrow::Cow<'a, str>> {
+        layout::read_sql_at(conn, sql)
+    }
+
+    /// Select the authoritative family's indexed message lookup. Resolving the
+    /// family first avoids a compound query that searches both layouts.
+    pub fn async_compaction_placement_sql(
+        conn: &rusqlite::Connection,
+        reference: &str,
+    ) -> rusqlite::Result<&'static str> {
+        Ok(if layout::legacy_exists(conn, reference)? {
+            layout::ENTRY_LOOKUP_SQL
+        } else {
+            layout::KV_ENTRY_LOOKUP_SQL
+        })
+    }
+
+    /// Move legacy records without changing any public conversation identity.
+    pub fn migrate_async_compaction_records(&self) -> Result<(), McStoreError> {
+        self.inner
+            .with_conn_fenced(|conn| layout::migrate_all(conn, None))
+            .map_err(Into::into)
+    }
+
+    /// Losslessly restore provider KV families for an older binary. The caller
+    /// must prove both databases have no other holders before invoking this
+    /// offline-only operation. It never opens or writes the context database.
+    pub fn downgrade_async_layout_offline(
+        path: &std::path::Path,
+    ) -> Result<Vec<String>, McStoreError> {
+        Self::downgrade_async_layout_sqlite(path)
+            .map_err(|error| McStoreError::Serde(format!("async layout downgrade: {error}")))
+    }
+
+    fn downgrade_async_layout_sqlite(path: &std::path::Path) -> rusqlite::Result<Vec<String>> {
+        let mut conn = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        let version = crate::single_store_schema::recorded_store_version(&conn)?;
+        if version != crate::LATEST_MIGRATION_VERSION {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "downgrade requires store fence {}, found {version}",
+                crate::LATEST_MIGRATION_VERSION
+            )));
+        }
+        let references = conn
+            .prepare(
+                "SELECT section FROM main.mc_cache_sections WHERE session_id=?1 ORDER BY section",
+            )?
+            .query_map([layout::HEADERS], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut converted = Vec::new();
+        for reference in references {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if let Some(header) = layout::header(&tx, &reference)? {
+                crate::move_store::check_writer(&tx, &header.session)?;
+            }
+            let changed = layout::downgrade_record(&tx, &reference)?;
+            tx.commit()?;
+            if changed {
+                converted.push(reference);
+            }
+        }
+        Ok(converted)
+    }
+
     /// Thin candidate identities, never full seeds or rendered heads.
     pub fn load_async_cut_candidates(
         &self,
@@ -250,8 +429,7 @@ impl McStore {
             if !legacy_covered {
                 #[derive(serde::Deserialize)]
                 struct Identity { first_ordinal: u64, cut_mid: String, cut_digest: String }
-                let raw = conn.query_row("SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2",
-                    params![reference,format!("published-cut:{first}")], |row| row.get::<_, String>(0)).optional()?;
+                let raw = conn.query_row(&crate::async_compaction_layout::read_sql_at(conn, "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2")?, params![reference,format!("published-cut:{first}")], |row| row.get::<_, String>(0)).optional()?;
                 if let Some(raw) = raw {
                     let Ok(identity) = serde_json::from_str::<Identity>(&raw) else { return Ok(None) };
                     if identity.first_ordinal == first && identity.cut_mid == mid && identity.cut_digest == digest {
@@ -318,18 +496,16 @@ impl McStore {
         reference: &str,
         slot: &str,
     ) -> Result<Option<String>, McStoreError> {
-        Ok(self.inner.with_conn(|conn| {
-            conn.query_row(
-            "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2",
-            params![reference, slot], |row| row.get(0),
-        ).optional()
-        })?)
+        self.prepare_async_record(reference)?;
+        self.inner
+            .with_conn(|conn| layout::get(conn, &layout::owner(reference), slot))
+            .map_err(Into::into)
     }
     /// Historical native edits are read only when a lineage restarts before
     /// its cuts. Ordinary conversation loads exclude these archive rows.
     pub fn load_async_undo_edits(&self, session_ref: &str) -> Result<Vec<String>, McStoreError> {
         self.inner.with_read(|conn| {
-            conn.prepare("SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'undo-native-edits:*' ORDER BY slot")?
+            conn.prepare(&crate::async_compaction_layout::read_sql_at(conn, "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'undo-native-edits:*' ORDER BY slot")?)?
                 .query_map([session_ref], |row| row.get(0))?
                 .collect::<rusqlite::Result<Vec<String>>>()
         }).map_err(Into::into)
@@ -342,11 +518,12 @@ impl McStore {
         session_ref: &str,
         mids: &[String],
     ) -> Result<Vec<String>, McStoreError> {
+        self.prepare_async_record(session_ref)?;
         let mids =
             serde_json::to_string(mids).map_err(|error| McStoreError::Serde(error.to_string()))?;
         self.inner.with_read(|conn| {
-            conn.prepare("SELECT b.view_json FROM json_each(?2) AS wanted CROSS JOIN mc_async_compaction_baselines b ON b.session_ref=?1 AND b.slot='undo-native-edits:mid:'||wanted.value")?
-                .query_map(params![session_ref, mids], |row| row.get(0))?
+            conn.prepare("SELECT b.body FROM json_each(?2) AS wanted CROSS JOIN main.mc_cache_sections b ON b.session_id=?1 AND b.section='undo-native-edits:mid:'||wanted.value")?
+                .query_map(params![layout::owner(session_ref), mids], |row| row.get(0))?
                 .collect::<rusqlite::Result<Vec<String>>>()
         }).map_err(Into::into)
     }
@@ -432,8 +609,7 @@ impl McStore {
             for (old_sequence,new_sequence) in sequences {
                 let ids:Option<(i64,i64,i64)>=conn.query_row("SELECT old.id,new.id,new.start_message-old.start_message FROM compartments old JOIN compartments new
                     ON new.session_id=?2 AND new.sequence=?4 WHERE old.session_id=?1 AND old.sequence=?3
-                    AND old.content=new.content AND old.p1 IS new.p1 AND old.p2 IS new.p2 AND old.p3 IS new.p3 AND old.p4 IS new.p4",
-                    params![source,target,old_sequence,new_sequence],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+                    AND old.content=new.content AND old.p1 IS new.p1 AND old.p2 IS new.p2 AND old.p3 IS new.p3 AND old.p4 IS new.p4", params![source,target,old_sequence,new_sequence], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
                 let Some((old_id,new_id,shift))=ids else {continue;};
                 mapped.push((*old_sequence,*new_sequence,shift));
                 conn.execute("UPDATE compartments SET p1_embedding=(SELECT p1_embedding FROM compartments WHERE id=?1),p1_embedding_model_id=(SELECT p1_embedding_model_id FROM compartments WHERE id=?1) WHERE id=?2",params![old_id,new_id])?;
@@ -454,73 +630,71 @@ impl McStore {
         Ok(copied)
     }
     pub fn retire_unannounced_async_views(&self, session_ref: &str) -> Result<(), McStoreError> {
-        metered!(session_ref, self.inner.with_conn_fenced(held(|conn|conn.execute("UPDATE mc_async_compaction_views SET announced=-1 WHERE session_ref=?1 AND announced=0",[session_ref]).map(|rows|((),rows as u64,0)))).map_err(McStoreError::from))
+        metered!(
+            session_ref,
+            self.inner
+                .with_conn_fenced(held(|conn| {
+                    layout::migrate(conn, session_ref)?;
+                    layout::retire(conn, session_ref, None).map(|rows| ((), rows as u64, 0))
+                }))
+                .map_err(McStoreError::from)
+        )
     }
 
-    /// A failed cut stage must not announce a view with no saved adoption seed.
     pub fn retire_unannounced_async_view(
         &self,
         reference: &str,
         version: u64,
     ) -> Result<(), McStoreError> {
-        self.inner.with_conn_fenced(|tx| {
-            tx.execute("UPDATE mc_async_compaction_views SET announced=-1 WHERE session_ref=?1 AND version=?2 AND announced=0", params![reference, version])?;
-            Ok(())
-        })?;
-        Ok(())
+        self.inner
+            .with_conn_fenced(|conn| {
+                layout::migrate(conn, reference)?;
+                layout::retire(conn, reference, Some(version)).map(|_| ())
+            })
+            .map_err(Into::into)
     }
-    /// The records of every conversation `runner` holds for `session`, whatever
-    /// its harness. A runner conversation's key starts with its runner module
-    /// id, never a project folder.
+    /// Records a runner holds for this opaque session, including legacy state
+    /// migrated by this first access.
     pub fn async_compaction_for_session(
         &self,
         runner: &str,
         session: &str,
     ) -> Result<Vec<String>, McStoreError> {
-        self.inner.with_conn(|conn| {
-            let mut query=conn.prepare("SELECT state_json FROM mc_async_compaction WHERE session=?2 AND json_extract(conversation_key,'$[0]')=?1")?;
-            let rows=query.query_map(params![runner,session],|row|row.get(0))?;
-            rows.collect()
-        }).map_err(Into::into)
+        self.inner
+            .with_conn_fenced(|conn| {
+                layout::migrate_all(conn, Some(session))?;
+                layout::records(conn, session, Some(runner))
+            })
+            .map_err(Into::into)
     }
-    /// The records of every conversation held for `session`, whatever its
-    /// runner or harness. The caller decides which of them it may reach.
+    /// Records held for an opaque session; route admission remains the caller's job.
     pub fn async_compaction_records_for_session(
         &self,
         session: &str,
     ) -> Result<Vec<String>, McStoreError> {
         self.inner
-            .with_conn(|conn| {
-                let mut query =
-                    conn.prepare("SELECT state_json FROM mc_async_compaction WHERE session=?1")?;
-                let rows = query.query_map([session], |row| row.get(0))?;
-                rows.collect()
+            .with_conn_fenced(|conn| {
+                layout::migrate_all(conn, Some(session))?;
+                layout::records(conn, session, None)
             })
             .map_err(Into::into)
     }
     pub fn load_async_compaction(&self, session_ref: &str) -> Result<Option<String>, McStoreError> {
+        self.prepare_async_record(session_ref)?;
         self.inner
             .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT state_json FROM mc_async_compaction WHERE session_ref=?1",
-                    [session_ref],
-                    |row| row.get(0),
-                )
-                .optional()
+                layout::header(conn, session_ref)
+                    .map(|header| header.map(|header| header.state_json))
             })
             .map_err(Into::into)
     }
 
     pub fn async_compaction_for_key(&self, key: &str) -> Result<bool, McStoreError> {
-        self.inner
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM mc_async_compaction WHERE conversation_key=?1)",
-                    [key],
-                    |row| row.get(0),
-                )
-            })
-            .map_err(Into::into)
+        self.inner.with_conn_fenced(|conn| {
+            let legacy = conn.query_row("SELECT session_ref FROM main.mc_async_compaction WHERE conversation_key=?1", [key], |row| row.get::<_,String>(0)).optional()?;
+            if let Some(reference) = legacy { layout::migrate(conn, &reference)?; }
+            layout::key_exists(conn, key)
+        }).map_err(Into::into)
     }
 
     /// Begin one atomic save of an async conversation: the small record plus
@@ -562,7 +736,7 @@ impl McStore {
     ) -> Result<(Vec<String>, Vec<String>), McStoreError> {
         self.inner.with_read(|conn| {
             let roots = cut_history_roots(conn, reference)?;
-            let objects = conn.prepare("SELECT slot FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'cut-history:*'")?
+            let objects = conn.prepare(&crate::async_compaction_layout::read_sql_at(conn, "SELECT slot FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'cut-history:*'")?)?
                 .query_map([reference], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
             Ok((roots, objects))
         }).map_err(Into::into)
@@ -578,55 +752,34 @@ impl McStore {
         slots: &[String],
         expected_roots: &[String],
     ) -> Result<bool, McStoreError> {
-        metered!(reference, self.inner.with_conn_fenced(held(|conn| {
-            if cut_history_roots(conn, reference)? != expected_roots { return Ok((false, 0, 0)); }
-            let mut rows = 0;
-            let mut delete = conn.prepare_cached("DELETE FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2 AND slot GLOB 'cut-history:*'")?;
-            for slot in slots { rows += delete.execute(params![reference, slot])? as u64; }
-            Ok((true, rows, 0))
-        }))).map_err(Into::into)
+        metered!(
+            reference,
+            self.inner.with_conn_fenced(held(|conn| {
+                layout::migrate(conn, reference)?;
+                if cut_history_roots(conn, reference)? != expected_roots {
+                    return Ok((false, 0, 0));
+                }
+                let mut rows = 0;
+                for slot in slots {
+                    if slot.starts_with("cut-history:") {
+                        rows += layout::baseline(conn, reference, slot, None, false)? as u64;
+                    }
+                }
+                Ok((true, rows, 0))
+            }))
+        )
+        .map_err(Into::into)
     }
 
-    /// Hot record, entries and engine baselines in one reader snapshot, so a
-    /// long transcript never holds the writer. Cold cut/undo archives are
-    /// excluded and fetched by identity only when recovery selects them.
+    /// Read the versioned header, held entries and live baselines in one
+    /// reader snapshot. Legacy families move atomically before the snapshot.
     pub fn load_async_compaction_rows(
         &self,
         session_ref: &str,
     ) -> Result<Option<AsyncCompactionRows>, McStoreError> {
+        self.prepare_async_record(session_ref)?;
         self.inner
-            .with_read(|conn| {
-                let Some(state) = conn
-                    .query_row(
-                        "SELECT state_json FROM mc_async_compaction WHERE session_ref=?1",
-                        [session_ref],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                else {
-                    return Ok(None);
-                };
-                let entries = conn
-                    .prepare("SELECT ordinal,entry_json,index_json FROM mc_async_compaction_entries WHERE session_ref=?1 ORDER BY ordinal")?
-                    .query_map([session_ref], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-                    .collect::<rusqlite::Result<_>>()?;
-                let engine_views = conn
-                    .prepare("SELECT version,engine_json FROM mc_async_compaction_views WHERE session_ref=?1 AND engine_json IS NOT NULL ORDER BY version")?
-                    .query_map([session_ref], |row| Ok((row.get(0)?, row.get(1)?)))?
-                    .collect::<rusqlite::Result<_>>()?;
-                // Equality probes use the existing (session_ref, slot) key.
-                // Excluding archive prefixes would still visit every cold key.
-                let baselines = conn
-                    .prepare("SELECT slot,view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot IN ('applied','produced','frozen_edits','retired_native_edits','pending-cut-stage')")?
-                    .query_map([session_ref], |row| Ok((row.get(0)?, row.get(1)?)))?
-                    .collect::<rusqlite::Result<_>>()?;
-                Ok(Some(AsyncCompactionRows {
-                    state,
-                    entries,
-                    engine_views,
-                    baselines,
-                }))
-            })
+            .with_read(|conn| layout::source_rows(conn, session_ref))
             .map_err(Into::into)
     }
 
@@ -664,23 +817,26 @@ impl McStore {
         self.load_async_compaction_entries_range(session_ref, 0, through)
     }
 
-    /// Read an inclusive ordinal window without loading covered entry payloads.
+    /// Read an inclusive ordinal window using bounded KV primary-key probes.
     pub fn load_async_compaction_entries_range(
         &self,
         session_ref: &str,
         from: u64,
         through: u64,
     ) -> Result<Vec<(u64, String)>, McStoreError> {
+        self.prepare_async_record(session_ref)?;
         self.inner
             .with_read(|conn| {
-                conn.prepare("SELECT ordinal,entry_json FROM mc_async_compaction_entries WHERE session_ref=?1 AND ordinal>=?2 AND ordinal<=?3 ORDER BY ordinal")?
-                    .query_map(params![session_ref, from, through], |row| Ok((row.get(0)?, row.get(1)?)))?
-                    .collect::<rusqlite::Result<_>>()
+                layout::entries(conn, session_ref, from, through).map(|rows| {
+                    rows.into_iter()
+                        .map(|row| (row.ordinal, row.entry_json))
+                        .collect()
+                })
             })
             .map_err(Into::into)
     }
 
-    /// Reserve before building a view. A crash skips the reservation, never reuses it.
+    /// Reserve before building a view. Crashes may skip a version, never reuse it.
     pub fn reserve_async_compaction_version(
         &self,
         session_ref: &str,
@@ -690,13 +846,8 @@ impl McStore {
             session_ref,
             self.inner
                 .with_conn_fenced(held(|conn| {
-                    conn.query_row(
-                        "UPDATE mc_async_compaction SET version_high_water=max(version_high_water,?2)+1
-                WHERE session_ref=?1 RETURNING version_high_water",
-                        params![session_ref, applied],
-                        |row| row.get(0),
-                    )
-                    .map(|version| (version, 1, 0))
+                    layout::migrate(conn, session_ref)?;
+                    layout::reserve(conn, session_ref, applied).map(|version| (version, 1, 0))
                 }))
                 .map_err(McStoreError::from)
         )
@@ -713,27 +864,45 @@ impl McStore {
             session_ref,
             self.inner
                 .with_conn_fenced(held(|conn| {
-                    conn.execute(
-            "INSERT INTO mc_async_compaction_views(session_ref,session,version,view_json,engine_json) SELECT ?1,session,?2,?3,?4 FROM mc_async_compaction WHERE session_ref=?1",
-            params![session_ref,version,view,engine],
-        ).map(|rows| ((), rows as u64, (view.len() + engine.len()) as u64))
+                    layout::migrate(conn, session_ref)?;
+                    let rows = layout::save_view(
+                        conn,
+                        session_ref,
+                        &layout::View {
+                            version,
+                            view_json: view.into(),
+                            engine_json: Some(engine.into()),
+                            announced: 0,
+                        },
+                        false,
+                    )?;
+                    Ok(((), rows as u64, (view.len() + engine.len()) as u64))
                 }))
                 .map_err(McStoreError::from)
         )
     }
 
-    /// Remove a deferred cut from its still-private view. Once announced, the
-    /// version is immutable and this update must refuse rather than rewrite it.
+    /// A deferred cut can change only while its view is still private.
     pub fn revise_unannounced_async_compaction_view(
         &self,
         reference: &str,
         version: u64,
         view: &str,
     ) -> Result<(), McStoreError> {
-        let changed = metered!(reference, self.inner.with_conn_fenced(held(|conn| {
-            let rows = conn.execute("UPDATE mc_async_compaction_views SET view_json=?3 WHERE session_ref=?1 AND version=?2 AND announced=0", params![reference, version, view])?;
-            Ok((rows, rows as u64, if rows > 0 { view.len() as u64 } else { 0 }))
-        })).map_err(McStoreError::from))?;
+        let changed = metered!(
+            reference,
+            self.inner
+                .with_conn_fenced(held(|conn| {
+                    layout::migrate(conn, reference)?;
+                    let rows = layout::revise(conn, reference, version, view)?;
+                    Ok((
+                        rows,
+                        rows as u64,
+                        if rows > 0 { view.len() as u64 } else { 0 },
+                    ))
+                }))
+                .map_err(McStoreError::from)
+        )?;
         if changed != 1 {
             return Err(McStoreError::Serde(
                 "async view is missing or already announced".into(),
@@ -747,45 +916,42 @@ impl McStore {
         session_ref: &str,
         version: u64,
     ) -> Result<Option<String>, McStoreError> {
+        self.prepare_async_record(session_ref)?;
         self.inner
             .with_conn(|conn| {
-                conn.query_row(
-            "SELECT view_json FROM mc_async_compaction_views WHERE session_ref=?1 AND version=?2",
-            params![session_ref,version], |row| row.get(0),
-        ).optional()
+                layout::view(conn, session_ref, version).map(|view| view.map(|view| view.view_json))
             })
             .map_err(Into::into)
     }
 
-    /// The conversation's retained views: `(version, view_json, engine_json,
-    /// announced)` in version order, and its version high-water.
+    /// Retained views, announcement state and high-water from one snapshot.
     #[allow(clippy::type_complexity)]
     pub fn load_async_compaction_views(
         &self,
         session_ref: &str,
     ) -> Result<(Vec<(u64, String, Option<String>, bool)>, u64), McStoreError> {
+        self.prepare_async_record(session_ref)?;
         self.inner
             .with_read(|conn| {
-                let views = conn
-                    .prepare("SELECT version,view_json,engine_json,announced FROM mc_async_compaction_views WHERE session_ref=?1 ORDER BY version")?
-                    .query_map([session_ref], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get::<_, i64>(3)? != 0)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                let high = conn
-                    .query_row(
-                        "SELECT version_high_water FROM mc_async_compaction WHERE session_ref=?1",
-                        [session_ref],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .unwrap_or(0);
+                let high = layout::header(conn, session_ref)?
+                    .map_or(0, |header| header.version_high_water);
+                let views = layout::views(conn, session_ref)?
+                    .into_iter()
+                    .map(|view| {
+                        (
+                            view.version,
+                            view.view_json,
+                            view.engine_json,
+                            view.announced != 0,
+                        )
+                    })
+                    .collect();
                 Ok((views, high))
             })
             .map_err(Into::into)
     }
 
-    /// Store views a conversation keeps from the lineage it descends from,
-    /// with their announcement state, and raise its version high-water to at
-    /// least `high`. The conversation's record must exist.
+    /// Adopt kept views without lowering the durable version high-water.
     pub fn adopt_async_compaction_views(
         &self,
         session_ref: &str,
@@ -794,18 +960,21 @@ impl McStore {
     ) -> Result<(), McStoreError> {
         self.inner
             .with_conn_fenced(|conn| {
-                for (version, view, engine, announced) in views {
-                    conn.execute(
-                        "INSERT OR REPLACE INTO mc_async_compaction_views(session_ref,session,version,view_json,engine_json,announced)
-                            SELECT ?1,session,?2,?3,?4,?5 FROM mc_async_compaction WHERE session_ref=?1",
-                        params![session_ref, version, view, engine, *announced as i64],
+                layout::migrate(conn, session_ref)?;
+                for (version, raw, engine, announced) in views {
+                    layout::save_view(
+                        conn,
+                        session_ref,
+                        &layout::View {
+                            version: *version,
+                            view_json: raw.clone(),
+                            engine_json: engine.clone(),
+                            announced: *announced as i64,
+                        },
+                        true,
                     )?;
                 }
-                conn.execute(
-                    "UPDATE mc_async_compaction SET version_high_water=max(version_high_water,?2) WHERE session_ref=?1",
-                    params![session_ref, high],
-                )?;
-                Ok(())
+                layout::raise_high(conn, session_ref, high)
             })
             .map_err(Into::into)
     }
@@ -813,11 +982,7 @@ impl McStore {
     pub fn pending_async_compaction_views(
         &self,
     ) -> Result<Vec<(String, u64, String)>, McStoreError> {
-        self.inner.with_conn(|conn| {
-            let mut query = conn.prepare("SELECT session_ref,version,view_json FROM mc_async_compaction_views WHERE announced=0 ORDER BY session_ref,version")?;
-            let rows = query.query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
-            rows.collect()
-        }).map_err(Into::into)
+        self.inner.with_conn(layout::pending).map_err(Into::into)
     }
 
     pub fn mark_async_compaction_announced(
@@ -829,10 +994,8 @@ impl McStore {
             session_ref,
             self.inner
                 .with_conn_fenced(held(|conn| {
-                    conn.execute(
-            "UPDATE mc_async_compaction_views SET announced=1 WHERE session_ref=?1 AND version=?2",
-            params![session_ref,version],
-        ).map(|rows| ((), rows as u64, 0))
+                    layout::migrate(conn, session_ref)?;
+                    layout::announce(conn, session_ref, version, 1).map(|rows| ((), rows as u64, 0))
                 }))
                 .map_err(McStoreError::from)
         )
@@ -1001,97 +1164,42 @@ impl<'a> AsyncCompactionSave<'a> {
             retain_views_from,
         } = *self;
         metered!(session_ref, store.inner.with_conn_fenced(held(|conn| {
-            let mut rows = conn.execute("INSERT INTO mc_async_compaction(session_ref,conversation_key,session,state_json) VALUES(?1,?2,?3,?4)
-                ON CONFLICT(session_ref) DO UPDATE SET state_json=excluded.state_json",
-                params![session_ref,key,session,state])? as u64;
+            layout::migrate(conn, session_ref)?;
+            let mut rows = layout::save_header(conn, session_ref, key, session, state)? as u64;
             let mut bytes = state.len();
-            if let Some(active) = active_cut_slot {
-                rows += conn.execute("DELETE FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'cut:*' AND (?2 IS NULL OR slot<>?2)",
-                    params![session_ref, active])? as u64;
+            if let Some(active) = active_cut_slot { rows += layout::remove_cut_facts(conn, session_ref, active.as_deref())? as u64; }
+            if let Some(through) = truncate_entries { rows += layout::truncate_entries(conn, session_ref, through)? as u64; }
+            if let Some(first) = truncate_below { rows += layout::truncate_below(conn, session_ref, first)? as u64; }
+            for (ordinal,raw,index) in entries {
+                rows += layout::insert_entry(conn, session_ref, *ordinal, raw, index)? as u64;
+                bytes += raw.len()+index.len();
             }
-            if let Some(through) = truncate_entries {
-                rows += conn.execute(
-                    "DELETE FROM mc_async_compaction_entries WHERE session_ref=?1 AND ordinal>?2",
-                    params![session_ref, through.map_or(-1, |n| n as i64)],
-                )? as u64;
+            for (ordinal,raw,index) in replaced_entries {
+                let changed = layout::replace_entry(conn, session_ref, *ordinal, raw, index)?;
+                if changed != 1 { return Err(rusqlite::Error::QueryReturnedNoRows); }
+                rows += changed as u64;
+                bytes += raw.len()+index.len();
             }
-            if let Some(first) = truncate_below {
-                rows += conn.execute(
-                    "DELETE FROM mc_async_compaction_entries WHERE session_ref=?1 AND ordinal<?2",
-                    params![session_ref, first as i64],
-                )? as u64;
+            for (slot,raw) in immutable_baselines {
+                let changed = layout::baseline(conn, session_ref, slot, Some(raw), true)?;
+                rows += changed as u64;
+                if changed>0 { bytes += raw.len(); }
             }
-            if !entries.is_empty() {
-                let mut insert = conn.prepare_cached("INSERT INTO mc_async_compaction_entries(session_ref,session,ordinal,entry_json,index_json,mid) VALUES(?1,?2,?3,?4,?5,CASE WHEN json_valid(?4) THEN json_extract(?4,'$.mid') END)")?;
-                for (ordinal, entry, index) in entries {
-                    rows += insert.execute(params![session_ref, session, ordinal, entry, index])? as u64;
-                    bytes += entry.len() + index.len();
-                }
+            for (slot,raw) in baselines {
+                rows += layout::baseline(conn, session_ref, slot, raw.as_deref(), false)? as u64;
+                bytes += raw.as_ref().map_or(0, String::len);
             }
-            if !replaced_entries.is_empty() {
-                let mut update = conn.prepare_cached("UPDATE mc_async_compaction_entries SET entry_json=?3, index_json=?4 WHERE session_ref=?1 AND ordinal=?2")?;
-                for (ordinal, entry, index) in replaced_entries {
-                    let updated = update.execute(params![session_ref, ordinal, entry, index])?;
-                    if updated != 1 {
-                        // A replaced entry must already be stored: refusing here
-                        // keeps the whole save atomic instead of inserting a row.
-                        return Err(rusqlite::Error::QueryReturnedNoRows);
-                    }
-                    rows += updated as u64;
-                    bytes += entry.len() + index.len();
-                }
-            }
-            for (slot, value) in immutable_baselines {
-                let inserted = conn.execute(
-                    "INSERT OR IGNORE INTO mc_async_compaction_baselines(session_ref,session,slot,view_json) VALUES(?1,?2,?3,?4)",
-                    params![session_ref, session, slot, value],
-                )? as u64;
-                rows += inserted;
-                if inserted != 0 { bytes += value.len(); }
-            }
-            for (slot, view) in baselines {
-                rows += match view {
-                    Some(view) => {
-                        bytes += view.len();
-                        conn.execute("INSERT INTO mc_async_compaction_baselines(session_ref,session,slot,view_json) VALUES(?1,?2,?3,?4)
-                            ON CONFLICT(session_ref,slot) DO UPDATE SET view_json=excluded.view_json",
-                            params![session_ref, session, slot, view])?
-                    }
-                    None => conn.execute(
-                        "DELETE FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2",
-                        params![session_ref, slot],
-                    )?,
-                } as u64;
-            }
-            if clear_engine_views {
-                rows += conn.execute(
-                    "UPDATE mc_async_compaction_views SET engine_json=NULL WHERE session_ref=?1 AND engine_json IS NOT NULL",
-                    [session_ref],
-                )? as u64;
-            }
-            if let Some(floor) = retain_views_from {
-                rows += conn.execute(
-                    "DELETE FROM mc_async_compaction_views WHERE session_ref=?1 AND version<?2
-                        AND version<(SELECT max(version) FROM mc_async_compaction_views WHERE session_ref=?1)",
-                    params![session_ref, floor],
-                )? as u64;
-            }
+            if clear_engine_views { rows += layout::clear_engine_views(conn, session_ref)? as u64; }
+            if let Some(floor) = retain_views_from { rows += layout::retain_views(conn, session_ref, floor)? as u64; }
             for mid in forget_tags_of {
                 let prefix = format!("{mid}#");
-                rows += conn.execute(
-                    "DELETE FROM mc_provider_consumed_tags_v1 WHERE engine_namespace=?1 AND tag_number IN
-                        (SELECT tag_number FROM mc_tags WHERE session_id=?1 AND substr(block_id,1,length(?2))=?2)",
-                    params![namespace, prefix],
-                )? as u64;
-                rows += conn.execute(
-                    "DELETE FROM mc_tags WHERE session_id=?1 AND substr(block_id,1,length(?2))=?2",
-                    params![namespace, prefix],
-                )? as u64;
+                rows += conn.execute("DELETE FROM mc_provider_consumed_tags_v1 WHERE engine_namespace=?1 AND tag_number IN (SELECT tag_number FROM mc_tags WHERE session_id=?1 AND substr(block_id,1,length(?2))=?2)",params![namespace,prefix])? as u64;
+                rows += conn.execute("DELETE FROM mc_tags WHERE session_id=?1 AND substr(block_id,1,length(?2))=?2",params![namespace,prefix])? as u64;
             }
             crate::provider_log::insert_tags_tx(conn, namespace, tags)?;
             rows += tags.len() as u64;
-            bytes += tags.iter().map(|t| t.source_bytes.len() + t.block_id.len()).sum::<usize>();
-            Ok(((), rows, bytes as u64))
+            bytes += tags.iter().map(|tag| tag.source_bytes.len()+tag.block_id.len()).sum::<usize>();
+            Ok(((),rows,bytes as u64))
         })).map_err(McStoreError::from))
     }
 }
@@ -1114,22 +1222,9 @@ mod tests {
             },
         })
         .unwrap();
-        // Extract the actual loader statement so a query fix cannot leave a
-        // copied, obsolete SQL string masquerading as a production witness.
-        let source = include_str!("async_compaction.rs");
-        let loader = source
-            .split_once("pub fn load_async_compaction_rows(")
-            .unwrap()
-            .1;
-        let query = loader
-            .lines()
-            .find_map(|line| {
-                line.trim()
-                    .strip_prefix(".prepare(\"SELECT slot,view_json")
-                    .and_then(|rest| rest.strip_suffix("\")?"))
-                    .map(|rest| format!("SELECT slot,view_json{rest}"))
-            })
-            .unwrap();
+        // Use the loader's actual KV statement, not a second query that could
+        // keep passing after the production access path changed.
+        let query = layout::HOT_BASELINES_SQL;
         let mut measurements = Vec::new();
         for cuts in [8, 128, 512] {
             let mut save = store.async_compaction_save("ref", "key", "session", "{}");
@@ -1158,10 +1253,10 @@ mod tests {
                 vec![("frozen_edits".into(), "live".into())]
             );
             let steps = store.inner.with_read(|conn| {
-                let plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {query}"))?
+                let plan = conn.prepare(&crate::async_compaction_layout::read_sql(&format!("EXPLAIN QUERY PLAN {query}")))?
                     .query_map(["ref"], |row| row.get::<_, String>(3))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                let mut stmt = conn.prepare(&query)?;
+                let mut stmt = conn.prepare(&crate::async_compaction_layout::read_sql(query))?;
                 let rows = stmt.query_map(["ref"], |row| row.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 assert_eq!(rows, vec!["frozen_edits"]);

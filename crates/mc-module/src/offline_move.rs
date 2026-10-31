@@ -532,8 +532,12 @@ mod shared_context_tests {
 }
 
 fn database_files(paths: &StorePaths) -> Vec<PathBuf> {
+    database_sidecars(&paths.all().map(Path::to_path_buf))
+}
+
+fn database_sidecars(paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for path in paths.all() {
+    for path in paths {
         files.push(path.to_path_buf());
         for suffix in ["-wal", "-shm"] {
             let mut name = path.as_os_str().to_owned();
@@ -547,7 +551,18 @@ fn database_files(paths: &StorePaths) -> Vec<PathBuf> {
 /// Refuse while any other process holds a target database. The window job checks
 /// this too; the move checks again because it is the one about to write.
 pub fn check_holders(paths: &StorePaths, check: &dyn HolderCheck) -> Result<(), Refusal> {
-    match check.holders(&database_files(paths)) {
+    check_database_files(&database_files(paths), check)
+}
+
+pub(crate) fn check_store_holders(
+    paths: &[PathBuf],
+    check: &dyn HolderCheck,
+) -> Result<(), Refusal> {
+    check_database_files(&database_sidecars(paths), check)
+}
+
+fn check_database_files(files: &[PathBuf], check: &dyn HolderCheck) -> Result<(), Refusal> {
+    match check.holders(files) {
         Ok(holders) if holders.is_empty() => Ok(()),
         Ok(holders) => Err(Refusal::new(
             "stores_in_use",
@@ -1468,7 +1483,7 @@ pub fn plan(paths: &StorePaths, session: &str) -> Result<Plan, Refusal> {
     if table_exists(&store, "mc_async_compaction").map_err(sql)? {
         let existing: bool = store
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM mc_async_compaction WHERE session=?1)",
+                mc_store::ASYNC_COMPACTION_EXISTS_FOR_SESSION_SQL,
                 [session],
                 |row| row.get(0),
             )
@@ -3099,6 +3114,9 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
 /// `ck-mc offline <args>`: prints one JSON object on stdout and a one-line verdict
 /// on stderr. Exit 0 when moved or planned, 2 when refused, 1 when interrupted.
 pub fn cli_main(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("downgrade-async-layout") {
+        return crate::offline_async_downgrade::cli_main(&args[1..]);
+    }
     if args.first().map(String::as_str) == Some("first-pass") {
         return crate::offline_first_pass::cli_main(&args[1..]);
     }

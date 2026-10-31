@@ -28,6 +28,7 @@ use serde_json::value::RawValue;
 
 use crate::{row_state_hash_128, ModuleMeta, ResolvedContextBoundary, TailHygieneBaseline};
 
+pub(crate) mod async_provider;
 mod field_filter;
 mod native_tail;
 use field_filter::RecordFields;

@@ -793,6 +793,10 @@ pub struct TransformRequest {
     /// Internal delivery ownership, set only by the async runner adapter.
     #[serde(skip)]
     pub(crate) runner_owned_reminders: bool,
+    /// Provider provenance stored atomically with its engine cache commit.
+    /// The wire cannot nominate a provider record or assert a checkpoint.
+    #[serde(skip)]
+    pub(crate) async_cache_recovery: Option<mc_store::AsyncCacheRecovery>,
     /// Internal proof for an async input with a covered logical prefix omitted.
     /// Wire requests cannot assert coverage or bypass complete-lineage validation.
     #[serde(skip)]
@@ -1329,6 +1333,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
         Ok(Self {
             native_tail_section: false,
             runner_owned_reminders: false,
+            async_cache_recovery: None,
             logical_prefix: None,
             source_lineage_first_ordinal: None,
             native_reminder_strip_pending: false,
@@ -2923,6 +2928,10 @@ pub mod compaction {
             "{}|broca-compaction:{}",
             req.render_config, state.rebuild_epoch
         );
+        if let Some(recovery) = &mut req.async_cache_recovery {
+            recovery.checkpoint["engine_epoch"] = serde_json::json!(state.rebuild_epoch);
+            recovery.checkpoint["initial"] = serde_json::json!(initial);
+        }
         #[cfg(test)]
         LAST_NATIVE_REQUEST.with(|slot| {
             if native_cc {
@@ -8964,6 +8973,14 @@ fn apply_once(
     scheduler_observation.identity_delta = identity_delta.clone();
     let store_commit_started_at = Instant::now();
     profile_start!(perf_commit, "store_commit");
+    let async_recovery = req.async_cache_recovery.as_ref().map(|recovery| {
+        let mut recovery = recovery.clone();
+        recovery.checkpoint["replay_safe"] = serde_json::json!(
+            !is_provider_prefix_mutation_pass
+                && recovery.checkpoint.get("initial").and_then(Value::as_bool) == Some(false)
+        );
+        recovery
+    });
     let row_version = if commit_required {
         #[cfg(test)]
         run_transform_attempt_hook(&req.session_id);
@@ -8998,9 +9015,9 @@ fn apply_once(
             }
         });
         let commit = if req.logical_prefix.is_some() {
-            McStore::commit_logical_transform_with_provider_policy
+            McStore::commit_logical_transform_with_async_recovery
         } else {
-            McStore::commit_transform_with_provider_policy
+            McStore::commit_transform_with_async_recovery
         };
         commit(
             store,
@@ -9043,6 +9060,7 @@ fn apply_once(
                 },
             },
             provider_policy.as_ref(),
+            async_recovery.as_ref(),
         )?
     } else {
         loaded.row_version.unwrap_or(0)
@@ -23843,6 +23861,7 @@ pub(crate) mod tests {
         TransformRequest {
             native_tail_section: false,
             runner_owned_reminders: false,
+            async_cache_recovery: None,
             logical_prefix: None,
             source_lineage_first_ordinal: None,
             native_reminder_strip_pending: false,

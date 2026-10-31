@@ -105,7 +105,7 @@ impl InputIndex {
 pub(super) struct InputWindow {
     pub(super) from: u64,
     pub(super) ordinal_base: u64,
-    through: Option<u64>,
+    pub(super) through: Option<u64>,
 }
 
 impl InputWindow {
@@ -148,6 +148,17 @@ pub(super) fn prepare_cut_input(
     echoes: &reminder_echoes::ReminderEchoes,
     prelude: Option<&cut_seed::HistorianPrelude>,
 ) -> Result<ck_wire::FlatProjection, HandlerOutcome> {
+    let messages = input_messages(store, reference, window, prelude)?;
+    prepare_messages(codec, parsed, echoes, &messages, window.ordinal_base)?;
+    ck_wire::project_messages(&parsed.messages).map_err(transient)
+}
+
+pub(super) fn input_messages(
+    store: &McStore,
+    reference: &str,
+    window: InputWindow,
+    prelude: Option<&cut_seed::HistorianPrelude>,
+) -> Result<Vec<InboundMessage>, HandlerOutcome> {
     let live_from = prelude
         .and_then(|p| p.messages.last())
         .map_or(0, |m| m.ordinal.saturating_add(1));
@@ -172,19 +183,28 @@ pub(super) fn prepare_cut_input(
             .map(|(_, raw)| HeldEntry::from_stored(raw)?.inbound())
             .collect::<Result<Vec<_>, _>>()?,
     );
-    echoes.prepare_with(codec, parsed, &messages, true, |parsed, messages| {
+    Ok(messages)
+}
+
+pub(super) fn prepare_messages(
+    codec: codec::Codec,
+    parsed: &mut TransformRequest,
+    echoes: &reminder_echoes::ReminderEchoes,
+    messages: &[InboundMessage],
+    ordinal_base: u64,
+) -> Result<(), HandlerOutcome> {
+    echoes.prepare_with(codec, parsed, messages, true, |parsed, messages| {
         codec.prepare_request(parsed, messages)?;
         if codec == codec::Codec::Pi {
             let ordinals = (0..messages.len())
-                .map(|index| window.ordinal_base.saturating_add(index as u64 + 1))
+                .map(|index| ordinal_base.saturating_add(index as u64 + 1))
                 .collect::<Vec<_>>();
             parsed.messages =
                 super::super::codec_pi::decode_messages_with_ordinals(messages, &ordinals)?
                     .messages;
         }
         Ok(())
-    })?;
-    ck_wire::project_messages(&parsed.messages).map_err(transient)
+    })
 }
 
 #[cfg(test)]

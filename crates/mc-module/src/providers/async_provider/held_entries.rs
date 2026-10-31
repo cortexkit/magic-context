@@ -15,6 +15,7 @@ pub(super) struct InputProof {
 pub(super) struct HeldEntries {
     entries: BTreeMap<u64, Arc<HeldEntry>>,
     proof: InputProof,
+    mutation_epoch: u64,
 }
 
 impl Deref for HeldEntries {
@@ -47,6 +48,13 @@ impl InputProof {
 
 impl HeldEntries {
     pub(super) fn insert(&mut self, ordinal: u64, entry: Arc<HeldEntry>) -> Option<Arc<HeldEntry>> {
+        if self
+            .entries
+            .last_key_value()
+            .is_some_and(|(last, _)| ordinal <= *last)
+        {
+            self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
+        }
         let old = self.entries.insert(ordinal, entry.clone());
         if ordinal < self.proof.before {
             if let Some(old) = &old {
@@ -61,6 +69,7 @@ impl HeldEntries {
 
     pub(super) fn remove(&mut self, ordinal: &u64) -> Option<Arc<HeldEntry>> {
         let old = self.entries.remove(ordinal)?;
+        self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
         if *ordinal < self.proof.before {
             self.proof.toggle(*ordinal, &old);
             self.proof.count -= 1;
@@ -80,9 +89,15 @@ impl HeldEntries {
     }
 
     pub(super) fn clear(&mut self) {
+        self.mutation_epoch = self.mutation_epoch.wrapping_add(1);
         self.entries.clear();
         self.proof.count = 0;
         self.proof.digest = [0; 32];
+    }
+
+    /// Append-only preparation may reuse a prefix only while this epoch agrees.
+    pub(super) fn mutation_epoch(&self) -> u64 {
+        self.mutation_epoch
     }
 
     /// Move the certified cut using only the entries crossed by that move. A

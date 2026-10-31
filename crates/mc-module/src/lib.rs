@@ -322,6 +322,7 @@ pub mod m1_compose;
 pub mod memory_render;
 pub mod memory_tool;
 mod memory_verification;
+mod offline_async_downgrade;
 pub mod offline_first_pass;
 pub mod offline_move;
 mod ops_facade;
@@ -3993,6 +3994,48 @@ impl McHandler {
         projection: &crate::ck_wire::FlatProjection,
         prepare: HistorianPrepareContext<'_>,
     ) -> PreparedHistorianAction {
+        self.prepare_historian_fire_inner(
+            store,
+            parsed,
+            binding,
+            project_path,
+            projection,
+            (prepare, None),
+        )
+    }
+
+    fn prepare_async_historian_fire(
+        &self,
+        store: Arc<McStore>,
+        parsed: &TransformRequest,
+        binding: &SessionBinding,
+        project_path: &str,
+        projection: &crate::ck_wire::FlatProjection,
+        prepare: (HistorianPrepareContext<'_>, &mut AsyncHistorianBoundary),
+    ) -> PreparedHistorianAction {
+        self.prepare_historian_fire_inner(
+            store,
+            parsed,
+            binding,
+            project_path,
+            projection,
+            (prepare.0, Some(prepare.1)),
+        )
+    }
+
+    fn prepare_historian_fire_inner(
+        &self,
+        store: Arc<McStore>,
+        parsed: &TransformRequest,
+        binding: &SessionBinding,
+        project_path: &str,
+        projection: &crate::ck_wire::FlatProjection,
+        prepare: (
+            HistorianPrepareContext<'_>,
+            Option<&mut AsyncHistorianBoundary>,
+        ),
+    ) -> PreparedHistorianAction {
+        let (prepare, async_boundary) = prepare;
         profile_start!(_perf_trigger, "trigger_ms");
         let HistorianPrepareContext {
             rust_background_enabled,
@@ -4115,7 +4158,18 @@ impl McHandler {
         let boundary_build_started_at = Instant::now();
         profile_start!(perf_boundary, "trigger_boundary_build");
         profile_start!(_perf_fallback, "rt19_fallback_tag_load");
-        let tags = if async_coverage.is_some() {
+        // Priming ignores tags once this session is warm. Avoid fetching their
+        // window-sized source payloads just to discard them on every notice.
+        let warm_async_tokens = async_coverage.is_some()
+            && self
+                .boundary_tokens
+                .lock()
+                .expect("boundary token cache mutex")
+                .sessions
+                .contains_key(&parsed.session_id);
+        let tags = if warm_async_tokens {
+            Ok(Vec::new())
+        } else if async_coverage.is_some() {
             let blocks = projection
                 .blocks
                 .iter()
@@ -4133,12 +4187,38 @@ impl McHandler {
                 .expect("boundary token cache mutex")
                 .prime_from_persisted_tags(&parsed.session_id, &tags);
         }
-        let CachedBoundaryMessages {
-            messages: boundary_messages,
+        let mut ordinary;
+        let (
+            boundary_messages,
+            trigger_cache,
             token_cache_hits,
             tokenized_blocks,
             mut token_cache_snapshot,
-        } = boundary_messages(parsed, projection, &self.boundary_tokens);
+        ) = if let Some(cache) = async_boundary {
+            let (snapshot, hits, misses) = cache.prepare(
+                parsed,
+                projection,
+                &self.boundary_tokens,
+                !warm_async_tokens,
+            );
+            (
+                cache.messages.as_slice(),
+                Some(&mut cache.trigger),
+                hits,
+                misses,
+                snapshot,
+            )
+        } else {
+            ordinary = boundary_messages(parsed, projection, &self.boundary_tokens);
+            let built = &mut ordinary;
+            (
+                built.messages.as_slice(),
+                None,
+                built.token_cache_hits,
+                built.tokenized_blocks,
+                std::mem::take(&mut built.token_cache_snapshot),
+            )
+        };
         trigger_timer.timings.boundary_build_ms +=
             boundary_build_started_at.elapsed().as_secs_f64() * 1_000.0;
         profile_end!(perf_boundary);
@@ -4209,7 +4289,7 @@ impl McHandler {
                 .unwrap_or_default()
         };
         let projected_post_drop_percentage = projected_post_drop_percentage(
-            &boundary_messages,
+            boundary_messages,
             &pending_drops,
             &pending_frozen_units,
             input_tokens,
@@ -4225,42 +4305,42 @@ impl McHandler {
             } else {
                 boundary::check_compartment_trigger_with_token_estimator
             };
-            check(
-                &boundary_messages,
-                &TriggerContext {
-                    boundary: BoundaryContext {
-                        calibration: Some(
-                            loaded
-                                .meta
-                                .decision_calibration
-                                .as_ref()
-                                .and_then(decision_calibration::DecisionCalibration::from_frozen)
-                                .unwrap_or_else(decision_calibration::DecisionCalibration::neutral),
-                        ),
-                        context_limit,
-                        // Historian preparation reloads module config independently, but a host-
-                        // resolved request threshold is still authoritative for this pass.
-                        execute_threshold_percentage: parsed.execute_threshold_or(
-                            cfg.resolve_execute_threshold(parsed.model_key.as_deref())
-                                .percentage,
-                        ),
-                        usage_percentage,
-                        usage_input_tokens: input_tokens,
-                        last_compartment_end_ordinal,
-                        prior_boundary_ordinal: last_compartment_end_ordinal.unwrap_or(0),
-                        migration_floor_active: last_compartment_end_ordinal.unwrap_or(0) > 0,
-                        emergency_tail_scale: None,
-                        trigger_budget: None,
-                        fold_is_only_reclaim,
-                    },
-                    projected_post_drop_percentage,
-                    reclaim_ride_available,
-                    compartment_in_progress: loaded.meta.historian.state != HistorianPhase::Idle,
-                    commit_cluster_trigger_enabled: DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED,
-                    min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS,
+            let context = TriggerContext {
+                boundary: BoundaryContext {
+                    calibration: Some(
+                        loaded
+                            .meta
+                            .decision_calibration
+                            .as_ref()
+                            .and_then(decision_calibration::DecisionCalibration::from_frozen)
+                            .unwrap_or_else(decision_calibration::DecisionCalibration::neutral),
+                    ),
+                    context_limit,
+                    // Host-resolved thresholds remain authoritative.
+                    execute_threshold_percentage: parsed.execute_threshold_or(
+                        cfg.resolve_execute_threshold(parsed.model_key.as_deref())
+                            .percentage,
+                    ),
+                    usage_percentage,
+                    usage_input_tokens: input_tokens,
+                    last_compartment_end_ordinal,
+                    prior_boundary_ordinal: last_compartment_end_ordinal.unwrap_or(0),
+                    migration_floor_active: last_compartment_end_ordinal.unwrap_or(0) > 0,
+                    emergency_tail_scale: None,
+                    trigger_budget: None,
+                    fold_is_only_reclaim,
                 },
-                &mut formatted_token_estimator,
-            )
+                projected_post_drop_percentage,
+                reclaim_ride_available,
+                compartment_in_progress: loaded.meta.historian.state != HistorianPhase::Idle,
+                commit_cluster_trigger_enabled: DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED,
+                min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS,
+            };
+            if let Some(cache) = trigger_cache {
+                cache.check(boundary_messages, &context, &mut formatted_token_estimator)
+            } else {
+                check(boundary_messages, &context, &mut formatted_token_estimator)
+            }
         };
         trigger_timer.timings.trigger_eval_ms +=
             trigger_eval_started_at.elapsed().as_secs_f64() * 1_000.0;
@@ -12288,6 +12368,191 @@ struct CachedBoundaryMessages {
     token_cache_hits: usize,
     tokenized_blocks: usize,
     token_cache_snapshot: BoundaryTokenCacheSnapshot,
+}
+
+#[derive(Default)]
+pub(crate) struct AsyncHistorianBoundary {
+    messages: Vec<BoundaryMsg>,
+    source_messages: usize,
+    source_blocks: usize,
+    seen: HashSet<String>,
+    trigger: boundary::AsyncTriggerCache,
+    message_heap_bytes: usize,
+    seen_key_bytes: usize,
+}
+
+impl AsyncHistorianBoundary {
+    #[cfg(test)]
+    fn retained_heap_bytes_walk(&self) -> usize {
+        self.messages
+            .capacity()
+            .saturating_mul(std::mem::size_of::<BoundaryMsg>())
+            .saturating_add(
+                self.messages
+                    .iter()
+                    .map(async_boundary_message_heap_bytes)
+                    .sum::<usize>(),
+            )
+            .saturating_add(crate::retained_size::hash_set_allocation_bytes(&self.seen))
+            .saturating_add(self.seen.iter().map(String::capacity).sum::<usize>())
+            .saturating_add(self.trigger.retained_heap_bytes_walk())
+    }
+
+    fn retained_heap_bytes(&self) -> usize {
+        self.messages
+            .capacity()
+            .saturating_mul(std::mem::size_of::<BoundaryMsg>())
+            .saturating_add(self.message_heap_bytes)
+            .saturating_add(crate::retained_size::hash_set_allocation_bytes(&self.seen))
+            .saturating_add(self.seen_key_bytes)
+            .saturating_add(self.trigger.retained_heap_bytes())
+    }
+
+    fn prepare(
+        &mut self,
+        parsed: &TransformRequest,
+        projection: &crate::ck_wire::FlatProjection,
+        token_cache: &Mutex<BoundaryTokenCache>,
+        cold_tokens: bool,
+    ) -> (BoundaryTokenCacheSnapshot, usize, usize) {
+        let mut unique = HashSet::new();
+        let duplicate = parsed
+            .messages
+            .get(self.source_messages..)
+            .is_none_or(|messages| {
+                messages.iter().any(|message| {
+                    self.seen.contains(&message.mid) || !unique.insert(message.mid.clone())
+                })
+            });
+        if cold_tokens
+            || self.source_messages == 0
+            || self.source_blocks > projection.blocks.len()
+            || duplicate
+        {
+            let built = boundary_messages(parsed, projection, token_cache);
+            self.messages = built.messages;
+            self.source_messages = parsed.messages.len();
+            self.source_blocks = projection.blocks.len();
+            self.seen = parsed
+                .messages
+                .iter()
+                .map(|message| message.mid.clone())
+                .collect();
+            self.message_heap_bytes = self
+                .messages
+                .iter()
+                .map(async_boundary_message_heap_bytes)
+                .sum();
+            self.seen_key_bytes = self.seen.iter().map(String::capacity).sum();
+            self.trigger = boundary::AsyncTriggerCache::default();
+            return (
+                built.token_cache_snapshot,
+                built.token_cache_hits,
+                built.tokenized_blocks,
+            );
+        }
+        let mut snapshot = token_cache
+            .lock()
+            .expect("boundary token cache mutex")
+            .snapshot(&parsed.session_id);
+        let mut ranges = HashMap::<&str, std::ops::Range<usize>>::new();
+        for (index, block) in projection
+            .blocks
+            .iter()
+            .enumerate()
+            .skip(self.source_blocks)
+        {
+            ranges
+                .entry(block.mid.as_str())
+                .and_modify(|range| range.end = index + 1)
+                .or_insert(index..index + 1);
+        }
+        for message in &parsed.messages[self.source_messages..] {
+            if self.seen.insert(message.mid.clone()) {
+                self.seen_key_bytes += self
+                    .seen
+                    .get(&message.mid)
+                    .expect("inserted message id")
+                    .capacity();
+            }
+            if message.ck.meta.synthetic || message.ck.role == "system" {
+                continue;
+            }
+            let prepared = BoundaryMsg {
+                message_ordinal: message.ordinal,
+                message_id: message.mid.clone(),
+                role: Role::from_provider(&message.ck.role),
+                blocks: ranges
+                    .get(message.mid.as_str())
+                    .into_iter()
+                    .flat_map(|range| projection.blocks[range.clone()].iter())
+                    .filter(|block| block.mid == message.mid && !block.synthetic)
+                    .map(|block| BoundaryBlock {
+                        id: block.id.clone(),
+                        ordinal: block.ordinal,
+                        kind: sel_kind_for_flat(block),
+                        provider_executed: block.provider_executed,
+                        byte_size: block.bytes.len(),
+                        arc_id: block.arc_id.clone(),
+                        original_token_count: boundary_block_tokens(block, &mut snapshot),
+                        original: Arc::clone(&block.bytes),
+                        rendered: None,
+                        ignored: false,
+                    })
+                    .collect(),
+            };
+            self.message_heap_bytes = self
+                .message_heap_bytes
+                .saturating_add(async_boundary_message_heap_bytes(&prepared));
+            self.messages.push(prepared);
+        }
+        self.source_messages = parsed.messages.len();
+        self.source_blocks = projection.blocks.len();
+        snapshot.retain_projection(projection);
+        let (hits, misses) = (snapshot.hits, snapshot.misses);
+        (snapshot, hits, misses)
+    }
+}
+
+fn async_boundary_message_heap_bytes(message: &BoundaryMsg) -> usize {
+    use crate::retained_size::value_heap_bytes;
+    let role = match &message.role {
+        Role::Other(role) => role.capacity(),
+        _ => 0,
+    };
+    message
+        .message_id
+        .capacity()
+        .saturating_add(role)
+        .saturating_add(
+            message
+                .blocks
+                .capacity()
+                .saturating_mul(std::mem::size_of::<BoundaryBlock>()),
+        )
+        .saturating_add(
+            message
+                .blocks
+                .iter()
+                .map(|block| {
+                    let kind = match &block.kind {
+                        SelKind::ToolCall { name, input } => {
+                            name.capacity().saturating_add(value_heap_bytes(input))
+                        }
+                        SelKind::ToolResult { tool_name } => tool_name.capacity(),
+                        _ => 0,
+                    };
+                    // `original` is an Arc clone of the projection's canonical bytes,
+                    // whose allocation is already charged by the projection owner.
+                    block
+                        .id
+                        .capacity()
+                        .saturating_add(kind)
+                        .saturating_add(block.arc_id.as_ref().map_or(0, String::capacity))
+                        .saturating_add(block.rendered.as_ref().map_or(0, String::capacity))
+                })
+                .sum::<usize>(),
+        )
 }
 
 fn cached_boundary_messages(

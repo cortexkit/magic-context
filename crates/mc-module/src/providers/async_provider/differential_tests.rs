@@ -602,7 +602,7 @@ impl Side {
 
     /// Every stored view of the conversation and its version high-water.
     fn views(&self, reference: &str) -> (Vec<(u64, String)>, Option<i64>) {
-        let conn = rusqlite::Connection::open(&self.db).unwrap();
+        let conn = inspection_sql(&self.db);
         conn.busy_timeout(Duration::from_secs(30)).unwrap();
         let views = conn
             .prepare("SELECT version,view_json FROM mc_async_compaction_views WHERE session_ref=?1 ORDER BY version")

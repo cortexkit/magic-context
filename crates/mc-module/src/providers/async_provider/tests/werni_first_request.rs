@@ -1,5 +1,120 @@
 use super::*;
 
+#[tokio::test]
+async fn review_werni_cached_and_uncached_preserve_prepared_view_and_bound_drops() {
+    let _clock = crate::tests::fixed_clock();
+    let (cached_dir, oracle_dir, project) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let (cached_prep, _) = prepared(cached_dir.path(), project.path(), werni_shaped_stores).await;
+    let (oracle_prep, _) = prepared(oracle_dir.path(), project.path(), werni_shaped_stores).await;
+    let cached = Arm::open(
+        cached_dir.path(),
+        project.path(),
+        &cached_prep.session,
+        Served::new(cached_prep.served.clone(), 127),
+        config(),
+    );
+    let oracle = Arm::open(
+        oracle_dir.path(),
+        project.path(),
+        &oracle_prep.session,
+        Served::new(oracle_prep.served.clone(), 127),
+        config(),
+    );
+    oracle
+        .h
+        .provider_store
+        .async_runtime
+        .resident
+        .lock()
+        .unwrap()
+        .oracle = true;
+
+    let initial = serde_json::to_vec(&cached.state().initial).unwrap();
+    let epoch = cached.state().engine.rebuild_epoch;
+    let bound =
+        serde_json::to_vec(&cached.state().standalone_move.as_ref().unwrap().bound_drops).unwrap();
+    assert!(!cached
+        .state()
+        .standalone_move
+        .unwrap()
+        .bound_drops
+        .is_empty());
+    assert_eq!(
+        initial,
+        serde_json::to_vec(&oracle.state().initial).unwrap()
+    );
+    assert_eq!(
+        bound,
+        serde_json::to_vec(&oracle.state().standalone_move.unwrap().bound_drops).unwrap()
+    );
+    assert_eq!(cached.views(), oracle.views());
+    let mut cached_model = ModelRecorder::default();
+    let mut oracle_model = ModelRecorder::default();
+    let left = cached
+        .setup(setup_request(&cached_prep.session, "fixture"))
+        .await;
+    let right = oracle
+        .setup(setup_request(&oracle_prep.session, "fixture"))
+        .await;
+    assert_eq!(
+        serde_json::to_vec(&left).unwrap(),
+        serde_json::to_vec(&right).unwrap()
+    );
+    cached_model.setup(&left, &cached_prep.served);
+    oracle_model.setup(&right, &oracle_prep.served);
+    assert_eq!(cached_model.request_bytes, oracle_model.request_bytes);
+    let moved = move_record(&cached_prep.paths, &cached_prep.session);
+    assert_eq!(moved.compartments.len(), 92);
+    assert_eq!(moved.message_count, 5340);
+    assert_eq!(
+        moved
+            .drops
+            .iter()
+            .filter(|drop| drop.kind == offline_move::DropKind::Applied)
+            .count(),
+        2720
+    );
+    for seq in 1..=3 {
+        if seq > 1 {
+            let ordinal = 9084 + seq;
+            let row = appended(&cached_prep.session, ordinal, 100_000 + seq);
+            cached.runner.entries.lock().unwrap().push(row.clone());
+            oracle.runner.entries.lock().unwrap().push(row);
+        }
+        assert_eq!(cached.notice(seq, 0, None, Vec::new()).await, "ok");
+        assert_eq!(oracle.notice(seq, 0, None, Vec::new()).await, "ok");
+        assert_eq!(
+            cached.views(),
+            oracle.views(),
+            "notice {seq}: all raw views and edits"
+        );
+        for (arm, model) in [(&cached, &mut cached_model), (&oracle, &mut oracle_model)] {
+            let view: view::CompactionView =
+                serde_json::from_str(&arm.views().last().unwrap().1).unwrap();
+            let rendered = model.view(&view, &arm.runner.entries.lock().unwrap());
+            assert_no_applied_drops(&rendered, &moved);
+        }
+        assert_eq!(cached_model.request_bytes, oracle_model.request_bytes);
+        for arm in [&cached, &oracle] {
+            let state = arm.state();
+            assert!(adopted(&state));
+            assert_eq!(
+                state.engine.rebuild_epoch, epoch,
+                "notice {seq}: no extra rebuild"
+            );
+            assert_eq!(serde_json::to_vec(&state.initial).unwrap(), initial);
+            assert_eq!(
+                serde_json::to_vec(&state.standalone_move.unwrap().bound_drops).unwrap(),
+                bound
+            );
+        }
+    }
+}
+
 fn werni_shaped_stores(dir: &Path) -> (StorePaths, String) {
     // The measured session's cut boundary is at message position 5341; it has
     // 92 imported summaries, one discarded summary covering 187 returned rows,

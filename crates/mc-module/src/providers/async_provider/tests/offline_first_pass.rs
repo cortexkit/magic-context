@@ -362,7 +362,7 @@ impl Arm {
 
     /// Every stored view, `(version, view_json, announced)`.
     fn views(&self) -> Vec<(u64, String, i64)> {
-        let conn = rusqlite::Connection::open(self.store_dir.join("store.db")).unwrap();
+        let conn = inspection_sql(self.store_dir.join("store.db"));
         conn.busy_timeout(Duration::from_secs(30)).unwrap();
         let views = conn.prepare("SELECT version,view_json,announced FROM mc_async_compaction_views WHERE session_ref=?1 ORDER BY version")
             .unwrap()
@@ -375,7 +375,7 @@ impl Arm {
 
     /// The stored native-edit baselines, by slot.
     fn edit_baselines(&self) -> Vec<(String, String)> {
-        let conn = rusqlite::Connection::open(self.store_dir.join("store.db")).unwrap();
+        let conn = inspection_sql(self.store_dir.join("store.db"));
         let baselines = conn.prepare("SELECT slot,view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot IN ('frozen_edits','retired_native_edits') ORDER BY slot")
             .unwrap()
             .query_map([self.reference()], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -636,7 +636,7 @@ fn proof_of(served: &[ReadMessage]) -> EntryInputProof {
 }
 
 fn rewrite_offline_marker(prep: &Prepared, rewrite: impl FnOnce(&mut Value)) {
-    let conn = rusqlite::Connection::open(&prep.paths.store_db).unwrap();
+    let conn = inspection_sql(&prep.paths.store_db);
     let reference = runner_session_ref(MODULE, "opencode", &prep.session);
     let raw: String = conn
         .query_row(
@@ -1218,7 +1218,7 @@ async fn an_offline_run_that_stopped_before_its_proof_requires_an_offline_rerun(
     // The record as a run stopped before its last save leaves it: marked, but
     // with no proof.
     let reference = runner_session_ref(MODULE, "opencode", &prep.session);
-    let conn = rusqlite::Connection::open(store.path().join("store.db")).unwrap();
+    let conn = inspection_sql(store.path().join("store.db"));
     let raw: String = conn
         .query_row(
             "SELECT state_json FROM mc_async_compaction WHERE session_ref=?1",
@@ -2272,4 +2272,78 @@ async fn card_review_offline_differential_at_new_seeds() {
         "card review: offline differential over seeds {first}..{}",
         first + count
     );
+}
+
+#[tokio::test]
+async fn prepared_view_keeps_its_snapshot_through_setup_fetch_and_adoption() {
+    let _clock = crate::tests::fixed_clock();
+    let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (prep, outcome) = prepared(store.path(), project.path(), fixture_stores).await;
+    let OfflineOutcome::Prepared(report) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(report.published_views, 1);
+    let arm = Arm::open(
+        store.path(),
+        project.path(),
+        &prep.session,
+        Served::new(prep.served.clone(), 7),
+        config(),
+    );
+    let reference = arm.reference();
+    let snapshot = arm
+        .store()
+        .load_async_compaction_views(&reference)
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|(version, _, _, _)| *version == 1)
+        .unwrap()
+        .2
+        .expect("preparation retains its engine/native-edit snapshot");
+    arm.store()
+        .retire_unannounced_async_views(&reference)
+        .unwrap();
+    assert_eq!(
+        arm.views()[0].2,
+        -1,
+        "a prepared view need not be announced before adoption"
+    );
+    assert!(arm.state().applied.is_none(), "prepared is not applied");
+    let answer = arm.setup(setup_request(&prep.session, "fixture")).await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    assert_eq!(
+        arm.store()
+            .load_async_compaction_views(&reference)
+            .unwrap()
+            .0[0]
+            .2
+            .as_deref(),
+        Some(snapshot.as_str())
+    );
+    let fetched = response(
+        arm.h
+            .dispatch_value(
+                CHANNEL,
+                json!({"method":"view.get","params":{"session_ref":reference,"view_version":1}}),
+            )
+            .await,
+    );
+    assert_eq!(fetched["answer"], "view");
+    assert_eq!(fetched["view"]["view_version"], 1);
+    assert_eq!(arm.notice(1, 8_000, Some(1), Vec::new()).await, "ok");
+    let adopted = arm.state();
+    // Adoption keeps the preparation marker, marked adopted, so a later Setup
+    // never treats the session as unprepared again.
+    assert!(super::super::offline_first_pass::adopted(&adopted));
+    assert_eq!(adopted.applied, Some(1));
+    assert!(adopted.snapshot_unavailable.is_none());
+    assert!(!adopted.snapshot_warning_logged);
+    assert!(arm
+        .store()
+        .load_async_compaction_views(&reference)
+        .unwrap()
+        .0[0]
+        .2
+        .is_some());
 }

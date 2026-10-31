@@ -358,6 +358,7 @@ impl AsyncRecord {
             Vec::new()
         });
         self.initial = serde_json::to_value(answer).map_err(transient)?;
+        self.initial_stored = false;
         if let Some(profile) = profile {
             self.initial["serializer_profile"] = profile;
         }

@@ -314,7 +314,7 @@ async fn measure<T>(
 }
 
 fn record_bytes(arm: &Arm) -> u64 {
-    let conn = rusqlite::Connection::open(arm.store_dir.join("store.db")).unwrap();
+    let conn = inspection_sql(arm.store_dir.join("store.db"));
     conn.query_row(
         "SELECT coalesce((SELECT length(state_json) FROM mc_async_compaction WHERE session_ref=?1),0)
          + coalesce((SELECT sum(length(entry_json)+length(index_json)) FROM mc_async_compaction_entries WHERE session_ref=?1),0)",
@@ -323,7 +323,7 @@ fn record_bytes(arm: &Arm) -> u64 {
 }
 
 fn no_rows_below_cut(arm: &Arm, cut: u64) {
-    let conn = rusqlite::Connection::open(arm.store_dir.join("store.db")).unwrap();
+    let conn = inspection_sql(arm.store_dir.join("store.db"));
     let below: u64 = conn
         .query_row(
             "SELECT count(*) FROM mc_async_compaction_entries WHERE session_ref=?1 AND ordinal<?2",

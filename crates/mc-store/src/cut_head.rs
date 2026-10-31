@@ -227,6 +227,7 @@ impl McStore {
             None,
             false,
             Some(head),
+            None,
         )?;
         Ok(())
     }

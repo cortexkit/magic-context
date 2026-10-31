@@ -28,6 +28,8 @@ pub(super) struct Pass {
     pub pruned_rebuild: bool,
     /// The pass published a new view.
     pub published: bool,
+    /// Publication only reissued verified serving bytes after a resync.
+    pub replayed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

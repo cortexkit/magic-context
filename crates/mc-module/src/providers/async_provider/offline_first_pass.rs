@@ -850,6 +850,7 @@ impl McHandler {
         // The runner already holds the prepared Setup bytes. Reconciliation
         // may publish a new view, but cannot rewrite that lineage's answer.
         fresh.initial = state.initial.clone();
+        fresh.initial_stored = false;
         let mut adopted = offline;
         adopted.state = PreparationState::Adopted;
         fresh.offline_first_pass = Some(adopted);
@@ -1143,6 +1144,7 @@ impl McHandler {
                 }
             }
             state.initial["initial"]["range"] = json!({"from":origin,"to":proof.end});
+            state.initial_stored = false;
             state.initial["initial"]["replacement"] = json!(replacement);
         }
         // The commit point: the record, its certificate and its proof in one

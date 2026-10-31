@@ -711,7 +711,7 @@ impl Rig {
     }
 
     fn sql(&self) -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open(&self.db).unwrap();
+        let conn = inspection_sql(&self.db);
         conn.busy_timeout(Duration::from_secs(30)).unwrap();
         conn
     }
@@ -1102,7 +1102,7 @@ fn row(label: &str, size: u64, sample: &Sample) -> String {
     line
 }
 
-const PHASES: [&str; 21] = [
+const PHASES: [&str; 30] = [
     "load",
     "rem:base",
     "rem:last",
@@ -1110,6 +1110,12 @@ const PHASES: [&str; 21] = [
     "phase:checkout",
     "phase:read",
     "phase:index",
+    "index:ingest",
+    "index:ack",
+    "ingest:reindex",
+    "ingest:restore",
+    "ingest:bind",
+    "ingest:tags",
     "phase:policy",
     "phase:skip",
     "phase:skip_meta",
@@ -1118,6 +1124,9 @@ const PHASES: [&str; 21] = [
     "phase:cache_state_load",
     "phase:cadence",
     "phase:historian",
+    "hist:projection",
+    "hist:identities",
+    "hist:fire",
     "phase:checkin",
     "save",
     "pub:engine",
@@ -2312,37 +2321,74 @@ fn moved_session_cost_failures() -> Vec<String> {
     failures
 }
 
-/// Report window work separately from the fixed-window history gate. Both
+/// Gate quiet-notice work separately from the fixed-window history gate. Both
 /// fixtures have exactly 150,000 messages below the cut and identical imported
-/// summaries; only the retained window and its carried drops change.
+/// summaries; only the retained window and its carried drops change. Each of
+/// three repetitions pools quiet notices (50 by default) from five fresh children.
+/// Setup and adoption remain diagnostics: they must materialize the window.
 #[test]
-#[ignore = "window-scaling diagnostic, not a cost gate; run with --release --ignored --nocapture"]
+#[ignore = "window CPU gate; run on Linux with --release --ignored --nocapture"]
 fn moved_window_scaling_diagnostic() {
-    for window in [400, 4_000] {
-        let samples = moved_session_samples(150_000 + window, window);
-        for index in 0..3 {
-            let timings = samples
+    let mut failures = Vec::new();
+    for repetition in 1..=3 {
+        let mut quiet = Vec::new();
+        for window in [400, 4_000] {
+            let samples = moved_session_samples(150_000 + window, window);
+            let quiet_samples = samples
                 .iter()
                 .flat_map(|sample| {
-                    let row = &sample.rows[index];
-                    row.timings
+                    &sample
+                        .rows
                         .iter()
-                        .zip(&row.window_rows)
-                        .map(|(timing, rows)| {
-                            assert!(*rows > 0);
-                            (
-                                timing.0 / *rows as f64,
-                                timing.1 / *rows as f64,
-                                timing.2 / *rows as f64,
-                            )
-                        })
+                        .find(|row| row.name == "quiet notice")
+                        .expect("quiet row")
+                        .timings
                 })
+                .copied()
                 .collect::<Vec<_>>();
-            let timing = CostTiming::from_samples(&timings);
-            eprintln!("window diagnostic {} history=150000 initial_window={window} samples={} CPU_p50_ms_per_window_row={:.6} own_CPU_p50_ms_per_window_row={:.6} wall_p50_ms_per_window_row={:.6}",
+            quiet.push(CostTiming::from_samples(&quiet_samples));
+            for index in 0..3 {
+                let timings = samples
+                    .iter()
+                    .flat_map(|sample| {
+                        let row = &sample.rows[index];
+                        row.timings
+                            .iter()
+                            .zip(&row.window_rows)
+                            .map(|(timing, rows)| {
+                                assert!(*rows > 0);
+                                (
+                                    timing.0 / *rows as f64,
+                                    timing.1 / *rows as f64,
+                                    timing.2 / *rows as f64,
+                                )
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                let timing = CostTiming::from_samples(&timings);
+                eprintln!("window diagnostic {} history=150000 initial_window={window} samples={} CPU_p50_ms_per_window_row={:.6} own_CPU_p50_ms_per_window_row={:.6} wall_p50_ms_per_window_row={:.6}",
                 samples[0].rows[index].name, timings.len(), timing.process_cpu_p50_ms, timing.thread_cpu_p50_ms, timing.wall_p50_ms);
+            }
+        }
+        let ratio = quiet[1].process_cpu_p50_ms / quiet[0].process_cpu_p50_ms;
+        eprintln!("WINDOW_GATE repetition={repetition} W400_CPU_p50_ms={:.3} W400_CPU_p90_ms={:.3} W4000_CPU_p50_ms={:.3} W4000_CPU_p90_ms={:.3} ratio={ratio:.3}",
+            quiet[0].process_cpu_p50_ms, quiet[0].process_cpu_p90_ms,
+            quiet[1].process_cpu_p50_ms, quiet[1].process_cpu_p90_ms);
+        if let Some(failure) = cpu_cost_failure_for_sizes(
+            &format!("quiet window repetition {repetition}"),
+            "W=400",
+            "W=4000",
+            quiet[0],
+            quiet[1],
+        ) {
+            failures.push(failure);
         }
     }
+    assert!(
+        failures.is_empty(),
+        "quiet window CPU grew: {}",
+        failures.join(", ")
+    );
 }
 
 /// The cost rule as an assertion: per-step work scales with new messages and

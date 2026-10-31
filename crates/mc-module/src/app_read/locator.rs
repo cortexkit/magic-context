@@ -130,7 +130,12 @@ pub(crate) fn locate(
     store: &Connection,
     session: &SessionRef,
 ) -> Result<LocatedSession, HandlerOutcome> {
-    let mut statement = store.prepare(ASYNC_LOOKUP).map_err(store_error)?;
+    let mut statement = store
+        .prepare(
+            &mc_store::McStore::async_compaction_read_sql_at(store, ASYNC_LOOKUP)
+                .map_err(store_error)?,
+        )
+        .map_err(store_error)?;
     let candidates = statement
         .query_map([&session.session, &session.harness], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
