@@ -417,7 +417,12 @@ export function applyDeferredCompactionMarker(
             };
         }
         endStep("persist");
-        sessionLog(sessionId, `compaction-marker drain timings: ${stepMs.join(" ")}`);
+        // End-to-end checks and diagnostics match this exact line to count marker
+        // moves; keep its wording when changing the drain.
+        sessionLog(
+            sessionId,
+            `compaction-marker drain: applied at ordinal ${pending.ordinal}, boundary user msg ${replacement.marker.boundaryMessageId} ${stepMs.join(" ")}`,
+        );
         return {
             kind: "applied",
             markerOrdinal: pending.ordinal,
