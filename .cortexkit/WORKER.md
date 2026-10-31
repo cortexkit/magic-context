@@ -40,6 +40,7 @@ Put each command, elapsed time, pass/fail counts and every failing test name in 
 - Open, copy or write the live stores under `~/.local/share/cortexkit/`. Work on copies you were given.
 - Commit generated archives, base64 blobs or any file over 1 MB into tracked files.
 - Force-add ignored `.cortexkit/` files.
+- Remove a route, role, op, hook or code path without listing in your report every feature that used it, and where each one lives afterwards. A removal that leaves a feature with nowhere to run is a regression, even when every test passes.
 
 ## Ask when
 
