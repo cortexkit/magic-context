@@ -12,6 +12,7 @@ mod conversation_identity_probe;
 mod descriptors_read;
 mod full_array_setup;
 mod held_copies_probe;
+mod history_budget;
 mod moved_session;
 mod notice_signals;
 mod offline_first_pass;

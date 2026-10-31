@@ -35,6 +35,37 @@ use resident::{EngineView, HeldEntry};
 #[cfg(test)]
 use scaling_tests::reminder_work;
 
+/// Carry the user's transform settings into a runner session's engine request,
+/// as the standalone plugin does on every pass: caveman compression of old
+/// text, and the per-model reasoning budget. Both only act on passes that are
+/// already rebuilding; a cache-hit pass replays what was served.
+pub(crate) fn apply_runner_transform_settings(
+    request: &mut TransformRequest,
+    config: &McModuleConfig,
+    model: &str,
+) {
+    request.caveman_enabled = config.caveman.enabled;
+    request.caveman_min_chars = config.caveman.min_size;
+    request.keep_reasoning_tokens_effective =
+        Some(config.resolve_keep_reasoning_tokens(Some(model)));
+}
+
+/// The history head's token budget for a runner session, sized as the
+/// TypeScript plugin sizes it (`resolveHistoryBudgetTokens`): the model's
+/// window × its execute threshold × `history_budget_percentage`. Without a
+/// known window it falls back to the renderer's default, as TypeScript does.
+pub(crate) fn async_history_budget_tokens(
+    config: &McModuleConfig,
+    context_window: u64,
+    model: &str,
+) -> f64 {
+    if context_window == 0 {
+        return crate::memory_render::DEFAULT_HISTORY_BUDGET_TOKENS;
+    }
+    let threshold = config.resolve_execute_threshold(Some(model)).percentage;
+    (context_window as f64 * (threshold / 100.0) * config.history_budget_percentage).floor()
+}
+
 /// The shared session reference for a bare runner module id, harness and
 /// session, derived without `Key` so tests check the provider's keys against
 /// the shared function. Named apart from the crate's `session_ref` so a call
@@ -3386,6 +3417,7 @@ impl McHandler {
         let mut template: TransformRequest = decode(
             &json!({"v":2,"kind":"compaction.step","session_id":state.namespace(),"messages":[],"render_config":serde_json::to_string(&state.setup.params).map_err(transient)?,"model_key":model,"tool_present":false,"auto_search_enabled":false}),
         )?;
+        apply_runner_transform_settings(&mut template, &binding.config, model);
         template.source_lineage_first_ordinal = Some(state.lineage_first_ordinal);
         #[cfg(test)]
         resident::counters::engine_pass();
@@ -5662,6 +5694,12 @@ impl McHandler {
 
     fn async_binding(&self, state: &State) -> SessionBinding {
         let identity = state.runner_identity();
+        let config = self.effective_config(&identity.project_root).clone();
+        let history_budget_tokens = async_history_budget_tokens(
+            &config,
+            state.setup.context_window.unwrap_or(0),
+            &state.setup.model,
+        );
         SessionBinding {
             principal: Some(subc_protocol::Principal::Reserved {
                 module_id: state.runner_module.clone(),
@@ -5671,8 +5709,8 @@ impl McHandler {
             harness: identity.harness,
             session: identity.session,
             model_key: None,
-            config: self.effective_config(&identity.project_root).clone(),
-            history_budget_tokens: 4_000.0,
+            config,
+            history_budget_tokens,
         }
     }
 

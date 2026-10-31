@@ -20,6 +20,8 @@ use crate::scheduler::{self, ExecuteThresholdConfig};
 /// Default execute threshold percentage (65.0). The Rust module reads config without the
 /// plugin, so this must stay identical to packages/plugin/src/config/schema/magic-context.ts.
 pub const DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE: f64 = 65.0;
+/// Matches the TypeScript `DEFAULT_HISTORY_BUDGET_PERCENTAGE`.
+pub const DEFAULT_HISTORY_BUDGET_PERCENTAGE: f64 = 0.15;
 /// Default token budget for project-memory injection. This is the twin of
 /// `packages/plugin/src/config/schema/magic-context.ts` and must stay at 4,000 tokens.
 pub const DEFAULT_MEMORY_BUDGET_TOKENS: f64 = 4_000.0;
@@ -152,6 +154,10 @@ pub struct McModuleConfig {
     pub historian_context_limit_known: bool,
     pub memory_budget_tokens: f64,
     pub user_profile_budget_tokens: f64,
+    /// Share of the execute threshold the rendered history may take
+    /// (`history_budget_percentage`, 0.05 to 0.5). The TypeScript plugin sizes
+    /// the history head the same way: window × execute threshold × this share.
+    pub history_budget_percentage: f64,
     /// Controls whether the frozen m0 baseline includes the canonical project-docs block.
     pub inject_docs: bool,
     /// Controls temporal gap overlays when the active wire surface supports overlays.
@@ -219,6 +225,7 @@ impl Default for McModuleConfig {
             historian_context_limit_known: false,
             memory_budget_tokens: DEFAULT_MEMORY_BUDGET_TOKENS,
             user_profile_budget_tokens: DEFAULT_USER_PROFILE_BUDGET_TOKENS,
+            history_budget_percentage: DEFAULT_HISTORY_BUDGET_PERCENTAGE,
             inject_docs: true,
             temporal_awareness: true,
             prompt_surface_guidance_override: None,
@@ -980,6 +987,9 @@ fn merge_tiers_with_warnings(
         if let Some(budget) = number_at(user, "/memory/user_profile_budget_tokens") {
             cfg.user_profile_budget_tokens = budget.max(1.0);
         }
+        if let Some(share) = number_at(user, "/history_budget_percentage") {
+            cfg.history_budget_percentage = share.clamp(0.05, 0.5);
+        }
         if let Some(enabled) = user
             .pointer("/memory/auto_promote")
             .and_then(Value::as_bool)
@@ -1038,6 +1048,9 @@ fn merge_tiers_with_warnings(
         apply_caveman_config(&mut cfg.caveman, project);
         if let Some(budget) = number_at(project, "/memory/injection_budget_tokens") {
             cfg.memory_budget_tokens = budget.max(1.0);
+        }
+        if let Some(share) = number_at(project, "/history_budget_percentage") {
+            cfg.history_budget_percentage = share.clamp(0.05, 0.5);
         }
         if let Some(enabled) = project
             .pointer("/memory/auto_promote")

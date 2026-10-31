@@ -889,6 +889,12 @@ impl McHandler {
             }
         }
         let request = &setup.request;
+        let config = self.effective_config(&setup.project_root);
+        let history_budget_tokens = super::async_history_budget_tokens(
+            &config,
+            request.context_window.unwrap_or(0),
+            &request.model,
+        );
         let binding = SessionBinding {
             principal: Some(subc_protocol::Principal::Reserved {
                 module_id: setup.runner_module.clone(),
@@ -898,8 +904,8 @@ impl McHandler {
             harness: request.harness.clone(),
             session: request.session.clone(),
             model_key: None,
-            config: self.effective_config(&setup.project_root),
-            history_budget_tokens: 4_000.0,
+            config,
+            history_budget_tokens,
         };
         self.bind_route(OFFLINE_CHANNEL, binding.clone());
         let key = Key::new(&binding, &request.session, &request.harness).map_err(interrupted)?;
