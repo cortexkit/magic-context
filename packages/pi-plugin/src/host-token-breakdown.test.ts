@@ -1,10 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import * as decayRender from "@magic-context/core/hooks/magic-context/decay-render";
-import {
-	HOST_BREAKDOWN_KEY,
-	persistHostTokenBreakdown,
-} from "@magic-context/core/hooks/magic-context/host-token-breakdown";
+import * as hostTokenBreakdown from "@magic-context/core/hooks/magic-context/host-token-breakdown";
 import * as tokenCount from "@magic-context/core/hooks/magic-context/token-count-exact";
 import {
 	clearContextHandlerSession,
@@ -22,6 +19,8 @@ import {
 	fakeContext,
 	userMessage,
 } from "./test-utils.test";
+
+const { HOST_BREAKDOWN_KEY, persistHostTokenBreakdown } = hostTokenBreakdown;
 
 for (const [host, prompt] of [
 	["Pi", "Pi system prompt"],
@@ -80,9 +79,24 @@ for (const [host, prompt] of [
 		const extract = spyOn(decayRender, "extractM0Block");
 		let cacheReads = 0;
 		let attributionReads = 0;
+		let measuringBreakdown = false;
+		// Persistence measures synchronously; deferred last-good-request saves
+		// outside this call must not count as breakdown measurement reads.
+		const measurement = spyOn(
+			hostTokenBreakdown,
+			"persistHostTokenBreakdown",
+		).mockImplementation((...args) => {
+			measuringBreakdown = true;
+			try {
+				return persistHostTokenBreakdown(...args);
+			} finally {
+				measuringBreakdown = false;
+			}
+		});
 		const prepare = db.prepare.bind(db);
 		const readSpy = spyOn(db, "prepare").mockImplementation(((sql: string) => {
-			if (sql.trimStart().startsWith("SELECT")) attributionReads++;
+			if (measuringBreakdown && sql.trimStart().startsWith("SELECT"))
+				attributionReads++;
 			const statement = prepare(sql);
 			if (
 				!sql.trimStart().startsWith("SELECT") ||
@@ -210,6 +224,7 @@ for (const [host, prompt] of [
 		} finally {
 			encode.mockRestore();
 			extract.mockRestore();
+			measurement.mockRestore();
 			readSpy.mockRestore();
 			clearContextHandlerSession(sessionId, db);
 			db.close();
