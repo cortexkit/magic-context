@@ -2,6 +2,7 @@
 //! Revalidating the same source prefix must not spend the model's prompt cache.
 use super::*;
 
+mod cache_recovery;
 mod independent_review;
 
 fn entry(n: u64, role: &str, content: Value, run: &str) -> ReadMessage {
@@ -479,8 +480,22 @@ async fn an_announced_legacy_applied_snapshot_refuses_once_and_recovers_once() {
     // Views live in the per-session layout; the inspection connection exposes
     // them under their legacy table names.
     let conn = crate::providers::async_provider::inspection_sql(dir.path().join("store.db"));
-    assert_eq!(conn.execute("UPDATE mc_async_compaction_views SET engine_json=NULL,announced=1 WHERE session_ref=?1 AND version=?2",
-        rusqlite::params![rig.reference, applied]).unwrap(), 1);
+    // The layout's INSTEAD OF trigger reports no changed rows, so read the
+    // row back to prove the update landed.
+    conn.execute("UPDATE mc_async_compaction_views SET engine_json=NULL,announced=1 WHERE session_ref=?1 AND version=?2",
+        rusqlite::params![rig.reference, applied]).unwrap();
+    let (engine, announced): (Option<String>, i64) = conn
+        .query_row(
+            "SELECT engine_json, announced FROM mc_async_compaction_views WHERE session_ref=?1 AND version=?2",
+            rusqlite::params![rig.reference, applied],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (engine, announced),
+        (None, 1),
+        "the legacy snapshot row is in place"
+    );
     rig.h.resident_cache().forget(&rig.reference);
     for seq in 4..=6 {
         direct_matching_notice(&rig, seq, Some(applied), "L").await;

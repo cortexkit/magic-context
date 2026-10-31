@@ -6088,8 +6088,8 @@ impl McHandler {
             .get()
             .ok_or_else(|| transient("store unavailable"))?;
         engine_cache::reconcile(store, state)?;
-        // Held copies the runner pruned make this one pass a rebuild, as a
-        // rewrite ride does.
+        // Reconciled archive-pruned copies request one rebuilding pass rather
+        // than reuse of the rendering captured before the prune.
         let pruned_rebuild = state.pruned_rebuild_pending && !ride;
         let ride = ride || state.pruned_rebuild_pending || state.moved_cold_prefix;
         state.cleanup_pending_cut_stage(store)?;
@@ -7833,7 +7833,12 @@ impl AsyncRecord {
             return Ok(());
         };
         let replay_engine = if let Some(replay) = &source.replay {
-            let cache_matches = match &replay.cache_witness {
+            let captured = replay.cache_witness.as_ref().or_else(|| {
+                self.engine_cache_witness
+                    .as_ref()
+                    .filter(|witness| witness.names(&source.namespace))
+            });
+            let cache_matches = match captured {
                 Some(witness) => witness.validates(store, &source.namespace)?,
                 // Older replay records predate independent cache witnesses.
                 None => true,

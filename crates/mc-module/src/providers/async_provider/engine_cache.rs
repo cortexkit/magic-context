@@ -12,6 +12,10 @@ fn digest(loaded: &mc_store::LoadedState) -> Result<String, HandlerOutcome> {
 }
 
 impl Witness {
+    pub(super) fn names(&self, namespace: &str) -> bool {
+        self.namespace == namespace
+    }
+
     pub(super) fn validates(
         &self,
         store: &McStore,
@@ -184,6 +188,8 @@ pub(super) struct Snapshot {
     engine: transform::compaction::State,
     produced: SavedBaseline,
     applied: SavedBaseline,
+    #[serde(default)]
+    acknowledged: Option<u64>,
 }
 
 pub(super) fn snapshot(
@@ -205,6 +211,7 @@ pub(super) fn snapshot(
         },
         produced: SavedBaseline::capture(state, engine.last_produced.as_ref(), current)?,
         applied: SavedBaseline::capture(state, engine.last_applied.as_ref(), current)?,
+        acknowledged: resync_replay::acknowledged_version(store, state)?,
     })
 }
 
@@ -214,11 +221,11 @@ pub(super) fn reconcile(store: &McStore, state: &mut State) -> Result<bool, Hand
     let namespace = state.namespace();
     let loaded = store.load(&namespace).map_err(transient)?;
     let actual = digest(&loaded)?;
-    if state
+    let known = state
         .engine_cache_witness
         .as_ref()
-        .is_some_and(|witness| witness.namespace == namespace && witness.digest == actual)
-    {
+        .is_some_and(|witness| witness.namespace == namespace && witness.digest == actual);
+    if known && !state.resync_replay_pending {
         return Ok(true);
     }
     if state.snapshot_unavailable.is_some() {
@@ -288,6 +295,7 @@ pub(super) fn reconcile(store: &McStore, state: &mut State) -> Result<bool, Hand
         state.moved_cold_prefix = false;
         if !state.resync
             && state.resync_sources.is_none()
+            && resync_replay::acknowledged_version(store, state)? == snapshot.acknowledged
             && (!reissued || resync_replay::acknowledged_version(store, state)? == reissued_from)
         {
             state.resync_replay_pending = false;
@@ -295,6 +303,9 @@ pub(super) fn reconcile(store: &McStore, state: &mut State) -> Result<bool, Hand
         return Ok(true);
     }
 
+    if known {
+        return Ok(true);
+    }
     // A non-authorizing engine pass can commit bookkeeping before a transport
     // reissue or record save. Its receipt shares the engine CAS transaction,
     // proving that reuse does not buy permission to rewrite the served prefix.
