@@ -737,7 +737,7 @@ pub(super) fn prepare<'a>(
     conn: &'a rusqlite::Connection,
     sql: &str,
 ) -> rusqlite::Result<rusqlite::Statement<'a>> {
-    conn.prepare(&mc_store::McStore::async_compaction_read_sql(sql))
+    conn.prepare(&mc_store::McStore::async_compaction_read_sql_at(conn, sql)?)
 }
 
 /// Preserve accumulated list rows when SQLite interrupts the next step for its deadline.

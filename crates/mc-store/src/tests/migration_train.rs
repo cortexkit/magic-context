@@ -132,7 +132,11 @@ fn scalar<T: rusqlite::types::FromSql>(store: &McStore, sql: &str) -> T {
     store
         .inner
         .with_conn(|conn| {
-            conn.query_row(&McStore::async_compaction_read_sql(sql), [], |r| r.get(0))
+            conn.query_row(
+                &McStore::async_compaction_read_sql_at(conn, sql)?,
+                [],
+                |r| r.get(0),
+            )
         })
         .unwrap()
 }

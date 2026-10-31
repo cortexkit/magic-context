@@ -14,8 +14,44 @@ struct Stats {
     max_prefix: f64,
 }
 
+fn chunk_heap_bytes(block: &ChunkBlock) -> usize {
+    use std::mem::size_of;
+    block
+        .role
+        .capacity()
+        .saturating_add(block.parts.capacity().saturating_mul(size_of::<String>()))
+        .saturating_add(block.parts.iter().map(String::capacity).sum::<usize>())
+        .saturating_add(
+            block
+                .meta
+                .capacity()
+                .saturating_mul(size_of::<(u64, String)>()),
+        )
+        .saturating_add(
+            block
+                .meta
+                .iter()
+                .map(|(_, mid)| mid.capacity())
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            block
+                .commit_hashes
+                .capacity()
+                .saturating_mul(size_of::<String>()),
+        )
+        .saturating_add(
+            block
+                .commit_hashes
+                .iter()
+                .map(String::capacity)
+                .sum::<usize>(),
+        )
+}
+
 pub(crate) struct ChunkCache {
     groups: Vec<Group>,
+    groups_heap_bytes: usize,
     tokens: Vec<f64>,
     counts: Vec<usize>,
     commits: Vec<usize>,
@@ -32,6 +68,7 @@ impl Default for ChunkCache {
     fn default() -> Self {
         Self {
             groups: Vec::new(),
+            groups_heap_bytes: 0,
             tokens: vec![0.0],
             counts: vec![0],
             commits: vec![0],
@@ -47,6 +84,45 @@ impl Default for ChunkCache {
 }
 
 impl ChunkCache {
+    #[cfg(test)]
+    pub(super) fn retained_heap_bytes_walk(&self) -> usize {
+        self.retained_heap_bytes()
+            .saturating_sub(self.groups_heap_bytes)
+            .saturating_add(
+                self.groups
+                    .iter()
+                    .map(|group| chunk_heap_bytes(&group.block))
+                    .sum::<usize>(),
+            )
+    }
+
+    pub(super) fn retained_heap_bytes(&self) -> usize {
+        use std::mem::size_of;
+        // Only the unfinished chunk and its bounded noise suffix need a walk;
+        // completed groups were charged when each group was appended.
+        self.groups
+            .capacity()
+            .saturating_mul(size_of::<Group>())
+            .saturating_add(self.groups_heap_bytes)
+            .saturating_add(self.tokens.capacity().saturating_mul(size_of::<f64>()))
+            .saturating_add(self.counts.capacity().saturating_mul(size_of::<usize>()))
+            .saturating_add(self.commits.capacity().saturating_mul(size_of::<usize>()))
+            .saturating_add(self.maxima.capacity().saturating_mul(size_of::<f64>()))
+            .saturating_add(self.current.as_ref().map_or(0, chunk_heap_bytes))
+            .saturating_add(
+                self.pending
+                    .capacity()
+                    .saturating_mul(size_of::<(u64, String)>()),
+            )
+            .saturating_add(
+                self.pending
+                    .iter()
+                    .map(|(_, mid)| mid.capacity())
+                    .sum::<usize>(),
+            )
+            .saturating_add(self.last_role.capacity())
+    }
+
     pub(crate) fn append(
         &mut self,
         messages: &[BoundaryMsg],
@@ -86,6 +162,9 @@ impl ChunkCache {
                         .unwrap_or(0.0)
                         .max(before + self.current_max.max(tokens)),
                 );
+                self.groups_heap_bytes = self
+                    .groups_heap_bytes
+                    .saturating_add(chunk_heap_bytes(&block));
                 self.groups.push(Group { block });
                 self.current_max = 0.0;
             }
@@ -99,6 +178,7 @@ impl ChunkCache {
             {
                 self.enabled = false;
                 self.groups.clear();
+                self.groups_heap_bytes = 0;
                 self.tokens.clear();
                 self.counts.clear();
                 self.commits.clear();

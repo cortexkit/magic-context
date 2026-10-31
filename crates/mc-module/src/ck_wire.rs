@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+mod retained;
+
 // The re-exported CK message/block serializers retain the original serde_json::Value
 // for pass-through. That must remain a Value-level replay path, not a typed-struct
 // round-trip, so harmless future CK fields are not silently dropped.
@@ -290,10 +292,17 @@ impl CkItem for FlatBlock {
 
 /// Projector state at one message boundary. Tail deltas resume from this exact frontier so a
 /// tool result in the changed suffix can still pair with a call in the cached prefix.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct ProjectionState {
     pending_calls: BTreeMap<String, VecDeque<String>>,
     call_arcs: BTreeMap<String, String>,
+    retained_arc_bytes: usize,
+}
+
+impl PartialEq for ProjectionState {
+    fn eq(&self, other: &Self) -> bool {
+        self.pending_calls == other.pending_calls && self.call_arcs == other.call_arcs
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -306,7 +315,7 @@ struct ProjectionMessageMeta {
     meta: HarnessMeta,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct FlatProjection {
     pub blocks: Vec<FlatBlock>,
     pub identity_by_mid: BTreeMap<String, Vec<BlockIdentity>>,
@@ -319,6 +328,39 @@ pub struct FlatProjection {
     /// Shared boundary states make prefix reconstruction proportional in small Arc copies rather
     /// than cloning pending tool-arc maps for every retained message.
     states_after_messages: Vec<Arc<ProjectionState>>,
+    retained_heap_bytes: usize,
+}
+
+impl Clone for FlatProjection {
+    fn clone(&self) -> Self {
+        let mut cloned = Self {
+            blocks: self.blocks.clone(),
+            identity_by_mid: self.identity_by_mid.clone(),
+            message_meta: self.message_meta.clone(),
+            message_block_ends: self.message_block_ends.clone(),
+            states_after_messages: self.states_after_messages.clone(),
+            retained_heap_bytes: 0,
+        };
+        cloned.retained_heap_bytes = retained::projection_heap_bytes(
+            &cloned.blocks,
+            &cloned.identity_by_mid,
+            &cloned.message_meta,
+            &cloned.states_after_messages,
+        );
+        cloned
+    }
+}
+
+impl PartialEq for FlatProjection {
+    fn eq(&self, other: &Self) -> bool {
+        // Allocation accounting is not projected data. Preserve equality of
+        // every message, block, identity and frontier regardless of capacity.
+        self.blocks == other.blocks
+            && self.identity_by_mid == other.identity_by_mid
+            && self.message_meta == other.message_meta
+            && self.message_block_ends == other.message_block_ends
+            && self.states_after_messages == other.states_after_messages
+    }
 }
 
 impl FlatProjection {
@@ -543,6 +585,7 @@ pub(crate) fn append_projected_messages(
             message_meta: cached.message_meta,
             message_block_ends: cached.message_block_ends,
             states_after_messages: cached.states_after_messages,
+            retained_heap_bytes: cached.retained_heap_bytes,
             state,
         },
     )
@@ -577,16 +620,23 @@ pub(crate) fn project_messages_incremental(
         };
         identity_by_mid.insert(message.mid.clone(), identities.clone());
     }
-    let builder = FlatProjectionBuilder {
+    let mut builder = FlatProjectionBuilder {
         blocks: cached.blocks[..prefix_block_end].to_vec(),
         identity_by_mid,
         message_meta: cached.message_meta[..prefix_messages].to_vec(),
         message_block_ends: cached.message_block_ends[..prefix_messages].to_vec(),
         states_after_messages: cached.states_after_messages[..prefix_messages].to_vec(),
+        retained_heap_bytes: 0,
         state: cached.states_after_messages[prefix_messages - 1]
             .as_ref()
             .clone(),
     };
+    builder.retained_heap_bytes = retained::projection_heap_bytes(
+        &builder.blocks,
+        &builder.identity_by_mid,
+        &builder.message_meta,
+        &builder.states_after_messages,
+    );
     project_messages_from_state(&messages[prefix_messages..], builder)
 }
 
@@ -597,6 +647,7 @@ struct FlatProjectionBuilder {
     message_meta: Vec<ProjectionMessageMeta>,
     message_block_ends: Vec<usize>,
     states_after_messages: Vec<Arc<ProjectionState>>,
+    retained_heap_bytes: usize,
     state: ProjectionState,
 }
 
@@ -655,6 +706,9 @@ fn project_messages_from_state(
                     byte_fingerprint: block_identity_fingerprint(msg, block, &flat)?,
                 });
             }
+            builder.retained_heap_bytes = builder
+                .retained_heap_bytes
+                .saturating_add(flat.retained_heap_bytes());
             builder.blocks.push(flat);
         }
 
@@ -669,20 +723,37 @@ fn project_messages_from_state(
             builder.state.pending_calls.clear();
         }
         if !msg.ck.meta.synthetic {
-            builder.identity_by_mid.insert(msg.mid.clone(), identities);
+            let old = builder.identity_by_mid.insert(msg.mid.clone(), identities);
+            let (mid, identities) = builder
+                .identity_by_mid
+                .get_key_value(&msg.mid)
+                .expect("inserted identity");
+            builder.retained_heap_bytes = builder
+                .retained_heap_bytes
+                .saturating_sub(old.as_ref().map_or(0, retained::identities_heap_bytes))
+                .saturating_add(retained::identities_heap_bytes(identities))
+                .saturating_add(if old.is_none() { mid.capacity() } else { 0 });
         }
-        builder.message_meta.push(ProjectionMessageMeta {
+        let meta = ProjectionMessageMeta {
             mid: msg.mid.clone(),
             ordinal: msg.ordinal,
             role: msg.ck.role.clone(),
             origin: msg.ck.origin.clone(),
             provider_extras: msg.ck.provider_extras.clone(),
             meta: msg.ck.meta.clone(),
-        });
+        };
+        builder.retained_heap_bytes = builder
+            .retained_heap_bytes
+            .saturating_add(meta.retained_heap_bytes());
+        builder.message_meta.push(meta);
         builder.message_block_ends.push(builder.blocks.len());
-        builder
-            .states_after_messages
-            .push(Arc::new(builder.state.clone()));
+        let mut frontier = builder.state.clone();
+        frontier.retained_arc_bytes = frontier.retained_arc_bytes_walk();
+        let frontier = Arc::new(frontier);
+        builder.retained_heap_bytes = builder
+            .retained_heap_bytes
+            .saturating_add(frontier.retained_arc_bytes());
+        builder.states_after_messages.push(frontier);
     }
 
     Ok(FlatProjection {
@@ -691,6 +762,7 @@ fn project_messages_from_state(
         message_meta: builder.message_meta,
         message_block_ends: builder.message_block_ends,
         states_after_messages: builder.states_after_messages,
+        retained_heap_bytes: builder.retained_heap_bytes,
     })
 }
 
@@ -1046,6 +1118,76 @@ mod tests {
                 ProviderExtras::new(),
                 HarnessMeta::default(),
             ),
+        }
+    }
+
+    #[test]
+    fn projection_retained_ledger_matches_full_walk_for_fanout_appends_and_clones() {
+        let calls = 64;
+        let mut messages = vec![CkIngressMessage {
+            mid: "fanout".into(),
+            ordinal: 0,
+            ck: CkWireMessage::from_parts(
+                "assistant",
+                (0..calls)
+                    .map(|n| {
+                        CkWireBlock::bare(CkKind::ToolCall {
+                            id: format!("call-{n}"),
+                            name: "read".into(),
+                            input: serde_json::json!({"path":"file"}),
+                            provider_executed: false,
+                        })
+                    })
+                    .collect(),
+                None,
+                ProviderExtras::new(),
+                HarnessMeta::default(),
+            ),
+        }];
+        for n in 0..calls {
+            messages.push(CkIngressMessage {
+                mid: format!("result-{n}"),
+                ordinal: n + 1,
+                ck: CkWireMessage::from_parts(
+                    "tool",
+                    vec![CkWireBlock::bare(CkKind::ToolResult {
+                        id: format!("call-{n}"),
+                        tool_name: "read".into(),
+                        output: CkToolOutput::bare(CkOutputKind::Text {
+                            text: "result".into(),
+                        }),
+                        provider_executed: false,
+                    })],
+                    None,
+                    ProviderExtras::new(),
+                    HarnessMeta::default(),
+                ),
+            });
+        }
+        messages.push(text_msg("tail", calls + 1, "user", "first tail"));
+        messages.push(text_msg("tail", calls + 2, "user", "replacement identity"));
+        let mut projection = project_messages(&[]).unwrap();
+        for end in 1..=messages.len() {
+            projection = append_projected_messages(projection, &messages[end - 1..end]).unwrap();
+            assert_eq!(
+                projection.retained_bytes_cached(),
+                projection.retained_bytes(),
+                "append {end}"
+            );
+            let cloned = projection.clone();
+            assert_eq!(
+                cloned.retained_bytes_cached(),
+                cloned.retained_bytes(),
+                "clone {end}"
+            );
+            let incremental =
+                project_messages_incremental(&messages[..end], &projection, end / 2).unwrap();
+            assert_eq!(
+                incremental.retained_bytes_cached(),
+                incremental.retained_bytes(),
+                "prefix {end}"
+            );
+            assert_eq!(projection, project_messages(&messages[..end]).unwrap());
         }
     }
 

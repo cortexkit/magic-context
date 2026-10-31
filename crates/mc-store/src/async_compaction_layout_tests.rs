@@ -285,8 +285,9 @@ fn offline_downgrade_is_lossless_atomic_per_session_and_resumable() {
     let originals = [seed_legacy(&store, "a"), seed_legacy(&store, "b")];
     store.migrate_async_compaction_records().unwrap();
     store.inner.with_conn_fenced(|conn| {
-        put(conn, "engine:async:0", "head", "engine bytes, unchanged")?;
-        put(conn, "engine:async:0", "tail", "tail bytes, unchanged")?;
+        // Use SQL for engine:async:0; async_compaction_layout::put only accepts reserved provider namespaces.
+        conn.execute("INSERT INTO main.mc_cache_sections(session_id,section,body) VALUES(?1,?2,?3)", params!["engine:async:0", "head", "engine bytes, unchanged"])?;
+        conn.execute("INSERT INTO main.mc_cache_sections(session_id,section,body) VALUES(?1,?2,?3)", params!["engine:async:0", "tail", "tail bytes, unchanged"])?;
         conn.execute_batch("CREATE TRIGGER interrupt_downgrade BEFORE INSERT ON mc_async_compaction WHEN NEW.session_ref='b' BEGIN SELECT RAISE(ABORT,'downgrade interrupted'); END")
     }).unwrap();
     let context = dir.path().join("context-untouched.db");

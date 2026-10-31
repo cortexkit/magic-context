@@ -1962,6 +1962,7 @@ impl State {
                 .lock()
                 .expect("historian input cache mutex")
                 .retained_bytes()
+                .max(historian_cache::Cache::owner_bytes())
             + self.tag_index.len() * TAG_ADDRESS
             + self.mid_index.len() * 96
             + cache_state

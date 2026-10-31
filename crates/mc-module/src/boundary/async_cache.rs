@@ -10,6 +10,9 @@ struct ArcIndex {
     arcs: Vec<ToolArc>,
     owners: Vec<Option<String>>,
     open: BTreeMap<String, BTreeSet<usize>>,
+    owner_bytes: usize,
+    open_key_bytes: usize,
+    open_positions: usize,
 }
 
 impl ArcIndex {
@@ -27,8 +30,20 @@ impl ArcIndex {
                     inv_ordinal: message.message_ordinal,
                     res_ordinal: None,
                 });
-                self.owners.push(Some(id.clone()));
+                let owner = id.clone();
+                self.owner_bytes += owner.capacity();
+                self.owners.push(Some(owner));
+                let old_keys = self.open.len();
                 self.open.entry(id.clone()).or_default().insert(index);
+                if self.open.len() != old_keys {
+                    self.open_key_bytes += self
+                        .open
+                        .get_key_value(id)
+                        .expect("new arc key")
+                        .0
+                        .capacity();
+                }
+                self.open_positions += 1;
             }
             for block in &message.blocks {
                 if block.provider_executed || !matches!(block.kind, SelKind::ToolResult { .. }) {
@@ -40,7 +55,15 @@ impl ArcIndex {
                 let Some(index) = self.open.get_mut(id).and_then(BTreeSet::pop_first) else {
                     continue;
                 };
+                self.open_positions -= 1;
+                let removed_owner_bytes = self.owners[index].as_ref().map_or(0, String::capacity);
                 if self.open.get(id).is_some_and(BTreeSet::is_empty) {
+                    self.open_key_bytes -= self
+                        .open
+                        .get_key_value(id)
+                        .expect("completed arc key")
+                        .0
+                        .capacity();
                     self.open.remove(id);
                 }
                 let ordinal = self.arcs[index].inv_ordinal;
@@ -56,6 +79,7 @@ impl ArcIndex {
                     self.owners[index] = Some(other);
                 }
                 self.owners[first_open] = None;
+                self.owner_bytes -= removed_owner_bytes;
                 self.arcs[first_open].res_ordinal = Some(message.message_ordinal);
             }
         }
@@ -85,6 +109,92 @@ impl Default for AsyncTriggerCache {
 }
 
 impl AsyncTriggerCache {
+    #[cfg(test)]
+    pub(crate) fn retained_heap_bytes_walk(&self) -> usize {
+        use crate::retained_size::{btree_map_allocation_bytes, hash_map_allocation_bytes};
+        use std::mem::size_of;
+        let index = self.index.as_ref().map_or(0, |index| {
+            index
+                .ordinals
+                .capacity()
+                .saturating_mul(size_of::<u64>())
+                .saturating_add(index.prefix.capacity().saturating_mul(size_of::<f64>()))
+                .saturating_add(hash_map_allocation_bytes(&index.tokens_by_ordinal))
+        });
+        index
+            .saturating_add(
+                self.arcs
+                    .arcs
+                    .capacity()
+                    .saturating_mul(size_of::<ToolArc>()),
+            )
+            .saturating_add(
+                self.arcs
+                    .owners
+                    .capacity()
+                    .saturating_mul(size_of::<Option<String>>()),
+            )
+            .saturating_add(
+                self.arcs
+                    .owners
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .map(String::capacity)
+                    .sum::<usize>(),
+            )
+            .saturating_add(btree_map_allocation_bytes::<String, BTreeSet<usize>>(
+                self.arcs.open.len(),
+            ))
+            .saturating_add(
+                self.arcs
+                    .open
+                    .iter()
+                    .map(|(key, positions)| {
+                        key.capacity()
+                            .saturating_add(btree_map_allocation_bytes::<usize, ()>(
+                                positions.len(),
+                            ))
+                    })
+                    .sum::<usize>(),
+            )
+            .saturating_add(self.chunks.retained_heap_bytes_walk())
+    }
+
+    pub(crate) fn retained_heap_bytes(&self) -> usize {
+        use crate::retained_size::{btree_map_allocation_bytes, hash_map_allocation_bytes};
+        use std::mem::size_of;
+        let index = self.index.as_ref().map_or(0, |index| {
+            index
+                .ordinals
+                .capacity()
+                .saturating_mul(size_of::<u64>())
+                .saturating_add(index.prefix.capacity().saturating_mul(size_of::<f64>()))
+                .saturating_add(hash_map_allocation_bytes(&index.tokens_by_ordinal))
+        });
+        index
+            .saturating_add(
+                self.arcs
+                    .arcs
+                    .capacity()
+                    .saturating_mul(size_of::<ToolArc>()),
+            )
+            .saturating_add(
+                self.arcs
+                    .owners
+                    .capacity()
+                    .saturating_mul(size_of::<Option<String>>()),
+            )
+            .saturating_add(self.arcs.owner_bytes)
+            .saturating_add(self.arcs.open_key_bytes)
+            .saturating_add(btree_map_allocation_bytes::<String, BTreeSet<usize>>(
+                self.arcs.open.len(),
+            ))
+            .saturating_add(btree_map_allocation_bytes::<usize, ()>(
+                self.arcs.open_positions,
+            ))
+            .saturating_add(self.chunks.retained_heap_bytes())
+    }
+
     pub(crate) fn check(
         &mut self,
         messages: &[BoundaryMsg],

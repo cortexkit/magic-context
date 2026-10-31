@@ -94,9 +94,9 @@ fn cut_history_roots(
     conn: &rusqlite::Connection,
     reference: &str,
 ) -> rusqlite::Result<Vec<String>> {
-    let mut roots = conn.prepare(&crate::async_compaction_layout::read_sql("SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'published-cut-root:*'
+    let mut roots = conn.prepare(&crate::async_compaction_layout::read_sql_at(conn, "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'published-cut-root:*'
         UNION ALL SELECT CASE WHEN json_valid(view_json) THEN json_quote(json_extract(view_json,'$.recovery_history_ref.root')) ELSE 'null' END
-        FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'cut:*'"))?
+        FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'cut:*'")?)?
         .query_map([reference], |row| row.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
     roots.sort();
     Ok(roots)
@@ -135,9 +135,10 @@ fn cut_candidates(
     reference: &str,
     first: u64,
 ) -> rusqlite::Result<Vec<String>> {
-    conn.prepare(&crate::async_compaction_layout::read_sql(
+    conn.prepare(&crate::async_compaction_layout::read_sql_at(
+        conn,
         "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB ?2",
-    ))?
+    )?)?
     .query_map(
         params![reference, format!("published-cut-candidate:{first:020}:*")],
         |row| row.get(0),
@@ -160,7 +161,7 @@ fn cut_history_objects(
         if !seen.insert(slot.clone()) {
             continue;
         }
-        let Some(raw) = conn.query_row(&crate::async_compaction_layout::read_sql("SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2"), params![reference,slot], |row| row.get::<_, String>(0)).optional()? else { return Ok(None) };
+        let Some(raw) = conn.query_row(&crate::async_compaction_layout::read_sql_at(conn, "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2")?, params![reference,slot], |row| row.get::<_, String>(0)).optional()? else { return Ok(None) };
         if slot.starts_with("cut-history:b:") {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(children) = value.get("Branch").and_then(|value| value.as_array()) {
@@ -180,14 +181,14 @@ fn cut_bundle(
     reference: &str,
     key: &str,
 ) -> rusqlite::Result<Option<AsyncCutBundle>> {
-    let metadata = conn.query_row(&crate::async_compaction_layout::read_sql("SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2"), params![reference, format!("published-cut-meta:{key}")], |row| row.get::<_, String>(0))
+    let metadata = conn.query_row(&crate::async_compaction_layout::read_sql_at(conn, "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2")?, params![reference, format!("published-cut-meta:{key}")], |row| row.get::<_, String>(0))
         .optional()?;
     let suffix = metadata
         .as_ref()
         .and_then(|raw| serde_json::from_str::<CutSeedAlias>(raw).ok())
         .and_then(|alias| alias.seed_suffix)
         .unwrap_or_else(|| key.to_owned());
-    let seed = conn.query_row(&crate::async_compaction_layout::read_sql("SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2"), params![reference, format!("published-cut:{suffix}")], |row| row.get::<_, String>(0))
+    let seed = conn.query_row(&crate::async_compaction_layout::read_sql_at(conn, "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2")?, params![reference, format!("published-cut:{suffix}")], |row| row.get::<_, String>(0))
         .optional()?;
     let Some(seed) = seed else { return Ok(None) };
     let root = serde_json::from_str::<CutArchiveRoot>(&seed)
@@ -228,6 +229,15 @@ impl McStore {
     /// The result contains only SELECT CTEs and also works on query-only readers.
     pub fn async_compaction_read_sql(sql: &str) -> std::borrow::Cow<'_, str> {
         layout::read_sql(sql)
+    }
+
+    /// Expand provider reads for the schema admitted on this connection. A
+    /// historical migration checkpoint must continue to read its legacy shape.
+    pub fn async_compaction_read_sql_at<'a>(
+        conn: &rusqlite::Connection,
+        sql: &'a str,
+    ) -> rusqlite::Result<std::borrow::Cow<'a, str>> {
+        layout::read_sql_at(conn, sql)
     }
 
     /// Select the authoritative family's indexed message lookup. Resolving the
@@ -329,7 +339,7 @@ impl McStore {
             if !legacy_covered {
                 #[derive(serde::Deserialize)]
                 struct Identity { first_ordinal: u64, cut_mid: String, cut_digest: String }
-                let raw = conn.query_row(&crate::async_compaction_layout::read_sql("SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2"), params![reference,format!("published-cut:{first}")], |row| row.get::<_, String>(0)).optional()?;
+                let raw = conn.query_row(&crate::async_compaction_layout::read_sql_at(conn, "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot=?2")?, params![reference,format!("published-cut:{first}")], |row| row.get::<_, String>(0)).optional()?;
                 if let Some(raw) = raw {
                     let Ok(identity) = serde_json::from_str::<Identity>(&raw) else { return Ok(None) };
                     if identity.first_ordinal == first && identity.cut_mid == mid && identity.cut_digest == digest {
@@ -405,7 +415,7 @@ impl McStore {
     /// its cuts. Ordinary conversation loads exclude these archive rows.
     pub fn load_async_undo_edits(&self, session_ref: &str) -> Result<Vec<String>, McStoreError> {
         self.inner.with_read(|conn| {
-            conn.prepare(&crate::async_compaction_layout::read_sql("SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'undo-native-edits:*' ORDER BY slot"))?
+            conn.prepare(&crate::async_compaction_layout::read_sql_at(conn, "SELECT view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'undo-native-edits:*' ORDER BY slot")?)?
                 .query_map([session_ref], |row| row.get(0))?
                 .collect::<rusqlite::Result<Vec<String>>>()
         }).map_err(Into::into)
@@ -636,7 +646,7 @@ impl McStore {
     ) -> Result<(Vec<String>, Vec<String>), McStoreError> {
         self.inner.with_read(|conn| {
             let roots = cut_history_roots(conn, reference)?;
-            let objects = conn.prepare(&crate::async_compaction_layout::read_sql("SELECT slot FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'cut-history:*'"))?
+            let objects = conn.prepare(&crate::async_compaction_layout::read_sql_at(conn, "SELECT slot FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot GLOB 'cut-history:*'")?)?
                 .query_map([reference], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
             Ok((roots, objects))
         }).map_err(Into::into)

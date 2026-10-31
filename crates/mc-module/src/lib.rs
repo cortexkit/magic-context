@@ -12276,9 +12276,37 @@ pub(crate) struct AsyncHistorianBoundary {
     source_blocks: usize,
     seen: HashSet<String>,
     trigger: boundary::AsyncTriggerCache,
+    message_heap_bytes: usize,
+    seen_key_bytes: usize,
 }
 
 impl AsyncHistorianBoundary {
+    #[cfg(test)]
+    fn retained_heap_bytes_walk(&self) -> usize {
+        self.messages
+            .capacity()
+            .saturating_mul(std::mem::size_of::<BoundaryMsg>())
+            .saturating_add(
+                self.messages
+                    .iter()
+                    .map(async_boundary_message_heap_bytes)
+                    .sum::<usize>(),
+            )
+            .saturating_add(crate::retained_size::hash_set_allocation_bytes(&self.seen))
+            .saturating_add(self.seen.iter().map(String::capacity).sum::<usize>())
+            .saturating_add(self.trigger.retained_heap_bytes_walk())
+    }
+
+    fn retained_heap_bytes(&self) -> usize {
+        self.messages
+            .capacity()
+            .saturating_mul(std::mem::size_of::<BoundaryMsg>())
+            .saturating_add(self.message_heap_bytes)
+            .saturating_add(crate::retained_size::hash_set_allocation_bytes(&self.seen))
+            .saturating_add(self.seen_key_bytes)
+            .saturating_add(self.trigger.retained_heap_bytes())
+    }
+
     fn prepare(
         &mut self,
         parsed: &TransformRequest,
@@ -12309,6 +12337,12 @@ impl AsyncHistorianBoundary {
                 .iter()
                 .map(|message| message.mid.clone())
                 .collect();
+            self.message_heap_bytes = self
+                .messages
+                .iter()
+                .map(async_boundary_message_heap_bytes)
+                .sum();
+            self.seen_key_bytes = self.seen.iter().map(String::capacity).sum();
             self.trigger = boundary::AsyncTriggerCache::default();
             return (
                 built.token_cache_snapshot,
@@ -12333,11 +12367,17 @@ impl AsyncHistorianBoundary {
                 .or_insert(index..index + 1);
         }
         for message in &parsed.messages[self.source_messages..] {
-            self.seen.insert(message.mid.clone());
+            if self.seen.insert(message.mid.clone()) {
+                self.seen_key_bytes += self
+                    .seen
+                    .get(&message.mid)
+                    .expect("inserted message id")
+                    .capacity();
+            }
             if message.ck.meta.synthetic || message.ck.role == "system" {
                 continue;
             }
-            self.messages.push(BoundaryMsg {
+            let prepared = BoundaryMsg {
                 message_ordinal: message.ordinal,
                 message_id: message.mid.clone(),
                 role: Role::from_provider(&message.ck.role),
@@ -12359,7 +12399,11 @@ impl AsyncHistorianBoundary {
                         ignored: false,
                     })
                     .collect(),
-            });
+            };
+            self.message_heap_bytes = self
+                .message_heap_bytes
+                .saturating_add(async_boundary_message_heap_bytes(&prepared));
+            self.messages.push(prepared);
         }
         self.source_messages = parsed.messages.len();
         self.source_blocks = projection.blocks.len();
@@ -12367,6 +12411,47 @@ impl AsyncHistorianBoundary {
         let (hits, misses) = (snapshot.hits, snapshot.misses);
         (snapshot, hits, misses)
     }
+}
+
+fn async_boundary_message_heap_bytes(message: &BoundaryMsg) -> usize {
+    use crate::retained_size::value_heap_bytes;
+    let role = match &message.role {
+        Role::Other(role) => role.capacity(),
+        _ => 0,
+    };
+    message
+        .message_id
+        .capacity()
+        .saturating_add(role)
+        .saturating_add(
+            message
+                .blocks
+                .capacity()
+                .saturating_mul(std::mem::size_of::<BoundaryBlock>()),
+        )
+        .saturating_add(
+            message
+                .blocks
+                .iter()
+                .map(|block| {
+                    let kind = match &block.kind {
+                        SelKind::ToolCall { name, input } => {
+                            name.capacity().saturating_add(value_heap_bytes(input))
+                        }
+                        SelKind::ToolResult { tool_name } => tool_name.capacity(),
+                        _ => 0,
+                    };
+                    // `original` is an Arc clone of the projection's canonical bytes,
+                    // whose allocation is already charged by the projection owner.
+                    block
+                        .id
+                        .capacity()
+                        .saturating_add(kind)
+                        .saturating_add(block.arc_id.as_ref().map_or(0, String::capacity))
+                        .saturating_add(block.rendered.as_ref().map_or(0, String::capacity))
+                })
+                .sum::<usize>(),
+        )
 }
 
 fn cached_boundary_messages(

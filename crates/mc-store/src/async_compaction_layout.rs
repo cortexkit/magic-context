@@ -1,17 +1,15 @@
 //! Versioned async data in the existing section KV store. No row is left in
 //! the legacy async tables: older binaries must see absence, never a cold
 //! header they cannot decode. Engine section namespaces remain independent.
+use crate::cache_codec::async_provider::Sections;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-pub(crate) const HEADERS: &str = "__ckmc_async_v2_headers";
-pub(crate) const KEYS: &str = "__ckmc_async_v2_keys";
-pub(crate) const OUTBOX: &str = "__ckmc_async_v2_outbox";
+pub(crate) use crate::cache_codec::async_provider::{CHILDREN, HEADERS, KEYS, OUTBOX};
 pub(crate) const ENTRY: &str = "__ckmc_async_v2_entry:";
 pub(crate) const VIEW: &str = "__ckmc_async_v2_view:";
 pub(crate) const MID: &str = "__ckmc_async_v2_mid:";
-pub(crate) const CHILDREN: &str = "__ckmc_async_v2_record:";
 const RESERVED: &str = "__ckmc_async_v2_";
 
 pub(super) fn owner(reference: &str) -> String {
@@ -67,14 +65,11 @@ pub(super) fn put(
     slot: &str,
     raw: &str,
 ) -> rusqlite::Result<usize> {
-    conn.execute("INSERT INTO main.mc_cache_sections(session_id,section,body) VALUES(?1,?2,?3) ON CONFLICT(session_id,section) DO UPDATE SET body=excluded.body", params![owner, slot, raw])
+    Sections::new(conn, owner)?.put(slot, raw)
 }
 
 pub(super) fn remove(conn: &Connection, owner: &str, slot: &str) -> rusqlite::Result<usize> {
-    conn.execute(
-        "DELETE FROM main.mc_cache_sections WHERE session_id=?1 AND section=?2",
-        params![owner, slot],
-    )
+    Sections::new(conn, owner)?.remove(slot)
 }
 
 pub(super) fn header(conn: &Connection, reference: &str) -> rusqlite::Result<Option<Header>> {
@@ -116,10 +111,7 @@ fn write_header(conn: &Connection, reference: &str, next: &Header) -> rusqlite::
     }
     let rows = put(conn, HEADERS, reference, &encode(next)?)?;
     let index = encode(&json!({"reference":reference,"session":next.session}))?;
-    let indexed = conn.execute(
-        "INSERT OR IGNORE INTO main.mc_cache_sections(session_id,section,body) VALUES(?1,?2,?3)",
-        params![KEYS, next.key, index],
-    )?;
+    let indexed = Sections::new(conn, KEYS)?.insert_if_absent(&next.key, &index)?;
     Ok(rows + indexed)
 }
 
@@ -150,7 +142,9 @@ pub(super) fn baseline(
         ));
     }
     match raw {
-        Some(raw) if immutable => conn.execute("INSERT OR IGNORE INTO main.mc_cache_sections(session_id,section,body) VALUES(?1,?2,?3)", params![owner(reference), slot, raw]),
+        Some(raw) if immutable => {
+            Sections::new(conn, &owner(reference))?.insert_if_absent(slot, raw)
+        }
         Some(raw) => put(conn, &owner(reference), slot, raw),
         None => remove(conn, &owner(reference), slot),
     }
@@ -181,10 +175,7 @@ fn mid_key(mid: &str, ordinal: u64) -> rusqlite::Result<String> {
 
 fn insert_entry_row(conn: &Connection, reference: &str, row: &Entry) -> rusqlite::Result<usize> {
     let slot = number(ENTRY, row.ordinal)?;
-    let mut rows = conn.execute(
-        "INSERT INTO main.mc_cache_sections(session_id,section,body) VALUES(?1,?2,?3)",
-        params![owner(reference), slot, encode(row)?],
-    )?;
+    let mut rows = Sections::new(conn, &owner(reference))?.insert(&slot, &encode(row)?)?;
     if let Some(mid) = &row.mid {
         rows += put(
             conn,
@@ -211,7 +202,7 @@ pub(super) fn replace_entry(
     raw: &str,
     index: &str,
 ) -> rusqlite::Result<usize> {
-    conn.execute("UPDATE main.mc_cache_sections SET body=json_set(body,'$.entry_json',?3,'$.index_json',?4) WHERE session_id=?1 AND section=?2", params![owner(reference), number(ENTRY, ordinal)?, raw, index])
+    Sections::new(conn, &owner(reference))?.replace_entry(&number(ENTRY, ordinal)?, raw, index)
 }
 
 pub(super) fn entries(
@@ -293,10 +284,7 @@ pub(super) fn save_view(
     let rows = if replace {
         put(conn, &owner(reference), &slot, &encode(value)?)?
     } else {
-        conn.execute(
-            "INSERT INTO main.mc_cache_sections(session_id,section,body) VALUES(?1,?2,?3)",
-            params![owner(reference), slot, encode(value)?],
-        )?
+        Sections::new(conn, &owner(reference))?.insert(&slot, &encode(value)?)?
     };
     let key = outbox_key(reference, value.version)?;
     if value.announced == 0 {
@@ -462,17 +450,11 @@ pub(super) fn legacy_exists(conn: &Connection, reference: &str) -> rusqlite::Res
 }
 
 fn clear_owned(conn: &Connection, reference: &str) -> rusqlite::Result<()> {
-    conn.execute(
-        "DELETE FROM main.mc_cache_sections WHERE session_id=?1",
-        [owner(reference)],
-    )?;
+    Sections::new(conn, &owner(reference))?.clear_record()?;
     remove(conn, HEADERS, reference)?;
-    conn.execute("DELETE FROM main.mc_cache_sections WHERE session_id=?1 AND CASE WHEN json_valid(body) THEN json_extract(body,'$.reference') END=?2", params![KEYS,reference])?;
+    Sections::new(conn, KEYS)?.remove_reference(reference)?;
     let (from, to) = outbox_bounds(reference)?;
-    conn.execute(
-        "DELETE FROM main.mc_cache_sections WHERE session_id=?1 AND section>=?2 AND section<?3",
-        params![OUTBOX, from, to],
-    )?;
+    Sections::new(conn, OUTBOX)?.remove_outbox_range(&from, &to)?;
     Ok(())
 }
 
@@ -621,15 +603,35 @@ fn relation(table: &str) -> &'static str {
 /// Read-only counterpart of the inspection views. CTEs work on query-only
 /// readers without creating even temporary schema objects.
 pub(super) fn read_sql(sql: &str) -> std::borrow::Cow<'_, str> {
-    let start = sql.trim_start().to_ascii_uppercase();
-    if !(start.contains("FROM MC_ASYNC_COMPACTION") || start.contains("JOIN MC_ASYNC_COMPACTION"))
-        || sql.contains("async-v2-direct")
-        || !(start.starts_with("SELECT ")
-            || start.starts_with("WITH ")
-            || start.starts_with("EXPLAIN QUERY PLAN "))
-    {
+    if !needs_expansion(sql) {
         return std::borrow::Cow::Borrowed(sql);
     }
+    expand_current_sql(sql)
+}
+
+fn needs_expansion(sql: &str) -> bool {
+    let start = sql.trim_start().to_ascii_uppercase();
+    (start.contains("FROM MC_ASYNC_COMPACTION") || start.contains("JOIN MC_ASYNC_COMPACTION"))
+        && !sql.contains("async-v2-direct")
+        && (start.starts_with("SELECT ")
+            || start.starts_with("WITH ")
+            || start.starts_with("EXPLAIN QUERY PLAN "))
+}
+
+/// Before migration 75, entries have no MID column and no provider KV family
+/// can exist. Preserve those historical tables' own column shape instead of
+/// preparing a current-layout UNION against them.
+pub(super) fn read_sql_at<'a>(
+    conn: &Connection,
+    sql: &'a str,
+) -> rusqlite::Result<std::borrow::Cow<'a, str>> {
+    if !needs_expansion(sql) || crate::single_store_schema::recorded_store_version(conn)? < 75 {
+        return Ok(std::borrow::Cow::Borrowed(sql));
+    }
+    Ok(expand_current_sql(sql))
+}
+
+fn expand_current_sql(sql: &str) -> std::borrow::Cow<'_, str> {
     let names = [
         "mc_async_compaction",
         "mc_async_compaction_entries",
@@ -729,7 +731,7 @@ pub(super) fn remove_cut_facts(
     reference: &str,
     active: Option<&str>,
 ) -> rusqlite::Result<usize> {
-    conn.execute("DELETE FROM main.mc_cache_sections WHERE session_id=?1 AND section GLOB 'cut:*' AND (?2 IS NULL OR section<>?2)", params![owner(reference),active])
+    Sections::new(conn, &owner(reference))?.remove_cut_facts(active)
 }
 
 pub(super) const HOT_BASELINES_SQL: &str = "SELECT section,body FROM main.mc_cache_sections WHERE session_id='__ckmc_async_v2_record:'||?1 AND section IN ('applied','produced','frozen_edits','retired_native_edits','pending-cut-stage','setup-initial','moved-bound-drops')";

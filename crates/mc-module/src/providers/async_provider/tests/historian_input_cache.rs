@@ -335,6 +335,11 @@ async fn historian_cache_matches_uncached_inputs_across_notice_lifecycle() {
                 "{codec:?}, notice {notice}: trigger, progress and firing boundary"
             );
             cache.finish(input, &mut cached, None);
+            assert_eq!(
+                cache.retained_bytes(),
+                cache.retained_bytes_walk(),
+                "{codec:?} notice {notice}: retained allocation ledger"
+            );
             assert_eq!(cache.message_count(), (next - from) as usize);
         }
     }

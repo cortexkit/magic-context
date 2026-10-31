@@ -86,6 +86,8 @@ pub(super) struct Prepared {
     messages: Vec<ck_wire::CkIngressMessage>,
     native: Option<Vec<Value>>,
     bytes: usize,
+    message_heap_bytes: usize,
+    native_heap_bytes: usize,
     pub projection: ck_wire::FlatProjection,
     pub boundary: AsyncHistorianBoundary,
     pub delta: BTreeMap<String, Vec<mc_store::BlockIdentity>>,
@@ -94,6 +96,12 @@ pub(super) struct Prepared {
 }
 
 impl Cache {
+    /// The Arc/Mutex allocation remains even when no reusable input is held.
+    pub(super) fn owner_bytes() -> usize {
+        crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
+            .saturating_add(std::mem::size_of::<std::sync::Mutex<Self>>())
+    }
+
     pub(super) fn clear(&mut self) {
         self.input = None;
         self.bytes = 0;
@@ -101,6 +109,34 @@ impl Cache {
 
     pub(super) fn retained_bytes(&self) -> usize {
         self.bytes
+    }
+
+    #[cfg(test)]
+    pub(super) fn retained_bytes_walk(&self) -> usize {
+        use std::mem::size_of;
+        self.input.as_ref().map_or(0, |input| {
+            Self::owner_bytes()
+                .saturating_add(input.stamp.lineage.as_ref().map_or(0, String::capacity))
+                .saturating_add(input.stamp.prelude.as_ref().map_or(0, String::capacity))
+                .saturating_add(
+                    input
+                        .messages
+                        .capacity()
+                        .saturating_mul(size_of::<ck_wire::CkIngressMessage>()),
+                )
+                .saturating_add(message_heap_bytes(&input.messages))
+                .saturating_add(input.native.as_ref().map_or(0, |native| {
+                    native.capacity().saturating_mul(size_of::<Value>())
+                }))
+                .saturating_add(native_heap_bytes(input.native.as_deref()))
+                .saturating_add(
+                    input
+                        .projection
+                        .retained_bytes()
+                        .saturating_sub(size_of::<ck_wire::FlatProjection>()),
+                )
+                .saturating_add(input.boundary.retained_heap_bytes_walk())
+        })
     }
 
     pub(super) fn prepare(
@@ -118,13 +154,14 @@ impl Cache {
                 }
         });
         self.bytes = 0;
-        let input = if let Some(prior) = cached {
+        let mut input = if let Some(prior) = cached {
             // An append that cannot be prepared independently is not trusted.
             // Re-reading the whole window also preserves the oracle's errors.
             Self::append(prior, &source, parsed).or_else(|_| Self::full(&source, parsed))?
         } else {
             Self::full(&source, parsed)?
         };
+        input.bytes = input.retained_bytes_for(&parsed.messages, parsed.native_messages.as_ref());
         self.bytes = input.bytes;
         Ok(input)
     }
@@ -135,6 +172,9 @@ impl Cache {
         parsed: &mut TransformRequest,
         known_version: Option<u64>,
     ) {
+        // Trigger evaluation can grow boundary/arc/chunk buffers after input
+        // preparation, so admission uses their final retained allocation size.
+        input.bytes = input.retained_bytes_for(&parsed.messages, parsed.native_messages.as_ref());
         if input.bytes > MAX_RETAINED_BYTES {
             self.clear();
             return;
@@ -172,7 +212,6 @@ impl Cache {
             source.prelude,
         )?;
         let native_count = messages.len();
-        let bytes = buffer_allowance(&messages)?;
         historian_tail::prepare_messages(
             source.codec,
             parsed,
@@ -181,13 +220,17 @@ impl Cache {
             source.window.ordinal_base,
         )?;
         let projection = ck_wire::project_messages(&parsed.messages).map_err(transient)?;
+        let message_heap_bytes = message_heap_bytes(&parsed.messages);
+        let native_heap_bytes = native_heap_bytes(parsed.native_messages.as_deref());
         Ok(Prepared {
             stamp: source.stamp.clone(),
             through: source.window.through,
             native_count,
             messages: Vec::new(),
             native: None,
-            bytes,
+            bytes: 0,
+            message_heap_bytes,
+            native_heap_bytes,
             projection,
             boundary: AsyncHistorianBoundary::default(),
             delta: BTreeMap::new(),
@@ -223,7 +266,6 @@ impl Cache {
             )?
         };
         let native_count = prior.native_count + messages.len();
-        let bytes = prior.bytes + buffer_allowance(&messages)?;
         historian_tail::prepare_messages(
             source.codec,
             parsed,
@@ -231,6 +273,12 @@ impl Cache {
             &messages,
             delta_window.ordinal_base,
         )?;
+        let message_heap_bytes = prior
+            .message_heap_bytes
+            .saturating_add(message_heap_bytes(&parsed.messages));
+        let native_heap_bytes = prior
+            .native_heap_bytes
+            .saturating_add(native_heap_bytes(parsed.native_messages.as_deref()));
         let projection = ck_wire::append_projected_messages(prior.projection, &parsed.messages)
             .map_err(transient)?;
         let delta = parsed
@@ -259,7 +307,9 @@ impl Cache {
             native_count,
             messages: Vec::new(),
             native: None,
-            bytes,
+            bytes: 0,
+            message_heap_bytes,
+            native_heap_bytes,
             projection,
             boundary: prior.boundary,
             delta,
@@ -269,11 +319,55 @@ impl Cache {
     }
 }
 
-/// Conservative resident-budget allowance for native values, CK values, flat
-/// blocks and projection frontiers. It is charged only for newly read input.
-fn buffer_allowance(messages: &[InboundMessage]) -> Result<usize, HandlerOutcome> {
-    if messages.is_empty() {
-        return Ok(0);
+fn message_heap_bytes(messages: &[ck_wire::CkIngressMessage]) -> usize {
+    use crate::retained_size::ck_wire_message_retained_bytes;
+    messages
+        .iter()
+        .map(|message| {
+            message.mid.capacity().saturating_add(
+                ck_wire_message_retained_bytes(&message.ck)
+                    .saturating_sub(std::mem::size_of::<ck_wire::CkWireMessage>()),
+            )
+        })
+        .sum()
+}
+
+fn native_heap_bytes(messages: Option<&[Value]>) -> usize {
+    messages.map_or(0, |messages| {
+        messages
+            .iter()
+            .map(crate::retained_size::value_heap_bytes)
+            .sum()
+    })
+}
+
+impl Prepared {
+    fn retained_bytes_for(
+        &self,
+        messages: &Vec<ck_wire::CkIngressMessage>,
+        native: Option<&Vec<Value>>,
+    ) -> usize {
+        use std::mem::size_of;
+        // The temporary delta map is cleared before storage; the other owned buffers
+        // and their spare capacities survive in the retained preparation.
+        Cache::owner_bytes()
+            .saturating_add(self.stamp.lineage.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.stamp.prelude.as_ref().map_or(0, String::capacity))
+            .saturating_add(
+                messages
+                    .capacity()
+                    .saturating_mul(size_of::<ck_wire::CkIngressMessage>()),
+            )
+            .saturating_add(self.message_heap_bytes)
+            .saturating_add(native.map_or(0, |messages| {
+                messages.capacity().saturating_mul(size_of::<Value>())
+            }))
+            .saturating_add(self.native_heap_bytes)
+            .saturating_add(
+                self.projection
+                    .retained_bytes_cached()
+                    .saturating_sub(size_of::<ck_wire::FlatProjection>()),
+            )
+            .saturating_add(self.boundary.retained_heap_bytes())
     }
-    Ok(serde_json::to_vec(messages).map_err(transient)?.len() * 16 + messages.len() * 16384)
 }
