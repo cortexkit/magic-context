@@ -104,7 +104,7 @@ cortexkit-role-llm-runner = { version = "=0.7.31", features = ["test-vectors"] }
 cpu-time = "1"
 subc-core = { workspace = true }
 # Embedded real-daemon coverage of HELLO_ACK/open versus the first plan fetch.
-subc-daemon = "=0.36.19"
+subc-daemon = "=0.39.0"
 # Enable the store's seed helpers for mc-module's compose tests (populate memories +
 # mutations). The feature is gated so the writers never reach production builds.
 mc-store = { workspace = true, features = ["test-support"] }
