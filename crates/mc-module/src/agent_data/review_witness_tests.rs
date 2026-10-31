@@ -132,6 +132,9 @@ fn manifest_before_participant(
             cortexkit_role_compaction_provider::PROVIDES.to_string(),
             // Core discovers tool providers by this claim; agent-data changes nothing here.
             cortexkit_role_tool_provider::PROVIDES.to_string(),
+            // Restored for the pre_user hook (time markers and auto memory);
+            // agent-data changes nothing here.
+            cortexkit_role_step_transform_provider::PROVIDES.to_string(),
             crate::MCP_CONVERSATION_BINDING_V1.to_string(),
             // Declared with the flow fence; the agent-data feature changes nothing here.
             subc_protocol::scope::FLOW_SCOPES_CAPABILITY.to_string(),

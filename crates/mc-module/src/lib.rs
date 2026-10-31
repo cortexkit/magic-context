@@ -14789,6 +14789,7 @@ mod tests {
         let mut expected_capabilities = vec![
             "compaction-provider/v1".to_string(),
             "tool-provider/v1".to_string(),
+            "step-transform-provider/v1".to_string(),
             "mcp-conversation-binding/v1".to_string(),
             "flow-scopes/v1".to_string(),
         ];
