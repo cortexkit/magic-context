@@ -976,6 +976,16 @@ pub struct HistorianProducer {
     /// When set, every route opens to this session's own runner instead of the
     /// configured runner module. The child session remains its own bind identity.
     session_runner: Option<SessionRunnerRoute>,
+    /// The runner refused `generation.temperature` on this producer, so later
+    /// sends leave it out.
+    temperature_refused: bool,
+}
+
+/// A runner's `invalid_params` refusal naming `generation.temperature`, the
+/// one way llm-runner §9 lets a runner decline a member no describe group
+/// declares.
+fn refuses_temperature(body: &ProducerErrorBody) -> bool {
+    body.code == "invalid_params" && body.message.contains("generation.temperature")
 }
 
 impl HistorianProducer {
@@ -1137,6 +1147,7 @@ impl HistorianProducer {
             session_retention: None,
             released: None,
             session_runner: None,
+            temperature_refused: false,
         })
     }
 
@@ -1240,18 +1251,37 @@ impl HistorianProducer {
         // a distinct session id. Use that durable attempt identity as `send_id`, not a
         // connection nonce or frame correlation id: resending after a lost reply must
         // deduplicate, while a new attempt after a classified failure must start a new run.
-        let body = session_send_request(
-            session_id,
-            system,
-            prompt,
-            model,
-            variant,
-            max_output_tokens,
-            temperature,
-            retention,
-        )?
-        .for_session_runner(self.route_limits)?;
-        let response = self.unary_json(route, body).await?;
+        // No describe group declares `generation.temperature`, so a runner may
+        // refuse it as `invalid_params` naming the field (llm-runner §9). A
+        // refused send is never admitted, so resend once without it, and keep
+        // omitting it on this route.
+        let temperature = temperature.filter(|_| !self.temperature_refused);
+        let limits = self.route_limits;
+        let send = |temperature| {
+            session_send_request(
+                session_id,
+                system,
+                prompt,
+                model,
+                variant,
+                max_output_tokens,
+                temperature,
+                retention,
+            )?
+            .for_session_runner(limits)
+        };
+        let response = match self.unary_json(route, send(temperature)?).await {
+            Err(HistorianProducerError::Subc(body))
+                if temperature.is_some() && refuses_temperature(&body) =>
+            {
+                tracing::info!(
+                    "mc-module: historian runner refused generation.temperature; sending without it"
+                );
+                self.temperature_refused = true;
+                self.unary_json(route, send(None)?).await?
+            }
+            other => other?,
+        };
         match send_outcome(&response) {
             SendOutcome::Active(run_id) => Ok(RunHandle { run_id }),
             SendOutcome::Queued(submission_id) => {
@@ -3113,6 +3143,21 @@ pub(crate) mod tests {
                                     } else {
                                         responses.front().unwrap().clone()
                                     };
+                                    // A scripted `{"__error": body}` answers the send
+                                    // with an ERROR frame carrying that body.
+                                    if let Some(body) = response.get("__error") {
+                                        let frame = Frame::build(
+                                            FrameType::Error,
+                                            Flags::new(false, Priority::Interactive, false),
+                                            frame.header.channel,
+                                            frame.header.epoch,
+                                            frame.header.corr,
+                                            serde_json::to_vec(body).unwrap(),
+                                        )
+                                        .unwrap();
+                                        write_frame(&mut stream, &frame).await.unwrap();
+                                        continue;
+                                    }
                                     send_response_frame(
                                         &mut stream,
                                         frame.header.channel,
@@ -4158,6 +4203,74 @@ pub(crate) mod tests {
                 json!(temperature)
             );
         }
+    }
+
+    /// llm-runner §9 lets a runner refuse an undeclared member as
+    /// `invalid_params` naming it. THALAMUS's runner refuses
+    /// `generation.temperature`, which failed every historian firing on a
+    /// runner-hosted head while the user config set a historian temperature.
+    #[tokio::test]
+    async fn a_runner_that_refuses_temperature_gets_the_send_again_without_it() {
+        let server = fake_server(
+            json!([
+                {"__error":{"code":"invalid_params","message":"invalid or unsupported parameter generation.temperature"}},
+                {"state":"active","run_id":"run-without-temperature"},
+            ]),
+            Vec::new(),
+        )
+        .await;
+        let mut client = client(&server).await;
+        let handle = client
+            .start_with_temperature(
+                "mc-historian:proj:1",
+                "role guidance",
+                "prompt",
+                "prov/model-a",
+                None,
+                Some(0.1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.run_id, "run-without-temperature");
+        assert!(client.temperature_refused);
+        client.close().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let log = server.log.lock().await;
+        assert_eq!(log.sends.len(), 2, "one refused send, one resend");
+        assert_eq!(log.sends[0]["generation"]["temperature"], json!(0.1));
+        assert!(
+            log.sends[1]["generation"].get("temperature").is_none(),
+            "{}",
+            log.sends[1]
+        );
+    }
+
+    /// Any other `invalid_params` refusal still fails the send, unretried.
+    #[tokio::test]
+    async fn other_invalid_params_refusals_are_not_retried() {
+        let server = fake_server(
+            json!([
+                {"__error":{"code":"invalid_params","message":"invalid parameter model"}},
+                {"state":"active","run_id":"never"},
+            ]),
+            Vec::new(),
+        )
+        .await;
+        let mut client = client(&server).await;
+        let refused = client
+            .start_with_temperature(
+                "mc-historian:proj:1",
+                "role guidance",
+                "prompt",
+                "prov/model-a",
+                None,
+                Some(0.1),
+            )
+            .await;
+        assert!(matches!(refused, Err(HistorianProducerError::Subc(_))));
+        client.close().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(server.log.lock().await.sends.len(), 1);
     }
 
     /// Broca's own `session.send` goldens, vendored byte-for-byte; see

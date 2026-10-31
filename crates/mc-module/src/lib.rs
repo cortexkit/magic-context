@@ -7609,6 +7609,16 @@ impl McHandler {
                 .as_ref()
                 .is_none_or(|catalog| catalog.tools.contains(name));
         if !served {
+            // Name what decided, so a refused tool on a live head can be traced
+            // without reproducing the route.
+            tracing::info!(
+                tool = %name,
+                preset = ?preset.map(|preset| preset.as_str()),
+                frozen = frozen.is_some(),
+                compacting,
+                frozen_tools = ?frozen.as_ref().map(|catalog| &catalog.tools),
+                "mc-module: tool call not in the session's catalog"
+            );
             let body = cortexkit_role_tool_provider::errors::unknown_tool(name);
             return Err(HandlerOutcome::ErrorWithDetail {
                 code: body.code,
