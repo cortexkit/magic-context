@@ -5533,7 +5533,14 @@ impl McHandler {
             baseline_refreshed: prior_generation != loaded_generation,
             hard_fold_coverage_advanced: base.coverage_ordinal > cadence.meta.coverage_ordinal,
             user_message_id: user.map(|message| message.mid.as_str()),
-            temporal_enabled: config.temporal_awareness,
+            // A time marker only means something in front of the user message
+            // whose gap it measures. A runner send can't put it there: it lands
+            // after that turn, on the next tool result or, on an idle session,
+            // as a separate user turn that starts a run and reads to the model as
+            // silence (seen live on a moved head). So the runner lane sends no
+            // time marker, whatever `temporal_awareness` says, until runners
+            // render the marker on the user message themselves.
+            temporal_enabled: false,
             gap_ms,
             ready_search_hint: None,
         };
