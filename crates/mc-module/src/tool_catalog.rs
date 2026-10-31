@@ -421,6 +421,8 @@ pub(crate) fn catalog_answer_bytes(
 
 /// The `role.describe` answer's bytes. It depends only on the build.
 pub(crate) fn role_describe_bytes() -> Result<Vec<u8>, CatalogError> {
+    let mut capabilities = vec!["compacting-preflight/v1".to_string()];
+    capabilities.extend(crate::project_bind_capabilities());
     jcs_bytes(&json!({
         "majors": [{
             "version": PROVIDES,
@@ -428,7 +430,7 @@ pub(crate) fn role_describe_bytes() -> Result<Vec<u8>, CatalogError> {
             "stability": "alpha",
         }],
         "implementation_version": crate::version_line(),
-        "capabilities": ["compacting-preflight/v1"],
+        "capabilities": capabilities,
     }))
 }
 
@@ -544,14 +546,15 @@ fn request_preset(request: &CatalogRequest) -> Result<Preset, CatalogError> {
     let name = request.preset.as_deref().unwrap_or("head");
     let preset = Preset::parse(name).ok_or_else(|| CatalogError::unserved_preset(name))?;
     if let Some(item) = &request.system_text {
-        let text_preset = Preset::parse(&item.preset)
-            .ok_or_else(|| CatalogError::unserved_preset(&item.preset))?;
+        let text_name = item.preset.as_deref().unwrap_or("head");
+        let text_preset =
+            Preset::parse(text_name).ok_or_else(|| CatalogError::unserved_preset(text_name))?;
         if text_preset != preset {
             return Err(CatalogError::invalid(
                 "system_text.preset",
                 format!(
                     "the text item's preset {:?} must be the tool item's {name:?}",
-                    item.preset
+                    text_name
                 ),
             ));
         }
@@ -846,7 +849,7 @@ fn guidance_text(
 fn preflight_digest(item: &SystemTextItem, config: &CatalogConfig) -> Result<String, CatalogError> {
     let value = json!({
         "format": PREFLIGHT_FORMAT,
-        "preset": item.preset,
+        "preset": item.preset.as_deref().unwrap_or("head"),
         "params": item.params,
         "config": config.resolved_json(),
         "text_revision": text_revision()?,

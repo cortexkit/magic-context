@@ -16,6 +16,7 @@ use tokio::net::TcpListener;
 
 struct Observer {
     handler: Arc<McHandler>,
+    project: PathBuf,
     gate: Arc<Notify>,
     release_on_catalog: bool,
     bind_before_open: Arc<AtomicBool>,
@@ -32,7 +33,19 @@ impl ModuleHandler for Observer {
     async fn on_bind(&self, request: &RouteBindRequest) -> subc_client_rs::BindDecision {
         self.bind_before_open
             .store(self.handler.store.get().is_none(), Ordering::Release);
-        self.handler.on_bind(request).await
+        // This fixture isolates startup ordering, not scope authorization. Supply
+        // the stamped project a scoped plan-fetch route receives from the daemon.
+        let mut request = request.clone();
+        request.scope = Some(
+            subc_protocol::scope::ScopeStamp::new(
+                subc_protocol::Principal::Direct,
+                "startup",
+                1,
+                subc_protocol::scope::ScopeKind::Head,
+            )
+            .with_workdir(Some(self.project.to_string_lossy().into_owned())),
+        );
+        self.handler.on_bind(&request).await
     }
 
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
@@ -67,6 +80,7 @@ struct LiveRoute {
     consumer: SubcConsumer,
     handler: Arc<McHandler>,
     identity: BindIdentity,
+    project: PathBuf,
     gate: Arc<Notify>,
     bind_before_open: Arc<AtomicBool>,
     catalog_before_open: Arc<AtomicBool>,
@@ -139,7 +153,7 @@ impl LiveRoute {
             key: generate_key().unwrap(),
             daemon_id: generate_daemon_id().unwrap(),
             pid: std::process::id(),
-            daemon_ver: "catalog-startup-test".into(),
+            daemon_ver: "0.39.0".into(),
         };
         write_atomic(&connection_file, &connection).unwrap();
         let connected = ConnectedClients::new();
@@ -175,6 +189,7 @@ impl LiveRoute {
         let transforms = Arc::new(AtomicU64::new(0));
         let observer = Observer {
             handler: Arc::clone(&handler),
+            project: project.clone(),
             gate: Arc::clone(&gate),
             release_on_catalog: !matches!(condition, StoreCondition::Delayed),
             bind_before_open: Arc::clone(&bind_before_open),
@@ -203,7 +218,8 @@ impl LiveRoute {
         Self {
             consumer,
             handler,
-            identity: BindIdentity::new(project, session_resolver::RUNNER_BIND_HARNESS, "s"),
+            identity: BindIdentity::new(session_resolver::RUNNER_BIND_HARNESS, "s"),
+            project,
             gate,
             bind_before_open,
             catalog_before_open,
@@ -281,7 +297,7 @@ async fn first_composition_catalog_on_a_real_route_awaits_the_startup_open_witho
         .get()
         .expect("catalog joined the coordinator's open");
     assert!(store
-        .load_provider_catalog(&route.identity.project_root.to_string_lossy(), "s")
+        .load_provider_catalog(&route.project.to_string_lossy(), "s")
         .unwrap()
         .is_some());
     assert!(route.catalog_refusal().is_none());

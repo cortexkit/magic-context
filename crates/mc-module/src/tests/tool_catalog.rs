@@ -522,7 +522,9 @@ fn compaction_must_be_an_object_with_a_provider_and_never_null() {
 fn role_describe_advertises_compacting_preflight() {
     let answer: Value =
         serde_json::from_slice(&tool_catalog::role_describe_bytes().unwrap()).unwrap();
-    assert_eq!(answer["capabilities"], json!(["compacting-preflight/v1"]));
+    let mut capabilities = vec!["compacting-preflight/v1".to_string()];
+    capabilities.extend(crate::project_bind_capabilities());
+    assert_eq!(answer["capabilities"], json!(capabilities));
 }
 
 #[test]
@@ -835,6 +837,19 @@ fn example_handler() -> (McHandler, Arc<McStore>, tempfile::TempDir, PathBuf) {
         },
     );
     (handler, store, dir, project)
+}
+
+#[test]
+fn omitted_system_text_preset_uses_the_default_head_text() {
+    let config = CatalogConfig::from_module_config(&example_module_config());
+    let omitted =
+        crate::tool_catalog::catalog_answer_bytes(&json!({"system_text":{}}), &config).unwrap();
+    let explicit = crate::tool_catalog::catalog_answer_bytes(
+        &json!({"system_text":{"preset":"head"}}),
+        &config,
+    )
+    .unwrap();
+    assert_eq!(omitted, explicit);
 }
 
 #[tokio::test(flavor = "current_thread")]

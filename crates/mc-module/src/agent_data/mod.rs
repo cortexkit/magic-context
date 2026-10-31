@@ -613,8 +613,16 @@ impl AgentDataService {
             .expect("route bindings")
             .get(&channel)
             .cloned();
+        let route = handler.route_identity(channel);
         let request = match decode(
-            binding.as_ref().and_then(|b| b.principal.as_ref()),
+            route
+                .as_ref()
+                .and_then(|route| route.principal.as_ref())
+                .or_else(|| {
+                    binding
+                        .as_ref()
+                        .and_then(|binding| binding.principal.as_ref())
+                }),
             method,
             params,
         ) {

@@ -483,6 +483,20 @@ impl McStore {
             rows.collect()
         }).map_err(Into::into)
     }
+
+    /// Read only the project metadata saved in serialized compaction state, not its potentially large
+    /// serialized compaction state. Multiple conversations remain ambiguous.
+    pub fn async_compaction_projects_for_session(
+        &self,
+        runner: Option<&str>,
+        session: &str,
+    ) -> Result<Vec<(String, Option<String>)>, McStoreError> {
+        self.inner.with_conn(|conn| {
+            let mut query = conn.prepare("SELECT json_extract(state_json,'$.runner_identity.project_root'), json_extract(state_json,'$.dream_target.project') FROM mc_async_compaction WHERE session=?1 AND (?2 IS NULL OR json_extract(conversation_key,'$[0]')=?2) AND json_type(state_json,'$.runner_identity.project_root')='text'")?;
+            let rows = query.query_map(params![session, runner], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect()
+        }).map_err(Into::into)
+    }
     /// The records of every conversation held for `session`, whatever its
     /// runner or harness. The caller decides which of them it may reach.
     pub fn async_compaction_records_for_session(

@@ -87,6 +87,27 @@ async fn pre_user_prepends_the_gap_since_the_newest_held_message() {
 }
 
 #[tokio::test]
+async fn unscoped_pre_user_uses_the_existing_sessions_setup_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = rig(dir.path()).await;
+    let request = subc_client_rs::RouteBindRequest::new(
+        subc_client_rs::RouteHandle::detached(7, 1),
+        crate::route_targets::catalog_provider_target_for_test(),
+        subc_protocol::BindIdentity::new("runner", "s"),
+    )
+    .with_principal(subc_protocol::Principal::Reserved {
+        module_id: "thalamus-harness".into(),
+    });
+    assert!(request.scope.is_none());
+    let decision = rig.h.on_bind(&request).await;
+    assert!(format!("{decision:?}").contains("Accept"));
+    held(&rig, 20 * 60_000 + 5_000).await;
+    let answer = hook(&rig, &["What's next?"]).await;
+    assert_eq!(prepended(&answer), vec!["<!-- +20m -->\n".to_string()]);
+    assert_eq!(rig.h.facade_binding(7).unwrap().project_root, dir.path());
+}
+
+#[tokio::test]
 async fn pre_user_adds_no_marker_under_the_threshold() {
     let dir = tempfile::tempdir().unwrap();
     let rig = rig(dir.path()).await;

@@ -73,6 +73,7 @@ impl Clock for SystemClock {
 
 /// Process-wide state of the Rust dreamer.
 pub struct DreamRuns {
+    child_scopes: Arc<crate::child_scopes::ChildScopes>,
     targets: Mutex<HashMap<String, DreamTarget>>,
     in_flight: Arc<Mutex<HashSet<String>>>,
     timer: AtomicBool,
@@ -87,8 +88,13 @@ pub struct DreamRuns {
 }
 
 impl DreamRuns {
-    pub fn new(connection_file: Option<PathBuf>, route_targets: &RouteTargetConfig) -> Self {
+    pub fn new(
+        connection_file: Option<PathBuf>,
+        route_targets: &RouteTargetConfig,
+        child_scopes: Arc<crate::child_scopes::ChildScopes>,
+    ) -> Self {
         Self {
+            child_scopes,
             targets: Mutex::default(),
             in_flight: Arc::default(),
             timer: AtomicBool::new(false),
@@ -357,6 +363,7 @@ impl Run<'_> {
                         project_root: captured.directory.clone(),
                         harness: self.harness.to_owned(),
                         session_runner: Some(route.clone()),
+                        child_scopes: Arc::clone(&self.handles.runs.child_scopes),
                     },
                     routes: self.handles.broca_routes.clone(),
                     module_id: self.handles.module_id.clone(),
@@ -385,6 +392,7 @@ impl Run<'_> {
                         project_root: captured.directory.clone(),
                         harness: self.harness.to_owned(),
                         session_runner: None,
+                        child_scopes: Arc::clone(&self.handles.runs.child_scopes),
                     },
                     routes: self.handles.broca_routes.clone(),
                     module_id: self.handles.module_id.clone(),

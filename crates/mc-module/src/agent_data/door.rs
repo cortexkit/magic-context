@@ -102,7 +102,7 @@ impl SubcMoveIo {
         let target = RouteTargetConfig::default()
             .target(route)
             .ok_or_else(DoorError::unavailable)?;
-        let identity = BindIdentity::new(PathBuf::from("/"), "agent-data", "agent-data");
+        let identity = BindIdentity::new("agent-data", "agent-data");
         let budget = Duration::from_secs(30);
         let nonce = subc_client_rs::launch_nonce()
             .ok()

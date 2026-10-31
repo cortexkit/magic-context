@@ -75,7 +75,7 @@ impl Rig {
             key: generate_key().unwrap(),
             daemon_id: generate_daemon_id().unwrap(),
             pid: std::process::id(),
-            daemon_ver: "context-watch-test".into(),
+            daemon_ver: "0.39.0".into(),
         };
         write_atomic(&file, &connection).unwrap();
         let connected = ConnectedClients::new();
@@ -100,7 +100,7 @@ impl Rig {
         let consumer = SubcConsumer::connect(&file, ConsumerOptions::default())
             .await
             .unwrap();
-        let identity = BindIdentity::new(dir.path().to_path_buf(), "desktop", "ignored");
+        let identity = BindIdentity::new("desktop", "ignored");
         Self {
             consumer,
             handler,
@@ -173,6 +173,34 @@ async fn event(sub: &mut subc_client_rs::Subscription, management: bool) -> Valu
     } else {
         value
     }
+}
+
+#[tokio::test]
+async fn unscoped_management_watch_uses_the_named_session() {
+    if super::super::tests::isolated(
+        "app_read::watch::transport_tests::unscoped_management_watch_uses_the_named_session",
+    ) {
+        return;
+    }
+    let rig = Rig::start().await;
+    let mut watch = rig.subscribe(true, None).await;
+    let initial = event(&mut watch, true).await;
+    assert_eq!(initial["kind"], "resync");
+    assert!(rig
+        .handler
+        .route_identities
+        .lock()
+        .unwrap()
+        .values()
+        .all(|route| route.scope.is_none()));
+    assert!(rig.handler.bindings.lock().unwrap().is_empty());
+    super::super::tests_support::apply_sql(
+        &rig.dir.path().join("context.db"),
+        "UPDATE session_meta SET counter=1 WHERE session_id='s'",
+    );
+    assert_eq!(event(&mut watch, true).await["kind"], "changes");
+    watch.unsubscribe().unwrap();
+    rig.slots(0).await;
 }
 
 #[tokio::test]

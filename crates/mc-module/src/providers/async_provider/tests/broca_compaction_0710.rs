@@ -76,8 +76,8 @@ async fn replay_case(case: &str, fetches: usize, notices: usize, models: usize) 
     )
     .await;
 
-    // The published Setup decoder ignores future fields, not their whole
-    // request. The captured scripted preset is not one ck-mc implements.
+    // The current Setup decoder retains negotiated view features and still
+    // ignores unknown fields. The captured scripted preset is not implemented.
     let decoded: compact::setup::SetupRequest = decode(params).unwrap();
     assert_eq!(decoded.view_due_max_ms(), Some(30_000));
     assert_eq!(decoded.ride_wait_max_ms, Some(120_000));
@@ -86,20 +86,29 @@ async fn replay_case(case: &str, fetches: usize, notices: usize, models: usize) 
         json!(["truncate", "tag_bytes_edits"])
     );
     let known = serde_json::to_value(decoded).unwrap();
-    assert!(known.get("view_features").is_none());
+    assert_eq!(known["view_features"], params["view_features"]);
+    let mut future = params.clone();
+    future["ck_mc_unknown_fixture_field"] = json!({"future":true});
+    let future: compact::setup::SetupRequest = decode(&future).unwrap();
+    assert_eq!(serde_json::to_value(future).unwrap(), known);
     let error = invalid_params(rig.h.dispatch_value(7, setup.clone()).await);
     assert_eq!(error, "unknown provider preset");
     assert!(load_head(rig.h.store.get().unwrap(), &rig.reference)
         .unwrap()
         .is_none());
-    println!("{setup_name}: PASS decode (view_due_max_ms=30000, view_features ignored); handler REJECT invalid_params: {error}");
+    println!("{setup_name}: PASS decode (view_due_max_ms=30000, view_features retained); handler REJECT invalid_params: {error}");
 
     // This is a separate compatibility probe, not a rewrite of the capture:
-    // remove only the future member and leave view_due_max_ms unchanged.
+    // remove only view features and leave view_due_max_ms unchanged.
     let mut v0710 = params.clone();
     v0710.as_object_mut().unwrap().remove("view_features");
     let decoded: compact::setup::SetupRequest = decode(&v0710).unwrap();
-    assert_eq!(serde_json::to_value(decoded).unwrap(), known);
+    let mut without_features = known.clone();
+    without_features
+        .as_object_mut()
+        .unwrap()
+        .remove("view_features");
+    assert_eq!(serde_json::to_value(decoded).unwrap(), without_features);
     let error = invalid_params(
         rig.h
             .dispatch_value(7, json!({"method":"compaction.setup","params":v0710}))
@@ -142,15 +151,19 @@ async fn replay_case(case: &str, fetches: usize, notices: usize, models: usize) 
         no_truncate(&answer);
 
         // These captured answers come from a scripted provider, not ck-mc.
-        // An unknown truncate field decodes but cannot supply the action that
-        // the 0.7.10 view validator requires (bytes or drop).
+        // The current role crate understands truncate edits in scripted views;
+        // ck-mc's independent publication witness below still emits none.
         let scripted: view::ViewGetAnswer = decode(&capture["answer"]).unwrap();
         if case == "part_edits_truncate_renders_with_own_tag" {
             let view::ViewGetAnswer::View { view } = scripted else {
                 panic!("expected a scripted view")
             };
-            assert_eq!(view.check(), Err(view::ViewProblem::EditAction));
-            println!("{name}: request PASS; ck-mc answer PASS (unknown_session); scripted answer PASS decode, FAIL validation (EditAction)");
+            assert_eq!(
+                serde_json::to_value(&view).unwrap()["ranges"][0]["edits"][0]["truncate"],
+                "placeholder"
+            );
+            assert_eq!(view.check(), Ok(()));
+            println!("{name}: request PASS; ck-mc answer PASS (unknown_session); scripted truncate answer PASS decode/validation");
         } else {
             if let view::ViewGetAnswer::View { view } = scripted {
                 assert_eq!(view.check(), Ok(()), "{name}");

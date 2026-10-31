@@ -152,12 +152,32 @@ impl McHandler {
         method: &str,
         params: &Value,
     ) -> HandlerOutcome {
-        let binding = match self.facade_binding(channel) {
-            Ok(binding) => binding,
-            Err(_) => return error("route_unbound", "compaction requires a bound runner route"),
+        if method == "compaction.setup"
+            && self.route_identity(channel).is_some_and(|route| {
+                crate::route_binding::ScopedProject::from_stamp(route.scope.as_ref()).is_none()
+            })
+        {
+            return error(
+                "setup_route_unscoped",
+                "compaction.setup requires a project in the route scope",
+            );
+        }
+        let route = self.route_identity(channel);
+        let trusted_binding = if route.is_none() {
+            self.facade_binding(channel).ok()
+        } else {
+            None
         };
+        let principal = route
+            .as_ref()
+            .and_then(|route| route.principal.as_ref())
+            .or_else(|| {
+                trusted_binding
+                    .as_ref()
+                    .and_then(|binding| binding.principal.as_ref())
+            });
         if !matches!(
-            binding.principal.as_ref(),
+            principal,
             Some(subc_protocol::Principal::Reserved { module_id })
                 if crate::route_targets::SESSION_RUNNER_MODULE_IDS
                     .contains(&module_id.as_str())
@@ -167,15 +187,28 @@ impl McHandler {
                 "compaction requires an attested session runner",
             );
         }
-        if let Some(session) = params.get("session").and_then(Value::as_str) {
-            if let Some(refusal) = self.provider_store.catalog_refusal(&binding, session) {
-                return refusal;
-            }
-        }
         let result = match method {
-            "compaction.setup" => self.async_setup(channel, &binding, params).await,
-            "view.get" => self.async_view_get(&binding, params).await,
-            "compaction.ride" => self.async_ride(&binding, params).await,
+            "compaction.setup" => {
+                let Some(binding) = route
+                    .as_ref()
+                    .and_then(|route| self.scoped_binding(route))
+                    .or(trusted_binding)
+                else {
+                    return error("route_unbound", "compaction requires a bound runner route");
+                };
+                let binding = match self.binding_for_existing_setup(binding, params) {
+                    Ok(binding) => binding,
+                    Err(error) => return error,
+                };
+                if let Some(session) = params.get("session").and_then(Value::as_str) {
+                    if let Some(refusal) = self.provider_store.catalog_refusal(&binding, session) {
+                        return refusal;
+                    }
+                }
+                self.async_setup(channel, &binding, params).await
+            }
+            "view.get" => self.async_view_get(principal, params).await,
+            "compaction.ride" => self.async_ride(principal, params).await,
             _ => Err(invalid("unknown compaction operation")),
         };
         match result {
