@@ -177,6 +177,67 @@ async fn runner_attested_plain_head_tools_survive_first_setup() {
     }
 }
 
+/// THALAMUS's runner fetches the head's catalog on the session's own route with
+/// provider params only (`{"params":{"compacting":true},"preset":"head"}`, no
+/// composition), then calls tools naming `preset: "head"` at the top level.
+/// WERNI's first `ctx_reduce` was refused `unknown_tool` on exactly this path.
+#[tokio::test]
+async fn a_compacting_runner_head_fetched_with_params_only_serves_ctx_reduce() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::without_setup(
+        dir.path(),
+        "thalamus-harness",
+        ("opencode", CANARY_SESSION),
+        ("opencode", CANARY_SESSION),
+        |h| {
+            let mut binding = h.facade_binding(7).unwrap();
+            binding.project_root = CANARY_ROOT.into();
+            h.bind_route(7, binding);
+            h.store
+                .get()
+                .unwrap()
+                .set_route_identity_for_test(CANARY_ROOT, "git:canary");
+        },
+    )
+    .await;
+    let setup = rig.op("compaction.setup", json!({
+        "session":CANARY_SESSION, "harness":"opencode", "request_id":"first-setup", "model":"fixture",
+        "context_window":100_000, "composition":{"render_tags":true},
+        "params":{"serializer_profile":"opencode-aisdk"}, "lineage_id":"L", "now":1
+    })).await;
+    assert_eq!(setup["answer"], "ready", "{setup}");
+    let catalog = outcome(
+        rig.h
+            .dispatch_value(
+                7,
+                json!({"name":"tool.catalog","arguments":{"params":{"compacting":true},"preset":"head"}}),
+            )
+            .await,
+    );
+    let names = catalog["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{catalog}"))
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert!(names.contains("ctx_reduce"), "{names:?}");
+    for (name, arguments) in [
+        ("ctx_reduce", json!({"drop":"1"})),
+        ("ctx_expand", json!({"message":0})),
+    ] {
+        let answer = outcome(
+            rig.h
+                .dispatch_value(
+                    7,
+                    json!({"name":name,"arguments":arguments,"tool_call_id":"t1","preset":"head"}),
+                )
+                .await,
+        );
+        assert_ne!(answer["code"], "unknown_tool", "{name}: {answer}");
+        assert_ne!(answer["code"], "compaction_inactive", "{name}: {answer}");
+    }
+}
+
 #[tokio::test]
 async fn unattested_plain_head_routes_still_refuse_and_claude_keeps_wrapper_message() {
     let dir = tempfile::tempdir().unwrap();
