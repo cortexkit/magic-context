@@ -361,3 +361,53 @@ async fn chain_reset_and_ttl_drain_held_summary_and_drops_then_replay_identicall
         );
     }
 }
+
+/// compaction-provider 0.7.12: a service tier is part of the provider's cache
+/// key, so a `service_tier_change` ride lands held work in one rebuild exactly
+/// like a TTL expiry. A ride without its tier is refused by that member.
+#[tokio::test]
+async fn service_tier_change_rides_like_a_ttl_expiry() {
+    let control = {
+        let dir = tempfile::tempdir().unwrap();
+        let rig = held_summary_and_drops(dir.path()).await;
+        rig.notice(2, 1_000, None).await;
+        let view = rig.ride("ttl_expired").await.expect("ttl rewrite view");
+        (view.ranges.clone(), rig.render(&view))
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let rig = held_summary_and_drops(dir.path()).await;
+    rig.notice(2, 1_000, None).await;
+    let pending = rig.pending_targets();
+    match rig
+        .h
+        .dispatch_value(
+            7,
+            json!({"method":"compaction.ride","params":{
+                "session_ref":rig.reference,"cause":"service_tier_change","deadline_ms":10_000
+            }}),
+        )
+        .await
+    {
+        HandlerOutcome::ErrorWithDetail { code, detail, .. } => {
+            assert_eq!(code, "invalid_params");
+            assert_eq!(detail["field"], "service_tier");
+        }
+        other => panic!("a tier change without its tier must be refused: {other:?}"),
+    }
+    assert_eq!(rig.newest(), None);
+    assert_eq!(rig.pending_targets(), pending);
+
+    let answer = rig
+        .op(
+            "compaction.ride",
+            json!({
+                "session_ref":rig.reference,"cause":"service_tier_change",
+                "service_tier":"fast","deadline_ms":10_000
+            }),
+        )
+        .await;
+    assert_eq!(answer["answer"], "view", "{answer}");
+    let view: view::CompactionView = decode(&answer["view"]).unwrap();
+    assert!(rig.pending_targets().is_empty());
+    assert_eq!((view.ranges.clone(), rig.render(&view)), control);
+}

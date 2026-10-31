@@ -369,7 +369,8 @@ pub(crate) struct AsyncRecord {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     moved_cold_prefix: bool,
     /// A rewrite ride (`ttl_expired`, `model_change`, `account_change`,
-    /// `surface_change`, `chain_reset`) rebuilt this conversation since the last notice
+    /// `surface_change`, `chain_reset`, `service_tier_change`) rebuilt this
+    /// conversation since the last notice
     /// completed. Its request rewrote the runner's prompt cache from the
     /// runner's own current bytes, so a prune reconciled before the next
     /// notice completes needs no second rebuild. Kept only for a session that
@@ -6633,6 +6634,7 @@ impl McHandler {
             // A missing or malformed account label is refused by its own
             // member; the label itself is never echoed.
             ride::RideProblem::Account => invalid_field("account", e.name()),
+            ride::RideProblem::ServiceTier => invalid_field("service_tier", e.name()),
             _ => invalid_field("deadline_ms", e.name()),
         })?;
         if matches!(request.cause, ride::RideCause::Unknown(_)) {
@@ -6717,7 +6719,9 @@ impl McHandler {
             let reference = request.session_ref.clone();
             // A rewrite ride's request rewrites the runner's prompt cache from
             // its own current bytes; a prune reconciled before the next
-            // notice completes then needs no rebuild of its own.
+            // notice completes then needs no rebuild of its own. A service tier
+            // is part of the provider's cache key, so a tier change loses the
+            // cache exactly like a model change.
             let rewrite = matches!(
                 request.cause,
                 ride::RideCause::TtlExpired
@@ -6725,6 +6729,7 @@ impl McHandler {
                     | ride::RideCause::ModelChange
                     | ride::RideCause::AccountChange
                     | ride::RideCause::SurfaceChange
+                    | ride::RideCause::ServiceTierChange
             );
             let (view, pass) = tokio::task::spawn_blocking(move || {
                 let _serial = _serial;

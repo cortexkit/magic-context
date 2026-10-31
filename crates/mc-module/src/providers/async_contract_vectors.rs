@@ -200,6 +200,7 @@ fn the_largest_well_formed_notice_fits_the_header_bound() {
     .with_reasoning_pruned(
         cortexkit_role_llm_runner::archive_prunes_reasoning::ReasoningPruned::new(max, max, max),
     )
+    .with_service_tier(cortexkit_role_llm_runner::service_tier::ServiceTier::Ultrafast)
     .with_events(events);
     let mut encoded = notice.to_headers();
     encoded.insert("history_edit_cost".into(), "x".repeat(1024));
@@ -211,12 +212,15 @@ fn the_largest_well_formed_notice_fits_the_header_bound() {
     );
     // Every value at its bound: `events` at 1,024 bytes, both lineage ids at
     // 256, and the rest at their widest encodings. The open edit-cost header
-    // can also carry a future value of 1,024 bytes.
+    // can also carry a future value of 1,024 bytes. A notice's service tier is
+    // `fast` or `ultrafast` (standard is omitted), so at most 9 bytes.
     let names: usize = notice::headers::NOTICE.iter().map(|n| n.len()).sum();
     let descent = 256 + 1 + 20 + 1 + 64;
     let pruned = 3 * 20 + 2;
-    let widest = names + 2 * 1024 + 5 * 20 + 3 + 256 + 32 + 64 + 5 * 20 + 256 + descent + pruned;
-    assert_eq!(widest, 3432);
+    let tier = "ultrafast".len();
+    let widest =
+        names + 2 * 1024 + 5 * 20 + 3 + 256 + 32 + 64 + 5 * 20 + 256 + descent + pruned + tier;
+    assert_eq!(widest, 3453);
     assert!(widest <= notice::MAX_NOTICE_HEADER_BYTES);
     assert!(notice::header_bytes(&encoded) <= widest);
 }
