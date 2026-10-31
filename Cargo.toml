@@ -27,8 +27,9 @@ cortexkit-lease = "=0.1.2"
 cortexkit-log = { version = "=0.3.5", features = ["store-paths"] }
 
 # Published subc wire/SDK crates use crates.io. subc-core is unpublished; this
-# revision matches the published daemon 0.39.0 release.
-subc-protocol = "=0.34.0"
+# revision matches daemon 0.39.0. Historian, classifier and dream sessions receive
+# their exact project directory through scopes rather than the opener's identity.
+subc-protocol = "=0.34.1"
 subc-control = "=0.34.0"
 subc-transport = "=0.15.0"
 subc-client-rs = "=0.33.0"
@@ -56,7 +57,7 @@ subc-daemon = { version = "=0.39.0" }
 subc-jobobject = { version = "=0.2.3" }
 subc-jsonc = { version = "=0.1.3" }
 subc-os = { version = "=0.1.26" }
-subc-protocol = { version = "=0.34.0" }
+subc-protocol = { version = "=0.34.1" }
 subc-transport = { version = "=0.15.0" }
 subc-presence = { version = "=0.1.3" }
 subc-uptime = { version = "=0.1.1" }
