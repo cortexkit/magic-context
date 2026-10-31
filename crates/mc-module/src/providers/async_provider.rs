@@ -1511,7 +1511,9 @@ impl State {
         }
         // Keep the applied version, everything newer (not yet acknowledged)
         // and any version an engine baseline names; the store also keeps the
-        // newest version.
+        // newest version. Restoration can copy a published baseline into a
+        // separate row without clearing its publication version. Recovery
+        // snapshots still reference that publication, so retain it too.
         let retain_from = self.applied.map(|applied| {
             [
                 self.engine_baselines.produced,
@@ -1522,6 +1524,12 @@ impl State {
                 Baseline::Published(version) => Some(version),
                 _ => None,
             })
+            .chain(
+                self.produced_view
+                    .iter()
+                    .chain(&self.applied_view)
+                    .filter_map(|view| view.publication_version),
+            )
             .fold(applied, u64::min)
         });
         let retain_from = retain_from.map(|floor| {
