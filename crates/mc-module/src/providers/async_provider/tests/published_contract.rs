@@ -53,6 +53,54 @@ async fn descending_setup_uses_kept_head_without_runner_calls() {
     assert_eq!(retry["initial"], answer["initial"]);
 }
 
+/// Core recomposes a runner head's plan between lineages (new tools, a
+/// provider respawning), so a cut's Setup carries the plan in effect
+/// (compaction-provider §4). WERNI's cut Setup was refused "async setup plan
+/// is frozen" for hours after one such change.
+#[tokio::test]
+async fn descending_setup_adopts_a_changed_plan_composition() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(dir.path()).await;
+    rig.fill(180);
+    rig.history(130, "completed history");
+    rig.notice(1, 90_000, None).await;
+    let state = rig.state();
+    let first = state
+        .newest_published_cut()
+        .expect("published adoptable cut")
+        .first_ordinal;
+    let mut request = serde_json::to_value(&state.setup).unwrap();
+    request["lineage_id"] = json!("L2");
+    request["descends_from"] = json!({"lineage_id":"L","through_ordinal":first - 1});
+    request["request_id"] = json!("descent");
+    request["composition"]["tool_providers"] = json!([{"provider":"aft","tools":["read","edit"]}]);
+    let answer = rig.op("compaction.setup", request.clone()).await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    assert_eq!(
+        serde_json::to_value(&rig.state().setup.composition).unwrap(),
+        request["composition"]
+    );
+
+    // The message format still identifies the session.
+    let mut changed_format = request;
+    changed_format["lineage_id"] = json!("L3");
+    changed_format["request_id"] = json!("format");
+    changed_format["params"]["serializer_profile"] = json!("pi");
+    *rig.runner.setup_lineage.lock().unwrap() = Some("L3".into());
+    let refused = rig
+        .h
+        .dispatch_value(
+            7,
+            json!({"method":"compaction.setup","params":changed_format}),
+        )
+        .await;
+    *rig.runner.setup_lineage.lock().unwrap() = None;
+    assert!(
+        matches!(&refused, HandlerOutcome::ErrorWithDetail { code, .. } if code == "invalid_params"),
+        "{refused:?}"
+    );
+}
+
 #[tokio::test]
 async fn native_descent_initial_covers_retained_rows_with_drops_no_read_one_rebuild() {
     // A native cut-descent Setup answers `initial` with the history head plus

@@ -3288,7 +3288,7 @@ impl McHandler {
         let stored_floor = existing
             .as_ref()
             .and_then(|state| state.full_array_floor.clone());
-        if let Some(state) = existing.filter(|_| discarded.is_none()) {
+        if let Some(mut state) = existing.filter(|_| discarded.is_none()) {
             self.authorize_async(binding, &state)?;
             let project = self.historian_lane_project(channel, binding, store)?;
             self.record_session_runner_dream_target(
@@ -3297,12 +3297,7 @@ impl McHandler {
                 &state.key.harness,
                 state.runner()?,
             );
-            if state.setup.params != request.params
-                || state.setup.composition != request.composition
-                || state.setup.preset != request.preset
-            {
-                return Err(invalid_field("params", "async setup plan is frozen"));
-            }
+            adopt_setup_plan(&mut state, &request)?;
             // The post-prune Setup (compaction-provider §4): the runner
             // pruned this session since ck-mc last reconciled, and calls
             // Setup before any other call for its run. Re-read the held copies
@@ -3906,6 +3901,22 @@ impl McHandler {
         )?;
         template.logical_prefix = prefix;
         template.runner_owned_reminders = true;
+        // Parts the view drops whole are gone from what the runner sends, but the
+        // engine still reads their raw bytes. Name them so reminder backlog
+        // doesn't count them.
+        if state.frozen_edits.has_whole_drops() {
+            template.view_dropped_tags = state
+                .tag_index
+                .iter()
+                .filter(|(_, address)| {
+                    state
+                        .frozen_edits
+                        .drops_whole(&address.mid, &address.part, &address.digest)
+                })
+                .filter_map(|(tag, _)| tags::parse_tag(tag))
+                .filter_map(|number| i64::try_from(number).ok())
+                .collect();
+        }
         template.pruned_reasoning_readopt = state.pruned_readopt.clone();
         template.native_reminder_strip_pending =
             state.reminder_cadence.as_ref().is_some_and(|cadence| {
@@ -8369,4 +8380,30 @@ pub(crate) fn serve_descriptors(entry: &ReadMessage) -> ReadMessage {
     let budget = DESCRIPTOR_MESSAGE_MAX - serde_json::to_vec(&envelope).unwrap().len();
     served.message = describe(&entry.message, &payloads, budget).expect("describable test message");
     served
+}
+
+/// A runner head's plan changes between lineages: core recomposes it on a
+/// schedule and sends `session.refresh` when a provider's tools change, and the
+/// runner reports that as `surface_change` (compaction-provider §4). The next
+/// lineage's Setup carries the plan in effect, so its composition is adopted.
+/// The message format (`params`) and the preset identify the session itself and
+/// still refuse a change.
+fn adopt_setup_plan(
+    state: &mut State,
+    request: &compact::setup::SetupRequest,
+) -> Result<(), HandlerOutcome> {
+    if state.setup.params != request.params || state.setup.preset != request.preset {
+        return Err(invalid_field(
+            "params",
+            "the session's message format or preset changed; set up a new session",
+        ));
+    }
+    if state.setup.composition != request.composition {
+        tracing::info!(
+            session_ref = %state.reference(),
+            "async setup: adopted the plan composition in effect"
+        );
+        state.setup.composition = request.composition.clone();
+    }
+    Ok(())
 }

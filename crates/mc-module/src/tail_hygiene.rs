@@ -529,6 +529,7 @@ pub(crate) fn queued_tag_numbers(
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn measure_tail_hygiene_with_pending_drops(
     projection: &FlatProjection,
     core: &CoreState,
@@ -537,6 +538,34 @@ pub(crate) fn measure_tail_hygiene_with_pending_drops(
     protected_tag_numbers: &TagNumberProjection,
     protected_block_ids: &HashSet<String>,
     pending_drop_target_ids: &HashSet<String>,
+) -> TailHygieneMeasurement {
+    measure_tail_hygiene_excluding_view_drops(
+        projection,
+        core,
+        coverage_ordinal,
+        tag_rows,
+        protected_tag_numbers,
+        protected_block_ids,
+        pending_drop_target_ids,
+        &HashSet::new(),
+    )
+}
+
+/// [`measure_tail_hygiene_with_pending_drops`], also treating every part whose
+/// tag is in `view_dropped_tags` as already gone. On the async runner lane the
+/// provider's view drops some parts the engine still sees in full (drops
+/// carried over from standalone by a session move); counting them as backlog
+/// claimed reclaimable mass larger than the whole request.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn measure_tail_hygiene_excluding_view_drops(
+    projection: &FlatProjection,
+    core: &CoreState,
+    coverage_ordinal: Option<u64>,
+    tag_rows: &[McTagRow],
+    protected_tag_numbers: &TagNumberProjection,
+    protected_block_ids: &HashSet<String>,
+    pending_drop_target_ids: &HashSet<String>,
+    view_dropped_tags: &HashSet<i64>,
 ) -> TailHygieneMeasurement {
     profile_start!(perf_indexes, "hygiene_indexes");
     let (tags_by_block, tags_by_arc) = tag_numbers_by_block_and_arc(projection, tag_rows);
@@ -594,6 +623,10 @@ pub(crate) fn measure_tail_hygiene_with_pending_drops(
         }
 
         let tag_number = block_tag_number(block, &tags_by_block, &tags_by_arc);
+        if tag_number.is_some_and(|number| view_dropped_tags.contains(&number)) {
+            parts.push(excluded_part(key, &block.bytes));
+            continue;
+        }
         let protected = block_is_protected(
             block,
             tag_number,
@@ -1621,6 +1654,40 @@ mod tests {
         for part in &measured.parts {
             assert!(part.u_tokens > 0, "{part:?}");
         }
+    }
+
+    /// A part the async view already drops is gone from the request, so it is
+    /// neither backlog nor tail mass. Counting it made a moved head report more
+    /// reclaimable tokens than its whole request held.
+    #[test]
+    fn view_dropped_parts_are_gone_not_backlog() {
+        let messages = vec![
+            text("kept", 1, &"kept mass ".repeat(2_000)),
+            text("dropped", 2, &"dropped mass ".repeat(2_000)),
+            text("recent", 3, "recent"),
+        ];
+        let tags = vec![tag(1, "kept#0"), tag(2, "dropped#0"), tag(3, "recent#0")];
+        let projection = project_messages(&messages).unwrap();
+        let protected = legacy_tag_number_projection(&tags, 1);
+        let measure = |dropped: &HashSet<i64>| {
+            measure_tail_hygiene_excluding_view_drops(
+                &projection,
+                &CoreState::default(),
+                None,
+                &tags,
+                &protected,
+                &HashSet::new(),
+                &HashSet::new(),
+                dropped,
+            )
+        };
+        let all = measure(&HashSet::new());
+        let without = measure(&HashSet::from([2]));
+        assert!(all.parts[1].u_tokens > 0);
+        assert_eq!(without.parts[1].kind, TailHygienePartKind::Excluded);
+        assert_eq!(without.parts[1].u_tokens, 0);
+        assert_eq!(without.parts[1].tokens, 0);
+        assert_eq!(without.parts[0].u_tokens, all.parts[0].u_tokens);
     }
 
     #[test]

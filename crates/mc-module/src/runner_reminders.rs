@@ -45,6 +45,10 @@ pub(crate) mod phase_meter {
 
 const MAX: i64 = 100_000;
 const DELIVERY: [Mode; 3] = [Mode::TurnSystem, Mode::ToolResult, Mode::Steer];
+/// Routine `ctx_reduce` reminders ride the next tool result and never take a
+/// step of their own, as in standalone, where they are appended to a tool
+/// output. A reminder with no tool result to ride expires unsent.
+const ROUTINE_REDUCE_DELIVERY: [Mode; 1] = [Mode::ToolResult];
 const SEARCH_DELIVERY: [Mode; 2] = [Mode::ToolResult, Mode::Steer];
 const NO_DELIVERY_MODE: &str = "not due: runner cannot land any delivery mode";
 const REFUSED_DELIVERY: &str = "not due: runner previously refused this delivery list";
@@ -572,6 +576,13 @@ fn delivery_modes(
     } else {
         &SEARCH_DELIVERY
     };
+    declared_modes(modes, description)
+}
+
+fn declared_modes(
+    modes: &[Mode],
+    description: &cortexkit_role_llm_runner::describe::RoleDescribe,
+) -> Vec<Mode> {
     modes
         .iter()
         .copied()
@@ -788,7 +799,7 @@ async fn send_due_reminders_impl<const FULL_META: bool>(
             count,
             &selected.oldest_reclaimable,
         );
-        let modes = delivery_modes(true, &describe);
+        let modes = declared_modes(&ROUTINE_REDUCE_DELIVERY, &describe);
         if issue(
             runner,
             project_root,
@@ -1379,10 +1390,8 @@ mod tests {
     #[tokio::test]
     async fn fake_runner_delivery_list_is_exact() {
         let sends = sends().await;
-        assert_eq!(
-            sends[0]["delivery"],
-            json!(["turn_system", "tool_result", "steer"])
-        );
+        // A routine ctx_reduce reminder only rides a tool result.
+        assert_eq!(sends[0]["delivery"], json!(["tool_result"]));
         assert_eq!(
             sends[1]["delivery"],
             json!(["turn_system", "tool_result", "steer"])
@@ -1407,14 +1416,18 @@ mod tests {
         )
         .await;
 
-        assert_eq!(outcome.issued.len(), 3);
+        // A steer-only runner gets the time marker and search hint as steers,
+        // and no routine ctx_reduce reminder, which never takes its own step.
+        assert_eq!(outcome.issued.len(), 2);
         assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
-        assert!(runner
-            .sends
-            .lock()
-            .unwrap()
+        assert!(outcome.not_due.contains(&NO_DELIVERY_MODE));
+        let sends = runner.sends.lock().unwrap().clone();
+        assert!(sends
             .iter()
             .all(|send| send["delivery"] == json!(["steer"])));
+        assert!(sends
+            .iter()
+            .all(|send| !send.to_string().contains("mc.ctx_reduce.")));
         assert_eq!(*runner.describe_calls.lock().unwrap(), 1);
     }
 
@@ -1451,15 +1464,18 @@ mod tests {
         let mut state = ReminderState::default();
         let first =
             send_due_reminders(&runner, root, "reminder-test", &mut state, &conditions).await;
-        assert_eq!(first.errors.len(), 2);
+        // Three distinct lists, each refused once: the routine reduce reminder,
+        // the time marker and the search hint.
+        assert_eq!(first.errors.len(), 3);
         let initial_sends = runner.sends.lock().unwrap().clone();
-        assert_eq!(initial_sends.len(), 2);
+        assert_eq!(initial_sends.len(), 3);
+        assert_eq!(initial_sends[0]["delivery"], json!(["tool_result"]));
         assert_eq!(
-            initial_sends[0]["delivery"],
+            initial_sends[1]["delivery"],
             json!(["turn_system", "tool_result", "steer"])
         );
         assert_eq!(
-            initial_sends[1]["delivery"],
+            initial_sends[2]["delivery"],
             json!(["tool_result", "steer"])
         );
 
@@ -1486,7 +1502,7 @@ mod tests {
             &conditions,
         )
         .await;
-        assert_eq!(third.errors.len(), 2);
+        assert_eq!(third.errors.len(), 3);
         assert_eq!(runner.sends.lock().unwrap().len(), initial_sends.len() * 2);
         assert_eq!(*runner.describe_calls.lock().unwrap(), 3);
     }

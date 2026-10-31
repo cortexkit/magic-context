@@ -92,6 +92,18 @@ impl FrozenEdits {
         });
     }
 
+    /// Whether this exact source part is dropped whole: the view leaves it out,
+    /// so the runner sends none of its bytes.
+    pub(super) fn drops_whole(&self, mid: &str, part: &str, digest: &str) -> bool {
+        self.parts
+            .get(&(mid.to_owned(), part.to_owned(), digest.to_owned()))
+            .is_some_and(|frozen| frozen.bytes.is_none())
+    }
+
+    pub(super) fn has_whole_drops(&self) -> bool {
+        self.parts.values().any(|frozen| frozen.bytes.is_none())
+    }
+
     pub(super) fn merge(&mut self, acknowledged: &Self) {
         for part in acknowledged.parts.values() {
             self.insert(part.clone());

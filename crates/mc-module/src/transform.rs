@@ -48,10 +48,10 @@ use crate::selection::{
     SelectionConfig, SelectionContext, AGE_RECLAIM_MIN_TOKENS,
 };
 use crate::tail_hygiene::{
-    channel1_refire_tokens, effective_tail_hygiene, hygiene_band,
-    measure_tail_hygiene_with_pending_drops, post_reduce_grace_holds, queued_tag_numbers,
-    real_user_turn_count, refresh_tail_hygiene_baseline_calibrated, HygieneBand,
-    HygieneCalibration, CHANNEL1_FLOOR_TOKENS, CHANNEL2_FLOOR_TOKENS, CHANNEL2_SEVERITY_THRESHOLD,
+    channel1_refire_tokens, effective_tail_hygiene, hygiene_band, post_reduce_grace_holds,
+    queued_tag_numbers, real_user_turn_count, refresh_tail_hygiene_baseline_calibrated,
+    HygieneBand, HygieneCalibration, CHANNEL1_FLOOR_TOKENS, CHANNEL2_FLOOR_TOKENS,
+    CHANNEL2_SEVERITY_THRESHOLD,
 };
 use mc_core::{classify, CkItem, ClassifierInput, CoreState, FrozenUnit, PassInput, PassPlan};
 use mc_store::{
@@ -793,6 +793,12 @@ pub struct TransformRequest {
     /// Internal delivery ownership, set only by the async runner adapter.
     #[serde(skip)]
     pub(crate) runner_owned_reminders: bool,
+    /// Tag numbers of parts the runner already leaves out because the async
+    /// provider's view drops them (drops carried over from standalone by a
+    /// session move). The engine still sees their raw bytes, so tail hygiene
+    /// must count them as gone, not as reclaimable backlog.
+    #[serde(skip)]
+    pub(crate) view_dropped_tags: std::collections::HashSet<i64>,
     /// Provider provenance stored atomically with its engine cache commit.
     /// The wire cannot nominate a provider record or assert a checkpoint.
     #[serde(skip)]
@@ -1333,6 +1339,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
         Ok(Self {
             native_tail_section: false,
             runner_owned_reminders: false,
+            view_dropped_tags: Default::default(),
             async_cache_recovery: None,
             logical_prefix: None,
             source_lineage_first_ordinal: None,
@@ -8199,6 +8206,7 @@ fn apply_once(
                 .iter()
                 .filter(|unit| unit.key.starts_with("red:") || unit.key.starts_with("cav:"))
                 .collect::<Vec<_>>(),
+            req.view_dropped_tags.iter().collect::<BTreeSet<_>>(),
         ))
     });
     let held_hygiene = req.native_fold_hygiene.as_ref().and_then(|memo| {
@@ -8208,7 +8216,7 @@ fn apply_once(
             .flatten()
     });
     let mut hygiene_measurement = held_hygiene.unwrap_or_else(|| {
-        measure_tail_hygiene_with_pending_drops(
+        crate::tail_hygiene::measure_tail_hygiene_excluding_view_drops(
             &projection,
             &core,
             meta.coverage_ordinal,
@@ -8216,6 +8224,7 @@ fn apply_once(
             &protection_window.tag_numbers,
             &nudge_protected_block_ids,
             &pending_drop_target_ids,
+            &req.view_dropped_tags,
         )
     });
     if let Some(memo) = &req.native_fold_hygiene {
@@ -23861,6 +23870,7 @@ pub(crate) mod tests {
         TransformRequest {
             native_tail_section: false,
             runner_owned_reminders: false,
+            view_dropped_tags: Default::default(),
             async_cache_recovery: None,
             logical_prefix: None,
             source_lineage_first_ordinal: None,
@@ -24251,7 +24261,7 @@ pub(crate) mod tests {
             let old_protected =
                 crate::selection::protected_blocks_for_policy(&items, &HashSet::new(), &old_policy);
             let window = ProtectionWindow::from_persisted_rows(&rows, 4000);
-            let measured = measure_tail_hygiene_with_pending_drops(
+            let measured = crate::tail_hygiene::measure_tail_hygiene_with_pending_drops(
                 &projection,
                 &loaded.core,
                 loaded.meta.coverage_ordinal,

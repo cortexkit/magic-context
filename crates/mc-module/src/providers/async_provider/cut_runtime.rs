@@ -988,12 +988,7 @@ impl McHandler {
         };
         state.load_setup_payloads(store)?;
         self.authorize_async(binding, &state)?;
-        if state.setup.params != request.params
-            || state.setup.composition != request.composition
-            || state.setup.preset != request.preset
-        {
-            return Err(invalid_field("params", "async setup plan is frozen"));
-        }
+        adopt_setup_plan(&mut state, request)?;
         if state.setup.descends_from == request.descends_from && state.lineage == request.lineage_id
         {
             if state.active_seed_is_unsafe(store)? {

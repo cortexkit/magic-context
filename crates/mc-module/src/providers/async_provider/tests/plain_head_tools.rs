@@ -238,6 +238,48 @@ async fn a_compacting_runner_head_fetched_with_params_only_serves_ctx_reduce() {
     }
 }
 
+/// WERNI's live refusal (`frozen=false compacting=false record_exists=true`):
+/// core fetches the head's catalog through its own preflight session, so the
+/// hosted session has no frozen catalog, yet its calls name `preset: "head"`.
+/// A session with a compaction record must be served the compacting tools.
+#[tokio::test]
+async fn a_compacting_runner_head_without_its_own_catalog_serves_ctx_reduce() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::without_setup(
+        dir.path(),
+        "thalamus-harness",
+        ("opencode", CANARY_SESSION),
+        ("opencode", CANARY_SESSION),
+        |h| {
+            let mut binding = h.facade_binding(7).unwrap();
+            binding.project_root = CANARY_ROOT.into();
+            h.bind_route(7, binding);
+            h.store
+                .get()
+                .unwrap()
+                .set_route_identity_for_test(CANARY_ROOT, "git:canary");
+        },
+    )
+    .await;
+    let setup = rig.op("compaction.setup", json!({
+        "session":CANARY_SESSION, "harness":"opencode", "request_id":"first-setup", "model":"fixture",
+        "context_window":100_000, "composition":{"render_tags":true},
+        "params":{"serializer_profile":"opencode-aisdk"}, "lineage_id":"L", "now":1
+    })).await;
+    assert_eq!(setup["answer"], "ready", "{setup}");
+    // The live precondition: no catalog was ever fetched for this session.
+    let binding = rig.h.facade_binding(7).unwrap();
+    assert!(rig.h.provider_store.catalog(&binding).unwrap().is_none());
+    assert!(rig.h.frozen_tool_catalogs.lock().unwrap().is_empty());
+    assert!(rig.h.facade_compaction_record_exists(&binding));
+    for name in ["ctx_reduce", "ctx_expand"] {
+        let checked = rig
+            .h
+            .check_catalog_call(7, name, &json!({"name": name, "preset": "head"}));
+        assert!(checked.is_ok(), "{name}: {checked:?}");
+    }
+}
+
 #[tokio::test]
 async fn unattested_plain_head_routes_still_refuse_and_claude_keeps_wrapper_message() {
     let dir = tempfile::tempdir().unwrap();

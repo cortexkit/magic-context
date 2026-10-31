@@ -648,7 +648,7 @@ impl McHandler {
             .get()
             .ok_or_else(|| transient("store unavailable"))?;
         let binding = self.async_binding(state);
-        let route = self.route_project(0, store, &binding)?;
+        let route = self.route_project(crate::INTERNAL_CHANNEL, store, &binding)?;
         let namespace = state.namespace();
         let now = now_ms();
         let mut hash = Sha256::new();

@@ -4330,6 +4330,7 @@ mod tests {
         TransformRequest {
             native_tail_section: false,
             runner_owned_reminders: false,
+            view_dropped_tags: Default::default(),
             async_cache_recovery: None,
             logical_prefix: None,
             source_lineage_first_ordinal: None,

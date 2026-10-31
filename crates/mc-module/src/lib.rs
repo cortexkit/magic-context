@@ -1533,8 +1533,14 @@ struct RouteProject {
     memory_paused: Option<String>,
 }
 
-/// Identity state belongs to a channel, not a session or directory: a fresh binding
+/// The channel ck-mc passes for work that runs without a route of its own:
+/// runner-session passes, notices and offline passes. subc reserves channel 0
+/// for control, so no route ever binds it.
+pub(crate) const INTERNAL_CHANNEL: u16 = 0;
+
+/// Identity state belongs to a route binding, not a directory: a fresh binding
 /// may adopt a newer host decision without changing an already-served prefix.
+/// Work on [`INTERNAL_CHANNEL`] keeps one per session instead.
 #[derive(Default)]
 struct BindingProject {
     initial: Option<Result<String, project_identity::ProjectIdentityError>>,
@@ -1881,6 +1887,10 @@ pub struct McHandler {
     project_identities: Arc<project_identity::ProjectIdentityResolver>,
     entorhinal: entorhinal_resolve::EntorhinalResolver,
     binding_projects: Mutex<HashMap<u16, BindingProject>>,
+    /// The same per-binding project decision for work that runs without a route:
+    /// runner-session passes, notices and offline passes use [`INTERNAL_CHANNEL`].
+    /// That channel serves every session, so its decision is kept per session.
+    internal_binding_projects: Mutex<HashMap<String, BindingProject>>,
     active_project_roots: Mutex<HashMap<String, PathBuf>>,
     /// Route roots inside a git checkout whose identity git could not give, with the
     /// reason. Their history keeps being served, but every memory feature is paused until
@@ -2706,6 +2716,7 @@ impl McHandler {
             project_identities: Arc::new(project_identity::ProjectIdentityResolver::new()),
             entorhinal,
             binding_projects: Mutex::default(),
+            internal_binding_projects: Mutex::default(),
             active_project_roots: Mutex::default(),
             memory_paused_routes: Arc::default(),
             #[cfg(test)]
@@ -3142,6 +3153,7 @@ impl McHandler {
             project_identities: Arc::new(project_identity::ProjectIdentityResolver::new()),
             entorhinal: entorhinal_resolve::EntorhinalResolver::new(None),
             binding_projects: Mutex::default(),
+            internal_binding_projects: Mutex::default(),
             active_project_roots: Mutex::default(),
             memory_paused_routes: Arc::default(),
             #[cfg(test)]
@@ -3454,7 +3466,18 @@ impl McHandler {
         binding: &SessionBinding,
     ) -> Result<RouteProject, HandlerOutcome> {
         let mut projects = self.binding_projects.lock().expect("binding project mutex");
-        let project = projects.entry(channel).or_default();
+        let mut internal = self
+            .internal_binding_projects
+            .lock()
+            .expect("internal binding project mutex");
+        // A route's channel names one session, so its decision is kept per
+        // channel. The internal channel serves every runner session, so keying it
+        // by channel would hand one session the project another session set first.
+        let project = if channel == INTERNAL_CHANNEL {
+            internal.entry(binding.session.clone()).or_default()
+        } else {
+            projects.entry(channel).or_default()
+        };
         let moved = self
             .active_project_roots
             .lock()
@@ -7628,23 +7651,29 @@ impl McHandler {
         if !name.starts_with("ctx_") {
             return Ok(());
         }
-        if matches!(name, "ctx_reduce" | "ctx_expand") {
-            if let Ok(binding) = self.facade_binding(channel) {
+        // A runner-attested session compacts exactly when ck-mc holds its
+        // compaction record. Core fetches the head's catalog through its own
+        // preflight session, so the hosted session usually has no frozen catalog
+        // of its own (WERNI: `frozen=false compacting=false record_exists=true`).
+        let runner_compacting = match self.facade_binding(channel) {
+            Ok(binding)
                 if route_targets::SessionRunnerRoute::for_principal(
                     binding.principal.as_ref(),
                     &binding.session,
                 )
-                .is_some()
-                    && self.async_compaction_namespace(&binding, true)?.is_none()
-                {
-                    return Err(HandlerOutcome::Error {
-                        code: "compaction_inactive".into(),
-                        message: format!(
-                            "{name} is unavailable: compaction is not active for this session"
-                        ),
-                    });
-                }
+                .is_some() =>
+            {
+                Some(self.async_compaction_namespace(&binding, true)?.is_some())
             }
+            _ => None,
+        };
+        if matches!(name, "ctx_reduce" | "ctx_expand") && runner_compacting == Some(false) {
+            return Err(HandlerOutcome::Error {
+                code: "compaction_inactive".into(),
+                message: format!(
+                    "{name} is unavailable: compaction is not active for this session"
+                ),
+            });
         }
         let preset = match request.get("preset") {
             Some(Value::String(name)) => {
@@ -7682,7 +7711,8 @@ impl McHandler {
         if preset.is_none() && frozen.is_none() {
             return Ok(());
         }
-        let compacting = frozen.as_ref().is_some_and(|catalog| catalog.compacting);
+        let compacting = runner_compacting
+            .unwrap_or_else(|| frozen.as_ref().is_some_and(|catalog| catalog.compacting));
         let served = preset
             .unwrap_or(tool_catalog::Preset::Head)
             .serves(name, compacting)
@@ -15953,6 +15983,34 @@ mod tests {
                     .pin_live_answer(&project, "pj-later", Some(&project));
                 assert_eq!(served(&handler, &store, 7), expected);
             }
+        }
+
+        /// Runner sessions in different projects all pass through the internal
+        /// channel. One session's served project must never become another's: a
+        /// moved head was served the first worker's project memories this way.
+        #[tokio::test]
+        async fn internal_channel_keeps_each_sessions_own_project() {
+            let (handler, store, _temp, project) = fixture();
+            store
+                .with_context_conn_for_test(|db| {
+                    db.execute_batch(
+                        "INSERT INTO session_projects (session_id, harness, project_path, updated_at) VALUES
+                         ('worker', 'opencode', 'pj-worker-project', 1),
+                         ('head', 'opencode', 'pj-head-project', 1);",
+                    )
+                })
+                .unwrap();
+            let root = project.to_string_lossy();
+            let served = |session: &str| {
+                handler
+                    .route_project(INTERNAL_CHANNEL, &store, &super::binding(&root, session))
+                    .unwrap()
+                    .key
+            };
+            assert_eq!(served("worker"), "pj-worker-project");
+            assert_eq!(served("head"), "pj-head-project");
+            assert_eq!(served("worker"), "pj-worker-project");
+            assert_eq!(served("head"), "pj-head-project");
         }
 
         #[tokio::test]
