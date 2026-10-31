@@ -135,3 +135,50 @@ async fn durable_reissue_snapshot_keeps_unacknowledged_decisions_as_references()
     );
     assert!(!recovered.resync_replay_pending);
 }
+
+#[tokio::test]
+async fn published_baseline_retention_advances_when_placed_references_move_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, applied) = held_drops(dir.path()).await;
+    let produced = rig.ride("ceiling").await.unwrap().view_version;
+    closing_mismatch(&rig).await;
+    rig.notice(4, 8_000, Some(applied)).await;
+    let first_reissue = rig.newest().unwrap();
+    rig.notice(5, 8_000, Some(produced)).await;
+    rig.notice(6, 8_000, Some(first_reissue)).await;
+
+    let store = rig.h.store.get().unwrap();
+    let state = rig.state();
+    assert_eq!(state.engine_baselines.produced, Baseline::Stored);
+    assert_eq!(
+        state.produced_view.as_ref().unwrap().publication_version,
+        Some(produced)
+    );
+    assert!(state.applied.unwrap() > produced);
+    assert!(store
+        .load_async_compaction_view(&rig.reference, produced)
+        .unwrap()
+        .is_some());
+
+    // A real rebuild replaces the produced decision; its acknowledgement
+    // replaces the applied baseline, releasing the old publication dependency.
+    let replacement = rig.ride("ceiling").await.unwrap().view_version;
+    assert!(replacement > first_reissue);
+    rig.notice(7, 8_000, Some(replacement)).await;
+    let state = rig.state();
+    assert_eq!(state.applied, Some(replacement));
+    for baseline in [&state.produced_view, &state.applied_view] {
+        assert_eq!(
+            baseline.as_ref().unwrap().publication_version,
+            Some(replacement)
+        );
+    }
+    assert!(store
+        .load_async_compaction_view(&rig.reference, produced)
+        .unwrap()
+        .is_none());
+    assert!(store
+        .load_async_compaction_view(&rig.reference, replacement)
+        .unwrap()
+        .is_some());
+}
