@@ -10,7 +10,7 @@ import { Database } from "../../shared/sqlite";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { deadlineClock, nextLoopTurn } from "./auto-search-clock.test";
 import { persistAutoSearchSkip } from "./auto-search-deadline";
-import { runAutoSearchHint } from "./auto-search-runner";
+import { _resetAutoSearchCache, runAutoSearchHint } from "./auto-search-runner";
 import { autoSearchTestSnapshot } from "./auto-search-snapshot.fixture";
 import * as search from "./auto-search-worker-client";
 import { searchAutoHint } from "./auto-search-worker-client";
@@ -40,7 +40,12 @@ beforeEach(() => {
         autoSearchTestSnapshot(options.projectPath),
     );
 });
-afterEach(() => snapshotSpy.mockRestore());
+afterEach(() => {
+    // A timed-out search can still hold the shared project's worker lease after one loop turn.
+    // Cancel detached work before another test tries to acquire that worker.
+    _resetAutoSearchCache();
+    snapshotSpy.mockRestore();
+});
 afterAll(() => db.close());
 
 test("slow embedding aborts at the deadline, freezes skip bytes, and cannot land late", async () => {
@@ -158,12 +163,14 @@ test("worker hint bytes match the original search and the pre-change golden payl
     expect(`\n\n${buildAutoSearchHint(original)}`).toBe(golden);
     const wire = messages();
     const prompt = wire[0].parts[0].text;
-    await runAutoSearchHint({
-        sessionId: "bytes",
-        db,
-        messages: wire,
-        options: { ...options, embeddingEnabled: false, scoreThreshold: 0 },
-    });
+    expect(
+        await runAutoSearchHint({
+            sessionId: "bytes",
+            db,
+            messages: wire,
+            options: { ...options, embeddingEnabled: false, scoreThreshold: 0 },
+        }),
+    ).toEqual({ ok: true });
     expect(wire[0].parts[0].text).toBe(prompt + golden);
 });
 
