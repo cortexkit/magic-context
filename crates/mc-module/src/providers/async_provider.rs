@@ -2250,6 +2250,11 @@ fn existing_setup_answer(
             offline_first_pass::PreparedAnswer::Inline(inline) => answer = inline,
             offline_first_pass::PreparedAnswer::Refuse(refusal) => return bytes(&refusal),
             offline_first_pass::PreparedAnswer::Due(head_only, due) => {
+                tracing::info!(
+                    session_ref = %state.reference(),
+                    view_version = due.version,
+                    "moved session Setup answered with the prepared view due"
+                );
                 // Added after the typed rebuild in `with_checkpoint`, which
                 // keeps only the members it knows.
                 let mut built = with_checkpoint(head_only, checkpoint);
@@ -6121,6 +6126,15 @@ impl McHandler {
         {
             Some(raw) => {
                 let view: view::CompactionView = serde_json::from_str(&raw).map_err(transient)?;
+                // The fetch an unadopted moved session's first step depends on,
+                // logged so a stalled first turn shows whether it arrived.
+                if offline_first_pass::prepared(&state) {
+                    tracing::info!(
+                        session_ref = %request.session_ref,
+                        view_version = request.view_version,
+                        "moved session prepared view served"
+                    );
+                }
                 bytes(&view::ViewGetAnswer::view(view))
             }
             None => bytes(
