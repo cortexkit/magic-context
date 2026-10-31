@@ -2002,3 +2002,75 @@ async fn card_review_offline_differential_at_new_seeds() {
         first + count
     );
 }
+
+#[tokio::test]
+async fn prepared_view_keeps_its_snapshot_through_setup_fetch_and_adoption() {
+    let _clock = crate::tests::fixed_clock();
+    let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (prep, outcome) = prepared(store.path(), project.path(), fixture_stores).await;
+    let OfflineOutcome::Prepared(report) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(report.published_views, 1);
+    let arm = Arm::open(
+        store.path(),
+        project.path(),
+        &prep.session,
+        Served::new(prep.served.clone(), 7),
+        config(),
+    );
+    let reference = arm.reference();
+    let snapshot = arm
+        .store()
+        .load_async_compaction_views(&reference)
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|(version, _, _, _)| *version == 1)
+        .unwrap()
+        .2
+        .expect("preparation retains its engine/native-edit snapshot");
+    arm.store()
+        .retire_unannounced_async_views(&reference)
+        .unwrap();
+    assert_eq!(
+        arm.views()[0].2,
+        -1,
+        "a prepared view need not be announced before adoption"
+    );
+    assert!(arm.state().applied.is_none(), "prepared is not applied");
+    let answer = arm.setup(setup_request(&prep.session, "fixture")).await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    assert_eq!(
+        arm.store()
+            .load_async_compaction_views(&reference)
+            .unwrap()
+            .0[0]
+            .2
+            .as_deref(),
+        Some(snapshot.as_str())
+    );
+    let fetched = response(
+        arm.h
+            .dispatch_value(
+                CHANNEL,
+                json!({"method":"view.get","params":{"session_ref":reference,"view_version":1}}),
+            )
+            .await,
+    );
+    assert_eq!(fetched["answer"], "view");
+    assert_eq!(fetched["view"]["view_version"], 1);
+    assert_eq!(arm.notice(1, 8_000, Some(1), Vec::new()).await, "ok");
+    let adopted = arm.state();
+    assert!(adopted.offline_first_pass.is_none());
+    assert_eq!(adopted.applied, Some(1));
+    assert!(adopted.snapshot_unavailable.is_none());
+    assert!(!adopted.snapshot_warning_logged);
+    assert!(arm
+        .store()
+        .load_async_compaction_views(&reference)
+        .unwrap()
+        .0[0]
+        .2
+        .is_some());
+}

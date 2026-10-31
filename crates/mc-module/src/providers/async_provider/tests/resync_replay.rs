@@ -22,7 +22,7 @@ fn entry(n: u64, role: &str, content: Value, run: &str) -> ReadMessage {
     entry
 }
 
-async fn held_drops(dir: &Path) -> (Rig, u64) {
+async fn source_rig(dir: &Path) -> Rig {
     let rig = Rig::open(
         dir,
         "broca",
@@ -39,6 +39,11 @@ async fn held_drops(dir: &Path) -> (Rig, u64) {
         };
         entry(n, role, content, "old-run")
     }).collect();
+    rig
+}
+
+async fn held_drops(dir: &Path) -> (Rig, u64) {
+    let rig = source_rig(dir).await;
     rig.history(4, "published work from the previous run");
     rig.notice(1, 8_000, None).await;
     let baseline = rig
@@ -280,4 +285,310 @@ async fn genuine_lineage_change_revalidates_and_rebuilds_once() {
     assert_eq!(rig.newest(), Some(version));
     assert_eq!(rig.pending_targets(), pending);
     assert!(last_decision(&rig).starts_with("async decision defer "));
+}
+
+#[tokio::test]
+async fn unapplied_work_waits_for_a_real_rebuild_after_reissue() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, applied) = held_drops(dir.path()).await;
+    let expected = request_bytes(&rig, &rig.get(applied).await);
+    let unapplied = rig.ride("ceiling").await.unwrap();
+    assert_ne!(request_bytes(&rig, &unapplied), expected);
+    closing_mismatch(&rig).await;
+    rig.notice(4, 8_000, Some(applied)).await;
+    let reissued = rig.newest().unwrap();
+    assert_eq!(request_bytes(&rig, &rig.get(reissued).await), expected);
+    assert!(last_decision(&rig).starts_with("async decision defer "));
+    let rebuilt = rig
+        .ride("ceiling")
+        .await
+        .expect("a real rebuild can carry held produced work");
+    assert!(rebuilt.view_version > reissued);
+    assert_ne!(request_bytes(&rig, &rebuilt), expected);
+    assert!(last_decision(&rig).contains("+rebuild"));
+}
+
+#[tokio::test]
+async fn an_acknowledgement_received_during_resync_selects_the_applied_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, _) = held_drops(dir.path()).await;
+    let produced = rig.ride("ceiling").await.unwrap();
+    let expected = request_bytes(&rig, &produced);
+    closing_mismatch(&rig).await;
+    rig.notice(4, 8_000, Some(produced.view_version)).await;
+    let reissued = rig.newest().unwrap();
+    assert!(reissued > produced.view_version);
+    assert_eq!(request_bytes(&rig, &rig.get(reissued).await), expected);
+    assert!(last_decision(&rig).starts_with("async decision defer "));
+    assert!(!last_decision(&rig).contains("+rebuild"));
+}
+
+#[tokio::test]
+async fn setup_only_reissue_preserves_the_initial_rendering_and_raw_appends() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = source_rig(dir.path()).await;
+    rig.notice(1, 8_000, None).await;
+    assert!(rig.newest().is_none());
+    let initial = rig.state().initial["initial"].clone();
+    assert_eq!(initial["range"], json!({"from":0,"to":0}));
+    rig.queue(&[118, 130, 142]).await;
+    let pending = rig.pending_targets();
+    closing_mismatch(&rig).await;
+    rig.runner.entries.lock().unwrap().push(entry(
+        40,
+        "user",
+        json!({"type":"text","text":"next prompt"}),
+        "next-run",
+    ));
+    let mut expected: Vec<Value> = decode(&initial["replacement"]).unwrap();
+    expected.extend(
+        rig.runner
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.message.clone()),
+    );
+    rig.notice(4, 8_000, None).await;
+    let reissued = rig
+        .get(rig.newest().expect("resync publishes its first view"))
+        .await;
+    assert_eq!(
+        request_bytes(&rig, &reissued),
+        serde_json::to_vec(&expected).unwrap()
+    );
+    assert_eq!(rig.pending_targets(), pending);
+    assert!(last_decision(&rig).starts_with("async decision defer "));
+}
+
+#[tokio::test]
+async fn a_saved_reissue_is_not_skipped_for_an_already_completed_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, applied) = held_drops(dir.path()).await;
+    let expected = request_bytes(&rig, &rig.get(applied).await);
+    let unapplied = rig.ride("ceiling").await.unwrap().view_version;
+    closing_mismatch(&rig).await;
+    let store = rig.h.store.get().unwrap();
+    let mut state = load(store, &rig.reference).unwrap().unwrap();
+    rig.h
+        .read_async(&mut state, 0, Duration::from_secs(10))
+        .await
+        .unwrap();
+    state.resync = false;
+    state.ingest_read(store, codec::Codec::OwnedBroca).unwrap();
+    assert!(state.resync_replay_pending);
+    let last = rig.runner.entries.lock().unwrap().last().cloned().unwrap();
+    let notice = notice::AdvanceNotice::new(
+        &rig.reference,
+        4,
+        "L",
+        last.ordinal,
+        contract::digest::content_digest(&last.message),
+        8_000,
+        "fixture",
+    )
+    .with_window(100_000)
+    .with_applied_view_version(applied);
+    state.conditions = Some(notice.to_headers());
+    state.seq = 4;
+    state.completed_seq = 4;
+    state.save(store, &[]).unwrap();
+    rig.h.resident_cache().forget(&rig.reference);
+    rig.notice(4, 8_000, Some(applied)).await;
+    let reissued = rig.newest().unwrap();
+    assert!(
+        reissued > unapplied,
+        "completion must not swallow an owed reissue"
+    );
+    assert_eq!(request_bytes(&rig, &rig.get(reissued).await), expected);
+    assert!(!rig.state().resync_replay_pending);
+    assert!(last_decision(&rig).starts_with("async decision defer "));
+}
+
+#[tokio::test]
+async fn a_late_acknowledgement_supersedes_a_stale_transport_reissue() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, applied) = held_drops(dir.path()).await;
+    let produced = rig.ride("ceiling").await.unwrap();
+    let expected = request_bytes(&rig, &produced);
+    closing_mismatch(&rig).await;
+    rig.notice(4, 8_000, Some(applied)).await;
+    let old_reissue = rig.newest().unwrap();
+    rig.notice(5, 8_000, Some(produced.view_version)).await;
+    let reissued = rig.newest().unwrap();
+    assert!(reissued > old_reissue);
+    assert_eq!(request_bytes(&rig, &rig.get(reissued).await), expected);
+    assert!(last_decision(&rig).starts_with("async decision defer "));
+    assert!(!last_decision(&rig).contains("+rebuild"));
+}
+
+#[tokio::test]
+async fn an_omitted_acknowledgement_does_not_reissue_setup_over_an_acknowledged_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, applied) = held_drops(dir.path()).await;
+    let expected = request_bytes(&rig, &rig.get(applied).await);
+    let pending = rig.pending_targets();
+    closing_mismatch(&rig).await;
+    rig.notice(4, 8_000, None).await;
+    let reissued = rig.newest().unwrap();
+    assert!(reissued > applied);
+    assert_eq!(request_bytes(&rig, &rig.get(reissued).await), expected);
+    assert_eq!(rig.pending_targets(), pending);
+    assert!(last_decision(&rig).starts_with("async decision defer "));
+}
+
+async fn direct_matching_notice(rig: &Rig, seq: u64, applied: Option<u64>, lineage: &str) {
+    let last = rig.runner.entries.lock().unwrap().last().cloned().unwrap();
+    let mut notice = notice::AdvanceNotice::new(
+        &rig.reference,
+        seq,
+        lineage,
+        last.ordinal,
+        contract::digest::content_digest(&last.message),
+        8_000,
+        "fixture",
+    )
+    .with_window(100_000);
+    if let Some(applied) = applied {
+        notice = notice.with_applied_view_version(applied);
+    }
+    let message = cortexkit_bus_trait::Message {
+        subject: notice::event_subject("fixture", &rig.module, notice::ADVANCED_EVENT),
+        id: bus_id(&rig.reference, "advanced", seq),
+        digest: notice.digest().parse().unwrap(),
+        headers: notice.to_headers(),
+    };
+    rig.h.advance_compaction("fixture", &message).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_announced_legacy_applied_snapshot_refuses_once_and_recovers_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, _) = held_drops(dir.path()).await;
+    let applied = rig.ride("ceiling").await.unwrap().view_version;
+    assert_eq!(
+        applied, 2,
+        "the legacy fixture's applied row is version two"
+    );
+    rig.notice(3, 8_000, Some(applied)).await;
+    let store = rig.h.store.get().unwrap();
+    let before = rig.state();
+    let generation = before.generation;
+    let core_version = store.load(&before.namespace()).unwrap().row_version;
+    let mut request = before.setup.clone();
+    let conn = rusqlite::Connection::open(dir.path().join("store.db")).unwrap();
+    assert_eq!(conn.execute("UPDATE mc_async_compaction_views SET engine_json=NULL,announced=1 WHERE session_ref=?1 AND version=?2",
+        rusqlite::params![rig.reference, applied]).unwrap(), 1);
+    rig.h.resident_cache().forget(&rig.reference);
+    for seq in 4..=6 {
+        direct_matching_notice(&rig, seq, Some(applied), "L").await;
+    }
+    let blocked = rig.state();
+    assert_eq!(blocked.snapshot_unavailable, Some(applied));
+    assert!(blocked.snapshot_warning_logged);
+    assert!(!blocked.snapshot_recovery_used);
+    assert_eq!(blocked.generation, generation);
+    assert_eq!(
+        store.load(&blocked.namespace()).unwrap().row_version,
+        core_version,
+        "blocked notices do not rerun or rebuild the engine"
+    );
+    let binding = rig.h.async_binding(&blocked);
+    let refusal = rig
+        .h
+        .async_ride(
+            &binding,
+            &json!({"session_ref":rig.reference,"cause":"ceiling","deadline_ms":10_000}),
+        )
+        .await
+        .unwrap_err();
+    let HandlerOutcome::Error { code, message } = refusal else {
+        panic!("{refusal:?}");
+    };
+    assert_eq!(code, "applied_snapshot_unavailable");
+    assert!(message.contains("snapshot is unavailable"));
+    assert!(message.contains("compaction.setup"));
+    request.request_id = "same-lineage-retry".into();
+    let refused = rig
+        .op("compaction.setup", serde_json::to_value(&request).unwrap())
+        .await;
+    assert_eq!(refused["answer"], "refuse");
+    assert_eq!(refused["code"], "applied_snapshot_unavailable");
+    assert_eq!(rig.state().generation, generation);
+
+    *rig.runner.lineage.lock().unwrap() = "snapshot-recovered".into();
+    request.lineage_id = Some("snapshot-recovered".into());
+    request.request_id = "snapshot-recovery".into();
+    let passes_before = resident::counters::read().engine_passes;
+    let ready = rig
+        .op("compaction.setup", serde_json::to_value(&request).unwrap())
+        .await;
+    assert_eq!(ready["answer"], "ready", "{ready}");
+    let recovered = rig.state();
+    assert!(
+        recovered.generation > generation,
+        "cut stages may already reserve intervening generations"
+    );
+    assert_eq!(
+        resident::counters::read().engine_passes - passes_before,
+        1,
+        "fresh Setup runs one recovery engine pass"
+    );
+    assert!(recovered.snapshot_recovery_used);
+    assert!(recovered.snapshot_warning_logged);
+    assert!(recovered.snapshot_unavailable.is_none());
+    let recovered_core = store.load(&recovered.namespace()).unwrap().row_version;
+    for _ in 0..3 {
+        assert_eq!(
+            rig.op("compaction.setup", serde_json::to_value(&request).unwrap())
+                .await["answer"],
+            "ready"
+        );
+    }
+    assert_eq!(rig.state().generation, recovered.generation);
+    assert_eq!(
+        resident::counters::read().engine_passes - passes_before,
+        1,
+        "repeated Setup does not rerun recovery"
+    );
+    assert_eq!(
+        store.load(&recovered.namespace()).unwrap().row_version,
+        recovered_core
+    );
+    rig.notice(7, 8_000, None).await;
+    let version = rig.newest();
+    rig.notice(8, 8_000, None).await;
+    assert_eq!(
+        rig.newest(),
+        version,
+        "ordinary notices do not repeat recovery"
+    );
+    direct_matching_notice(&rig, 5, Some(applied), "L").await;
+    assert_eq!(
+        rig.state().generation,
+        recovered.generation,
+        "stale pre-recovery notices cannot restart recovery"
+    );
+
+    let mut state = rig.state();
+    state.resync_replay_pending = true;
+    let current =
+        crate::providers::async_provider::resync_replay::reissue_applied(store, &mut state, false)
+            .unwrap()
+            .expect("a transport alias provides a current snapshot for the second corruption");
+    state.save(store, &[]).unwrap();
+    rig.h.checkin(state);
+    rig.notice(9, 8_000, Some(current.view_version)).await;
+    conn.execute("UPDATE mc_async_compaction_views SET engine_json=NULL,announced=1 WHERE session_ref=?1 AND version=?2",
+        rusqlite::params![rig.reference, current.view_version]).unwrap();
+    rig.h.resident_cache().forget(&rig.reference);
+    direct_matching_notice(&rig, 10, Some(current.view_version), "snapshot-recovered").await;
+    request.lineage_id = Some("would-loop".into());
+    request.request_id = "second-recovery".into();
+    let refused = rig
+        .op("compaction.setup", serde_json::to_value(&request).unwrap())
+        .await;
+    assert_eq!(refused["code"], "applied_snapshot_unavailable");
+    assert!(refused["reason"].as_str().unwrap().contains("already used"));
+    assert_eq!(rig.state().generation, recovered.generation);
 }

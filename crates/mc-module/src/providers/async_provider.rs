@@ -227,6 +227,14 @@ pub(crate) struct AsyncRecord {
     resync_sources: Option<ResyncSources>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     resync_replay_pending: bool,
+    #[serde(default, skip_serializing_if = "resync_replay::zero")]
+    publication_floor: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot_unavailable: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    snapshot_warning_logged: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    snapshot_recovery_used: bool,
     #[serde(default)]
     restored_head: Option<RestoredHead>,
     /// Set for a session the offline move brought over from the standalone
@@ -549,9 +557,11 @@ pub(crate) enum FailureState {
 
 impl AsyncRecord {
     fn failed(&self) -> bool {
-        self.failure
-            .as_ref()
-            .is_some_and(|failure| failure.state == FailureState::Failed)
+        self.snapshot_unavailable.is_some()
+            || self
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.state == FailureState::Failed)
     }
 }
 
@@ -1140,6 +1150,19 @@ impl State {
         {
             return Ok(Some(lineage.clone()));
         }
+        if let Some(lineage) = self
+            .applied_view
+            .as_ref()
+            .filter(|view| view.publication_version == Some(version))
+            .and_then(|view| view.publication_lineage.as_ref())
+        {
+            return Ok(Some(lineage.clone()));
+        }
+        if let Some(lineage) = resync_replay::stored_view(store, &self.reference(), version)?
+            .and_then(|view| view.publication_lineage)
+        {
+            return Ok(Some(lineage));
+        }
         store
             .load_async_compaction_view(&self.reference(), version)
             .map_err(transient)?
@@ -1234,15 +1257,51 @@ impl State {
         }
         self.applied = notice.applied_view_version;
         // Repeated acknowledgements do not rewrite an unchanged baseline.
-        if let Some(applied) = self
-            .applied
-            .and_then(|version| self.published_engine.get(&version))
-            .filter(|view| Some(&view.identity.1.lineage_id) == self.lineage.as_ref())
-            .filter(|view| {
-                self.applied_view.as_ref().map(|held| &held.identity) != Some(&view.identity)
+        let acknowledged = resync_replay::acknowledged_version(store, self)?;
+        let applied = match acknowledged {
+            Some(version) => match self.published_engine.get(&version) {
+                Some(view) => Some(view.clone()),
+                None if self
+                    .applied_view
+                    .as_ref()
+                    .is_none_or(|view| view.publication_version != Some(version)) =>
+                {
+                    resync_replay::stored_view(store, &self.reference(), version)?
+                }
+                None => None,
+            },
+            None => None,
+        };
+        if applied.is_none()
+            && acknowledged.is_some_and(|version| {
+                self.applied_view
+                    .as_ref()
+                    .is_none_or(|view| view.publication_version != Some(version))
             })
         {
-            self.applied_view = Some(applied.clone());
+            resync_replay::mark_unavailable(self, acknowledged.expect("acknowledged version"));
+        }
+        if let Some(applied) =
+            applied.filter(|view| Some(&view.identity.1.lineage_id) == self.lineage.as_ref())
+        {
+            self.engine.version_high_water = self.engine.version_high_water.max(applied.identity.0);
+            if self.applied_view.as_ref().is_none_or(|held| {
+                held.identity != applied.identity
+                    || held.publication_version != applied.publication_version
+            }) {
+                self.applied_view = Some(applied);
+            }
+        }
+        if self
+            .published_engine
+            .last_key_value()
+            .is_some_and(|(version, latest)| {
+                latest.resync_reissued
+                    && acknowledged.is_none_or(|ack| ack < *version)
+                    && latest.resync_reissued_from != acknowledged
+            })
+        {
+            self.resync_replay_pending = true;
         }
         self.acknowledgements = notice.events.iter().map(notice::Event::token).collect();
         for token in &self.acknowledgements {
@@ -2020,6 +2079,7 @@ impl State {
 
     fn reset(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
         self.capture_resync_sources(store)?;
+        self.resync_sources.as_mut().expect("resync sources").replay = None;
         self.finish_reset(store)
     }
 
@@ -2212,8 +2272,18 @@ impl State {
                 self.retired_frozen.dirty = true;
             }
         }
+        if let Some((version, _)) = self.published_engine.last_key_value() {
+            self.publication_floor = self.publication_floor.max(
+                version
+                    .checked_add(1)
+                    .ok_or_else(|| transient("async version exhausted"))?,
+            );
+        }
         self.published_engine.clear();
-        self.journal.clear_published = true;
+        // A retained view remains acknowledgeable after a reset. Keep its
+        // immutable rendering metadata with the view row, but do not count an
+        // older generation's views as new publications by this generation.
+        self.journal.clear_published = false;
         self.save(store, &[])?;
         store
             .retire_unannounced_async_views(&self.reference())
@@ -2268,6 +2338,19 @@ fn load(store: &McStore, reference: &str) -> Result<Option<State>, HandlerOutcom
         return Ok(None);
     };
     let mut state: State = serde_json::from_str(&rows.state).map_err(transient)?;
+    let possible_applied = state.applied.or(state.frozen_edits_version);
+    if state.snapshot_unavailable.is_none()
+        && possible_applied.is_some_and(|version| {
+            !rows
+                .engine_views
+                .iter()
+                .any(|(candidate, _)| *candidate == version)
+        })
+    {
+        if let Some(version) = resync_replay::missing_snapshot(store, &state)? {
+            resync_replay::mark_unavailable(&mut state, version);
+        }
+    }
     for (ordinal, entry, index) in rows.entries {
         let entry = HeldEntry::from_stored(entry)?;
         #[cfg(test)]
@@ -2288,27 +2371,34 @@ fn load(store: &McStore, reference: &str) -> Result<Option<State>, HandlerOutcom
         state.entries.insert(ordinal, Arc::new(entry));
     }
     for (version, engine) in rows.engine_views {
-        state
-            .published_engine
-            .insert(version, EngineView::parse(engine)?);
+        if version >= state.publication_floor
+            || state.engine_baselines.produced == Baseline::Published(version)
+            || state.engine_baselines.applied == Baseline::Published(version)
+        {
+            state.published_engine.insert(
+                version,
+                EngineView::parse(engine)?.with_publication_version(version),
+            );
+        }
     }
     let mut stored = rows
         .baselines
         .into_iter()
         .collect::<BTreeMap<String, String>>();
+    let blocked = state.snapshot_unavailable.is_some();
     let mut resolve = |slot: &str, baseline: Baseline| match baseline {
         Baseline::Absent => Ok(None),
-        Baseline::Published(version) => state
-            .published_engine
-            .get(&version)
-            .cloned()
-            .map(Some)
-            .ok_or_else(|| transient("async engine baseline view missing")),
+        Baseline::Published(version) => match state.published_engine.get(&version).cloned() {
+            Some(view) => Ok(Some(view)),
+            None if blocked => Ok(None),
+            None => Err(transient("async engine baseline view missing")),
+        },
         Baseline::Stored => stored
             .remove(slot)
             .map(EngineView::parse)
             .transpose()?
             .map(Some)
+            .or_else(|| blocked.then_some(None))
             .ok_or_else(|| transient("async engine baseline row missing")),
     };
     let produced = resolve("produced", state.engine_baselines.produced)?;
@@ -2329,6 +2419,20 @@ fn load(store: &McStore, reference: &str) -> Result<Option<State>, HandlerOutcom
     }
     state.produced_view = produced;
     state.applied_view = applied;
+    if state.produced_view.is_none() {
+        state.engine_baselines.produced = Baseline::Absent;
+    }
+    if state.applied_view.is_none() {
+        state.engine_baselines.applied = Baseline::Absent;
+    }
+    state
+        .published_engine
+        .retain(|version, _| *version >= state.publication_floor);
+    state.engine.version_high_water = state
+        .published_engine
+        .values()
+        .map(|view| view.identity.0)
+        .fold(state.engine.version_high_water, u64::max);
     if let Some(prefix) = &state.logical_prefix {
         state.entries.proof_before(prefix.tail_from);
     }
@@ -2603,7 +2707,40 @@ impl McHandler {
             moved_session::Fence::Refuse(answer) => return bytes(&answer),
         };
         let reference = key.reference();
-        let existing = load_head(store, &reference)?;
+        let mut existing = load_head(store, &reference)?;
+        if let Some(old) = &existing {
+            self.authorize_async(binding, old)?;
+            if old.snapshot_unavailable.is_some()
+                || resync_replay::missing_snapshot(store, old)?.is_some()
+            {
+                let mut blocked = self
+                    .checkout(store, &reference)?
+                    .ok_or_else(|| transient("async session disappeared"))?;
+                resync_replay::park_unavailable(store, &mut blocked, None)?;
+                self.checkin(blocked);
+                existing = load_head(store, &reference)?;
+            }
+        }
+        if let Some(old) = existing
+            .as_ref()
+            .filter(|old| old.snapshot_unavailable.is_some())
+        {
+            if old.snapshot_recovery_used
+                || request.lineage_id.is_none()
+                || request.lineage_id == old.lineage
+                || request.descends_from.is_some()
+            {
+                return bytes(&compact::setup::SetupAnswer::refuse(
+                    &request.request_id,
+                    compact::errors::RefuseCode::from_code(resync_replay::SNAPSHOT_UNAVAILABLE),
+                    resync_replay::unavailable_reason(old),
+                ));
+            }
+        }
+        let recovery_flags = existing
+            .as_ref()
+            .map(|old| (old.snapshot_recovery_used, old.snapshot_warning_logged))
+            .unwrap_or_default();
         let unsafe_existing = existing
             .as_ref()
             .map(|state| state.active_seed_is_unsafe(store))
@@ -2613,6 +2750,21 @@ impl McHandler {
             let answer = self
                 .setup_cut_descent(binding, &request, existing, store)
                 .await?;
+            if (recovery_flags.0 || recovery_flags.1)
+                && serde_json::from_slice::<Value>(&answer)
+                    .is_ok_and(|answer| answer["answer"] == "ready")
+            {
+                if let Some(mut state) = self.checkout(store, &reference)? {
+                    let changed = (!state.snapshot_recovery_used && recovery_flags.0)
+                        || (!state.snapshot_warning_logged && recovery_flags.1);
+                    state.snapshot_recovery_used |= recovery_flags.0;
+                    state.snapshot_warning_logged |= recovery_flags.1;
+                    if changed {
+                        state.save(store, &[])?;
+                    }
+                    self.checkin(state);
+                }
+            }
             // A post-prune Setup can name the new lineage too: reconcile the
             // window's held copies before the run renders from them.
             if let Some(seen) = request.reasoning_pruned.filter(|seen| seen.valid()) {
@@ -2642,6 +2794,13 @@ impl McHandler {
                 .map_err(transient)?;
             let mut state =
                 self.new_async_record(channel, binding, &request, key, None, generation)?;
+            state.snapshot_recovery_used =
+                old.snapshot_recovery_used || old.snapshot_unavailable.is_some();
+            state.snapshot_warning_logged = old.snapshot_warning_logged;
+            if old.snapshot_unavailable.is_some() {
+                state.seq = old.seq;
+                state.completed_seq = old.completed_seq;
+            }
             // A new lineage of an existing conversation keeps its pruning
             // permission as it was; only new conversations opt in here.
             if !old.accepts_pruning() {
@@ -2848,6 +3007,8 @@ impl McHandler {
         };
         let mut state =
             self.new_async_record(channel, binding, &request, key, standalone_move, generation)?;
+        state.snapshot_recovery_used |= recovery_flags.0;
+        state.snapshot_warning_logged |= recovery_flags.1;
         state.full_array_floor = full_array_floor;
         if discarded.is_some() {
             state.forget_discarded_rows();
@@ -2891,6 +3052,24 @@ impl McHandler {
         let codec = codec::Codec::from_params(&Value::Object(request.params.clone()))?;
         let chosen = preset(request.preset.as_deref())?;
         let mut engine = transform::compaction::State::new(reference.clone(), chosen);
+        let publication_floor = if generation > 0 {
+            store
+                .load_async_compaction_views(&reference)
+                .map_err(transient)?
+                .0
+                .iter()
+                .map(|(version, _, _, _)| *version)
+                .max()
+                .map(|version| {
+                    version
+                        .checked_add(1)
+                        .ok_or_else(|| transient("async version exhausted"))
+                })
+                .transpose()?
+                .unwrap_or(0)
+        } else {
+            0
+        };
         let mut state = State {
             commands: Default::default(),
             historian_cadence: None,
@@ -2898,6 +3077,10 @@ impl McHandler {
             restored_no_new_content: false,
             resync_sources: None,
             resync_replay_pending: false,
+            publication_floor,
+            snapshot_unavailable: None,
+            snapshot_warning_logged: false,
+            snapshot_recovery_used: false,
             restored_head: None,
             standalone_move: standalone_move.map(moved_session::StandaloneMove::from_record),
             full_array_floor: None,
@@ -3318,9 +3501,6 @@ impl McHandler {
         // views never remove the signed reasoning they invalidate.
         let signed = transform::compaction::SignedReasoning::RunnerCompanion;
         let previous_engine = engine.clone();
-        let replay_applied = state
-            .resync_replay_pending
-            .then(|| engine.last_applied.clone());
         #[cfg(test)]
         if self
             .provider_store
@@ -3345,7 +3525,7 @@ impl McHandler {
             .logical_prefix
             .as_ref()
             .and_then(|prefix| prefix.declared_cut_trim());
-        let output = if engine.last_applied.is_none() || state.resync_replay_pending {
+        let output = if engine.last_applied.is_none() {
             transform::compaction::setup_with(store, &template, &context, status, engine, signed)
         } else {
             transform::compaction::step_with(store, &template, &context, status, engine, signed)
@@ -3382,7 +3562,7 @@ impl McHandler {
                     .logical_prefix
                     .as_ref()
                     .and_then(|prefix| prefix.declared_cut_trim());
-                if engine.last_applied.is_none() || state.resync_replay_pending {
+                if engine.last_applied.is_none() {
                     transform::compaction::setup_with(
                         store, &template, &context, status, engine, signed,
                     )
@@ -3395,11 +3575,6 @@ impl McHandler {
             }
             Err(error) => return Err(engine_error(error)),
         };
-        if let Some(applied) = replay_applied {
-            // Reissuing verified bytes is not another Setup and does not
-            // acknowledge the new version on the runner's behalf.
-            engine.last_applied = applied;
-        }
         Ok((template, output))
     }
 }
@@ -4422,6 +4597,18 @@ impl McHandler {
         state = self
             .checkout(store, &notice.session_ref)?
             .ok_or_else(|| transient("async session disappeared"))?;
+        if resync_replay::park_unavailable(store, &mut state, Some(notice.seq))? {
+            self.checkin(state);
+            return Ok(());
+        }
+        if state.snapshot_recovery_used
+            && !state.resync_replay_pending
+            && notice.seq <= state.completed_seq
+            && state.lineage.as_deref() != Some(notice.lineage_id.as_str())
+        {
+            self.checkin(state);
+            return Ok(());
+        }
         if state.active_seed_is_unsafe(store)? {
             return Err(error(
                 "unsafe_cut_seed",
@@ -4706,6 +4893,10 @@ impl McHandler {
         #[cfg(test)]
         let phase = scaling_tests::save_meter::start_kind(&notice.session_ref, "phase:index");
         state.ingest_read(store, codec)?;
+        if resync_replay::park_unavailable(store, &mut state, Some(notice.seq))? {
+            self.checkin(state);
+            return Ok(());
+        }
         if state.completed_seq < notice.seq || resuming {
             // Reset clears the read lineage, and ingestion normalizes served
             // source parts. Validate acknowledgements only after both recover.
@@ -4750,8 +4941,12 @@ impl McHandler {
             .len();
         #[cfg(test)]
         let skip_phase = scaling_tests::save_meter::start_kind(&notice.session_ref, "phase:skip");
-        let run_engine = (state.completed_seq < notice.seq || resynced)
-            && (resynced || !self.async_engine_can_skip(&state, &notice)?);
+        // A pending resync replay remains owed even if an earlier attempt completed
+        // the notice without publishing. The engine must still authorize any
+        // rewrite of history already sent to the model.
+        let run_engine = state.resync_replay_pending
+            || ((state.completed_seq < notice.seq || resynced)
+                && (resynced || !self.async_engine_can_skip(&state, &notice)?));
         #[cfg(test)]
         if self
             .provider_store
@@ -4794,6 +4989,10 @@ impl McHandler {
                     return Err(error);
                 }
             }
+        }
+        if resync_replay::park_unavailable(store, &mut state, Some(notice.seq))? {
+            self.checkin(state);
+            return Ok(());
         }
         let (decision, why) = match &state.last_pass {
             Some(pass) if pass.published && !pass.replayed => (
@@ -5312,7 +5511,7 @@ impl McHandler {
         ride: bool,
     ) -> Result<Option<view::CompactionView>, HandlerOutcome> {
         state.last_pass = None;
-        if state.resync || state.entries.is_empty() {
+        if state.resync || state.failed() || state.entries.is_empty() {
             return Ok(None);
         }
         // Held copies the runner pruned make this one pass a rebuild, as a
@@ -5383,7 +5582,7 @@ impl McHandler {
             rebuild: ride,
             pruned_rebuild,
             published: false,
-            replayed: state.resync_replay_pending && !ride && !output.prefix_bust_permitted,
+            replayed: false,
         });
 
         #[cfg(test)]
@@ -5464,11 +5663,11 @@ impl McHandler {
         }
         let transform::compaction::Answer::Replacement(mut candidate) = output.answer else {
             state.adopt_engine(engine)?;
-            return Ok(None);
+            return resync_replay::reissue_applied(store, state, output.prefix_bust_permitted);
         };
-        if !ride && !output.prefix_bust_permitted && !state.resync_replay_pending {
+        if !ride && !output.prefix_bust_permitted {
             state.adopt_engine(engine)?;
-            return Ok(None);
+            return resync_replay::reissue_applied(store, state, false);
         }
         #[cfg(test)]
         drop(meter);
@@ -5676,12 +5875,14 @@ impl McHandler {
             native_frozen_edits: &'a frozen_edits::FrozenEdits,
             history_through: Option<u64>,
             publication_lineage: &'a str,
+            publication_version: u64,
         }
         let engine_json: Arc<str> = serde_json::to_string(&PublishedEngine {
             view: &candidate,
             native_frozen_edits: &frozen_edits,
             history_through: coverage,
             publication_lineage: &view.lineage_id,
+            publication_version: version,
         })
         .map_err(transient)?
         .into();
@@ -5697,7 +5898,8 @@ impl McHandler {
             version,
             EngineView::with_json(&candidate, Arc::clone(&engine_json))
                 .with_frozen_edits(frozen_edits)
-                .with_publication_lineage(view.lineage_id.clone()),
+                .with_publication_lineage(view.lineage_id.clone())
+                .with_publication_version(version),
         );
         // The produced baseline is this published view; adopting after the
         // insert shares its serialized form instead of serializing it again.
@@ -5813,7 +6015,9 @@ impl McHandler {
                 return bytes(&ride::RideAnswer::nothing());
             };
             self.authorize_async(binding, &state)?;
-            if let Some(failure) = state.failure.as_ref().filter(|_| state.failed()) {
+            if let Some(failure) = state.failure.as_ref().filter(|failure| {
+                failure.state == FailureState::Failed && state.snapshot_unavailable.is_none()
+            }) {
                 return Err(HandlerOutcome::ErrorWithDetail {
                     code: FAILED_ERROR.into(),
                     message: format!("async compaction failed: {}", failure.reason),
@@ -5831,6 +6035,11 @@ impl McHandler {
             state = self
                 .checkout(store, &request.session_ref)?
                 .ok_or_else(|| transient("async session disappeared"))?;
+            if resync_replay::park_unavailable(store, &mut state, None)? {
+                let refusal = resync_replay::unavailable_error(&state);
+                self.checkin(state);
+                return Err(refusal);
+            }
             // An offline-prepared record serves nothing until a notice has
             // checked it against the runner's transcript.
             if state.resync || state.offline_first_pass.is_some() {
@@ -5884,6 +6093,11 @@ impl McHandler {
                     }
                 };
                 state.engine_failed = false;
+                if resync_replay::park_unavailable(&store, &mut state, None)? {
+                    let refusal = resync_replay::unavailable_error(&state);
+                    worker.checkin(state);
+                    return Err(refusal);
+                }
                 if rewrite && state.last_pass.is_some() && state.accepts_pruning() {
                     state.rode_since_notice = true;
                 }
@@ -5948,6 +6162,11 @@ impl McHandler {
         let mut state = self
             .checkout(store, &state.reference())?
             .ok_or_else(|| transient("async session disappeared"))?;
+        if resync_replay::park_unavailable(store, &mut state, None)? {
+            let refusal = resync_replay::unavailable_error(&state);
+            self.checkin(state);
+            return Err(refusal);
+        }
         let codec = codec::Codec::from_params(&Value::Object(state.setup.params.clone()))?;
         let resolve = |state: &State| -> Result<_, HandlerOutcome> {
             let mut targets = Vec::new();
@@ -6811,11 +7030,19 @@ impl McHandler {
         state = self
             .checkout(store, reference)?
             .ok_or_else(|| transient("async session disappeared"))?;
+        if resync_replay::park_unavailable(store, &mut state, None)? {
+            self.checkin(state);
+            return Ok(());
+        }
         let codec = codec::Codec::from_params(&Value::Object(state.setup.params.clone()))?;
         let facts = self.decision_facts(&state);
         self.publish_async(0, &mut state, codec, false)?;
+        if resync_replay::park_unavailable(store, &mut state, None)? {
+            self.checkin(state);
+            return Ok(());
+        }
         let (decision, why) = match &state.last_pass {
-            Some(pass) if pass.published => (
+            Some(pass) if pass.published && !pass.replayed => (
                 decision_log::Decision::Execute,
                 decision_log::pass_why(pass),
             ),
@@ -6923,6 +7150,10 @@ impl AsyncRecord {
         } else {
             None
         };
+        let retained_views = replay_engine
+            .as_ref()
+            .map(|_| resync_replay::retained_views(store, &self.reference()))
+            .transpose()?;
         // Restoring sources after a resync is rare; it reads every held
         // message once.
         let held = self
@@ -7120,7 +7351,12 @@ impl AsyncRecord {
                 .commit(&namespace, target.row_version, &served.core, &served.meta)
                 .map_err(transient)?;
             self.adopt_engine(engine)?;
-            self.resync_replay_pending = true;
+            resync_replay::restore_baselines(
+                store,
+                self,
+                &retained_views.expect("verified view metadata"),
+            )?;
+            self.resync_replay_pending = self.snapshot_unavailable.is_none();
         }
         tracing::info!(session_ref=%self.reference(),history_compartments=retained.len(),copied_chunk_embeddings=copied,transferred_drops=transferred,discarded_drops=self.last_discarded_drops,"async lineage sources revalidated");
         self.resync_sources = None;
