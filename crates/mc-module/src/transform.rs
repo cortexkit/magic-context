@@ -14765,7 +14765,7 @@ fn select_query_tokens(
         .collect()
 }
 
-fn run_user_hint_lexical_search(
+pub(crate) fn run_user_hint_lexical_search(
     store: &McStore,
     project_path: &str,
     session_id: &str,
@@ -14952,13 +14952,13 @@ fn user_hint_message_text(message: &CkIngressMessage) -> String {
         .join("\n")
 }
 
-fn has_stacked_user_hint_augmentation(raw_prompt: &str) -> bool {
+pub(crate) fn has_stacked_user_hint_augmentation(raw_prompt: &str) -> bool {
     ["<ctx-search-hint>", "<ctx-search-auto>"]
         .iter()
         .any(|marker| raw_prompt.contains(marker))
 }
 
-fn sanitize_user_hint_query(text: &str) -> String {
+pub(crate) fn sanitize_user_hint_query(text: &str) -> String {
     let without_reminders = strip_system_reminder_wrappers(text);
     let without_comments = html_comment_regex().replace_all(&without_reminders, "");
     let without_markup = xml_html_tag_regex().replace_all(&without_comments, "");

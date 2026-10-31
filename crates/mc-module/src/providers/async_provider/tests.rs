@@ -18,6 +18,7 @@ mod offline_first_pass;
 mod open_tool_notice;
 mod pass_decision_review;
 mod plain_head_tools;
+mod pre_user;
 mod pruned_reasoning_review;
 mod pruned_reasoning_tests;
 mod published_contract;

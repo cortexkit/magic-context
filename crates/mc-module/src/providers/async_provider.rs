@@ -7295,6 +7295,26 @@ impl McHandler {
             .is_some_and(|store| route_records(store, binding).is_ok_and(|rows| !rows.is_empty()))
     }
 
+    /// For a runner's `pre_user` hook: the conversation's namespace, and when
+    /// the runner wrote the newest message ck-mc holds. `None` when the route
+    /// has no single compaction record.
+    pub(crate) fn pre_user_context(
+        &self,
+        binding: &SessionBinding,
+    ) -> Option<(String, Option<u64>)> {
+        let store = self.store.get()?;
+        let rows = route_records(store, binding).ok()?;
+        let [raw] = rows.as_slice() else {
+            return None;
+        };
+        let state: State = serde_json::from_str(raw).ok()?;
+        let newest = store
+            .newest_async_entry_written_at(&state.reference())
+            .ok()
+            .flatten();
+        Some((state.namespace(), newest))
+    }
+
     pub(crate) fn async_compaction_namespace(
         &self,
         binding: &SessionBinding,

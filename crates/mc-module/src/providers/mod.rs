@@ -8,11 +8,13 @@ mod async_bus;
 #[cfg(test)]
 mod async_contract_vectors;
 mod async_provider;
+mod step_transform;
 pub(crate) use async_provider::offline_first_pass as offline_first_pass_engine;
 pub(crate) use async_provider::reminder_echoes::accounting as runner_accounting;
 pub(crate) use async_provider::reminder_echoes::origin as runner_origin;
 #[cfg(test)]
 pub(crate) use async_provider::serve_descriptors;
+pub(crate) use step_transform::declare as step_transform_declare;
 #[cfg(test)]
 mod describe_fixture_tests;
 
@@ -117,6 +119,10 @@ pub fn describe() -> HandlerOutcome {
     answer["majors"]
         .as_array_mut()
         .expect("role majors")
+        .push(serde_json::to_value(step_transform::describe_major()).expect("step role major"));
+    answer["majors"]
+        .as_array_mut()
+        .expect("role majors")
         .push(json!({
             "version": compact::PROVIDES,
             "ops": ["role.describe", "compaction.setup", "view.get", "compaction.ride"],
@@ -184,13 +190,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discovery_does_not_advertise_retired_step_or_native_capabilities() {
+    fn discovery_restores_pre_user_without_native_capabilities() {
         let HandlerOutcome::Response(bytes) = describe() else {
             panic!("role discovery failed")
         };
         let answer: Value = serde_json::from_slice(&bytes).unwrap();
         let majors = answer["majors"].as_array().unwrap();
-        assert!(!majors
+        // The role is restored for pre_user time markers and auto memory.
+        assert!(majors
             .iter()
             .any(|major| major["version"] == "step-transform-provider/v1"));
         let compaction = majors
@@ -224,14 +231,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retired_step_and_hook_methods_are_unrecognized() {
+    async fn retired_compaction_methods_are_unrecognized() {
         let handler = McHandler::new();
         for method in [
             "compaction.step",
             "compaction.delete",
             "compaction.view.read",
-            "transform.declare",
-            "transform.hook",
+            // The step-transform role is restored for pre_user time markers and auto memory.
         ] {
             let answer = handler
                 .dispatch_value(1, json!({"method":method,"params":{}}))

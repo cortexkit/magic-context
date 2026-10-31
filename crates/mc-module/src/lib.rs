@@ -9729,6 +9729,19 @@ impl McHandler {
         if let Some(outcome) = self.broca_dream_route(channel, method, &request) {
             return outcome;
         }
+        match method {
+            Some("transform.declare") => {
+                return providers::step_transform_declare(
+                    request.get("params").unwrap_or(&Value::Null),
+                );
+            }
+            Some("transform.hook") => {
+                return self
+                    .handle_step_transform(channel, request.get("params").unwrap_or(&Value::Null))
+                    .await;
+            }
+            _ => {}
+        }
         let catalog_request = method.is_none()
             && request.get("name").and_then(Value::as_str) == Some("tool.catalog")
             && request.get("arguments").is_some();
@@ -12682,6 +12695,7 @@ pub fn manifest_with_route_targets_and_smart_notes(
         // claim, before it calls role.describe. Without it, core never composes
         // Magic Context into a worker plan: no tools and no compaction.
         cortexkit_role_tool_provider::PROVIDES.to_string(),
+        cortexkit_role_step_transform_provider::PROVIDES.to_string(),
         MCP_CONVERSATION_BINDING_V1.to_string(),
         // basal reaches `subagent_invocations.read` over the calling flow's own
         // scoped route, which the daemon opens only to a module declaring this.

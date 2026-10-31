@@ -53,6 +53,7 @@ cortexkit-role-agent-data = "0.2.4"
 # Runner-owned tags and context-ceiling details for async compaction.
 cortexkit-role-llm-runner = "=0.7.31"
 cortexkit-role-compaction-provider = "=0.7.10"
+cortexkit-role-step-transform-provider = "=0.4.0"
 # RFC 8785 (JCS) canonical JSON for tool.catalog's answer bytes and digests: the
 # same canonicaliser the role crate uses, so floats and non-ASCII keys in a
 # caller's composition hash exactly as the runner hashes them.
@@ -129,3 +130,4 @@ cortexkit-role-llm-runner-conformance = "=0.15.36"
 # every spelling of its project folder, and another runner reaches other state
 # (src/providers/async_provider/tests/conversation_identity_probe.rs).
 cortexkit-role-compaction-provider = { version = "=0.7.10", features = ["conformance"] }
+cortexkit-role-step-transform-provider = { version = "=0.4.0", features = ["test-vectors"] }

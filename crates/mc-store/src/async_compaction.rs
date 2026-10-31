@@ -630,6 +630,28 @@ impl McStore {
             .map_err(Into::into)
     }
 
+    /// When the runner wrote the newest held entry (its `written_at`, ms), read
+    /// from that one row. `None` when nothing is held or it carries no time.
+    pub fn newest_async_entry_written_at(
+        &self,
+        session_ref: &str,
+    ) -> Result<Option<u64>, McStoreError> {
+        self.inner
+            .with_read(|conn| {
+                let entry: Option<String> = conn
+                    .query_row(
+                        "SELECT entry_json FROM mc_async_compaction_entries WHERE session_ref=?1 ORDER BY ordinal DESC LIMIT 1",
+                        [session_ref],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                Ok(entry
+                    .and_then(|entry| serde_json::from_str::<serde_json::Value>(&entry).ok())
+                    .and_then(|entry| entry.get("written_at").and_then(serde_json::Value::as_u64)))
+            })
+            .map_err(Into::into)
+    }
+
     /// The stored entries of a conversation through `through` (inclusive),
     /// `(ordinal, entry_json)` in ordinal order, read from a reader
     /// connection: for background work that needs the whole held transcript
