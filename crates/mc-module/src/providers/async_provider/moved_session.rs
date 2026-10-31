@@ -11,6 +11,9 @@ const OPENCODE1_HARNESS: &str = "opencode";
 /// What the offline move left for this conversation.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub(super) struct StandaloneMove {
+    /// Tool/search data copied from the host session into this generation.
+    #[serde(default)]
+    pub carry_version: u32,
     /// The highest tag number standalone allocated. Setup repeats it on every
     /// answer, with the cut, so the runner can number from it even if the
     /// marker's checkpoint key is lost.
@@ -155,6 +158,7 @@ impl StandaloneMove {
 
     pub(super) fn from_record(record: MoveRecord) -> Self {
         Self {
+            carry_version: 0,
             tag_checkpoint: record.tag_checkpoint,
             cut: record.cut.clone(),
             message_count: record.message_count,
@@ -327,10 +331,59 @@ impl AsyncRecord {
         let _ = store
             .copy_async_history_artifacts(&record.session, &namespace, &sequences)
             .map_err(transient)?;
+        self.carry_moved_session_data(store)?;
         // Do not arm a refresh before the Setup engine pass: it renders the
         // head insertion from these rows, and a pending refresh would leave it
         // without its frames. The seed finish arms it for the first notice.
         Ok(())
+    }
+
+    /// Catch up legacy moved records without changing rendered state. These are
+    /// tool/search rows only: no engine metadata, refresh flag, frozen prefix,
+    /// or render watermark is touched, including on a cache-hit notice.
+    pub(super) fn carry_moved_session_data(
+        &mut self,
+        store: &McStore,
+    ) -> Result<bool, HandlerOutcome> {
+        let Some(moved) = &self.standalone_move else {
+            return Ok(false);
+        };
+        if moved.carry_version >= mc_store::session_carry::CARRY_VERSION {
+            return Ok(false);
+        }
+        store
+            .carry_session_data(&self.key.session, &self.namespace())
+            .map_err(transient)?;
+        self.standalone_move
+            .as_mut()
+            .expect("moved session")
+            .carry_version = mc_store::session_carry::CARRY_VERSION;
+        Ok(true)
+    }
+
+    pub(super) fn catch_up_moved_session_data(
+        &mut self,
+        store: &McStore,
+    ) -> Result<bool, HandlerOutcome> {
+        if !self.carry_moved_session_data(store)? {
+            return Ok(false);
+        }
+        // Tool rows commit together in context.db, but this provider record is
+        // in store.db, so the store cannot commit the carry version in that
+        // transaction. Persist it immediately, before any tool can be served.
+        // A crash between the two commits retries payload-deduplicated copies;
+        // later edits are not reconciled and identical source rows can coalesce.
+        let header = serde_json::to_string(self).map_err(transient)?;
+        store
+            .async_compaction_save(
+                &self.reference(),
+                &self.key.store_key().conversation_key(),
+                &self.key.session,
+                &header,
+            )
+            .commit()
+            .map_err(transient)?;
+        Ok(true)
     }
 
     /// The adoption seed for the manifest, without touching the record. Setup

@@ -2232,7 +2232,11 @@ impl State {
         self.truncate_entries(None);
         self.todo_scan = None;
         self.lineage = None;
+        let prior_namespace = self.namespace();
         self.generation = self.next_generation()?;
+        store
+            .carry_session_data(&prior_namespace, &self.namespace())
+            .map_err(transient)?;
         self.engine = transform::compaction::State::new(self.reference(), self.engine.preset);
         self.produced_view = None;
         self.applied_view = None;
@@ -2732,6 +2736,16 @@ impl McHandler {
         }
         let reference = key.reference();
         let mut existing = load_head(store, &reference)?;
+        if let Some(state) = existing.as_mut() {
+            self.authorize_async(binding, state)?;
+            if state.catch_up_moved_session_data(store)? {
+                runtime
+                    .resident
+                    .lock()
+                    .expect("async resident cache")
+                    .forget(&reference);
+            }
+        }
         if existing
             .as_ref()
             .is_some_and(|state| !offline_first_pass::proof_version_matches(state))
@@ -2835,7 +2849,7 @@ impl McHandler {
                 None
             };
             let generation = old.next_generation()?;
-            let history = store
+            let mut history = store
                 .load_compartments(&old.namespace())
                 .map_err(transient)?;
             let mut state = self.new_async_record(
@@ -2875,15 +2889,49 @@ impl McHandler {
             state.cut_history_gc_pending =
                 old.cut_history_gc_pending || old.cut_first_ordinal.is_some();
             state.trim_published_cut_cache();
-            // The adoption import already installed the manifest's exact rows in
-            // the fresh namespace; copying the old namespace over them would
-            // replace the authoritative import with whatever the old generation
-            // held. Only non-moved lineages copy history here.
-            if standalone_move.is_none() {
+            // The manifest owns its imported sequences. Keep those exact rows,
+            // then add old-generation summaries only at sequences absent from
+            // the import. Thus post-move history survives without an old row
+            // overwriting an authoritative manifest row. Artifact copies use
+            // the same ownership split. replace_compartments clears the stored
+            // raw-history chunk transcripts, so both owners must recopy theirs.
+            let imported = store
+                .load_compartments(&state.namespace())
+                .map_err(transient)?;
+            history.retain(|row| {
+                !imported
+                    .iter()
+                    .any(|target| target.sequence == row.sequence)
+            });
+            let sequences = history
+                .iter()
+                .map(|row| (row.sequence, row.sequence))
+                .collect::<Vec<_>>();
+            history.extend(imported);
+            history.sort_by_key(|row| row.sequence);
+            store
+                .replace_compartments(&state.namespace(), &history)
+                .map_err(transient)?;
+            if let Some(record) = &standalone_move {
+                let imported_sequences = record
+                    .compartments
+                    .iter()
+                    .map(|row| (row.sequence, row.sequence))
+                    .collect::<Vec<_>>();
                 store
-                    .replace_compartments(&state.namespace(), &history)
+                    .copy_async_history_artifacts(
+                        &record.session,
+                        &state.namespace(),
+                        &imported_sequences,
+                    )
                     .map_err(transient)?;
             }
+            store
+                .copy_async_history_artifacts(&old.namespace(), &state.namespace(), &sequences)
+                .map_err(transient)?;
+            store
+                .carry_session_data(&old.namespace(), &state.namespace())
+                .map_err(transient)?;
             if let Some(recovery) = recovery {
                 state.offline_first_pass = old.offline_first_pass.clone();
                 state.install_adoption_suffix(store, recovery)?;
@@ -4813,6 +4861,7 @@ impl McHandler {
         {
             return Err(offline_first_pass::unprepared());
         }
+        state.catch_up_moved_session_data(store)?;
         if state.active_seed_is_unsafe(store)? {
             return Err(error(
                 "unsafe_cut_seed",

@@ -97,6 +97,7 @@ mod upgrade_rehearsal;
 pub const EMBEDDING_QUEUE_API: &str = "mc_store::embedding_queue";
 pub use provider_records::ProviderSessionKey;
 pub mod score_projection;
+pub mod session_carry;
 pub mod single_store_domain;
 pub mod single_store_schema;
 pub use score_projection::{CompartmentScoreSnapshot, ScoreSelector, RESCORE_RUBRIC_VERSION};
