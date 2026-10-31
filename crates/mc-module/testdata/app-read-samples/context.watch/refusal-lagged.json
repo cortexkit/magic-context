@@ -1,0 +1,20 @@
+{
+  "name": "stream ends with lagged when the subscriber falls behind",
+  "refusal": {
+    "code": "lagged",
+    "detail": null,
+    "message": "The context watch fell behind; reconnect with the last received cursor."
+  },
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  }
+}

@@ -11,9 +11,11 @@ import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import {
     __resetProjectIdentityForTests,
     __setProjectIdentityTestHooks,
+    borrowedProjectIdentity,
     describeUnresolvedProjectIdentity,
     isLinkedGitWorktree,
     type LiveProjectIdentityAnswer,
+    normalizeStoredProjectPath,
     rememberResolvedProjectIdentity,
     resolveProjectIdentity,
     resolveProjectIdentityForSession,
@@ -23,8 +25,13 @@ import {
     projectDirectoryKey,
     readRememberedProjectIdentity,
     rememberGitIdentity,
+    rememberPinnedProjectIdentity,
 } from "./project-identity-cache";
 import { __setProjectPinWriterForTests, flushProjectPinWrites } from "./project-pin-writer";
+import {
+    __resetSessionIdentityDecisionsForTests,
+    awaitSessionIdentityDecision,
+} from "./session-identity-decision";
 
 function tempDir(): string {
     return createTestTempDirFromPath(join(tmpdir(), "mc-identity-"));
@@ -55,6 +62,22 @@ afterEach(async () => {
     if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalDataHome;
     rmSync(testRoot, { recursive: true, force: true });
+});
+
+test.each([
+    "git:root",
+    "dir:0123456789ab",
+    "pj-7a213b44",
+])("normalizeStoredProjectPath preserves resolved id %s", (identity) => {
+    const previousCwd = process.cwd();
+    // A same-named directory must not turn an already-resolved key into a path.
+    mkdirSync(join(testRoot, "pj-7a213b44"));
+    try {
+        process.chdir(testRoot);
+        expect(normalizeStoredProjectPath(identity)).toBe(identity);
+    } finally {
+        process.chdir(previousCwd);
+    }
 });
 
 describe("linked Git worktree detection", () => {
@@ -177,11 +200,257 @@ function sidecarBytes(): Map<string, string> {
     );
 }
 
+function linkedIdentityFixture() {
+    const main = join(testRoot, "main");
+    const worktree = join(testRoot, "worktree");
+    const gitDir = join(main, ".git", "worktrees", "linked");
+    mkdirSync(gitDir, { recursive: true });
+    mkdirSync(worktree);
+    writeFileSync(join(worktree, ".git"), `gitdir: ${gitDir}\n`);
+    writeFileSync(join(gitDir, "commondir"), "../..\n");
+    return { main, worktree, gitDir };
+}
+
+test("warm linked-worktree identity with 500 sidecars performs no scans or file reads", async () => {
+    const { main, worktree, gitDir } = linkedIdentityFixture();
+    pin(main, "pj-ROOT");
+    for (let i = 0; i < 499; i++) pin(join(testRoot, `unrelated-${i}`), `pj-other-${i}`);
+    const read = spyOn(fs, "readFileSync");
+    const scan = spyOn(fs, "readdirSync");
+    try {
+        expect(resolveProjectIdentityForSession(worktree)).toBe("pj-ROOT");
+        expect(await flushProjectPinWrites(2_000)).toBe(true);
+        expect(resolveProjectIdentityForSession(worktree)).toBe("pj-ROOT");
+        expect(read.mock.calls.filter(([file]) => file === join(worktree, ".git"))).toHaveLength(1);
+        expect(read.mock.calls.filter(([file]) => file === join(gitDir, "commondir"))).toHaveLength(
+            1,
+        );
+        read.mockClear();
+        scan.mockClear();
+        const started = performance.now();
+        let answer: string | undefined;
+        for (let i = 0; i < 100; i++) answer = resolveProjectIdentityForSession(worktree);
+        const elapsed = performance.now() - started;
+        console.info(
+            `WORKTREE_WARM_TS calls=100 sidecars=500 us_per_call=${elapsed * 10} reads=${read.mock.calls.length} scans=${scan.mock.calls.length}`,
+        );
+        expect(answer).toBe("pj-ROOT");
+        expect(resolveProjectIdentity(worktree)).toBe("pj-ROOT");
+        expect(resolveProjectIdentityStrict(worktree)).toBe("pj-ROOT");
+        expect(borrowedProjectIdentity(worktree)).toBe("pj-ROOT");
+        expect(scan).not.toHaveBeenCalled();
+        expect(read).not.toHaveBeenCalled();
+    } finally {
+        read.mockRestore();
+        scan.mockRestore();
+    }
+});
+
+test.each([
+    "external",
+    "pending",
+])("a cached worktree git answer observes an %s checkout pin", async (source) => {
+    const { main, worktree } = linkedIdentityFixture();
+    __setProjectIdentityTestHooks({ execFileSync: returningRootCommit("abcdef123") });
+    expect(resolveProjectIdentityForSession(worktree)).toBe("git:abcdef123");
+    expect(resolveProjectIdentityForSession(worktree)).toBe("git:abcdef123");
+    if (source === "external") pin(main, "pj-NEW");
+    else {
+        rememberPinnedProjectIdentity(main, "pj-NEW");
+        const mainPin = join(
+            storageDir,
+            "project-identities",
+            `${createHash("sha256").update(projectDirectoryKey(main)).digest("hex")}.json`,
+        );
+        expect(fs.existsSync(mainPin)).toBe(false);
+    }
+    expect(resolveProjectIdentityForSession(worktree)).toBe("pj-NEW");
+    expect(await flushProjectPinWrites(2_000)).toBe(true);
+});
+
+test("a borrowed answer notices an in-place pin replacement and a new exact worktree pin", () => {
+    const { main, worktree } = linkedIdentityFixture();
+    pin(main, "pj-FIRST");
+    expect(resolveProjectIdentityForSession(worktree)).toBe("pj-FIRST");
+    pin(main, "pj-OTHER");
+    expect(resolveProjectIdentityForSession(worktree)).toBe("pj-OTHER");
+    pin(worktree, "pj-EXACT");
+    // A linked folder keeps its own pin only with explicit Entorhinal root-registration evidence.
+    expect(resolveProjectIdentityForSession(worktree)).toBe("pj-OTHER");
+});
+
+test("worktree cleanup runs only once even if a legacy writer recreates its sidecar", async () => {
+    const { main, worktree } = linkedIdentityFixture();
+    pin(main, "pj-ROOT");
+    const stale = pin(worktree, "git:abcdef123");
+    expect(borrowedProjectIdentity(worktree)).toBe("pj-ROOT");
+    expect(await flushProjectPinWrites(2_000)).toBe(true);
+    expect(fs.existsSync(stale)).toBe(false);
+    pin(worktree, "git:abcdef123");
+    expect(borrowedProjectIdentity(worktree)).toBe("pj-ROOT");
+    expect(await flushProjectPinWrites(2_000)).toBe(true);
+    expect(fs.existsSync(stale)).toBe(true);
+});
+
+test("ordinary warm sessions perform no new filesystem probes", () => {
+    const main = join(testRoot, "main");
+    mkdirSync(join(main, ".git"), { recursive: true });
+    __setProjectIdentityTestHooks({ execFileSync: returningRootCommit("abcdef123") });
+    expect(resolveProjectIdentityForSession(main)).toBe("git:abcdef123");
+    const read = spyOn(fs, "readFileSync");
+    const scan = spyOn(fs, "readdirSync");
+    const stat = spyOn(fs, "lstatSync");
+    try {
+        for (let i = 0; i < 100; i++)
+            expect(resolveProjectIdentityForSession(main)).toBe("git:abcdef123");
+        expect(read).not.toHaveBeenCalled();
+        expect(scan).not.toHaveBeenCalled();
+        expect(stat).not.toHaveBeenCalled();
+    } finally {
+        read.mockRestore();
+        scan.mockRestore();
+        stat.mockRestore();
+    }
+});
+
+test("session topology caching preserves fail-closed worktree detection for malformed metadata", () => {
+    const { worktree } = linkedIdentityFixture();
+    writeFileSync(join(worktree, ".git"), "not a gitdir pointer\n");
+    __setProjectIdentityTestHooks({ execFileSync: returningRootCommit("abcdef123") });
+    expect(resolveProjectIdentityForSession(worktree)).toBe("git:abcdef123");
+    expect(isLinkedGitWorktree(worktree)).toBe(true);
+});
+
 describe("live project pin writes", () => {
+    for (const row of parity.cases.filter(
+        (row) => row.name.startsWith("worktree-") || "cacheTransition" in row,
+    )) {
+        test(`parity worktree resolvers: ${row.name}`, async () => {
+            const expand = (value: string) => value.replaceAll("<fixture>", testRoot);
+            const fixture = parity.fixtures.linked;
+            for (const repo of fixture.repositories) {
+                mkdirSync(expand(repo.root), { recursive: true });
+                mkdirSync(expand(repo.gitDir), { recursive: true });
+                if (repo.kind === "worktree") {
+                    writeFileSync(
+                        join(expand(repo.root), ".git"),
+                        `gitdir: ${expand(repo.gitDir)}\n`,
+                    );
+                    writeFileSync(
+                        join(expand(repo.gitDir), "commondir"),
+                        `${expand(repo.commonDir)}\n`,
+                    );
+                }
+            }
+            for (const record of row.sidecars) {
+                const file = pin(expand(record.directory), record.identity);
+                writeFileSync(
+                    file,
+                    JSON.stringify({
+                        ...record,
+                        directory: expand(record.directory),
+                        ...("gitCommonDir" in record
+                            ? { gitCommonDir: expand(record.gitCommonDir) }
+                            : {}),
+                    }),
+                );
+            }
+            let probes = 0;
+            __setProjectIdentityTestHooks({
+                execFileSync: (() => {
+                    probes++;
+                    return parity.gitRootCommit;
+                }) as unknown as typeof execFileSync,
+            });
+            const directory = expand(row.directory);
+            const expected = row.expected.identity;
+            if ("cacheTransition" in row) {
+                const transition = row.cacheTransition as {
+                    publication?: { directory: string; identity: string };
+                    warmIdentity: string;
+                    sidecars: { directory: string; identity: string }[];
+                    atomic?: boolean;
+                    recreateFromFixture?: keyof typeof parity.fixtures;
+                };
+                if (transition.publication)
+                    rememberPinnedProjectIdentity(
+                        expand(transition.publication.directory),
+                        transition.publication.identity,
+                    );
+                expect(await flushProjectPinWrites(2_000)).toBe(true);
+                expect(resolveProjectIdentityForSession(directory)).toBe(transition.warmIdentity);
+                expect(await flushProjectPinWrites(2_000)).toBe(true);
+                borrowedProjectIdentity(directory);
+                if (transition.recreateFromFixture) {
+                    const [parent] = parity.fixtures[transition.recreateFromFixture].repositories;
+                    const gitDir = join(expand(parent.gitDir), "worktrees", "recreated");
+                    fs.rmSync(directory, { recursive: true });
+                    mkdirSync(directory, { recursive: true });
+                    mkdirSync(gitDir, { recursive: true });
+                    writeFileSync(join(directory, ".git"), `gitdir: ${gitDir}\n`);
+                    writeFileSync(join(gitDir, "commondir"), "../..\n");
+                }
+                for (const record of transition.sidecars) {
+                    const file = join(
+                        storageDir,
+                        "project-identities",
+                        `${createHash("sha256")
+                            .update(projectDirectoryKey(expand(record.directory)))
+                            .digest("hex")}.json`,
+                    );
+                    const destination = transition.atomic ? `${file}.replacement` : file;
+                    writeFileSync(
+                        destination,
+                        JSON.stringify({ ...record, directory: expand(record.directory) }),
+                    );
+                    if (transition.atomic) fs.renameSync(destination, file);
+                }
+                probes = 0;
+            }
+            const before = sidecarBytes();
+            if (row.name === "worktree-stale-git-sidecar-retired") {
+                expect(resolveProjectIdentityStrict(directory, false, { cache: false })).toBe(
+                    expected,
+                );
+                expect(await flushProjectPinWrites(2_000)).toBe(true);
+                expect(sidecarBytes()).toEqual(before);
+            }
+            expect(resolveProjectIdentityStrict(directory)).toBe(expected);
+            expect(resolveProjectIdentity(directory)).toBe(expected);
+            expect(resolveProjectIdentityForSession(directory)).toBe(expected);
+            __resetSessionIdentityDecisionsForTests();
+            try {
+                expect(
+                    (
+                        await awaitSessionIdentityDecision(row.name, directory, {
+                            connectionFile: join(testRoot, "absent.json"),
+                        })
+                    ).identity,
+                ).toBe(expected);
+            } finally {
+                __resetSessionIdentityDecisionsForTests();
+            }
+            expect(await flushProjectPinWrites(2_000)).toBe(true);
+            const after = sidecarBytes();
+            const removed = "sidecarRemovals" in row.expected ? row.expected.sidecarRemovals : [];
+            for (const [file, bytes] of before) {
+                if (removed?.some((folder) => expand(folder) === JSON.parse(bytes).directory))
+                    expect(after.has(file)).toBe(false);
+                else expect(after.get(file)).toBe(bytes);
+            }
+            expect([...after.keys()].filter((file) => !before.has(file))).toEqual([]);
+            expect(probes).toBe(row.expected.gitProbeCalls);
+            __setProjectIdentityTestHooks({ homeDirectory: () => directory });
+            expect(resolveProjectIdentityForSession(directory, false)).toBeUndefined();
+        });
+    }
+
     const rowNames = [
         "registered-root",
         "registered-subfolder",
         "registered-linked-worktree",
+        "registered-linked-root",
+        "nonroot-linked-equal-canonical-root",
         "unregistered-checkout",
         "nested-registration-without-parent-pin",
         "nested-registration-with-parent-pin",

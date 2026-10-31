@@ -143,6 +143,8 @@ export function onNoteTrigger(db: Database, sessionId: string, trigger: NoteNudg
  *   the nudge fires again at the next work boundary so the agent regains
  *   visibility into deferred intentions. Caller computes this via
  *   `hasVisibleNoteReadCall(messages)` AFTER drops are materialized.
+ * @param projectLookupUnavailable - Keep undisplayed work pending when project
+ *   notes cannot be read and no session note can be delivered.
  */
 export function peekNoteNudgeText(
     db: Database,
@@ -151,6 +153,7 @@ export function peekNoteNudgeText(
     projectIdentity?: string,
     noteReadStillVisible?: boolean,
     eligibility?: NoteNudgeDeliveryEligibility,
+    projectLookupUnavailable = false,
 ): string | null {
     const state = getPersistedNoteNudge(db, sessionId);
 
@@ -209,6 +212,8 @@ export function peekNoteNudgeText(
     const notes = getSessionNotes(db, sessionId);
     const readySmartNotes = projectIdentity ? getReadySmartNotes(db, projectIdentity) : [];
     const totalCount = notes.length + readySmartNotes.length;
+    // An unavailable project scope is not evidence that there are no notes.
+    if (projectLookupUnavailable && totalCount === 0) return null;
     if (totalCount === 0) {
         sessionLog(sessionId, "note-nudge: triggerPending but no notes found, skipping");
         clearNoteNudgeTriggerOnly(db, sessionId);

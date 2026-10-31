@@ -232,6 +232,7 @@ async fn moved_rig_stage(dir: &Path, run_move: bool, prepare: bool) -> (Rig, Val
                 describe: None,
                 inputs: None,
                 proof: None,
+                due_view: None,
             };
             let binding = SessionBinding {
                 principal: Some(subc_protocol::Principal::Reserved {
@@ -725,6 +726,57 @@ async fn second_bind_adds_no_duplicate_and_keeps_the_move_record() {
         .standalone_move
         .as_ref()
         .is_some_and(|moved| moved.pending.is_none()));
+}
+
+/// A runner may key a message's parts by position ("0", "1", …), as
+/// THALAMUS's OpenCode runner does, while the move recorded each drop target
+/// by OpenCode's part id. The bind resolves the host id through the served
+/// message's parts, and stores the runner's key.
+#[tokio::test]
+async fn drops_bind_when_the_runner_keys_parts_by_position() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rig, _) = moved_offline_setup_rig(dir.path()).await;
+    let store = rig.h.store.get().unwrap();
+    let mut state = rig.state();
+    for entry in rig.runner.entries.lock().unwrap().iter() {
+        if entry.ordinal < 6 {
+            continue;
+        }
+        let mut entry = entry.clone();
+        let keys: std::collections::HashMap<String, String> = entry
+            .tags
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.part.clone(), index.to_string()))
+            .collect();
+        for row in &mut entry.tags {
+            row.part = keys[&row.part].clone();
+        }
+        if let Some(digests) = &mut entry.part_digests {
+            for row in digests {
+                row.part = keys[&row.part].clone();
+            }
+        }
+        state.entries.insert(
+            entry.ordinal,
+            Arc::new(HeldEntry::from_read(&entry).unwrap()),
+        );
+    }
+    state.journal.complete = true;
+    state
+        .ingest_read(store, codec::Codec::OpencodeAiSdk)
+        .expect("drops bind through positional keys");
+    let moved = state.standalone_move.as_ref().unwrap();
+    assert!(moved.pending.is_none());
+    assert!(!moved.bound_drops.is_empty());
+    assert!(
+        moved
+            .bound_drops
+            .iter()
+            .all(|drop| drop.part.parse::<usize>().is_ok()),
+        "bound drops keep the runner's keys: {:?}",
+        moved.bound_drops
+    );
 }
 
 #[tokio::test]

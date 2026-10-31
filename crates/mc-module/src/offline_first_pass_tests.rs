@@ -202,3 +202,59 @@ fn the_checkpoint_is_the_number_below_the_lowest_tag() {
         "checkpoint_mismatch"
     );
 }
+
+/// An export written before the live Setup can't know its `request_id` or
+/// `now`, and the Setup identity digest ignores both, so a request without
+/// them reads as the same Setup as one that carries them.
+#[test]
+fn a_setup_export_without_request_id_or_now_reads_as_the_same_setup() {
+    let dir = tempfile::tempdir().unwrap();
+    let request = json!({
+        "session": "ses_export",
+        "harness": "opencode",
+        "lineage_id": "lin_export",
+        "params": {},
+        "composition": {"prefrontal": "x"},
+        "model": "anthropic/claude-opus-5-5",
+        "context_window": 1_000_000,
+    });
+    let write = |name: &str, request: Value| {
+        let path = dir.path().join(name);
+        std::fs::write(
+            &path,
+            json!({
+                "project_root": "/repo",
+                "runner_module": "thalamus-harness",
+                // A real thalamus-harness describe, captured from a live export.
+                "runner_describe": serde_json::from_str::<Value>(include_str!(
+                    "../testdata/offline-first-pass/thalamus-runner-describe.json"
+                ))
+                .unwrap(),
+                "request": request,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        path
+    };
+    let bare = read_setup(&write("bare.json", request.clone()), "ses_export");
+    let mut full = request;
+    full["request_id"] = json!("live-request-7");
+    full["now"] = json!(1_790_000_000_000u64);
+    let full = read_setup(&write("full.json", full), "ses_export");
+    let (bare, full) = match (bare, full) {
+        (Ok(bare), Ok(full)) => (bare, full),
+        (bare, full) => panic!("bare: {:?}, full: {:?}", bare.err(), full.err()),
+    };
+    assert_eq!(full.request.request_id, "live-request-7");
+    // The identity digest drops exactly these two fields, so removing them
+    // from both requests must leave the same JSON.
+    let identity = |request: &SetupRequest| {
+        let mut value = serde_json::to_value(request).unwrap();
+        let fields = value.as_object_mut().unwrap();
+        fields.remove("request_id");
+        fields.remove("now");
+        value
+    };
+    assert_eq!(identity(&bare.request), identity(&full.request));
+}

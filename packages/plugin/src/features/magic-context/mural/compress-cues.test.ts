@@ -6,6 +6,7 @@ import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/comp
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { acquireLease } from "../dreamer/lease";
+import { getDreamTaskBacklog } from "../dreamer/task-gates";
 import {
     ensureContextStoreUuid,
     installAuthorityManagedMarker,
@@ -142,6 +143,20 @@ function freshDb(): Database {
     return db;
 }
 
+function cueRow(db: Database, id: number) {
+    return db
+        .prepare(
+            "SELECT content, mural_cue, mural_cue_hash, mural_cue_at, updated_at FROM memories WHERE id = ?",
+        )
+        .get(id) as {
+        content: string;
+        mural_cue: string | null;
+        mural_cue_hash: string | null;
+        mural_cue_at: number | null;
+        updated_at: number;
+    };
+}
+
 function cueArgs(db: Database, projectIdentity: string): CompressCuesArgs {
     const holderId = "compress-holder";
     const leaseKey = `compress-${Math.random()}`;
@@ -160,6 +175,112 @@ function cueArgs(db: Database, projectIdentity: string): CompressCuesArgs {
         deadline: Date.now() + 600_000,
     };
 }
+
+describe("timestamp-only cue freshness", () => {
+    test("a timestamp-only write makes the gate due once and does not rewrite the cue", async () => {
+        const db = freshDb();
+        try {
+            const project = "git:cue-timestamp-only";
+            const text = "Keep the same memory text.";
+            const memory = insertMemory(db, {
+                projectPath: project,
+                category: "ARCHITECTURE",
+                content: text,
+                sourceSessionId: "ses",
+            });
+            const cue = "kept cue";
+            const hash = computeCueContentHash(text);
+            db.prepare(
+                `UPDATE memories
+                    SET mural_cue = ?, mural_cue_hash = ?, mural_cue_at = ?, updated_at = ?
+                  WHERE id = ?`,
+            ).run(cue, hash, 10, 99, memory.id);
+            expect(getDreamTaskBacklog(db, project, "compress-cues")).toEqual({
+                pending: 1,
+                total: 1,
+            });
+
+            const args = cueArgs(db, project);
+            let prompted = 0;
+            args.client = {
+                session: {
+                    create: async () => {
+                        prompted += 1;
+                        throw new Error("timestamp-only cue must not open a child");
+                    },
+                    prompt: async () => {
+                        prompted += 1;
+                        throw new Error("timestamp-only cue must not be recompressed");
+                    },
+                    messages: async () => ({ data: [] }),
+                    delete: async () => ({}),
+                },
+            } as never;
+
+            const result = await runCompressCues(args);
+            expect(result).toMatchObject({ compressed: 0, complete: true, remaining: 0 });
+            expect(prompted).toBe(0);
+            expect(cueRow(db, memory.id)).toEqual({
+                content: text,
+                mural_cue: cue,
+                mural_cue_hash: hash,
+                mural_cue_at: 99,
+                updated_at: 99,
+            });
+            expect(getDreamTaskBacklog(db, project, "compress-cues").pending).toBe(0);
+
+            const again = await runCompressCues(args);
+            expect(again.complete).toBe(true);
+            expect(prompted).toBe(0);
+            expect(cueRow(db, memory.id).mural_cue).toBe(cue);
+            expect(getDreamTaskBacklog(db, project, "compress-cues").pending).toBe(0);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("a content change still produces a new cue", async () => {
+        const db = freshDb();
+        try {
+            const project = "git:cue-content-changed";
+            const previous = "The handler used the old name.";
+            const edited = "The handler uses the new name.";
+            const memory = insertMemory(db, {
+                projectPath: project,
+                category: "ARCHITECTURE",
+                content: previous,
+                sourceSessionId: "ses",
+            });
+            db.prepare(
+                `UPDATE memories
+                    SET content = ?, normalized_hash = ?, mural_cue = ?, mural_cue_hash = ?,
+                        mural_cue_at = ?, updated_at = ?
+                  WHERE id = ?`,
+            ).run(
+                edited,
+                computeNormalizedHash(edited),
+                "old cue",
+                computeCueContentHash(previous),
+                10,
+                99,
+                memory.id,
+            );
+            expect(getDreamTaskBacklog(db, project, "compress-cues").pending).toBe(1);
+
+            const args = cueArgs(db, project);
+            args.client = successfulCueClient() as never;
+            const result = await runCompressCues(args);
+
+            expect(result.compressed).toBe(1);
+            const row = cueRow(db, memory.id);
+            expect(row.mural_cue).toBe(`anchor ${memory.id}`);
+            expect(row.mural_cue).not.toBe("old cue");
+            expect(row.mural_cue_hash).toBe(computeCueContentHash(edited));
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
 
 describe("runCompressCues disposition", () => {
     test("compresses through the v2 executor without a v1 client", async () => {

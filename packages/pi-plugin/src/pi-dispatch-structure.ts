@@ -14,6 +14,11 @@ import {
 	piChatHistoryPlan,
 	piMatchesChatImages,
 } from "./pi-dispatch-chat-history";
+import {
+	PI_DATE_REMINDER_APIS,
+	piDateReminderWireText,
+	piWithoutDateReminders,
+} from "./pi-dispatch-date-reminder";
 import { piGoogleConversation } from "./pi-dispatch-google";
 import {
 	type PiImageBudgetPlan,
@@ -88,6 +93,21 @@ export interface PiPreparedStructure {
 	/** Set when some prepared assistants may be absent from the wire. */
 	anthropicOptional?: PiAnthropicOptionalPlan;
 }
+
+interface PiDateReminderPlan {
+	cwd?: string;
+	plan?: PiAnthropicOptionalPlan;
+	firstUser: number;
+	midConversationSystem: boolean;
+	developerRole: boolean;
+}
+
+// Per-preparation evidence only, not a session mirror. Keep PiPreparedStructure
+// objects and outgoing messages unchanged when no date control is present.
+const dateReminderPlans = new WeakMap<
+	PiPreparedStructure,
+	PiDateReminderPlan
+>();
 
 const MAX_MESSAGES = 100_000;
 const ORPHAN_NOTE = Symbol("prepared orphan tool result");
@@ -710,6 +730,7 @@ export function preparePiDispatch<T>(
 	messages: T[],
 	model: PiChatHistoryModel | undefined,
 	omp: boolean,
+	cwd?: string,
 ): { messages: T[]; structure: PiPreparedStructure | undefined } {
 	let output = messages;
 	const structure = buildPiPreparedStructure(
@@ -728,6 +749,8 @@ export function preparePiDispatch<T>(
 			: undefined,
 		omp ? "omp" : "pi",
 	);
+	const reminders = structure && dateReminderPlans.get(structure);
+	if (reminders) reminders.cwd = cwd;
 	return { messages: output, structure };
 }
 
@@ -756,6 +779,7 @@ function buildPiPreparedStructure(
 	const toolIds = new Map<string, string | undefined>();
 	const responsesToolIds = new Map<string, string | undefined>();
 	const byIndex = new Map<number, MessageStructure>();
+	let firstUserRow: MessageStructure | undefined;
 	const imageBudget = piImageBudgetPlan<MessageStructure>(model);
 	let valid = true;
 	for (let index = 0; index < projectedMessages.length; index++) {
@@ -848,6 +872,7 @@ function buildPiPreparedStructure(
 				);
 		}
 		rows.push(row);
+		if (source?.role === "user") firstUserRow ??= row;
 		byIndex.set(index, row);
 		piRecordImages(imageBudget, row, source);
 	}
@@ -1012,7 +1037,7 @@ function buildPiPreparedStructure(
 		}
 		return [row];
 	});
-	return {
+	const prepared: PiPreparedStructure = {
 		messages: rows,
 		...(imageBudget?.count ? { imageBudget } : {}),
 		...(responsesApi && !responsesMessages
@@ -1041,6 +1066,15 @@ function buildPiPreparedStructure(
 				}
 			: {}),
 	};
+	if (host === "omp" && PI_DATE_REMINDER_APIS.has(model?.api ?? ""))
+		dateReminderPlans.set(prepared, {
+			...(modelsContinuePad ? { plan: { rows: baseRows, promotable } } : {}),
+			firstUser: firstUserRow ? baseRows.indexOf(firstUserRow) : -1,
+			midConversationSystem:
+				object(model?.compat)?.supportsMidConversationSystem === true,
+			developerRole: object(model?.compat)?.supportsDeveloperRole === true,
+		});
+	return prepared;
 }
 
 function responsesLane(api: string | undefined): boolean {
@@ -1477,6 +1511,8 @@ function countAnthropicOptionalAlignments(
 		expected: MessageStructure,
 		actual: MessageStructure,
 	) => StructureComparison | undefined,
+	reminders?: ReadonlySet<MessageStructure>,
+	firstUser = -1,
 ): number {
 	const pad: MessageStructure = {
 		role: "user",
@@ -1532,10 +1568,21 @@ function countAnthropicOptionalAlignments(
 		// both are assistants.
 		const place = (next: number | undefined): number | undefined => {
 			if (current < 0) return at;
-			const nextRole = next === undefined ? undefined : role(next);
-			if (!matches(final(current, previous, nextRole), at)) return undefined;
 			let after = at + 1;
-			if (role(current) === "assistant" && nextRole === "assistant") {
+			while (after < wire.length && reminders?.has(wire[after])) after++;
+			const controls = after > at + 1;
+			if (controls && (firstUser < 0 || current < firstUser)) return undefined;
+			const nextRole = controls
+				? wire[at + 1].role
+				: next === undefined
+					? undefined
+					: role(next);
+			if (!matches(final(current, previous, nextRole), at)) return undefined;
+			if (
+				!controls &&
+				role(current) === "assistant" &&
+				nextRole === "assistant"
+			) {
 				if (!matches(pad, after)) return undefined;
 				after++;
 			}
@@ -1544,7 +1591,12 @@ function countAnthropicOptionalAlignments(
 		for (let next = current + 1; next < base.length; next++) {
 			const after = place(next);
 			if (after !== undefined)
-				add(next, current < 0 ? undefined : role(current), after, count);
+				add(
+					next,
+					current < 0 ? undefined : wire[after - 1]?.role,
+					after,
+					count,
+				);
 			if (!base[next].optionalThinking) return;
 		}
 		// Every remaining row is optional and left out: the current row ends
@@ -1557,7 +1609,7 @@ function countAnthropicOptionalAlignments(
 		if (
 			after === wire.length ||
 			(after === wire.length - 1 &&
-				role(current) === "assistant" &&
+				wire[after - 1]?.role === "assistant" &&
 				isAnthropicContinuePadRow(wire[after]))
 		)
 			complete = Math.min(2, complete + count);
@@ -1586,6 +1638,132 @@ export function piPreparedStructureMismatch(
 		trimmed: number;
 	}) => void,
 ): string | undefined {
+	const plan = prepared && dateReminderPlans.get(prepared);
+	// Synthetic reminders always follow an existing conversation message, never
+	// the instruction prefix that the normal structural parser leaves out.
+	try {
+		const messages = plan ? object(payload)?.messages : undefined;
+		if (Array.isArray(messages)) {
+			for (const value of messages) {
+				const message = object(value);
+				if (message?.role !== "system" && message?.role !== "developer") break;
+				if (piDateReminderWireText(message.content, plan?.cwd) !== undefined)
+					return "comparison=role";
+			}
+		}
+	} catch {
+		// The guarded structural reader below supplies the safe exception detail.
+	}
+	const mismatch = preparedStructureMismatch(payload, prepared, onImageTrim);
+	if (!mismatch) return mismatch;
+	try {
+		if (!prepared || !plan) return mismatch;
+		// DateCwdReminderInjector runs after the context hook. Do not mirror its
+		// private session state: it repeats controls after earlier conversation
+		// messages and can insert several at the same position. Recognize only
+		// its exact template and wire roles after a real user turn; every prepared
+		// row must still align in order.
+		if (!plan.plan) {
+			if (plan.firstUser < 0) return mismatch;
+			const root = prepared.messages[plan.firstUser];
+			const body = object(payload);
+			const routeRows = Array.isArray(body?.input)
+				? (prepared.responsesMessages ?? prepared.messages)
+				: prepared.api === "openai-completions"
+					? (prepared.chatMessages ?? prepared.messages)
+					: prepared.messages;
+			const firstUser = routeRows.indexOf(root);
+			if (firstUser < 0) return mismatch;
+			const filtered = piWithoutDateReminders(
+				payload,
+				prepared.api ?? "",
+				plan.cwd,
+				plan.developerRole,
+				(prefix) => {
+					const rows = payloadStructure(
+						prefix,
+						prepared.api === "ollama-chat",
+						!!prepared.responsesMessages,
+					);
+					return !!rows && rows.length > firstUser;
+				},
+			);
+			return filtered === undefined
+				? mismatch
+				: preparedStructureMismatch(filtered, prepared, onImageTrim);
+		}
+		const messages = object(payload)?.messages;
+		if (!Array.isArray(messages)) return mismatch;
+		for (const value of messages) {
+			const message = object(value);
+			if (
+				piDateReminderWireText(message?.content, plan.cwd) !== undefined &&
+				Object.keys(message ?? {}).some(
+					(key) => !["role", "content"].includes(key),
+				)
+			)
+				return mismatch;
+		}
+		const wire = payloadStructure(
+			payload,
+			false,
+			false,
+			!!prepared.imageBudget &&
+				piWireImageCount(payload) < prepared.imageBudget.count,
+		);
+		if (!wire) return mismatch;
+		const reminders = new Set(
+			wire.filter(
+				(row) =>
+					piDateReminderWireText(row.wireContent, plan.cwd) !== undefined,
+			),
+		);
+		if (!reminders.size) return mismatch;
+		for (let index = 0; index < wire.length; index++) {
+			const row = wire[index];
+			if (!reminders.has(row)) continue;
+			const previous = wire[index - 1];
+			const next = wire[index + 1];
+			const promoted =
+				plan.midConversationSystem &&
+				(previous?.role === "user" || previous?.role === "toolResult") &&
+				(!next || next.role === "assistant");
+			if (
+				row.wireRole !== (promoted ? "system" : "user") ||
+				row.calls.length ||
+				row.results.length
+			)
+				return mismatch;
+		}
+		// Anthropic developer promotion and inserted "Continue." user nudges
+		// depend on the extra controls.
+		// Reuse the alignment walk rather than dropping rows and hiding those
+		// changes to the prepared developer or assistant neighbours.
+		return preparedStructureMismatch(
+			payload,
+			{ ...prepared, anthropicOptional: plan.plan },
+			onImageTrim,
+			reminders,
+			wire,
+			plan.firstUser,
+		);
+	} catch {
+		return mismatch;
+	}
+}
+
+function preparedStructureMismatch(
+	payload: unknown,
+	prepared: PiPreparedStructure | undefined,
+	onImageTrim?: (counts: {
+		planned: number;
+		actual: number;
+		trimmed: number;
+	}) => void,
+	reminders?: ReadonlySet<MessageStructure>,
+	reminderWire?: readonly MessageStructure[],
+	firstUser?: number,
+): string | undefined {
 	// Where the comparison was when something threw, plus the built-in error
 	// class. Both are fixed vocabularies, so an exception's message or a
 	// getter's value can never reach the refusal text.
@@ -1613,12 +1791,14 @@ export function piPreparedStructureMismatch(
 			body.inferenceConfig === undefined;
 		const responses =
 			body?.messages === undefined && Array.isArray(body?.input);
-		rows = payloadStructure(
-			payload,
-			ollama,
-			responses && !!prepared?.responsesMessages,
-			imageProjection,
-		);
+		rows =
+			reminderWire ??
+			payloadStructure(
+				payload,
+				ollama,
+				responses && !!prepared?.responsesMessages,
+				imageProjection,
+			);
 		const chat =
 			!!body &&
 			Array.isArray(body.messages) &&
@@ -1794,6 +1974,8 @@ export function piPreparedStructureMismatch(
 					: optionalPlan.rows,
 				rows,
 				compareRow,
+				reminders,
+				firstUser,
 			);
 			if (alignments > 1)
 				return structureDetail(0, expectedRows, rows, "alignment");

@@ -243,7 +243,9 @@ describe("Pi status refresh work", () => {
 			for (let second = 1; second <= 60; second++)
 				refresh.refresh(second * 1000);
 			const after = { queries, tokenizations };
-			expect(before.tokenizations).toBeGreaterThanOrEqual(120);
+			// The shared schema cache leaves only the system prompt to count on
+			// each direct detail build; the refresh cache also eliminates that work.
+			expect(before.tokenizations).toBe(60);
 			expect(after.tokenizations).toBe(0);
 			// Six full detail builds plus one cheap revision query per second
 			// and one post-build revision query per build.

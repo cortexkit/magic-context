@@ -68,6 +68,11 @@ impl<H: ModuleHandler> ModuleHandler for McTransportHandler<H> {
         bound_health(self.inner.health().await)
     }
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
+        // A held-open subscription must not occupy a blocking-pool thread for
+        // its lifetime. Its handler moves only setup/snapshot work off-runtime.
+        if crate::app_read::watch::is_watch(&body) {
+            return self.inner.handle(ctx, body).await;
+        }
         let inner = Arc::clone(&self.inner);
         let replies = Arc::clone(&self.replies);
         let runtime = tokio::runtime::Handle::current();

@@ -145,7 +145,7 @@ describe("project identity sidecars", () => {
         expect(fs.readFileSync(file, "utf8")).toBe(before);
     });
 
-    test("pending and completed process pins override stale disk records in exact and common-dir reads", async () => {
+    test("pending process pins override disk records but completed publications yield to durable replacements", async () => {
         let finish!: () => void;
         const writer = new ProjectPinWriter(
             () =>
@@ -165,8 +165,9 @@ describe("project identity sidecars", () => {
         expect(await writer.flush(100)).toBe(true);
         writeRecord(directory, "pj-STALE", "/metadata/repo.git");
         rememberGitIdentity(directory, "git:fffffff");
-        expect(readRememberedProjectIdentity(directory)?.identity).toBe("pj-A");
-        expect(findPinnedIdentityByGitCommonDir("/metadata/repo.git")).toBe("pj-A");
+        // Once the write completes, another process's durable replacement is authoritative.
+        expect(readRememberedProjectIdentity(directory)?.identity).toBe("pj-STALE");
+        expect(findPinnedIdentityByGitCommonDir("/metadata/repo.git")).toBe("pj-STALE");
     });
 
     test("neither sidecar writer persists an implicit id or an invalid identity", () => {

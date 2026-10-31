@@ -7,6 +7,7 @@ import type {
 	RetrospectiveSinceRead,
 } from "@magic-context/core/features/magic-context/dreamer/retrospective-raw-provider";
 import { readSessionActivity } from "@magic-context/core/features/magic-context/session-activity";
+import { cleanUserText } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { sameProjectDirectory } from "@magic-context/core/shared/project-directory-key";
 import type { Database } from "@magic-context/core/shared/sqlite";
 import {
@@ -216,7 +217,7 @@ function normalizePiUserEntry(
 	if (!message || typeof message !== "object") return null;
 	if (message.role !== "user" || typeof message.timestamp !== "number")
 		return null;
-	const text = extractPiTextContent(message.content).trim();
+	const text = cleanUserText(extractPiTextContent(message.content));
 	if (!text) return null;
 	return {
 		sessionId,
@@ -250,7 +251,9 @@ function extractPiTextContent(content: unknown): string {
 		.flatMap((part) => {
 			if (part === null || typeof part !== "object") return [];
 			const record = part as Record<string, unknown>;
-			return record.type === "text" && typeof record.text === "string"
+			return record.synthetic !== true &&
+				record.type === "text" &&
+				typeof record.text === "string"
 				? [record.text]
 				: [];
 		})

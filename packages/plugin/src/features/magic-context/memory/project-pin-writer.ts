@@ -1,12 +1,9 @@
 import { dirname } from "node:path";
 import { Worker } from "node:worker_threads";
 import { log } from "../../../shared/logger";
-import {
-    setStoragePrivatePermissionEnforcement,
-    shouldEnforcePrivateStoragePermissions,
-    writeStorageFileAtomicSync,
-} from "../../../shared/storage-permissions";
+import { shouldEnforcePrivateStoragePermissions } from "../../../shared/storage-permissions";
 import type { ProjectIdentityRecord } from "./project-identity-cache";
+import { persistPinRequest } from "./project-pin-persistence";
 import type { PinWriteRequest } from "./project-pin-worker";
 
 type WritePin = (request: PinWriteRequest) => Promise<void>;
@@ -33,6 +30,7 @@ export class ProjectPinWriter {
     private saturated = false;
     private pumpScheduled = false;
     private readonly changed = new Set<() => void>();
+    private revision = 0;
 
     constructor(
         private readonly write: WritePin,
@@ -41,9 +39,10 @@ export class ProjectPinWriter {
     ) {}
 
     publish(destination: string, record: ProjectIdentityRecord): void {
-        // Keep the original record if later resolutions propose a different identity
-        // for this destination, even while its first write is still pending.
+        // Keep the original record while persistence is pending, even if a later
+        // resolution proposes another identity for the same destination.
         const existing = this.pins.get(destination);
+        if (!existing) this.revision++;
         const pin = existing ?? {
             destination,
             record: { ...record },
@@ -58,17 +57,33 @@ export class ProjectPinWriter {
         this.schedule(pin);
     }
 
+    removeIfUnchanged(destination: string, record: ProjectIdentityRecord, bytes: string): void {
+        if (this.pins.has(destination)) return;
+        this.schedule({
+            destination,
+            record,
+            removeIfUnchanged: bytes,
+            privateStorage: false,
+            persisted: false,
+            awaitingDecision: false,
+        });
+    }
+
     lookup(destination: string): ProjectIdentityRecord | undefined {
         const pin = this.pins.get(destination);
-        if (!pin) return undefined;
+        if (!pin || pin.persisted) return undefined;
         this.schedule(pin);
         return { ...pin.record };
     }
 
     records(sidecarDirectory: string): ProjectIdentityRecord[] {
         return [...this.pins.values()]
-            .filter((pin) => dirname(pin.destination) === sidecarDirectory)
+            .filter((pin) => !pin.persisted && dirname(pin.destination) === sidecarDirectory)
             .map((pin) => ({ ...pin.record }));
+    }
+
+    get generation(): number {
+        return this.revision;
     }
 
     private schedule(pin: Pin): void {
@@ -102,6 +117,9 @@ export class ProjectPinWriter {
             .then(
                 () => {
                     pin.persisted = true;
+                    // Retain a completed destination only to reject late publications;
+                    // lookups now yield to durable state, including other processes' writes.
+                    if (this.pins.get(pin.destination) === pin) this.revision++;
                 },
                 (error) => {
                     pin.awaitingDecision = true;
@@ -205,8 +223,7 @@ export class PinWorker {
             workerUnavailableReported = true;
             this.report("[magic-context] pin worker unavailable; writing pins in process");
         }
-        setStoragePrivatePermissionEnforcement(request.privateStorage);
-        writeStorageFileAtomicSync(request.destination, JSON.stringify(request.record));
+        persistPinRequest(request);
     }
 
     private failed(worker: Worker, error: unknown): void {

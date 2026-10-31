@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { HiddenRunIdentity } from "../hooks/magic-context/compartment-runner-types";
 import { Database } from "../shared/sqlite";
+import { cleanupLegacyHiddenChildren } from "./hidden-child-cleanup";
 import {
     __resetParentDroppedNotice,
     isSessionNotFound,
@@ -41,6 +42,7 @@ const request = () => ({
 async function setup(
     options: {
         keepsParent?: boolean;
+        readError?: Error;
         removeError?: unknown;
         keepSubagents?: boolean;
         stuck?: boolean;
@@ -58,6 +60,7 @@ async function setup(
     const removed: string[] = [];
     const legacyRemovals: string[] = [];
     const logs: string[] = [];
+    const lifecycleLogs: string[] = [];
     const parents = new Map<string, string | undefined>();
     const rows = new Map<string, StoreRow<"assistant">[]>();
     let seq = 0;
@@ -72,6 +75,7 @@ async function setup(
         },
         async get(input) {
             reads.push(input.sessionID);
+            if (options.readError) throw options.readError;
             const parentID = parents.get(input.sessionID);
             return {
                 model: { providerID: "mock", id: "user" },
@@ -145,7 +149,16 @@ async function setup(
         generation: "native-generation",
         removalTimeoutMs: 20,
         ...(options.keepSubagents ? { keepSubagents: true } : {}),
-        log: (message) => logs.push(message),
+        log: (message) => {
+            // Keep the existing warning assertions separate from lifecycle diagnostics.
+            if (
+                /hidden child \S+ (created |removing$|removed$|kept \(keep_subagents\)$)/.test(
+                    message,
+                )
+            )
+                lifecycleLogs.push(message);
+            else logs.push(message);
+        },
     });
     let prompts = 0;
     const prompt = host.prompt.bind(host);
@@ -180,6 +193,7 @@ async function setup(
         removed,
         legacyRemovals,
         logs,
+        lifecycleLogs,
         runOnce,
         executor,
         prompts: () => prompts,
@@ -197,6 +211,118 @@ async function setup(
 
 describe("OpenCode 2 hidden children on a host with session.remove", () => {
     beforeEach(() => __resetParentDroppedNotice());
+
+    for (const keepSubagents of [false, true]) {
+        test(`logs creation and finish decisions once per child with keep_subagents=${keepSubagents}`, async () => {
+            const state = await setup({ keepSubagents });
+            try {
+                await state.runOnce(historian);
+                await state.runOnce(dreamer);
+                expect(state.lifecycleLogs).toEqual([
+                    `[magic-context] hidden child child-1 created role=historian parent=user-session keep_subagents=${keepSubagents}`,
+                    ...(keepSubagents
+                        ? ["[magic-context] hidden child child-1 kept (keep_subagents)"]
+                        : [
+                              "[magic-context] hidden child child-1 removing",
+                              "[magic-context] hidden child child-1 removed",
+                          ]),
+                    `[magic-context] hidden child child-2 created role=dreamer parent=user-session keep_subagents=${keepSubagents}`,
+                    ...(keepSubagents
+                        ? ["[magic-context] hidden child child-2 kept (keep_subagents)"]
+                        : [
+                              "[magic-context] hidden child child-2 removing",
+                              "[magic-context] hidden child child-2 removed",
+                          ]),
+                ]);
+            } finally {
+                state.db.close();
+            }
+        });
+    }
+
+    test("creation logs the parent read back from the host, not the requested parent", async () => {
+        const state = await setup({ keepsParent: false });
+        try {
+            await state.runOnce(historian);
+            expect(state.lifecycleLogs).toEqual([
+                "[magic-context] hidden child child-1 created role=historian parent=none keep_subagents=false",
+                "[magic-context] hidden child child-1 removing",
+                "[magic-context] hidden child child-1 removed",
+            ]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("creation logs an unknown parent when the host read-back fails", async () => {
+        const state = await setup({ readError: new Error("host unavailable") });
+        try {
+            await state.runOnce(historian);
+            expect(state.lifecycleLogs).toEqual([
+                "[magic-context] hidden child child-1 created role=historian parent=unknown keep_subagents=false",
+                "[magic-context] hidden child child-1 removing",
+                "[magic-context] hidden child child-1 removed",
+            ]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("an unparented creation logs once without adding a host read", async () => {
+        const state = await setup();
+        try {
+            const { parentSessionId: _unused, ...withoutParent } = dreamer;
+            await state.runOnce(withoutParent);
+            expect(state.reads).toEqual([]);
+            expect(state.lifecycleLogs).toEqual([
+                "[magic-context] hidden child child-1 created role=dreamer parent=none keep_subagents=false",
+                "[magic-context] hidden child child-1 removing",
+                "[magic-context] hidden child child-1 removed",
+            ]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("a failed removal logs its decision but not a successful removal", async () => {
+        const state = await setup({ removeError: new Error("host unavailable") });
+        try {
+            await state.runOnce(historian);
+            expect(state.lifecycleLogs).toEqual([
+                "[magic-context] hidden child child-1 created role=historian parent=user-session keep_subagents=false",
+                "[magic-context] hidden child child-1 removing",
+            ]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("legacy startup cleanup logs each removal once and does not log drained ids again", async () => {
+        const state = await setup();
+        const logs: string[] = [];
+        const removed: string[] = [];
+        try {
+            state.db.prepare("INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)").run(
+                "opencode2_hidden_children:legacy",
+                JSON.stringify({
+                    active: { historian: { id: "legacy-active" } },
+                    retired_children: [{ id: "legacy-retired" }],
+                }),
+            );
+            const remove = async ({ sessionID }: { sessionID: string }) => {
+                removed.push(sessionID);
+            };
+            await cleanupLegacyHiddenChildren(state.db, remove, (line) => logs.push(line));
+            await cleanupLegacyHiddenChildren(state.db, remove, (line) => logs.push(line));
+            expect(removed).toEqual(["legacy-active", "legacy-retired"]);
+            expect(logs).toEqual([
+                "[magic-context] legacy hidden child legacy-active removed",
+                "[magic-context] legacy hidden child legacy-retired removed",
+            ]);
+        } finally {
+            state.db.close();
+        }
+    });
 
     test("each historian and dreamer run gets a child under the user's session, removed when it ends", async () => {
         const state = await setup();

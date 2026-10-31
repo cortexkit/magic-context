@@ -1040,6 +1040,7 @@ const EMPTY_HARD_SIGNALS: M0HardSignals = {
 };
 
 export interface M0M1State {
+    memoryBlockCount?: number | null;
     cachedM0ScoreSelectionWatermark?: number;
     sessionId: string;
     isSubagent?: boolean;
@@ -1200,6 +1201,8 @@ export interface InjectM0M1Result {
     injected: boolean;
     prependedMessageCount: number;
     m0RematerializedThisPass: boolean;
+    /** Fresh m[1] rendering, excluding a replay or non-persisted contention fallback. */
+    m1Refreshed?: boolean;
     materializationContentionRetryExhausted: boolean;
     decision: MaterializeDecision;
     m0Bytes: Buffer | null;
@@ -2040,14 +2043,9 @@ export function mustMaterialize(args: {
     // ── HARD: genuine m[0] CONTENT change (the rendered baseline bytes differ) ──
     if (current.projectIdentity !== null) {
         const cachedProjectIdentity = args.state.cachedM0ProjectIdentity ?? null;
-        if (cachedProjectIdentity === null) {
-            args.state.cachedM0ProjectIdentity = current.projectIdentity;
-            args.db
-                .prepare(
-                    "UPDATE session_meta SET cached_m0_project_identity = ? WHERE session_id = ?",
-                )
-                .run(current.projectIdentity, args.sessionId);
-        } else if (cachedProjectIdentity !== current.projectIdentity) {
+        // Old prefixes have no proven owner. Neither guess one without replacing
+        // their bytes nor force a fold solely to populate the ownership field.
+        if (cachedProjectIdentity !== null && cachedProjectIdentity !== current.projectIdentity) {
             return withToolSetHashComparison({ value: true, reason: "project_change" });
         }
     }
@@ -3000,6 +2998,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
 
         steps.mark("onFoldCommit");
         options.db.exec("COMMIT");
+        options.state.memoryBlockCount = visibleMemoryIds.length;
         steps.mark("commit");
         logSlowWriteTransaction(
             "opencode_materialize_cache",
@@ -3652,6 +3651,7 @@ function decodeM0Bytes(bytes: Buffer | Uint8Array | null): string | null {
 }
 
 interface CachedM0M1Row {
+    memory_block_count?: number | null;
     cached_m0_score_selection_watermark: number;
     cached_m0_bytes: Buffer | Uint8Array | null;
     cached_m0_mural_data_url: string | null;
@@ -3729,6 +3729,7 @@ function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | nul
             const row = db
                 .prepare(
                     `SELECT ${sessionRenderCacheSelect("cached_m0_bytes")},
+                memory_block_count,
                 cached_m0_score_selection_watermark,
                 ${sessionRenderCacheSelect("cached_m0_mural_data_url")},
                 cached_m0_mural_hash,
@@ -3831,6 +3832,8 @@ function cachedRowMatchesState(row: CachedM0M1Row, state: M0M1State): boolean {
 }
 
 function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
+    state.memoryBlockCount =
+        typeof row.memory_block_count === "number" ? row.memory_block_count : null;
     const markers = markersFromCachedRow(row);
     if (!row.cached_m0_bytes || !row.cached_m1_bytes || !markers) {
         throw new RenderM1InvalidMarkersError(state.sessionId);
@@ -4010,6 +4013,7 @@ function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
         )
             options.onM1Commit?.();
         options.db.exec("COMMIT");
+        options.state.memoryBlockCount = visibleMemoryIds.length;
         steps.mark("commit");
         logSlowWriteTransaction(
             "opencode_soft_refresh_cache",
@@ -5095,6 +5099,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         m0RematerializedThisPass: rematerialized,
         materializationContentionRetryExhausted: contentionExhausted,
         decision,
+        m1Refreshed: m1Recomputed && !contentionExhausted,
         m0Bytes: options.state.cachedM0Bytes,
         m1Text,
         preparedMessages,

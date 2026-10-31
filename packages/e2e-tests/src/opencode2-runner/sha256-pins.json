@@ -3,7 +3,7 @@
 	"packages/e2e-tests/mutations/goldens-dg-1.json": "3460cfe3cfa31ef3a4576235ac24fba0b36d9372804fd941a9c7ab6d239b52af",
 	"packages/e2e-tests/mutations/goldens-dg-2.json": "f8b7e04765f428b159fa21306fa6e70b7918a92309537b67af1a6cc6a5b69eda",
 	"packages/e2e-tests/mutations/goldens-dg-3.json": "155c8ec37fb0be2d906a0000e2671d5e473106ae70b02b0cfb0d1ee8e28f7c41",
-	"packages/plugin/src/index.ts": "e70d85e274b6f51b684408711b4d2b42b302b5075107023cff73003edfae1163",
+	"packages/plugin/src/index.ts": "765db6c4f2cf6a9782dc2fde408e367af767ecace8d9d3e045a4a28b93b07491",
 	"packages/plugin/src/v2/server.ts": "4f0054e8a5fe8628f84e309ecf306b3cde146882e69386117b1c522a3cc0c876",
 	"packages/e2e-tests/src/opencode2-runner/host-rows.json": "1208c136df23a54de1fef24f3ea5c3155f16ed1c28fa3d7e5864aec4cdfbcc82",
 	"packages/e2e-tests/src/opencode2-runner/payload-v1.json": "992fedba515632bccec56dab34a36f96d192a90ee06f1c33d68020bf7bb25091",

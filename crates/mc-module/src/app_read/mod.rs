@@ -22,6 +22,7 @@ mod samples_tests;
 pub(crate) mod search;
 mod session_data;
 mod version;
+pub(crate) mod watch;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,13 +35,18 @@ use sha2::Digest;
 use subc_client_rs::HandlerOutcome;
 
 pub const SERVICE_ID: &str = "mc-app-read";
-pub const MANAGEMENT_METHODS: &[&str] =
-    &["session_data.read", "context.cache_why", "context.search"];
+pub const MANAGEMENT_METHODS: &[&str] = &[
+    "session_data.read",
+    "context.cache_why",
+    "context.search",
+    "context.watch",
+];
 pub const APP_READ_METHODS: &[&str] = &[
     "context.states",
     "context.compartment",
     "context.search",
     "context.cache_why",
+    "context.watch",
     "session_data.read",
     "project_memory.read",
     "dreamer.read",
@@ -1296,7 +1302,8 @@ mod tests {
                 (&json!("subagent_invocations.read"), &json!("query")),
                 (&json!("session_data.read"), &json!("query")),
                 (&json!("context.cache_why"), &json!("query")),
-                (&json!("context.search"), &json!("query"))
+                (&json!("context.search"), &json!("query")),
+                (&json!("context.watch"), &json!("query"))
             ]
         );
         for role in provides
@@ -1314,7 +1321,7 @@ mod tests {
     }
 
     #[test]
-    fn trait_handle_is_exact_channel_delegation() {
+    fn trait_handle_preserves_request_context_for_subscriptions() {
         let source = syn::parse_file(include_str!("../lib.rs")).unwrap();
         let module_handler = source
             .items
@@ -1338,8 +1345,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let expected: syn::Block =
-            syn::parse_quote!({ self.handle_channel(ctx.route_handle().channel, body).await });
+        let expected: syn::Block = syn::parse_quote!({ self.handle_with_context(ctx, body).await });
         assert_eq!(quote::quote!(#expected).to_string(), {
             let block = &handle.block;
             quote::quote!(#block).to_string()

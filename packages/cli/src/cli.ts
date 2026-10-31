@@ -169,6 +169,10 @@ async function runCommand(command: string | undefined, rest: string[]): Promise<
             const { runProjectIdsCli } = await import("./commands/doctor-project-ids");
             return runProjectIdsCli(rest.slice(1));
         }
+        if (rest[0] === "history" && rest[1] === "heal") {
+            const { runHistoryHealCli } = await import("./commands/doctor-history-heal");
+            return runHistoryHealCli(rest.slice(2));
+        }
         if (rest[0] === "repair-db") {
             const { runRepairDbCli } = await import("./commands/doctor-repair-db");
             return runRepairDbCli(rest.slice(1));

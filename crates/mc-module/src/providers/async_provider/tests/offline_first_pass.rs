@@ -577,7 +577,20 @@ async fn prepared(
     project: &Path,
     write: impl FnOnce(&Path) -> (StorePaths, String),
 ) -> (Prepared, OfflineOutcome) {
+    prepared_with(store, project, write, |_| {}).await
+}
+
+/// [`prepared`], preparing under the fixture Setup as `adjust` changes it, so
+/// the live Setup a test sends can carry the same extra members.
+async fn prepared_with(
+    store: &Path,
+    project: &Path,
+    write: impl FnOnce(&Path) -> (StorePaths, String),
+    adjust: impl FnOnce(&mut Value),
+) -> (Prepared, OfflineOutcome) {
     let (paths, session, served) = moved_stores(store, write);
+    let mut request = setup_request(&session, "fixture");
+    adjust(&mut request);
     pin_history_generation(&paths.context_db, &session, &[0, 1]);
     let work = tempfile::tempdir().unwrap();
     let args = command_args(
@@ -585,7 +598,7 @@ async fn prepared(
         &paths,
         &session,
         &export(&served, LINEAGE, 3),
-        &setup_file(project, &setup_request(&session, "fixture")),
+        &setup_file(project, &request),
     );
     let outcome = first_pass(&args, project, &fixture::NoHolders)
         .await
@@ -1935,14 +1948,35 @@ async fn seeded(seeds: std::ops::Range<u64>) {
     }
 }
 
-#[tokio::test]
-async fn offline_first_pass_matches_fresh_preparation_over_seeded_sessions_0_to_24() {
-    seeded(0..25).await;
+/// Run [`seeded`] on its own thread with an 8 MiB stack and a current-thread
+/// runtime, as `#[tokio::test]` would. In a debug build its offline pass, live
+/// Setup and notice sequence needs just over the 2 MiB test-thread default
+/// (measured between 2.0 and 2.25 MiB on 2026-10-31), so any small change on
+/// that path would abort the whole test binary with a stack overflow. Same
+/// pattern as `scaling_tests::acknowledgement_evicts_only_superseded_views`.
+fn seeded_on_large_stack(seeds: std::ops::Range<u64>) {
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(seeded(seeds))
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
-#[tokio::test]
-async fn offline_first_pass_matches_fresh_preparation_over_seeded_sessions_25_to_49() {
-    seeded(25..50).await;
+#[test]
+fn offline_first_pass_matches_fresh_preparation_over_seeded_sessions_0_to_24() {
+    seeded_on_large_stack(0..25);
+}
+
+#[test]
+fn offline_first_pass_matches_fresh_preparation_over_seeded_sessions_25_to_49() {
+    seeded_on_large_stack(25..50);
 }
 
 // ── Cost on a 175,000-message moved session ──
@@ -2238,4 +2272,78 @@ async fn card_review_offline_differential_at_new_seeds() {
         "card review: offline differential over seeds {first}..{}",
         first + count
     );
+}
+
+#[tokio::test]
+async fn prepared_view_keeps_its_snapshot_through_setup_fetch_and_adoption() {
+    let _clock = crate::tests::fixed_clock();
+    let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (prep, outcome) = prepared(store.path(), project.path(), fixture_stores).await;
+    let OfflineOutcome::Prepared(report) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(report.published_views, 1);
+    let arm = Arm::open(
+        store.path(),
+        project.path(),
+        &prep.session,
+        Served::new(prep.served.clone(), 7),
+        config(),
+    );
+    let reference = arm.reference();
+    let snapshot = arm
+        .store()
+        .load_async_compaction_views(&reference)
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|(version, _, _, _)| *version == 1)
+        .unwrap()
+        .2
+        .expect("preparation retains its engine/native-edit snapshot");
+    arm.store()
+        .retire_unannounced_async_views(&reference)
+        .unwrap();
+    assert_eq!(
+        arm.views()[0].2,
+        -1,
+        "a prepared view need not be announced before adoption"
+    );
+    assert!(arm.state().applied.is_none(), "prepared is not applied");
+    let answer = arm.setup(setup_request(&prep.session, "fixture")).await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    assert_eq!(
+        arm.store()
+            .load_async_compaction_views(&reference)
+            .unwrap()
+            .0[0]
+            .2
+            .as_deref(),
+        Some(snapshot.as_str())
+    );
+    let fetched = response(
+        arm.h
+            .dispatch_value(
+                CHANNEL,
+                json!({"method":"view.get","params":{"session_ref":reference,"view_version":1}}),
+            )
+            .await,
+    );
+    assert_eq!(fetched["answer"], "view");
+    assert_eq!(fetched["view"]["view_version"], 1);
+    assert_eq!(arm.notice(1, 8_000, Some(1), Vec::new()).await, "ok");
+    let adopted = arm.state();
+    // Adoption keeps the preparation marker, marked adopted, so a later Setup
+    // never treats the session as unprepared again.
+    assert!(super::super::offline_first_pass::adopted(&adopted));
+    assert_eq!(adopted.applied, Some(1));
+    assert!(adopted.snapshot_unavailable.is_none());
+    assert!(!adopted.snapshot_warning_logged);
+    assert!(arm
+        .store()
+        .load_async_compaction_views(&reference)
+        .unwrap()
+        .0[0]
+        .2
+        .is_some());
 }

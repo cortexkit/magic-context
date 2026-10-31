@@ -14,6 +14,7 @@ mod full_array_setup;
 mod held_copies_probe;
 mod historian_input_cache;
 mod moved_session;
+mod notice_signals;
 mod offline_first_pass;
 mod open_tool_notice;
 mod pass_decision_review;
@@ -29,8 +30,10 @@ mod reminder_replay;
 mod reminders;
 mod reply_shape;
 mod rollback_layout;
+mod resync_replay;
 mod route_identity_vectors;
 mod setup_checkpoint;
+mod thin_view;
 mod user_commands_tests;
 mod wrapup;
 

@@ -576,6 +576,17 @@ mod tests {
         PathBuf,
         std::sync::Arc<std::sync::Mutex<Vec<SeenRoute>>>,
     ) {
+        fake_daemon_answering_frame(reply, subc_protocol::FrameType::Response).await
+    }
+
+    async fn fake_daemon_answering_frame(
+        reply: Vec<u8>,
+        reply_type: subc_protocol::FrameType,
+    ) -> (
+        tempfile::TempDir,
+        PathBuf,
+        std::sync::Arc<std::sync::Mutex<Vec<SeenRoute>>>,
+    ) {
         use subc_control::{ClientControlRequest, ClientControlResponse};
         use subc_protocol::{Flags, Frame, FrameType, Priority};
         use subc_transport::{
@@ -647,7 +658,11 @@ mod tests {
                         _ => continue,
                     };
                     let response = Frame::build(
-                        FrameType::Response,
+                        if frame.header.channel == 0 {
+                            FrameType::Response
+                        } else {
+                            reply_type
+                        },
                         Flags::new(false, Priority::Interactive, false),
                         frame.header.channel,
                         frame.header.epoch,
@@ -730,6 +745,34 @@ mod tests {
                 (Err(SessionResolveError::ReplyShape(_)), None) => {}
                 (other, expected) => panic!("{method} {reply}: {other:?}, expected {expected:?}"),
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn broca_session_change_plan_model_mismatch_keeps_the_named_refusal() {
+        let bytes = crate::broca_session_change_tests::sample_bytes(
+            "session.refresh.plan_model_mismatch.json",
+        );
+        let (_temp, connection_file, _) =
+            fake_daemon_answering_frame(bytes, subc_protocol::FrameType::Error).await;
+        let runner =
+            RealProviderRunner::new(connection_file, RouteTargetConfig::runner_module("broca"));
+        let error = runner
+            .call(
+                std::path::Path::new("/project"),
+                "s",
+                "session.refresh",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap_err();
+        match error {
+            SessionResolveError::Refused { code, message } => {
+                assert_eq!(code, "plan_model_mismatch");
+                assert_eq!(message, "pending refresh generation 1: provider fixture has a plan model different from the send model");
+            }
+            other => panic!("expected a named refusal, got {other:?}"),
         }
     }
 

@@ -57,10 +57,12 @@ export function createV2TransformFeatureDeps(
 export function createV2AutoEmbedSession(
     deps: EmbedHistoryDeps,
     ensureProjectRegistered = ensureProjectRegisteredFromOpenCodeDirectory,
-): (sessionId: string) => void {
-    return (sessionId) => {
+): NonNullable<TransformDeps["maybeAutoEmbedSession"]> {
+    return (sessionId, owner) => {
         const directory = deps.resolveDirectory(sessionId);
-        const projectIdentity = resolveProjectIdentityForSession(directory, deps.allowHomeProject);
+        const projectIdentity = owner
+            ? owner.projectIdentity
+            : resolveProjectIdentityForSession(directory, deps.allowHomeProject);
         if (!projectIdentity) return;
         maybeAutoEmbedSessionBackfill(
             {

@@ -1,0 +1,29 @@
+{
+  "name": "first notice with stale cursor is resync",
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "cursor": "abc:0",
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  },
+  "response": {
+    "cursor": "abc:2",
+    "kind": "resync",
+    "op": "context.watch",
+    "schema": 1,
+    "sessions": [
+      {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "s"
+      }
+    ]
+  }
+}

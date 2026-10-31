@@ -56,6 +56,33 @@ fn ask_answer_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Read parked-question answers in the `<system-reminder>` format defined by
+/// `extract_ask_answer_notices`, without attributing extension prose to the
+/// person. Older serialized CK blocks kept Pi custom-message JSON as opaque.
+fn block_ask_answer_lines(block: &FlatBlock) -> Vec<String> {
+    match &block.wire_shape().kind {
+        CkKind::Text { .. } => block
+            .scalar_text()
+            .map_or_else(Vec::new, |text| ask_answer_lines(&text)),
+        CkKind::Opaque(opaque) if opaque.raw["type"] == "custom_message" => {
+            let content = &opaque.raw["content"];
+            if let Some(text) = content.as_str() {
+                ask_answer_lines(text)
+            } else {
+                content
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|part| part["type"] == "text")
+                    .filter_map(|part| part["text"].as_str())
+                    .flat_map(ask_answer_lines)
+                    .collect()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkSnapshotOwnedItem {
     pub id: String,
@@ -323,13 +350,11 @@ impl Builder {
         // would drop it. Its answer lines follow the user's own words instead, in
         // block order. A message with no answer notice appends nothing and is
         // rendered exactly as before.
-        let answer_parts: Vec<String> = if message.role == "user" {
+        let answer_parts: Vec<String> = if matches!(message.role, "user" | "notice") {
             message
                 .blocks
                 .iter()
-                .filter(|block| matches!(block.wire_shape().kind, CkKind::Text { .. }))
-                .filter_map(|block| block.scalar_text())
-                .flat_map(|text| ask_answer_lines(&text))
+                .flat_map(|block| block_ask_answer_lines(block))
                 .map(|line| normalize_text(&line))
                 .filter(|line| !line.is_empty())
                 .collect()
@@ -337,7 +362,11 @@ impl Builder {
             Vec::new()
         };
         let meaningful_text = !text_parts.is_empty();
-        let mut all_parts = self.render_parts(message, meaningful_text);
+        let mut all_parts = if message.role == "notice" && !answer_parts.is_empty() {
+            Vec::new()
+        } else {
+            self.render_parts(message, meaningful_text)
+        };
         all_parts.extend(answer_parts);
         let compacted = compact_text_for_summary(&all_parts.join(" / "), message.role);
         if compacted.text.is_empty() {
@@ -1847,6 +1876,16 @@ fn last_block_id(message: &FlatMessage<'_>) -> Option<String> {
 }
 
 fn text_parts(message: &FlatMessage<'_>) -> Vec<String> {
+    // An answer delivery can contain extension bookkeeping around the answer.
+    // Keep the recognized answer, not that surrounding notice prose.
+    if message.role == "notice"
+        && message
+            .blocks
+            .iter()
+            .any(|block| !block_ask_answer_lines(block).is_empty())
+    {
+        return Vec::new();
+    }
     message
         .blocks
         .iter()
@@ -1868,6 +1907,9 @@ fn text_parts(message: &FlatMessage<'_>) -> Vec<String> {
 }
 
 fn media_placeholder(media: &crate::ck_wire::MediaBlock) -> String {
+    if let Some(marker) = crate::providers::codec::media::marker(media) {
+        return marker.to_owned();
+    }
     let kind = match media.kind {
         crate::ck_wire::MediaKind::Image => "image",
         crate::ck_wire::MediaKind::Audio => "audio",
@@ -1886,17 +1928,18 @@ fn has_text_parts(message: &FlatMessage<'_>) -> bool {
 }
 
 fn has_meaningful_user_text(message: &FlatMessage<'_>) -> bool {
+    if message.role != "user" {
+        return false;
+    }
     text_parts(message)
         .iter()
         .any(|text| !text.is_empty() && !is_system_directive(text))
         // A message that held only an answer notice cleans to nothing, but it
         // carries a decision the user made, so it is not noise.
-        || message.blocks.iter().any(|block| match &block.wire_shape().kind {
-            CkKind::Text { .. } => block
-                .scalar_text()
-                .is_some_and(|text| !ask_answer_lines(&text).is_empty()),
-            _ => false,
-        })
+        || message
+            .blocks
+            .iter()
+            .any(|block| !block_ask_answer_lines(block).is_empty())
 }
 
 fn tool_result_body_tokens(message: &FlatMessage<'_>) -> usize {
@@ -1959,6 +2002,10 @@ fn build_tool_expansion_lookup(
                 }
                 CkOutputKind::Json { value } | CkOutputKind::ErrorJson { value } => value.clone(),
                 CkOutputKind::Content { blocks } | CkOutputKind::ErrorContent { blocks } => {
+                    if let Some(text) = crate::providers::codec::media::parts_text(&output.kind) {
+                        results.insert(arc.clone(), Value::String(text));
+                        continue;
+                    }
                     Value::String(
                         blocks
                             .iter()
@@ -2048,7 +2095,7 @@ fn clean_user_text(text: &str) -> String {
     result.trim().to_string()
 }
 
-/// Every ask answer notice in one user text, in delivery order.
+/// Every ask answer notice in user or template text, in delivery order.
 ///
 /// Prefrontal renders an ask notice as a `<system-reminder>` envelope: an inbox attribution line, a
 /// fixed body, and an unindented closing line. The shape is matched exactly and anything
@@ -2293,6 +2340,28 @@ fn space_before_punct_regex() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn broca_media_summarizer_text_uses_only_media_off_markers() {
+        let capture: serde_json::Value = serde_json::from_str(include_str!(
+            "../testdata/broca-media-set2/on-session-read-descriptors.jsonl"
+        ))
+        .unwrap();
+        let entries: Vec<crate::providers::codec::InboundMessage> =
+            serde_json::from_value(capture["result"]["messages"].clone()).unwrap();
+        let messages = crate::providers::codec::Codec::OwnedBroca
+            .decode_entries(&entries)
+            .unwrap();
+        let projection = crate::ck_wire::project_messages(&messages).unwrap();
+        let overrides =
+            std::collections::BTreeMap::from([("work".into(), serde_json::json!("${output}"))]);
+        let expanded = super::build_tool_expansion_lookup(&projection.blocks, 6, &overrides);
+        // Historian templates normalize line breaks without changing marker bytes.
+        assert_eq!(expanded["m3#0"], "before-media [media not shown: kind=image mime=image/png bytes=4749 sha256=2bb3f6f7eb60 reason=carrier] [media not shown: kind=document mime=application/pdf bytes=584 sha256=b7442ba422ac reason=carrier] after-media");
+        let crate::ck_wire::CkKind::Media(media) = &messages[2].ck.content[1].kind else {
+            panic!("person media")
+        };
+        assert_eq!(super::media_placeholder(media), "[media not shown: kind=image mime=image/png bytes=3592 sha256=2d317c5c185e reason=carrier]");
+    }
     mod score_projection {
         use super::*;
         include!("historian_score_projection_tests.rs");
@@ -2603,6 +2672,83 @@ mod tests {
             "{}",
             built.text
         );
+    }
+
+    #[test]
+    fn pi_custom_message_ask_answers_reach_the_historian_without_other_notice_text() {
+        for content in [
+            serde_json::json!(format!(
+                "Extension notice\n{SINGLE}\nNot the person's words"
+            )),
+            serde_json::json!([
+                {"type":"text", "text":"Extension notice"},
+                {"type":"text", "text":SINGLE},
+                {"type":"text", "text":DRIFT_HEADER},
+                {"type":"image", "text":TYPED}
+            ]),
+        ] {
+            let mut messages = crate::codec::decode_pi(&[serde_json::json!({
+                "type":"custom_message", "id":"notice", "parentId":null,
+                "customType":"cortexkit:ask-answer", "display":true, "content":content
+            })])
+            .messages;
+            messages.push(msg("a2", 2, "assistant", vec![text("noted")]));
+            messages.push(msg("u3", 3, "user", vec![text("protected tail")]));
+            let built = project_and_build(&messages, 1, 10_000, 3);
+            assert_eq!(
+                built.text.lines().next().unwrap_or_default(),
+                format!("[1] N: {}", normalize_answer(SINGLE_LINE)),
+                "{}",
+                built.text
+            );
+            for excluded in [
+                "Extension notice",
+                "Not the person's words",
+                "user_answers",
+                "What should I write?",
+            ] {
+                assert!(!built.text.contains(excluded), "{}", built.text);
+            }
+        }
+    }
+
+    #[test]
+    fn pi_shells_and_notices_never_become_the_persons_text() {
+        let rows = [
+            serde_json::json!({"type":"message","id":"person","message":{"role":"user","content":"person request"}}),
+            serde_json::json!({"type":"message","id":"shell","message":{"role":"bashExecution","command":"ls","output":"shell output"}}),
+            serde_json::json!({"type":"custom_message","id":"extension","content":"extension notice"}),
+            serde_json::json!({"type":"branch_summary","id":"branch","summary":"branch history"}),
+        ];
+        let mut messages = crate::codec::decode_pi(&rows).messages;
+        messages.push(msg("a5", 5, "assistant", vec![text("noted")]));
+        messages.push(msg("u6", 6, "user", vec![text("protected tail")]));
+        let projection = project_messages(&messages).unwrap();
+        for (ordinal, role) in [(1, "user"), (2, "tool"), (3, "notice"), (4, "notice")] {
+            let message = FlatMessage {
+                ordinal,
+                role,
+                blocks: projection
+                    .blocks
+                    .iter()
+                    .filter(|block| block.ordinal == ordinal)
+                    .collect(),
+            };
+            assert_eq!(has_meaningful_user_text(&message), ordinal == 1);
+        }
+        let built = project_and_build(&messages, 1, 10_000, 6);
+        assert!(built.text.contains("U: person request"), "{}", built.text);
+        assert!(built.text.contains("T: Ran `ls`"), "{}", built.text);
+        assert!(built.text.contains("N: extension notice"), "{}", built.text);
+        assert!(
+            built
+                .text
+                .contains("[3-4] N: extension notice / The following is a summary of a branch"),
+            "{}",
+            built.text
+        );
+        assert!(built.text.contains("shell output") && built.text.contains("branch history"));
+        assert_eq!(built.text.matches("U:").count(), 1, "{}", built.text);
     }
 
     #[test]

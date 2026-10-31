@@ -97,7 +97,7 @@ async function createFixture(): Promise<Fixture> {
     mkdirSync(join(dir, "opencode"), { recursive: true });
     const store = new Database(process.env.OPENCODE_DB);
     store.exec(
-        "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT); CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL);",
+        "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT, time_updated INTEGER); CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL);",
     );
     // The context hook's storage gate opens the default store under
     // XDG_DATA_HOME; the boot probe must hand back that same database.

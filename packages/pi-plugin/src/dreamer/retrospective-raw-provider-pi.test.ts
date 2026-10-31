@@ -186,6 +186,85 @@ describe("PiRetrospectiveRawProvider", () => {
 		});
 	});
 
+	it("cleans reminder envelopes and synthetic parts before emitting user rows", async () => {
+		const reminder =
+			"<system-reminder>Prefrontal inbox notice</system-reminder>";
+		const provider = new PiRetrospectiveRawProvider({
+			projectCwd: "/repo/project",
+			listSessions: () => [
+				{ id: "s1", cwd: "/repo/project", path: "/sessions/s1.jsonl" },
+			],
+			loadEntriesFromFile: () => [
+				{
+					type: "message",
+					message: { role: "user", timestamp: 100, content: reminder },
+				},
+				{
+					type: "message",
+					message: {
+						role: "user",
+						timestamp: 200,
+						content: [
+							{
+								type: "text",
+								text: "<system-reminder>AFT background bash finished</system-reminder>",
+							},
+							{ type: "text", text: "injected correction", synthetic: true },
+						],
+					},
+				},
+				{
+					type: "message",
+					message: {
+						role: "user",
+						timestamp: 300,
+						content: [
+							{ type: "text", text: reminder },
+							{ type: "text", text: "Actually, keep the existing API." },
+							{ type: "text", text: "synthetic follow-up", synthetic: true },
+						],
+					},
+				},
+				{
+					type: "message",
+					message: {
+						role: "user",
+						timestamp: 400,
+						content: `Use the shared cleaner.\n${reminder}`,
+					},
+				},
+			],
+		});
+
+		await provider.listProjectSessions("identity");
+		const expected = [
+			{
+				sessionId: "s1",
+				ordinal: 3,
+				role: "user",
+				text: "Actually, keep the existing API.",
+				ts: 300,
+			},
+			{
+				sessionId: "s1",
+				ordinal: 4,
+				role: "user",
+				text: "Use the shared cleaner.",
+				ts: 400,
+			},
+		];
+		expect(await provider.readUserMessagesSince("s1", 0, 10)).toEqual({
+			messages: expected,
+			truncated: false,
+		});
+		expect(await provider.readUserMessagesBefore("s1", 500, 10)).toEqual(
+			expected,
+		);
+		expect(await provider.readOldestMessageTimesSince(["s1"], 0)).toEqual(
+			new Map([["s1", 300]]),
+		);
+	});
+
 	it("marks a later user line only after an assistant has replied to a user turn", async () => {
 		const provider = new PiRetrospectiveRawProvider({
 			projectCwd: "/repo/project",

@@ -1885,6 +1885,8 @@ interface RunPostTransformPhaseArgs {
     forceMaterializationPercentage: number;
     hasRecentReduceCall: boolean;
     projectPath?: string;
+    /** Read-only scope sampled after mutation checks; it cannot authorize rebuilding the cached leading context messages. */
+    readProjectScope?: () => { projectIdentity: string | undefined; memoryUnavailable: boolean };
     sessionDirectory?: string;
     /** Experimental auto-search: when enabled, runs ctx_search on the latest
      *  user prompt and appends a compact fragment hint. */
@@ -1955,6 +1957,8 @@ interface RunPostTransformPhaseArgs {
 }
 
 export interface PostTransformPhaseResult {
+    /** A completed fold or delta refresh can change the cached attribution blocks. */
+    prefixChanged: boolean;
     finalizeServedPrefix?: (publish?: boolean) => boolean;
     prefixRecordWritable?: boolean;
     thinkingReleasedForFit?: boolean;
@@ -1975,6 +1979,8 @@ export interface PostTransformPhaseResult {
     emergencyReclaimedTokens: number;
     droppedCount: number;
     emergency: boolean;
+    /** Permission to rebuild the prefix, distinct from whether any bytes changed. */
+    prefixMutationPermitted: boolean;
     bustedThisPass: boolean;
     /** How the delivered prefix cut the raw conversation; null when no m[0]/m[1] prefix was delivered. */
     prefixTrimStatus: PrefixTrimStatus | null;
@@ -4950,14 +4956,18 @@ export async function runPostTransformPhase(
               prefixRewriteCoversAnchor: canEditWholePrefix && rewrittenHeadCoversNote,
           })
         : undefined;
+    const projectReadScope = args.readProjectScope
+        ? args.readProjectScope()
+        : { projectIdentity: args.projectPath, memoryUnavailable: false };
     const deferredNoteText = args.fullFeatureMode
         ? peekNoteNudgeText(
               args.db,
               args.sessionId,
               noteNudgeUserMessageId,
-              args.projectPath,
+              projectReadScope.memoryUnavailable ? undefined : projectReadScope.projectIdentity,
               noteReadStillVisible,
               noteNudgeEligibility,
+              projectReadScope.memoryUnavailable,
           )
         : null;
     if (deferredNoteText) {
@@ -5065,7 +5075,7 @@ export async function runPostTransformPhase(
     // in buildSidebarSnapshot (rpc-handlers.ts) when the TUI actually polls,
     // keeping the prompt path free of it.
 
-    if (args.fullFeatureMode && args.autoSearch?.enabled && args.projectPath) {
+    if (args.fullFeatureMode && args.autoSearch?.enabled) {
         // The runner drops hint fragments for memories whose current text the agent
         // already sees in the memory pair, so the hint stays "vague recall". That
         // visibility check reads current memory, so it is resolved only when a new hint
@@ -5082,7 +5092,8 @@ export async function runPostTransformPhase(
                     scoreThreshold: args.autoSearch.scoreThreshold,
                     minPromptChars: args.autoSearch.minPromptChars,
                     directory: args.autoSearch.directory ?? args.sessionDirectory,
-                    projectPath: args.projectPath,
+                    projectPath: projectReadScope.projectIdentity,
+                    memoryOwnerUnavailable: projectReadScope.memoryUnavailable,
                     ensureProjectRegistered: args.autoSearch.ensureProjectRegistered,
                     resolveVisibleMemoryIds: () =>
                         getVisibleMemoryIds(args.db, args.sessionId) ?? undefined,
@@ -5957,6 +5968,11 @@ export async function runPostTransformPhase(
         if (!parkedTriggers?.pending) parkedBustTriggersBySession.delete(args.sessionId);
         return {
             finalizeServedPrefix: prefixRecordEnabled ? finalizeServedPrefix : undefined,
+            prefixChanged:
+                foldExecutedThisPass ||
+                publishedM1RefreshedThisPass ||
+                m0RematerializedThisPass ||
+                deliveredPrefix?.m1Refreshed === true,
             prefixRecordWritable: prefixRecordEnabled && !activeThinkingPrefixHold,
             explicitMaterializedSuccessfully,
             deferredMaterializedSuccessfully,
@@ -5981,6 +5997,7 @@ export async function runPostTransformPhase(
             emergencyReclaimedTokens,
             droppedCount,
             emergency,
+            prefixMutationPermitted: canEditWholePrefix,
             bustedThisPass,
             prefixTrimStatus: deliveredPrefix?.prefixTrimStatus ?? null,
             thinkingBindingRecovery,

@@ -2816,7 +2816,11 @@
             }
           ],
           "tasks": {
-            "verify": {}
+            "verify": {
+              "model": {
+                "model": "oc/verify"
+              }
+            }
           }
         },
         "tasks": {
@@ -2945,7 +2949,7 @@
       "[project config] Ignoring dreamer.prompt, dreamer.opencode.model.permission, dreamer.opencode.model.tools, dreamer.opencode.fallback_models.0.prompt, dreamer.opencode.tasks.verify.prompt from project config (security: a repository cannot reprogram or re-permission hidden agents).",
       "[project config] Ignoring historian.pi.model from project config (security: historian model selection is user-level only; a repository cannot force extra compaction cost).",
       "[project config] \"historian\": invalid nested field(s) \"historian.pi.system_prompt\", using defaults for those. Unrecognized key: \"system_prompt\"",
-      "[project config] \"dreamer\": invalid nested field(s) \"dreamer.opencode.tasks.verify.model\", \"dreamer.tasks.verify.system_prompt\", using defaults for those. Unrecognized key: \"system_prompt\""
+      "[project config] \"dreamer\": invalid nested field(s) \"dreamer.opencode.tasks.verify.model.system_prompt\", \"dreamer.tasks.verify.system_prompt\", using defaults for those. Unrecognized key: \"system_prompt\""
     ],
     "trust": {
       "user": "ok",
@@ -9447,6 +9451,9 @@
       "rust_background_enabled": false,
       "historian": {
         "pi": {
+          "model": {
+            "model": "pi/model"
+          },
           "fallback_models": [
             "pi/fallback"
           ]
@@ -9531,7 +9538,7 @@
       "invalid_leaf"
     ],
     "warningMessages": [
-      "[user config] \"historian\": invalid nested field(s) \"historian.pi.model\", using defaults for those."
+      "[user config] \"historian\": invalid nested field(s) \"historian.pi.model.unknown\", using defaults for those. Unrecognized key: \"unknown\""
     ],
     "trust": {
       "user": "ok",

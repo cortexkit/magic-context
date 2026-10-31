@@ -9,6 +9,30 @@ import {
 const NATIVE_TOOL_INPUTS = "native tool inputs";
 const NATIVE_REASONING_IDS = "native reasoning ids";
 
+const nativeWriteBarriers = new WeakMap<Database, Map<string, () => void>>();
+
+/** Publish earlier buffered native decisions before another native writer can insert keys. */
+export function withNativeReplayWriteBarrier<T>(
+    db: Database,
+    sessionId: string,
+    beforeWrite: () => void,
+    edit: () => T,
+): T {
+    let sessions = nativeWriteBarriers.get(db);
+    if (!sessions) {
+        sessions = new Map();
+        nativeWriteBarriers.set(db, sessions);
+    }
+    const prior = sessions.get(sessionId);
+    sessions.set(sessionId, beforeWrite);
+    try {
+        return edit();
+    } finally {
+        if (prior) sessions.set(sessionId, prior);
+        else sessions.delete(sessionId);
+    }
+}
+
 export interface NativeReplayState {
     toolInputs: Map<string, string>;
     reasoningIds: Set<string>;
@@ -139,6 +163,7 @@ export function saveNativeToolInputs(
     }
     if (requested.size === 0) return;
 
+    nativeWriteBarriers.get(db)?.get(sessionId)?.();
     const persisted = updateReplayDocument(db, sessionId, (doc) => {
         const current = parseNativeReplayState(doc, sessionId);
         let changed = false;
@@ -177,6 +202,7 @@ export function addNativeReasoningIds(
     }
     if (requested.size === 0) return;
 
+    nativeWriteBarriers.get(db)?.get(sessionId)?.();
     const persisted = updateReplayDocument(db, sessionId, (doc) => {
         const current = parseNativeReplayState(doc, sessionId);
         let changed = false;

@@ -1,0 +1,20 @@
+{
+  "name": "database path cannot be observed before streaming",
+  "refusal": {
+    "code": "watch_unavailable",
+    "detail": null,
+    "message": "Database paths cannot be observed: No such file or directory (os error 2)"
+  },
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  }
+}

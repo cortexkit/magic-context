@@ -48,6 +48,7 @@ packages/plugin/docs/animation[0-9]*/
 !/.cortexkit/release-notes/
 !/.cortexkit/skills/
 !/.cortexkit/rules/
+!/.cortexkit/WORKER.md
 
 # Prompt/model experiment harnesses (model-dispatch, replay, migration validation).
 # Kept on disk for reuse but excluded from git + CI typecheck: they intentionally

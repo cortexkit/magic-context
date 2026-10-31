@@ -5,6 +5,154 @@ use cortexkit_role_llm_runner::read::ReadPage;
 
 mod open_tool_wait;
 
+#[test]
+fn broca_media_descriptors_preserve_digest_and_unnumbered_part_rows() {
+    for (descriptor, inline) in [
+        (
+            include_str!("../../../../testdata/broca-media-set2/on-session-read-descriptors.jsonl"),
+            include_str!("../../../../testdata/broca-media-set2/on-session-read.jsonl"),
+        ),
+        (
+            include_str!(
+                "../../../../testdata/broca-media-set2/off-session-read-descriptors.jsonl"
+            ),
+            include_str!("../../../../testdata/broca-media-set2/off-session-read.jsonl"),
+        ),
+    ] {
+        let descriptor: Value = serde_json::from_str(descriptor).unwrap();
+        let inline: Value = serde_json::from_str(inline).unwrap();
+        let entries: Vec<ReadMessage> = decode(&descriptor["result"]["messages"]).unwrap();
+        let inline: Vec<ReadMessage> = decode(&inline["result"]["messages"]).unwrap();
+        assert_eq!(entries.len(), inline.len());
+        for (entry, original) in entries.iter().zip(&inline) {
+            check_served_identity(entry, codec::Codec::OwnedBroca).unwrap();
+            assert_eq!(
+                served_digest(entry).unwrap(),
+                inline_digest(original, &original.message).unwrap()
+            );
+            let kept = tool_arcs::KeptMessage::new(codec::Codec::OwnedBroca, entry).unwrap();
+            assert_eq!(
+                kept.parts,
+                entry
+                    .tags
+                    .iter()
+                    .map(|tag| tag.part.clone())
+                    .collect::<Vec<_>>()
+            );
+            for (index, tag) in entry.tags.iter().enumerate() {
+                assert_eq!(
+                    served_part_digest(entry, &tag.part).unwrap(),
+                    inline_digest(original, &original.message["content"][index]).unwrap()
+                );
+                if let Some(block) = entry.message["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|block| block["part"] == tag.part)
+                {
+                    assert_eq!(block["type"], "media_ref");
+                    assert!(tag.tag.is_none());
+                    assert_eq!(tag.part, "m2#1");
+                }
+            }
+            let decoded = decoded_entry(
+                codec::Codec::OwnedBroca,
+                &InboundMessage {
+                    ordinal: entry.ordinal,
+                    mid: entry.mid.clone(),
+                    message: entry.message.clone(),
+                },
+            )
+            .unwrap();
+            assert_eq!(codec::encode_message(&decoded.ck).unwrap(), entry.message);
+            if entry.mid == "m4" {
+                let rendered = render_part(&entry.message["content"][0], Some("§4§"), true);
+                let mut tagged = decoded.ck.clone();
+                assert!(crate::transform::apply_tag_prefix_to_block(
+                    "tool",
+                    &mut tagged.content[0],
+                    crate::transform::TaggableKind::ToolResult,
+                    4
+                ));
+                assert_eq!(
+                    codec::encode_message(&tagged).unwrap()["content"][0],
+                    rendered
+                );
+                assert!(!crate::descriptors::holds_stand_in(&rendered));
+            }
+            let mut corrupt = entry.clone();
+            corrupt.part_digests.as_mut().unwrap().pop();
+            assert!(check_served_identity(&corrupt, codec::Codec::OwnedBroca).is_err());
+        }
+        assert!(
+            tag_rows_for(held(&entries).values(), codec::Codec::OwnedBroca)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn broca_media_tag_rows_keep_outer_part_identity_and_reduce_target() {
+    let capture: Value = serde_json::from_str(include_str!(
+        "../../../../testdata/broca-media/on-session-read.jsonl"
+    ))
+    .unwrap();
+    let mut entries: Vec<ReadMessage> = decode(&capture["result"]["messages"]).unwrap();
+    let native_counts: Vec<_> = entries
+        .iter()
+        .map(|entry| parts(&entry.message).unwrap().len())
+        .collect();
+    assert_eq!(native_counts, vec![1, 1, 2, 1, 1, 1]);
+    for entry in &entries {
+        assert_eq!(entry.tags.len(), parts(&entry.message).unwrap().len());
+        for (index, row) in entry.tags.iter().enumerate() {
+            assert_eq!(row.part, format!("{}#{index}", entry.mid));
+            assert!(
+                row.tag.is_none(),
+                "the real capture was made with numbering off"
+            );
+        }
+    }
+    assert!(
+        tag_rows_for(held(&entries).values(), codec::Codec::OwnedBroca)
+            .unwrap()
+            .is_empty()
+    );
+    // Number user/assistant text and the outer tool result, as Broca does.
+    // Standalone media and tool calls retain their unnumbered rows.
+    for (ordinal, number) in [(0, 1), (1, 2), (2, 3), (4, 4), (5, 5)] {
+        entries[ordinal].tags[0].tag = Some(format!("§{number}§"));
+    }
+    let rows = tag_rows_for(held(&entries).values(), codec::Codec::OwnedBroca).unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.tag_number, row.block_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, "m0#0"),
+            (2, "m1#0"),
+            (3, "m2#0"),
+            (4, "m4#0"),
+            (5, "m5#0")
+        ]
+    );
+    assert_eq!(String::from_utf8(rows[3].source_bytes.to_vec()).unwrap(), "before-media\n[media not shown: kind=image mime=image/png bytes=4749 sha256=2bb3f6f7eb60 reason=carrier]\n[media not shown: kind=document mime=application/pdf bytes=584 sha256=b7442ba422ac reason=carrier]\nafter-media");
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::open(
+        dir.path(),
+        "broca",
+        "broca",
+        json!({"serializer_profile":"owned-broca"}),
+    )
+    .await;
+    *rig.runner.entries.lock().unwrap() = entries;
+    let answer = rig.tool(7, "ctx_reduce", json!({"drop":"4"})).await;
+    assert_ne!(answer["isError"], true, "{answer}");
+    assert_eq!(rig.pending_targets(), vec!["m4#0"]);
+    assert_eq!(rig.state().tag_index["§4§"].part, "m4#0");
+}
+
 struct Golden {
     name: &'static str,
     bytes: &'static str,

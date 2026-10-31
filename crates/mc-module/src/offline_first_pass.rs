@@ -278,8 +278,18 @@ pub(crate) fn check_checkpoint(record: &MoveRecord, pages: &Pages) -> Result<(),
 fn read_setup(path: &Path, session: &str) -> Result<OfflineSetup, Refusal> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| refusal("setup_unreadable", format!("{}: {error}", path.display())))?;
-    let file: SetupFile = serde_json::from_str(&text)
+    let mut file: SetupFile = serde_json::from_str(&text)
         .map_err(|error| refusal("setup_unreadable", error.to_string()))?;
+    // `request_id` and `now` differ on every call, so an export made before the
+    // live Setup cannot know them, and the Setup identity digest leaves both
+    // out (`setup_identity_digest`). Fill them only when absent so the contract
+    // type decodes; a value the export did carry is kept as written.
+    if let Value::Object(fields) = &mut file.request {
+        fields
+            .entry("request_id")
+            .or_insert_with(|| Value::String("offline-first-pass".into()));
+        fields.entry("now").or_insert(Value::from(0u64));
+    }
     let request: SetupRequest = serde_json::from_value(file.request)
         .map_err(|error| refusal("setup_unreadable", format!("request: {error}")))?;
     if !file.project_root.is_absolute() {
@@ -378,23 +388,85 @@ pub(crate) fn check(args: &Args, holders: &dyn HolderCheck) -> Result<Checked, R
     })
 }
 
+/// The storage namespaces a module's `store.db` lease can be keyed under: the
+/// one the daemon's `ack.storage` names for a managed install, then the
+/// standalone fallback (`dev_descriptor`).
+const STORE_NAMESPACES: [&str; 2] = ["default", "mc_cache"];
+
+/// The epoch at which a writer last claimed `store.db` (`cortexkit_fence`), or
+/// 0 when no fenced write has run yet.
+fn stored_fence_epoch(store_db: &Path) -> Result<u64, String> {
+    let conn = rusqlite::Connection::open_with_flags(
+        store_db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| error.to_string())?;
+    let table: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'cortexkit_fence'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if table == 0 {
+        return Ok(0);
+    }
+    conn.query_row(
+        "SELECT COALESCE((SELECT epoch FROM cortexkit_fence WHERE id = 0), 0)",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|epoch| epoch as u64)
+    .map_err(|error| error.to_string())
+}
+
 /// Open the two ck-mc stores as the module does at startup: `store.db`, with
 /// `context.db` attached as its domain.
+///
+/// The store's single-writer lease must be the one the module last wrote under.
+/// The daemon names the module's namespace in `ack.storage`, which a command
+/// line can't see, and a lease keyed under another namespace starts its own
+/// epoch below the database's fence, so every fenced write of the pass would be
+/// rejected. So each candidate namespace is tried, and the first whose lease
+/// epoch reaches the stored fence is used; a store no candidate covers is
+/// refused instead of opened under the wrong lease.
 fn open_store(paths: &StorePaths) -> Result<mc_store::McStore, String> {
     let private = crate::config::private_storage_permissions_enabled();
-    let descriptor = cortexkit_store_types::StorageDescriptor {
-        module_id: crate::DEFAULT_MODULE_ID.into(),
-        storage_namespace: "mc_cache".into(),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: paths.store_db.to_string_lossy().into_owned(),
-        },
+    let fence = if paths.store_db.exists() {
+        stored_fence_epoch(&paths.store_db)?
+    } else {
+        0
     };
-    let store = mc_store::McStore::open_with_private_permissions(&descriptor, private)
+    let mut tried = Vec::new();
+    for namespace in STORE_NAMESPACES {
+        let descriptor = cortexkit_store_types::StorageDescriptor {
+            module_id: crate::DEFAULT_MODULE_ID.into(),
+            storage_namespace: namespace.into(),
+            isolation: cortexkit_store_types::Isolation::Module,
+            backend: cortexkit_store_types::StorageBackend::Sqlite {
+                path: paths.store_db.to_string_lossy().into_owned(),
+            },
+        };
+        let store = mc_store::McStore::open_with_private_permissions(&descriptor, private)
+            .map_err(|error| error.to_string())?;
+        let epoch = store.lease_epoch();
+        if epoch < fence {
+            tried.push(format!("{namespace}: lease epoch {epoch}"));
+            continue;
+        }
+        crate::single_store_reads::attach_with_private_permissions(
+            &store,
+            &paths.context_db,
+            private,
+        )
         .map_err(|error| error.to_string())?;
-    crate::single_store_reads::attach_with_private_permissions(&store, &paths.context_db, private)
-        .map_err(|error| error.to_string())?;
-    Ok(store)
+        return Ok(store);
+    }
+    Err(format!(
+        "no store lease reaches the database's fence epoch {fence} ({}); \
+         the module last wrote it under another lease",
+        tried.join(", ")
+    ))
 }
 
 /// What one run ended in, with what the CLI prints.
@@ -499,9 +571,11 @@ fn report(outcome: &OfflineOutcome, checked: &Checked, started: Instant) -> Valu
 }
 
 const USAGE: &str = "usage: ck-mc offline first-pass --session <id> --pages <jsonl> \
-     --setup <json> --opencode-db <path> --context-db <path> --store-db <path>";
+     --setup <json> --opencode-db <path> --context-db <path> --store-db <path> \
+     [--shared-context-db]";
 
-fn parse_args(args: &[String]) -> Result<Args, String> {
+fn parse_args(args: &[String]) -> Result<(Args, bool), String> {
+    let mut shared_context = false;
     let (mut session, mut pages, mut setup) = (None, None, None);
     let (mut opencode_db, mut context_db, mut store_db) = (None, None, None);
     let mut iter = args.iter();
@@ -518,6 +592,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--opencode-db" => opencode_db = Some(PathBuf::from(value()?)),
             "--context-db" => context_db = Some(PathBuf::from(value()?)),
             "--store-db" => store_db = Some(PathBuf::from(value()?)),
+            "--shared-context-db" => shared_context = true,
             other => return Err(format!("unknown argument {other:?}; {USAGE}")),
         }
     }
@@ -529,24 +604,27 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             Some(opencode_db),
             Some(context_db),
             Some(store_db),
-        ) => Ok(Args {
-            paths: StorePaths {
-                opencode_db,
-                context_db,
-                store_db,
+        ) => Ok((
+            Args {
+                paths: StorePaths {
+                    opencode_db,
+                    context_db,
+                    store_db,
+                },
+                session,
+                pages,
+                setup,
             },
-            session,
-            pages,
-            setup,
-        }),
+            shared_context,
+        )),
         _ => Err(USAGE.into()),
     }
 }
 
 /// `ck-mc offline first-pass <args>`.
 pub fn cli_main(args: &[String]) -> i32 {
-    let args = match parse_args(args) {
-        Ok(args) => args,
+    let (args, shared_context) = match parse_args(args) {
+        Ok(parsed) => parsed,
         Err(usage) => {
             println!(
                 "{}",
@@ -556,7 +634,12 @@ pub fn cli_main(args: &[String]) -> i32 {
         }
     };
     let session = args.session.clone();
-    match run(&args, &Lsof) {
+    // See `SharedContextLsof`: only the host copy and store.db need exclusivity then.
+    let shared = crate::offline_move::SharedContextLsof {
+        context_db: args.paths.context_db.clone(),
+    };
+    let holders: &dyn HolderCheck = if shared_context { &shared } else { &Lsof };
+    match run(&args, holders) {
         Ok(report) => {
             let verdict = if report["status"] == "unchanged" {
                 "SESSION UNCHANGED"

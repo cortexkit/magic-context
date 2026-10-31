@@ -23,6 +23,7 @@ import type {
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { resolveProjectIdentityForSession } from "@magic-context/core/features/magic-context/memory/project-identity";
+import { UnprovenCachedProjectOwnerError } from "@magic-context/core/features/magic-context/memory/session-identity-decision";
 import { getLastIndexedOrdinal } from "@magic-context/core/features/magic-context/message-index";
 import {
 	compileSurfaceCondition,
@@ -253,7 +254,7 @@ export interface CtxNoteToolDeps {
 	resolveProjectIdentity?: (
 		directory: string,
 		ctx: ExtensionContext,
-	) => string | undefined;
+	) => string | undefined | Promise<string | undefined>;
 }
 
 export function createCtxNoteTool(
@@ -327,6 +328,29 @@ export function createCtxNoteTool(
 					? parseNoteIds(action, targetedReadIds)
 					: undefined;
 			if (typeof noteIds === "string") return err(noteIds);
+			let projectIdentity: string | undefined;
+			let ownerUnavailable: UnprovenCachedProjectOwnerError | undefined;
+			try {
+				projectIdentity = await resolveProject(ctx.cwd, ctx);
+			} catch (error) {
+				if (!(error instanceof UnprovenCachedProjectOwnerError)) throw error;
+				ownerUnavailable = error;
+			}
+			const sessionOnlyTargets =
+				Array.isArray(noteIds) &&
+				noteIds.every(
+					(id) =>
+						getNoteByIdInScope(deps.db, id, {
+							sessionId,
+							projectPath: undefined,
+						})?.type === "session",
+				);
+			if (!projectIdentity && Array.isArray(noteIds) && !sessionOnlyTargets)
+				return ok(
+					(
+						ownerUnavailable ?? new UnprovenCachedProjectOwnerError(undefined)
+					).refusal("ctx_note", action),
+				);
 
 			if (action === "write") {
 				const content = params.content?.trim();
@@ -355,8 +379,9 @@ export function createCtxNoteTool(
 							"Error: Smart notes require dreamer to be enabled. Enable dreamer in magic-context.jsonc to use surface_condition.",
 						);
 					}
-					const projectIdentity = resolveProject(ctx.cwd, ctx);
 					if (!projectIdentity) {
+						if (ownerUnavailable)
+							return ok(ownerUnavailable.refusal("ctx_note", action));
 						return err(
 							"Error: Could not resolve project identity for smart note.",
 						);
@@ -388,8 +413,7 @@ export function createCtxNoteTool(
 			}
 
 			if (action === "dismiss") {
-				const projectIdentity = resolveProject(ctx.cwd, ctx);
-				if (!projectIdentity) {
+				if (!projectIdentity && !sessionOnlyTargets) {
 					return err(
 						"Error: Could not resolve project identity for note dismiss.",
 					);
@@ -424,13 +448,10 @@ export function createCtxNoteTool(
 					| Awaited<ReturnType<typeof compileSurfaceCondition>>
 					| undefined;
 				if (params.surface_condition?.trim()) {
-					const project = resolveProject(ctx.cwd, ctx);
-					const existing = project
-						? getNoteByIdInScope(deps.db, noteId, {
-								projectPath: project,
-								sessionId,
-							})
-						: null;
+					const existing = getNoteByIdInScope(deps.db, noteId, {
+						projectPath: projectIdentity,
+						sessionId,
+					});
 					if (existing?.type === "session")
 						return err(
 							"Error: Only a note created with a condition can have one. Write a new note with surface_condition, and dismiss this one.",
@@ -447,8 +468,7 @@ export function createCtxNoteTool(
 						"Error: Provide 'content' and/or 'surface_condition' to update.",
 					);
 				}
-				const projectIdentity = resolveProject(ctx.cwd, ctx);
-				if (!projectIdentity) {
+				if (!projectIdentity && !sessionOnlyTargets) {
 					return err(
 						"Error: Could not resolve project identity for note update.",
 					);
@@ -487,10 +507,7 @@ export function createCtxNoteTool(
 				typeof params.offset === "number" && params.offset > 0
 					? Math.floor(params.offset)
 					: 0;
-			const projectIdentity = Array.isArray(noteIds)
-				? resolveProject(ctx.cwd, ctx)
-				: undefined;
-			if (Array.isArray(noteIds) && !projectIdentity) {
+			if (Array.isArray(noteIds) && !projectIdentity && !sessionOnlyTargets) {
 				return err("Error: Could not resolve project identity for note read.");
 			}
 			const nowMs = Date.now();
@@ -498,7 +515,7 @@ export function createCtxNoteTool(
 				? formatNotesById(
 						deps.db,
 						noteIds,
-						{ projectPath: projectIdentity as string, sessionId },
+						{ projectPath: projectIdentity, sessionId },
 						nowMs,
 					)
 				: renderGlance(
@@ -506,8 +523,7 @@ export function createCtxNoteTool(
 							db: deps.db,
 							sessionId,
 							cwd: ctx.cwd,
-							resolveProjectIdentity: (directory) =>
-								resolveProject(directory, ctx),
+							resolveProjectIdentity: () => projectIdentity,
 							filter: params.filter,
 						}),
 						{ limit, offset, nowMs },

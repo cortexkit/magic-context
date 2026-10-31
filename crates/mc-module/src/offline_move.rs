@@ -472,6 +472,65 @@ impl HolderCheck for Lsof {
     }
 }
 
+/// `lsof` over every target database except the shared `context.db`, for
+/// `--shared-context-db`. Running hosts and the dashboard keep `context.db` open, and
+/// ck-mc shares it with them in normal operation through `BEGIN IMMEDIATE` writes;
+/// the move and first pass write the same way. The host database (a copy that
+/// no host has open yet) and `store.db` (ck-mc's own, so ck-mc must be stopped)
+/// still need exclusive access. This is only safe when no host is serving the
+/// session being moved; the operator vouches for that by passing the flag.
+pub struct SharedContextLsof {
+    pub context_db: PathBuf,
+}
+
+impl HolderCheck for SharedContextLsof {
+    fn holders(&self, files: &[PathBuf]) -> Result<Vec<String>, String> {
+        Lsof.holders(&without_context_files(files, &self.context_db))
+    }
+}
+
+/// `files` minus `context_db` and its `-wal`/`-shm` files.
+fn without_context_files(files: &[PathBuf], context_db: &Path) -> Vec<PathBuf> {
+    let context = context_db.as_os_str().to_string_lossy().into_owned();
+    let shared = [
+        context.clone(),
+        format!("{context}-wal"),
+        format!("{context}-shm"),
+    ];
+    files
+        .iter()
+        .filter(|file| !shared.contains(&file.as_os_str().to_string_lossy().into_owned()))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod shared_context_tests {
+    use super::*;
+
+    #[test]
+    fn shared_context_check_still_covers_the_host_copy_and_store_db() {
+        let paths = StorePaths {
+            opencode_db: PathBuf::from("/w/opencode.db"),
+            context_db: PathBuf::from("/m/context.db"),
+            store_db: PathBuf::from("/m/store.db"),
+        };
+        let kept = without_context_files(&database_files(&paths), &paths.context_db);
+        let names: Vec<String> = kept.iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(
+            names,
+            [
+                "/w/opencode.db",
+                "/w/opencode.db-wal",
+                "/w/opencode.db-shm",
+                "/m/store.db",
+                "/m/store.db-wal",
+                "/m/store.db-shm",
+            ]
+        );
+    }
+}
+
 fn database_files(paths: &StorePaths) -> Vec<PathBuf> {
     database_sidecars(&paths.all().map(Path::to_path_buf))
 }
@@ -2986,12 +3045,14 @@ pub fn run_with_head_cut(
 }
 
 const USAGE: &str = "usage: ck-mc offline move-session --session <id> --opencode-db <path> \
-     --context-db <path> --store-db <path> (--plan | --dry-run | --apply --head-cut <file>)";
+     --context-db <path> --store-db <path> [--shared-context-db] \
+     (--plan | --dry-run | --apply --head-cut <file>)";
 
 struct CliArgs {
     paths: StorePaths,
     session: String,
     mode: CliMode,
+    shared_context: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3006,6 +3067,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     let mut plan_flag = false;
     let mut apply_flag = false;
     let mut head_cut: Option<PathBuf> = None;
+    let mut shared_context = false;
     let mut iter = args.iter();
     match iter.next().map(String::as_str) {
         Some("move-session") => {}
@@ -3025,6 +3087,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             "--plan" | "--dry-run" => plan_flag = true,
             "--apply" => apply_flag = true,
             "--head-cut" => head_cut = Some(PathBuf::from(value()?)),
+            "--shared-context-db" => shared_context = true,
             other => return Err(format!("unknown argument {other:?}; {USAGE}")),
         }
     }
@@ -3042,6 +3105,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             },
             session,
             mode,
+            shared_context,
         }),
         _ => Err(USAGE.into()),
     }
@@ -3060,6 +3124,7 @@ pub fn cli_main(args: &[String]) -> i32 {
         paths,
         session,
         mode,
+        shared_context,
     } = match parse_args(args) {
         Ok(parsed) => parsed,
         Err(usage) => {
@@ -3070,9 +3135,15 @@ pub fn cli_main(args: &[String]) -> i32 {
             return 2;
         }
     };
+    let shared = SharedContextLsof {
+        context_db: paths.context_db.clone(),
+    };
+    let holders: &dyn HolderCheck = if shared_context { &shared } else { &Lsof };
     let outcome = match mode {
-        CliMode::Plan => plan_only(&paths, &session, &Lsof),
-        CliMode::Apply { head_cut } => run_with_head_cut(&paths, &session, &head_cut, &Lsof, None),
+        CliMode::Plan => plan_only(&paths, &session, holders),
+        CliMode::Apply { head_cut } => {
+            run_with_head_cut(&paths, &session, &head_cut, holders, None)
+        }
     };
     match outcome {
         Ok(Outcome::Planned(plan)) => {

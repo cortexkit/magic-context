@@ -1,12 +1,13 @@
 //! Recorded app-read exchanges for the Alfonso phone (CKIOS) and desktop
 //! (CKDESK) decoders.
 //!
-//! Every sample is produced by the real handlers through the real dispatch
+//! Unary samples are produced by the real handlers through the real dispatch
 //! path: a `Direct` bind with no scope is admitted by `admission::admit`
 //! (with `app_read.allow_direct` on, as the local desktop binds), then the
 //! request bytes go through `app_read::handle` exactly as the daemon would
 //! deliver them. The files only record what the handlers served; nothing in
-//! them is hand-written.
+//! them is hand-written. Watch samples use the real daemon, provider dispatch
+//! and consumer subscription, including management StreamData wrapping.
 //!
 //! Layout: `testdata/app-read-samples/<op>/<case>.json` plus `SHA256SUMS`
 //! (`sha256sum` format, sorted by path) and a `README.md` that lists each
@@ -119,8 +120,8 @@ fn normalize(method: &str, served: &mut Served) {
     let Served::Reply(reply) = served else {
         return;
     };
-    if let Some(object) = reply.as_object_mut() {
-        object.insert("as_of_ms".into(), json!(NOW_MS));
+    if let Some(as_of_ms) = reply.get_mut("as_of_ms") {
+        *as_of_ms = json!(NOW_MS);
     }
     if method == "store.health" {
         if let Some(databases) = reply
@@ -666,6 +667,32 @@ fn session_data_records() -> Vec<Record> {
                 "section": "token_breakdown",
             }),
         ),
+        // Host counts were saved before the provider response completed.
+        plain(
+            "token-breakdown-host-pass",
+            "session_data.read/token-breakdown-host-pass.json",
+            "session_data.read",
+            "INSERT INTO session_meta(session_id,harness,last_response_time,last_input_tokens,system_prompt_tokens,total_input_tokens,new_work_tokens) \
+             VALUES('host','opencode',1700000000200,649000,18000,649000,0); \
+             CREATE TABLE IF NOT EXISTS session_render_cache(session_id TEXT, cache_key TEXT, value BLOB, PRIMARY KEY(session_id,cache_key)) WITHOUT ROWID; \
+             INSERT INTO session_render_cache VALUES('host','host_token_breakdown', \
+             '{\"version\":1,\"measured_at\":1700000000000,\"tolerance\":{\"ratio\":0.01,\"tokens\":500},\"last_user_message_in_history_raw\":true,\"parts\":{\"tool_definitions\":27000,\"project_docs\":21000,\"user_profile\":3000,\"history_raw\":76000,\"tool_calls_results\":481000,\"last_user_message\":0}}');",
+            "",
+            json!({"session": opencode_session("host"), "section": "token_breakdown"}),
+        ),
+        // Calibrated sidebar buckets exhaust the provider's measured input total.
+        plain(
+            "token-breakdown-calibrated",
+            "session_data.read/token-breakdown-calibrated.json",
+            "session_data.read",
+            "INSERT INTO session_meta(session_id,harness,last_response_time,last_input_tokens,system_prompt_tokens,total_input_tokens,new_work_tokens) \
+             VALUES('calibrated','opencode',1700000000200,448000,18000,448000,0); \
+             CREATE TABLE IF NOT EXISTS session_render_cache(session_id TEXT, cache_key TEXT, value BLOB, PRIMARY KEY(session_id,cache_key)) WITHOUT ROWID; \
+             INSERT INTO session_render_cache VALUES('calibrated','host_token_breakdown', \
+             '{\"version\":2,\"measured_at\":1700000000000,\"tolerance\":{\"ratio\":0.01,\"tokens\":500},\"last_user_message_in_history_raw\":true,\"parts\":{\"system_prompt\":27207,\"tool_definitions\":33275,\"history_summaries\":1572,\"memory\":3144,\"project_docs\":4715,\"user_profile\":786,\"history_raw\":188650,\"tool_calls_results\":188651,\"last_user_message\":0}}');",
+            "",
+            json!({"session": opencode_session("calibrated"), "section": "token_breakdown"}),
+        ),
         // No provider total was recorded, so the legacy estimate stands in.
         plain(
             "token-breakdown-estimate",
@@ -810,6 +837,33 @@ fn all_records() -> Vec<Record> {
     records.extend(dreamer_records());
     records.extend(health_records());
     records.extend(config_records());
+    for sample in super::watch::samples() {
+        let served = match sample.result {
+            Ok(value) => Served::Reply(value),
+            Err(HandlerOutcome::ErrorWithDetail {
+                code,
+                message,
+                detail,
+            }) => Served::Refusal {
+                code,
+                message,
+                detail,
+            },
+            Err(HandlerOutcome::Error { code, message }) => Served::Refusal {
+                code,
+                message,
+                detail: Value::Null,
+            },
+            Err(other) => panic!("unexpected watch refusal {other:?}"),
+        };
+        records.push(Record {
+            name: sample.name,
+            file: sample.file,
+            method: super::watch::METHOD,
+            params: sample.params,
+            served,
+        });
+    }
     records
 }
 fn sample_root() -> PathBuf {
@@ -867,6 +921,15 @@ fn app_read_samples_match_handlers() {
                 record.file,
                 first_difference("", &got, &wanted).unwrap_or_default()
             );
+        }
+        if record.method == super::watch::METHOD {
+            if let Served::Reply(notice) = &record.served {
+                let exchange: Value = serde_json::from_slice(&actual).expect("watch sample JSON");
+                assert_eq!(
+                    &exchange["response"], notice,
+                    "watch samples must not invent wire fields"
+                );
+            }
         }
         assert!(
             expected.len() <= super::envelope::REPLY_LIMIT,

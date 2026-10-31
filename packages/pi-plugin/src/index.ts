@@ -61,6 +61,7 @@ import {
 	awaitSessionIdentityDecision,
 	forgetSessionIdentityDecision,
 	readSessionIdentityDecision,
+	resolveSessionProjectIdentity,
 } from "@magic-context/core/features/magic-context/memory/session-identity-decision";
 import { detectOverflow } from "@magic-context/core/features/magic-context/overflow-detection";
 import { resolveSessionCacheTtl } from "@magic-context/core/features/magic-context/session-cache-ttl";
@@ -124,7 +125,10 @@ import { setHarness } from "@magic-context/core/shared/harness";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { setKeepSubagents } from "@magic-context/core/shared/keep-subagents";
 import { flushLogger, log } from "@magic-context/core/shared/logger";
-import { resolveHistorianModel } from "@magic-context/core/shared/model-resolution";
+import {
+	type ModelInput,
+	resolveHistorianModel,
+} from "@magic-context/core/shared/model-resolution";
 import {
 	createPromptSurfaceGuidanceEpochCache,
 	createPromptSurfaceRuntime,
@@ -1775,7 +1779,7 @@ async function startPiMagicContextRuntime(
 			}
 			const emptyHistorian = empty.find((chain) => chain.owner === "historian");
 			const historianLine = historian
-				? `registered historian trigger (model=${historian.model}${historian.fallbackModels?.length ? `, fallbacks=${historian.fallbackModels.join(",")}` : ""}, executeThreshold=${formatExecuteThresholdForLog(historian.executeThresholdPercentage)})`
+				? `registered historian trigger (model=${historian.model}${historian.fallbackModels?.length ? `, fallbacks=${historian.fallbackModels.map(formatPiModelForLog).join(",")}` : ""}, executeThreshold=${formatExecuteThresholdForLog(historian.executeThresholdPercentage)})`
 				: emptyHistorian
 					? `registered historian trigger: DISABLED (no configured model is registered in Pi: ${formatEmptyPiModelChain(emptyHistorian)})`
 					: undefined;
@@ -1943,8 +1947,18 @@ async function startPiMagicContextRuntime(
 			resolveCurrentProjectDeps(ctx).config.protected_tools,
 		resolveProtectedTags: (ctx) =>
 			resolveCurrentProjectDeps(ctx).config.protected_tags ?? 20,
-		resolveProjectIdentity: (ctx) =>
-			resolveCurrentProjectDeps(ctx).projectIdentity,
+		resolveProjectIdentity: (ctx) => {
+			const project = resolveProjectDepsForDir(ctx.cwd);
+			return resolveSessionProjectIdentity(
+				ctx.sessionManager.getSessionId(),
+				ctx.cwd,
+				{
+					db,
+					allowHomeProject: project.config.allow_home_project,
+					connectionFile: project.config.subc?.connection_file,
+				},
+			);
+		},
 		// Smart notes (surface_condition) only work when dreamer is
 		// running — otherwise the note sits `pending` forever with no
 		// path to surface. Match the user's dreamer config flag.
@@ -1975,7 +1989,7 @@ async function startPiMagicContextRuntime(
 		{
 			db,
 			signalPendingMarker: signalPiDeferredCompactionMarkerDrain,
-			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId),
+			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId, "pass"),
 		},
 	);
 	pi.on("session_start", async (event, ctx) => {
@@ -2021,7 +2035,7 @@ async function startPiMagicContextRuntime(
 		await handlePiCloneSessionStart(event, ctx, {
 			db,
 			signalPendingMarker: signalPiDeferredCompactionMarkerDrain,
-			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId),
+			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId, "pass"),
 		});
 		if (
 			!piMarkerRehydrationLogged &&
@@ -2041,7 +2055,7 @@ async function startPiMagicContextRuntime(
 				modelKey: canonicalPiModelKey(model.provider, model.id),
 			});
 		}
-		if (sessionId) prewarmPiTagSnapshot(db, sessionId);
+		if (sessionId) prewarmPiTagSnapshot(db, sessionId, "pass");
 	});
 
 	pi.on("agent_start", (_event, ctx) => {
@@ -3080,7 +3094,7 @@ async function startPiMagicContextRuntime(
 				// Drain context-handler session-keyed maps too. Without
 				// this, sessions accumulate state across `session_shutdown`
 				// in long-lived Pi processes that re-init the extension.
-				clearContextHandlerSession(sessionId);
+				clearContextHandlerSession(sessionId, db);
 				forgetSessionIdentityDecision(sessionId);
 				// A cancelled prewarm is still owned by this runtime until its
 				// result settles and worker exits, within the existing shutdown cap.
@@ -3151,12 +3165,12 @@ async function startPiMagicContextRuntime(
 				incomingSessionId &&
 				(_event as { reason?: unknown })?.reason !== "fork"
 			)
-				prewarmPiTagSnapshot(db, incomingSessionId);
+				prewarmPiTagSnapshot(db, incomingSessionId, "pass");
 			if (!outgoingSessionId || outgoingSessionId === readSessionId(ctx))
 				return;
 			clearPiSystemPromptSession(outgoingSessionId);
 			promptSurfaceGuidanceEpochs.clear(outgoingSessionId);
-			clearContextHandlerSession(outgoingSessionId);
+			clearContextHandlerSession(outgoingSessionId, db);
 		} catch {
 			// best-effort cleanup
 		}
@@ -3191,3 +3205,8 @@ import { createRescoreCommandController } from "@magic-context/core/hooks/magic-
 import { rescoreAdmissionFailure } from "@magic-context/core/hooks/magic-context/rescore-driver";
 import { registerCtxRescoreCommand } from "./commands/ctx-rescore";
 import { createPiRescoreCarrier } from "./rescore-carrier";
+
+function formatPiModelForLog(entry: ModelInput): string {
+	if (typeof entry === "string") return entry;
+	return `${entry.model}${entry.qualifier ? ` (thinking_level=${entry.qualifier})` : ""}`;
+}

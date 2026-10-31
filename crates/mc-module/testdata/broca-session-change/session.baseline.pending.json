@@ -1,0 +1,1 @@
+{"result":{"state":"ready","baseline":{"items":[],"composition_digest":"0f11f797cdf7e3a6135a14f06107a6787121d5015545094caedd3def1f57ce3f","tool_names":["work"],"accepted_generation":1,"applied_generation":0,"pending":{"generation":1,"policy":"immediately"},"rungs":{"tools":["on_prefix_rebuild","immediately"],"system_text":["on_prefix_rebuild","immediately"]}}}}

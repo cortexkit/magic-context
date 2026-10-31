@@ -24,7 +24,10 @@ export interface CtxSearchToolDeps {
      * OpenCode's top-level `ctx.directory` reflects the launch dir, not the
      * session's working directory.
      */
-    resolveProjectPath: (directory: string) => string | undefined;
+    resolveProjectPath: (
+        directory: string,
+        sessionId: string,
+    ) => string | undefined | Promise<string | undefined>;
     memoryEnabled?: boolean;
     embeddingEnabled?: boolean;
     /** When true, ctx_search surfaces indexed git commits as a 3rd source. */

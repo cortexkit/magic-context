@@ -24,6 +24,7 @@ import {
 	queueMemoryMutation,
 	setProjectState,
 } from "@magic-context/core/features/magic-context/storage";
+import { readSessionMeta } from "@magic-context/core/features/magic-context/storage-meta-session";
 import {
 	getActiveUserMemories,
 	insertUserMemory,
@@ -2634,7 +2635,7 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 		}
 	});
 
-	it("lazy-adopts a NULL cached project marker without a no-switch HARD fold", () => {
+	it("keeps an unknown cached project marker until an admitted rebuild", () => {
 		const db = createTestDb();
 		const cwd = createTestTempDirFromPath(
 			join(tmpdir(), "pi-tax-project-null-a-"),
@@ -2675,16 +2676,28 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 						"SELECT cached_m0_project_identity FROM session_meta WHERE session_id = ?",
 					)
 					.get(state.sessionId),
-			).toEqual({ cached_m0_project_identity: state.projectIdentity });
+			).toEqual({ cached_m0_project_identity: null });
 
 			const switched = {
 				...piState(state.sessionId, cwdB),
 				hardSignals: baseHard,
 			};
 			expect(mustMaterializePi(switched, db)).toMatchObject({
-				value: true,
-				reason: "project_change",
+				value: false,
+				reason: null,
 			});
+			const rebuild = {
+				...switched,
+				hardSignals: { ...baseHard, modelKey: "anthropic/sonnet" },
+			};
+			expect(
+				injectM0M1Pi(rebuild, db, [userMessage("rebuild", 12)] as never, [
+					"entry-0",
+				]).m0Materialized,
+			).toBe(true);
+			expect(readSessionMeta(db, state.sessionId).cachedM0ProjectIdentity).toBe(
+				switched.projectIdentity,
+			);
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 			rmSync(cwdB, { recursive: true, force: true });

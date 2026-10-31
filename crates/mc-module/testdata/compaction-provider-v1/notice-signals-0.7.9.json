@@ -1,0 +1,99 @@
+{
+  "source": "cortexkit-role-compaction-provider 0.7.9 test-vectors/compaction-provider-v1/async.json",
+  "source_sha256": "dcc974d03a6c6be1b8bfe3d8d999b16bc2d2fc5b6ab88bae325ad996ff18d037",
+  "history_edit_cost": [
+    {
+      "name": "history edit pricing: absent",
+      "subject": "ck.acme.event.runner-a.compaction.advanced.v1",
+      "message_id": "0b9679cc5a4044d51710921d5233db02:advanced:1",
+      "headers": {
+        "session_ref": "0b9679cc5a4044d51710921d5233db02",
+        "seq": "1",
+        "lineage_id": "lin_a",
+        "through_ordinal": "1",
+        "through_digest": "efc959960e9c3392a28c897f298ca6651073d4d263c7f241eb7956ed87267fc1",
+        "est_tokens": "1200",
+        "model": "anthropic/claude-sonnet-4-5",
+        "window": "200000"
+      },
+      "digest": "68933bae4689968a07316d16c364e9f90d8528f525cf49474fcdc4305bcb51ff",
+      "effective": null,
+      "without_header_digest": "68933bae4689968a07316d16c364e9f90d8528f525cf49474fcdc4305bcb51ff"
+    },
+    {
+      "name": "history edit pricing: suffix",
+      "subject": "ck.acme.event.runner-a.compaction.advanced.v1",
+      "message_id": "0b9679cc5a4044d51710921d5233db02:advanced:1",
+      "headers": {
+        "session_ref": "0b9679cc5a4044d51710921d5233db02",
+        "seq": "1",
+        "lineage_id": "lin_a",
+        "through_ordinal": "1",
+        "through_digest": "efc959960e9c3392a28c897f298ca6651073d4d263c7f241eb7956ed87267fc1",
+        "est_tokens": "1200",
+        "model": "anthropic/claude-sonnet-4-5",
+        "window": "200000",
+        "history_edit_cost": "suffix"
+      },
+      "digest": "dac42100dcdfa6fbb0c2113aff5427fcc93d6cc176b15980212e09e09baa4c27",
+      "effective": "suffix",
+      "without_header_digest": "68933bae4689968a07316d16c364e9f90d8528f525cf49474fcdc4305bcb51ff"
+    },
+    {
+      "name": "history edit pricing: full_resend",
+      "subject": "ck.acme.event.runner-a.compaction.advanced.v1",
+      "message_id": "0b9679cc5a4044d51710921d5233db02:advanced:1",
+      "headers": {
+        "session_ref": "0b9679cc5a4044d51710921d5233db02",
+        "seq": "1",
+        "lineage_id": "lin_a",
+        "through_ordinal": "1",
+        "through_digest": "efc959960e9c3392a28c897f298ca6651073d4d263c7f241eb7956ed87267fc1",
+        "est_tokens": "1200",
+        "model": "anthropic/claude-sonnet-4-5",
+        "window": "200000",
+        "history_edit_cost": "full_resend"
+      },
+      "digest": "83553812f00204d11159e9931c3b0dd0463936fa8e6eeef995c4524a3084c0f4",
+      "effective": "full_resend",
+      "without_header_digest": "68933bae4689968a07316d16c364e9f90d8528f525cf49474fcdc4305bcb51ff"
+    },
+    {
+      "name": "history edit pricing: future_cost",
+      "subject": "ck.acme.event.runner-a.compaction.advanced.v1",
+      "message_id": "0b9679cc5a4044d51710921d5233db02:advanced:1",
+      "headers": {
+        "session_ref": "0b9679cc5a4044d51710921d5233db02",
+        "seq": "1",
+        "lineage_id": "lin_a",
+        "through_ordinal": "1",
+        "through_digest": "efc959960e9c3392a28c897f298ca6651073d4d263c7f241eb7956ed87267fc1",
+        "est_tokens": "1200",
+        "model": "anthropic/claude-sonnet-4-5",
+        "window": "200000",
+        "history_edit_cost": "future_cost"
+      },
+      "digest": "1f56cceaf3a5f3dc77b4d8558db804ddcf44d6b6b931ff0fd6b960217626a865",
+      "effective": null,
+      "without_header_digest": "68933bae4689968a07316d16c364e9f90d8528f525cf49474fcdc4305bcb51ff"
+    }
+  ],
+  "chain_reset": [
+    {
+      "name": "response chain reset known before rendering",
+      "params": {
+        "session_ref": "0b9679cc5a4044d51710921d5233db02",
+        "cause": "chain_reset",
+        "deadline_ms": 1500
+      }
+    },
+    {
+      "name": "a chain-reset ride waiting the most a ride may: 300,000 ms",
+      "params": {
+        "session_ref": "0b9679cc5a4044d51710921d5233db02",
+        "cause": "chain_reset",
+        "deadline_ms": 300000
+      }
+    }
+  ]
+}

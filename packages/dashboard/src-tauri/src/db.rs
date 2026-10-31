@@ -819,6 +819,18 @@ pub struct MemoryStats {
     pub categories: Vec<CategoryCount>,
 }
 
+/// Filters for [`get_memory_stats_scoped`]. Summary totals stay project-scoped.
+/// `categories` follows the memory list: an exact status, or archived rows
+/// omitted unless `include_archived` is set, plus the same search text.
+#[derive(Clone, Copy)]
+pub struct MemoryStatsScope<'a> {
+    pub project: Option<&'a str>,
+    pub workspace_id: Option<i64>,
+    pub status: Option<&'a str>,
+    pub search: Option<&'a str>,
+    pub include_archived: bool,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct Primer {
     pub id: i64,
@@ -5711,6 +5723,34 @@ pub fn get_memories(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Memory>, rusqlite::Error> {
+    get_memories_filtered(
+        conn,
+        project_filter,
+        workspace_filter,
+        status_filter,
+        category_filter,
+        search_query,
+        false,
+        limit,
+        offset,
+    )
+}
+
+/// Same list as [`get_memories`]. `exclude_archived` drops archived rows when
+/// no exact status is set, which is the Memories tab default: category totals
+/// omit archived rows, and the page must be able to reach every counted row.
+#[allow(clippy::too_many_arguments)]
+pub fn get_memories_filtered(
+    conn: &Connection,
+    project_filter: Option<&str>,
+    workspace_filter: Option<i64>,
+    status_filter: Option<&str>,
+    category_filter: Option<&str>,
+    search_query: Option<&str>,
+    exclude_archived: bool,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Memory>, rusqlite::Error> {
     let run =
         |search: Option<&str>, id_condition: Option<MemoryIdCondition>, limit: i64, offset: i64| {
             query_memories(
@@ -5721,6 +5761,7 @@ pub fn get_memories(
                 category_filter,
                 search,
                 id_condition,
+                exclude_archived,
                 limit,
                 offset,
             )
@@ -5765,6 +5806,7 @@ fn query_memories(
     category_filter: Option<&str>,
     search_query: Option<&str>,
     id_condition: Option<MemoryIdCondition>,
+    exclude_archived: bool,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Memory>, rusqlite::Error> {
@@ -5862,6 +5904,10 @@ fn query_memories(
     if let Some(s) = status_filter {
         params.push(Box::new(s.to_string()));
         conditions.push(format!("m.status = ?{}", params.len()));
+    } else if exclude_archived {
+        // No extra parameter: the clause is a literal, so the LIKE fallback
+        // reuses `where_extra` without rebinding it.
+        conditions.push("m.status != 'archived'".to_string());
     }
     if let Some(c) = category_filter {
         params.push(Box::new(c.to_string()));
@@ -6304,6 +6350,24 @@ pub fn get_memory_stats(
     project_filter: Option<&str>,
     workspace_filter: Option<i64>,
 ) -> Result<MemoryStats, rusqlite::Error> {
+    get_memory_stats_scoped(
+        conn,
+        MemoryStatsScope {
+            project: project_filter,
+            workspace_id: workspace_filter,
+            status: None,
+            search: None,
+            include_archived: false,
+        },
+    )
+}
+
+pub fn get_memory_stats_scoped(
+    conn: &Connection,
+    scope: MemoryStatsScope<'_>,
+) -> Result<MemoryStats, rusqlite::Error> {
+    let project_filter = scope.project;
+    let workspace_filter = scope.workspace_id;
     let resolved_paths: Vec<String> = if let Some(ws_id) = workspace_filter {
         crate::workspaces::resolve_workspace_filter_paths(conn, ws_id)?
     } else if let Some(p) = project_filter {
@@ -6421,19 +6485,7 @@ pub fn get_memory_stats(
         )?
     };
 
-    let cat_sql = format!(
-        "SELECT category, COUNT(*) as cnt FROM memories {} GROUP BY category ORDER BY cnt DESC",
-        where_with_extra("status != 'archived'", has_filter)
-    );
-    let mut stmt = conn.prepare(&cat_sql)?;
-    let categories: Vec<CategoryCount> = stmt
-        .query_map(path_params.as_slice(), |row| {
-            Ok(CategoryCount {
-                category: row.get(0)?,
-                count: row.get(1)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+    let categories = category_counts_for_scope(conn, scope)?;
 
     Ok(MemoryStats {
         total,
@@ -6443,6 +6495,231 @@ pub fn get_memory_stats(
         with_embeddings,
         categories,
     })
+}
+
+/// Category totals for the memory list. Uses the same project, status, search,
+/// and archived-omission rules as `get_memories_filtered`, so a header count is
+/// the number of rows that category can page through. Not limited to a page.
+fn category_counts_for_scope(
+    conn: &Connection,
+    scope: MemoryStatsScope<'_>,
+) -> Result<Vec<CategoryCount>, rusqlite::Error> {
+    let exclude_archived = scope.status.is_none() && !scope.include_archived;
+    let search = scope
+        .search
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(id) = parse_memory_id_query(search) {
+        // Same union as `get_memories_filtered`: an exact ID that passes the
+        // view filters is counted even when the text search would miss it, and
+        // it is not counted twice when the text search also hits it.
+        let exact = query_memories(
+            conn,
+            scope.project,
+            scope.workspace_id,
+            scope.status,
+            None,
+            None,
+            Some(MemoryIdCondition::Only(id)),
+            exclude_archived,
+            1,
+            0,
+        )?
+        .into_iter()
+        .next();
+        if let Some(exact) = exact {
+            let mut counts = aggregate_categories(
+                conn,
+                scope.project,
+                scope.workspace_id,
+                scope.status,
+                search,
+                Some(MemoryIdCondition::Exclude(id)),
+                exclude_archived,
+            )?;
+            add_category_count(&mut counts, &exact.category, 1);
+            return Ok(counts);
+        }
+    }
+    aggregate_categories(
+        conn,
+        scope.project,
+        scope.workspace_id,
+        scope.status,
+        search,
+        None,
+        exclude_archived,
+    )
+}
+
+fn add_category_count(counts: &mut Vec<CategoryCount>, category: &str, extra: i64) {
+    if let Some(row) = counts.iter_mut().find(|row| row.category == category) {
+        row.count += extra;
+    } else {
+        counts.push(CategoryCount {
+            category: category.to_string(),
+            count: extra,
+        });
+    }
+    counts.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.category.cmp(&right.category))
+    });
+}
+
+fn aggregate_categories(
+    conn: &Connection,
+    project_filter: Option<&str>,
+    workspace_filter: Option<i64>,
+    status_filter: Option<&str>,
+    search_query: Option<&str>,
+    id_condition: Option<MemoryIdCondition>,
+    exclude_archived: bool,
+) -> Result<Vec<CategoryCount>, rusqlite::Error> {
+    let raw_search = search_query.unwrap_or("").trim().to_string();
+    let has_search = !raw_search.is_empty();
+    let sanitized_fts = if has_search {
+        let tokens: Vec<String> = raw_search
+            .split_whitespace()
+            .filter(|token| !token.is_empty())
+            .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+            .collect();
+        tokens.join(" ")
+    } else {
+        String::new()
+    };
+    let use_fts = !sanitized_fts.is_empty();
+    let use_like_fallback = has_search && (!use_fts || raw_search.len() < 3);
+    let like_pattern = like_contains_pattern(&raw_search);
+
+    let mut conditions = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if use_fts && !use_like_fallback {
+        params.push(Box::new(sanitized_fts));
+    } else if has_search {
+        params.push(Box::new(like_pattern.clone()));
+    }
+
+    let resolved_paths: Vec<String> = if let Some(ws_id) = workspace_filter {
+        crate::workspaces::resolve_workspace_filter_paths(conn, ws_id)?
+    } else if let Some(project) = project_filter {
+        resolve_paths_for_memory_filter(conn, project)?
+    } else {
+        Vec::new()
+    };
+    if !resolved_paths.is_empty() {
+        let start_idx = params.len() + 1;
+        for path in &resolved_paths {
+            params.push(Box::new(path.clone()));
+        }
+        conditions.push(format!(
+            "m.project_path IN ({})",
+            build_in_placeholders(resolved_paths.len(), start_idx)
+        ));
+    } else if workspace_filter.is_some() || project_filter.is_some() {
+        conditions.push("0 = 1".to_string());
+    }
+    if let Some(status) = status_filter {
+        params.push(Box::new(status.to_string()));
+        conditions.push(format!("m.status = ?{}", params.len()));
+    } else if exclude_archived {
+        conditions.push("m.status != 'archived'".to_string());
+    }
+    let mut exclude_param_pos = None;
+    match id_condition {
+        Some(MemoryIdCondition::Only(id)) => {
+            params.push(Box::new(id));
+            conditions.push(format!("m.id = ?{}", params.len()));
+        }
+        Some(MemoryIdCondition::Exclude(id)) => {
+            exclude_param_pos = Some(params.len());
+            params.push(Box::new(id));
+            conditions.push(format!("m.id IS NOT ?{}", params.len()));
+        }
+        None => {}
+    }
+    let where_extra = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("AND {}", conditions.join(" AND "))
+    };
+
+    let map_counts = |sql: &str, bound: &[Box<dyn rusqlite::types::ToSql>]| {
+        let mut stmt = conn.prepare(sql)?;
+        let refs: Vec<&dyn rusqlite::types::ToSql> =
+            bound.iter().map(|param| param.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), |row| {
+            Ok(CategoryCount {
+                category: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+    };
+
+    let grouped = |from_where: &str| {
+        format!(
+            "SELECT m.category, COUNT(*) AS cnt {from_where} {where_extra} GROUP BY m.category ORDER BY cnt DESC, m.category ASC"
+        )
+    };
+
+    if use_fts && !use_like_fallback {
+        let sql = grouped(
+            "FROM memories m INNER JOIN memories_fts ON memories_fts.rowid = m.id WHERE memories_fts MATCH ?1",
+        );
+        match map_counts(&sql, &params) {
+            Ok(counts) if !counts.is_empty() => return Ok(counts),
+            Ok(empty) => {
+                // An empty FTS aggregate falls back to LIKE only when FTS itself
+                // matches nothing. An exclusion that removed the only FTS hit
+                // must stay on FTS, or the count would include substring hits
+                // the list does not show.
+                let fts_has_hits = if exclude_param_pos.is_some() {
+                    let mut probe: Vec<&dyn rusqlite::types::ToSql> =
+                        params.iter().map(|param| param.as_ref()).collect();
+                    if let Some(pos) = exclude_param_pos {
+                        probe[pos] = &rusqlite::types::Null;
+                    }
+                    let probe_sql = format!(
+                        "SELECT 1 FROM memories m INNER JOIN memories_fts ON memories_fts.rowid = m.id WHERE memories_fts MATCH ?1 {where_extra} LIMIT 1"
+                    );
+                    conn.prepare(&probe_sql)?
+                        .query(probe.as_slice())?
+                        .next()?
+                        .is_some()
+                } else {
+                    false
+                };
+                if fts_has_hits {
+                    return Ok(empty);
+                }
+            }
+            Err(error) => {
+                eprintln!("FTS category count failed, falling back to LIKE: {error}");
+            }
+        }
+    } else if !has_search {
+        let sql = grouped("FROM memories m WHERE 1=1");
+        return map_counts(&sql, &params);
+    }
+
+    let like_sql = grouped(
+        "FROM memories m WHERE (m.content LIKE ?1 ESCAPE '\\' OR m.category LIKE ?1 ESCAPE '\\')",
+    );
+    let mut like_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    like_params.push(Box::new(like_pattern));
+    for path in &resolved_paths {
+        like_params.push(Box::new(path.clone()));
+    }
+    if let Some(status) = status_filter {
+        like_params.push(Box::new(status.to_string()));
+    }
+    if let Some(MemoryIdCondition::Only(id) | MemoryIdCondition::Exclude(id)) = id_condition {
+        like_params.push(Box::new(id));
+    }
+    map_counts(&like_sql, &like_params)
 }
 
 fn mutation_race_error() -> rusqlite::Error {
@@ -12810,6 +13087,176 @@ mod memory_project_filter_tests {
             .expect("stats must not crash on an empty-resolved filter");
         assert_eq!(stats.total, 0);
         assert_eq!(stats.with_embeddings, 0);
+        assert!(stats.categories.is_empty());
+    }
+
+    fn insert_paged_memory(
+        conn: &Connection,
+        project_path: &str,
+        category: &str,
+        status: &str,
+        content: &str,
+        updated_at: i64,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO memories
+                (project_path, category, content, normalized_hash,
+                 source_type, seen_count, retrieval_count,
+                 first_seen_at, last_seen_at, verification_status,
+                 status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4,
+                     'historian', 1, 0,
+                     1000, 1000, 'unverified',
+                     ?5, ?6, ?6)",
+            (
+                project_path,
+                category,
+                content,
+                format!("{:x}", md5::compute(content)),
+                status,
+                updated_at,
+            ),
+        )
+        .expect("insert paged memory");
+        let id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO memories_fts(rowid, content, category) VALUES (?1, ?2, ?3)",
+            (id, content, category),
+        )
+        .expect("index paged memory");
+        id
+    }
+
+    #[test]
+    fn category_counts_cover_every_row_past_the_first_page() {
+        // A category larger than one list page must report its full count, and
+        // the same filter must return the row past that page. Archived rows are
+        // omitted from the default totals and from that page.
+        let conn = make_memory_db();
+        // updated_at descends, so the first page is the 200 newest rows and
+        // offset 200 is the oldest active row.
+        let mut oldest_active = 0;
+        for index in 0..201 {
+            let id = insert_paged_memory(
+                &conn,
+                "/tmp/big",
+                "ARCHITECTURE",
+                "active",
+                &format!("architecture row {index}"),
+                index,
+            );
+            if index == 0 {
+                oldest_active = id;
+            }
+        }
+        for index in 0..5 {
+            insert_paged_memory(
+                &conn,
+                "/tmp/big",
+                "ARCHITECTURE",
+                "archived",
+                &format!("archived architecture {index}"),
+                1_000 + index,
+            );
+        }
+        insert_paged_memory(
+            &conn,
+            "/tmp/big",
+            "CONSTRAINTS",
+            "active",
+            "constraint row",
+            2_000,
+        );
+        insert_paged_memory(
+            &conn,
+            "/tmp/other",
+            "ARCHITECTURE",
+            "active",
+            "other project",
+            3_000,
+        );
+
+        let identity = stable_dir_identity("/tmp/big");
+        let stats = get_memory_stats_scoped(
+            &conn,
+            MemoryStatsScope {
+                project: Some(&identity),
+                workspace_id: None,
+                status: None,
+                search: None,
+                include_archived: false,
+            },
+        )
+        .expect("stats");
+        let architecture = stats
+            .categories
+            .iter()
+            .find(|row| row.category == "ARCHITECTURE")
+            .expect("architecture count");
+        assert_eq!(architecture.count, 201);
+        let constraints = stats
+            .categories
+            .iter()
+            .find(|row| row.category == "CONSTRAINTS")
+            .expect("constraints count");
+        assert_eq!(constraints.count, 1);
+
+        let page = get_memories_filtered(
+            &conn,
+            Some(&identity),
+            None,
+            None,
+            Some("ARCHITECTURE"),
+            None,
+            true,
+            200,
+            200,
+        )
+        .expect("page past the first 200");
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].id, oldest_active);
+
+        let archived = get_memory_stats_scoped(
+            &conn,
+            MemoryStatsScope {
+                project: Some(&identity),
+                workspace_id: None,
+                status: Some("archived"),
+                search: None,
+                include_archived: false,
+            },
+        )
+        .expect("archived stats");
+        assert_eq!(archived.categories.len(), 1);
+        assert_eq!(archived.categories[0].count, 5);
+
+        let searched = get_memory_stats_scoped(
+            &conn,
+            MemoryStatsScope {
+                project: Some(&identity),
+                workspace_id: None,
+                status: None,
+                search: Some("constraint row"),
+                include_archived: false,
+            },
+        )
+        .expect("search stats");
+        assert_eq!(searched.categories.len(), 1);
+        assert_eq!(searched.categories[0].category, "CONSTRAINTS");
+        assert_eq!(searched.categories[0].count, 1);
+        let searched_rows = get_memories_filtered(
+            &conn,
+            Some(&identity),
+            None,
+            None,
+            None,
+            Some("constraint row"),
+            true,
+            50,
+            0,
+        )
+        .expect("search list");
+        assert_eq!(searched_rows.len(), 1);
     }
 
     #[test]
@@ -13132,12 +13579,22 @@ mod memory_project_filter_tests {
 
         for search in ["1451", "#1451"] {
             // Pin the premise: text ranking alone puts 1451 last.
-            let text_only: Vec<i64> =
-                query_memories(&conn, None, None, None, None, Some(search), None, 200, 0)
-                    .expect("text search")
-                    .into_iter()
-                    .map(|m| m.id)
-                    .collect();
+            let text_only: Vec<i64> = query_memories(
+                &conn,
+                None,
+                None,
+                None,
+                None,
+                Some(search),
+                None,
+                false,
+                200,
+                0,
+            )
+            .expect("text search")
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
             assert_eq!(text_only.len(), 3, "{search:?}: {text_only:?}");
             assert_eq!(text_only.last(), Some(&1451), "{search:?}: {text_only:?}");
 

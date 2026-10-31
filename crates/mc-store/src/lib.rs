@@ -137,6 +137,11 @@ pub type ProviderExtras = BTreeMap<String, BTreeMap<String, Value>>;
 
 static NEXT_TAG_CACHE_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 
+/// Resolved storage keys must never be interpreted as filesystem paths.
+pub fn is_resolved_project_id(value: &str) -> bool {
+    value.starts_with("git:") || value.starts_with("dir:") || value.starts_with("pj-")
+}
+
 /// Canonicalize a filesystem route root before using it as lineage state.
 ///
 /// Transform and facade lanes can observe the same directory through different spellings when
@@ -8448,6 +8453,14 @@ impl McStore {
 
     pub fn open(descriptor: &StorageDescriptor) -> Result<Self, McStoreError> {
         Self::open_with_private_permissions(descriptor, true)
+    }
+
+    /// The fence epoch of the single-writer lease this store holds. A fenced
+    /// write is rejected when the database was claimed at a higher epoch, so an
+    /// offline tool compares this against the database's stored fence to prove
+    /// it opened under the same lease as the module that last wrote it.
+    pub fn lease_epoch(&self) -> u64 {
+        self.inner.epoch()
     }
 
     /// Open with the real opener but only the migrations up to `ceiling`, which

@@ -75,6 +75,7 @@ import {
 	resolveProjectIdentityForSession,
 	storedPathBelongsToIdentity,
 } from "@magic-context/core/features/magic-context/memory/project-identity";
+import { UnprovenCachedProjectOwnerError } from "@magic-context/core/features/magic-context/memory/session-identity-decision";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
 	expandWorkspaceIdentitySetWithAliases,
@@ -344,11 +345,11 @@ export interface CtxMemoryToolDeps {
 	) => Promise<void>;
 	memoryEnabled?: boolean;
 	embeddingEnabled?: boolean;
-	/** Resolve a directory's project identity, allowing home only when user-level configuration enables it. */
+	/** Resolve the session's served memory owner. */
 	resolveProjectIdentity?: (
 		directory: string,
 		ctx: ExtensionContext,
-	) => string | undefined;
+	) => string | undefined | Promise<string | undefined>;
 	/** When true, Curate-only execution fields and guards are enabled. The separate
 	 *  ctx_memory_list registration uses this mode to reuse the list handler. */
 	allowDreamerActions?: boolean;
@@ -415,7 +416,14 @@ export function createCtxMemoryTool(
 				);
 			}
 
-			const projectIdentity = resolveProject(ctx.cwd, ctx);
+			let projectIdentity: string | undefined;
+			try {
+				projectIdentity = await resolveProject(ctx.cwd, ctx);
+			} catch (error) {
+				if (!(error instanceof UnprovenCachedProjectOwnerError)) throw error;
+				// Ownership refusals are named tool replies, not host transport failures.
+				return ok(error.refusal("ctx_memory", params.action));
+			}
 			if (!projectIdentity) {
 				return err(
 					"Error: Could not resolve project identity for memory action.",
