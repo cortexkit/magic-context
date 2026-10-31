@@ -2,6 +2,10 @@
 
 Standing rules for every worker in this repository. A brief can tighten them but never loosens them.
 
+## Read first
+
+Read `ARCHITECTURE.md` and `STRUCTURE.md` at the repository root before changing any code. They describe how a transform pass works, the cache rules every change must keep, and where code belongs. Don't edit either file.
+
 ## Build and test remotely
 
 - Run builds and tests on the build server (`runon: "linux"`, more cores for whole suites). Run on this Mac only what needs macOS, at `nice -n 10`.
