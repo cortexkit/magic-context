@@ -669,14 +669,17 @@ impl McStore {
     }
 
     /// Read only the project metadata saved in serialized compaction state, not its potentially large
-    /// serialized compaction state. Multiple conversations remain ambiguous.
+    /// serialized compaction state. Multiple conversations remain ambiguous. Records written in the
+    /// versioned layout live outside the physical table, so the query reads through the same
+    /// layout expansion as every other record reader.
     pub fn async_compaction_projects_for_session(
         &self,
         runner: Option<&str>,
         session: &str,
     ) -> Result<Vec<(String, Option<String>)>, McStoreError> {
         self.inner.with_conn(|conn| {
-            let mut query = conn.prepare("SELECT json_extract(state_json,'$.runner_identity.project_root'), json_extract(state_json,'$.dream_target.project') FROM mc_async_compaction WHERE session=?1 AND (?2 IS NULL OR json_extract(conversation_key,'$[0]')=?2) AND json_type(state_json,'$.runner_identity.project_root')='text'")?;
+            let sql = crate::async_compaction_layout::read_sql_at(conn, "SELECT json_extract(state_json,'$.runner_identity.project_root'), json_extract(state_json,'$.dream_target.project') FROM mc_async_compaction WHERE session=?1 AND (?2 IS NULL OR json_extract(conversation_key,'$[0]')=?2) AND json_type(state_json,'$.runner_identity.project_root')='text'")?;
+            let mut query = conn.prepare(&sql)?;
             let rows = query.query_map(params![session, runner], |row| Ok((row.get(0)?, row.get(1)?)))?;
             rows.collect()
         }).map_err(Into::into)
