@@ -38,7 +38,16 @@ pub(crate) fn declare(params: &Value) -> HandlerOutcome {
                     .with_on_unavailable(OnUnavailable::Pass),
             ]
         }
-        "worker" | "reader" => Vec::new(),
+        // Workers get the time marker only. Like standalone subagents, they get
+        // no automatic memory recall: their prompts come from the agent that
+        // launched them, not from a person's question.
+        "worker" => {
+            vec![
+                DeclaredSubscription::new(Hook::PreUser, vec![Op::Prepend], 1500)
+                    .with_on_unavailable(OnUnavailable::Pass),
+            ]
+        }
+        "reader" => Vec::new(),
         _ => return invalid_field("preset", "unknown step-transform preset"),
     };
     let declaration = Declaration {
@@ -65,6 +74,16 @@ impl McHandler {
         let answer = self
             .pre_user_answer(channel, &call)
             .unwrap_or(HookAnswer::Pass);
+        // One line per call, so a runner's hook log can be matched against
+        // what ck-mc answered.
+        let outcome = match &answer {
+            HookAnswer::Ops { ops } => format!("ops:{}", ops.len()),
+            _ => "pass".to_string(),
+        };
+        tracing::info!(
+            "step-transform hook session={} outcome={outcome}",
+            call.session
+        );
         match bytes(&answer) {
             Ok(bytes) => HandlerOutcome::Response(bytes),
             Err(error) => error,
@@ -100,7 +119,7 @@ impl McHandler {
             return None;
         }
         let store = self.store.get()?;
-        let (namespace, newest_written_at) = self.pre_user_context(&binding)?;
+        let (namespace, newest_written_at, head) = self.pre_user_context(&binding)?;
         let mut ops = Vec::new();
 
         if binding.config.temporal_awareness {
@@ -124,7 +143,8 @@ impl McHandler {
         }
 
         let auto = &binding.config.auto_search;
-        if auto.enabled
+        if head
+            && auto.enabled
             && binding.config.memory_enabled
             && !crate::transform::has_stacked_user_hint_augmentation(&text)
             && prompt.encode_utf16().count() >= auto.min_prompt_chars

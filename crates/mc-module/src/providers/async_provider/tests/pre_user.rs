@@ -122,7 +122,7 @@ async fn pre_user_passes_for_a_session_without_a_record() {
 }
 
 #[tokio::test]
-async fn declare_subscribes_heads_to_pre_user_only() {
+async fn declare_subscribes_heads_and_workers_to_pre_user() {
     let dir = tempfile::tempdir().unwrap();
     let rig = rig(dir.path()).await;
     let head = rig
@@ -132,10 +132,16 @@ async fn declare_subscribes_heads_to_pre_user_only() {
         head,
         json!({"subscriptions":[{"hook":"pre_user","ops":["prepend","append"],"on_unavailable":"pass","budget_ms":1500}]})
     );
-    for preset in ["worker", "reader"] {
-        let answer = rig
-            .op("transform.declare", json!({"preset":preset,"params":{}}))
-            .await;
-        assert_eq!(answer, json!({"subscriptions":[]}), "{preset}");
-    }
+    // Workers get the time marker only, like standalone subagents.
+    let worker = rig
+        .op("transform.declare", json!({"preset":"worker","params":{}}))
+        .await;
+    assert_eq!(
+        worker,
+        json!({"subscriptions":[{"hook":"pre_user","ops":["prepend"],"on_unavailable":"pass","budget_ms":1500}]})
+    );
+    let reader = rig
+        .op("transform.declare", json!({"preset":"reader","params":{}}))
+        .await;
+    assert_eq!(reader, json!({"subscriptions":[]}));
 }

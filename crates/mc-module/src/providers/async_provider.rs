@@ -7339,7 +7339,7 @@ impl McHandler {
     pub(crate) fn pre_user_context(
         &self,
         binding: &SessionBinding,
-    ) -> Option<(String, Option<u64>)> {
+    ) -> Option<(String, Option<u64>, bool)> {
         let store = self.store.get()?;
         let rows = route_records(store, binding).ok()?;
         let [raw] = rows.as_slice() else {
@@ -7350,7 +7350,8 @@ impl McHandler {
             .newest_async_entry_written_at(&state.reference())
             .ok()
             .flatten();
-        Some((state.namespace(), newest))
+        let head = state.engine.preset == transform::compaction::Preset::Head;
+        Some((state.namespace(), newest, head))
     }
 
     pub(crate) fn async_compaction_namespace(
