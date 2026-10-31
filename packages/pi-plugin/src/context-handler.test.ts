@@ -134,7 +134,7 @@ import { createCtxReduceTool } from "./tools/ctx-reduce";
 import { createPiTranscript } from "./transcript-pi";
 
 describe("pi auto-search served decisions", () => {
-	function setup(label: string) {
+	function setup(label: string, enabled = true) {
 		const fixture = createAutoSearchReplayFixture("pi", label);
 		const snapshot = spyOn(
 			embeddingModule,
@@ -148,7 +148,7 @@ describe("pi auto-search served decisions", () => {
 			db: fixture.db,
 			protectedTags: 0,
 			injection: { injectionBudgetTokens: 8000, injectDocs: false },
-			autoSearch: { enabled: true, scoreThreshold: 0.6, minPromptChars: 12 },
+			autoSearch: { enabled, scoreThreshold: 0.6, minPromptChars: 12 },
 		});
 		const handler = fake.handlers.get("context");
 		if (!handler) throw new Error("context handler was not registered");
@@ -185,6 +185,27 @@ describe("pi auto-search served decisions", () => {
 			},
 		};
 	}
+
+	it("full host processor logs a disabled auto-search turn without searching", async () => {
+		const fixture = setup("disabled-logging", false);
+		const log = spyOn(loggerModule, "sessionLog");
+		try {
+			const first = await fixture.invoke("disabled");
+			expect(await fixture.invoke("disabled")).toBe(first);
+			expect(fixture.search).not.toHaveBeenCalled();
+			expect(
+				log.mock.calls.filter(([, line]) =>
+					line.includes("auto-search: decision outcome=disabled"),
+				),
+			).toHaveLength(1);
+			expect(getAutoSearchHintDecisions(fixture.db, fixture.sessionId)).toEqual(
+				[],
+			);
+		} finally {
+			log.mockRestore();
+			fixture.close();
+		}
+	});
 
 	it("full host processor cannot retry a served search exception", async () => {
 		const fixture = setup("host-exception");

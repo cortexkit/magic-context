@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import type { AutoSearchDiagnostics } from "../../features/magic-context/auto-search-diagnostics";
 import type { CompartmentChunkPoolWarmReport } from "../../features/magic-context/compartment-chunk-embedding";
 import {
     embedBatchForProject,
@@ -203,6 +204,7 @@ export interface AutoSearchWorkerInput {
         | "readMessages"
         | "searchMessageHistory"
         | "stepTimings"
+        | "onAutoSearchDiagnostics"
     >;
     embeddingRuntimeEnabled: boolean;
     embeddingHostBusy: boolean;
@@ -212,6 +214,7 @@ export interface AutoSearchWorkerInput {
     messageRequest?: MessageHistorySearchRequest;
 }
 export type AutoSearchWorkerReply =
+    | { kind: "diagnostics"; diagnostics: AutoSearchDiagnostics }
     | { kind: "result"; results: UnifiedSearchResult[]; timings?: AutoSearchJobTimings }
     | { kind: "messages"; outcome: MessageHistorySearchOutcome }
     /** Sent by a "messages" job as soon as its thread runs, before loading search code. */
@@ -524,6 +527,7 @@ async function executeAutoSearchWorker(
         readMessages: _readMessages,
         searchMessageHistory: _searchMessageHistory,
         stepTimings: _stepTimings,
+        onAutoSearchDiagnostics: _onAutoSearchDiagnostics,
         ...serializable
     } = options;
     const lifecycle = registerAutoSearchWork(sessionId);
@@ -573,6 +577,10 @@ async function executeAutoSearchWorker(
         throw new AutoSearchBusyError();
     }
     const { slot, fresh } = lease;
+    if (options.autoSearchDiagnostics) {
+        options.autoSearchDiagnostics.workerStarted = fresh;
+        if (fresh) options.autoSearchDiagnostics.pool = "cold";
+    }
     const worker = slot.worker;
     // Only pooled searches keep running past their caller's deadline. A backfill
     // is disposed when it is cancelled, and a test entry is never reused.
@@ -655,6 +663,15 @@ async function executeAutoSearchWorker(
             finish([], new Error(`auto-search worker exited (${code})`));
         const onMessage = async (reply: AutoSearchWorkerReply) => {
             if (released) return;
+            if (reply.kind === "diagnostics") {
+                if (!settled && options.autoSearchDiagnostics) {
+                    const workerStarted = options.autoSearchDiagnostics.workerStarted;
+                    Object.assign(options.autoSearchDiagnostics, reply.diagnostics, {
+                        workerStarted,
+                    });
+                }
+                return;
+            }
             if (reply.kind === "result" || reply.kind === "error") {
                 if (detachedAt !== undefined) {
                     logLateSearch(

@@ -403,7 +403,7 @@ for (const host of ["opencode", "opencode2"] as const) {
             return {
                 ...fixture,
                 search,
-                async invoke(id: string, busting = false) {
+                async invoke(id: string, busting = false, enabled = true) {
                     const user = {
                         info: { id, role: "user" },
                         parts: [{ type: "text", text: replayPrompt }],
@@ -412,7 +412,7 @@ for (const host of ["opencode", "opencode2"] as const) {
                         currentTurnId: id,
                         schedulerDecision: busting ? "execute" : "defer",
                         projectPath: fixture.projectPath,
-                        autoSearch: { enabled: true, scoreThreshold: 0.6, minPromptChars: 12 },
+                        autoSearch: { enabled, scoreThreshold: 0.6, minPromptChars: 12 },
                         m0M1: fixture.renderOptions(
                             busting ? "anthropic/other" : "anthropic/claude",
                         ),
@@ -427,6 +427,28 @@ for (const host of ["opencode", "opencode2"] as const) {
                 },
             };
         }
+
+        it("full host processor logs a disabled auto-search turn without searching", async () => {
+            const fixture = setup("disabled-logging");
+            const log = spyOn(loggerModule, "sessionLog");
+            try {
+                const first = await fixture.invoke("disabled", false, false);
+                const replay = await fixture.invoke("disabled", false, false);
+                expect(replay.userBytes).toBe(first.userBytes);
+                expect(fixture.search).not.toHaveBeenCalled();
+                expect(
+                    log.mock.calls.filter(([, line]) =>
+                        line.includes("auto-search: decision outcome=disabled"),
+                    ),
+                ).toHaveLength(1);
+                expect(
+                    replayStorage.getAutoSearchHintDecisions(fixture.db, fixture.sessionId),
+                ).toEqual([]);
+            } finally {
+                log.mockRestore();
+                fixture.close();
+            }
+        });
 
         it("full host processor cannot retry a served search exception", async () => {
             const fixture = setup("host-exception");
