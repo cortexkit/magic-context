@@ -99,9 +99,9 @@ If you downgrade OpenCode, keep Magic Context on the current version. Older Magi
 
 ## Idle checkpoints for long sessions
 
-Magic Context automatically asks OpenCode to checkpoint a long session after it has been idle past the served request's cache lifetime. This is on by default when Magic Context compaction is enabled; there is no extra setting to turn on. It also works with the built-in `compaction.auto: false` configuration written by setup.
+Magic Context automatically asks OpenCode to checkpoint a long session after it has been idle past the configured cache lifetime. This is on by default when Magic Context compaction is enabled; there is no extra setting to turn on. It also works with the built-in `compaction.auto: false` configuration written by setup.
 
-OpenCode otherwise loads the history since its last host checkpoint on every step, even when Magic Context sends only a small prompt to the model. After at least 1,000 stored history rows, an idle checkpoint moves that starting point forward. It runs between turns, not while the model is answering, and waits until the existing prompt cache has expired. With `cache_ttl: "never"`, no automatic idle checkpoint is scheduled.
+OpenCode otherwise loads the history since its last host checkpoint on every step, even when Magic Context sends only a small prompt to the model. After at least 1,000 stored history rows, an idle checkpoint moves that starting point forward. It runs between turns, not while the model is answering, and waits until the configured idle lifetime has elapsed. With `cache_ttl: "never"`, no automatic idle checkpoint is scheduled.
 
 The checkpoint uses Magic Context's own summary, without another model summarization call. OpenCode retains the source history; the next turn still receives the Magic Context summary and unsummarized tail, including after a restart. If the optional replay cache has been evicted, Magic Context restores the needed rows from the host store instead of dropping messages.
 
@@ -159,4 +159,4 @@ OpenCode 1 writes to `$TMPDIR/opencode/magic-context/magic-context.log`. On Linu
 
 When Magic Context refuses a turn before it reaches the provider, the reason and session are written to this log. Include the log when you [file a bug report](/help/troubleshooting/#filing-a-bug-report).
 
-Sessions created with an older experimental host-fold version may need one cache rebuild when upgrading. Magic Context validates the old checkpoint and preserves its history before recording the new replay boundary. If that one-time repair is interrupted, the next turn retries it instead of accepting a partial checkpoint.
+Sessions created with an older experimental host-fold version keep their served request layout when reopened before the cache lifetime expires. Magic Context validates the old receipt without rebuilding the prefix. It records the new replay boundary only when expiry or another normal condition already permits a rebuild. An interrupted or deferred upgrade is retried without accepting a partial checkpoint.

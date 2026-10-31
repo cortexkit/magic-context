@@ -343,10 +343,10 @@ test("a V2 receipt upgrades once from exact summary coverage, not keepID alone",
             },
         }),
     ).toBe(true);
-    expect(hard).toBe(1);
+    expect(hard).toBe(0);
     expect(f.kv.has("native-fold/v3/s")).toBe(false);
     expect(f.loads.filter((load) => load.after === -1)).toHaveLength(1);
-    expect(await f.replay.commitLegacyUpgrade("s")).toBe(true);
+    expect(await f.replay.commitLegacyUpgrade("s", true)).toBe(true);
     f.loads.length = 0;
     expect(JSON.stringify(f.kv.get("native-fold/v2/s"))).toBe(bytes);
     const cold = f.make();
@@ -366,18 +366,17 @@ test("a V2 receipt upgrades once from exact summary coverage, not keepID alone",
         "u8",
     ]);
     expect(f.loads.every((load) => load.after >= 5)).toBe(true);
-    expect(hard).toBe(1);
+    expect(hard).toBe(0);
     expect(f.logs.filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(1);
     expect(f.logs.join("\n")).toContain("mode=bounded");
 });
 
-test("a V2 receipt without a proven floor keeps the host checkpoint across restart and the next fold", async () => {
+test("validated legacy source survives restart and the next fold without trusting recent text", async () => {
     const f = fixture(3);
     const { raw, cut, bytes } = await oldReceipt(f);
     cut.data.recent = raw.map((row) => row.content[0]!.text).join("\n");
     let hard = 0;
     const draft = context([message(cut.id, "host checkpoint")]);
-    f.loads.length = 0;
     expect(
         await f.replay.prepareLegacyUpgrade({
             draft,
@@ -388,30 +387,17 @@ test("a V2 receipt without a proven floor keeps the host checkpoint across resta
             },
         }),
     ).toBe(true);
-    expect(hard).toBe(1);
+    expect(f.replay.legacyUpgradeInput("s", draft.model)).toEqual(raw);
+    expect(await f.replay.checkpointForReplay("s", f.reader)).toBeUndefined();
+    expect(await f.replay.commitLegacyUpgrade("s", false)).toBe(false);
     expect(f.kv.has("native-fold/v3/s")).toBe(false);
-    expect(await f.replay.commitLegacyUpgrade("s")).toBe(true);
+    expect(hard).toBe(0);
+    expect(await f.replay.commitLegacyUpgrade("s", true)).toBe(true);
     f.loads.length = 0;
-    const carrier = await f.replay.checkpointForReplay("s", f.reader);
-    expect(carrier?.rendered.id).toBe(cut.id);
-    for (const row of raw)
-        expect(JSON.stringify(carrier?.rendered)).toContain(row.content[0]!.text as string);
-    expect(await f.replay.admits("s", cut, f.reader)).toBe(true);
-    expect(await f.replay.restore("s", cut, "p/m", { bounded: true })).toEqual([]);
     const cold = f.make();
-    expect(
-        await cold.prepareLegacyUpgrade({
-            draft,
-            cut,
-            reader: f.reader,
-            onHard: () => {
-                hard++;
-            },
-        }),
-    ).toBe(false);
-    expect(await cold.checkpointForReplay("s", f.reader)).toEqual(carrier);
+    expect(await cold.prepareLegacyUpgrade({ draft, cut, reader: f.reader })).toBe(false);
     expect(await cold.admits("s", cut, f.reader)).toBe(true);
-    expect(await cold.restore("s", cut, "p/m", { bounded: true })).toEqual([]);
+    expect(await cold.restore("s", cut, "p/m", { bounded: true })).toEqual(raw);
     f.rows.push({
         id: "next",
         session_id: "s",
@@ -420,21 +406,21 @@ test("a V2 receipt without a proven floor keeps the host checkpoint across resta
         data: { text: "new turn after fallback" },
     });
     const next = message("next", "new turn after fallback");
-    await cold.capture(context([message(HEAD_IDS[0], "head"), next]), [next]);
+    await cold.capture(context([message(HEAD_IDS[0], "head"), ...raw, next]), [...raw, next]);
     expect(await cold.canFold("s", f.reader)).toBe(true);
     f.begin();
     expect(await cold.supply({ draft: context([]), reader: f.reader, summary: "head" })).toBe(true);
     const nextCut = f.finish();
     const restarted = f.make();
     expect(await restarted.admits("s", nextCut, f.reader)).toBe(true);
-    const restored = await restarted.restore("s", nextCut, "p/m", { bounded: true });
-    expect(restored?.map((row) => row.id)).toEqual(["next"]);
-    expect(await restarted.checkpointForReplay("s", f.reader)).toEqual(carrier);
-    expect(f.loads.every((load) => load.after >= cut.seq - 1)).toBe(true);
+    expect(
+        (await restarted.restore("s", nextCut, "p/m", { bounded: true }))?.map((row) => row.id),
+    ).toEqual(["u1", "u2", "u3", "next"]);
+    expect(f.loads.every((load) => load.after >= 0)).toBe(true);
     expect(JSON.stringify(f.kv.get("native-fold/v2/s"))).toBe(bytes);
-    expect(hard).toBe(1);
+    expect(hard).toBe(0);
     expect(f.logs.filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(1);
-    expect(f.logs.join("\n")).toContain("mode=host-checkpoint");
+    expect(f.logs.join("\n")).toContain("mode=source-repair");
 });
 
 test("a session without a V2 receipt never takes the upgrade fallback", async () => {
@@ -500,10 +486,14 @@ test("an unsupported effort control blocks a new fold but not a V2 upgrade turn"
         true,
     );
     expect(JSON.stringify(draft)).toBe(before);
-    expect(await f.replay.checkpointForReplay("s", f.reader)).toBeDefined();
-    expect(await f.replay.commitLegacyUpgrade("s")).toBe(true);
+    expect(await f.replay.checkpointForReplay("s", f.reader)).toBeUndefined();
+    expect(f.replay.legacyUpgradeInput("s", draft.model)?.map((row) => row.id)).toEqual([
+        "u1",
+        "u2",
+    ]);
+    expect(await f.replay.commitLegacyUpgrade("s", true)).toBe(false);
     expect(await f.replay.canFold("s", f.reader)).toBe(false);
-    expect(f.logs.filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(1);
+    expect(f.logs.filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(0);
 });
 
 test("a legacy-only full repair retries after interruption and persists only its successful source floor", async () => {
@@ -564,7 +554,7 @@ test("a legacy-only full repair retries after interruption and persists only its
         id: "u6",
         summary,
     });
-    expect(await retry.commitLegacyUpgrade("s")).toBe(true);
+    expect(await retry.commitLegacyUpgrade("s", true)).toBe(true);
     expect(f.logs.filter((line) => line.includes("upgrade-state HARD"))).toHaveLength(1);
     expect(f.logs.join("\n")).toMatch(/mode=source-repair rows_read=8 duration_ms=\d+ floor=u6:6/);
     f.loads.length = 0;
@@ -584,7 +574,7 @@ test("a legacy-only full repair retries after interruption and persists only its
         (await restarted.restore("s", cut, "p/m", { bounded: true }))?.map((row) => row.id),
     ).toEqual(["u7", "u8"]);
     expect(f.loads.every((load) => load.after >= 5)).toBe(true);
-    expect(hard).toBe(2);
+    expect(hard).toBe(0);
 });
 
 test("an edited start row retains its proven coordinate and refreshes provenance only after the shared rebuild", async () => {

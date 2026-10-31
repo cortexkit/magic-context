@@ -9,26 +9,33 @@ const text = (messages: Array<{ content: Array<Record<string, unknown>> }>) =>
         .map((part) => part.text ?? "")
         .join("\n");
 
-test("a V2 missing-floor upgrade serves the turn once and keeps every row through restart and the next native fold", async () => {
+test("a V2 upgrade preserves warm bytes and converts only on an independently expired pass", async () => {
     const f = await oc2ContextFixture(8631, {
         area: "native-v2-upgrade",
         instructions: false,
         temporal: false,
+        cacheTtl: "30s",
     });
     try {
+        f.respond();
         const before = await f.pass();
         const oldTexts = f.rows.map((row) => row.text);
         for (const value of oldTexts) expect(text(before.draft.messages)).toContain(value);
         await f.nativeFold(2);
         await f.restart();
+        const warm = await f.pass();
+        expect(warm.bytes).toBe(before.bytes);
+        expect(warm.logs.some((line) => line.includes("upgrade-state HARD"))).toBe(false);
+        expect(
+            await f.hostStorage.get(`native-fold/v3/${encodeURIComponent(f.session)}`),
+        ).toBeUndefined();
+        f.idle(1);
         const upgraded = await f.pass();
         expect(
-            upgraded.logs.filter((line) =>
-                line.includes("upgrade-state HARD mode=host-checkpoint"),
-            ),
+            upgraded.logs.filter((line) => line.includes("upgrade-state HARD mode=source-repair")),
         ).toHaveLength(1);
         for (const value of oldTexts) expect(text(upgraded.draft.messages)).toContain(value);
-        expect(text(upgraded.draft.messages)).toContain("<recent-context>");
+        expect(text(upgraded.draft.messages)).not.toContain("<recent-context>");
         expect((await f.pass()).bytes).toBe(upgraded.bytes);
         await f.restart();
         expect((await f.pass()).bytes).toBe(upgraded.bytes);
@@ -56,6 +63,7 @@ test("a V2 upgrade retires an oversized host transcript only after a permitted s
         area: "native-v2-upgrade",
         instructions: false,
         temporal: false,
+        cacheTtl: "30s",
     });
     try {
         await f.pass();
@@ -64,6 +72,7 @@ test("a V2 upgrade retires an oversized host transcript only after a permitted s
         f.compartment(f.rows.length - 1);
         f.user("continue after the completed host checkpoint", 1000);
         await f.restart();
+        f.idle(1);
         const repaired = await f.pass();
         const sent = text(repaired.draft.messages);
         expect(sent).toContain("<session-history>");
@@ -97,6 +106,7 @@ test("a legacy source repair preserves the unsummarized gap before keepID and ad
         host: "2.1.0",
         instructions: false,
         temporal: false,
+        cacheTtl: "30s",
     });
     try {
         f.respond(120);
@@ -106,6 +116,7 @@ test("a legacy source repair preserves the unsummarized gap before keepID and ad
         f.compartment(old.length - 6);
         f.user("continue after repairing the legacy source gap", 1000);
         await f.restart();
+        f.idle(1);
         const repaired = await f.pass();
         const body = text(repaired.draft.messages);
         expect(body).toContain("<session-history>");

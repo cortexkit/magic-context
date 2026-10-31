@@ -38,6 +38,13 @@ export interface AdmissionV3 {
     };
     replay: ReplayStateV3;
 }
+export interface CapturedReplayV3 {
+    version: 3;
+    sessionID: string;
+    sourceDigest: string;
+    through: number;
+    replay: ReplayStateV3;
+}
 
 const object = (value: unknown): value is Record<string, unknown> =>
     !!value && typeof value === "object" && !Array.isArray(value);
@@ -114,6 +121,18 @@ export function validAdmissionV3(value: unknown): value is AdmissionV3 {
 export function encodeAdmissionV3(value: AdmissionV3): string {
     if (!validAdmissionV3(value)) throw new Error("Unsupported native fold admission metadata");
     return JSON.stringify(value);
+}
+
+export function validCapturedReplayV3(value: unknown): value is CapturedReplayV3 {
+    return (
+        object(value) &&
+        keys(value, ["version", "sessionID", "sourceDigest", "through", "replay"]) &&
+        value.version === 3 &&
+        identity(value.sessionID) &&
+        digest(value.sourceDigest) &&
+        Number.isSafeInteger(value.through) &&
+        validReplayState(value.replay)
+    );
 }
 
 export function floorFor(row: StoreRow, kind: ReplayFloor["kind"]): ReplayFloor {

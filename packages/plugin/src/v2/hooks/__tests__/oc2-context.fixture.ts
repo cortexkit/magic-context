@@ -275,8 +275,9 @@ export async function oc2ContextFixture(
         setModel(id: string) {
             modelId = id;
         },
-        async pass() {
+        async pass(editInput?: (draft: SessionContext) => void) {
             const draft = inputDraft();
+            editInput?.(draft);
             const inputIds = draft.messages.flatMap((message) => (message.id ? [message.id] : []));
             const input = structuredClone(draft.messages);
             const before = logs.mock.calls.length;

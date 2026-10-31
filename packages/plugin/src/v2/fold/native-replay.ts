@@ -13,6 +13,7 @@ import type { NativeFoldCache, NativeRowRecord } from "./memory-cache";
 import { encodeNative, NativeReplayUnavailable, reviveNative } from "./native-codec";
 import {
     type AdmissionV3,
+    type CapturedReplayV3,
     ControlMetadataUnavailable,
     captureControls,
     controlsThrough,
@@ -25,6 +26,7 @@ import {
     type ReplayFloor,
     type ReplayStateV3,
     validAdmissionV3,
+    validCapturedReplayV3,
     validFloor,
     validReplayState,
 } from "./native-replay-v3";
@@ -53,6 +55,9 @@ interface DurableSnapshot {
 const coordinates = new WeakMap<V2Message, string>();
 export function nativeRowID(message: V2Message): string | undefined {
     return coordinates.get(message) ?? message.id;
+}
+export function bindNativeRowID(message: V2Message, id: string): void {
+    coordinates.set(message, id);
 }
 export function copyNativeInput(messages: readonly V2Message[]): V2Message[] {
     const copies = reviveNative(encodeNative(messages));
@@ -96,6 +101,8 @@ const conversational = (row: { type: string }) =>
 const historyDigest = (reader: V2StoreReader, sessionID: string, through: number, after = -1) =>
     foldDigest(JSON.stringify(reader.range(sessionID, after, through).filter(conversational)));
 const admissionKey = (sessionID: string) => `native-fold/v2/${encodeURIComponent(sessionID)}`;
+const capturedReplayKey = (sessionID: string) =>
+    `native-fold-state/v3/${encodeURIComponent(sessionID)}`;
 
 export async function forgetNativeFoldProvenance(
     storage: V2Context["storage"],
@@ -109,6 +116,7 @@ export async function forgetNativeFoldProvenance(
     if (!legacyOnly) {
         await remove(admissionKey(sessionID));
         await remove(`native-fold/v3/${encodeURIComponent(sessionID)}`);
+        await remove(capturedReplayKey(sessionID));
     }
     if (!storage.scan) return;
     let after: string | undefined;
@@ -140,6 +148,7 @@ export class NativeFoldReplay {
     private readonly loaded = new Map<string, number>();
     private readonly sources = new Map<string, string>();
     private readonly staleHeads = new Set<string>();
+    private readonly unprovenControls = new Set<string>();
     private readonly editedAdmissions = new Map<
         string,
         {
@@ -220,10 +229,19 @@ export class NativeFoldReplay {
         reader: V2StoreReader,
         boundary?: { id: string; summary: string },
         served?: SessionContext,
+        preferCapture = false,
     ): Promise<ReplayStateV3 | undefined> {
         const retained = this.tail(sessionID)?.replay;
+        const controlsKnown = (replay: ReplayStateV3) =>
+            replay.controls.every(
+                (control) =>
+                    !control.after || reader.sequenceForId(sessionID, control.after) !== undefined,
+            );
         const memory =
-            retained && validReplayState(retained) && validFloor(reader, sessionID, retained.floor)
+            retained &&
+            validReplayState(retained) &&
+            controlsKnown(retained) &&
+            validFloor(reader, sessionID, retained.floor)
                 ? retained
                 : undefined;
         const cut = reader.latestCompaction(sessionID);
@@ -232,11 +250,18 @@ export class NativeFoldReplay {
             saved &&
             saved.proof.sourceDigest === foldDigest(reader.hostIdentity()) &&
             (!cut || saved.proof.admissionID === cut.id) &&
+            controlsKnown(saved.replay) &&
             validFloor(reader, sessionID, saved.replay.floor)
                 ? saved.replay
                 : undefined;
         const imported = importedFloor(reader, sessionID, cut?.seq);
-        const existing = memory ?? durable;
+        const captured = await this.readCapturedReplay(sessionID, reader);
+        const existing = preferCapture
+            ? (captured ?? memory ?? durable)
+            : (memory ?? durable ?? captured);
+        // A store coordinate cannot prove that a previously served effort
+        // marker was absent. Only a fresh capture may establish empty controls.
+        if (preferCapture && !existing && !served) return undefined;
         let floor: ReplayFloor | undefined = existing?.floor ?? imported;
         if (imported && (!floor || imported.after > floor.after)) floor = imported;
         if (cut) {
@@ -293,6 +318,61 @@ export class NativeFoldReplay {
                 : undefined;
         } catch {
             return undefined;
+        }
+    }
+
+    private async readCapturedReplay(
+        sessionID: string,
+        reader: V2StoreReader,
+    ): Promise<ReplayStateV3 | undefined> {
+        const saved = (await this.admissions?.get(capturedReplayKey(sessionID))) as
+            | { payload?: string; digest?: string }
+            | undefined;
+        if (typeof saved?.payload !== "string" || saved.digest !== foldDigest(saved.payload))
+            return undefined;
+        try {
+            const value: unknown = JSON.parse(saved.payload);
+            return validCapturedReplayV3(value) &&
+                value.sessionID === sessionID &&
+                value.sourceDigest === foldDigest(reader.hostIdentity()) &&
+                value.through <= reader.latestSequence(sessionID) &&
+                validFloor(reader, sessionID, value.replay.floor) &&
+                value.replay.controls.every(
+                    (control) =>
+                        !control.after ||
+                        reader.sequenceForId(sessionID, control.after) !== undefined,
+                )
+                ? value.replay
+                : undefined;
+        } catch {
+            return undefined;
+        }
+    }
+
+    private async saveCapturedReplay(
+        sessionID: string,
+        replay: ReplayStateV3,
+        reader: V2StoreReader,
+    ): Promise<void> {
+        const value: CapturedReplayV3 = {
+            version: 3,
+            sessionID,
+            sourceDigest: foldDigest(reader.hostIdentity()),
+            through: reader.latestSequence(sessionID),
+            replay,
+        };
+        if (!validCapturedReplayV3(value))
+            throw new Error("Unsupported captured native replay metadata");
+        const payload = JSON.stringify(value);
+        try {
+            await this.admissions?.set(capturedReplayKey(sessionID), {
+                payload,
+                digest: foldDigest(payload),
+            });
+            this.unprovenControls.delete(sessionID);
+        } catch (error) {
+            this.unprovenControls.add(sessionID);
+            throw error;
         }
     }
     private servedBaseline(draft: SessionContext): string | undefined {
@@ -355,7 +435,11 @@ export class NativeFoldReplay {
             this.report(sessionID, "fold refused: V2 upgrade has not completed a rebuilding pass");
             return false;
         }
-        const replay = await this.floorState(sessionID, reader);
+        if (this.unprovenControls.has(sessionID)) {
+            this.report(sessionID, "fold refused: capture controls have not been persisted");
+            return false;
+        }
+        const replay = await this.floorState(sessionID, reader, undefined, undefined, true);
         if (!replay || replay.blocked) {
             this.report(
                 sessionID,
@@ -393,7 +477,7 @@ export class NativeFoldReplay {
         draft: SessionContext;
         cut: StoreRow<"compaction">;
         reader: V2StoreReader;
-        onHard(): void;
+        onHard?(): void;
     }): Promise<boolean> {
         const { draft, cut, reader } = args;
         const admissions = this.admissions;
@@ -441,30 +525,12 @@ export class NativeFoldReplay {
             )
                 floor = candidate.floor;
         }
-        const recent = cut.data.recent;
-        const completeRecent =
-            !floor &&
-            !!recent &&
-            rows.every((row) =>
-                this.rendered(row, draft.model).every((message) =>
-                    message.content.every(
-                        (part) =>
-                            part.type === "text" &&
-                            typeof part.text === "string" &&
-                            recent.includes(part.text),
-                    ),
-                ),
-            );
-        const mode = floor ? "bounded" : completeRecent ? "host-checkpoint" : "source-repair";
-        // Only a valid V2 receipt can enter this exception. Without coverage or
-        // a complete host transcript, reuse the validated source once on the
-        // upgrade's prefix-rebuilding pass. Normal V3 admission never guesses
-        // an origin after restart. No V3 floor is saved until the pass succeeds.
-        floor ??= completeRecent
-            ? floorFor(cut, "host-checkpoint")
-            : rows[0]
-              ? floorFor(rows[0], "start")
-              : floorFor(cut, "checkpoint");
+        const mode = floor ? "bounded" : "source-repair";
+        // Serialized recent text has no source identities, roles, boundaries or
+        // multiplicity proof. Always project the validated source rows instead.
+        // Staging this projection grants no permission to replace a prefix
+        // whose served cache lifetime has not expired.
+        floor ??= rows[0] ? floorFor(rows[0], "start") : floorFor(cut, "checkpoint");
         let controls: ReturnType<typeof captureControls> = [];
         let blocked = false;
         try {
@@ -501,7 +567,6 @@ export class NativeFoldReplay {
         // A failed attempt leaves no durable V3 floor. The next healthy writer
         // retries under the same rebuild permission rather than replaying a
         // partially repaired prefix.
-        args.onHard();
         this.legacyUpgrades.set(draft.sessionID, { value, rows, started });
         await this.retainReplay(
             draft.sessionID,
@@ -524,11 +589,16 @@ export class NativeFoldReplay {
             });
     }
 
-    async commitLegacyUpgrade(sessionID: string): Promise<boolean> {
+    async commitLegacyUpgrade(
+        sessionID: string,
+        prefixMutationPermitted: boolean,
+    ): Promise<boolean> {
+        if (!prefixMutationPermitted) return false;
         const pending = this.legacyUpgrades.get(sessionID);
         const admissions = this.admissions;
         if (!pending || !admissions) return false;
         const replay = this.tail(sessionID)?.replay ?? pending.value.replay;
+        if (replay.blocked) return false;
         const value: AdmissionV3 = {
             ...pending.value,
             replay,
@@ -1043,40 +1113,10 @@ export class NativeFoldReplay {
                     replay = await this.floorState(draft.sessionID, reader, boundary, draft);
                     if (!replay)
                         throw new NativeReplayUnavailable("No usable host replay boundary");
-                    const known = reader.rowStampsThrough(
-                        draft.sessionID,
-                        reader.latestSequence(draft.sessionID),
-                        replay.floor.after,
-                    );
-                    const ids = new Set(known.map((row) => row.id));
-                    replay = {
-                        ...replay,
-                        blocked: false,
-                        controls: captureControls(
-                            draft,
-                            (message) => {
-                                const id = nativeRowID(message);
-                                if (id) return id;
-                                if (message.role !== "system") return undefined;
-                                const text = message.content
-                                    .filter((part) => part.type === "text")
-                                    .map((part) => part.text)
-                                    .join("\n");
-                                return known
-                                    .filter((row) => row.type === "system")
-                                    .find((row) =>
-                                        reader
-                                            .range(draft.sessionID, row.seq - 1, row.seq)
-                                            .some(
-                                                (stored) =>
-                                                    stored.id === row.id &&
-                                                    stored.data.text === text,
-                                            ),
-                                    )?.id;
-                            },
-                            ids,
-                        ),
-                    };
+                    // Match stored instruction-update system messages, including
+                    // repeated text, against source records before capturing controls.
+                    // controls must use those source identities, not a text match.
+                    replay = { ...replay, blocked: false };
                     const replayAfter = replay.floor.after;
                     captured = native.filter((message) => {
                         if (effortPart(message)) return false;
@@ -1153,8 +1193,7 @@ export class NativeFoldReplay {
         } catch (error) {
             this.unavailable.add(draft.sessionID);
             this.invalidate(draft.sessionID);
-            if (replay && error instanceof ControlMetadataUnavailable)
-                replay = { ...replay, blocked: true };
+            if (replay) replay = { ...replay, blocked: true };
             if (this.options.protocol === 3)
                 this.report(draft.sessionID, `capture unavailable: ${String(error)}`);
         } finally {
@@ -1170,6 +1209,9 @@ export class NativeFoldReplay {
             );
             const reader = this.openReader(draft.sessionID);
             try {
+                // Control provenance is small and durable, independent of the
+                // optional transcript cache's capacity and eviction callbacks.
+                await this.saveCapturedReplay(draft.sessionID, replay, reader);
                 const saved = await this.readV3(draft.sessionID);
                 const cut = reader.latestCompaction(draft.sessionID);
                 if (
@@ -1244,13 +1286,20 @@ export class NativeFoldReplay {
     }): Promise<boolean> {
         const { draft, reader, summary } = args;
         if (this.options.protocol === 3) {
+            if (this.unprovenControls.has(draft.sessionID)) return false;
             if (
                 (await this.admissions?.get(admissionKey(draft.sessionID))) &&
                 !(await this.readV3(draft.sessionID))
             )
                 return false;
             const running = reader.latestRunningCompaction(draft.sessionID);
-            const replay = await this.floorState(draft.sessionID, reader);
+            const replay = await this.floorState(
+                draft.sessionID,
+                reader,
+                undefined,
+                undefined,
+                true,
+            );
             if (!running || !replay || replay.blocked) {
                 this.report(draft.sessionID, "fold refused: no usable host checkpoint boundary");
                 return false;
@@ -1544,6 +1593,7 @@ export class NativeFoldReplay {
         this.staleHeads.delete(sessionID);
     }
     async forget(sessionID: string): Promise<void> {
+        this.unprovenControls.delete(sessionID);
         this.cancelLegacyUpgrade(sessionID);
         this.cancelEditedAdmission(sessionID);
         // The session id locates the v2 key and matching legacy keys without any

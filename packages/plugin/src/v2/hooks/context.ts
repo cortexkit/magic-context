@@ -154,6 +154,7 @@ import { HostFoldIdle } from "../fold/idle";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { nativeFoldCache } from "../fold/memory-cache";
 import {
+    bindNativeRowID,
     copyNativeInput,
     forgetNativeFoldProvenance,
     isLocalCheckpoint,
@@ -269,12 +270,71 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
     return true;
 }
 
+function bindKeptInstructionCoordinates(
+    messages: readonly V2Message[],
+    incoming: V2Message,
+    reader: V2StoreReader,
+    sessionID: string,
+): void {
+    const rows = reader.instructionRowsThrough(sessionID, reader.latestSequence(sessionID));
+    let previous: number | undefined;
+    let pending: V2Message[] = [];
+    const bind = (next?: number) => {
+        if (!pending.length) return;
+        const candidates = rows.filter(
+            (row) =>
+                (previous === undefined || row.seq > previous) &&
+                (next === undefined || row.seq < next),
+        );
+        // Kept history is an ordered suffix. Between two visible source IDs it
+        // is contiguous; at its leading edge use the suffix before the next ID.
+        // The text only verifies that structural alignment, never defines identity.
+        const selected =
+            previous === undefined
+                ? candidates.slice(-pending.length)
+                : next === undefined
+                  ? candidates.slice(0, pending.length)
+                  : candidates;
+        if (
+            selected.length === pending.length &&
+            selected.every((row, index) => {
+                const message = pending[index];
+                return (
+                    message?.role === "system" &&
+                    message.content.length === 1 &&
+                    message.content[0]?.type === "text" &&
+                    message.content[0].text === row.data.text
+                );
+            })
+        ) {
+            selected.forEach((row, index) => {
+                const message = pending[index];
+                if (message) bindNativeRowID(message, row.id);
+            });
+        }
+        pending = [];
+    };
+    for (const message of messages) {
+        if (message === incoming || effortPart(message)) continue;
+        const id = nativeRowID(message);
+        const seq = id ? reader.sequenceForId(sessionID, id) : undefined;
+        if (seq !== undefined) {
+            bind(seq);
+            previous = seq;
+        } else if (!id && message.role === "system") pending.push(message);
+    }
+    bind();
+}
+
 function restoreNativeCheckpointInput(
     messages: readonly V2Message[],
     incoming: V2Message,
     restored: readonly V2Message[],
+    reader: V2StoreReader,
+    sessionID: string,
 ): V2Message[] {
-    const present = new Set(messages.flatMap((message) => (message.id ? [message.id] : [])));
+    bindKeptInstructionCoordinates(messages, incoming, reader, sessionID);
+    const present = new Set(messages.flatMap((message) => nativeRowID(message) ?? []));
     const currentControls = new Map<string, number>();
     let after: string | undefined;
     for (const message of messages) {
@@ -286,7 +346,7 @@ function restoreNativeCheckpointInput(
                 previous: part.previous as string | undefined,
             });
             currentControls.set(key, (currentControls.get(key) ?? 0) + 1);
-        } else if (message.id && message !== incoming) after = message.id;
+        } else if (message !== incoming && nativeRowID(message)) after = nativeRowID(message);
     }
     const hidden = restored.filter((message) => {
         const key = rememberedControlKey(message);
@@ -2283,6 +2343,8 @@ export async function registerContext(context: V2Context) {
                                     messages,
                                     incoming,
                                     restored,
+                                    reader,
+                                    draft.sessionID,
                                 );
                             } else {
                                 messages = await restoreAfterCheckpoint({
@@ -2526,16 +2588,6 @@ export async function registerContext(context: V2Context) {
                         draft,
                         cut: localCut,
                         reader,
-                        onHard: () => {
-                            clearCachedM0(storage.require(), draft.sessionID);
-                            restoredRows.forget(draft.sessionID);
-                            historyRefreshSessions.add(draft.sessionID);
-                            requestPendingMaterialization(
-                                pendingMaterializationSessions,
-                                draft.sessionID,
-                                "host_compaction",
-                            );
-                        },
                     });
                     const carrier = await nativeFoldReplay.checkpointForReplay(
                         draft.sessionID,
@@ -2625,7 +2677,13 @@ export async function registerContext(context: V2Context) {
                     draft.messages.splice(
                         0,
                         draft.messages.length,
-                        ...restoreNativeCheckpointInput(draft.messages, incoming, nativeRestored),
+                        ...restoreNativeCheckpointInput(
+                            draft.messages,
+                            incoming,
+                            nativeRestored,
+                            reader,
+                            draft.sessionID,
+                        ),
                     );
                 } else if (localCut && cut && incoming) {
                     // Only a matching legacy owner can preserve a frozen carrier.
@@ -2819,13 +2877,7 @@ export async function registerContext(context: V2Context) {
                     );
                 }
             }
-            if (
-                (checkpointPermission ||
-                    (checkpointPermission === undefined &&
-                        upgradeCheckpointSequence !== undefined &&
-                        headApplied)) &&
-                replayHead === undefined
-            )
+            if (checkpointPermission === true && replayHead === undefined)
                 admissionRebuildPasses.add(draft.sessionID);
             const capturedSlot = getSlot(draft.sessionID);
             if (
@@ -2996,7 +3048,7 @@ export async function registerContext(context: V2Context) {
                     !deletedSessions.has(draft.sessionID) &&
                     admissionRebuildPasses.has(draft.sessionID)
                 ) {
-                    await nativeFoldReplay?.commitLegacyUpgrade(draft.sessionID);
+                    await nativeFoldReplay?.commitLegacyUpgrade(draft.sessionID, true);
                     await nativeFoldReplay?.commitEditedAdmission(draft.sessionID);
                 }
             } finally {
