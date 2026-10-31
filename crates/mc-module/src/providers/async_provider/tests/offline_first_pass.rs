@@ -1948,14 +1948,35 @@ async fn seeded(seeds: std::ops::Range<u64>) {
     }
 }
 
-#[tokio::test]
-async fn offline_first_pass_matches_fresh_preparation_over_seeded_sessions_0_to_24() {
-    seeded(0..25).await;
+/// Run [`seeded`] on its own thread with an 8 MiB stack and a current-thread
+/// runtime, as `#[tokio::test]` would. In a debug build its offline pass, live
+/// Setup and notice sequence needs just over the 2 MiB test-thread default
+/// (measured between 2.0 and 2.25 MiB on 2026-10-31), so any small change on
+/// that path would abort the whole test binary with a stack overflow. Same
+/// pattern as `scaling_tests::acknowledgement_evicts_only_superseded_views`.
+fn seeded_on_large_stack(seeds: std::ops::Range<u64>) {
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(seeded(seeds))
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
-#[tokio::test]
-async fn offline_first_pass_matches_fresh_preparation_over_seeded_sessions_25_to_49() {
-    seeded(25..50).await;
+#[test]
+fn offline_first_pass_matches_fresh_preparation_over_seeded_sessions_0_to_24() {
+    seeded_on_large_stack(0..25);
+}
+
+#[test]
+fn offline_first_pass_matches_fresh_preparation_over_seeded_sessions_25_to_49() {
+    seeded_on_large_stack(25..50);
 }
 
 // ── Cost on a 175,000-message moved session ──

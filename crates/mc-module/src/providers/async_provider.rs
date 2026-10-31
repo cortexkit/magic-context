@@ -2228,6 +2228,39 @@ impl State {
     }
 }
 
+/// The Setup answer for an existing record: its stored answer, or for an
+/// unadopted offline preparation the head-only answer naming the prepared
+/// view as due. Kept out of `async_setup_inner`, whose debug-build poll frame
+/// is already near the test threads' stack limit.
+#[inline(never)]
+fn existing_setup_answer(
+    state: &State,
+    store: &McStore,
+    request: &compact::setup::SetupRequest,
+    params: &Value,
+    mut answer: Value,
+    checkpoint: Option<contract::setup::SetupCheckpoint>,
+) -> Result<Vec<u8>, HandlerOutcome> {
+    answer["request_id"] = json!(request.request_id);
+    if offline_first_pass::prepared(state) {
+        // `view_due_max_ms` (compaction-provider 0.7.10) is read from the raw
+        // request so it reaches this check on every pinned contract version.
+        let cap = params.get("view_due_max_ms").and_then(Value::as_u64);
+        match offline_first_pass::prepared_answer(state, store, request, cap, answer)? {
+            offline_first_pass::PreparedAnswer::Inline(inline) => answer = inline,
+            offline_first_pass::PreparedAnswer::Refuse(refusal) => return bytes(&refusal),
+            offline_first_pass::PreparedAnswer::Due(head_only, due) => {
+                // Added after the typed rebuild in `with_checkpoint`, which
+                // keeps only the members it knows.
+                let mut built = with_checkpoint(head_only, checkpoint);
+                built["view_due"] = json!({"version": due.version, "digest": due.digest});
+                return bytes(&built);
+            }
+        }
+    }
+    bytes(&with_checkpoint(answer, checkpoint))
+}
+
 /// A `ready` Setup answer carrying a moved session's Setup checkpoint
 /// (compaction-provider §4): on every answer for that session, unchanged, and
 /// on none for a session that was never moved. Records stored before the
@@ -2958,27 +2991,8 @@ impl McHandler {
             {
                 return bytes(&refusal);
             }
-            let unadopted_preparation = offline_first_pass::prepared(&state);
-            let mut answer = reconciled.unwrap_or_else(|| state.initial.clone());
-            answer["request_id"] = json!(request.request_id);
-            if unadopted_preparation {
-                // `view_due_max_ms` (compaction-provider 0.7.10) is read from
-                // the raw request so it reaches this check on every pinned
-                // contract version.
-                let cap = params.get("view_due_max_ms").and_then(Value::as_u64);
-                match offline_first_pass::prepared_answer(&state, store, &request, cap, answer)? {
-                    offline_first_pass::PreparedAnswer::Inline(inline) => answer = inline,
-                    offline_first_pass::PreparedAnswer::Refuse(refusal) => return bytes(&refusal),
-                    offline_first_pass::PreparedAnswer::Due(head_only, due) => {
-                        // Added after the typed rebuild in `with_checkpoint`,
-                        // which keeps only the members it knows.
-                        let mut built = with_checkpoint(head_only, checkpoint);
-                        built["view_due"] = json!({"version": due.version, "digest": due.digest});
-                        return bytes(&built);
-                    }
-                }
-            }
-            return bytes(&with_checkpoint(answer, checkpoint));
+            let answer = reconciled.unwrap_or_else(|| state.initial.clone());
+            return existing_setup_answer(&state, store, &request, params, answer, checkpoint);
         }
         let checkpoint = standalone_move.as_ref().map(moved_session::checkpoint);
         // A Claude Code conversation ck-mc served on the full-array route
