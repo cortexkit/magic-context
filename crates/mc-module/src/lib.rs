@@ -302,7 +302,9 @@ pub mod background {
         }
     }
 }
+mod ctx_search;
 mod descriptors;
+pub mod embedding_provider;
 pub mod healing;
 pub mod historian;
 pub mod historian_chunk;
@@ -1872,6 +1874,7 @@ pub struct McHandler {
     producer_factory: Arc<dyn HistorianProducerFactory>,
     session_resolver: Arc<dyn SessionResolver>,
     retrieval_reranker: Option<Arc<dyn retrieval::hybrid::RerankClient>>,
+    search_io: Arc<dyn embedding_provider::ProviderIo>,
     config: Arc<Mutex<ConfigCache>>,
     historian_runner_refusals: Arc<HistorianRunnerRefusalCache>,
     /// Live Broca dream children, keyed by the Broca session each one runs in.
@@ -2707,6 +2710,9 @@ impl McHandler {
             store_open: Arc::new(StoreOpenCoordinator::new()),
             producer_factory,
             session_resolver,
+            search_io: Arc::new(embedding_provider::NetworkIo::new(
+                retrieval_reranker.clone(),
+            )),
             retrieval_reranker,
             config: Arc::new(Mutex::new(ConfigCache::default())),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
@@ -3142,6 +3148,7 @@ impl McHandler {
             producer_factory: factory,
             session_resolver,
             retrieval_reranker: None,
+            search_io: Arc::new(embedding_provider::NetworkIo::new(None)),
             config: Arc::new(Mutex::new(ConfigCache::default())),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
             broca_dream_tools: Arc::new(dream_dispatch::broca_carrier::BrocaToolRoute::default()),
@@ -8624,15 +8631,18 @@ impl McHandler {
         };
         let args = &args;
         let Some(query) = non_empty_string_arg(args, "query") else {
-            return tool_error_result("Error: 'query' is required for ctx_search.");
+            return tool_error_result("Error: 'query' is required.");
         };
         if let Err(error) = validate_string_cap(args, "query", MAX_QUERY_BYTES) {
             return tool_error_result(format!("Error: {error}."));
         }
-        let limit = usize_arg(args, "limit")
-            .filter(|value| *value > 0)
-            .unwrap_or(10)
-            .clamp(1, 25);
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite() && *v != 0.0)
+            .unwrap_or(10.0)
+            .floor()
+            .clamp(1.0, 25.0) as usize;
         let from_ms = match parse_search_date_bound(args, "from", false) {
             Ok(value) => value,
             Err(error) => return tool_error_result(format!("Error: {error}")),
@@ -8660,7 +8670,7 @@ impl McHandler {
         };
         let memory_project = facade_scope.memory_project_path.as_str();
         let conversation_key = facade_scope.conversation_key.as_str();
-        let include_memories = facade_scope.memory_enabled && sources.memory;
+        let include_memories = facade_scope.memory_enabled;
         let workspace_membership = match store.resolve_workspace_membership(memory_project) {
             Ok(membership) => membership,
             Err(error) => return tool_error_result(format!("Error: {error}")),
@@ -8708,32 +8718,19 @@ impl McHandler {
             }
         }
 
-        match memory_tool::search_available_corpora_for_session_with_diagnostics(
+        match ctx_search::search(
+            self,
             &store,
-            memory_project,
-            conversation_key,
+            &facade_scope,
             query,
-            memory_tool::MemorySearchOptions {
-                limit,
-                include_memories,
-                include_messages: sources.message,
-                include_notes: sources.note,
-                excluded_memory_ids: &visible_memory_ids,
-                from_ms,
-                to_ms,
-            },
-        ) {
-            Ok(outcome) => mcp_text_result(
-                render_facade_search_results(
-                    query,
-                    &outcome.results,
-                    &outcome.diagnostics,
-                    conversation_key,
-                    workspace_membership.as_ref(),
-                    !facade_scope.tools_only,
-                ),
-                false,
-            ),
+            limit,
+            sources,
+            retrieval::hybrid::DateBounds { from_ms, to_ms },
+            &visible_memory_ids,
+        )
+        .await
+        {
+            Ok(text) => mcp_text_result(text, false),
             Err(error) => tool_error_result(format!("Error: {error}")),
         }
     }
@@ -10795,6 +10792,8 @@ fn resolve_ctx_expand_mode(args: &Map<String, Value>) -> Result<CtxExpandMode, S
 struct FacadeSearchSources {
     memory: bool,
     message: bool,
+    git_commit: bool,
+    primer: bool,
     note: bool,
 }
 
@@ -10803,6 +10802,8 @@ fn facade_search_sources(args: &Map<String, Value>) -> FacadeSearchSources {
         return FacadeSearchSources {
             memory: true,
             message: true,
+            git_commit: true,
+            primer: true,
             note: true,
         };
     };
@@ -10810,6 +10811,8 @@ fn facade_search_sources(args: &Map<String, Value>) -> FacadeSearchSources {
         return FacadeSearchSources {
             memory: true,
             message: true,
+            git_commit: true,
+            primer: true,
             note: true,
         };
     };
@@ -10817,19 +10820,29 @@ fn facade_search_sources(args: &Map<String, Value>) -> FacadeSearchSources {
         return FacadeSearchSources {
             memory: true,
             message: true,
+            git_commit: true,
+            primer: true,
             note: true,
         };
     }
     FacadeSearchSources {
         memory: values.iter().any(|value| value.as_str() == Some("memory")),
         message: values.iter().any(|value| value.as_str() == Some("message")),
+        git_commit: values
+            .iter()
+            .any(|value| value.as_str() == Some("git_commit")),
+        primer: values.iter().any(|value| value.as_str() == Some("primer")),
         note: values.iter().any(|value| value.as_str() == Some("note")),
     }
 }
 
 fn parse_search_memory_ids(query: &str) -> Option<Vec<i64>> {
     const MAX_IDS: usize = 5;
-    let tokens = query.trim().split(',').map(str::trim).collect::<Vec<_>>();
+    let tokens = query
+        .trim()
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
     if tokens.is_empty() || tokens.len() > MAX_IDS {
         return None;
     }
@@ -13195,6 +13208,7 @@ mod tests {
     // The per-harness default runner, driven through real passes.
     mod default_runner;
     mod retrieval_parity;
+    mod served_search;
     // Prompt and response pairs for a scripted historian in model-less rigs.
     mod scripted_historian_pairs;
 
@@ -18327,6 +18341,17 @@ mod tests {
             )
             .unwrap();
 
+        // Without a configured encoder, TypeScript searches archived messages,
+        // not summary titles. Keep the same per-conversation isolation proof
+        // using indexed text inside each conversation's compartment boundary.
+        store.with_context_conn_for_test(|db| {
+            for (session,content) in [(key_a,"alpha-compartment-only"),(key_b,"beta-compartment-only")] {
+                db.execute("INSERT INTO message_history_fts(session_id,message_ordinal,message_id,role,content) VALUES (?1,1,?1,'user',?2)",rusqlite::params![session,content])?;
+                db.execute("INSERT INTO message_fts_rowid_map(session_id,message_ordinal,fts_rowid,message_time_ms) VALUES (?1,1,?2,0)",rusqlite::params![session,db.last_insert_rowid()])?;
+            }
+            Ok(())
+        }).unwrap();
+
         let a = call_facade_on_channel(
             &handler,
             7,
@@ -18379,7 +18404,7 @@ mod tests {
                 &handler,
                 7,
                 "ctx_search",
-                json!({ "query": "alpha-compartment-only", "limit": 5 }),
+                json!({ "query": "alpha-compartment-only", "limit": 5, "sources":["message"] }),
             )
             .await,
         );
@@ -18389,7 +18414,7 @@ mod tests {
                 &handler,
                 7,
                 "ctx_search",
-                json!({ "query": "beta-compartment-only", "limit": 5 }),
+                json!({ "query": "beta-compartment-only", "limit": 5, "sources":["message"] }),
             )
             .await,
         );
@@ -18402,7 +18427,7 @@ mod tests {
                 &handler,
                 8,
                 "ctx_search",
-                json!({ "query": "beta-compartment-only", "limit": 5 }),
+                json!({ "query": "beta-compartment-only", "limit": 5, "sources":["message"] }),
             )
             .await,
         );
@@ -18737,15 +18762,11 @@ mod tests {
                 json!({"drop":false}),
                 r#"Error: 'drop' must be provided as a string of tag numbers, for example {"drop": "3-5,8"}."#,
             ),
-            (
-                "ctx_search",
-                json!({}),
-                "Error: 'query' is required for ctx_search.",
-            ),
+            ("ctx_search", json!({}), "Error: 'query' is required."),
             (
                 "ctx_search",
                 json!({"query":false}),
-                "Error: 'query' is required for ctx_search.",
+                "Error: 'query' is required.",
             ),
         ] {
             let rejected = tool_body(call_facade(&handler, name, arguments.clone()).await);
@@ -20468,11 +20489,13 @@ mod tests {
             .await,
         );
         assert!(
-            !results.contains(&format!("[memory] score=1.00 id={visible} ")),
+            !results
+                .lines()
+                .any(|line| line.contains("[memory]") && line.contains(&format!("id={visible} "))),
             "{results}"
         );
         assert!(
-            results.contains(&format!("[memory] score=1.00 id={hidden} ")),
+            results.contains(&format!("[memory] score=0.80 id={hidden} ")),
             "{results}"
         );
     }
@@ -22622,8 +22645,8 @@ mod tests {
         );
         assert_eq!(
             parse_search_memory_ids(&format!("{first_id} {second_id}")),
-            None,
-            "direct memory ids require TypeScript's comma-separated query shape"
+            Some(vec![first_id, second_id]),
+            "direct memory ids accept the TypeScript tool's whitespace-separated shape"
         );
         store
             .replace_compartments("ses", &[stored_comp(1, 10, 20, "m20", "needle history")])
@@ -22654,12 +22677,15 @@ mod tests {
             )
             .await,
         );
-        assert!(all.starts_with("Found 4 results for \"needle\":"), "{all}");
+        // The served tool uses TypeScript's reciprocal full-text-search ranks,
+        // penalizing matches with only a lexical or semantic signal. Summary
+        // titles alone are not semantic history candidates.
+        assert!(all.starts_with("Found 3 results for \"needle\":"), "{all}");
         assert!(!all.lines().any(|line| {
             line.contains("[memory]") && line.contains(&format!("id={visible_id} "))
         }));
-        assert!(all.contains(&format!("[memory] score=1.00 id={first_id}")));
-        assert!(all.contains(&format!("[memory] score=1.00 id={second_id}")));
+        assert!(all.contains(&format!("[memory] score=0.40 id={first_id}")));
+        assert!(all.contains(&format!("[memory] score=0.27 id={second_id}")));
         assert!(all.contains(&format!(
             "Memories: 1 additional match suppressed because it is already visible in your project-memory block (ids {visible_id})."
         )));
@@ -22667,12 +22693,10 @@ mod tests {
             all.find(&format!("id={first_id}")) < all.find(&format!("id={second_id}")),
             "equal-score/equal-recency memory ties must use ascending ids: {all}"
         );
-        assert!(
-            all.contains("[message] score=0.90 compartment_id=1 range=10-20 match=fts title=C1")
-        );
+        assert!(!all.contains("compartment_id="));
         assert!(all.contains(&format!("[note] score=0.11 id=#{}", note.id)));
         assert!(all.contains("@msg 18"));
-        assert!(all.contains("Use ctx_expand(start, end)"));
+        assert!(all.contains("Use ctx_expand(start=N-10, end=N)"));
 
         let message_only = tool_text(
             call_facade(
@@ -22682,7 +22706,7 @@ mod tests {
             )
             .await,
         );
-        assert!(message_only.contains("[message]"));
+        assert!(message_only.starts_with("No results found"));
         assert!(!message_only.contains("[memory]"));
         assert!(!message_only.contains("[note]"));
 
@@ -22712,17 +22736,23 @@ mod tests {
             )
         );
 
-        let unsupported_corpus = tool_text(
+        // Primer-only requests used to be pinned to an empty result. Matching
+        // rows from the primer producer must be searchable, as in TypeScript.
+        store.with_context_conn_for_test(|db| {
+            db.execute("INSERT INTO primers(project_path,question,created_at,updated_at) VALUES (?1,'needle primer',0,0)",[project])?;
+            Ok(())
+        }).unwrap();
+        let primer_corpus = tool_text(
             call_facade(
                 &handler,
                 "ctx_search",
-                json!({"query": "needle", "sources": ["primer", "git_commit"]}),
+                json!({"query": "needle", "sources": ["primer"]}),
             )
             .await,
         );
-        assert_eq!(
-            unsupported_corpus,
-            "No results found for \"needle\" across notes, memories, primers, git commits, or message history."
+        assert!(
+            primer_corpus.contains("[primer] score=1.00"),
+            "{primer_corpus}"
         );
     }
 

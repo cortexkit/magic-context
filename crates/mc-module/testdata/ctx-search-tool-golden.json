@@ -1,0 +1,15 @@
+{
+  "outputs": {
+    "memory": "Found 1 result for \"needle\":\n\n[1] [memory] score=0.80 id=1 category=CONSTRAINTS match=fts\nneedle memory",
+    "message": "Found 1 result for \"needle\":\n\n[1] [message] score=1.00 ordinal=4 range=1-7 role=user\nneedle archived text\n\nUse ctx_expand(start, end) with the range from any message result above to read the conversation context. If the host no longer holds those messages, ctx_expand returns indexed text from the search archive only, with no surrounding messages or tool output.",
+    "primer": "Found 1 result for \"needle\":\n\n[1] [primer] score=1.00 id=1 support=3 match=fts\nQ: needle question A: A supported answer",
+    "git": "Found 1 result for \"needle\":\n\n[1] [git_commit] score=0.80 sha=aaaaaaa future match=fts\nneedle commit",
+    "note": "Found 1 result for \"needle\":\n\n[1] [note] score=0.11 id=#1 status=active future @msg 4\nneedle note\n\nUse ctx_expand(start=N-10, end=N) around any note @msg anchor above to read the surrounding conversation context.",
+    "compartment": "Found 1 result for \"needle\":\n\n[1] [message] score=0.80 compartment_id=1 range=1-5 match=semantic title=C1\nC1\n\nUse ctx_expand(start, end) with the range from any message result above to read the conversation context. If the host no longer holds those messages, ctx_expand returns indexed text from the search archive only, with no surrounding messages or tool output."
+  },
+  "embedding": {
+    "modelId": "embedding-provider:b32f354eaace1a6e979d28d78c490b98",
+    "chunkId": "embedding-provider:b32f354eaace1a6e979d28d78c490b98:chunk:3c2ce7cb06a416e2",
+    "synapseId": "synapse:v1:636f1e322fa50b497c336a19dfc403e94daad71e767cbaa436d9e8a5ad7ee633"
+  }
+}

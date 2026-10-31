@@ -1130,11 +1130,11 @@ mod parity_runtime_tests {
     }
 
     #[tokio::test]
-    async fn search_query_required_refusal_is_unchanged() {
+    async fn search_query_required_refusal_matches_typescript() {
         let handler = crate::McHandler::new();
         assert_eq!(
             refusal(&handler, "ctx_search", json!({})).await,
-            "Error: 'query' is required for ctx_search."
+            "Error: 'query' is required."
         );
     }
 

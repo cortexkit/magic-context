@@ -63,6 +63,7 @@ cortexkit-bus-naming = "=0.2.5"
 cortexkit-bus-nats = "=0.3.0"
 async-nats = { version = "=0.50.0", default-features = false, features = ["ring"] }
 base64 = "=0.22.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", features = ["fs"] }

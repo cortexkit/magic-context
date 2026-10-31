@@ -427,6 +427,8 @@ struct TierConfig {
 
 #[derive(Debug, Clone, Default)]
 pub struct ConfigCache {
+    #[cfg(test)]
+    search_override: Option<crate::embedding_provider::Settings>,
     startup_smart_notes_enabled: Option<bool>,
     user: TierConfig,
     project: TierConfig,
@@ -434,6 +436,40 @@ pub struct ConfigCache {
 }
 
 impl ConfigCache {
+    /// Tool providers use the same cached tiers without changing the configuration
+    /// projection consumed by prompt/history rendering.
+    pub fn search_providers_for_project(
+        &mut self,
+        project_root: &Path,
+    ) -> crate::embedding_provider::Settings {
+        #[cfg(test)]
+        if let Some(settings) = &self.search_override {
+            return settings.clone();
+        }
+        self.search_providers_for_paths(&user_config_path(), project_root)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_search_providers_for_test(
+        &mut self,
+        settings: crate::embedding_provider::Settings,
+    ) {
+        self.search_override = Some(settings);
+    }
+
+    pub fn search_providers_for_paths(
+        &mut self,
+        user_path: &Path,
+        project_root: &Path,
+    ) -> crate::embedding_provider::Settings {
+        let user = read_tier_cached(&mut self.user, user_path.to_path_buf());
+        let project = read_tier_cached(
+            &mut self.project,
+            detect_config_file(&project_root.join(".cortexkit")),
+        );
+        crate::embedding_provider::Settings::from_tiers(user.as_ref(), project.as_ref(), user_path)
+    }
+
     pub fn freeze_smart_notes_enabled(&mut self, enabled: bool) {
         self.startup_smart_notes_enabled = Some(enabled);
     }
