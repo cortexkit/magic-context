@@ -94,8 +94,12 @@ impl Replay {
         if state.entries.is_empty() || state.applied_view.is_none() {
             return Ok(None);
         }
+        let engine = state.engine_with_baselines()?;
+        if !engine_on_lineage(&engine, state.lineage.as_deref()) {
+            return Ok(None);
+        }
         Ok(Some(Self {
-            engine: state.engine_with_baselines()?,
+            engine,
             entries: state
                 .entries
                 .iter()
@@ -107,7 +111,9 @@ impl Replay {
     }
 
     pub(super) fn matches(&self, state: &State) -> Result<bool, HandlerOutcome> {
-        if self.first_ordinal != state.lineage_first_ordinal {
+        if self.first_ordinal != state.lineage_first_ordinal
+            || !engine_on_lineage(&self.engine, state.lineage.as_deref())
+        {
             return Ok(false);
         }
         // Appended messages do not invalidate a verified prefix. Every old
@@ -123,6 +129,23 @@ impl Replay {
         }
         Ok(true)
     }
+}
+
+fn engine_on_lineage(engine: &transform::compaction::State, lineage: Option<&str>) -> bool {
+    let Some(lineage) = lineage else {
+        return false;
+    };
+    // Equal source rows cannot validate a rendering baseline from another
+    // lineage. Restoring it would repeat the engine's lineage refusal on every
+    // retry instead of allowing the full reread to initialize its lineage.
+    engine
+        .last_applied
+        .as_ref()
+        .is_some_and(|view| view.range.lineage_id == lineage)
+        && engine
+            .last_produced
+            .as_ref()
+            .is_none_or(|view| view.range.lineage_id == lineage)
 }
 
 pub(super) fn fingerprint(entry: &ReadMessage) -> Result<String, HandlerOutcome> {

@@ -29,6 +29,7 @@ mod read_resume;
 mod reminder_replay;
 mod reminders;
 mod reply_shape;
+mod resync_lineage_guard;
 mod resync_replay;
 mod rollback_layout;
 mod route_identity_vectors;
