@@ -1,8 +1,89 @@
 //! Async cursors and view versions are independent of the compatibility record.
 //! A legacy record save must never reset a notice-driven reader's progress.
 use crate::async_compaction_layout as layout;
-use crate::{McStore, McStoreError, McTagRow};
+use crate::{McStore, McStoreError, McTagRow, ModuleMeta};
+use cortexkit_cache_core::CoreState;
 use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub(crate) const ENGINE_CACHE_RECOVERY_SLOT: &str = "engine-cache-recovery";
+
+/// Trusted adapter context, never accepted from a transform's wire request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AsyncCacheRecovery {
+    pub session_ref: String,
+    pub checkpoint: Value,
+}
+
+/// Evidence written in the same transaction as an accepted engine cache.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AsyncCacheReceipt {
+    pub namespace: String,
+    pub cache_digest: String,
+    pub checkpoint: Value,
+}
+
+/// The provider witness deliberately excludes activity and identity-only rows.
+pub fn engine_cache_digest(
+    core: &CoreState,
+    meta: &ModuleMeta,
+) -> Result<String, serde_json::Error> {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(&(
+        core,
+        &meta.last_render_config,
+        &meta.served_output_fingerprint,
+        meta.coverage_ordinal,
+        meta.initialized,
+    ))?;
+    Ok(Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+pub(crate) fn save_engine_receipt_tx(
+    conn: &rusqlite::Connection,
+    namespace: &str,
+    recovery: &AsyncCacheRecovery,
+    core: &CoreState,
+    meta: &ModuleMeta,
+) -> rusqlite::Result<()> {
+    if recovery
+        .checkpoint
+        .get("replay_safe")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        // A pass allowed to change the served prefix needs a durable view, not
+        // merely cache provenance, before its outcome can be re-adopted.
+        layout::baseline(
+            conn,
+            &recovery.session_ref,
+            ENGINE_CACHE_RECOVERY_SLOT,
+            None,
+            false,
+        )?;
+        return Ok(());
+    }
+    let receipt = AsyncCacheReceipt {
+        namespace: namespace.into(),
+        cache_digest: engine_cache_digest(core, meta)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+        checkpoint: recovery.checkpoint.clone(),
+    };
+    let raw = serde_json::to_string(&receipt)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    layout::baseline(
+        conn,
+        &recovery.session_ref,
+        ENGINE_CACHE_RECOVERY_SLOT,
+        Some(&raw),
+        false,
+    )?;
+    Ok(())
+}
 
 /// Write accounting for one async conversation, compiled only for sibling-crate
 /// tests. It lets a test prove that a notice's write set does not grow with the
@@ -206,6 +287,15 @@ fn cut_bundle(
 }
 
 impl McStore {
+    pub fn load_async_cache_receipt(
+        &self,
+        reference: &str,
+    ) -> Result<Option<AsyncCacheReceipt>, McStoreError> {
+        Ok(self
+            .load_async_compaction_baseline(reference, ENGINE_CACHE_RECOVERY_SLOT)?
+            .and_then(|raw| serde_json::from_str(&raw).ok()))
+    }
+
     fn prepare_async_record(&self, reference: &str) -> Result<(), McStoreError> {
         if self
             .inner

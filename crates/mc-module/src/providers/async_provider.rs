@@ -2223,6 +2223,7 @@ impl State {
     }
 
     fn reset_for_notice(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
+        engine_cache::reconcile(store, self)?;
         // A mismatching notice requires rereading the source, not necessarily
         // discarding the engine's cached serving state. Never reuse a baseline
         // an earlier structural reset rejected.
@@ -2640,6 +2641,7 @@ fn load(store: &McStore, reference: &str) -> Result<Option<State>, HandlerOutcom
             .map(|view| view.identity.clone()),
         saved_json: Some(rows.state),
     };
+    engine_cache::reconcile(store, &mut state)?;
     Ok(Some(state))
 }
 
@@ -3931,6 +3933,7 @@ impl McHandler {
         // views never remove the signed reasoning they invalidate.
         let signed = transform::compaction::SignedReasoning::RunnerCompanion;
         let previous_engine = engine.clone();
+        template.async_cache_recovery = Some(engine_cache::recovery_context(state)?);
         #[cfg(test)]
         if self
             .provider_store
@@ -6080,14 +6083,15 @@ impl McHandler {
         if state.resync || state.failed() || state.entries.is_empty() {
             return Ok(None);
         }
-        // Held copies the runner pruned make this one pass a rebuild, as a
-        // rewrite ride does.
-        let pruned_rebuild = state.pruned_rebuild_pending && !ride;
-        let ride = ride || state.pruned_rebuild_pending || state.moved_cold_prefix;
         let store = self
             .store
             .get()
             .ok_or_else(|| transient("store unavailable"))?;
+        engine_cache::reconcile(store, state)?;
+        // Held copies the runner pruned make this one pass a rebuild, as a
+        // rewrite ride does.
+        let pruned_rebuild = state.pruned_rebuild_pending && !ride;
+        let ride = ride || state.pruned_rebuild_pending || state.moved_cold_prefix;
         state.cleanup_pending_cut_stage(store)?;
         state.forward_parent_history(store)?;
         state.restore_undo_edits(store)?;
@@ -6448,6 +6452,7 @@ impl McHandler {
             history_through: Option<u64>,
             publication_lineage: &'a str,
             publication_version: u64,
+            engine_cache_snapshot: engine_cache::Snapshot,
         }
         let engine_json: Arc<str> = serde_json::to_string(&PublishedEngine {
             view: &candidate,
@@ -6455,6 +6460,7 @@ impl McHandler {
             history_through: coverage,
             publication_lineage: &view.lineage_id,
             publication_version: version,
+            engine_cache_snapshot: engine_cache::snapshot(store, state, &engine, Some(&candidate))?,
         })
         .map_err(transient)?
         .into();
@@ -7827,7 +7833,12 @@ impl AsyncRecord {
             return Ok(());
         };
         let replay_engine = if let Some(replay) = &source.replay {
-            if source.lineage == self.lineage && replay.matches(self)? {
+            let cache_matches = match &replay.cache_witness {
+                Some(witness) => witness.validates(store, &source.namespace)?,
+                // Older replay records predate independent cache witnesses.
+                None => true,
+            };
+            if source.lineage == self.lineage && replay.matches(self)? && cache_matches {
                 Some(replay.engine.clone())
             } else {
                 None
@@ -7915,7 +7926,10 @@ impl AsyncRecord {
         store
             .replace_compartments(&namespace, &retained)
             .map_err(transient)?;
-        if let Some(seed) = self.recovery_seed(store)? {
+        if let Some(seed) = self
+            .recovery_seed(store)?
+            .filter(|_| replay_engine.is_none())
+        {
             // Keep the covered boundary available even when an incomplete
             // tool arc makes the first engine pass wait for another message.
             let mut bootstrap = seed.as_ref().clone();
@@ -8028,13 +8042,7 @@ impl AsyncRecord {
             // A reset still advances the generation, invalidating in-flight
             // work. Carry only the verified serving state into its new
             // namespace so verification does not bootstrap a cold engine.
-            let mut served = store.load(&source.namespace).map_err(transient)?;
-            let target = store.load(&namespace).map_err(transient)?;
-            // Historian claims belong to their namespace, not the served bytes.
-            served.meta.historian = target.meta.historian;
-            store
-                .commit(&namespace, target.row_version, &served.core, &served.meta)
-                .map_err(transient)?;
+            let source_namespace = source.namespace.clone();
             self.adopt_engine(engine)?;
             resync_replay::restore_baselines(
                 store,
@@ -8042,6 +8050,18 @@ impl AsyncRecord {
                 &retained_views.expect("verified view metadata"),
             )?;
             self.resync_replay_pending = self.snapshot_unavailable.is_none();
+            if !engine_cache::reconcile(store, self)? {
+                // A retry may already have committed this generation's cache
+                // and view. Do not replace that explained state with its parent.
+                let mut served = store.load(&source_namespace).map_err(transient)?;
+                let target = store.load(&namespace).map_err(transient)?;
+                // Historian claims belong to their namespace, not served bytes.
+                served.meta.historian = target.meta.historian;
+                store
+                    .commit(&namespace, target.row_version, &served.core, &served.meta)
+                    .map_err(transient)?;
+                self.engine_cache_witness = Some(engine_cache::capture(store, self)?);
+            }
         }
         tracing::info!(session_ref=%self.reference(),history_compartments=retained.len(),copied_chunk_embeddings=copied,transferred_drops=transferred,discarded_drops=self.last_discarded_drops,"async lineage sources revalidated");
         self.resync_sources = None;

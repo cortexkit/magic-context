@@ -4320,6 +4320,7 @@ mod tests {
         TransformRequest {
             native_tail_section: false,
             runner_owned_reminders: false,
+            async_cache_recovery: None,
             logical_prefix: None,
             source_lineage_first_ordinal: None,
             native_reminder_strip_pending: false,

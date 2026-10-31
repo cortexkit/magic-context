@@ -563,8 +563,8 @@ pub(super) fn downgrade_record(conn: &Connection, reference: &str) -> rusqlite::
     // Read and validate the complete family before the first legacy write.
     let entries = entries(conn, reference, 0, i64::MAX as u64)?;
     let views = views(conn, reference)?;
-    let baselines = conn.prepare("SELECT section,body FROM main.mc_cache_sections WHERE session_id=?1 AND section NOT GLOB '__ckmc_async_v2_*' AND section NOT IN ('setup-initial','moved-bound-drops')")?
-        .query_map([owner(reference)],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let baselines = conn.prepare("SELECT section,body FROM main.mc_cache_sections WHERE session_id=?1 AND section NOT GLOB '__ckmc_async_v2_*' AND section NOT IN ('setup-initial','moved-bound-drops') AND section<>?2")?
+        .query_map(params![owner(reference),crate::async_compaction::ENGINE_CACHE_RECOVERY_SLOT],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let state = encode(&state)?;
     conn.execute("INSERT INTO main.mc_async_compaction(session_ref,conversation_key,session,state_json,version_high_water) VALUES(?1,?2,?3,?4,?5)",params![reference,current.key,current.session,state,current.version_high_water])?;
     for entry in entries {

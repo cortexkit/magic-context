@@ -85,6 +85,8 @@ pub(super) struct Replay {
     pub engine: transform::compaction::State,
     pub entries: BTreeMap<u64, String>,
     first_ordinal: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_witness: Option<engine_cache::Witness>,
 }
 
 impl Replay {
@@ -100,6 +102,7 @@ impl Replay {
                 .map(|(ordinal, entry)| Ok((*ordinal, fingerprint(&entry.read()?)?)))
                 .collect::<Result<_, HandlerOutcome>>()?,
             first_ordinal: state.lineage_first_ordinal,
+            cache_witness: state.engine_cache_witness.clone(),
         }))
     }
 
@@ -122,7 +125,7 @@ impl Replay {
     }
 }
 
-fn fingerprint(entry: &ReadMessage) -> Result<String, HandlerOutcome> {
+pub(super) fn fingerprint(entry: &ReadMessage) -> Result<String, HandlerOutcome> {
     // This is a private equality proof for the same fields as stable_entry,
     // not a content identity computed from descriptor payloads. Content
     // identities remain the runner's digest and part_digests, used as given.
@@ -355,6 +358,13 @@ pub(super) fn reissue_applied(
     engine["publication_version"] = json!(version);
     engine["resync_reissued"] = json!(true);
     engine["resync_reissued_from"] = json!(basis);
+    engine["engine_cache_snapshot"] = serde_json::to_value(engine_cache::snapshot(
+        store,
+        state,
+        &state.engine_with_baselines()?,
+        None,
+    )?)
+    .map_err(transient)?;
     let engine = serde_json::to_string(&engine).map_err(transient)?;
     // The immutable view and its applied engine/native-edit snapshot are
     // written together. Existing view retention prunes both in the same row.

@@ -60,6 +60,7 @@ async fn engine_cache_upgrade_reuses_matching_rows_and_rebuilds_mismatches() {
         request_tokens: 1_000,
         context_window: 100_000,
         prefix_rebuilding: false,
+        cold_prefix: false,
         pipeline_switch: false,
         last_applied_version: None,
         last_not_applied: None,
