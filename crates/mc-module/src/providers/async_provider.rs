@@ -2958,8 +2958,26 @@ impl McHandler {
             {
                 return bytes(&refusal);
             }
-            let mut answer = reconciled.unwrap_or(state.initial);
+            let unadopted_preparation = offline_first_pass::prepared(&state);
+            let mut answer = reconciled.unwrap_or_else(|| state.initial.clone());
             answer["request_id"] = json!(request.request_id);
+            if unadopted_preparation {
+                // `view_due_max_ms` (compaction-provider 0.7.10) is read from
+                // the raw request so it reaches this check on every pinned
+                // contract version.
+                let cap = params.get("view_due_max_ms").and_then(Value::as_u64);
+                match offline_first_pass::prepared_answer(&state, store, &request, cap, answer)? {
+                    offline_first_pass::PreparedAnswer::Inline(inline) => answer = inline,
+                    offline_first_pass::PreparedAnswer::Refuse(refusal) => return bytes(&refusal),
+                    offline_first_pass::PreparedAnswer::Due(head_only, due) => {
+                        // Added after the typed rebuild in `with_checkpoint`,
+                        // which keeps only the members it knows.
+                        let mut built = with_checkpoint(head_only, checkpoint);
+                        built["view_due"] = json!({"version": due.version, "digest": due.digest});
+                        return bytes(&built);
+                    }
+                }
+            }
             return bytes(&with_checkpoint(answer, checkpoint));
         }
         let checkpoint = standalone_move.as_ref().map(moved_session::checkpoint);
@@ -3707,10 +3725,11 @@ fn rendered_view(
     } else {
         // Only output sources need native sidecars. Synthetic head frames have
         // no source, and covered sources cannot affect tail-native rendering.
+        // Messages the runner holds carry their ordinal, including the
+        // notices it persists as synthetic; ck-mc's own have none.
         let ordinals = view
             .replacement
             .iter()
-            .filter(|m| !m.meta.synthetic)
             .filter_map(|m| m.meta.ordinal)
             .collect::<BTreeSet<_>>();
         inbound_messages(
@@ -3845,6 +3864,29 @@ fn ctx_reduce_summarized_details(summarized: &[u64]) -> String {
         "tags {} already in the history summary, nothing to drop",
         format_plain_tag_numbers(summarized)
     )
+}
+
+/// A part with the leading tag notation removed from its text, wherever
+/// `render_part` would put a number. Comparing two parts this way asks whether
+/// they differ in anything except tag rendering, which is the runner's job
+/// (`llm-runner/v1` §9.6), never ck-mc's.
+fn untagged_part(part: &Value) -> Value {
+    let mut part = part.clone();
+    if let Value::String(text) = &part {
+        return json!(tags::strip_leading_tag_notation(text));
+    }
+    for pointer in [
+        "/text",
+        "/state/output",
+        "/state/error",
+        "/output/text",
+        "/content",
+    ] {
+        if let Some(value) = part.pointer_mut(pointer).filter(|v| v.is_string()) {
+            *value = json!(tags::strip_leading_tag_notation(value.as_str().unwrap()));
+        }
+    }
+    part
 }
 
 /// The part as the runner renders it to the model under `render_tags`: a
@@ -4036,12 +4078,15 @@ fn ranges(
                 .first_key_value()
                 .map_or(0, |(ordinal, _)| *ordinal),
         );
-    let render = state
-        .setup
-        .composition
-        .get("render_tags")
-        .and_then(Value::as_bool)
-        == Some(true);
+    let held_mids = state
+        .entries
+        .values()
+        .map(|entry| entry.mid.as_str())
+        .collect::<HashSet<_>>();
+    let mut conformance = ViewConformance::default();
+    // A runner numbers a part exactly when it served a tag for it
+    // (`tags_only_on_tag_rendering_sessions`), so each part's own tag row says
+    // whether the runner renders a number on it. ck-mc never renders one.
     // The first held entry with each mid, as an ordinal-order search finds it.
     let mut by_mid = HashMap::new();
     if state.logical_prefix.is_none() {
@@ -4051,12 +4096,11 @@ fn ranges(
             by_mid.entry(entry.mid.as_str()).or_insert(*ordinal);
         }
     } else {
-        for ordinal in engine
-            .replacement
-            .iter()
-            .filter(|m| !m.meta.synthetic)
-            .filter_map(|m| m.meta.ordinal)
-        {
+        // A message the runner holds carries its ordinal; only ck-mc's own
+        // messages (the history head, a synthetic todo) have none. The
+        // `synthetic` flag is not that test: runners persist their own
+        // notices as synthetic messages too.
+        for ordinal in engine.replacement.iter().filter_map(|m| m.meta.ordinal) {
             let Some(entry) = state.entries.get(&ordinal) else {
                 continue;
             };
@@ -4074,13 +4118,16 @@ fn ranges(
             engine
                 .replacement
                 .get(position)
-                .filter(|m| !m.meta.synthetic)
                 .and_then(|m| m.meta.ordinal)
                 .and_then(|n| state.entries.get(&n))
         };
         let Some(original) = original else {
             // Messages ck-mc authors (a head, a fold of covered messages) are
             // sent as written, so a ref inside one never reaches the model.
+            // A message the runner already holds is never re-sent this way.
+            if let Some(mid) = mid.filter(|mid| held_mids.contains(mid)) {
+                conformance.runner_message_resent(mid);
+            }
             synthetic.push(crate::descriptors::without_refs(message));
             continue;
         };
@@ -4116,7 +4163,7 @@ fn ranges(
             // the part unchanged.
             let exposed = crate::descriptors::expose(part);
             let seen = exposed.as_ref().unwrap_or(part);
-            let expected = render_part(seen, row.tag.as_deref(), render);
+            let expected = render_part(seen, row.tag.as_deref(), row.tag.is_some());
             let changed = if let Some(origins) = &origins {
                 origins
                     .iter()
@@ -4138,10 +4185,13 @@ fn ranges(
                 // An edit that still holds a ref or ck-mc's stand-in for one is
                 // not sent, and the part stays as written: otherwise the model
                 // would get ck-mc's placeholder in place of the runner's payload.
+                // A part that differs only in tag rendering is unchanged: the
+                // runner renders its number, so no edit re-sends it.
                 Some(value)
                     if value != &expected
                         && value != part
                         && value != seen
+                        && untagged_part(value) != untagged_part(seen)
                         && !crate::descriptors::holds_stand_in(value) =>
                 {
                     edits.push(view::PartEdit::replace(
@@ -4177,7 +4227,42 @@ fn ranges(
             history_end,
         )?;
     }
+    conformance.finish(&state.reference());
     Ok((ranges, kept))
+}
+
+/// What a view may carry: ck-mc's own messages (the history head), ranges and
+/// part references, and edits that change a part. A message the runner already
+/// holds never travels back to it. This records any such message, so a test
+/// fails on it and production logs it, rather than a view quietly growing into
+/// a copy of the conversation.
+#[derive(Default)]
+struct ViewConformance {
+    resent: Vec<String>,
+}
+
+impl ViewConformance {
+    fn runner_message_resent(&mut self, mid: &str) {
+        self.resent.push(mid.to_owned());
+    }
+
+    fn finish(self, reference: &str) {
+        let Some(first) = self.resent.first() else {
+            return;
+        };
+        #[cfg(test)]
+        panic!(
+            "view for {reference} re-sends {} message(s) the runner holds, first {first}",
+            self.resent.len()
+        );
+        #[cfg(not(test))]
+        tracing::warn!(
+            session_ref = %reference,
+            resent = self.resent.len(),
+            first = %first,
+            "view re-sends messages the runner holds"
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

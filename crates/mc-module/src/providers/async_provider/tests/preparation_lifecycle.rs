@@ -24,6 +24,7 @@ fn marker(request: &Value) -> OfflineFirstPass {
         ),
         inputs: None,
         proof: None,
+        due_view: None,
     }
 }
 
@@ -293,6 +294,99 @@ async fn a_non_moved_notice_still_runs_the_ordinary_first_pass() {
     assert_eq!(rig.state().completed_seq, 1);
     assert_eq!(rig.state().entries.len(), 4);
     assert!(rig.state().offline_first_pass.is_none());
+}
+
+/// A runner that holds its first step for a due view gets the history head
+/// alone plus `view_due` naming the prepared view (compaction-provider §4),
+/// never the rendered window. Applying that view gives exactly the first
+/// request the inline answer would have given, and adopts the preparation.
+#[tokio::test]
+async fn a_due_view_setup_sends_only_the_head_and_the_view_gives_the_prepared_request() {
+    let _clock = crate::tests::fixed_clock();
+    let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let with_cap = |request: &mut Value| request["view_due_max_ms"] = json!(30_000);
+    let (prep, outcome) =
+        prepared_with(store.path(), project.path(), fixture_stores, with_cap).await;
+    let OfflineOutcome::Prepared(report) = outcome else {
+        panic!("{outcome:?}")
+    };
+    let runner = Served::new(prep.served.clone(), 7);
+    let mut arm = Arm::open(
+        store.path(),
+        project.path(),
+        &prep.session,
+        runner,
+        config(),
+    );
+    let inline = arm.state().initial.clone();
+    let (version, view_json, _) = arm.views().into_iter().next().unwrap();
+    let prepared_view: view::CompactionView = serde_json::from_str(&view_json).unwrap();
+    let expected = apply_view(&prepared_view, &prep.served);
+
+    let mut request = setup_request(&prep.session, "fixture");
+    with_cap(&mut request);
+    let answer = arm.setup(request).await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    assert_eq!(
+        answer["view_due"],
+        json!({"version": version, "digest": prepared_view.digest})
+    );
+    let origin = report.proof.origin;
+    assert_eq!(
+        answer["initial"]["range"],
+        json!({"from": origin, "to": origin}),
+        "a due-view Setup replaces none of the runner's messages"
+    );
+    let head = match prepared_view.ranges.first() {
+        Some(view::ViewRange::Replace { from, to, bytes }) if from == to => {
+            serde_json::from_str::<Value>(bytes).unwrap()
+        }
+        _ => json!([]),
+    };
+    assert_eq!(answer["initial"]["replacement"], head);
+    let sizes = (
+        serde_json::to_vec(&answer).unwrap().len(),
+        serde_json::to_vec(&inline).unwrap().len(),
+    );
+    assert!(
+        sizes.0 < sizes.1,
+        "head-only answer {} vs inline {}",
+        sizes.0,
+        sizes.1
+    );
+    // The runner fetches the due view and applies it before its first model
+    // step: that request is exactly the prepared one.
+    let fetched = response(
+        arm.h
+            .dispatch_value(
+                CHANNEL,
+                json!({"method":"view.get","params":{"session_ref": arm.reference(), "view_version": version}}),
+            )
+            .await,
+    );
+    assert_eq!(fetched["answer"], "view", "{fetched}");
+    let fetched: view::CompactionView = decode(&fetched["view"]).unwrap();
+    assert_eq!(fetched.digest, prepared_view.digest);
+    assert_eq!(apply_view(&fetched, &prep.served), expected);
+    assert_eq!(arm.notice(1, 0, Some(version), Vec::new()).await, "ok");
+    assert!(adopted(&arm.state()));
+
+    // A runner that did not ask for a due view still gets the inline answer,
+    // which fits one frame here.
+    let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
+    let runner = Served::new(prep.served.clone(), 7);
+    let mut arm = Arm::open(
+        store.path(),
+        project.path(),
+        &prep.session,
+        runner,
+        config(),
+    );
+    let inline = arm.state().initial.clone();
+    let answer = arm.setup(setup_request(&prep.session, "fixture")).await;
+    assert!(answer.get("view_due").is_none(), "{answer}");
+    assert_eq!(answer["initial"], inline["initial"]);
 }
 
 #[tokio::test]

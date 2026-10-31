@@ -232,6 +232,7 @@ async fn moved_rig_stage(dir: &Path, run_move: bool, prepare: bool) -> (Rig, Val
                 describe: None,
                 inputs: None,
                 proof: None,
+                due_view: None,
             };
             let binding = SessionBinding {
                 principal: Some(subc_protocol::Principal::Reserved {

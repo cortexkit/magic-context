@@ -577,7 +577,20 @@ async fn prepared(
     project: &Path,
     write: impl FnOnce(&Path) -> (StorePaths, String),
 ) -> (Prepared, OfflineOutcome) {
+    prepared_with(store, project, write, |_| {}).await
+}
+
+/// [`prepared`], preparing under the fixture Setup as `adjust` changes it, so
+/// the live Setup a test sends can carry the same extra members.
+async fn prepared_with(
+    store: &Path,
+    project: &Path,
+    write: impl FnOnce(&Path) -> (StorePaths, String),
+    adjust: impl FnOnce(&mut Value),
+) -> (Prepared, OfflineOutcome) {
     let (paths, session, served) = moved_stores(store, write);
+    let mut request = setup_request(&session, "fixture");
+    adjust(&mut request);
     pin_history_generation(&paths.context_db, &session, &[0, 1]);
     let work = tempfile::tempdir().unwrap();
     let args = command_args(
@@ -585,7 +598,7 @@ async fn prepared(
         &paths,
         &session,
         &export(&served, LINEAGE, 3),
-        &setup_file(project, &setup_request(&session, "fixture")),
+        &setup_file(project, &request),
     );
     let outcome = first_pass(&args, project, &fixture::NoHolders)
         .await

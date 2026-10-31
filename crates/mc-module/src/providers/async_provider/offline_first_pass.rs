@@ -109,6 +109,94 @@ pub(crate) struct OfflineFirstPass {
     /// adopted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof: Option<EntryInputProof>,
+    /// The view the pass published, which a live Setup names as due
+    /// (compaction-provider §4 `view_due`) when the runner asks for that, so
+    /// the answer carries only the history head and never the rendered window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_view: Option<DueView>,
+}
+
+/// A published view a Setup answer can name as due: its version and its own
+/// view digest.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DueView {
+    pub version: u64,
+    pub digest: String,
+}
+
+/// The largest Setup answer the daemon delivers in one frame: 4 MiB for the
+/// whole encoded frame, its 21-byte header included (compaction-provider §4).
+pub(super) const SETUP_FRAME_BUDGET: usize = 4 * 1024 * 1024 - 21;
+
+/// What a live Setup on an unadopted offline preparation answers.
+pub(super) enum PreparedAnswer {
+    /// The stored answer, unchanged.
+    Inline(Value),
+    /// The stored answer with its `initial` cut to the history head, to send
+    /// with `view_due` naming the prepared view.
+    Due(Value, DueView),
+    /// A refusal to send as it is.
+    Refuse(Value),
+}
+
+/// The Setup answer for an unadopted offline preparation. A runner that sent
+/// `view_due_max_ms` gets the history head alone plus `view_due`, naming the
+/// prepared view: it applies that view before its first model step, so the
+/// retained window never travels back to the runner that holds it. A runner
+/// that did not ask gets the stored answer only when it fits one frame;
+/// otherwise Setup refuses `misconfigured`, as the contract requires.
+pub(super) fn prepared_answer(
+    state: &State,
+    store: &McStore,
+    request: &compact::setup::SetupRequest,
+    view_due_max_ms: Option<u64>,
+    mut answer: Value,
+) -> Result<PreparedAnswer, HandlerOutcome> {
+    let due = state
+        .offline_first_pass
+        .as_ref()
+        .filter(|offline| offline.state == PreparationState::Prepared)
+        .and_then(|offline| offline.due_view.clone());
+    match (due, view_due_max_ms.filter(|cap| *cap > 0)) {
+        (Some(due), Some(_)) => {
+            // The head-only insertion at the lineage start: the runner never
+            // renders it while the view is due, but it stays well formed.
+            let head = head_insertion(store, &state.reference(), due.version)?;
+            let from = answer["initial"]["range"]["from"].clone();
+            answer["initial"]["range"] = json!({"from": from, "to": from});
+            answer["initial"]["replacement"] = head;
+            Ok(PreparedAnswer::Due(answer, due))
+        }
+        (_, _) if serde_json::to_vec(&answer).map_err(transient)?.len() > SETUP_FRAME_BUDGET => {
+            tracing::warn!(
+                session_ref = %state.reference(),
+                "moved session Setup refused: its answer exceeds one frame and the runner did not ask for a due view"
+            );
+            Ok(PreparedAnswer::Refuse(super::moved_session::setup_refusal(
+                &request.request_id,
+                "misconfigured",
+                "The prepared first view does not fit one Setup answer; send view_due_max_ms so the provider can name it as due.",
+            )))
+        }
+        _ => Ok(PreparedAnswer::Inline(answer)),
+    }
+}
+
+/// The history head the prepared view inserts at the lineage start: the
+/// messages of its leading empty `replace` range. Empty when the view has none.
+fn head_insertion(store: &McStore, reference: &str, version: u64) -> Result<Value, HandlerOutcome> {
+    let raw = store
+        .load_async_compaction_view(reference, version)
+        .map_err(transient)?
+        .ok_or_else(|| transient("the prepared view is gone"))?;
+    let view: view::CompactionView = serde_json::from_str(&raw).map_err(transient)?;
+    let head = match view.ranges.first() {
+        Some(view::ViewRange::Replace { from, to, bytes }) if from == to => {
+            serde_json::from_str::<Value>(bytes).map_err(transient)?
+        }
+        _ => json!([]),
+    };
+    Ok(head)
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -828,6 +916,7 @@ impl McHandler {
             describe: Some(describe_digest.clone()),
             inputs: None,
             proof: None,
+            due_view: None,
         };
         if let Some(old) = load_head(store, &reference).map_err(interrupted)? {
             if proof_version_matches(&old) {
@@ -1011,6 +1100,10 @@ impl McHandler {
             offline.state = PreparationState::Prepared;
             offline.inputs = Some(inputs);
             offline.proof = Some(proof.clone());
+            offline.due_view = view.as_ref().map(|view| DueView {
+                version: view.view_version,
+                digest: view.digest.clone(),
+            });
         }
         // Store the exact published view as the live lineage's Setup answer.
         // Only this proof commit may replace the offline head insertion.

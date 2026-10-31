@@ -28,6 +28,7 @@ mod reminders;
 mod reply_shape;
 mod route_identity_vectors;
 mod setup_checkpoint;
+mod thin_view;
 mod user_commands_tests;
 mod wrapup;
 
