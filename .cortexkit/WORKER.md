@@ -13,7 +13,13 @@ Read `ARCHITECTURE.md` and `STRUCTURE.md` at the repository root before changing
 
 ## Gate before you deliver
 
-Filtered tests alone are never a gate. Run the shared CI gate on Linux (`runon: "linux,8c,net"` for full by default):
+A worker's gate covers what it touched, run on Linux:
+
+- `bash scripts/gate.sh preflight`, always. It takes about a minute and catches pin, golden, lockfile and format drift anywhere.
+- The full test suite of every package or crate you changed: for example `cargo test -p mc-module --lib --locked -- --skip final_hundreds` plus clippy with `-D warnings` for ck-mc, or `bun test` in each touched package. Add the shared guards (`cd packages/plugin && bun test src/shared/`) whenever you add a test or a subprocess.
+- A test that fails without your fix, for every bug fix.
+
+`bash scripts/gate.sh full` is the head's integration gate. The head runs it once over several merged deliveries, not per worker delivery. Run it yourself only when your brief asks for it. The details below describe both scripts.
 
 - **Cheap checks:** `bash scripts/gate.sh preflight` runs all pins, goldens, lockfiles, layout and shard contracts, compiled contracts, Rust format, package typechecks and the pinned Biome. It reports every independent failure.
 - **Preflight ordering:** workflow-marked independent layout/format groups overlap dist production. Generated-output readers follow the build, then package typechecks run concurrently after the shared composite declarations are prepared. Package typecheck script payloads remain authoritative.
