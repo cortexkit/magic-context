@@ -303,6 +303,9 @@ impl Run<'_> {
         captured: Arc<super::context::CapturedConfig>,
         manual: Option<ManualRun>,
     ) -> Result<RunReport, String> {
+        if manual.is_none() {
+            self.index_git(&captured);
+        }
         // An explicit `broca` keeps a runner lane on the configured Broca module;
         // `host` or no choice means the conversation's own runner.
         let session_runner = self
@@ -412,6 +415,36 @@ impl Run<'_> {
         Ok(report)
     }
 
+    fn index_git(&self, captured: &super::context::CapturedConfig) {
+        let settings = &captured.effective["memory"]["git_commit_indexing"];
+        if settings["enabled"].as_bool() != Some(true) {
+            return;
+        }
+        let options = mc_store::git_archive::index::IndexOptions {
+            since_days: settings["since_days"].as_f64().unwrap_or(365.0),
+            max_commits: settings["max_commits"].as_f64().unwrap_or(2000.0),
+        };
+        let clock = self.handles.runs.clock();
+        match self.store.index_git_commits(
+            self.project,
+            &captured.directory,
+            &options,
+            clock.now_ms(),
+            || clock.now_ms(),
+        ) {
+            Ok(Some(result)) => tracing::info!(
+                project = self.project,
+                new_commits = result.inserted,
+                scanned = result.scanned,
+                evicted = result.evicted,
+                non_indexable = result.non_indexable,
+                "git index"
+            ),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(project = self.project, %error, "git index failed"),
+        }
+    }
+
     fn task_config(
         &self,
         task: TaskName,
@@ -486,3 +519,7 @@ impl Run<'_> {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "git_tick_tests.rs"]
+mod git_tests;
