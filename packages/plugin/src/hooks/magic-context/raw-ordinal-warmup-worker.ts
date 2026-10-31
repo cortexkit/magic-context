@@ -42,6 +42,11 @@ main().catch((error: unknown) => {
 });
 
 async function main(): Promise<void> {
+    if (input.v2ArchiveReader) {
+        const { serveV2ArchiveReads } = await import("../../tools/ctx-expand/v2-archive-reader");
+        await serveV2ArchiveReads(port, openConnections);
+        return;
+    }
     const [
         { Database, registerSqliteDiagnosticSink },
         { readRawSessionMessageIdsAtOrdinalsFromDb, scanRawSessionSummaryRows },
