@@ -137,6 +137,8 @@ const GATED_VERSION: u8 = 3;
 /// `refusal_after_tool_use`), which it ignores. `output-reservation/v1` adds an
 /// `output_reservation_clamped` record (a step's output cap lowered so input
 /// plus cap fits the window), which this reader skips.
+/// `compaction-view-negotiation/v1` gates view negotiation metadata; this
+/// reader does not interpret that metadata when counting steps and usage.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -181,6 +183,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "provider-fallback-block/v1",
     "refusal-fallback/v1",
     "output-reservation/v1",
+    "compaction-view-negotiation/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1931,6 +1934,7 @@ pub(crate) mod tests {
             "provider-fallback-block/v1",
             "refusal-fallback/v1",
             "output-reservation/v1",
+            "compaction-view-negotiation/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -2180,6 +2184,24 @@ pub(crate) mod tests {
         let runs = decode(&bytes).expect("output-reservation/v1 run decodes");
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
         assert_eq!(runs[0].steps[0].usage.output_tokens, Some(4));
+    }
+
+    #[test]
+    fn a_compaction_view_negotiation_run_keeps_its_steps() {
+        let bytes = wal_bytes(&[
+            json!({"requires": ["compaction-view-negotiation/v1"],
+                   "record": run_started("r1", 1)}),
+            json!(step_finished(1, usage(1, 2, 3, 4))),
+            json!({"requires": ["compaction-view-negotiation/v1"],
+                   "record": step_finished(2, usage(5, 6, 7, 8))}),
+        ]);
+        let runs = decode(&bytes).expect("compaction-view-negotiation/v1 run decodes");
+        assert_eq!(
+            step_ids(&runs),
+            [("r1".to_string(), 1), ("r1".to_string(), 2)]
+        );
+        assert_eq!(runs[0].steps[0].usage.output_tokens, Some(4));
+        assert_eq!(runs[0].steps[1].usage.output_tokens, Some(8));
     }
 
     /// `structured-output-paragraph/v1` marks a structured-output run whose
