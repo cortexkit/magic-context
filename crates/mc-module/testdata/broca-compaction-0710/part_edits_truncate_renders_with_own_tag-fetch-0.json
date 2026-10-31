@@ -1,0 +1,37 @@
+{
+  "answer": {
+    "answer": "view",
+    "view": {
+      "covers_through": {
+        "mid": "m1",
+        "ordinal": 1
+      },
+      "digest": "b2e01cc1ca838020646d7cc2b00af2032d46c50c6ae7a2ed0765c394ee980a8e",
+      "lineage_id": "ccf8b6de-edba-4f52-affb-bc844ccda580",
+      "ranges": [
+        {
+          "edits": [
+            {
+              "mid": "m1",
+              "ordinal": 1,
+              "part": "m1#0",
+              "truncate": "placeholder"
+            }
+          ],
+          "from": 0,
+          "kind": "keep",
+          "to": 2
+        }
+      ],
+      "session_ref": "828b10bbe380c69080b5d1c081f5b3cf",
+      "view_version": 1
+    }
+  },
+  "request": {
+    "method": "view.get",
+    "params": {
+      "session_ref": "828b10bbe380c69080b5d1c081f5b3cf",
+      "view_version": 1
+    }
+  }
+}
