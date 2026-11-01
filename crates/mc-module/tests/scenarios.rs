@@ -1,8 +1,8 @@
 //! ck-mc against the mock runner, in process. The mock runner and its mock
 //! model providers enforce what real ones do (prompt caching, signed
 //! reasoning, the window), so a scenario fails here the way it would fail on
-//! a real runner. The same scenarios run over the subc daemon in the wire
-//! suite; here each notice is handled before the runner's next step, which
+//! a real runner. The wire suite (`wire.rs`) runs them through a real subc
+//! daemon, the module bus that routes calls between module processes; here each notice is handled before the runner's next step, which
 //! keeps the assertions exact.
 
 use std::sync::{Arc, Mutex};

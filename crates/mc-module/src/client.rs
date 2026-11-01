@@ -1,5 +1,7 @@
 //! The calls ck-mc makes to a session's runner. The real module makes them
-//! over the subc daemon; tests make them in process.
+//! through the subc daemon, the CortexKit module bus that routes calls
+//! between module processes ([`crate::transport`]); tests make them in
+//! process.
 
 use std::future::Future;
 
