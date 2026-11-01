@@ -14,7 +14,10 @@ import {
 } from "../../features/magic-context/storage";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
 import type { TransformDeps } from "../../hooks/magic-context/transform";
-import { usagePredatesHistoryChange } from "../../hooks/magic-context/transform-context-state";
+import {
+    recordUsageRefusal,
+    shouldResetRefusedUsage,
+} from "../../hooks/magic-context/transform-context-state";
 import { ABSOLUTE_EMERGENCY_PERCENTAGE } from "../../shared/escalation-bands";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
@@ -85,7 +88,7 @@ describe("persistV2UsageReading", () => {
                 },
             });
         const stale = () =>
-            usagePredatesHistoryChange(
+            shouldResetRefusedUsage(
                 db,
                 sessionID,
                 getOrCreateSessionMeta(db, sessionID),
@@ -93,11 +96,14 @@ describe("persistV2UsageReading", () => {
             );
         persist(97_000, 1000);
         expect(contextUsageMap.get(sessionID)?.updatedAt).toBe(1000);
+        expect(stale()).toBe(false);
+        recordUsageRefusal(db, sessionID, 1500);
         expect(stale()).toBe(true);
         persist(40_000, 3000);
         expect(contextUsageMap.get(sessionID)?.updatedAt).toBe(3000);
         expect(stale()).toBe(false);
         // A later completion without usage refreshes the idle clock, not the measurement.
+        recordUsageRefusal(db, sessionID, 3200);
         updateSessionMeta(db, sessionID, { cachedM0MaterializedAt: 3500 });
         persist(0, 4000);
         expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(4000);

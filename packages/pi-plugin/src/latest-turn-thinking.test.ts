@@ -1086,8 +1086,6 @@ for (const trigger of ["wall", "final fit"] as const)
 				ids.push("latest-fit-call", "latest-fit-result");
 				queuePendingOp(db, sessionId, tag.tagNumber, "drop");
 				percent = trigger === "wall" ? 96 : 75;
-				// The pressure increase is a new reading after the warm-up fold.
-				updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
 				if (outcome === "fits") {
 					const output = JSON.stringify(await serve());
 					expect(output).not.toContain("fit-signature");

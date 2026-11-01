@@ -6267,9 +6267,6 @@ describe("registerPiContextHandler", () => {
 						}
 					},
 				);
-				// The force-pressure sample is a new provider reading after publication.
-				if (mode.startsWith("force"))
-					updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
 				const messages = buildMessages();
 				const ctx = {
 					...fakeContext(sessionId, process.cwd(), entryIds, messages),
@@ -6910,8 +6907,6 @@ describe("registerPiContextHandler", () => {
 					ctx: never,
 				) => Promise<{ messages: never[] }>;
 				const pass = async (percent: number) => {
-					// Each scripted sample represents a newly completed provider response.
-					updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
 					const messages = Array.from({ length: 11 }, (_, index) =>
 						index % 2 === 0
 							? userMessage(`request ${index + 1}`, index + 1)
@@ -10098,7 +10093,7 @@ it("invalidates pre-publication pressure through repeated Pi turns without disca
 		expect(getOrCreateSessionMeta(db, sessionId).lastInputTokens).toBe(0);
 		expect(
 			log.mock.calls.some(([, line]) =>
-				String(line).includes("history changed since usage"),
+				String(line).includes("refused turn recovery"),
 			),
 		).toBe(true);
 		clock.mockReturnValue(Date.now() + 100);

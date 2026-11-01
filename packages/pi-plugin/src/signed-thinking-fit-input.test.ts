@@ -147,8 +147,6 @@ function piSession(name: string, harness: "pi" | "omp", model: string) {
 		},
 		/** One pass over a fresh copy of the history; returns that event's messages. */
 		async pass(percent: number, hasUI: boolean) {
-			// The scripted pressure is new usage, not a reading from before the last fold.
-			updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
 			const messages = structuredClone(source);
 			const ctx = {
 				...fakeContext(sessionId, process.cwd(), [...ids], messages as never),

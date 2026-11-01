@@ -501,9 +501,8 @@ it("review: 10:32:20 forced thinking release and 10:32:24 replay use one trim se
     const root = createTestTempDir("review-trim-sequence-");
     const db = openDatabase(`${root.dir}/context.db`)!;
     const sessionId = "review-trim-sequence";
-    const at = Date.parse("2026-10-13T10:32:20Z");
     getOrCreateSessionMeta(db, sessionId);
-    updateSessionMeta(db, sessionId, { cacheTtl: "never", lastResponseTime: at - 1000 });
+    updateSessionMeta(db, sessionId, { cacheTtl: "never", lastResponseTime: Date.now() });
     recordDetectedContextLimit(db, sessionId, 16_000, `${route.providerID}/${route.modelID}`);
     updateSessionMeta(db, sessionId, { systemPromptTokens: 100, systemPromptHash: "trim-system" });
     recordToolDefinition(route.providerID, route.modelID, undefined, "read", "Read a file", {
@@ -515,7 +514,7 @@ it("review: 10:32:20 forced thinking release and 10:32:24 replay use one trim se
             sessionId,
             {
                 usage: { percentage: 75.4, inputTokens: 12_064 },
-                updatedAt: at - 1000,
+                updatedAt: Date.now(),
                 hasUsageTokens: true,
             },
         ],
@@ -609,8 +608,7 @@ it("review: 10:32:20 forced thinking release and 10:32:24 replay use one trim se
         seams.push(result.preparedTrimBoundaryId);
         return result;
     });
-    // History publication and scripted provider usage share the same test clock.
-    const clock = spyOn(Date, "now").mockReturnValue(at - 1000);
+    const clock = spyOn(Date, "now");
     const logs = spyOn(logger, "sessionLog");
     try {
         appendCompartments(db, sessionId, [compartment(0, 1, 2)]);
@@ -621,6 +619,7 @@ it("review: 10:32:20 forced thinking release and 10:32:24 replay use one trim se
         appendCompartments(db, sessionId, [compartment(1, 3, 4)]);
         deferred.add(sessionId);
         decision = "execute";
+        const at = Date.parse("2026-10-13T10:32:20Z");
         clock.mockReturnValue(at);
         // Just below the hold cap (65% + 10), so the turn is still held.
         usage.set(sessionId, {

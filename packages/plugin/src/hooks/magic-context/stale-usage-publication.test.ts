@@ -21,12 +21,19 @@ import type { MessageLike } from "./tag-messages";
 import { createTransform, type TransformDeps } from "./transform";
 
 for (const generation of ["v2", "v1"] as const)
-    for (const cacheOnly of [false, true]) {
-        const hostLabel = `${generation}${cacheOnly ? " cache-only" : ""}`;
+    for (const cacheKind of ["none", "live", "persisted"] as const) {
+        const cacheOnly = cacheKind !== "none";
+        const suffix =
+            cacheKind === "none"
+                ? ""
+                : cacheKind === "live"
+                  ? " cache-only"
+                  : " persisted-cache-only";
+        const hostLabel = `${generation}${suffix}`;
         test(`${hostLabel} escapes repeated untrusted historian timeouts after publication and accepts fresh pressure`, async () => {
             const home = createTestTempDir("stale-usage-publication-");
             const db = openDatabase(`${home.dir}/context.db`)!;
-            const sessionId = `stale-usage-${generation}-${cacheOnly}`;
+            const sessionId = `stale-usage-${generation}-${cacheKind}`;
             const route = { providerID: "stale-usage-provider", modelID: "100k" };
             const clock = spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
             const logs = spyOn(logger, "sessionLog").mockImplementation(() => {});
@@ -85,6 +92,16 @@ for (const generation of ["v2", "v1"] as const)
                         usage: { percentage, inputTokens: percentage * 1000 },
                         updatedAt: Date.now(),
                         hasUsageTokens: true,
+                    });
+                }
+                if (cacheKind === "persisted") {
+                    // A persisted cache has the provider reading but no locally recorded usage event.
+                    const cached = usage.get(sessionId);
+                    if (!cached) throw new Error("Expected cached provider usage");
+                    usage.set(sessionId, {
+                        ...cached,
+                        hasUsageTokens: false,
+                        lastResponseTime: Date.now(),
                     });
                 }
             };

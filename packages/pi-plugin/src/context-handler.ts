@@ -267,7 +267,10 @@ import {
 	buildSyntheticToolReclaimOps,
 	toolReclaimDistanceEntries,
 } from "@magic-context/core/hooks/magic-context/tool-reclaim";
-import { usagePredatesHistoryChange } from "@magic-context/core/hooks/magic-context/transform-context-state";
+import {
+	recordUsageRefusal,
+	shouldResetRefusedUsage,
+} from "@magic-context/core/hooks/magic-context/transform-context-state";
 import {
 	logTransformElapsed as logStageElapsed,
 	withTransformTimingSummary,
@@ -4995,7 +4998,7 @@ export function registerPiContextHandler(
 			}
 			// Model change invalidates the safe-token baseline + alert state too
 			// (new model, new limits), so it clears all four pressure fields.
-			const usagePredatesHistory = usagePredatesHistoryChange(
+			const usageResetAfterRefusal = shouldResetRefusedUsage(
 				options.db,
 				sessionId,
 				sessionMetaForUsage,
@@ -5036,11 +5039,11 @@ export function registerPiContextHandler(
 				sessionMetaForUsage.observedSafeInputTokens = 0;
 				sessionMetaForUsage.cacheAlertSent = false;
 			} else if (
-				(isFirstContextPassForSession || usagePredatesHistory) &&
+				(isFirstContextPassForSession || usageResetAfterRefusal) &&
 				sessionMetaForUsage.lastContextPercentage > 0
 			) {
-				// A restart or newer published/folded history invalidates only the
-				// pressure fields, not permission to rebuild the cached prefix.
+				// A restart, or history landed after a refused turn, invalidates only
+				// the pressure fields, not permission to rebuild the cached prefix.
 				// As on OpenCode, historian-failure state and the
 				// reasoning watermark MUST be preserved — restart recovery uses the
 				// failure backoff, and clearing the reasoning watermark would
@@ -5051,7 +5054,7 @@ export function registerPiContextHandler(
 				// too — only lastContextPercentage/lastInputTokens are cleared).
 				sessionLog(
 					sessionId,
-					`transform: ${isFirstContextPassForSession ? "first pass" : "history changed since usage"} reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale usage state`,
+					`transform: ${isFirstContextPassForSession ? "first pass" : "refused turn recovery"} reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale usage state`,
 				);
 				updateSessionMeta(options.db, sessionId, {
 					lastContextPercentage: 0,
@@ -5075,7 +5078,7 @@ export function registerPiContextHandler(
 				usagePercentage = sessionMetaForUsage.lastContextPercentage;
 				usageInputTokens = sessionMetaForUsage.lastInputTokens;
 				usedPersistedUsage = true;
-			} else if (!usagePredatesHistory) {
+			} else if (!usageResetAfterRefusal) {
 				// Pi's live figure still includes the old provider reading until a
 				// reply arrives, so it cannot undo a history-driven reset.
 				usagePercentage =
@@ -5218,7 +5221,7 @@ export function registerPiContextHandler(
 			let fallbackInputTokens: number | undefined;
 			const suspectReading = Math.max(usageInputTokens, piUsage?.tokens ?? 0);
 			if (
-				usagePredatesHistory ||
+				usageResetAfterRefusal ||
 				suspectReading > providerInputLimit ||
 				piProviderUsageWasRejected(sessionId)
 			) {
@@ -5264,7 +5267,7 @@ export function registerPiContextHandler(
 					persistedFromLive: !usedPersistedUsage,
 					persistedPercentage: usagePercentage,
 					persistedInputTokens: usageInputTokens,
-					liveInputTokens: usagePredatesHistory ? undefined : piUsage?.tokens,
+					liveInputTokens: usageResetAfterRefusal ? undefined : piUsage?.tokens,
 					usableContextLimit: usageContextLimit,
 				}));
 			const realUsagePercentageBeforeEmergencyBump = usagePercentage;
@@ -7311,6 +7314,8 @@ export function registerPiContextHandler(
 		onRefusal: (ctx, budget, message, isCurrent) => {
 			const sessionId = resolveSessionId(ctx);
 			if (!sessionId) return;
+			// The guarded hook calls this only for an actual unsent turn, not an LKG replay.
+			if (!budget.sideTurn) recordUsageRefusal(baseOptions.db, sessionId);
 			withoutSqliteTransformPass(() =>
 				setImmediate(() => {
 					if (!isCurrent()) return;

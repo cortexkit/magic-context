@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import {
     closeDatabase,
     getOrCreateSessionMeta,
@@ -16,9 +17,10 @@ import { computeHardCacheExpired } from "./transform";
 import {
     contextUsagePassSnapshot,
     loadContextUsage,
+    recordUsageRefusal,
     resolveUnknownUsageFromWireEstimate,
     savedProviderReadingForPass,
-    usagePredatesHistoryChange,
+    shouldResetRefusedUsage,
 } from "./transform-context-state";
 
 const tempDirs: string[] = [];
@@ -395,37 +397,86 @@ describe("computeHardCacheExpired finite boundary parity", () => {
     });
 });
 
-it("compares history to provider reading age independently of the idle clock", () => {
-    useTempDataHome("usage-fold-");
+it("keeps ordinary provider readings trusted after publications and folds", () => {
+    useTempDataHome("usage-healthy-");
     const db = openDatabase()!;
-    const id = "usage-fold";
+    const id = "usage-healthy";
+    const now = Date.now();
     const meta = {
         ...getOrCreateSessionMeta(db, id),
-        lastResponseTime: 1000,
-        cachedM0MaterializedAt: 2000,
+        lastResponseTime: now - 3000,
+        cachedM0MaterializedAt: now - 2000,
     };
-    expect(usagePredatesHistoryChange(db, id, meta)).toBe(true);
-    expect(usagePredatesHistoryChange(db, id, { ...meta, lastResponseTime: 3000 })).toBe(false);
-    // An error or usage-less completion can move the idle clock without replacing usage.
+    expect(shouldResetRefusedUsage(db, id, meta)).toBe(false);
+    appendCompartments(db, id, [
+        {
+            sequence: 0,
+            startMessage: 1,
+            endMessage: 2,
+            startMessageId: "m1",
+            endMessageId: "m2",
+            title: "Published",
+            content: "History published after the provider reading.",
+        },
+    ]);
+    expect(shouldResetRefusedUsage(db, id, { ...meta, cachedM0MaterializedAt: null })).toBe(false);
+    // A later refusal cannot retroactively turn that earlier publication into recovery.
+    recordUsageRefusal(db, id);
+    expect(shouldResetRefusedUsage(db, id, { ...meta, cachedM0MaterializedAt: null })).toBe(false);
+});
+
+it("requires reading then refusal then landed history, and retires the latch on a new reading", () => {
+    useTempDataHome("usage-refused-");
+    const db = openDatabase()!;
+    const id = "usage-refused";
+    const now = Date.now();
+    const meta = {
+        ...getOrCreateSessionMeta(db, id),
+        lastResponseTime: now - 5000,
+        cachedM0MaterializedAt: now - 4500,
+    };
+    recordUsageRefusal(db, id, now - 4000);
+    expect(shouldResetRefusedUsage(db, id, meta)).toBe(false);
+    expect(shouldResetRefusedUsage(db, id, { ...meta, cachedM0MaterializedAt: now + 60_000 })).toBe(
+        false,
+    );
+    const recovered = { ...meta, cachedM0MaterializedAt: now - 3000 };
+    expect(shouldResetRefusedUsage(db, id, recovered)).toBe(true);
+    expect(shouldResetRefusedUsage(db, "other-session", recovered)).toBe(false);
+    // A retry must not move the refusal boundary past a recovery fold.
+    recordUsageRefusal(db, id, now - 2000);
+    expect(shouldResetRefusedUsage(db, id, recovered)).toBe(true);
+    const newReading = { ...recovered, lastResponseTime: now - 1000 };
+    expect(shouldResetRefusedUsage(db, id, newReading)).toBe(false);
+    expect(shouldResetRefusedUsage(db, id, { ...newReading, cachedM0MaterializedAt: now })).toBe(
+        false,
+    );
+});
+
+it("uses the live provider timestamp rather than an independently moving idle clock", () => {
+    useTempDataHome("usage-live-refused-");
+    const db = openDatabase()!;
+    const id = "usage-live-refused";
+    const now = Date.now();
+    const meta = {
+        ...getOrCreateSessionMeta(db, id),
+        lastResponseTime: now - 5000,
+        cachedM0MaterializedAt: now - 3000,
+    };
+    const live = {
+        usage: { percentage: 97, inputTokens: 97_000 },
+        updatedAt: now - 2000,
+        hasUsageTokens: true,
+    };
+    recordUsageRefusal(db, id, now - 4000);
+    expect(shouldResetRefusedUsage(db, id, meta, live)).toBe(false);
+    recordUsageRefusal(db, id, now - 1000);
     expect(
-        usagePredatesHistoryChange(
+        shouldResetRefusedUsage(
             db,
             id,
-            { ...meta, lastResponseTime: 3000 },
-            {
-                usage: { percentage: 97, inputTokens: 97_000 },
-                updatedAt: 1000,
-                hasUsageTokens: true,
-            },
+            { ...meta, lastResponseTime: now, cachedM0MaterializedAt: now - 500 },
+            live,
         ),
     ).toBe(true);
-    // A new provider measurement remains fresh even if the idle clock has not advanced.
-    expect(
-        usagePredatesHistoryChange(db, id, meta, {
-            usage: { percentage: 97, inputTokens: 97_000 },
-            updatedAt: 3000,
-            hasUsageTokens: true,
-        }),
-    ).toBe(false);
-    expect(usagePredatesHistoryChange(db, id, { ...meta, lastResponseTime: 0 })).toBe(false);
 });

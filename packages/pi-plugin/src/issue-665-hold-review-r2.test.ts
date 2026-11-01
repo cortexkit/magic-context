@@ -635,10 +635,6 @@ export async function runPiHoldDriver(options: {
 				events.push("restart");
 			}
 		}
-		// Sample the scripted provider usage after the preceding response/fold.
-		// Idle-expiry cases deliberately keep their older provider timestamp.
-		if (!resetIdle)
-			updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
 		const carriedBefore = readPiIdentityRebuilds(db, sessionId).length;
 		const lkgBefore = getSlot(sessionId) !== undefined;
 		if (carriedBefore > 0 && !events.includes("carried-repair"))
@@ -1160,7 +1156,6 @@ async function piRulingFixture(withCarriedRepair: boolean) {
 		ids,
 		setPercent: (value: number) => {
 			percent = value;
-			updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
 		},
 	};
 }

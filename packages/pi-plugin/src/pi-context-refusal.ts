@@ -444,8 +444,8 @@ export function registerPiGuardedContext(
 		} finally {
 			if (!budget.sideTurn) ctx.abort();
 		}
-		// This callback only queues a diagnostic; it must never do storage work on
-		// the payload hook's synchronous dispatch stack.
+		// Refusal bookkeeping must stay in memory here. Diagnostic storage work
+		// must be queued, never performed on the synchronous payload dispatch stack.
 		try {
 			options.onRefusal?.(ctx, budget, message, isCurrent);
 		} catch (error) {
