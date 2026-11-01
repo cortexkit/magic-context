@@ -147,16 +147,19 @@ import { CTX_NOTE_LIGHT_DESCRIPTION } from "../../tools/light-descriptions";
 import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-descriptions";
 import { createV2RustCompactionMarkerStrategy, trimToRecordedBoundary } from "../fold/boundary";
 import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/host-media";
+import { HostFoldIdle } from "../fold/idle";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { nativeFoldCache } from "../fold/memory-cache";
 import {
+    bindNativeRowID,
     copyNativeInput,
     forgetNativeFoldProvenance,
     isLocalCheckpoint,
     NativeFoldReplay,
     nativeRowID,
 } from "../fold/native-replay";
-import { FoldOwner, stripCheckpointRecentContext } from "../fold/owner";
+import { controlKey, effortPart, rememberedControlKey } from "../fold/native-replay-v3";
+import { FoldOwner, foldDigest, stripCheckpointRecentContext } from "../fold/owner";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
@@ -169,7 +172,12 @@ import {
 } from "../hidden-completion";
 import { HiddenModelActivity } from "../hidden-model-activity";
 import { V2MessageTimesCache } from "../message-times";
-import { gaDatabasePath, type V2StoreReader, V2StoreReaderPool } from "../store-reader";
+import {
+    gaDatabasePath,
+    RAW_MESSAGE_TYPES,
+    type V2StoreReader,
+    V2StoreReaderPool,
+} from "../store-reader";
 import {
     clearSyntheticCandidates,
     deliverPendingChannel2,
@@ -234,7 +242,13 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
     const { checkpoint, submitted } = head;
     const first = draft.messages.find((message) => message.id === HEAD_IDS[0]);
     const baseline = first?.content.find((part) => part.type === "text")?.text;
-    if (typeof baseline !== "string") return false;
+    if (typeof baseline !== "string") {
+        // A migrated host window may contain only its checkpoint. With no raw
+        // tail the shared transform has no head to replace, but the checkpoint
+        // is still the only account of the earlier conversation.
+        draft.messages.unshift(checkpoint);
+        return true;
+    }
     for (const part of checkpoint.content)
         if (part.type === "text" && typeof part.text === "string") {
             part.text = part.text.replace(
@@ -252,6 +266,141 @@ function applyCheckpointHead(draft: SessionContext, head: V2LkgCheckpointHead): 
         ...draft.messages.filter((message) => message !== first),
     );
     return true;
+}
+
+function bindKeptInstructionCoordinates(
+    messages: readonly V2Message[],
+    incoming: V2Message,
+    reader: V2StoreReader,
+    sessionID: string,
+): void {
+    const rows = reader.instructionRowsThrough(sessionID, reader.latestSequence(sessionID));
+    let previous: number | undefined;
+    let pending: V2Message[] = [];
+    const bind = (next?: number) => {
+        if (!pending.length) return;
+        const candidates = rows.filter(
+            (row) =>
+                (previous === undefined || row.seq > previous) &&
+                (next === undefined || row.seq < next),
+        );
+        // Kept history is an ordered suffix. Between two visible source IDs it
+        // is contiguous; at its leading edge use the suffix before the next ID.
+        // The text only verifies that structural alignment, never defines identity.
+        const selected =
+            previous === undefined
+                ? candidates.slice(-pending.length)
+                : next === undefined
+                  ? candidates.slice(0, pending.length)
+                  : candidates;
+        if (
+            selected.length === pending.length &&
+            selected.every((row, index) => {
+                const message = pending[index];
+                return (
+                    message?.role === "system" &&
+                    message.content.length === 1 &&
+                    message.content[0]?.type === "text" &&
+                    message.content[0].text === row.data.text
+                );
+            })
+        ) {
+            selected.forEach((row, index) => {
+                const message = pending[index];
+                if (message) bindNativeRowID(message, row.id);
+            });
+        }
+        pending = [];
+    };
+    for (const message of messages) {
+        if (message === incoming || effortPart(message)) continue;
+        const id = nativeRowID(message);
+        const seq = id ? reader.sequenceForId(sessionID, id) : undefined;
+        if (seq !== undefined) {
+            bind(seq);
+            previous = seq;
+        } else if (!id && message.role === "system") pending.push(message);
+    }
+    bind();
+}
+
+function controlSuffixKeys(
+    messages: readonly V2Message[],
+    skip?: V2Message,
+): Map<V2Message, string> {
+    const keys = new Map<V2Message, string>();
+    let before: string | undefined;
+    let occurrence = 0;
+    for (let index = messages.length - 1; index >= 0; index--) {
+        const message = messages[index];
+        if (!message || message === skip) continue;
+        const part = effortPart(message);
+        if (part) {
+            if (before)
+                keys.set(
+                    message,
+                    JSON.stringify({
+                        before,
+                        occurrence: occurrence++,
+                        effort: part.effort,
+                        previous: part.previous,
+                    }),
+                );
+        } else {
+            before = nativeRowID(message);
+            occurrence = 0;
+        }
+    }
+    return keys;
+}
+
+function restoreNativeCheckpointInput(
+    messages: readonly V2Message[],
+    incoming: V2Message,
+    restored: readonly V2Message[],
+    reader: V2StoreReader,
+    sessionID: string,
+): V2Message[] {
+    bindKeptInstructionCoordinates(messages, incoming, reader, sessionID);
+    const present = new Set(messages.flatMap((message) => nativeRowID(message) ?? []));
+    const currentControls = new Map<string, number>();
+    const currentSuffixKeys = controlSuffixKeys(messages, incoming);
+    const restoredSuffixKeys = controlSuffixKeys(restored);
+    const leadingControls = new Set<string>();
+    let after: string | undefined;
+    for (const message of messages) {
+        const part = effortPart(message);
+        if (part) {
+            // At the kept suffix's leading edge the left source row is hidden.
+            // Align controls backwards from the next source row instead, so equal
+            // controls at different positions remain distinct occurrences.
+            const suffixKey = currentSuffixKeys.get(message);
+            if (!after && suffixKey) {
+                leadingControls.add(suffixKey);
+                continue;
+            }
+            const key = controlKey({
+                after,
+                effort: part.effort as string | undefined,
+                previous: part.previous as string | undefined,
+            });
+            currentControls.set(key, (currentControls.get(key) ?? 0) + 1);
+        } else if (message !== incoming && nativeRowID(message)) after = nativeRowID(message);
+    }
+    const hidden = restored.filter((message) => {
+        const suffixKey = restoredSuffixKeys.get(message);
+        if (suffixKey && leadingControls.delete(suffixKey)) return false;
+        const key = rememberedControlKey(message);
+        const count = key ? (currentControls.get(key) ?? 0) : 0;
+        if (key && count > 0) {
+            currentControls.set(key, count - 1);
+            return false;
+        }
+        const id = nativeRowID(message);
+        return !id || !present.has(id);
+    });
+    const at = messages.indexOf(incoming);
+    return [...messages.slice(0, at), ...hidden, ...messages.slice(at + 1)];
 }
 
 function estimateCheckpointRequest(draft: SessionContext) {
@@ -767,17 +916,15 @@ export async function registerContext(context: V2Context) {
         resolveProjectIdentityForSession(directory, config.allow_home_project),
     );
     const folds = new FoldOwner(context.storage);
-    // Experimental and opt-in (MC_OC2_INVISIBLE_FOLD=1). After OpenCode folds the
-    // history, the provider request bytes must stay identical to the ones sent
-    // before the fold, so the provider's prompt cache still matches. That has not
-    // yet been verified across providers and plugin restarts, so automatic host
-    // folding stays off by default.
-    const nativeFoldMemory =
-        !compactionOff && process.env.MC_OC2_INVISIBLE_FOLD === "1"
-            ? nativeFoldCache(() => storage.require())
-            : undefined;
+    // The host store owns history; this bounded cache only accelerates replay.
+    // Idle folding waits out the served response's frozen cache lifetime, and
+    // missing captures are restored from the source store rather than lost.
+    const nativeFoldMemory = compactionOff ? undefined : nativeFoldCache(() => storage.require());
     const nativeFoldReplay = nativeFoldMemory
-        ? new NativeFoldReplay(nativeFoldMemory, () => openStoreReader(), context.storage)
+        ? new NativeFoldReplay(nativeFoldMemory, () => openStoreReader(), context.storage, {
+              protocol: 3,
+              log: sessionLog,
+          })
         : undefined;
     setOutputReserveConfig(config.output_reserve);
     const queriedModels = new Set<string>();
@@ -1396,10 +1543,14 @@ export async function registerContext(context: V2Context) {
                   storage: nativeFoldMemory,
                   openReader: openStoreReader,
                   canReplay: (sessionID, reader) => nativeFoldReplay.canReplay(sessionID, reader),
+                  canFold: (sessionID, reader) => nativeFoldReplay.canFold(sessionID, reader),
                   threshold: Number(process.env.MC_OC2_HOST_FOLD_ROWS ?? 1000),
                   log: sessionLog,
               })
             : undefined;
+    const hostFoldIdle = hostFolds
+        ? new HostFoldIdle((sessionID, eligible) => hostFolds.idle(sessionID, eligible))
+        : undefined;
     const usageController = new AbortController();
     const usageDone = (async () => {
         let retry = 0;
@@ -1447,6 +1598,13 @@ export async function registerContext(context: V2Context) {
                             );
                         }
                         if (
+                            event.type === "session.execution.started" ||
+                            event.type === "session.execution.interrupted"
+                        ) {
+                            hostFoldIdle?.active(sessionID);
+                            continue;
+                        }
+                        if (
                             event.type?.startsWith("session.revert.") ||
                             event.type === "session.message.content.updated"
                         ) {
@@ -1467,6 +1625,7 @@ export async function registerContext(context: V2Context) {
                             event.type === "session.error" ||
                             event.type === "session.execution.failed"
                         ) {
+                            hostFoldIdle?.active(sessionID);
                             const error = hiddenTerminalError(event);
                             if (error !== undefined) hiddenSessionErrors.set(sessionID, error);
                             if (error !== undefined && db && !compactionOff) {
@@ -1490,6 +1649,7 @@ export async function registerContext(context: V2Context) {
                         }
                         if (event.type === "session.deleted") {
                             overflowRecovery.forget(sessionID);
+                            hostFoldIdle?.active(sessionID);
                             clearLkgMeasuredRequest(sessionID);
                             deletedSessions.add(sessionID);
                             // A failed store clear (a busy writer lock, say) must not skip
@@ -1550,13 +1710,18 @@ export async function registerContext(context: V2Context) {
                                 sessionID,
                                 model: { providerID: model.providerID, id: model.modelID },
                             });
-                            // Do not block event handling while the automatic fold runs: idle()
-                            // queues a compaction and then waits for OpenCode to settle it.
-                            if (
-                                !compactionOff &&
-                                typeof (await nativeFoldReplay?.baseline(sessionID)) === "string"
-                            )
-                                void hostFolds?.idle(sessionID);
+                            // Use the TTL already frozen by the served request, not
+                            // a live config edit made while its cache is still warm.
+                            if (!compactionOff) {
+                                if (db) {
+                                    const meta = getOrCreateSessionMeta(db, sessionID);
+                                    hostFoldIdle?.idle(
+                                        sessionID,
+                                        meta.cacheTtl,
+                                        meta.lastResponseTime,
+                                    );
+                                }
+                            }
                         }
                     } catch (error) {
                         log(
@@ -1691,24 +1856,22 @@ export async function registerContext(context: V2Context) {
                   : "module";
             if (nativeFoldReplay) {
                 try {
-                    if (await nativeFoldReplay.canReplay(draft.sessionID, reader)) {
-                        const state = getOrCreateSessionMeta(storage.require(), draft.sessionID);
-                        const summary =
-                            moduleBaseline ??
-                            (await nativeFoldReplay.baseline(draft.sessionID)) ??
-                            state.cachedM0Bytes?.toString("utf8") ??
-                            "<session-history></session-history>";
-                        if (
-                            await nativeFoldReplay.supply({
-                                draft,
-                                reader,
-                                previousCut: reader.latestCompaction(draft.sessionID),
-                                summary,
-                            })
-                        ) {
-                            draft.result = { summary, metadata: { keepID: undefined } };
-                            return;
-                        }
+                    const state = getOrCreateSessionMeta(storage.require(), draft.sessionID);
+                    const summary =
+                        moduleBaseline ??
+                        (await nativeFoldReplay.baseline(draft.sessionID)) ??
+                        state.cachedM0Bytes?.toString("utf8") ??
+                        "<session-history></session-history>";
+                    if (
+                        await nativeFoldReplay.supply({
+                            draft,
+                            reader,
+                            previousCut: reader.latestCompaction(draft.sessionID),
+                            summary,
+                        })
+                    ) {
+                        draft.result = { summary, metadata: { keepID: undefined } };
+                        return;
                     }
                 } catch (error) {
                     nativeFoldReplay.invalidate(draft.sessionID, true);
@@ -1781,7 +1944,7 @@ export async function registerContext(context: V2Context) {
      * only, so a replay can build the same transform input the managed pass
      * builds and compare the saved copy against it.
      */
-    const restoreAfterCheckpoint = (args: {
+    const restoreAfterCheckpoint = async (args: {
         db: NonNullable<typeof db>;
         reader: V2StoreReader;
         draft: SessionContext;
@@ -1789,7 +1952,7 @@ export async function registerContext(context: V2Context) {
         cut: NonNullable<ReturnType<V2StoreReader["latestCompaction"]>>;
         incoming: V2Message;
         boundaryRepair: HistoryBoundaryRepair | undefined;
-    }): V2Message[] => {
+    }): Promise<V2Message[]> => {
         const { db, reader, draft, cut, boundaryRepair } = args;
         // Rust mode restores against the boundary the module itself published and
         // keeps that boundary row, because the array handed to the module has to
@@ -1827,16 +1990,19 @@ export async function registerContext(context: V2Context) {
         const servedBoundary = boundaryID
             ? servedBoundaryRow(reader, draft.sessionID, boundaryID)
             : null;
-        const boundary =
+        const nativeFloor = await nativeFoldReplay?.restorationFloor(draft.sessionID, cut, reader);
+        const boundary = Math.max(
+            nativeFloor ?? -Infinity,
             // A changed hidden row may have lived inside the frozen
             // prefix. Make it available to the shared-path rebuild too.
             (nativeFoldReplay?.sourceChanged(draft.sessionID) && !rustModeModuleClient
                 ? (reader.earliestSequence(draft.sessionID) ?? 0) - 1
                 : undefined) ??
-            (moduleBoundarySeq !== undefined ? moduleBoundarySeq - 1 : undefined) ??
-            servedBoundary?.seq ??
-            reader.sequenceForId(draft.sessionID, boundaryID) ??
-            (reader.earliestSequence(draft.sessionID) ?? 0) - 1;
+                (moduleBoundarySeq !== undefined ? moduleBoundarySeq - 1 : undefined) ??
+                servedBoundary?.seq ??
+                reader.sequenceForId(draft.sessionID, boundaryID) ??
+                (reader.earliestSequence(draft.sessionID) ?? 0) - 1,
+        );
         if (moduleBoundarySeq !== undefined)
             sessionLog(
                 draft.sessionID,
@@ -1883,6 +2049,7 @@ export async function registerContext(context: V2Context) {
     // with replay helpers that hold the request's messages and attachments.
     const checkpointPassPermissions = new Map<string, boolean>();
     const checkpointInputEstimates = new Map<string, { tokens: number; pressureTokens: number }>();
+    const admissionRebuildPasses = new Set<string>();
     const initializeTransform = (database: NonNullable<typeof db>) =>
         (transform ??= createTransform({
             ...createV2TransformFeatureDeps(
@@ -2164,7 +2331,7 @@ export async function registerContext(context: V2Context) {
          * synthetic marks, exactly as the managed pass below builds them.
          * Rust mode keeps the host's messages unchanged, as before. Undefined
          * when no replay can match (the store is unreadable, the checkpoint is
-         * missing from the draft, or the experimental native fold owns it).
+         * missing from the draft, or its native provenance cannot be proved).
          */
         const buildReplayInput = async (): Promise<
             { draft: SessionContext; mapped: ReturnType<typeof adaptPayload> } | undefined
@@ -2179,7 +2346,7 @@ export async function registerContext(context: V2Context) {
                     const localCut = cut && isLocalCheckpoint(cut) ? cut : undefined;
                     const incoming =
                         localCut && messages.find((message) => message.id === localCut.id);
-                    if ((localCut && !incoming) || (cut && nativeFoldReplay)) return undefined;
+                    if (localCut && !incoming) return undefined;
                     checkpointAtEntry = incoming || null;
                     // A replay serves the tool list a healthy pass would serve: in a
                     // subagent session that is without the primary-only tools, which
@@ -2205,17 +2372,43 @@ export async function registerContext(context: V2Context) {
                             )
                                 admitted.add(message.id);
                         const replayDb = db ?? storage.current();
-                        if (localCut && incoming && replayDb)
-                            messages = restoreAfterCheckpoint({
-                                db: replayDb,
-                                reader,
-                                draft,
-                                messages,
-                                cut: localCut,
-                                incoming,
-                                boundaryRepair: undefined,
-                            });
-                        else if (localCut) return undefined;
+                        if (localCut && incoming && replayDb) {
+                            const admission = nativeFoldReplay
+                                ? await nativeFoldReplay.replayAdmission(
+                                      draft.sessionID,
+                                      localCut,
+                                      reader,
+                                  )
+                                : "legacy";
+                            if (admission === undefined) return undefined;
+                            if (admission === "native" && nativeFoldReplay) {
+                                const restored = await nativeFoldReplay.projectReplay({
+                                    sessionID: draft.sessionID,
+                                    cut: localCut,
+                                    model: draft.model,
+                                    reader,
+                                    bounded: true,
+                                });
+                                if (!restored) return undefined;
+                                messages = restoreNativeCheckpointInput(
+                                    messages,
+                                    incoming,
+                                    restored,
+                                    reader,
+                                    draft.sessionID,
+                                );
+                            } else {
+                                messages = await restoreAfterCheckpoint({
+                                    db: replayDb,
+                                    reader,
+                                    draft,
+                                    messages,
+                                    cut: localCut,
+                                    incoming,
+                                    boundaryRepair: undefined,
+                                });
+                            }
+                        } else if (localCut) return undefined;
                         times = readTimes(reader, messages);
                     }
                 } finally {
@@ -2396,6 +2589,7 @@ export async function registerContext(context: V2Context) {
             const reader = openStoreReader();
             let checkpoint: SessionContext["messages"][number] | undefined;
             let submitted: string | undefined;
+            let upgradeCheckpointSequence: number | undefined;
             try {
                 const candidates = syntheticCandidates(
                     context,
@@ -2441,11 +2635,44 @@ export async function registerContext(context: V2Context) {
                 if (localCut && !incoming)
                     throw new Error("The host checkpoint disappeared from the context draft");
                 checkpointAtEntry = incoming || null;
-                let nativeRestored: V2Message[] | undefined;
+                if (localCut && nativeFoldReplay) {
+                    await nativeFoldReplay.prepareLegacyUpgrade({
+                        draft,
+                        cut: localCut,
+                        reader,
+                    });
+                    const carrier = await nativeFoldReplay.checkpointForReplay(
+                        draft.sessionID,
+                        reader,
+                    );
+                    if (carrier) {
+                        const identity = await folds.observe({
+                            sessionID: draft.sessionID,
+                            cutSeq: carrier.row.seq,
+                            summary: carrier.submitted,
+                            rendered: carrier.rendered,
+                            onHard: () => {
+                                historyRefreshSessions.add(draft.sessionID);
+                                requestPendingMaterialization(
+                                    pendingMaterializationSessions,
+                                    draft.sessionID,
+                                    "host_compaction",
+                                );
+                            },
+                        });
+                        checkpoint = structuredClone(identity.rendered ?? carrier.rendered);
+                        submitted = identity.renderedSummary ?? carrier.submitted;
+                        upgradeCheckpointSequence = carrier.row.seq;
+                    }
+                }
+                let nativeRestored = localCut
+                    ? nativeFoldReplay?.legacyUpgradeInput(draft.sessionID, draft.model)
+                    : undefined;
                 // Validate fold provenance before the cache path or its raw-row
                 // fallback can invisibly replace the checkpoint. Without a valid
                 // local admission, use ordinary managed-history reconstruction instead.
                 if (
+                    nativeRestored === undefined &&
                     cut &&
                     nativeFoldReplay &&
                     (await nativeFoldReplay.admits(draft.sessionID, cut, reader))
@@ -2499,27 +2726,26 @@ export async function registerContext(context: V2Context) {
                     );
                 }
                 if (cut && incoming && nativeRestored) {
-                    const present = new Set(
-                        draft.messages.flatMap((message) => (message.id ? [message.id] : [])),
-                    );
-                    const hidden = nativeRestored.filter((message) => {
-                        const id = nativeRowID(message);
-                        return !id || !present.has(id);
-                    });
                     draft.messages.splice(
                         0,
                         draft.messages.length,
-                        ...hidden,
-                        ...draft.messages.filter((message) => message !== incoming),
+                        ...restoreNativeCheckpointInput(
+                            draft.messages,
+                            incoming,
+                            nativeRestored,
+                            reader,
+                            draft.sessionID,
+                        ),
                     );
                 } else if (localCut && cut && incoming) {
-                    // A checkpoint without native replay admission still uses our
-                    // ordinary host-row reconstruction below. Let the transform
-                    // render or reuse the history head from our compartments, so
-                    // any rebuild opens the same mutation/drain gate as other folds.
-                    // Keep FoldOwner's host wrapper out of this path: its serialized
-                    // raw context can already be covered by the compartments.
-                    if (!nativeFoldReplay) {
+                    // Only a matching legacy owner can preserve a frozen carrier.
+                    // Unknown native wrappers must not become legacy state; the
+                    // existing owner's rebuild policy owns retiring old text.
+                    const legacy = await folds.read(draft.sessionID);
+                    if (
+                        legacy?.cutSeq === cut.seq &&
+                        legacy.submittedSha === foldDigest(cut.data.summary ?? "")
+                    ) {
                         const identity = await folds.observe({
                             sessionID: draft.sessionID,
                             cutSeq: cut.seq,
@@ -2543,7 +2769,7 @@ export async function registerContext(context: V2Context) {
                     draft.messages.splice(
                         0,
                         draft.messages.length,
-                        ...restoreAfterCheckpoint({
+                        ...(await restoreAfterCheckpoint({
                             db,
                             reader,
                             draft,
@@ -2551,7 +2777,7 @@ export async function registerContext(context: V2Context) {
                             cut: localCut,
                             incoming,
                             boundaryRepair,
-                        }),
+                        })),
                     );
                 }
                 messageTimes = readTimes(reader, draft.messages);
@@ -2617,8 +2843,42 @@ export async function registerContext(context: V2Context) {
             checkpointPassPermissions.delete(draft.sessionID);
             checkpointInputEstimates.delete(draft.sessionID);
             if (checkpoint?.id && checkpointPermission && replayHead === undefined) {
-                const stripped = await folds.stripRecentContext(draft.sessionID, checkpoint.id);
-                if (stripped?.rendered) checkpoint = structuredClone(stripped.rendered);
+                let covered = upgradeCheckpointSequence === undefined;
+                if (upgradeCheckpointSequence !== undefined) {
+                    const boundary = db
+                        .prepare(
+                            "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id=?",
+                        )
+                        .get(draft.sessionID) as { id: string | null } | undefined;
+                    const source = openStoreReader();
+                    try {
+                        const through = upgradeCheckpointSequence - 1;
+                        const last = source
+                            .rowStampsThrough(draft.sessionID, through)
+                            .filter((row) =>
+                                (RAW_MESSAGE_TYPES as readonly string[]).includes(row.type),
+                            )
+                            .at(-1)?.seq;
+                        const end = boundary?.id
+                            ? source.sequenceForId(draft.sessionID, boundary.id)
+                            : undefined;
+                        covered = last === undefined || (end !== undefined && end >= last);
+                    } finally {
+                        source.close();
+                    }
+                }
+                if (covered) {
+                    const checkpointID = checkpoint.id;
+                    const stripped = await folds.stripRecentContext(draft.sessionID, checkpointID);
+                    if (stripped?.rendered) {
+                        checkpoint = structuredClone(stripped.rendered);
+                        if (upgradeCheckpointSequence !== undefined)
+                            await nativeFoldReplay?.checkpointCovered(
+                                draft.sessionID,
+                                checkpointID,
+                            );
+                    }
+                }
             }
             // Keep the transform decision this pass staged (if any) together with
             // the store sequence captured before the request; the next pass binds it
@@ -2645,9 +2905,21 @@ export async function registerContext(context: V2Context) {
                       : null;
             const servedHead = head && structuredClone(head);
             const headApplied = head ? applyCheckpointHead(draft, head) : false;
-            if (nativeMessages && !checkpoint) {
+            if (nativeMessages && (!checkpoint || upgradeCheckpointSequence !== undefined)) {
                 try {
-                    await nativeFoldReplay?.capture(draft, nativeMessages);
+                    const state = db && getOrCreateSessionMeta(db, draft.sessionID);
+                    const boundary = db
+                        ?.prepare(
+                            "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id=?",
+                        )
+                        .get(draft.sessionID) as { id: string | null } | undefined;
+                    await nativeFoldReplay?.capture(
+                        draft,
+                        nativeMessages,
+                        boundary?.id && state?.cachedM0Bytes
+                            ? { id: boundary.id, summary: state.cachedM0Bytes.toString("utf8") }
+                            : undefined,
+                    );
                 } catch (error) {
                     nativeFoldReplay?.invalidate(draft.sessionID, true);
                     sessionLog(
@@ -2657,6 +2929,8 @@ export async function registerContext(context: V2Context) {
                     );
                 }
             }
+            if (checkpointPermission === true && replayHead === undefined)
+                admissionRebuildPasses.add(draft.sessionID);
             const capturedSlot = getSlot(draft.sessionID);
             if (
                 capturedSlot &&
@@ -2817,11 +3091,22 @@ export async function registerContext(context: V2Context) {
     };
     await context.session.hook("context", (draft) =>
         withSqliteTransformPass(async () => {
+            hostFoldIdle?.active(draft.sessionID);
             const anchor = generateReplayAnchor(draft.messages);
             try {
                 await runManagedContext(draft);
                 if (!compactionOff) await refuseOversizedCheckpoint(draft);
+                if (
+                    !deletedSessions.has(draft.sessionID) &&
+                    admissionRebuildPasses.has(draft.sessionID)
+                ) {
+                    await nativeFoldReplay?.commitLegacyUpgrade(draft.sessionID, true);
+                    await nativeFoldReplay?.commitEditedAdmission(draft.sessionID);
+                }
             } finally {
+                admissionRebuildPasses.delete(draft.sessionID);
+                nativeFoldReplay?.cancelLegacyUpgrade(draft.sessionID);
+                nativeFoldReplay?.cancelEditedAdmission(draft.sessionID);
                 checkpointInputEstimates.delete(draft.sessionID);
                 checkpointPassPermissions.delete(draft.sessionID);
             }
@@ -3004,6 +3289,7 @@ export async function registerContext(context: V2Context) {
     return {
         async dispose() {
             messageTimesCache.clear();
+            hostFoldIdle?.dispose();
             usageController.abort();
             // OpenCode 2 runs this disposer before it removes this instance's hooks
             // (scope finalizers run in reverse registration order, and the disposer

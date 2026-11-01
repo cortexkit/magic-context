@@ -1346,12 +1346,14 @@ test("the search index matches the v2 projection with no duplicate ordinals", ()
 test("the converted store rebuilds once and serves five byte-identical cache hits", () => {
     expect(evidence.forward.pins).toHaveLength(5);
     expect(new Set(evidence.forward.pins).size).toBe(1);
-    expect(evidence.forwardRebuilds).toEqual(["fold_owner:boot_recovery"]);
+    // Native replay leaves this single initial rebuild to the shared transform,
+    // rather than pinning and replaying the host's legacy checkpoint wrapper.
+    expect(evidence.forwardRebuilds).toEqual(["transform:first_render"]);
     const folds = evidence.forward.folds.slice(0, 5);
     expect(folds).toHaveLength(5);
-    expect(folds.map((fold) => fold.rematerialized)).toEqual([false, false, false, false, false]);
+    expect(folds.map((fold) => fold.rematerialized)).toEqual([true, false, false, false, false]);
     expect(folds.map((fold) => fold.reason)).toEqual([
-        "cache_hit",
+        "first_render",
         "cache_hit",
         "cache_hit",
         "cache_hit",
