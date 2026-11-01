@@ -1,0 +1,7 @@
+This is a historian draft. Clean it up following the rules in your system prompt.
+
+<draft>
+{{DRAFT}}
+</draft>
+
+Return the cleaned draft as valid XML matching the original structure.

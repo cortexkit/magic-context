@@ -1,5 +1,6 @@
 use super::*;
 use cortexkit_persona::{Approval, ApprovalState, Digest, RenderFailure, TrustClass};
+use sha2::Digest as _;
 use std::fs;
 
 #[derive(Deserialize)]
@@ -38,6 +39,42 @@ fn expected_system(directive: &str) -> String {
     } else {
         format!("{system}\n\n{directive}")
     }
+}
+
+#[test]
+fn embedded_editor_matches_ts_generated_bytes_and_digest() {
+    let pins: serde_json::Value =
+        serde_json::from_str(include_str!("../../testdata/historian-editor-digests.json")).unwrap();
+    assert_eq!(
+        format!("{:x}", sha2::Sha256::digest(EDITOR_PERSONA.as_bytes())),
+        pins["personas/mc_summary_editor/PERSONA.md"]
+            .as_str()
+            .unwrap()
+    );
+    for language in [None, Some("en"), Some("tr")] {
+        let rendered = render_embedded_editor(language).unwrap();
+        let directive = render_language_directive(language, LanguageOptions::default()).unwrap();
+        let expected = if directive.is_empty() {
+            EDITOR_SYSTEM.to_string()
+        } else {
+            format!("{EDITOR_SYSTEM}\n\n{directive}")
+        };
+        assert_eq!(rendered.text, expected);
+        assert_eq!(rendered.digest, Digest::of(expected.as_bytes()));
+    }
+    assert_eq!(
+        format!("{:x}", sha2::Sha256::digest(EDITOR_SYSTEM.as_bytes())),
+        pins["personas/mc_summary_editor/fragments/system.md"]
+            .as_str()
+            .unwrap()
+    );
+    let prompt = include_str!("../../testdata/historian-editor-prompt.txt");
+    assert_eq!(
+        format!("{:x}", sha2::Sha256::digest(prompt.as_bytes())),
+        pins["testdata/historian-editor-prompt.txt"]
+            .as_str()
+            .unwrap()
+    );
 }
 
 #[test]

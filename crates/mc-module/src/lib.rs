@@ -3167,6 +3167,7 @@ impl McHandler {
                 cache_ttl_by_model: std::collections::BTreeMap::new(),
                 catalog: crate::config::CatalogConfigInputs::default(),
                 historian_temperature: None,
+                historian_two_pass: false,
                 historian_expand_tools: Default::default(),
                 historian_runner: None,
                 dreamer_runner: None,
@@ -4925,6 +4926,7 @@ impl McHandler {
         fire_decision.producer_model = model_chain.first().cloned();
         self.record_fire_decision(&store, &parsed.session_id, &loaded, &fire_decision);
         firing.recent_decision = Some(fire_decision);
+        firing.editor_pass = cfg.historian_two_pass;
         PreparedHistorianAction::FireReady(Box::new(PreparedHistorianFiring {
             task: HistorianFiringTask {
                 rust_background_enabled,
@@ -5123,6 +5125,7 @@ impl McHandler {
                 // Only the final wrapup chunk has no lookahead; intermediate chunks still
                 // need discard-last healing so the next round can re-read their tail.
                 firing.validate_options.force_keep_last_compartment = !firing.chunk.has_more;
+                firing.editor_pass = cfg.historian_two_pass;
                 firing
             }
             Ok(AssembleHistorianFiringOutcome::NoFire(
@@ -5403,7 +5406,9 @@ impl McHandler {
                                 runner_limits::refusal("historian_runner_fit_unavailable".into())
                             })?;
                             let recent_decision = firing.recent_decision.clone();
+                            let editor_pass = firing.editor_pass;
                             firing = refit(&store, limits)?;
+                            firing.editor_pass = editor_pass;
                             firing.recent_decision = recent_decision;
                         }
                     } else if session_runner.is_some() {
@@ -17343,6 +17348,7 @@ mod tests {
             cache_ttl_by_model: std::collections::BTreeMap::new(),
             catalog: crate::config::CatalogConfigInputs::default(),
             historian_temperature: None,
+            historian_two_pass: false,
             historian_expand_tools: Default::default(),
             historian_runner: None,
             dreamer_runner: None,

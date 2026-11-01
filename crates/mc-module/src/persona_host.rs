@@ -17,6 +17,9 @@ pub mod dream;
 
 pub const MODULE: &str = "magic-context";
 pub const SUMMARY_ROLE: &str = "mc_summary";
+const EDITOR_ROLE: &str = "mc_summary_editor";
+const EDITOR_PERSONA: &str = include_str!("../personas/mc_summary_editor/PERSONA.md");
+const EDITOR_SYSTEM: &str = include_str!("../personas/mc_summary_editor/fragments/system.md");
 /// The routing consumer summaries select under. Dotted so routing configuration
 /// for `mc` applies to every ck-mc consumer unless `mc.summary` overrides it.
 pub const SUMMARY_CONSUMER: &str = "mc.summary";
@@ -330,10 +333,33 @@ struct ModuleContext<'a> {
 /// The compiled base works without any persona files on the host filesystem.
 pub fn embedded_base() -> EmbeddedTier {
     dream::with_embedded(EmbeddedTier::new())
+        .with_file(EDITOR_ROLE, "PERSONA.md", EDITOR_PERSONA)
+        .expect("fixed editor persona path")
+        .with_file(EDITOR_ROLE, "fragments/system.md", EDITOR_SYSTEM)
+        .expect("fixed editor system path")
         .with_file(SUMMARY_ROLE, "PERSONA.md", SUMMARY_PERSONA)
         .expect("fixed summary persona path")
         .with_file(SUMMARY_ROLE, "fragments/system.md", HISTORIAN_SYSTEM_PROMPT)
         .expect("fixed summary system path")
+}
+
+/// Editor guidance is a distinct role: using the historian's system would ask
+/// the model to summarize the draft instead of preserving and polishing it.
+pub(crate) fn render_embedded_editor(language: Option<&str>) -> Result<Rendered, PersonaError> {
+    let tiers = vec![Tier::embedded(
+        "base",
+        cortexkit_persona::TrustClass::Operator,
+        embedded_base(),
+    )?];
+    let role = load_role::<Routing>(EDITOR_ROLE, &tiers, &ApprovalSet::new(), None)?;
+    let context = SummaryContext {
+        language: LanguageContext::new(language, LanguageOptions::default()),
+        ..Default::default()
+    };
+    role.render(
+        &render_context(EDITOR_ROLE, &context, &Routing::default()),
+        &fragments()?,
+    )
 }
 
 /// Use persona/v1's platform config resolver, including APPDATA on Windows.

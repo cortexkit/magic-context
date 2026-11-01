@@ -1639,6 +1639,7 @@ pub struct HistorianModelLimits {
 }
 
 pub struct HistorianFireRequest<'a> {
+    pub editor_pass: bool,
     pub rust_background_enabled: bool,
     pub store: &'a McStore,
     pub session_id: &'a str,
@@ -3118,7 +3119,7 @@ where
             producer.close().await;
             return Err(error.into());
         }
-        let output = match observed_output {
+        let mut output = match observed_output {
             Ok(output) => output,
             Err(HistorianProducerError::TimedOut)
                 if crate::historian_producer::is_stage_submission(&handle.run_id) =>
@@ -3328,6 +3329,16 @@ where
             }
         };
 
+        let (selected_child, selected_run) = polish_served_draft(
+            producer,
+            &request,
+            &producer_session_id,
+            &handle.run_id,
+            model,
+            &mut output,
+        )
+        .await;
+
         // Always release both routes, whether publish succeeds or the validate/publish
         // path errors out — an early `?` return here would leak the command + subscribe
         // routes for this firing on the shared consumer connection.
@@ -3409,8 +3420,8 @@ where
         };
         return Ok(HistorianDriveOutcome::Completed(HistorianRunSuccess {
             row_version,
-            producer_session_id,
-            producer_run_id: handle.run_id,
+            producer_session_id: selected_child,
+            producer_run_id: selected_run,
             model: model.clone(),
         }));
     }
@@ -3430,6 +3441,100 @@ where
     Err(HistorianDriveError::Producer(HistorianProducerError::Subc(
         ProducerErrorBody::untagged("runner_refusal_chain_exhausted", detail),
     )))
+}
+
+/// Polish only a validated draft. Keep the original child until the editor has
+/// passed validation, because a later memory turn must continue the chosen reply.
+async fn polish_served_draft<P: HistorianProducerDriver + ?Sized>(
+    producer: &mut P,
+    request: &HistorianFireRequest<'_>,
+    draft_child: &str,
+    draft_run: &str,
+    model: &str,
+    draft: &mut ProducerOutput,
+) -> (String, String) {
+    let keep = (draft_child.to_owned(), draft_run.to_owned());
+    if !request.editor_pass
+        || draft.length_capped
+        || validate_historian_output(
+            &draft.text,
+            request.validation_chunk,
+            request.prior_compartments,
+            request.validate_options,
+        )
+        .is_err()
+    {
+        return keep;
+    }
+    let system = match crate::persona_host::render_embedded_editor(request.content_language) {
+        Ok(system) => system.text,
+        Err(error) => {
+            tracing::warn!(%error, "historian editor persona failed; keeping validated draft");
+            return keep;
+        }
+    };
+    let editor_child = format!("{draft_child}-editor");
+    let prompt = include_str!("../testdata/historian-editor-prompt.txt").replacen(
+        "{{DRAFT}}",
+        &draft.text,
+        1,
+    );
+    producer.close().await;
+    let edited = async {
+        let run = producer
+            .start_with_temperature(
+                &editor_child,
+                &system,
+                &prompt,
+                model,
+                request.model_variants.get(model).map(String::as_str),
+                request.temperature,
+            )
+            .await?;
+        let output = match producer
+            .await_output_with_timeout(&run.run_id, request.await_timeout)
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = producer.cancel(&run.run_id).await;
+                return Err(error);
+            }
+        };
+        Ok::<_, HistorianProducerError>((run, output))
+    }
+    .await;
+    let accepted = edited.as_ref().is_ok_and(|(_, output)| {
+        !output.length_capped
+            && validate_historian_output(
+                &output.text,
+                request.validation_chunk,
+                request.prior_compartments,
+                request.validate_options,
+            )
+            .is_ok()
+    });
+    if accepted {
+        let (run, output) = edited.expect("accepted editor result");
+        producer.close().await;
+        if producer.bind_session(draft_child).await.is_ok() {
+            producer
+                .release_child("historian draft", request.session_id)
+                .await;
+        }
+        producer.close().await;
+        let _ = producer.bind_session(&editor_child).await;
+        *draft = output;
+        (editor_child, run.run_id)
+    } else {
+        tracing::info!("historian editor failed validation or completion; keeping validated draft");
+        producer
+            .release_child("historian editor", request.session_id)
+            .await;
+        producer.close().await;
+        let _ = producer.bind_session(draft_child).await;
+        keep
+    }
 }
 
 pub async fn reattach_historian_producer<P>(
@@ -5001,7 +5106,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn historian_4b_served_firing_does_not_run_editor_even_with_two_pass() {
+    async fn historian_4b_served_firing_runs_editor_when_requested() {
         for two_pass in [false, true] {
             let config = resolve_fixture_config(
                 serde_json::json!({"historian":{"two_pass":two_pass,"temperature":0.3,"opencode":{"model":"prov/main"}}}),
@@ -5016,18 +5121,29 @@ mod tests {
             let models = vec!["prov/main".into()];
             let mut producer = ScriptedProducer::default()
                 .with_start(Ok(run_handle("served")))
-                .with_output(Ok(producer_output(historian_xml("served draft"))));
+                .with_start(Ok(run_handle("editor")))
+                .with_output(Ok(producer_output(historian_xml("served draft"))))
+                .with_output(Ok(producer_output(historian_xml("polished summary"))));
             let mut request = fire_request(&main_store, "prompt", &models, &chunk, &prior);
+            // Draft polish used to run only in fixtures, leaving served summaries
+            // unedited even when two_pass requested it.
+            request.editor_pass = config.effective.historian_two_pass;
             request.temperature = config.effective.historian_temperature;
             assert!(matches!(
                 run_historian_firing(&mut producer, request).await.unwrap(),
                 HistorianDriveOutcome::Completed(_)
             ));
-            assert_eq!(producer.observed_starts.len(), 1);
-            assert!(producer
-                .observed_prompts
-                .iter()
-                .all(|prompt| !prompt.contains("<draft>")));
+            assert_eq!(producer.observed_starts.len(), if two_pass { 2 } else { 1 });
+            if two_pass {
+                assert!(producer.observed_prompts[1].contains("<draft>"));
+                assert!(producer.observed_prompts[1].contains("served draft"));
+                assert_eq!(
+                    producer.observed_systems[1],
+                    crate::persona_host::render_embedded_editor(None)
+                        .unwrap()
+                        .text
+                );
+            }
             assert_eq!(
                 main_store
                     .load_compartments("ses")
@@ -5036,7 +5152,54 @@ mod tests {
                     .unwrap()
                     .p1
                     .as_deref(),
-                Some("served draft")
+                Some(if two_pass {
+                    "polished summary"
+                } else {
+                    "served draft"
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn historian_4b_served_editor_failures_keep_the_validated_draft() {
+        for editor_reply in [
+            Err(HistorianProducerError::TimedOut),
+            Ok(producer_output("not XML".into())),
+            Ok(ProducerOutput {
+                length_capped: true,
+                ..producer_output(historian_xml("partial polish"))
+            }),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let main_store = store(dir.path());
+            seed_prior_compartment(&main_store);
+            let chunk = historian_chunk();
+            let prior = prior_ranges();
+            let models = vec!["prov/main".into()];
+            let mut producer = ScriptedProducer::default()
+                .with_start(Ok(run_handle("draft")))
+                .with_start(Ok(run_handle("editor")))
+                .with_output(Ok(producer_output(historian_xml("kept draft"))))
+                .with_output(editor_reply);
+            let mut request = fire_request(&main_store, "prompt", &models, &chunk, &prior);
+            request.editor_pass = true;
+            let HistorianDriveOutcome::Completed(success) =
+                run_historian_firing(&mut producer, request).await.unwrap()
+            else {
+                panic!("expected publication")
+            };
+            assert_eq!(success.producer_run_id, "draft");
+            assert_eq!(producer.observed_starts.len(), 2);
+            assert_eq!(
+                main_store
+                    .load_compartments("ses")
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .p1
+                    .as_deref(),
+                Some("kept draft")
             );
         }
     }
@@ -5296,6 +5459,7 @@ mod tests {
             .unwrap()
             .compartment_set_generation;
         HistorianFireRequest {
+            editor_pass: false,
             rust_background_enabled: false,
             store,
             session_id: "ses",

@@ -834,6 +834,7 @@ impl HistorianNoFireReason {
 
 #[derive(Debug, Clone)]
 pub struct AssembledHistorianFiring {
+    pub editor_pass: bool,
     pub prompt: String,
     pub model_chain: Vec<String>,
     pub model_limits: std::collections::BTreeMap<String, crate::historian::HistorianModelLimits>,
@@ -898,6 +899,7 @@ impl AssembledHistorianFiring {
         system: std::borrow::Cow<'a, str>,
     ) -> HistorianFireRequest<'a> {
         HistorianFireRequest {
+            editor_pass: self.editor_pass,
             rust_background_enabled: false,
             store,
             session_id,
@@ -1729,6 +1731,7 @@ fn assemble_historian_firing_inner(
 
     Ok(AssembleHistorianFiringOutcome::Fire(Box::new(
         AssembledHistorianFiring {
+            editor_pass: false,
             model_limits: config.model_limits.clone(),
             model_variants: config.model_variants.clone(),
             prompt,

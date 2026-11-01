@@ -405,6 +405,7 @@ fn runtime_projection(config: crate::config::McModuleConfig) -> Value {
         signed_thinking_hold,
         historian_expand_tools: _, // Templates contain arbitrary user prompt text and are not exposed.
         historian_temperature,
+        historian_two_pass: _,
         historian_runner,
         dreamer_runner,
         language,

@@ -104,6 +104,8 @@ pub struct McModuleConfig {
     // module refuses a request that carries none rather than guessing from disk.
     /// Optional trusted user-configured sampling temperature for historian requests.
     pub historian_temperature: Option<f64>,
+    /// Optional draft polish; editor failures keep the validated historian draft.
+    pub historian_two_pass: bool,
     /// Which side runs the historian's completion, when the user tier names one.
     /// USER-tier only, for the same reason the model is: it decides whose provider
     /// account and whose process pays for the call, so a cloned repository must not
@@ -202,6 +204,7 @@ impl Default for McModuleConfig {
             rust_background_enabled: false,
             signed_thinking_hold: SignedThinkingHold::Off,
             historian_temperature: None,
+            historian_two_pass: false,
             historian_expand_tools: Default::default(),
             historian_runner: None,
             dreamer_runner: None,
@@ -900,6 +903,12 @@ fn merge_tiers_with_warnings(
     // What the tiers say about the review-user-memories schedule; None if neither does.
     let mut review_schedule_enabled: Option<bool> = None;
     for (tier, value) in [("user", user), ("project", project)] {
+        if let Some(two_pass) = value
+            .and_then(|value| value.pointer("/historian/two_pass"))
+            .and_then(Value::as_bool)
+        {
+            cfg.historian_two_pass = two_pass;
+        }
         let Some(value) = value else {
             continue;
         };
