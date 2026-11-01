@@ -37,6 +37,9 @@ pub struct Session {
     version: u64,
     /// Parts the model asked to drop, held for the next view.
     queued: BTreeSet<(String, String)>,
+    /// The age sweep's bookmark from the previous pass with permission to
+    /// rebuild: tool outputs at or below it were already far behind then.
+    reclaim_bookmark: u64,
     /// The highest notice number handled.
     seq: u64,
 }
@@ -51,6 +54,7 @@ impl Session {
             latest: None,
             version: 0,
             queued: BTreeSet::new(),
+            reclaim_bookmark: 0,
             seq: 0,
         }
     }
@@ -105,7 +109,7 @@ impl Session {
         }
         self.forget_missing();
         if pass::at_execute(&self.conditions, settings) && !self.summary_on_its_way() {
-            if let Some(view) = self.build() {
+            if let Some(view) = self.build(settings) {
                 self.publish(client, view).await;
             }
         }
@@ -113,9 +117,9 @@ impl Session {
 
     /// A ride: the runner is about to send a request that rewrites the cache
     /// anyway, or would not fit. Everything held lands now.
-    pub fn ride(&mut self, ride: &RideRequest) -> Option<View> {
+    pub fn ride(&mut self, settings: &Settings, ride: &RideRequest) -> Option<View> {
         self.conditions = ride.conditions.clone();
-        let view = self.build()?;
+        let view = self.build(settings)?;
         self.accept(view.clone());
         Some(view)
     }
@@ -179,25 +183,43 @@ impl Session {
         false
     }
 
-    /// The next view with every lane's edits, or `None` when no lane has
-    /// work. Lanes that have work but cannot produce a valid view are a bug;
-    /// they are logged and their work dropped, so the same failure does not
-    /// repeat on every pass.
-    fn build(&mut self) -> Option<View> {
-        let (ops, covered) = lanes::queued_drops(&self.index, &self.queued);
+    /// A pass with permission to rebuild: every lane adds the parts it wants
+    /// gone, and one view carries them. `None` when no lane has work.
+    ///
+    /// A view that fails ck-mc's own checks is a bug in a lane. It is logged
+    /// and the work it held is dropped, so the same failure does not repeat
+    /// on every pass.
+    fn build(&mut self, settings: &Settings) -> Option<View> {
+        let edited = lanes::Edited::of(self.latest.as_ref());
+        let context = lanes::Context {
+            index: &self.index,
+            edited: &edited,
+            protected_tools: &settings.protected_tools,
+            keep_first_message: self.features.keep_first_message,
+        };
+        let mut wanted: Vec<lanes::PartKey> = self.queued.iter().cloned().collect();
+        wanted.extend(lanes::age_sweep(&context, self.reclaim_bookmark));
+        wanted.extend(lanes::reasoning_over_budget(
+            &context,
+            settings.keep_reasoning_tokens,
+        ));
+        let (ops, covered) = lanes::drop_ops(&context, &wanted);
+        let bookmark = lanes::far_behind_bookmark(&context, pass::usable_window(&self.conditions));
+        self.reclaim_bookmark = self.reclaim_bookmark.max(bookmark);
         let version = self.version + 1;
-        match view_builder::next_view(
+        let built = view_builder::next_view(
             self.latest.as_ref(),
             self.index.entries(),
             ops,
             &self.conditions.rules,
             version,
-        ) {
+        );
+        for part in &covered {
+            self.queued.remove(part);
+        }
+        match built {
             Ok(Some(view)) => {
                 self.version = version;
-                for part in covered {
-                    self.queued.remove(&part);
-                }
                 Some(view)
             }
             Ok(None) => None,
@@ -206,9 +228,6 @@ impl Session {
                     "ck-mc: session {}: no valid view: {refusal:?}",
                     self.key.session
                 );
-                for part in covered {
-                    self.queued.remove(&part);
-                }
                 None
             }
         }

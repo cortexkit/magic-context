@@ -195,7 +195,9 @@ impl<C: RunnerClient> Module<C> {
                         }
                     }
                     Job::Ride(ride, reply) => {
-                        let view = session.as_mut().and_then(|session| session.ride(&ride));
+                        let view = session
+                            .as_mut()
+                            .and_then(|session| session.ride(&inner.settings, &ride));
                         let _ = reply.send(view);
                     }
                     Job::Tool { name, input, reply } => {

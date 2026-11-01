@@ -143,9 +143,13 @@ fn config(preset: &str, kind: Kind, rules: ProviderRules) -> SessionConfig {
 }
 
 async fn start(config: SessionConfig) -> Runner<InProcess> {
+    start_with(config, Settings::default()).await
+}
+
+async fn start_with(config: SessionConfig, settings: Settings) -> Runner<InProcess> {
     let client = HostClient::default();
     let provider = InProcess {
-        module: Module::new(client.clone(), Settings::default()),
+        module: Module::new(client.clone(), settings),
         client,
     };
     let runner = Runner::start(config, provider).await.unwrap();
@@ -370,4 +374,81 @@ async fn a_cache_loss_lands_queued_drops_below_the_threshold() {
         requests[last].usage.cache_read_tokens,
         requests[last - 1].usage.prompt_tokens
     );
+}
+
+/// Reasoning parts the model sees, and how many the transcript holds.
+fn reasoning_seen(host: &Host) -> (usize, usize) {
+    let count = |parts: &mut dyn Iterator<Item = &ck_contract_draft::part::Part>| {
+        parts
+            .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
+            .count()
+    };
+    let rendered = host.rendered();
+    let seen = count(&mut rendered.iter().flat_map(|message| message.parts.iter()));
+    let entries = host.entries();
+    let written = count(&mut entries.iter().flat_map(|entry| entry.parts.iter()));
+    (seen, written)
+}
+
+#[tokio::test]
+async fn the_age_sweep_drops_an_output_only_after_it_was_far_behind_on_an_earlier_rebuild() {
+    // Reads at tags 3, 5, 7 and 9, each about 7,000 tokens. The request
+    // after the fourth read (the fifth request) is the first over the
+    // threshold. The pass after it sees 3 and 5 far behind (more than a
+    // quarter of the usable window, 9,750 tokens, of newer content) and only
+    // records that; the pass after the sixth request drops them, so the
+    // seventh request is the first under a view. Reasoning is too small to
+    // matter here.
+    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    runner
+        .play(&[
+            user("Review the module."),
+            read_file(50),
+            read_file(50),
+            read_file(50),
+            read_file(50),
+            answer(),
+            answer(),
+            answer(),
+        ])
+        .await;
+    assert_clean(&runner);
+    let requests = &runner.report.requests;
+    let first_under_view = requests.iter().position(|record| record.view.is_some());
+    assert_eq!(first_under_view, Some(6));
+    assert_eq!(requests[6].view, Some(1));
+    let host = runner.host();
+    assert_eq!(seen(host, 3).as_deref(), Some(placeholder(3).as_str()));
+    assert_eq!(seen(host, 5).as_deref(), Some(placeholder(5).as_str()));
+    assert!(seen(host, 7).unwrap().starts_with("§7§ xxx"));
+    assert!(seen(host, 9).unwrap().starts_with("§9§ xxx"));
+}
+
+#[tokio::test]
+async fn reasoning_beyond_the_budget_goes_on_the_first_execute_pass() {
+    for (kind, rules) in [(Kind::OpenAi, FREE), (Kind::Anthropic, BOUND)] {
+        let settings = Settings {
+            keep_reasoning_tokens: 1_000,
+            ..Settings::default()
+        };
+        let mut runner = start_with(config("worker", kind, rules), settings).await;
+        runner
+            .play(&[
+                user("Review the module."),
+                read_file(400),
+                read_file(400),
+                read_file(400),
+                read_file(400),
+                answer(),
+                answer(),
+            ])
+            .await;
+        // The mock providers check every request: under signed reasoning, a
+        // view that left a gap before kept reasoning would fail here.
+        assert_clean(&runner);
+        assert_eq!(runner.host().applied_version(), Some(1), "{kind:?}");
+        // The newest reasoning (400) plus the next older (400) fit 1,000; the
+        // rest went, as the oldest run.
+        assert_eq!(reasoning_seen(runner.host()), (2, 4), "{kind:?}");
+    }
 }
