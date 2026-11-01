@@ -29,6 +29,9 @@ pub struct MessageRange {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkLine {
     pub ordinal: u64,
+    /// Hashes from this raw message, not from a merged display block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commit_hashes: Vec<String>,
     /// The real flat block id (`<mid>#<index>`) of the line's last block. This is empty
     /// only when the raw message has no flat blocks and therefore cannot anchor a
     /// compartment boundary.
@@ -602,6 +605,31 @@ pub fn validate_historian_output(
     }
 
     let mut compartments = emitted;
+    for compartment in &mut compartments {
+        let supported = chunk
+            .lines
+            .iter()
+            .filter(|line| {
+                line.ordinal >= compartment.start_message && line.ordinal <= compartment.end_message
+            })
+            .flat_map(|line| line.commit_hashes.iter().map(String::as_str))
+            .collect();
+        compartment.title =
+            crate::historian_hashes::remove_unsupported_hashes(&compartment.title, &supported);
+        compartment.content =
+            crate::historian_hashes::remove_unsupported_hashes(&compartment.content, &supported);
+        for tier in [
+            &mut compartment.p1,
+            &mut compartment.p2,
+            &mut compartment.p3,
+            &mut compartment.p4,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *tier = crate::historian_hashes::remove_unsupported_hashes(tier, &supported);
+        }
+    }
     let emitted_count = compartments.len();
     let mut discarded_last = false;
     if !options.in_emergency && !options.force_keep_last_compartment && compartments.len() >= 2 {
@@ -1671,6 +1699,7 @@ mod tests {
                     ordinal,
                     message_id: format!("msg-{ordinal}"),
                     anchorable: true,
+                    commit_hashes: Vec::new(),
                 })
                 .collect(),
             present_ordinals: (start..=end).collect(),
@@ -1959,16 +1988,19 @@ full narrative
                     ordinal: 1,
                     message_id: "m1#0".into(),
                     anchorable: true,
+                    commit_hashes: Vec::new(),
                 },
                 ChunkLine {
                     ordinal: 1,
                     message_id: "m1-dup#0".into(),
                     anchorable: true,
+                    commit_hashes: Vec::new(),
                 },
                 ChunkLine {
                     ordinal: 2,
                     message_id: "m2#0".into(),
                     anchorable: true,
+                    commit_hashes: Vec::new(),
                 },
             ],
             present_ordinals: vec![1, 1, 2],
@@ -1986,16 +2018,19 @@ full narrative
                     ordinal: 1,
                     message_id: "m1#0".into(),
                     anchorable: true,
+                    commit_hashes: Vec::new(),
                 },
                 ChunkLine {
                     ordinal: 3,
                     message_id: "m3#0".into(),
                     anchorable: true,
+                    commit_hashes: Vec::new(),
                 },
                 ChunkLine {
                     ordinal: 2,
                     message_id: "m2#0".into(),
                     anchorable: true,
+                    commit_hashes: Vec::new(),
                 },
             ],
             present_ordinals: vec![1, 2, 3],
@@ -2152,6 +2187,7 @@ full narrative
                     ordinal,
                     message_id: format!("m{ordinal}#0"),
                     anchorable: true,
+                    commit_hashes: Vec::new(),
                 })
                 .collect(),
             present_ordinals: vec![1, 2, 100],

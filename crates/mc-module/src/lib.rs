@@ -50,6 +50,7 @@ pub mod divergence;
 pub mod healing;
 pub mod historian;
 pub mod historian_chunk;
+mod historian_hashes;
 pub mod historian_host;
 pub mod historian_producer;
 pub mod historian_prompt;

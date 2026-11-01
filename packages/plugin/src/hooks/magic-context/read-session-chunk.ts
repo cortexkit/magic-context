@@ -9,6 +9,7 @@ import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { isSystemDirective, removeSystemReminders } from "../../shared/system-directive";
 import { askAnswerLines } from "./ask-answer-notice";
+import { rawCommitHashes } from "./compartment-commit-hashes";
 import { isHostUnservedRow, markHostUnservedRow } from "./host-served-rows";
 import { prewarmRawSessionOrdinalsForDb } from "./raw-ordinal-warmup";
 import {
@@ -1455,7 +1456,13 @@ export function readSessionChunk(
         }
         if (msg.ordinal < startOrdinal) continue;
 
-        const meta = { ordinal: msg.ordinal, messageId: msg.id };
+        const commitHashes = rawCommitHashes(msg.parts);
+        const meta: SessionChunkLine = {
+            ordinal: msg.ordinal,
+            messageId: msg.id,
+        };
+        // Provenance belongs to validation, not the serialized chunk or prompt.
+        Object.defineProperty(meta, "commitHashes", { value: commitHashes });
         if (isHostUnservedRow(msg)) markHostUnservedRow(meta);
 
         // Host instructions are prompt material, not user decisions. Keep their

@@ -1,5 +1,6 @@
 import { withContentLanguageDirective } from "../../agents/language-directive";
 import { renderUserFacingFailure } from "../../shared/user-facing-codes";
+import { removeUnsupportedCommitHashes } from "./compartment-commit-hashes";
 import { parseCompartmentOutput } from "./compartment-parser";
 import { mapParsedCompartmentsToChunk } from "./compartment-runner-mapping";
 import type {
@@ -18,7 +19,7 @@ export const HISTORIAN_BOUNDARY_HEALING_SLACK = 2;
 export interface HistorianValidationChunk {
     startIndex: number;
     endIndex: number;
-    lines: Array<{ ordinal: number; messageId: string }>;
+    lines: Array<{ ordinal: number; messageId: string; commitHashes?: string[] }>;
     /** Optional — when provided, gaps inside these ranges heal at any size. */
     toolOnlyRanges?: ReadonlyArray<{ start: number; end: number }>;
     /** Completed invocation/result arcs visible in the raw snapshot. */
@@ -200,6 +201,26 @@ export function validateHistorianOutput(
             ok: false,
             error: "Historian terminal boundary splits a completed tool invocation/result arc",
         });
+    }
+
+    // A chunk can contain several compartments. A hash from later raw messages
+    // is unsupported in an earlier compartment's title, content and P1–P4 fields.
+    for (const compartment of mapped.compartments) {
+        const supported = new Set(
+            chunk.lines
+                .filter(
+                    (line) =>
+                        line.ordinal >= compartment.startMessage &&
+                        line.ordinal <= compartment.endMessage,
+                )
+                .flatMap((line) => line.commitHashes ?? []),
+        );
+        for (const field of ["title", "content", "p1", "p2", "p3", "p4"] as const) {
+            const value = compartment[field];
+            if (typeof value === "string") {
+                compartment[field] = removeUnsupportedCommitHashes(value, supported);
+            }
+        }
     }
 
     return finish({
