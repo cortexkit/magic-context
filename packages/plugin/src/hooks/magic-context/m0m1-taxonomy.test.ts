@@ -1,13 +1,18 @@
 /// <reference types="bun-types" />
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
-// Cache-stability gate for the SOFT+ / SOFT / HARD materialization taxonomy.
+// Cache-stability gate for the m[0]/m[1] side of the pass taxonomy. SOFT+,
+// SOFT and HARD are cache-bust levels, named by how far into the cached prefix
+// a pass may change bytes (ARCHITECTURE.md, "Pass taxonomy").
 //
 // This is THE regression guard for the m[0]/m[1] split. The contract:
-//   SOFT+ (defer pass, nothing new)      → m[0] AND m[1] replay BYTE-IDENTICAL.
-//   SOFT  (exec / cache-busting pass)    → m[1] re-renders, m[0] stays identical.
+//   defer (cache hit, no bust)           → m[0] AND m[1] replay BYTE-IDENTICAL.
+//   SOFT+ (conversation-only bust)       → m[0] AND m[1] replay BYTE-IDENTICAL;
+//                                          only messages after them change.
+//   SOFT  (m[1] bust: new content)       → m[1] re-renders, m[0] stays identical.
 //   HARD  (TTL idle / system / tools /   → m[0] re-materializes (fold m[1] in),
 //          model change, or content)        m[1] resets to placeholder.
+// The defer and SOFT+ cases look the same from here: both keep m[0] and m[1].
 //
 // The bug this guards against: a routine historian publish (new compartment)
 // must NEVER mutate m[0] — folding m[0] on every publish busts the Anthropic
