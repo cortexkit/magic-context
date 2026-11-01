@@ -18,22 +18,26 @@ pub fn bytes_tokens(bytes: u64) -> u64 {
     bytes.div_ceil(4)
 }
 
-/// Tokens a full part costs in a request. Reasoning costs what the model
-/// reported when it produced it, which the caller supplies, because encrypted
-/// reasoning has no text to count.
-pub fn part_tokens(part: &Part, reasoning_tokens: impl Fn(&str) -> u64) -> u64 {
+/// Tokens a part costs as the model sees it, tag prefix included. Reasoning
+/// costs what the model reported when it produced it, which the caller
+/// supplies, because encrypted reasoning has no text to count.
+pub fn part_tokens(
+    message: &RenderedMessage,
+    part: &Part,
+    reasoning_tokens: impl Fn(&str) -> u64,
+) -> u64 {
+    let wire = || message.wire_text(part).map_or(0, |text| text_tokens(&text));
     match &part.body {
-        PartBody::Text { text } => text_tokens(text),
+        PartBody::Text { .. } => wire(),
         PartBody::Reasoning { .. } => reasoning_tokens(&part.id),
         PartBody::Tool(tool) => {
             let input = serde_json::to_string(&tool.input).expect("tool input serializes");
-            let output = tool.output.as_deref().map_or(0, text_tokens);
             let attachments: u64 = tool
                 .attachments
                 .iter()
                 .map(|attachment| media_tokens(&attachment.media.mime, attachment.media.size))
                 .sum();
-            text_tokens(&tool.name) + text_tokens(&input) + output + attachments
+            text_tokens(&tool.name) + text_tokens(&input) + wire() + attachments
         }
         PartBody::Image(media) | PartBody::File(media) => media_tokens(&media.mime, media.size),
     }
@@ -54,7 +58,7 @@ pub fn messages_tokens(
 ) -> u64 {
     messages
         .iter()
-        .flat_map(|message| &message.parts)
-        .map(|part| part_tokens(part, reasoning_tokens))
+        .flat_map(|message| message.parts.iter().map(move |part| (message, part)))
+        .map(|(message, part)| part_tokens(message, part, reasoning_tokens))
         .sum()
 }

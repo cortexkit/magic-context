@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use crate::model::{Kind, ModelError};
 use crate::runner::{CallError, Host, Provider, Runner, SessionConfig, UserEdit};
-use crate::script::{Step, ToolCall, Turn};
+use crate::script::{SelfTag, Step, ToolCall, Turn};
 
 type Decide = Box<dyn FnMut(&Host) -> Option<Vec<Edit>> + Send>;
 
@@ -468,4 +468,119 @@ async fn after_a_revert_the_runner_skips_edits_for_messages_that_are_gone() {
     assert!(notices.iter().any(|notice| notice
         .events
         .contains(&Event::TranscriptChanged { from_ordinal: 2 })));
+}
+
+/// A reply that only answers, starting its text the given way.
+fn answer_tagged(self_tag: SelfTag) -> Step {
+    Step::Model(Turn {
+        text: Some("Done.".into()),
+        self_tag,
+        output_tokens: 5,
+        ..Turn::default()
+    })
+}
+
+/// Whether each request read the whole previous request back from the cache,
+/// that is, continued the chain.
+fn continued(report: &crate::runner::Report) -> Vec<bool> {
+    report
+        .requests
+        .windows(2)
+        .map(|pair| pair[1].usage.cache_read_tokens == pair[0].usage.prompt_tokens)
+        .collect()
+}
+
+#[tokio::test]
+async fn self_tagged_replies_keep_a_chained_route_continuing_across_a_revert() {
+    let mut runner = start(config(Kind::OpenAiChained, FREE, 100_000)).await;
+    runner
+        .play(&[
+            user("start"),
+            work(100, 1_000),
+            work(100, 1_000),
+            answer(),
+            user("next"),
+            answer(),
+        ])
+        .await;
+    assert_eq!(continued(&runner.report), [true; 3]);
+
+    // Remove the second user message and the reply to it. The next user
+    // message takes the next number, above the removed ones, so the model's
+    // next self-tag is still the number the runner assigns.
+    let removed = runner.host().entries()[4].ordinal;
+    runner
+        .play(&[
+            Step::Revert { ordinal: removed },
+            user("instead"),
+            answer(),
+            work(10, 500),
+            answer(),
+        ])
+        .await;
+    assert!(
+        runner.report.model_errors.is_empty(),
+        "{:?}",
+        runner.report.model_errors
+    );
+    // The first request after the revert is a full resend: the history
+    // changed under the chain. Every later one continues again.
+    assert_eq!(
+        continued(&runner.report),
+        [true, true, true, false, true, true]
+    );
+
+    // Every reply renders exactly as written, and numbers skip the removed
+    // range instead of reusing it.
+    let rendered = runner.host().rendered();
+    let tags: Vec<u64> = rendered
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| part.tag)
+        .collect();
+    assert!(tags.windows(2).all(|pair| pair[0] < pair[1]), "{tags:?}");
+    assert!(
+        tags.windows(2).any(|pair| pair[1] > pair[0] + 1),
+        "{tags:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_reply_without_its_self_tag_breaks_the_chain_every_time() {
+    let mut runner = start(config(Kind::OpenAiChained, FREE, 100_000)).await;
+    runner
+        .play(&[
+            user("start"),
+            answer_tagged(SelfTag::Missing),
+            user("next"),
+            answer_tagged(SelfTag::Missing),
+            user("again"),
+            answer_tagged(SelfTag::Missing),
+        ])
+        .await;
+    assert_eq!(continued(&runner.report), [false, false]);
+}
+
+#[tokio::test]
+async fn a_wrong_self_tag_breaks_the_chain_once() {
+    let mut runner = start(config(Kind::OpenAiChained, FREE, 100_000)).await;
+    runner
+        .play(&[
+            user("start"),
+            answer_tagged(SelfTag::Number(99)),
+            user("next"),
+            answer(),
+            user("again"),
+            answer(),
+        ])
+        .await;
+    assert_eq!(continued(&runner.report), [false, true]);
+    // The stored reply carries no prefix; the runner renders the number it
+    // assigned in front of it.
+    let first_reply = &runner.host().rendered()[1];
+    let text = first_reply.wire_text(&first_reply.parts[0]).unwrap();
+    assert_eq!(
+        text,
+        format!("§{}§ Done.", first_reply.parts[0].tag.unwrap())
+    );
 }

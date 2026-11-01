@@ -41,8 +41,22 @@ pub struct Turn {
     /// Visible reasoning text, for a provider that returns some.
     pub reasoning_text: Option<String>,
     pub text: Option<String>,
+    /// How the model starts its text.
+    pub self_tag: SelfTag,
     pub tools: Vec<ToolCall>,
     pub output_tokens: u64,
+}
+
+/// The tag prefix a model writes at the start of its reply's text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SelfTag {
+    /// One more than the highest number it can see, as it is told to.
+    #[default]
+    Next,
+    /// None at all.
+    Missing,
+    /// A number of its own choosing.
+    Number(u64),
 }
 
 #[derive(Clone, Debug)]

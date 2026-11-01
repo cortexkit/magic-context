@@ -10,7 +10,8 @@
 //!
 //! The provider computes every byte it puts in a view (placeholders such as
 //! `[dropped §12§]`, cut-down edit arguments, the history head). The runner
-//! adds nothing to them, not even a tag prefix.
+//! adds nothing to them, not even a tag prefix; every other tagged text is
+//! rendered with its prefix ([`RenderedMessage::wire_text`]).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -153,6 +154,30 @@ pub struct RenderedMessage {
     /// The parts that remain, with replaced fields applied. A replaced part
     /// keeps its id and tag and gets a new checksum.
     pub parts: Vec<Part>,
+    /// The parts whose text (a text part's text or a tool result's output)
+    /// a view replaced. Those bytes are final: no tag prefix goes in front.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub final_text: BTreeSet<String>,
+}
+
+impl RenderedMessage {
+    /// The text the model sees for a text part or a finished tool result:
+    /// the tag prefix ([`crate::part::tag_prefix`]) then the stored text, or
+    /// a view's replaced bytes as they are. `None` for other parts and for a
+    /// tool still running.
+    pub fn wire_text(&self, part: &Part) -> Option<String> {
+        let text = match &part.body {
+            PartBody::Text { text } => text,
+            PartBody::Tool(tool) => tool.output.as_ref()?,
+            PartBody::Reasoning { .. } | PartBody::Image(_) | PartBody::File(_) => return None,
+        };
+        match part.tag {
+            Some(tag) if !self.final_text.contains(&part.id) => {
+                Some(format!("{}{text}", crate::part::tag_prefix(tag)))
+            }
+            _ => Some(text.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,12 +347,21 @@ pub fn apply_edits(entries: &[Entry], edits: &[Edit]) -> Result<Vec<RenderedMess
             continue;
         }
         let mut parts = Vec::with_capacity(entry.parts.len());
+        let mut final_text = BTreeSet::new();
         for part in &entry.parts {
             if dropped_parts.contains(&(entry.mid.as_str(), part.id.as_str())) {
                 continue;
             }
             match replaces.get(&(entry.mid.as_str(), part.id.as_str())) {
-                Some(fields) => parts.push(replaced(part, fields)),
+                Some(fields) => {
+                    if fields
+                        .iter()
+                        .any(|(field, _)| matches!(*field, "text" | "output"))
+                    {
+                        final_text.insert(part.id.clone());
+                    }
+                    parts.push(replaced(part, fields));
+                }
                 None => parts.push(part.clone()),
             }
         }
@@ -343,6 +377,7 @@ pub fn apply_edits(entries: &[Entry], edits: &[Edit]) -> Result<Vec<RenderedMess
             role: entry.role,
             notice: entry.notice.clone(),
             parts,
+            final_text,
         });
     }
     Ok(rendered)
@@ -498,6 +533,7 @@ fn render_inserted(message: &InsertedMessage) -> RenderedMessage {
                 )
             })
             .collect(),
+        final_text: BTreeSet::new(),
     }
 }
 

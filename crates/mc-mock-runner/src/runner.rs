@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use ck_contract_draft::notice::{
     Conditions, Event, NoticeAnswer, NoticeRequest, ENTRIES_BUDGET_BYTES,
 };
-use ck_contract_draft::part::{Part, PartBody, Sealing, ToolPart, ToolStatus};
+use ck_contract_draft::part::{
+    split_self_tag, tag_prefix, Part, PartBody, Sealing, ToolPart, ToolStatus,
+};
 use ck_contract_draft::read::{
     Entry, Head, NoticeOrigin, ReadPage, ReadRequest, Role, SessionRef, StepUsage,
 };
@@ -27,7 +29,7 @@ use ck_contract_draft::view::{
 use serde_json::Value;
 
 use crate::model::{Completion, Kind, MockModel, ModelError, Request};
-use crate::script::{Step, ToolCall, Turn};
+use crate::script::{SelfTag, Step, ToolCall, Turn};
 use crate::tokens;
 use crate::transcript::Transcript;
 
@@ -515,9 +517,15 @@ impl<P: Provider> Runner<P> {
             }
         }
 
-        let completion = {
+        let (completion, highest_tag) = {
             let state = self.host.lock();
             let messages = state.render();
+            let highest_tag = messages
+                .iter()
+                .flat_map(|message| &message.parts)
+                .filter_map(|part| part.tag)
+                .max()
+                .unwrap_or(0);
             let reasoning = &state.reasoning_tokens;
             let lookup = |id: &str| reasoning.get(id).copied().unwrap_or(0);
             let request = Request {
@@ -528,7 +536,7 @@ impl<P: Provider> Runner<P> {
                 now: state.now,
                 reasoning_tokens: &lookup,
             };
-            self.model.complete(&request)
+            (self.model.complete(&request), highest_tag)
         };
         let completion = match completion {
             Ok(completion) => completion,
@@ -537,7 +545,7 @@ impl<P: Provider> Runner<P> {
                 return false;
             }
         };
-        self.store_reply(turn, completion);
+        self.store_reply(turn, completion, highest_tag);
         self.notice().await;
         if !turn.tools.is_empty() {
             self.run_tools(&turn.tools).await;
@@ -547,13 +555,13 @@ impl<P: Provider> Runner<P> {
         true
     }
 
-    fn store_reply(&mut self, turn: &Turn, completion: Completion) {
+    fn store_reply(&mut self, turn: &Turn, completion: Completion, highest_tag: u64) {
         let mut state = self.host.lock();
         let mut bodies = Vec::new();
         if let Some(tokens) = turn.reasoning_tokens {
             let sealing = match self.model.kind() {
                 Kind::Anthropic => Sealing::Signed,
-                Kind::OpenAi => Sealing::Encrypted,
+                Kind::OpenAi | Kind::OpenAiChained => Sealing::Encrypted,
             };
             let text = match self.model.kind() {
                 Kind::Anthropic => Some(
@@ -561,7 +569,7 @@ impl<P: Provider> Runner<P> {
                         .clone()
                         .unwrap_or_else(|| "x".repeat(tokens as usize * 4)),
                 ),
-                Kind::OpenAi => None,
+                Kind::OpenAi | Kind::OpenAiChained => None,
             };
             bodies.push(PartBody::Reasoning {
                 text_bytes: text.as_ref().map(|text| text.len() as u64),
@@ -569,8 +577,18 @@ impl<P: Provider> Runner<P> {
                 sealing,
             });
         }
-        if let Some(text) = &turn.text {
-            bodies.push(PartBody::Text { text: text.clone() });
+        // The text exactly as the model wrote it, tag prefix included. The
+        // transcript keeps it without the prefix; rendering puts the assigned
+        // number back.
+        let written = turn.text.as_ref().map(|text| match turn.self_tag {
+            SelfTag::Next => format!("{}{text}", tag_prefix(highest_tag + 1)),
+            SelfTag::Missing => text.clone(),
+            SelfTag::Number(number) => format!("{}{text}", tag_prefix(number)),
+        });
+        if let Some(written) = &written {
+            bodies.push(PartBody::Text {
+                text: split_self_tag(written).1.to_owned(),
+            });
         }
         let ordinal = state.transcript.entries().len();
         for (index, call) in turn.tools.iter().enumerate() {
@@ -603,6 +621,9 @@ impl<P: Provider> Runner<P> {
             )
             .clone();
         for part in &entry.parts {
+            if let (PartBody::Text { .. }, Some(written)) = (&part.body, &written) {
+                self.model.record_output(&part.id, written.clone());
+            }
             if let PartBody::Reasoning { sealing, .. } = part.body {
                 state
                     .reasoning_tokens

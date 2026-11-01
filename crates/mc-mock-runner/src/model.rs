@@ -3,7 +3,10 @@
 //! - it counts the prompt and rejects one larger than the model's window;
 //! - it keeps a prompt cache and reports what it read and wrote;
 //! - for signed reasoning (Anthropic), it remembers what each signed part was
-//!   generated after, and rejects a request in which that history changed.
+//!   generated after, and rejects a request in which that history changed;
+//! - for chained requests (OpenAI Responses continuing from the previous
+//!   response), it continues only when the request repeats the previous one
+//!   and the model's own replies exactly as the model wrote them.
 //!
 //! The signature check works from the rendered request alone. It does not use
 //! the contract's rule checker, so it is an independent check of it.
@@ -62,8 +65,14 @@ pub struct Binding {
 pub enum Kind {
     /// Anthropic: signed thinking, prompt cache with a requested lifetime.
     Anthropic,
-    /// OpenAI Responses: encrypted reasoning with no signature check.
+    /// OpenAI Responses sent in full each time: encrypted reasoning, prefix
+    /// cache.
     OpenAi,
+    /// OpenAI Responses chained to the previous response, as a connection
+    /// that sends only what is new. Any change to history already sent, the
+    /// model's own replies included, ends the chain: the request is sent in
+    /// full and reads nothing but the system prompt from the cache.
+    OpenAiChained,
 }
 
 /// A mock provider for one session.
@@ -73,6 +82,13 @@ pub struct MockModel {
     cache_ttl_ms: u64,
     cache: Vec<CacheEntry>,
     bindings: HashMap<String, Binding>,
+    /// Text the model wrote in its newest reply, per text part. A chained
+    /// request continues from the previous response, so only that reply has
+    /// to come back as written; older ones were checked as part of the
+    /// previous request.
+    outputs: HashMap<String, String>,
+    /// The previous request, for chaining: its blocks and prompt tokens.
+    previous: Option<(Vec<[u8; 32]>, u64)>,
 }
 
 struct CacheEntry {
@@ -90,6 +106,8 @@ impl MockModel {
             cache_ttl_ms,
             cache: Vec::new(),
             bindings: HashMap::new(),
+            outputs: HashMap::new(),
+            previous: None,
         }
     }
 
@@ -109,6 +127,30 @@ impl MockModel {
         }
         if self.kind == Kind::Anthropic {
             self.check_signatures(request)?;
+        }
+        if self.kind == Kind::OpenAiChained {
+            let continues = self.previous.as_ref().is_some_and(|(previous, _)| {
+                previous.len() <= blocks.len() && blocks[..previous.len()] == previous[..]
+            }) && self.replies_unchanged(request.messages);
+            self.outputs.clear();
+            let read = match &self.previous {
+                Some((_, prompt)) if continues => *prompt,
+                _ => request.system_tokens,
+            };
+            self.previous = Some((blocks, prompt_tokens));
+            return Ok(Completion {
+                usage: StepUsage {
+                    prompt_tokens,
+                    cache_read_tokens: read,
+                    cache_write_tokens: prompt_tokens - read,
+                    output_tokens: 0,
+                    reasoning_tokens: None,
+                },
+                binding: Binding {
+                    content: String::new(),
+                    signed_before: Vec::new(),
+                },
+            });
         }
 
         // A read reaches the end of an earlier request whose whole prompt is a
@@ -152,6 +194,25 @@ impl MockModel {
         self.bindings.insert(part.to_owned(), binding);
     }
 
+    /// Record the text the model wrote for a text part of its newest reply.
+    pub fn record_output(&mut self, part: &str, text: String) {
+        self.outputs.insert(part.to_owned(), text);
+    }
+
+    /// Whether the newest reply's text reaches this request exactly as the
+    /// model wrote it.
+    fn replies_unchanged(&self, messages: &[RenderedMessage]) -> bool {
+        messages.iter().all(|message| {
+            message
+                .parts
+                .iter()
+                .all(|part| match self.outputs.get(&part.id) {
+                    Some(written) => message.wire_text(part).as_ref() == Some(written),
+                    None => true,
+                })
+        })
+    }
+
     fn check_signatures(&self, request: &Request<'_>) -> Result<(), ModelError> {
         let mut position = 0;
         for message in request.messages {
@@ -187,11 +248,13 @@ impl MockModel {
         let mut total = request.system_tokens;
         for message in request.messages {
             for part in &message.parts {
-                total += part_tokens(part, request.reasoning_tokens);
+                total += part_tokens(message, part, request.reasoning_tokens);
+                let wire = message.wire_text(part).unwrap_or_default();
                 blocks.push(hash(&[
                     role_name(message.role).as_bytes(),
                     part.id.as_bytes(),
                     part.digest.as_bytes(),
+                    wire.as_bytes(),
                 ]));
                 tokens.push(total);
             }

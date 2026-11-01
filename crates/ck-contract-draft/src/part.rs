@@ -25,6 +25,44 @@ pub struct Part {
     pub body: PartBody,
 }
 
+/// What a runner renders in front of a tagged part's text (a text part's
+/// text, a tool result's output): the number between section signs, then one
+/// space, as in `§12§ `. Text in the neutral part model never carries it.
+///
+/// A model sees these numbers and starts its own reply with the next one, the
+/// way a runner will number it. Its reply then reaches the next request with
+/// exactly the bytes the model produced, which routes that continue from
+/// earlier replies depend on (see [`split_self_tag`]).
+pub fn tag_prefix(tag: u64) -> String {
+    format!("§{tag}§ ")
+}
+
+/// Split the tag prefixes a model wrote at the start of a reply's text from
+/// the text, returning the first number written and the rest. A runner stores
+/// the rest and renders the number it assigns in front, so a reply whose
+/// model wrote exactly that number, then one space, renders byte for byte as
+/// written. Any other prefix (a different number, repeated prefixes, other
+/// spacing) is replaced by the assigned one, and the reply's rendered bytes
+/// then differ from what the model produced.
+pub fn split_self_tag(text: &str) -> (Option<u64>, &str) {
+    let mut rest = text;
+    let mut first = None;
+    while let Some(after_open) = rest.strip_prefix('§') {
+        let digits = after_open.bytes().take_while(u8::is_ascii_digit).count();
+        let Some(after_close) = after_open[digits..].strip_prefix('§') else {
+            break;
+        };
+        if digits == 0 {
+            break;
+        }
+        if first.is_none() {
+            first = after_open[..digits].parse().ok();
+        }
+        rest = after_close.trim_start();
+    }
+    (first, rest)
+}
+
 impl Part {
     /// Build a part in full form, computing its checksum from the body.
     pub fn new(id: impl Into<String>, tag: Option<u64>, body: PartBody) -> Self {
@@ -176,6 +214,18 @@ mod tests {
         assert_eq!(wire["name"], "read");
         let back: Part = serde_json::from_value(wire).unwrap();
         assert_eq!(back, part);
+    }
+
+    #[test]
+    fn a_correct_self_tag_splits_off_and_renders_back_byte_for_byte() {
+        let written = "§12§ Done. §3§ was the old read.";
+        let (number, rest) = split_self_tag(written);
+        assert_eq!(number, Some(12));
+        assert_eq!(format!("{}{rest}", tag_prefix(12)), written);
+        assert_eq!(split_self_tag("§7§ §7§  twice"), (Some(7), "twice"));
+        assert_eq!(split_self_tag("no prefix"), (None, "no prefix"));
+        assert_eq!(split_self_tag("§§ empty"), (None, "§§ empty"));
+        assert_eq!(split_self_tag("§12 open"), (None, "§12 open"));
     }
 
     #[test]
