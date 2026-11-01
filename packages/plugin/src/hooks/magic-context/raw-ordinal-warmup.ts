@@ -195,6 +195,7 @@ export function runSessionWarmupWorker(
             clearTimeout(deadline);
             options.signal?.removeEventListener("abort", abort);
             if (worker) {
+                worker.off("online", startDeadline);
                 activeWorkers.delete(worker);
                 const stopped = shutdown?.close() ?? worker.terminate();
                 worker.unref();
@@ -215,6 +216,9 @@ export function runSessionWarmupWorker(
             );
             deadline.unref?.();
         };
+        const startDeadline = () => {
+            if (!settled) arm("not-accepted", options.acceptMs ?? ACCEPT_TIMEOUT_MS);
+        };
         const abort = () => finish({ failure: "stopped", detail: "stopped" });
         if (options.signal?.aborted) {
             abort();
@@ -228,7 +232,11 @@ export function runSessionWarmupWorker(
                           workerData: { ...input, openCancellation: openCancellation.buffer },
                       })
                     : reuseWorker(defaultEntry(), {
-                          workerData: { ...input, openCancellation: openCancellation.buffer },
+                          workerData: {
+                              ...input,
+                              job: rawWorkerJobKind(input),
+                              openCancellation: openCancellation.buffer,
+                          },
                       }),
             );
             shutdown = createWorkerShutdown(worker, "raw-ordinal-warmup", WARMUP_CLOSE_DEADLINE_MS);
@@ -239,7 +247,10 @@ export function runSessionWarmupWorker(
         // Never keep the host process alive for a warm-up.
         worker.unref();
         activeWorkers.set(worker, (failure) => finish({ failure, detail: "stopped" }));
-        arm("not-accepted", options.acceptMs ?? ACCEPT_TIMEOUT_MS);
+        // Pool wait time is not thread startup. Arm the startup watchdog only
+        // when this job is dispatched to its thread, not while it is queued.
+        if (options.entry) startDeadline();
+        else worker.once("online", startDeadline);
         worker.on("message", (reply: RawOrdinalWarmupReply) => {
             if (reply.kind === "accepted") arm("no-result", options.resultMs ?? RESULT_TIMEOUT_MS);
             else if (reply.kind === "scan") finish({ scan: reply.scan });
@@ -261,6 +272,15 @@ export function runSessionWarmupWorker(
         worker.on("error", (error) => finish({ failure: "worker-error", detail: String(error) }));
         worker.on("exit", (code) => finish({ failure: "exited", detail: `exit code ${code}` }));
     });
+}
+
+function rawWorkerJobKind(input: RawOrdinalWarmupInput): string {
+    if (input.indexMessage) return "index-message";
+    if (input.ftsRowidBackfill) return "fts-rowid-backfill";
+    if (input.searchArchive) return "search-archive";
+    if (input.exactOrdinalIds) return "exact-ordinal-ids";
+    if (input.tagRatio !== undefined) return input.tagState ? "tag-delta" : "tag-summary";
+    return "ordinal-scan";
 }
 
 /**

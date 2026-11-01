@@ -41,6 +41,7 @@ class Lease extends EventEmitter {
     start() {
         if (this.referenced) this.slot.worker.ref();
         else this.slot.worker.unref();
+        this.emit("online");
         this.slot.worker.postMessage({ jobId: this.id, start: this.data });
         for (const { value, transferList } of this.outbox.splice(0))
             this.postMessage(value, transferList);
