@@ -37,7 +37,11 @@ serveWorkerJobs<RawOrdinalWarmupInput>(async (input, port) => {
 
     async function main(): Promise<void> {
         if (input.v2ArchiveReader) {
-            const { serveV2ArchiveReads } = await import("../../tools/ctx-expand/v2-archive-reader");
+            // The archive client owns a dedicated persistent Worker for these reads.
+            // Do not queue ctx_expand behind unrelated pooled warm-up jobs.
+            const { serveV2ArchiveReads } = await import(
+                "../../tools/ctx-expand/v2-archive-reader"
+            );
             await serveV2ArchiveReads(port, openConnections);
             return;
         }

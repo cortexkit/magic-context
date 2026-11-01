@@ -202,7 +202,12 @@ serveWorkerJobs<AutoSearchWorkerInput>(async (initial, port) => {
                         isEmbeddingRuntimeEnabled: () => input.embeddingRuntimeEnabled,
                         stepTimings: steps,
                         onAutoSearchDiagnostics: diagnostics
-                            ? () => post({ kind: "diagnostics", diagnostics })
+                            ? () =>
+                                  port.postMessage({
+                                      kind: "diagnostics",
+                                      diagnostics,
+                                      jobId: jobInput.jobId,
+                                  } satisfies AutoSearchWorkerReply)
                             : undefined,
                     },
                 );
