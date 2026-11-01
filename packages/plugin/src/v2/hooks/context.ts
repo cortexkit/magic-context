@@ -188,6 +188,7 @@ import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { registerV2DreamScheduleTimer } from "./dream-timer";
 import { startDreamTrigger } from "./dream-trigger";
 import { createV2EmbeddingScope } from "./embedding-lifecycle";
+import { createV2RecoveryAttachments } from "./expand-attachments";
 import { generateReplayAnchor, V2GenerateReplay } from "./generate";
 import { HiddenChildHook, hiddenToolCallRefusal, registerHiddenChildAgents } from "./hidden-child";
 import { hiddenTerminalError } from "./hidden-terminal-error";
@@ -887,6 +888,8 @@ export async function registerContext(context: V2Context) {
                   moduleToolBackends?.backends,
                   (id) => hiddenChildHook.owns(id),
                   embeddings.ensureRegistered,
+                  (sessionId, messageId) =>
+                      createV2RecoveryAttachments(openStoreReader)(sessionId, messageId),
               )
             : undefined;
     const usage: TransformDeps["contextUsageMap"] = new Map();

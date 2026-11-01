@@ -9,7 +9,12 @@ import type { ToolExpansionMap } from "../../shared/historian-tool-template";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_EXPAND_DESCRIPTION, CTX_EXPAND_TOKEN_BUDGET } from "./constants";
 import { resolveCtxExpandMode } from "./mode";
-import { renderItemByTag, renderMessageByOrdinal, renderVerboseRange } from "./render";
+import {
+    type RecoveryAttachments,
+    renderItemByTag,
+    renderMessageByOrdinal,
+    renderVerboseRange,
+} from "./render";
 import { renderSearchArchiveOffThread } from "./search-archive";
 import type { CtxExpandArgs } from "./types";
 
@@ -18,6 +23,7 @@ export { CTX_EXPAND_LIGHT_DESCRIPTION } from "../light-descriptions";
 export interface CtxExpandToolDeps {
     db: ContextDatabase;
     expandTools?: ToolExpansionMap;
+    recoveryAttachments?: RecoveryAttachments;
     /**
      * The resolved transform mode of this plugin process. In Rust mode the ck-mc
      * module numbers the §N§ tags the agent sees, in its own store (`store.db`),
@@ -94,7 +100,13 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                 return mode.message;
             }
             if (mode.kind === "tag") {
-                return renderItemByTag(deps.db, sessionId, mode.tag);
+                return renderItemByTag(
+                    deps.db,
+                    sessionId,
+                    mode.tag,
+                    "part",
+                    deps.recoveryAttachments,
+                );
             }
             if (mode.kind === "message") {
                 return (
@@ -104,7 +116,7 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                         mode.message,
                         mode.message,
                         CTX_EXPAND_TOKEN_BUDGET,
-                    )) ?? renderMessageByOrdinal(sessionId, mode.message)
+                    )) ?? renderMessageByOrdinal(sessionId, mode.message, deps.recoveryAttachments)
                 );
             }
             const { start, end, verbose } = mode;
@@ -136,6 +148,7 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                     effectiveEnd,
                     CTX_EXPAND_TOKEN_BUDGET,
                     deps.expandTools,
+                    deps.recoveryAttachments,
                 );
                 if (!v.text) {
                     return `No messages found in range ${start}-${effectiveEnd}. The range may be outside this session's history.`;

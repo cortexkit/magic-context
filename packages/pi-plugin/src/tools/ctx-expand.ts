@@ -44,6 +44,7 @@ import {
 	resolvePiOrdinalAlignmentForContext,
 } from "../pi-ordinal-alignment";
 import { readPiSessionMessages } from "../read-session-pi";
+import { piRecoveryAttachments } from "./expand-attachments";
 
 const ParamsSchema = Type.Object(
 	{
@@ -145,6 +146,9 @@ export function createCtxExpandTool(
 					});
 
 			try {
+				const attachments = piRecoveryAttachments(
+					ctx.sessionManager.getBranch(),
+				);
 				const mode = resolveCtxExpandMode(params, "positive");
 				if (mode.kind === "error") {
 					return err(mode.message);
@@ -152,7 +156,9 @@ export function createCtxExpandTool(
 				// Tags resolve through message ids, not stored ordinals, so they
 				// expand whatever the alignment below says.
 				if (mode.kind === "tag") {
-					return ok(renderItemByTag(deps.db, sessionId, mode.tag, "text"));
+					return ok(
+						renderItemByTag(deps.db, sessionId, mode.tag, "text", attachments),
+					);
 				}
 				// Stored ordinals must be aligned before reading branch messages, or
 				// the same number could show a different message. Archived text keeps
@@ -194,7 +200,9 @@ export function createCtxExpandTool(
 							`No message at ordinal ${mode.message}: it is no longer in this session's history, which now starts at message ${firstAvailable}.`,
 						);
 					}
-					return ok(renderMessageByOrdinal(sessionId, mode.message));
+					return ok(
+						renderMessageByOrdinal(sessionId, mode.message, attachments),
+					);
 				}
 				const { end, verbose } = mode;
 				const requestedStart = mode.start;
@@ -241,6 +249,7 @@ export function createCtxExpandTool(
 						effectiveEnd,
 						CTX_EXPAND_TOKEN_BUDGET,
 						deps.expandTools,
+						attachments,
 					);
 					if (!v.text) {
 						return ok(
