@@ -359,8 +359,8 @@ function cloneMessages(messages: MessageLike[]): MessageLike[] {
 }
 
 describe("issue 643 subagent skeleton retirement", () => {
-    function fixture(thinking = false) {
-        db = new Database(":memory:");
+    function fixture(thinking = false, databasePath = ":memory:") {
+        db = new Database(databasePath);
         initializeDatabase(db);
         const sessionId = "subagent-skeleton-retirement";
         const source: MessageLike[] = [
@@ -491,6 +491,20 @@ describe("issue 643 subagent skeleton retirement", () => {
         const rebuilt = await serve(true, true);
         expect(modes()).toEqual(Array(60).fill("skeleton_real"));
         expect(JSON.stringify(rebuilt.messages)).toBe(JSON.stringify(before.messages));
+    });
+
+    it("replays retired arcs byte-identically after reopening the database", async () => {
+        const dir = createTestTempDirFromPath(join(tmpdir(), "issue-643-restart-"));
+        tempDirs.push(dir);
+        const path = join(dir, "context.db");
+        const { serve, modes } = fixture(false, path);
+        const rebuilt = await serve(true);
+        expect(modes()).toEqual([...Array(40).fill("full"), ...Array(20).fill("skeleton_real")]);
+        db.close();
+        db = new Database(path);
+        expect(modes()).toEqual([...Array(40).fill("full"), ...Array(20).fill("skeleton_real")]);
+        const replayed = await serve(false);
+        expect(JSON.stringify(replayed.messages)).toBe(JSON.stringify(rebuilt.messages));
     });
 });
 

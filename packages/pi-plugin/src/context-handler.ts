@@ -10053,7 +10053,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		const savedRemovalInputs = nativeRemovalInputs;
 		try {
 			nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
-			args.db
+			const converted = args.db
 				.transaction(() =>
 					removalBatch((flush) => {
 						const conversions = prepareAgedToolSkeletonConversions(
@@ -10073,9 +10073,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						);
 						conversions.persist(args.db);
 						flush();
+						return conversions.converted.size;
 					}),
 				)
 				.immediate();
+			if (converted > 0) recordFirstApplicationWireEdit(true);
 		} catch (error) {
 			nativeRemovalInputs = savedRemovalInputs;
 			throw error;
