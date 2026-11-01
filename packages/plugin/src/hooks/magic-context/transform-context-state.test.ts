@@ -18,6 +18,7 @@ import {
     loadContextUsage,
     resolveUnknownUsageFromWireEstimate,
     savedProviderReadingForPass,
+    usagePredatesHistoryChange,
 } from "./transform-context-state";
 
 const tempDirs: string[] = [];
@@ -392,4 +393,39 @@ describe("computeHardCacheExpired finite boundary parity", () => {
         expect(computeHardCacheExpired("5m", now - ttl, now)).toBe(false);
         expect(computeHardCacheExpired("5m", now - ttl - 1, now)).toBe(true);
     });
+});
+
+it("invalidates pre-fold usage but retains a new provider reading and its older live timestamp", () => {
+    useTempDataHome("usage-fold-");
+    const db = openDatabase()!;
+    const id = "usage-fold";
+    const meta = {
+        ...getOrCreateSessionMeta(db, id),
+        lastResponseTime: 1000,
+        cachedM0MaterializedAt: 2000,
+    };
+    expect(usagePredatesHistoryChange(db, id, meta)).toBe(true);
+    expect(usagePredatesHistoryChange(db, id, { ...meta, lastResponseTime: 3000 })).toBe(false);
+    // An error or usage-less completion can move the idle clock without replacing usage.
+    expect(
+        usagePredatesHistoryChange(
+            db,
+            id,
+            { ...meta, lastResponseTime: 3000 },
+            {
+                usage: { percentage: 97, inputTokens: 97_000 },
+                updatedAt: 1000,
+                hasUsageTokens: true,
+            },
+        ),
+    ).toBe(true);
+    // A stored response can be ingested after the fold; its completion still predates it.
+    expect(
+        usagePredatesHistoryChange(db, id, meta, {
+            usage: { percentage: 97, inputTokens: 97_000 },
+            updatedAt: 3000,
+            hasUsageTokens: true,
+        }),
+    ).toBe(true);
+    expect(usagePredatesHistoryChange(db, id, { ...meta, lastResponseTime: 0 })).toBe(false);
 });

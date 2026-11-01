@@ -216,6 +216,7 @@ import {
     resolveSchedulerDecision,
     resolveUnknownUsageFromWireEstimate,
     savedProviderReadingForPass,
+    usagePredatesHistoryChange,
 } from "./transform-context-state";
 import { findLastUserMessageId, findSessionId } from "./transform-message-helpers";
 import {
@@ -1482,21 +1483,27 @@ export function createTransform(deps: TransformDeps) {
         const isFirstTransformPassForSession = !loadedSessions.has(sessionId);
         loadedSessions.add(sessionId);
 
-        // First-pass reset MUST run BEFORE loadContextUsage so threshold checks
-        // (95% blocking, 80% emergency nudge) don't fire on stale data from a
-        // different model, reverted message, or previous session state.
+        // Reset stale pressure BEFORE loadContextUsage so an old high reading
+        // cannot keep forcing rebuilds and blocking on the historian after history
+        // shrinks. Publishing a summary does not itself allow rewriting the cached prefix.
         // `persistedUsageBeforeResets` (captured above, before the model-change
         // clear too) holds the pre-reset usage that restart recovery and
         // protected-tail boundary sizing rely on.
         const earlyStateSnapshot = loadTransformPassStateSnapshot(db, sessionId);
         const historianFailureState = earlyStateSnapshot.historianFailure;
 
-        if (isFirstTransformPassForSession && sessionMeta) {
+        const usagePredatesHistory = usagePredatesHistoryChange(
+            db,
+            sessionId,
+            sessionMeta,
+            deps.contextUsageMap.get(sessionId),
+        );
+        if ((isFirstTransformPassForSession || usagePredatesHistory) && sessionMeta) {
             const persistedPct = sessionMeta.lastContextPercentage ?? 0;
             if (persistedPct > 0) {
                 sessionLog(
                     sessionId,
-                    `transform: first pass reset — percentage=${persistedPct.toFixed(1)}% — clearing stale usage state`,
+                    `transform: ${isFirstTransformPassForSession ? "first pass" : "history changed since usage"} reset — percentage=${persistedPct.toFixed(1)}% — clearing stale usage state`,
                 );
                 updateSessionMeta(db, sessionId, {
                     lastContextPercentage: 0,
@@ -1513,8 +1520,8 @@ export function createTransform(deps: TransformDeps) {
             }
         }
 
-        // Compute context usage AFTER first-pass reset so threshold checks use
-        // clean state (0%) instead of stale values from a previous model/session.
+        // Compute usage after the reset, falling back to the estimated size of
+        // the outgoing request until a new provider reading arrives.
         let contextUsageEarly = loadContextUsage(
             deps.contextUsageMap,
             db,
@@ -3032,15 +3039,17 @@ export function createTransform(deps: TransformDeps) {
             // as before: recovery is a fit decision, and the emergency planner
             // must plan its reclaim against the whole rejected request.
             const overflowRecoveryPass = usagePercentageSynthetic || emergencyRecoveryArmed;
-            const savedProviderReading = overflowRecoveryPass
-                ? null
-                : savedProviderReadingForPass({
-                      persisted: persistedUsageBeforeResets,
-                      currentModelKey: currentModelKeyForBoundary ?? (hardModelKey || undefined),
-                      contextLimit: resolvedContextLimit,
-                      lastResponseTime: sessionMeta.lastResponseTime,
-                      cacheExpired: hardCacheExpired,
-                  });
+            const savedProviderReading =
+                overflowRecoveryPass || usagePredatesHistory
+                    ? null
+                    : savedProviderReadingForPass({
+                          persisted: persistedUsageBeforeResets,
+                          currentModelKey:
+                              currentModelKeyForBoundary ?? (hardModelKey || undefined),
+                          contextLimit: resolvedContextLimit,
+                          lastResponseTime: sessionMeta.lastResponseTime,
+                          cacheExpired: hardCacheExpired,
+                      });
             let pressureEstimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
             try {
                 pressureEstimate = estimateFinalWireInputTokens({

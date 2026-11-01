@@ -267,6 +267,7 @@ import {
 	buildSyntheticToolReclaimOps,
 	toolReclaimDistanceEntries,
 } from "@magic-context/core/hooks/magic-context/tool-reclaim";
+import { usagePredatesHistoryChange } from "@magic-context/core/hooks/magic-context/transform-context-state";
 import {
 	logTransformElapsed as logStageElapsed,
 	withTransformTimingSummary,
@@ -4994,6 +4995,11 @@ export function registerPiContextHandler(
 			}
 			// Model change invalidates the safe-token baseline + alert state too
 			// (new model, new limits), so it clears all four pressure fields.
+			const usagePredatesHistory = usagePredatesHistoryChange(
+				options.db,
+				sessionId,
+				sessionMetaForUsage,
+			);
 			const usageReset = {
 				lastContextPercentage: 0,
 				lastInputTokens: 0,
@@ -5030,12 +5036,12 @@ export function registerPiContextHandler(
 				sessionMetaForUsage.observedSafeInputTokens = 0;
 				sessionMetaForUsage.cacheAlertSent = false;
 			} else if (
-				isFirstContextPassForSession &&
+				(isFirstContextPassForSession || usagePredatesHistory) &&
 				sessionMetaForUsage.lastContextPercentage > 0
 			) {
-				// First pass after restart (same model): clear ONLY the two stale
-				// pressure fields. Gate on lastContextPercentage>0 (matches OpenCode
-				// transform.ts first-pass). historian-failure state and the
+				// A restart or newer published/folded history invalidates only the
+				// pressure fields, not permission to rebuild the cached prefix.
+				// As on OpenCode, historian-failure state and the
 				// reasoning watermark MUST be preserved — restart recovery uses the
 				// failure backoff, and clearing the reasoning watermark would
 				// resurface previously cleared reasoning (a cache bust + larger
@@ -5045,7 +5051,7 @@ export function registerPiContextHandler(
 				// too — only lastContextPercentage/lastInputTokens are cleared).
 				sessionLog(
 					sessionId,
-					`transform: first pass reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale usage state`,
+					`transform: ${isFirstContextPassForSession ? "first pass" : "history changed since usage"} reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale usage state`,
 				);
 				updateSessionMeta(options.db, sessionId, {
 					lastContextPercentage: 0,
@@ -5069,7 +5075,9 @@ export function registerPiContextHandler(
 				usagePercentage = sessionMetaForUsage.lastContextPercentage;
 				usageInputTokens = sessionMetaForUsage.lastInputTokens;
 				usedPersistedUsage = true;
-			} else {
+			} else if (!usagePredatesHistory) {
+				// Pi's live figure still includes the old provider reading until a
+				// reply arrives, so it cannot undo a history-driven reset.
 				usagePercentage =
 					typeof piUsage?.percent === "number" ? piUsage.percent : 0;
 				usageInputTokens =
@@ -5210,6 +5218,7 @@ export function registerPiContextHandler(
 			let fallbackInputTokens: number | undefined;
 			const suspectReading = Math.max(usageInputTokens, piUsage?.tokens ?? 0);
 			if (
+				usagePredatesHistory ||
 				suspectReading > providerInputLimit ||
 				piProviderUsageWasRejected(sessionId)
 			) {
@@ -5255,7 +5264,7 @@ export function registerPiContextHandler(
 					persistedFromLive: !usedPersistedUsage,
 					persistedPercentage: usagePercentage,
 					persistedInputTokens: usageInputTokens,
-					liveInputTokens: piUsage?.tokens,
+					liveInputTokens: usagePredatesHistory ? undefined : piUsage?.tokens,
 					usableContextLimit: usageContextLimit,
 				}));
 			const realUsagePercentageBeforeEmergencyBump = usagePercentage;

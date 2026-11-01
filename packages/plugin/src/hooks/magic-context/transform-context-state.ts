@@ -2,6 +2,7 @@ import type { Scheduler } from "../../features/magic-context/scheduler";
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { loadPersistedUsage, type PersistedUsageState } from "../../features/magic-context/storage";
 import type { ContextUsage, SessionMeta } from "../../features/magic-context/types";
+import { getHarness } from "../../shared/harness";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 
@@ -11,6 +12,27 @@ type ContextUsageCacheEntry = {
     lastResponseTime?: number;
     hasUsageTokens?: boolean;
 };
+
+/** A provider count no longer measures history published or folded after that request. */
+export function usagePredatesHistoryChange(
+    db: ContextDatabase,
+    sessionId: string,
+    meta: Pick<SessionMeta, "lastResponseTime" | "cachedM0MaterializedAt">,
+    liveReading?: ContextUsageCacheEntry,
+): boolean {
+    // The idle clock may advance on a response without usage. Keep the live
+    // reading's older timestamp in that case; ingestion can also follow completion.
+    const readingAt = liveReading?.hasUsageTokens
+        ? Math.min(meta.lastResponseTime || liveReading.updatedAt, liveReading.updatedAt)
+        : meta.lastResponseTime;
+    if (!(readingAt > 0)) return false;
+    if ((meta.cachedM0MaterializedAt ?? 0) > readingAt) return true;
+    return !!db
+        .prepare(
+            "SELECT 1 FROM compartments WHERE session_id = ? AND harness = ? AND created_at > ? LIMIT 1",
+        )
+        .get(sessionId, getHarness(), readingAt);
+}
 
 function loadPersistedUsageWatermark(db: ContextDatabase, sessionId: string): number | null {
     const result = db

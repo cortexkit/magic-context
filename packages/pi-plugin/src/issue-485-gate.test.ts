@@ -95,8 +95,12 @@ function harness(db: ReturnType<typeof createTestDb>, manager: SessionManager) {
 		event: { messages: unknown[] },
 		ctx: unknown,
 	) => Promise<{ messages: unknown[] }>;
-	return (tokens = 10000, runtime: unknown = manager) =>
-		handler(
+	return (tokens = 10000, runtime: unknown = manager) => {
+		// Each supplied numerator is a fresh provider sample, including after a fold.
+		updateSessionMeta(db, manager.getSessionId(), {
+			lastResponseTime: Date.now(),
+		});
+		return handler(
 			{ messages: structuredClone(manager.buildSessionContext().messages) },
 			{
 				cwd: process.cwd(),
@@ -116,6 +120,7 @@ function harness(db: ReturnType<typeof createTestDb>, manager: SessionManager) {
 				}),
 			},
 		);
+	};
 }
 function publish(
 	db: ReturnType<typeof createTestDb>,
