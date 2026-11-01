@@ -108,7 +108,10 @@ impl Session {
             self.sync(client, Some(&notice.newest)).await;
         }
         self.forget_missing();
-        if pass::at_execute(&self.conditions, settings) && !self.summary_on_its_way() {
+        if pass::at_execute(&self.conditions, settings)
+            && !self.summary_on_its_way()
+            && !pass::signed_thinking_hold(self.index.entries(), &self.conditions, settings)
+        {
             if let Some(view) = self.build(settings) {
                 self.publish(client, view).await;
             }

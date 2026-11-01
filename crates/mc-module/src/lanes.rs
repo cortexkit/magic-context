@@ -294,6 +294,19 @@ pub fn age_sweep(context: &Context, bookmark: u64) -> Vec<PartKey> {
 /// reasoning with no reported count and no visible text.
 pub const UNKNOWN_REASONING_STEP_TOKENS: u64 = 1_000;
 
+/// What one assistant entry's reasoning costs, counting all of its reasoning.
+pub fn step_reasoning_tokens(entry: &Entry) -> u64 {
+    let reasoning: Vec<&Part> = entry
+        .parts
+        .iter()
+        .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
+        .collect();
+    if reasoning.is_empty() {
+        return 0;
+    }
+    reasoning_cost(entry, &reasoning)
+}
+
 /// What one assistant entry's reasoning costs: the count the provider
 /// reported, else the visible text, else a fixed estimate for reasoning that
 /// has no visible text.

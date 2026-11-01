@@ -13,6 +13,10 @@
 use std::collections::BTreeMap;
 
 use ck_contract_draft::notice::Conditions;
+use ck_contract_draft::read::{Entry, Role};
+use ck_contract_draft::rules::SignedReasoning;
+
+use crate::lanes;
 
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -55,4 +59,55 @@ pub fn usage(conditions: &Conditions) -> Option<f64> {
 /// Whether usage has reached the execute threshold.
 pub fn at_execute(conditions: &Conditions, settings: &Settings) -> bool {
     usage(conditions).is_some_and(|usage| usage * 100.0 >= settings.execute_threshold_percentage)
+}
+
+/// An assistant step that spent more reasoning tokens than this is heavy.
+pub const HEAVY_REASONING_TOKENS: u64 = 1_500;
+
+/// How many of the turn's newest assistant steps the hold looks at.
+pub const HEAVY_REASONING_WINDOW_STEPS: usize = 15;
+
+/// The hold always ends at the execute threshold plus this many points.
+pub const HOLD_CAP_POINTS: f64 = 10.0;
+
+/// The signed-thinking hold, for sessions whose runner declares signed
+/// reasoning (Anthropic thinking on prefix-bound models).
+///
+/// A new view that changes anything before a signed thinking block makes the
+/// view drop that block, so a rebuild right after heavy reasoning throws away
+/// the reasoning the model just paid for. An execute pass is therefore held,
+/// building no view, while both hold:
+/// - one of the current turn's last 15 assistant steps spent more than 1,500
+///   reasoning tokens, and
+/// - usage is below the execute threshold plus 10 points.
+///
+/// The cap bounds the hold: a session that keeps reasoning heavily still
+/// rebuilds before it gets near the force band. Rides are never held: their
+/// rewrite is paid for anyway.
+pub fn signed_thinking_hold(
+    entries: &[Entry],
+    conditions: &Conditions,
+    settings: &Settings,
+) -> bool {
+    if conditions.rules.signed_reasoning != SignedReasoning::Bound {
+        return false;
+    }
+    let Some(usage) = usage(conditions) else {
+        return false;
+    };
+    if usage * 100.0 >= settings.execute_threshold_percentage + HOLD_CAP_POINTS {
+        return false;
+    }
+    // The current turn starts after the last message the user wrote; notices
+    // a module or the runner delivered do not end it.
+    let turn_start = entries
+        .iter()
+        .rposition(|entry| entry.role == Role::User && entry.notice.is_none())
+        .map_or(0, |user| user + 1);
+    entries[turn_start..]
+        .iter()
+        .rev()
+        .filter(|entry| entry.role == Role::Assistant && !entry.parts.is_empty())
+        .take(HEAVY_REASONING_WINDOW_STEPS)
+        .any(|entry| lanes::step_reasoning_tokens(entry) > HEAVY_REASONING_TOKENS)
 }

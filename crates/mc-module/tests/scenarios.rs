@@ -452,3 +452,35 @@ async fn reasoning_beyond_the_budget_goes_on_the_first_execute_pass() {
         assert_eq!(reasoning_seen(runner.host()), (2, 4), "{kind:?}");
     }
 }
+
+#[tokio::test]
+async fn heavy_signed_thinking_holds_the_view_until_usage_passes_threshold_plus_ten() {
+    // Each read step reasons 2,000 tokens, more than the 1,500 that make a
+    // step heavy, and adds about 9,000 tokens. The fifth request (about 71%
+    // of the usable window) is the first over the 65% threshold, and the
+    // sixth is still under the cap of 75%: both passes are held. The seventh
+    // (about 94%) releases the hold, so the eighth request is the first
+    // under a view. Without the hold the sixth would be.
+    let mut runner = start(config("worker", Kind::Anthropic, BOUND)).await;
+    runner
+        .play(&[
+            user("Review the module."),
+            read_file(2_000),
+            reduce("3"),
+            read_file(2_000),
+            read_file(2_000),
+            answer(),
+            read_file(2_000),
+            answer(),
+            answer(),
+        ])
+        .await;
+    assert_clean(&runner);
+    let requests = &runner.report.requests;
+    let first_under_view = requests.iter().position(|record| record.view.is_some());
+    assert_eq!(first_under_view, Some(7));
+    assert_eq!(
+        seen(runner.host(), 3).as_deref(),
+        Some(placeholder(3).as_str())
+    );
+}
