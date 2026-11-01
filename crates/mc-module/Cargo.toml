@@ -138,3 +138,5 @@ cortexkit-role-llm-runner-conformance = "=0.16.0"
 cortexkit-role-compaction-provider = { version = "=0.7.12", features = ["conformance"] }
 cortexkit-role-step-transform-provider = { version = "=0.4.2", features = ["test-vectors"] }
 cortexkit-role-routing-conformance = "=0.1.0"
+# The pinned routing kit exposes its own protocol version in its test API.
+routing-kit-subc-protocol = { package = "subc-protocol", version = "=0.33.6" }

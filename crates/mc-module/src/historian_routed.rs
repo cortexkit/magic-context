@@ -150,7 +150,7 @@ const ROUTING_KEY_MAX_CHARS: usize = 128;
 #[derive(Debug, Clone)]
 pub struct SummaryScope {
     pub stamp: ScopeStamp,
-    pub identity: RunnerBindIdentity,
+    pub runner_identity: RunnerBindIdentity,
 }
 
 impl SummaryScope {
@@ -177,7 +177,7 @@ impl SummaryScope {
         self.stamp
             .project_id
             .clone()
-            .unwrap_or_else(|| self.identity.project_root.display().to_string())
+            .unwrap_or_else(|| self.runner_identity.project_root.display().to_string())
     }
 }
 
@@ -349,7 +349,7 @@ pub(crate) async fn run_routed_summary(
     };
     let scope = SummaryScope {
         stamp: stamp.clone(),
-        identity: summary.identity.clone(),
+        runner_identity: summary.identity.clone(),
     };
     let route = RoutedScope {
         routing: summary.routing,
@@ -1040,8 +1040,8 @@ impl SubcSummaryRouting {
             .map_err(|error| unavailable(error.to_string()))?;
         let target = crate::route_targets::routed_module_target(provider);
         let identity = subc_protocol::BindIdentity::new(
-            scope.identity.harness.as_str(),
-            scope.identity.session.as_str(),
+            scope.runner_identity.harness.as_str(),
+            scope.runner_identity.session.as_str(),
         );
         let role_versions = BTreeMap::from([(
             cortexkit_role_routing::ROLE.to_string(),
@@ -1214,7 +1214,7 @@ impl SummaryRouting for SubcSummaryRouting {
             route_targets: self.route_targets.clone(),
             child_scope: Some(
                 self.child_scopes
-                    .for_project(&scope.identity.project_root)
+                    .for_project(&scope.runner_identity.project_root)
                     .await
                     .map_err(|error| {
                         HistorianProducerError::Subc(
@@ -1224,8 +1224,8 @@ impl SummaryRouting for SubcSummaryRouting {
             ),
             ..crate::historian_producer::HistorianProducerConfig::new(
                 self.connection_file.clone(),
-                scope.identity.project_root.clone(),
-                scope.identity.harness.clone(),
+                scope.runner_identity.project_root.clone(),
+                scope.runner_identity.harness.clone(),
             )
         };
         Ok(Box::new(

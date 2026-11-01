@@ -402,6 +402,7 @@ describe("historian turn one with memory verification off", () => {
             clearReasoningAge: 50,
             protectedTokens: 0,
             historianRunnable: false,
+            historianTurnTwo: "off" as const,
             historianModel: "test/fixture-historian",
             getHistorianChunkTokens: () => 10_000,
             directory: a,
@@ -539,7 +540,7 @@ describe("historian turn one with memory verification off", () => {
             sourceType: "historian",
         });
         const { client, prompt } = historianClient(directory, () => REPLY_WITH_FACTS);
-        await runHistorian(db, sessionId, client, directory);
+        await runHistorian(db, sessionId, client, directory, { historianTurnTwo: "off" });
         expect(sentPrompts(prompt)[0]).toContain("Only the session decision can see this memory.");
         expect(
             getMemoriesByProject(db, projectPath)

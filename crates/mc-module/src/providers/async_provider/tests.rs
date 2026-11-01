@@ -3273,7 +3273,7 @@ async fn memory_profile_refused_setups_never_persist() {
         old.meta.memory_context = None;
         let version = store.commit_meta(&key, old.row_version, &old.meta).unwrap();
         let mut request = setup_request("s", "plan-refusal");
-        request["composition"] = json!({});
+        request["params"]["serializer_profile"] = json!("unsupported-fixture-profile");
         let answer = rig
             .h
             .dispatch_value(7, json!({"method":"compaction.setup","params":request}))
@@ -3289,11 +3289,11 @@ async fn memory_profile_refused_setups_never_persist() {
         assert_profile_setup_unbound(&rig, "opencode", "s");
     }
     {
-        use crate::offline_move::{self, tests as fixture};
+        use crate::offline_move::tests as fixture;
         let dir = tempfile::tempdir().unwrap();
         let session = fixture::fixture_session();
-        let paths = fixture::write_stores(dir.path());
-        offline_move::run(&paths, &session, false, &fixture::NoHolders, None).unwrap();
+        let paths = fixture::write_moved_session_stores(dir.path());
+        moved_session::apply_certified_move(&paths);
         let (rig, answer) = Rig::try_setup_with_model(
             dir.path(),
             "thalamus-harness",

@@ -28,6 +28,7 @@ struct DaemonState {
     providers: Vec<String>,
     refuse_sync: bool,
     scope_error: Option<String>,
+    sync_reply_mutation: Option<&'static str>,
     refuse_open: bool,
     hold_control: bool,
     via: String,
@@ -109,8 +110,8 @@ async fn socket(mut stream: TcpStream, state: Arc<Mutex<DaemonState>>, fake: Arc
                         let records: Vec<subc_protocol::scope::ScopeRecord> =
                             serde_json::from_value(body["scopes"].clone()).unwrap();
                         let next: HashMap<_, _> = records
-                            .into_iter()
-                            .map(|r| (r.scope_ref.clone(), r))
+                            .iter()
+                            .map(|r| (r.scope_ref.clone(), r.clone()))
                             .collect();
                         let ended: Vec<_> = s
                             .scopes
@@ -118,16 +119,21 @@ async fn socket(mut stream: TcpStream, state: Arc<Mutex<DaemonState>>, fake: Arc
                             .filter(|r| !next.contains_key(&r.scope_ref))
                             .map(|r| json!({"ref": r.scope_ref, "scope_epoch":r.scope_epoch}))
                             .collect();
-                        let results: Vec<_> = next.values().map(|r| {
+                        let results: Vec<_> = records.iter().map(|r| {
                             if let Some(code) = &s.scope_error { json!({"ref":r.scope_ref,"scope_epoch":r.scope_epoch,"outcome":"refused","code":code,"message":"record refused"}) } else { json!({"ref":r.scope_ref,"scope_epoch":r.scope_epoch,"outcome":"created","version":1}) }
                         }).collect();
                         if s.scope_error.is_none() {
                             s.scopes = next;
                         }
-                        (
-                            FrameType::Response,
-                            json!({"op":"scope.sync", "generation":generation,"results":results,"ended":ended}),
-                        )
+                        let mut answer = json!({"op":"scope.sync", "generation":generation,"results":results,"ended":ended});
+                        match s.sync_reply_mutation {
+                            Some("generation") => answer["generation"] = json!(generation + 1),
+                            Some("count") => answer["results"] = json!([]),
+                            Some("ref") => answer["results"][0]["ref"] = json!("another-scope"),
+                            Some("epoch") => answer["results"][0]["scope_epoch"] = json!(2),
+                            _ => {}
+                        }
+                        (FrameType::Response, answer)
                     }
                     "catalog.list" => {
                         let mut modules: Vec<_> = s
@@ -363,7 +369,7 @@ impl Daemon {
                 key: key.clone(),
                 daemon_id,
                 pid: std::process::id(),
-                daemon_ver: "0.36.35-fake".into(),
+                daemon_ver: "0.39.0".into(),
             },
         )
         .unwrap();
@@ -468,7 +474,7 @@ impl Daemon {
                 ScopeKind::Head,
             )
             .with_workdir(Some(project.to_string_lossy().into_owned())),
-            identity: crate::session_resolver::RunnerBindIdentity {
+            runner_identity: crate::session_resolver::RunnerBindIdentity {
                 project_root: project.to_path_buf(),
                 harness: "claude-code".into(),
                 session: "ses".into(),
@@ -609,6 +615,25 @@ async fn live_scope_snapshots_preserve_other_runs_and_release_only_the_finished_
     wire.end_scope(&second).await.unwrap();
     assert!(daemon.state.lock().unwrap().scopes.is_empty());
     serving.abort();
+}
+
+#[tokio::test]
+async fn shared_scope_publisher_rejects_mismatched_acknowledgements() {
+    for mutation in ["generation", "count", "ref", "epoch"] {
+        let rig = CarrierRig::new(vec![candidate("broca", "model-a", Some("claude-code"))]);
+        let daemon = Daemon::new(rig.wire.clone()).await;
+        let (wire, serving, result) = daemon.owner().await;
+        result.unwrap();
+        let scopes = crate::child_scopes::ChildScopes::new(crate::DEFAULT_MODULE_ID);
+        wire.install_child_scopes(&scopes);
+        daemon.state.lock().unwrap().sync_reply_mutation = Some(mutation);
+        let error = scopes
+            .for_project(&rig.f.context.config.directory)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "mc_dream_scope_sync_protocol", "{mutation}");
+        serving.abort();
+    }
 }
 
 #[tokio::test]

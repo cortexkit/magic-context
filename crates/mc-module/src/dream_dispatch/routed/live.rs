@@ -136,6 +136,22 @@ impl Scopes {
             .await;
         match result {
             Ok(reply) => {
+                if reply.generation != state.generation
+                    || reply.results.len() != next.len()
+                    || reply
+                        .results
+                        .iter()
+                        .zip(next.values())
+                        .any(|(result, record)| {
+                            result.scope_ref != record.scope_ref
+                                || result.scope_epoch != record.scope_epoch
+                        })
+                {
+                    return Err(refusal(
+                        "scope_sync_protocol",
+                        "scope.sync acknowledged a different generation or scope snapshot",
+                    ));
+                }
                 let mut current_refusal = None;
                 for rejected in reply
                     .results

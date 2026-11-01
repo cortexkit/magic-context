@@ -1942,6 +1942,29 @@ mod pin_tests {
 
     #[test]
     fn warm_worktree_with_500_sidecars_performs_no_scans_or_file_reads() {
+        // Pin-publication state is process-wide: concurrent tests can invalidate
+        // this resolver and add work to its I/O counters. Measure it alone while
+        // retaining every zero-I/O assertion below.
+        const CHILD: &str = "MC_PROJECT_IDENTITY_IO_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "project_identity::pin_tests::warm_worktree_with_500_sidecars_performs_no_scans_or_file_reads",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated warm resolver failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(temp.path()).unwrap();
         let mut table: Value = serde_json::from_str(PARITY).unwrap();

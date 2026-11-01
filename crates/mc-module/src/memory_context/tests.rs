@@ -390,7 +390,7 @@ async fn fake_endpoint(mode: Mode, hold_first: bool) -> FakeEndpoint {
             key: key.clone(),
             daemon_id,
             pid: std::process::id(),
-            daemon_ver: "fake".into(),
+            daemon_ver: "0.39.0".into(),
         },
     )
     .unwrap();
@@ -640,7 +640,9 @@ async fn resolver_and_context_reads_share_one_consumer_and_serialize_routes() {
             .resolve_for_session(&identities, &directory, "test-harness", "instance", None)
             .await
     });
-    endpoint.first_call.notified().await;
+    tokio::time::timeout(Duration::from_secs(5), endpoint.first_call.notified())
+        .await
+        .expect("resolver did not send its first request");
     assert!(
         slot.try_lock().is_err(),
         "resolver holds the shared slot while awaiting its reply"

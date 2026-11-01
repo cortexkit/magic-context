@@ -294,6 +294,9 @@ fn failed(code: &str) -> RunResult<String> {
 fn vendored_kit_fake_matches_published_source() {
     let source = include_str!("kit_fake.rs");
     let (_, body) = source.split_once("// BEGIN VENDORED BODY\n").unwrap();
+    let adapted_import = "use routing_kit_subc_protocol::ErrorBody;";
+    assert_eq!(body.matches(adapted_import).count(), 1);
+    let body = body.replace(adapted_import, "use subc_protocol::ErrorBody;");
     assert_eq!(
         format!("{:x}", Sha256::digest(body.as_bytes())),
         "ef60939ceaff9be40af1a89bbf56f3a5bb1d5acaeea71527f2ab604db8e2db6f"

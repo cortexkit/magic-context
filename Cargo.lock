@@ -1501,6 +1501,7 @@ dependencies = [
  "subc-core",
  "subc-daemon",
  "subc-os",
+ "subc-protocol 0.33.6",
  "subc-protocol 0.34.1",
  "subc-transport",
  "syn 2.0.119",

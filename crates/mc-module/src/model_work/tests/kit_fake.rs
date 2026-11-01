@@ -1,7 +1,7 @@
 // Vendored from cortexkit-role-routing-conformance 0.1.0, tests/fake/mod.rs.
 // Original SHA-256: ef60939ceaff9be40af1a89bbf56f3a5bb1d5acaeea71527f2ab604db8e2db6f
 // Replace this copy once the kit exports its fake provider.
-// Uses the same subc_protocol import as the published source.
+// Only the protocol import is adapted to the pinned kit's dependency version.
 // BEGIN VENDORED BODY
 //! A reference in-process routing provider, used ONLY to test the kit.
 //!
@@ -49,7 +49,7 @@ use cortexkit_role_routing_conformance::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use subc_protocol::ErrorBody;
+use routing_kit_subc_protocol::ErrorBody;
 
 /// How long a decision stays current.
 const DECISION_TTL_MS: u64 = 600_000;
@@ -242,10 +242,8 @@ impl RoutingRoute for FakeRoute {
                 Reply::Response(String::from_utf8(wire::reply_body(&answer).unwrap()).unwrap())
             }
             Err(refusal) => Reply::Error(
-                serde_json::from_value(serde_json::to_value(
-                    ErrorBody::new(refusal.code.as_str(), refusal.message)
-                        .with_detail(Value::Object(refusal.detail)),
-                ).unwrap()).unwrap(),
+                ErrorBody::new(refusal.code.as_str(), refusal.message)
+                    .with_detail(Value::Object(refusal.detail)),
             ),
         })
     }

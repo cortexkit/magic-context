@@ -912,7 +912,7 @@ impl LiveSummarySession {
         .unwrap();
         let scope = SummaryScope {
             stamp: stamp(),
-            identity: runner_bind_identity(&routed_binding(&rig.project)),
+            runner_identity: runner_bind_identity(&routed_binding(&rig.project)),
         };
         routing.observe_scope(&scope).await;
         assert!(routing.routing_support_for(Some(&scope.stamp)).is_ok());

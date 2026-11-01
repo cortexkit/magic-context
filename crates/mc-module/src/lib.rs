@@ -9899,7 +9899,7 @@ impl ModuleHandler for McHandler {
             routing
                 .observe_scope(&historian_routed::SummaryScope {
                     stamp: stamp.clone(),
-                    identity: runner_bind_identity(&binding),
+                    runner_identity: runner_bind_identity(&binding),
                 })
                 .await;
         }
@@ -13596,7 +13596,7 @@ mod tests {
         let production = serde_json::to_value(&hello).unwrap();
         assert_eq!(
             production["manifest"]["provenance"],
-            serde_json::json!({"wire_crate_version": "0.33.1"})
+            serde_json::json!({"wire_crate_version": "0.34.1"})
         );
         // The SDK version is truthful deployment metadata, not a wire-shape change.
         // Normalize only /manifest/provenance/wire_crate_version to the old SDK
@@ -13610,9 +13610,35 @@ mod tests {
             .unwrap()
             .wire_crate_version = Some("0.32.8".into());
         let current = serde_json::to_vec(&hello).unwrap();
-        assert_eq!(current.len(), 13_719);
+        assert_eq!(current.len(), 13_788);
         assert_eq!(
             format!("{:x}", Sha256::digest(&current)),
+            "c69abcc03a0f035794115441e5fac67d16718876794929ad0a84fa42f8b832b7"
+        );
+        // The newer module advertises step transforms and project-free scope
+        // binding. Removing only those claims and its version reproduces the
+        // earlier manifest byte for byte, including every tool description.
+        assert_eq!(hello.manifest.module_version, "0.49.31");
+        let capabilities = &mut hello.manifest.capabilities.as_mut().unwrap().provides;
+        for claim in [
+            "step-transform-provider/v1",
+            "bind-no-project/v1",
+            "scope-workdir/v1",
+        ] {
+            assert_eq!(
+                capabilities
+                    .iter()
+                    .filter(|value| value.as_str() == claim)
+                    .count(),
+                1
+            );
+            capabilities.retain(|value| value != claim);
+        }
+        hello.manifest.module_version = "0.49.29".into();
+        let previous = serde_json::to_vec(&hello).unwrap();
+        assert_eq!(previous.len(), 13_719);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&previous)),
             "90ba474a4af34b49ed58ab742ef882a073c041e8dc5a43f88206f7df88a4ea40"
         );
     }
