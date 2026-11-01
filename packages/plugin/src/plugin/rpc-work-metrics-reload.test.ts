@@ -57,6 +57,38 @@ function observeUsageReads() {
     }, "v2");
 }
 
+function observeSessionWrites(db: Database) {
+    const prepare = db.prepare.bind(db);
+    const exec = db.exec.bind(db);
+    let updates = 0;
+    let writeTransactions = 0;
+    const prepareSpy = spyOn(db, "prepare").mockImplementation((sql: string) => {
+        const statement = prepare(sql);
+        if (!/^\s*UPDATE\s+session_meta\b/i.test(sql)) return statement;
+        return {
+            run: (...params: unknown[]) => {
+                updates++;
+                return statement.run(...params);
+            },
+        } as typeof statement;
+    });
+    const execSpy = spyOn(db, "exec").mockImplementation((sql: string) => {
+        if (/^\s*BEGIN\s+(?:IMMEDIATE|EXCLUSIVE)\b/i.test(sql)) writeTransactions++;
+        return exec(sql);
+    });
+    return {
+        counts: () => ({ updates, writeTransactions }),
+        reset: () => {
+            updates = 0;
+            writeTransactions = 0;
+        },
+        restore: () => {
+            prepareSpy.mockRestore();
+            execSpy.mockRestore();
+        },
+    };
+}
+
 for (const count of [1_000, 40_000]) {
     test(`OpenCode 2 fresh RPC module resumes persisted usage carry at ${count} assistant rows`, async () => {
         const root = createTestTempDirFromPath(join(tmpdir(), "rpc-usage-reload-"));
@@ -68,6 +100,7 @@ for (const count of [1_000, 40_000]) {
         const oracle = new Database(":memory:");
         let db = new Database(contextPath);
         let observed: ReturnType<typeof observeUsageReads> | undefined;
+        let writes: ReturnType<typeof observeSessionWrites> | undefined;
         try {
             closeReadOnlySessionDb();
             _resetHarnessForTesting();
@@ -120,14 +153,22 @@ for (const count of [1_000, 40_000]) {
             const reloaded = await import(`./rpc-handlers.ts?usage-reload=${count}`);
             expect(reloaded.buildSidebarSnapshot).not.toBe(buildSidebarSnapshot);
             observed = observeUsageReads();
+            writes = observeSessionWrites(db);
             const after = reloaded.buildSidebarSnapshot(db, sessionId, root);
             expect(after).toMatchObject({
                 newWorkTokens: before.newWorkTokens,
                 totalInputTokens: before.totalInputTokens,
             });
             expect(observed.rowsRead).toEqual([1]);
+            expect(writes.counts()).toEqual({ updates: 0, writeTransactions: 0 });
+            expect(reloaded.buildSidebarSnapshot(db, sessionId, root)).toMatchObject({
+                newWorkTokens: before.newWorkTokens,
+                totalInputTokens: before.totalInputTokens,
+            });
+            expect(observed.rowsRead).toEqual([1, 1]);
+            expect(writes.counts()).toEqual({ updates: 0, writeTransactions: 0 });
             console.log(
-                `ISSUE_825_RELOAD assistantRows=${count} initialRows=${count} reloadRows=${observed.rowsRead[0]}`,
+                `ISSUE_825_RELOAD assistantRows=${count} initialRows=${count} reloadRows=${observed.rowsRead[0]} idleUpdates=${writes.counts().updates} idleWriteTransactions=${writes.counts().writeTransactions}`,
             );
 
             // The held-back row can finish streaming after the module reload.
@@ -146,6 +187,8 @@ for (const count of [1_000, 40_000]) {
                 computeOpenCodeWorkMetrics(oracle, sessionId),
             );
             expect(observed.rowsRead).toEqual([1]);
+            expect(writes.counts()).toEqual({ updates: 1, writeTransactions: 1 });
+            writes.reset();
             host.transaction(() => insert(count + 1, usage(count + 1, 444, 88))).immediate();
             observed.restore();
             closeReadOnlySessionDb();
@@ -154,6 +197,7 @@ for (const count of [1_000, 40_000]) {
                 computeOpenCodeWorkMetrics(oracle, sessionId),
             );
             expect(observed.rowsRead).toEqual([2]);
+            expect(writes.counts()).toEqual({ updates: 1, writeTransactions: 1 });
             expect(observed.plans.some((plan) => /SEARCH session_message.*seq>\?/.test(plan))).toBe(
                 true,
             );
@@ -169,6 +213,7 @@ for (const count of [1_000, 40_000]) {
             expect(rootState.magicContextWorkMetrics.lastTimeCreated).toBe(count);
         } finally {
             observed?.restore();
+            writes?.restore();
             closeReadOnlySessionDb();
             _resetHarnessForTesting();
             if (previousPath === undefined) delete process.env.OPENCODE_DB;

@@ -1,7 +1,13 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Database } from "../../shared/sqlite";
 import { sessionDecisionCalibration } from "./session-decision-calibration";
-import { emptyWorkMetricsCarry, foldWorkMetricsRows, metricsFromCarry } from "./work-metrics";
+import {
+    emptyWorkMetricsCarry,
+    foldWorkMetricsRows,
+    metricsFromCarry,
+    type WorkMetrics,
+    type WorkMetricsCarry,
+} from "./work-metrics";
 import {
     readSessionWorkMetricsCarry,
     setSessionWorkMetricsCarry,
@@ -58,3 +64,96 @@ test("usage carry preserves sibling namespaces and survives calibration writes",
         db.close();
     }
 });
+
+const changes: Array<{
+    name: string;
+    apply: (carry: WorkMetricsCarry, metrics: WorkMetrics) => void;
+}> = [
+    { name: "newWorkSum", apply: (carry) => carry.newWorkSum++ },
+    { name: "lastTimeCreated", apply: (carry) => carry.lastTimeCreated++ },
+    {
+        name: "lastId",
+        apply: (carry) => {
+            carry.lastId += "-next";
+        },
+    },
+    { name: "prevPrompt", apply: (carry) => carry.perAgent.get("build")!.prevPrompt++ },
+    { name: "phaseId", apply: (carry) => carry.perAgent.get("build")!.phaseId++ },
+    { name: "phasePeak", apply: (carry) => carry.perAgent.get("build")!.phasePeak++ },
+    { name: "closedPhaseSum", apply: (carry) => carry.perAgent.get("build")!.closedPhaseSum++ },
+    { name: "lastOutput", apply: (carry) => carry.perAgent.get("build")!.lastOutput++ },
+    {
+        name: "phaseHasQualifying",
+        apply: (carry) => {
+            carry.perAgent.get("build")!.phaseHasQualifying = false;
+        },
+    },
+    {
+        name: "seen",
+        apply: (carry) => {
+            carry.perAgent.get("build")!.seen = false;
+        },
+    },
+    {
+        name: "agent key",
+        apply: (carry) => {
+            const agent = carry.perAgent.get("build")!;
+            carry.perAgent.delete("build");
+            carry.perAgent.set("other", agent);
+        },
+    },
+    {
+        name: "agent count",
+        apply: (carry) => {
+            carry.perAgent.delete("plan");
+        },
+    },
+    { name: "newWorkTokens", apply: (_carry, metrics) => metrics.newWorkTokens++ },
+    { name: "totalInputTokens", apply: (_carry, metrics) => metrics.totalInputTokens++ },
+];
+
+for (const change of changes) {
+    test(`usage carry writes once for changed ${change.name} and never for unchanged state`, () => {
+        const db = new Database(":memory:");
+        const transaction = spyOn(db, "transaction");
+        try {
+            db.exec(`CREATE TABLE session_meta (
+                session_id TEXT PRIMARY KEY, deferred_execute_state TEXT,
+                new_work_tokens INTEGER, total_input_tokens INTEGER);
+                INSERT INTO session_meta (session_id) VALUES ('s')`);
+            const carry = foldWorkMetricsRows(
+                [
+                    { agent: "build", id: "a", timeCreated: 1, prompt: 100, output: 3 },
+                    { agent: "plan", id: "b", timeCreated: 2, prompt: 200, output: 4 },
+                ],
+                emptyWorkMetricsCarry(),
+            );
+            const metrics = metricsFromCarry(carry);
+            setSessionWorkMetricsCarry(db, "s", "v2:/host.db", carry, metrics);
+            const changesBefore = db.prepare("SELECT total_changes() AS n").get()!.n as number;
+            transaction.mockClear();
+            const equivalent = {
+                ...carry,
+                perAgent: new Map(
+                    [...carry.perAgent]
+                        .reverse()
+                        .map(([key, agent]) => [key, { ...agent }] as const),
+                ),
+            };
+            setSessionWorkMetricsCarry(db, "s", "v2:/host.db", equivalent, { ...metrics });
+            expect(transaction).not.toHaveBeenCalled();
+            expect(db.prepare("SELECT total_changes() AS n").get()!.n).toBe(changesBefore);
+
+            change.apply(carry, metrics);
+            setSessionWorkMetricsCarry(db, "s", "v2:/host.db", carry, metrics);
+            expect(transaction).toHaveBeenCalledTimes(1);
+            expect(db.prepare("SELECT total_changes() AS n").get()!.n).toBe(changesBefore + 1);
+            setSessionWorkMetricsCarry(db, "s", "v2:/host.db", carry, metrics);
+            expect(transaction).toHaveBeenCalledTimes(1);
+            expect(db.prepare("SELECT total_changes() AS n").get()!.n).toBe(changesBefore + 1);
+        } finally {
+            transaction.mockRestore();
+            db.close();
+        }
+    });
+}
