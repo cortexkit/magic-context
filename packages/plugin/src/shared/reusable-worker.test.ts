@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
+import { MessageChannel, type Worker } from "node:worker_threads";
 import { reuseWorker } from "./reusable-worker";
 import { withTestTempDir } from "./test-temp-dir";
 
@@ -107,6 +108,21 @@ describe("reusable job workers", () => {
         expect((await result(job)).value).toBe("submitted");
     });
 
+    test("job input keeps shared coordination live in both directions", async () => {
+        const state = new Int32Array(new SharedArrayBuffer(4));
+        Atomics.store(state, 0, 1);
+        const worker = start(`shared-${++key}`, { shared: state.buffer });
+        const first = once(worker, "message");
+        const exit = once(worker, "exit");
+        expect((await first)[0].shared).toBe(1);
+        const changed = once(worker, "message");
+        Atomics.store(state, 0, 7);
+        worker.postMessage({ read: true });
+        expect((await changed)[0].shared).toBe(7);
+        await exit;
+        expect(Atomics.load(state, 0)).toBe(8);
+    });
+
     test("a nonzero job exit fails the lease and replaces the thread", async () => {
         const path = `exit-code-${++key}`;
         const first = await result(start(path));
@@ -139,43 +155,99 @@ describe("reusable job workers", () => {
 
     test("a file ending with queued jobs cannot interrupt the next parallel file", () => {
         withTestTempDir("reusable-worker-files-", (dir) => {
+            const outcomes = join(dir, "outcomes.jsonl");
+            writeFileSync(outcomes, "");
             writeFileSync(
                 join(dir, "01-owner.test.ts"),
                 `import { test } from "bun:test";
+import { appendFileSync } from "node:fs";
 import { reuseWorker } from ${JSON.stringify(new URL("./reusable-worker.ts", import.meta.url).href)};
 test("owner finishes with queued work", async () => {
     const entry = new URL(${JSON.stringify(entry.href)});
     const active = reuseWorker(entry, { workerData: { path: "file-exit", hang: true } });
-    const queued = reuseWorker(entry, { workerData: { path: "file-exit", value: "queued" } });
     active.on("error", () => {});
-    queued.on("error", () => console.log("queued failure reached client"));
-    queued.on("exit", (code) => console.log("queued exit:", code));
+    for (let id = 0; id < 3; id++) {
+        const queued = reuseWorker(entry, { workerData: { path: "file-exit", value: "queued" } });
+        let replied = false;
+        let failed = false;
+        queued.on("message", () => { replied = true; });
+        queued.on("error", () => { failed = true; });
+        queued.on("exit", code => appendFileSync(${JSON.stringify(outcomes)}, JSON.stringify({
+            id, outcome: code === 0 && replied && !failed ? "completed" : "failed",
+        }) + "\\n"));
+    }
     await Promise.resolve();
 });`,
             );
-            // Top-level await lets the old file's native Worker exit handler run
-            // while the next file is importing.
             writeFileSync(
                 join(dir, "02-next.test.ts"),
                 `import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 await new Promise(resolve => setTimeout(resolve, 50));
 describe("next file", () => {
-    test("still registers", () => expect(1).toBe(1));
+    test("still registers after every queued client settles once", () => {
+        const outcomes = readFileSync(${JSON.stringify(outcomes)}, "utf8").trim().split("\\n").filter(Boolean).map(line => JSON.parse(line));
+        expect(outcomes).toHaveLength(3);
+        for (let id = 0; id < 3; id++) {
+            const client = outcomes.filter(outcome => outcome.id === id);
+            expect(client).toHaveLength(1);
+            expect(["completed", "failed"]).toContain(client[0].outcome);
+        }
+    });
 });`,
             );
-            const child = spawnSync(process.execPath, ["test", "--parallel=1", dir], {
-                cwd: dir,
-                encoding: "utf8",
-                timeout: 5_000,
-                windowsHide: true,
-            });
+            // The real preload owns file teardown. Bun may discard a bare file's
+            // callbacks without notifying its workers' clients during VM teardown.
+            const child = spawnSync(
+                process.execPath,
+                [
+                    "test",
+                    "--parallel=1",
+                    "--preload",
+                    fileURLToPath(new URL("../../test-preload.ts", import.meta.url)),
+                    dir,
+                ],
+                { cwd: dir, encoding: "utf8", timeout: 5_000, windowsHide: true },
+            );
             const output = child.stdout + child.stderr;
             expect(output).toContain("2 pass");
             expect(output).toContain("0 fail");
             expect(output).not.toContain("Unhandled error");
-            expect(output).toContain("queued failure reached client");
-            expect(output).toContain("queued exit: 1");
             expect(child.status).toBe(0);
+            const settled = readFileSync(outcomes, "utf8").trim().split("\n").filter(Boolean);
+            expect(settled).toHaveLength(3);
         });
     }, 10_000);
+
+    test("replacement construction failure settles every queued client exactly once", async () => {
+        const path = `replacement-failure-${++key}`;
+        const { port1, port2 } = new MessageChannel();
+        try {
+            const crashed = reuseWorker(entry, {
+                workerData: { path, crash: true },
+                transferList: [port1],
+            });
+            crashed.on("error", () => {});
+            const clients = [start(path), start(path)].map((worker) => {
+                const errors: unknown[] = [];
+                const exits: number[] = [];
+                worker.on("error", (error) => errors.push(error));
+                const done = new Promise<void>((resolve) =>
+                    worker.on("exit", (code) => {
+                        exits.push(code);
+                        resolve();
+                    }),
+                );
+                return { errors, exits, done };
+            });
+            await Promise.all(clients.map((client) => client.done));
+            await new Promise((resolve) => setImmediate(resolve));
+            for (const client of clients) {
+                expect(client.errors).toHaveLength(1);
+                expect(client.exits).toEqual([1]);
+            }
+        } finally {
+            port2.close();
+        }
+    });
 });
