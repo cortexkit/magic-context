@@ -992,6 +992,8 @@ pub struct HistorianProducer {
     route_limits: RunnerLimits,
     route_follow: FollowCapabilities,
     control_pending: bool,
+    step_finish_reason: Option<String>,
+    following_run_id: Option<String>,
     /// Freeze the first send's policy for this session. In particular, a session that
     /// began without retention must not opt in on a later send.
     session_retention: Option<ChildRetention>,
@@ -1058,6 +1060,16 @@ impl HistorianProducer {
                 )
                 .await;
         }
+        self.step_finish_reason = None;
+        self.following_run_id = None;
+        tracing::info!(
+            child = session_id,
+            stage = stage_key,
+            model,
+            variant,
+            max_output_tokens,
+            "historian producer stage send"
+        );
         if self.session_id.as_deref() != Some(session_id) {
             self.close().await;
         }
@@ -1184,6 +1196,8 @@ impl HistorianProducer {
             route_limits: RunnerLimits::default(),
             route_follow: FollowCapabilities::default(),
             control_pending: false,
+            step_finish_reason: None,
+            following_run_id: None,
             session_retention: None,
             released: None,
             session_runner: None,
@@ -1275,6 +1289,15 @@ impl HistorianProducer {
         max_output_tokens: u32,
         temperature: Option<f64>,
     ) -> Result<RunHandle, HistorianProducerError> {
+        self.step_finish_reason = None;
+        self.following_run_id = None;
+        tracing::info!(
+            child = session_id,
+            model,
+            variant,
+            max_output_tokens,
+            "historian producer send"
+        );
         self.bind_session(session_id.to_string());
         let route = self.ensure_command_route().await?;
         // Check `role.describe` before building this send; the groups it declares pick
@@ -1507,6 +1530,8 @@ impl HistorianProducer {
         self.route_limits = RunnerLimits::default();
         self.route_follow = FollowCapabilities::default();
         self.control_pending = false;
+        self.step_finish_reason = None;
+        self.following_run_id = None;
     }
 
     /// Read and cache the route runner's `role.describe`: its retention, run
@@ -1574,6 +1599,10 @@ impl HistorianProducer {
             } else {
                 run_id.to_string()
             };
+            if self.following_run_id.as_deref() != Some(&resolved) {
+                self.step_finish_reason = None;
+                self.following_run_id = Some(resolved.clone());
+            }
             let route = self.ensure_command_route().await?;
             self.retention_for_route(route).await?;
             self.require_follow()?;
@@ -1729,6 +1758,7 @@ impl HistorianProducer {
                     json!({"method":"run.status", "params":{"run_id":run_id}}),
                 )
                 .await?;
+            let status_finish = runner_finish_reason(&answer, self.step_finish_reason.as_deref());
             let status: RoleRunStatus = serde_json::from_value(answer)?;
             if status.run_state().is_terminal() {
                 let answer = self
@@ -1737,6 +1767,15 @@ impl HistorianProducer {
                         json!({"method":"run.result", "params":{"run_id":run_id}}),
                     )
                     .await?;
+                let result_finish =
+                    runner_finish_reason(&answer, self.step_finish_reason.as_deref());
+                let finish_reason = if result_finish == RunnerFinishReason::Length
+                    || status_finish == RunnerFinishReason::Length
+                {
+                    RunnerFinishReason::Length
+                } else {
+                    result_finish
+                };
                 let result: RoleRunResult = serde_json::from_value(answer)?;
                 if result.run_id != run_id
                     || result.state != status.state
@@ -1747,7 +1786,7 @@ impl HistorianProducer {
                         "run.result disagrees with the requested run or its terminal status",
                     )));
                 }
-                return output_from_run_result(result, self.route_follow.run_usage);
+                return output_from_run_result(result, self.route_follow.run_usage, finish_reason);
             }
             // Active, paused and unknown future states are all nonterminal. A
             // quiet or ended subscription cannot make any of them terminal.
@@ -1780,6 +1819,7 @@ impl HistorianProducer {
                 match frame.header.ty {
                     FrameType::StreamData => {
                         let event: Value = serde_json::from_slice(&frame.body)?;
+                        self.observe_step_finish(&event);
                         if runner_follow::control_wake(&event) {
                             return Ok(true);
                         }
@@ -1822,6 +1862,7 @@ impl HistorianProducer {
                 {
                     let event: Value = serde_json::from_slice(&frame.body)?;
                     self.control_pending |= runner_follow::control_wake(&event);
+                    self.observe_step_finish(&event);
                 }
             }
         })
@@ -1869,6 +1910,23 @@ impl HistorianProducer {
         let corr = self.next_corr;
         self.next_corr = self.next_corr.saturating_add(1).max(1);
         corr
+    }
+
+    fn observe_step_finish(&mut self, event: &Value) {
+        let Some(unit) = control_unit(event) else {
+            return;
+        };
+        if self
+            .following_run_id
+            .as_deref()
+            .is_some_and(|run| unit["run_id"] == run)
+            && (is_step_finished_unit(unit) || unit.get("terminal_status").is_some())
+        {
+            self.step_finish_reason = unit
+                .get("finish_reason")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
     }
 }
 
@@ -1996,9 +2054,37 @@ fn classify_run_state(_run_id: &str, value: &Value) -> RunState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunnerFinishReason {
+    Unknown,
+    Length,
+    Other,
+}
+
+/// Finish metadata is optional in the current runner role. Unknown and `other`
+/// are not evidence of completeness; envelope and compartment gates always run.
+/// Keep runner-specific finish-reason fields here so changes to their handling
+/// stay in one adapter, not the historian's publication or recovery logic.
+fn runner_finish_reason(answer: &Value, step_finish_reason: Option<&str>) -> RunnerFinishReason {
+    let reason = [
+        answer.get("final_step_finish_reason"),
+        answer.get("finish_reason"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(Value::as_str)
+    .or(step_finish_reason);
+    match reason {
+        Some("length" | "max_tokens" | "max_output_tokens") => RunnerFinishReason::Length,
+        Some(_) => RunnerFinishReason::Other,
+        None => RunnerFinishReason::Unknown,
+    }
+}
+
 fn output_from_run_result(
     result: RoleRunResult,
     reports_usage: bool,
+    finish_reason: RunnerFinishReason,
 ) -> Result<ProducerOutput, HistorianProducerError> {
     let usage = reports_usage
         .then_some(result.usage.as_ref())
@@ -2014,7 +2100,7 @@ fn output_from_run_result(
             })?;
             Ok(ProducerOutput {
                 text: final_message.text,
-                length_capped: false,
+                length_capped: finish_reason == RunnerFinishReason::Length,
                 usage,
             })
         }
@@ -2042,7 +2128,6 @@ fn output_from_run_result(
     }
 }
 
-#[cfg(test)]
 fn control_unit(event: &Value) -> Option<&Value> {
     let kind = event.get("kind").and_then(Value::as_str);
     if kind == Some("display") {
@@ -2055,7 +2140,6 @@ fn control_unit(event: &Value) -> Option<&Value> {
     Some(event.get("unit").unwrap_or(event))
 }
 
-#[cfg(test)]
 fn unit_type(unit: &Value) -> Option<&str> {
     unit.get("type")
         .or_else(|| unit.get("kind"))
@@ -2105,7 +2189,6 @@ fn is_terminal_unit(unit: &Value) -> bool {
         || ty == "error"
 }
 
-#[cfg(test)]
 fn is_step_finished_unit(unit: &Value) -> bool {
     unit_type(unit)
         .map(str::to_ascii_lowercase)
@@ -2307,6 +2390,110 @@ fn retry_after_secs_from_value(value: &Value) -> Option<u64> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn finish_reason_adapter_distinguishes_length_from_unknown_metadata() {
+        for (answer, step, expected) in [
+            (json!({}), None, RunnerFinishReason::Unknown),
+            (
+                json!({"final_step_finish_reason":"length"}),
+                None,
+                RunnerFinishReason::Length,
+            ),
+            (
+                json!({"final_step_finish_reason":"max_tokens"}),
+                None,
+                RunnerFinishReason::Length,
+            ),
+            (
+                json!({"finish_reason":"max_output_tokens"}),
+                None,
+                RunnerFinishReason::Length,
+            ),
+            (json!({}), Some("length"), RunnerFinishReason::Length),
+            (
+                json!({"final_step_finish_reason":"stop"}),
+                None,
+                RunnerFinishReason::Other,
+            ),
+            (
+                json!({"final_step_finish_reason":"other"}),
+                None,
+                RunnerFinishReason::Other,
+            ),
+            (
+                json!({"final_step_finish_reason":"future_value"}),
+                None,
+                RunnerFinishReason::Other,
+            ),
+            (
+                json!({"final_step_finish_reason":null}),
+                None,
+                RunnerFinishReason::Unknown,
+            ),
+        ] {
+            assert_eq!(runner_finish_reason(&answer, step), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_runner_length_metadata_is_not_reported_as_complete() {
+        for (result_reason, status_reason, capped) in [
+            (Some("length"), None, true),
+            (None, Some("length"), true),
+            (Some("stop"), Some("length"), true),
+            (Some("other"), None, false),
+            (None, None, false),
+        ] {
+            let server = fake_server(json!({"run_id":"run-1"}), vec![]).await;
+            {
+                let mut answers = server.answers.lock().await;
+                let mut status = json!({"state":"completed"});
+                if let Some(reason) = status_reason {
+                    status["final_step_finish_reason"] = json!(reason);
+                }
+                answers.statuses = [status].into();
+                let mut result = json!({"run_id":"run-1","state":"completed","final_message":{"ordinal":1,"mid":"answer","text":"syntactically valid but capped"}});
+                if let Some(reason) = result_reason {
+                    result["final_step_finish_reason"] = json!(reason);
+                }
+                answers.result = Some(result);
+            }
+            let mut producer = client(&server).await;
+            producer
+                .start("finish-child", "system", "prompt", "prov/model")
+                .await
+                .unwrap();
+            let output = producer
+                .await_output_with_timeout("run-1", Duration::from_secs(3))
+                .await
+                .unwrap();
+            assert_eq!(
+                output.length_capped, capped,
+                "result={result_reason:?} status={status_reason:?}"
+            );
+            producer.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn step_finish_metadata_is_scoped_to_the_followed_run() {
+        let server = fake_server(json!({"run_id":"run-1"}), vec![]).await;
+        let mut producer = client(&server).await;
+        producer.following_run_id = Some("current".into());
+        producer.observe_step_finish(&json!({"kind":"display","run_id":"current","type":"step_finished","finish_reason":"length"}));
+        assert_eq!(producer.step_finish_reason, None);
+        producer.observe_step_finish(&json!({"kind":"control","unit":{"type":"step_finished","run_id":"older","finish_reason":"length"}}));
+        assert_eq!(producer.step_finish_reason, None);
+        producer.observe_step_finish(&json!({"kind":"control","unit":{"type":"step_finished","run_id":"current","finish_reason":"length"}}));
+        assert_eq!(
+            runner_finish_reason(&json!({}), producer.step_finish_reason.as_deref()),
+            RunnerFinishReason::Length
+        );
+        producer.close().await;
+        assert_eq!(producer.following_run_id, None);
+        assert_eq!(producer.step_finish_reason, None);
+    }
+
     #[tokio::test]
     async fn broca_session_change_goldens_start_historian_through_unary_json() {
         let describe = crate::session_resolver::read_runner_reply(
@@ -2992,6 +3179,10 @@ pub(crate) mod tests {
             self.log.lock().await.methods.clone()
         }
 
+        pub(crate) async fn sends(&self) -> Vec<Value> {
+            self.log.lock().await.sends.clone()
+        }
+
         /// The session each `session.release` was bound to, in order.
         pub(crate) async fn released_sessions(&self) -> Vec<String> {
             let log = self.log.lock().await;
@@ -3012,6 +3203,22 @@ pub(crate) mod tests {
             json!({"capabilities":["no_tools","max_steps"]}),
         )
         .await
+    }
+
+    pub(crate) async fn publication_follower_with_finish(
+        output: &str,
+        finish: Option<&str>,
+    ) -> (HistorianProducer, FakeServer) {
+        let (producer, server) = publication_follower(output, false).await;
+        {
+            let mut answers = server.answers.lock().await;
+            let mut status = json!({"state":"completed"});
+            if let Some(finish) = finish {
+                status["final_step_finish_reason"] = json!(finish);
+            }
+            answers.statuses = [status].into();
+        }
+        (producer, server)
     }
 
     /// [`publication_follower`] against a runner whose `role.describe` answer is

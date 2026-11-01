@@ -5205,6 +5205,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn served_two_pass_runs_editor_but_never_memory_turn_two_or_scoring() {
+        assert!(!crate::historian_stage::lifecycle_enabled());
+        let dir = tempfile::tempdir().unwrap();
+        let main_store = store(dir.path());
+        seed_prior_compartment(&main_store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/main".into()];
+        let config = resolve_fixture_config(
+            serde_json::json!({"historian":{"two_pass":true,"turn_two":"on"}}),
+            serde_json::json!({}),
+        );
+        let xml = historian_xml("served summary");
+        let (mut producer, server) =
+            crate::historian_producer::tests::publication_follower(&xml, false).await;
+        let mut request = fire_request(&main_store, "turn one prompt", &models, &chunk, &prior);
+        request.editor_pass = config.effective.historian_two_pass;
+        run_historian_firing(&mut producer, request).await.unwrap();
+        let sends = server.sends().await;
+        // Draft polish is independent of memory reconciliation and scoring. The
+        // dormant lifecycle gate must not be bypassed by the two_pass setting.
+        assert_eq!(sends.len(), 2);
+        assert_eq!(sends[0]["prompt"], "turn one prompt");
+        assert_eq!(
+            sends[1]["prompt"],
+            include_str!("../testdata/historian-editor-prompt.txt").replacen("{{DRAFT}}", &xml, 1)
+        );
+        assert_eq!(
+            sends[1]["system"],
+            crate::persona_host::render_embedded_editor(None)
+                .unwrap()
+                .text
+        );
+        assert!(sends
+            .iter()
+            .all(|send| send["tools"] == serde_json::json!([])));
+    }
+
+    #[tokio::test]
+    async fn served_runner_length_and_unknown_replies_still_obey_publication_gates() {
+        for (finish, valid_xml, publishes) in [
+            (Some("length"), true, false),
+            (Some("other"), false, false),
+            (None, false, false),
+            (None, true, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let main_store = store(dir.path());
+            seed_prior_compartment(&main_store);
+            let chunk = historian_chunk();
+            let prior = prior_ranges();
+            let models = vec!["prov/main".into()];
+            let output = if valid_xml {
+                historian_xml("valid structure")
+            } else {
+                "partial <output>".into()
+            };
+            let (mut producer, _server) =
+                crate::historian_producer::tests::publication_follower_with_finish(&output, finish)
+                    .await;
+            let result = run_historian_firing(
+                &mut producer,
+                fire_request(&main_store, "prompt", &models, &chunk, &prior),
+            )
+            .await;
+            assert_eq!(
+                result.is_ok(),
+                publishes,
+                "finish={finish:?} valid_xml={valid_xml}"
+            );
+            assert_eq!(
+                main_store.load_compartments("ses").unwrap().len(),
+                if publishes { 2 } else { 1 }
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn historian_4b_editor_accepts_one_valid_polish() {
         // runEditorPassOrFallback at 282d9c08bce4 returned one call, this prompt,
         // "edited exact" and invocation 22 for the accepted reply; the call-failure,
