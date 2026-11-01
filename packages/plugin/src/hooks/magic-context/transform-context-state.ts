@@ -20,11 +20,9 @@ export function usagePredatesHistoryChange(
     meta: Pick<SessionMeta, "lastResponseTime" | "cachedM0MaterializedAt">,
     liveReading?: ContextUsageCacheEntry,
 ): boolean {
-    // The idle clock may advance on a response without usage. Keep the live
-    // reading's older timestamp in that case; ingestion can also follow completion.
-    const readingAt = liveReading?.hasUsageTokens
-        ? Math.min(meta.lastResponseTime || liveReading.updatedAt, liveReading.updatedAt)
-        : meta.lastResponseTime;
+    // Token-bearing events own their measurement time. The idle clock can
+    // advance without usage, or lag a newly delivered provider reading.
+    const readingAt = liveReading?.hasUsageTokens ? liveReading.updatedAt : meta.lastResponseTime;
     if (!(readingAt > 0)) return false;
     if ((meta.cachedM0MaterializedAt ?? 0) > readingAt) return true;
     return !!db

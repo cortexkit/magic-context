@@ -395,7 +395,7 @@ describe("computeHardCacheExpired finite boundary parity", () => {
     });
 });
 
-it("invalidates pre-fold usage but retains a new provider reading and its older live timestamp", () => {
+it("compares history to provider reading age independently of the idle clock", () => {
     useTempDataHome("usage-fold-");
     const db = openDatabase()!;
     const id = "usage-fold";
@@ -419,13 +419,13 @@ it("invalidates pre-fold usage but retains a new provider reading and its older 
             },
         ),
     ).toBe(true);
-    // A stored response can be ingested after the fold; its completion still predates it.
+    // A new provider measurement remains fresh even if the idle clock has not advanced.
     expect(
         usagePredatesHistoryChange(db, id, meta, {
             usage: { percentage: 97, inputTokens: 97_000 },
             updatedAt: 3000,
             hasUsageTokens: true,
         }),
-    ).toBe(true);
+    ).toBe(false);
     expect(usagePredatesHistoryChange(db, id, { ...meta, lastResponseTime: 0 })).toBe(false);
 });

@@ -14,6 +14,7 @@ import {
 } from "../../features/magic-context/storage";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
 import type { TransformDeps } from "../../hooks/magic-context/transform";
+import { usagePredatesHistoryChange } from "../../hooks/magic-context/transform-context-state";
 import { ABSOLUTE_EMERGENCY_PERCENTAGE } from "../../shared/escalation-bands";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
@@ -61,6 +62,51 @@ async function configure272kWindow(): Promise<void> {
 }
 
 describe("persistV2UsageReading", () => {
+    it("dates provider usage by completion when the store is read after a fold", () => {
+        process.env.XDG_DATA_HOME = makeTempDir("v2-usage-age-");
+        const db = openDatabase();
+        const sessionID = "v2-usage-age";
+        const contextUsageMap: TransformDeps["contextUsageMap"] = new Map();
+        getOrCreateSessionMeta(db, sessionID);
+        updateSessionMeta(db, sessionID, { cachedM0MaterializedAt: 2000 });
+        const persist = (inputTokens: number, completed: number) =>
+            persistV2UsageReading({
+                db,
+                sessionID,
+                contextUsageMap,
+                draftModel: { providerID: "test-provider", id: "test-model" },
+                reading: {
+                    inputTokens,
+                    completed,
+                    finish: "stop",
+                    limit: 100_000,
+                    admissionLimit: 100_000,
+                    modelKey: "test-provider/test-model",
+                },
+            });
+        const stale = () =>
+            usagePredatesHistoryChange(
+                db,
+                sessionID,
+                getOrCreateSessionMeta(db, sessionID),
+                contextUsageMap.get(sessionID),
+            );
+        persist(97_000, 1000);
+        expect(contextUsageMap.get(sessionID)?.updatedAt).toBe(1000);
+        expect(stale()).toBe(true);
+        persist(40_000, 3000);
+        expect(contextUsageMap.get(sessionID)?.updatedAt).toBe(3000);
+        expect(stale()).toBe(false);
+        // A later completion without usage refreshes the idle clock, not the measurement.
+        updateSessionMeta(db, sessionID, { cachedM0MaterializedAt: 3500 });
+        persist(0, 4000);
+        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(4000);
+        expect(contextUsageMap.get(sessionID)?.updatedAt).toBe(3000);
+        expect(stale()).toBe(true);
+        persist(97_000, 5000);
+        expect(stale()).toBe(false);
+    });
+
     it("treats provider usage above the configured window as real pressure on every reading", async () => {
         process.env.XDG_DATA_HOME = makeTempDir("v2-usage-persist-");
         await configure272kWindow();
