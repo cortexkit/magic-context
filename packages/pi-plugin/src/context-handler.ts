@@ -159,6 +159,7 @@ import {
 	applyPendingOperations,
 	convertLegacyToolSkeletons,
 	foldBustsServedPrefix,
+	prepareAgedToolSkeletonConversions,
 	prepareFlushedToolRemovals,
 	RECENT_TOOL_SKELETON_WINDOW,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
@@ -9799,9 +9800,18 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const tTag = performance.now();
 	// Part getters build fresh proxy objects. Reuse one view for tagging and
 	// safety coordinates; its proxies still read/write the working messages.
+	const strippedSubagentThinking =
+		args.sessionMeta.isSubagent &&
+		(!thinkingRecovery.restore || rewritingSignedPrefix)
+			? frozenBindingEntryIds(args.db, args.sessionId)
+			: new Set<string>();
 	const mutationView = transcript.messages.map((message) => ({
 		...message,
 		parts: message.parts,
+		// Persisted thinking removals release subagent arcs even when tagging sees raw thinking.
+		requiresToolArcSkeleton: strippedSubagentThinking.has(message.info.id ?? "")
+			? false
+			: message.requiresToolArcSkeleton,
 	}));
 	// Storage recovery sent these messages without the §N§ message-number markers.
 	// Adding markers changes cached bytes, so wait for permission to rewrite the
@@ -10054,6 +10064,45 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		"convertLegacyToolSkeletons",
 		tLegacyToolConversion,
 	);
+	if (
+		args.sessionMeta.isSubagent &&
+		isCacheBustingPass &&
+		!protectedSignedPrefix &&
+		!args.compactionOff
+	) {
+		const savedRemovalInputs = nativeRemovalInputs;
+		try {
+			nativeRemovalInputs = savedRemovalInputs && new Map(savedRemovalInputs);
+			const converted = args.db
+				.transaction(() =>
+					removalBatch((flush) => {
+						const conversions = prepareAgedToolSkeletonConversions(
+							args.db,
+							args.sessionId,
+							newTargets,
+							{
+								prepareRemovals: (rows) =>
+									preparePiToolRemovalChecks({
+										db: args.db,
+										rows,
+										targets: newTargets,
+										messages: args.messages,
+										prepare: transcript.prepareToolRemovalMeasurements,
+									}),
+							},
+						);
+						conversions.persist(args.db);
+						flush();
+						return conversions.converted.size;
+					}),
+				)
+				.immediate();
+			if (converted > 0) recordFirstApplicationWireEdit(true);
+		} catch (error) {
+			nativeRemovalInputs = savedRemovalInputs;
+			throw error;
+		}
+	}
 
 	// 1b. Note-nudge `commit_detected` trigger. Mirrors OpenCode's logic
 	// in `tag-messages.ts` + `transform.ts:677-690`: only fire on the

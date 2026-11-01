@@ -50,6 +50,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import {
+	addMergedReasoningStrippedIds,
 	DRAIN_WINDOW_MS,
 	getEmergencyInputSample,
 	getMergedReasoningStrippedIds,
@@ -57,6 +58,7 @@ import {
 	recordDetectedContextLimit,
 	recordOverflowDetected,
 	setPersistedNoteNudgeTriggerMessageId,
+	thinkingBindingRecoveryFrozenId,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import {
@@ -2807,6 +2809,133 @@ describe("registerPiContextHandler", () => {
 				expect(getPendingOps(db, sessionId)).toHaveLength(1);
 			} finally {
 				restoreHistorian?.();
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+	}
+
+	for (const [isSubagent, thinking] of [
+		[true, false],
+		[true, true],
+		[false, false],
+	] as const) {
+		it(`issue 643 retires old skeletons only on subagent rebuilds (subagent=${isSubagent}, thinking=${thinking})`, async () => {
+			const db = createTestDb();
+			const sessionId = `skeleton-retirement-${isSubagent}-${thinking}`;
+			try {
+				getOrCreateSessionMeta(db, sessionId);
+				updateSessionMeta(db, sessionId, {
+					isSubagent,
+					lastResponseTime: Date.now(),
+					cacheTtl: "59m",
+				});
+				const fake = createFakePi();
+				registerPiContextHandler(fake.pi as never, {
+					db,
+					protectedTags: 0,
+					heuristics: { keepReasoningTokens: 100000 },
+				});
+				const handler = fake.handlers.get("context") as (
+					event: { messages: never[] },
+					ctx: never,
+				) => Promise<{ messages: never[] }>;
+				let passTokens = 20000;
+				const ctx = {
+					...fakeContext(sessionId),
+					getContextUsage: () => ({
+						tokens: passTokens,
+						percent: passTokens / 1000,
+						contextWindow: 100000,
+					}),
+				};
+				const source = [
+					userMessage("work", 1),
+					...Array.from({ length: 60 }, (_, i) => [
+						{
+							role: "assistant",
+							timestamp: 2 + i * 2,
+							content: [
+								...(thinking && i === 0
+									? [
+											{
+												type: "thinking",
+												thinking: "signed thought",
+												thinkingSignature: "signature",
+											},
+										]
+									: []),
+								{
+									type: "toolCall",
+									id: `call-${i}`,
+									name: "bash",
+									arguments: { command: `echo ${i}` },
+								},
+							],
+						},
+						{
+							role: "toolResult",
+							toolCallId: `call-${i}`,
+							toolName: "bash",
+							timestamp: 3 + i * 2,
+							content: [{ type: "text", text: `output ${i}` }],
+						},
+					]).flat(),
+					userMessage("continue", 200),
+				];
+				const pass = () =>
+					handler(
+						{ messages: structuredClone(source) as never[] },
+						ctx as never,
+					);
+				await pass();
+				const tags = getTagsBySession(db, sessionId).filter(
+					(tag) => tag.type === "tool",
+				);
+				expect(tags).toHaveLength(60);
+				for (const tag of tags) {
+					updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
+					updateTagDropMode(db, sessionId, tag.tagNumber, "skeleton_real");
+				}
+				if (thinking) {
+					expect(tags[0].toolOwnerMessageId).toBeTruthy();
+					addMergedReasoningStrippedIds(db, sessionId, [
+						thinkingBindingRecoveryFrozenId(tags[0].toolOwnerMessageId!),
+					]);
+				}
+				const modes = () =>
+					getTagsBySession(db, sessionId)
+						.filter((tag) => tag.type === "tool")
+						.map((tag) => tag.dropMode);
+				await pass();
+				expect(modes()).toEqual(Array(60).fill("skeleton_real"));
+				passTokens = 70000;
+				if (!isSubagent) signalPiPendingMaterialization(sessionId);
+				const rebuilt = (await pass()).messages;
+				expect(modes()).toEqual(
+					isSubagent
+						? [...Array(40).fill("full"), ...Array(20).fill("skeleton_real")]
+						: Array(60).fill("skeleton_real"),
+				);
+				if (isSubagent) {
+					const calls = (
+						rebuilt as Array<{
+							content?: Array<{ type?: string; id?: string }>;
+						}>
+					)
+						.flatMap((message) =>
+							Array.isArray(message.content) ? message.content : [],
+						)
+						.filter((part) => part.type === "toolCall");
+					expect(calls.map((part) => part.id)).toEqual(
+						Array.from({ length: 20 }, (_, i) => `call-${i + 40}`),
+					);
+					passTokens = 20000;
+					expect(JSON.stringify((await pass()).messages)).toBe(
+						JSON.stringify(rebuilt),
+					);
+				}
+			} finally {
 				clearContextHandlerSession(sessionId);
 				closeQuietly(db);
 			}
@@ -9047,6 +9176,110 @@ describe("Pi proactive strip of invalidated thinking", () => {
 		).filter?.((part) => part.type === "thinking").length ?? 0;
 	const sha256 = (value: unknown) =>
 		createHash("sha256").update(JSON.stringify(value)).digest("hex");
+	it("issue 643 REVIEW skeleton retirement strips later signed thinking on the same rebuild", async () => {
+		const db = createTestDb();
+		const sessionId = "pi-retirement-before-signed-thinking";
+		const fake = createFakePi();
+		try {
+			getOrCreateSessionMeta(db, sessionId);
+			updateSessionMeta(db, sessionId, {
+				isSubagent: true,
+				piStableIdScheme: 1,
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+			});
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				protectedTags: 0,
+				heuristics: { keepReasoningTokens: 100000 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: unknown[] }>;
+			const source: Record<string, unknown>[] = [userMessage("work", 1)];
+			const entryIds = ["start"];
+			for (let i = 0; i < 21; i++) {
+				source.push(
+					assistantToolCall(
+						`call-${i}`,
+						"bash",
+						{ command: `echo ${i}` },
+						2 + i * 2,
+					),
+					toolResultMessage(`call-${i}`, `output ${i}`, 3 + i * 2),
+				);
+				entryIds.push(`assistant-${i}`, `result-${i}`);
+			}
+			source.push(userMessage("explain the results", 50));
+			entryIds.push("explain");
+			const pass = async (percent: number) => {
+				const messages = structuredClone(source);
+				return (
+					await handler({ messages: messages as never[] }, {
+						...fakeContext(
+							sessionId,
+							process.cwd(),
+							entryIds,
+							messages as never,
+						),
+						model: {
+							provider: "anthropic",
+							id: "claude-opus-5-5",
+							contextWindow: 100000,
+						},
+						getContextUsage: () => ({
+							tokens: percent * 1000,
+							percent,
+							contextWindow: 100000,
+						}),
+					} as never)
+				).messages;
+			};
+			await pass(20);
+			const dropped = getTagsBySession(db, sessionId).find(
+				(tag) => tag.type === "tool" && tag.messageId === "call-0",
+			);
+			if (!dropped) throw new Error("missing first tool tag");
+			// Reconstruct a recent dropped call: keep its invocation and replace
+			// only the result with a placeholder.
+			updateTagStatus(db, sessionId, dropped.tagNumber, "dropped");
+			updateTagDropMode(db, sessionId, dropped.tagNumber, "skeleton_real");
+			await pass(20);
+			// The later signature covers every preceding byte, including the kept
+			// invocation and placeholder result; removing either invalidates it.
+			source.push(
+				opusAssistant("later signed thought", "explanation", 51),
+				userMessage("continue", 52),
+			);
+			entryIds.push("later-thinking", "continue");
+			const baseline = await pass(20);
+			expect(
+				baseline.reduce((sum, message) => sum + thinkingIn(message), 0),
+			).toBe(1);
+			const rebuilt = await pass(70);
+			expect(
+				getTagsBySession(db, sessionId).find(
+					(tag) => tag.tagNumber === dropped.tagNumber,
+				)?.dropMode,
+			).toBe("full");
+			expect(JSON.stringify(rebuilt)).not.toContain('"id":"call-0"');
+			expect(JSON.stringify(rebuilt)).not.toContain('"toolCallId":"call-0"');
+			// Removing the earlier call/result invalidates the later signature.
+			expect(
+				rebuilt.reduce((sum, message) => sum + thinkingIn(message), 0),
+			).toBe(0);
+			expect(
+				getMergedReasoningStrippedIds(db, sessionId).has(
+					thinkingBindingRecoveryFrozenId("later-thinking"),
+				),
+			).toBe(true);
+			expect(JSON.stringify(await pass(20))).toBe(JSON.stringify(rebuilt));
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
 	for (const [lane, isSubagent, executePercent, name] of [
 		[
 			"image",

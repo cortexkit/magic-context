@@ -95,6 +95,7 @@ import {
     type ConvertedToolDropMode,
     foldBustsServedPrefix,
     foldChangesServedPrefix,
+    prepareAgedToolSkeletonConversions,
     prepareLegacyToolSkeletonConversions,
     renderConvertedToolSkeletons,
 } from "./apply-operations";
@@ -3561,6 +3562,31 @@ export async function runPostTransformPhase(
                     }
                 }
             }
+        }
+        if (!args.fullFeatureMode && canEditWholePrefix && !compactionOff) {
+            const thinkingStrippedIds = new Set([...bindingThinking, ...removedReasoningIds]);
+            for (const id of getMergedReasoningStrippedIds(args.db, args.sessionId)) {
+                if (id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX))
+                    thinkingStrippedIds.add(
+                        id.slice(THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length),
+                    );
+            }
+            const conversions = prepareAgedToolSkeletonConversions(
+                args.db,
+                args.sessionId,
+                newTargets,
+                { thinkingStrippedIds },
+            );
+            args.db
+                .transaction(() => {
+                    if (!conversions.isCurrent(args.db))
+                        throw new Error("Subagent skeleton candidates changed before commit");
+                    conversions.persist(args.db);
+                })
+                .immediate();
+            convertedToolSkeletonsDidMutate =
+                renderConvertedToolSkeletons(newTargets, conversions.converted) ||
+                convertedToolSkeletonsDidMutate;
         }
         const tBatchFinalize = performance.now();
         args.batch?.finalize();

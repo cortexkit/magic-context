@@ -59,6 +59,7 @@ import {
     setPersistedCompactionMarkerState,
     setPersistedTodoPermissionDenied,
     setPersistedTodoSyntheticAnchor,
+    thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
 import * as reasoningStorage from "../../features/magic-context/storage-reasoning-removal";
 import { getRemovedReasoningIds } from "../../features/magic-context/storage-reasoning-removal";
@@ -356,6 +357,156 @@ function basePostTransformArgs(
 function cloneMessages(messages: MessageLike[]): MessageLike[] {
     return structuredClone(messages);
 }
+
+describe("issue 643 subagent skeleton retirement", () => {
+    function fixture(thinking = false, databasePath = ":memory:") {
+        db = new Database(databasePath);
+        initializeDatabase(db);
+        const sessionId = "subagent-skeleton-retirement";
+        const source: MessageLike[] = [
+            { info: { id: "start", role: "user" }, parts: [{ type: "text", text: "work" }] },
+            ...Array.from(
+                { length: 60 },
+                (_, i) =>
+                    ({
+                        info: { id: `assistant-${i}`, role: "assistant" },
+                        parts: [
+                            ...(thinking && i === 0
+                                ? [
+                                      {
+                                          type: "reasoning",
+                                          text: "signed thought",
+                                          signature: "signature",
+                                      },
+                                  ]
+                                : []),
+                            {
+                                type: "tool",
+                                tool: "bash",
+                                callID: `call-${i}`,
+                                state: {
+                                    status: "completed",
+                                    input: {
+                                        command: Array.from(
+                                            { length: 60 },
+                                            (_, n) => `file-${i}-${n}`,
+                                        ).join(" "),
+                                    },
+                                    output: `output ${i} ${"word ".repeat(5000)}`,
+                                },
+                            },
+                        ],
+                    }) as MessageLike,
+            ),
+            { info: { id: "tail", role: "user" }, parts: [{ type: "text", text: "continue" }] },
+        ];
+        const tagger = createTagger();
+        tagMessages(sessionId, cloneMessages(source), tagger, db);
+        const tools = getTagsBySession(db, sessionId).filter((tag) => tag.type === "tool");
+        // These calls were dropped while each was recent on an earlier request.
+        for (const tag of tools) {
+            updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
+            updateTagDropMode(db, sessionId, tag.tagNumber, "skeleton_real");
+        }
+        const serve = async (execute: boolean, primary = false) => {
+            const messages = cloneMessages(source);
+            const replayTagger = createTagger();
+            replayTagger.initFromDb(sessionId, db);
+            const tagged = tagMessages(sessionId, messages, replayTagger, db);
+            applyFlushedStatuses(sessionId, db, tagged.targets);
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    ...tagged,
+                    tagger: replayTagger,
+                    tags: getTagsBySession(db, sessionId),
+                    fullFeatureMode: primary,
+                    schedulerDecision: execute ? "execute" : "defer",
+                    resolvedProviderID: "anthropic",
+                    resolvedModelID: "claude-opus-5-5",
+                    thinkingBindingRecoveryEnabledForModel: thinking,
+                    // Exercise a real rebuild permission even in the primary control.
+                    historyRebuiltThisPass: execute && primary,
+                }),
+            );
+            return { messages, result };
+        };
+        const modes = () =>
+            getTagsBySession(db, sessionId)
+                .filter((tag) => tag.type === "tool")
+                .map((tag) => tag.dropMode);
+        return { sessionId, source, serve, modes, tools };
+    }
+
+    it("converts the 40 older skeletons on subagent execute and defers byte-identically", async () => {
+        const { source, serve, modes } = fixture();
+        const held = await serve(false);
+        expect(modes()).toEqual(Array(60).fill("skeleton_real"));
+        const priced = await serve(true);
+        expect(modes()).toEqual([...Array(40).fill("full"), ...Array(20).fill("skeleton_real")]);
+        const calls = priced.messages
+            .flatMap((message) => message.parts)
+            .filter((part) => part.type === "tool");
+        expect(calls).toHaveLength(20);
+        expect(calls.map((part) => (part as { callID: string }).callID)).toEqual(
+            Array.from({ length: 20 }, (_, i) => `call-${i + 40}`),
+        );
+        const deferred = await serve(false);
+        expect(JSON.stringify(deferred.messages)).toBe(JSON.stringify(priced.messages));
+        const tokens = (messages: MessageLike[]) =>
+            messages.reduce((sum, message) => {
+                const estimate = estimateMessageTokens(message);
+                return sum + estimate.toolCall + estimate.conversation;
+            }, 0);
+        const raw = tokens(source);
+        const before = tokens(held.messages);
+        const after = tokens(priced.messages);
+        console.log(
+            `issue 643 long subagent fixture: raw=${raw}, skeletons=${before}, retired=${after} estimated tokens`,
+        );
+        expect(raw).toBeGreaterThan(280000);
+        expect(raw).toBeLessThan(330000);
+        expect(after).toBeLessThan(before / 2);
+    });
+
+    it("releases a thinking-held skeleton only after a persisted strip and a rebuild", async () => {
+        const { sessionId, serve, modes } = fixture(true);
+        await serve(true);
+        expect(modes()[0]).toBe("skeleton_real");
+        addMergedReasoningStrippedIds(db, sessionId, [
+            thinkingBindingRecoveryFrozenId("assistant-0"),
+        ]);
+        await serve(false);
+        expect(modes()[0]).toBe("skeleton_real");
+        const rebuilt = await serve(true);
+        expect(modes()[0]).toBe("full");
+        expect(JSON.stringify(rebuilt.messages)).not.toContain("signed thought");
+        expect(JSON.stringify((await serve(false)).messages)).toBe(
+            JSON.stringify(rebuilt.messages),
+        );
+    });
+
+    it("keeps primary skeletons unchanged even on a rebuilding pass", async () => {
+        const { serve, modes } = fixture();
+        const before = await serve(false, true);
+        const rebuilt = await serve(true, true);
+        expect(modes()).toEqual(Array(60).fill("skeleton_real"));
+        expect(JSON.stringify(rebuilt.messages)).toBe(JSON.stringify(before.messages));
+    });
+
+    it("replays retired arcs byte-identically after reopening the database", async () => {
+        const dir = createTestTempDirFromPath(join(tmpdir(), "issue-643-restart-"));
+        tempDirs.push(dir);
+        const path = join(dir, "context.db");
+        const { serve, modes } = fixture(false, path);
+        const rebuilt = await serve(true);
+        expect(modes()).toEqual([...Array(40).fill("full"), ...Array(20).fill("skeleton_real")]);
+        db.close();
+        db = new Database(path);
+        expect(modes()).toEqual([...Array(40).fill("full"), ...Array(20).fill("skeleton_real")]);
+        const replayed = await serve(false);
+        expect(JSON.stringify(replayed.messages)).toBe(JSON.stringify(rebuilt.messages));
+    });
+});
 
 it("repairs previously served tag-emptied history through one shared rebuild, then defers identically", async () => {
     const db = new Database(":memory:");
