@@ -11,6 +11,10 @@ use super::*;
 
 #[path = "broca_role_describe_offline.rs"]
 mod broca_role_describe;
+#[path = "moved_cost.rs"]
+mod moved_cost;
+#[path = "preparation_lifecycle.rs"]
+mod preparation_lifecycle;
 use crate::offline_first_pass as command;
 use crate::offline_move::{self, tests as fixture, HolderCheck, StorePaths};
 use crate::providers::offline_first_pass_engine::{EntryInputProof, OfflineOutcome, PagesRunner};
@@ -40,10 +44,10 @@ fn page_from(entries: &[ReadMessage], lineage: &str, from: u64, size: usize) -> 
     }
 }
 
-/// THALAMUS's export of `entries`: every page from ordinal 0, one per line.
+/// THALAMUS's export of the retained entries, one page per line.
 fn export(entries: &[ReadMessage], lineage: &str, size: usize) -> String {
     let mut lines = String::new();
-    let mut from = 0;
+    let mut from = entries.first().unwrap().ordinal;
     loop {
         let page = page_from(entries, lineage, from, size);
         lines.push_str(&serde_json::to_string(&page).unwrap());
@@ -58,7 +62,7 @@ fn export(entries: &[ReadMessage], lineage: &str, size: usize) -> String {
 /// The `role.describe` answer of a THALAMUS-style runner hosting compaction
 /// for moved sessions: the tags groups with `tag_checkpoint`.
 fn runner_describe() -> Value {
-    json!({"majors":[{"version":"llm-runner/v1","ops":["role.describe","session.baseline","session.send","session.read","session.resolve"]}],"implementation_version":"fake","session_capabilities_from":"baseline","capabilities":["delivery_order","compaction","tags","tag_checkpoint"]})
+    json!({"majors":[{"version":"llm-runner/v1","ops":["role.describe","session.baseline","session.send","session.read","session.resolve"]}],"implementation_version":"fake","session_capabilities_from":"baseline","capabilities":["delivery_order","compaction","tags","tag_checkpoint","message_checkpoint"]})
 }
 
 /// A runner serving `entries` in pages of `page` messages.
@@ -67,6 +71,8 @@ struct Served {
     lineage: Mutex<String>,
     page: usize,
     reads: std::sync::atomic::AtomicU64,
+    read_from: Mutex<Vec<u64>>,
+    head: Mutex<Value>,
     sends: Mutex<Vec<Value>>,
     /// The `role.describe` answer; [`runner_describe`] unless a test changes it.
     describe: Mutex<Value>,
@@ -79,6 +85,8 @@ impl Served {
             lineage: Mutex::new(LINEAGE.into()),
             page,
             reads: Default::default(),
+            read_from: Default::default(),
+            head: Mutex::new(json!({"first_ordinal":0})),
             sends: Mutex::new(Vec::new()),
             describe: Mutex::new(runner_describe()),
         })
@@ -118,7 +126,7 @@ impl session_resolver::ProviderRunner for Served {
                 return Ok(json!({"state":"pending","submission_id":"reminder"}));
             }
             "role.describe" => return Ok(self.describe.lock().unwrap().clone()),
-            "session.head" => return Ok(json!({"first_ordinal":0})),
+            "session.head" => return Ok(self.head.lock().unwrap().clone()),
             _ => assert_eq!(method, "session.read"),
         }
         self.reads
@@ -133,6 +141,7 @@ impl session_resolver::ProviderRunner for Served {
             ));
         }
         let from = params["from_ordinal"].as_u64().unwrap();
+        self.read_from.lock().unwrap().push(from);
         let entries = self.entries.lock().unwrap();
         Ok(serde_json::to_value(page_from(&entries, &lineage, from, self.page)).unwrap())
     }
@@ -219,6 +228,11 @@ impl Arm {
         runner: Arc<Served>,
         config: McModuleConfig,
     ) -> Self {
+        if let Some(checkpoint) =
+            super::moved_session::newest_marker_checkpoint(&store_dir.join("opencode.db"), session)
+        {
+            *runner.head.lock().unwrap() = json!({"first_ordinal":checkpoint.message_count,"cut":checkpoint.head_cut,"lineage_id":LINEAGE});
+        }
         let h = handler(store_dir, project, session, runner.clone(), &config);
         let announced = Arc::new(Announced::default());
         *h.provider_store.async_runtime.publisher.lock().unwrap() = Some(announced.clone());
@@ -348,7 +362,7 @@ impl Arm {
 
     /// Every stored view, `(version, view_json, announced)`.
     fn views(&self) -> Vec<(u64, String, i64)> {
-        let conn = rusqlite::Connection::open(self.store_dir.join("store.db")).unwrap();
+        let conn = inspection_sql(self.store_dir.join("store.db"));
         conn.busy_timeout(Duration::from_secs(30)).unwrap();
         let views = conn.prepare("SELECT version,view_json,announced FROM mc_async_compaction_views WHERE session_ref=?1 ORDER BY version")
             .unwrap()
@@ -361,7 +375,7 @@ impl Arm {
 
     /// The stored native-edit baselines, by slot.
     fn edit_baselines(&self) -> Vec<(String, String)> {
-        let conn = rusqlite::Connection::open(self.store_dir.join("store.db")).unwrap();
+        let conn = inspection_sql(self.store_dir.join("store.db"));
         let baselines = conn.prepare("SELECT slot,view_json FROM mc_async_compaction_baselines WHERE session_ref=?1 AND slot IN ('frozen_edits','retired_native_edits') ORDER BY slot")
             .unwrap()
             .query_map([self.reference()], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -452,8 +466,27 @@ fn moved_stores(
     write: impl FnOnce(&Path) -> (StorePaths, String),
 ) -> (StorePaths, String, Vec<ReadMessage>) {
     let (paths, session) = write(dir);
-    offline_move::run(&paths, &session, false, &fixture::NoHolders, None).unwrap();
-    let served = served_entries(&paths.opencode_db, &session);
+    let plan = offline_move::plan(&paths, &session).unwrap();
+    let vector: Value = serde_json::from_str(
+        cortexkit_role_llm_runner::vectors::file("message-checkpoint.json").unwrap(),
+    )
+    .unwrap();
+    let mut head = vector["worked_head_cut"]["head_cut"].clone();
+    head["mid"] = json!(plan.p);
+    let certificate = dir.join("head-cut.json");
+    std::fs::write(
+        &certificate,
+        json!({"message_count":plan.message_count,"head_cut":head}).to_string(),
+    )
+    .unwrap();
+    offline_move::run_with_head_cut(&paths, &session, &certificate, &fixture::NoHolders, None)
+        .unwrap();
+    let checkpoint =
+        super::moved_session::newest_marker_checkpoint(&paths.opencode_db, &session).unwrap();
+    let served = served_entries(&paths.opencode_db, &session)
+        .into_iter()
+        .filter(|entry| entry.ordinal >= checkpoint.message_count.unwrap())
+        .collect();
     (paths, session, served)
 }
 
@@ -478,7 +511,12 @@ fn pin_history_generation(context_db: &Path, session: &str, generations: &[u64])
 }
 
 fn fixture_stores(dir: &Path) -> (StorePaths, String) {
-    (fixture::write_stores(dir), fixture::fixture_session())
+    // The fixture puts the marker on the selected cut message, which lets `run`
+    // apply the move.
+    (
+        fixture::write_moved_session_stores(dir),
+        fixture::fixture_session(),
+    )
 }
 
 /// The command's inputs written to `work`, as the window script hands them
@@ -513,10 +551,13 @@ async fn first_pass(
 ) -> Result<OfflineOutcome, command::RunError> {
     let mut checked = command::check(args, holders)?;
     let store_dir = args.paths.store_db.parent().unwrap();
-    let runner = Arc::new(PagesRunner::new(
-        std::mem::take(&mut checked.pages.served),
-        checked.setup.runner_describe.clone(),
-    ));
+    let runner = Arc::new(
+        PagesRunner::new(
+            std::mem::take(&mut checked.pages.served),
+            checked.setup.runner_describe.clone(),
+        )
+        .with_move_record(&checked.record),
+    );
     let h = handler(store_dir, project, &args.session, runner, &config());
     command::execute(&h, &checked).await
 }
@@ -536,7 +577,20 @@ async fn prepared(
     project: &Path,
     write: impl FnOnce(&Path) -> (StorePaths, String),
 ) -> (Prepared, OfflineOutcome) {
+    prepared_with(store, project, write, |_| {}).await
+}
+
+/// [`prepared`], preparing under the fixture Setup as `adjust` changes it, so
+/// the live Setup a test sends can carry the same extra members.
+async fn prepared_with(
+    store: &Path,
+    project: &Path,
+    write: impl FnOnce(&Path) -> (StorePaths, String),
+    adjust: impl FnOnce(&mut Value),
+) -> (Prepared, OfflineOutcome) {
     let (paths, session, served) = moved_stores(store, write);
+    let mut request = setup_request(&session, "fixture");
+    adjust(&mut request);
     pin_history_generation(&paths.context_db, &session, &[0, 1]);
     let work = tempfile::tempdir().unwrap();
     let args = command_args(
@@ -544,7 +598,7 @@ async fn prepared(
         &paths,
         &session,
         &export(&served, LINEAGE, 3),
-        &setup_file(project, &setup_request(&session, "fixture")),
+        &setup_file(project, &request),
     );
     let outcome = first_pass(&args, project, &fixture::NoHolders)
         .await
@@ -570,9 +624,226 @@ fn proof_of(served: &[ReadMessage]) -> EntryInputProof {
             Arc::new(HeldEntry::from_read(&serve_descriptors(entry)).unwrap()),
         );
     }
-    EntryInputProof::of(&entries, LINEAGE, None, codec::Codec::OpencodeAiSdk)
+    EntryInputProof::of(
+        &entries,
+        LINEAGE,
+        served.first().unwrap().ordinal,
+        None,
+        codec::Codec::OpencodeAiSdk,
+    )
+    .unwrap()
+    .unwrap()
+}
+
+fn rewrite_offline_marker(prep: &Prepared, rewrite: impl FnOnce(&mut Value)) {
+    let conn = inspection_sql(&prep.paths.store_db);
+    let reference = runner_session_ref(MODULE, "opencode", &prep.session);
+    let raw: String = conn
+        .query_row(
+            "SELECT state_json FROM mc_async_compaction WHERE session_ref=?1",
+            [&reference],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut record: Value = serde_json::from_str(&raw).unwrap();
+    rewrite(&mut record["offline_first_pass"]);
+    conn.execute(
+        "UPDATE mc_async_compaction SET state_json=?1 WHERE session_ref=?2",
+        rusqlite::params![record.to_string(), reference],
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn nonzero_proof_creation_rerun_and_live_verification_never_read_below_the_cut() {
+    let _clock = crate::tests::fixed_clock();
+    let (store, project, work) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let (paths, session, served) = moved_stores(store.path(), fixture_stores);
+    let origin = served[0].ordinal;
+    assert!(origin > 0);
+    let end = served.last().unwrap().ordinal + 1;
+    let args = command_args(
+        work.path(),
+        &paths,
+        &session,
+        &export(&served, LINEAGE, 1),
+        &setup_file(project.path(), &setup_request(&session, "fixture")),
+    );
+    let checked = command::check(&args, &fixture::NoHolders).unwrap();
+    let arm = Arm::open(
+        store.path(),
+        project.path(),
+        &session,
+        Served::new(served.clone(), 1),
+        config(),
+    );
+    let OfflineOutcome::Prepared(report) = command::execute(&arm.h, &checked).await.unwrap() else {
+        panic!("not prepared")
+    };
+    assert_eq!(
+        (report.proof.origin, report.proof.count, report.proof.end),
+        (origin, served.len() as u64, end)
+    );
+    assert_eq!(report.proof, proof_of(&served));
+    let creation_reads = arm.runner.read_from.lock().unwrap().clone();
+    assert!(!creation_reads.is_empty());
+    assert!(creation_reads.iter().all(|from| *from >= origin));
+    drop(arm);
+
+    let arm = Arm::open(
+        store.path(),
+        project.path(),
+        &session,
+        Served::new(served.clone(), 7),
+        config(),
+    );
+    let before = store_rows(&paths);
+    let OfflineOutcome::Unchanged(rerun) = command::execute(&arm.h, &checked).await.unwrap() else {
+        panic!("not unchanged")
+    };
+    assert_eq!(rerun.proof, report.proof);
+    assert_eq!(store_rows(&paths), before);
+    assert_eq!(
+        arm.setup(setup_request(&session, "fixture")).await["answer"],
+        "ready"
+    );
+    assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
+    let reads = arm.runner.read_from.lock().unwrap();
+    assert!(
+        reads.iter().filter(|from| **from == origin).count() >= 2,
+        "rerun and live verification both start at the cut: {reads:?}"
+    );
+    assert!(reads.iter().all(|from| *from >= origin), "{reads:?}");
+}
+
+#[tokio::test]
+async fn a_missing_entry_in_the_nonzero_proof_is_refused_without_writes() {
+    let _clock = crate::tests::fixed_clock();
+    let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
+    let origin = prep.served[0].ordinal;
+    let end = prep.served.last().unwrap().ordinal + 1;
+    let mut served = prep.served.clone();
+    served.remove(1);
+    let mut held = held_entries::HeldEntries::default();
+    for entry in &served {
+        held.insert(
+            entry.ordinal,
+            Arc::new(HeldEntry::from_read(&serve_descriptors(entry)).unwrap()),
+        );
+    }
+    assert!(EntryInputProof::of(
+        &held,
+        LINEAGE,
+        origin,
+        Some(end),
+        codec::Codec::OpencodeAiSdk
+    )
+    .unwrap()
+    .is_none());
+    let arm = Arm::open(
+        store.path(),
+        project.path(),
+        &prep.session,
+        Served::new(served, 7),
+        config(),
+    );
+    let before = store_rows(&prep.paths);
+    let outcome = arm.notice(1, 0, None, Vec::new()).await;
+    assert_ne!(outcome, "ok", "a missing prepared entry cannot be adopted");
+    assert_eq!(store_rows(&prep.paths), before);
+    assert!(arm
+        .runner
+        .read_from
+        .lock()
         .unwrap()
-        .unwrap()
+        .iter()
+        .all(|from| *from >= origin));
+}
+
+#[tokio::test]
+async fn old_or_zero_origin_proofs_refuse_live_and_are_reprepared_offline() {
+    let _clock = crate::tests::fixed_clock();
+    for old_shape in [true, false] {
+        let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
+        rewrite_offline_marker(&prep, |marker| {
+            if old_shape {
+                marker["version"] = json!(2);
+                let proof = marker["proof"].as_object_mut().unwrap();
+                proof.remove("origin");
+                proof.remove("end");
+            } else {
+                marker["proof"]["origin"] = json!(0);
+                marker["proof"]["end"] = marker["proof"]["count"].clone();
+            }
+        });
+        let arm = Arm::open(
+            store.path(),
+            project.path(),
+            &prep.session,
+            Served::new(prep.served.clone(), 7),
+            config(),
+        );
+        let before = store_rows(&prep.paths);
+        let answer = arm.setup(setup_request(&prep.session, "fixture")).await;
+        assert_eq!(answer["code"], "offline_proof_version", "{answer}");
+        let notice = arm.notice(1, 0, None, Vec::new()).await;
+        assert!(notice.contains("offline_proof_version"), "{notice}");
+        assert_eq!(store_rows(&prep.paths), before);
+        assert!(arm.runner.read_from.lock().unwrap().is_empty());
+        drop(arm);
+        let outcome = first_pass(&prep.args, project.path(), &fixture::NoHolders)
+            .await
+            .unwrap();
+        let OfflineOutcome::Prepared(report) = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(report.proof, proof_of(&prep.served));
+        assert_eq!(report.generation, 1);
+        let arm = Arm::open(
+            store.path(),
+            project.path(),
+            &prep.session,
+            Served::new(prep.served.clone(), 7),
+            config(),
+        );
+        assert_eq!(
+            arm.setup(setup_request(&prep.session, "fixture")).await["answer"],
+            "ready"
+        );
+        assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
+    }
+}
+
+#[tokio::test]
+async fn offline_codec_mismatch_is_refused_before_import_without_writes() {
+    let _clock = crate::tests::fixed_clock();
+    let (store, project, work) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let (paths, session, served) = moved_stores(store.path(), fixture_stores);
+    let mut request = setup_request(&session, "fixture");
+    request["params"]["serializer_profile"] = json!("owned-broca");
+    let args = command_args(
+        work.path(),
+        &paths,
+        &session,
+        &export(&served, LINEAGE, 3),
+        &setup_file(project.path(), &request),
+    );
+    let before = store_rows(&paths);
+    assert_eq!(
+        refusal_code(first_pass(&args, project.path(), &fixture::NoHolders).await),
+        "moved_session_codec_mismatch"
+    );
+    assert_eq!(store_rows(&paths), before);
 }
 
 /// Every row of every table in both ck-mc stores, so a run that must write
@@ -696,16 +967,16 @@ async fn offline_first_pass_is_adopted_by_the_first_live_notice_without_a_first_
             .entries
             .matches(state.prefix_input_proof.as_ref(), prefix.tail_from));
     }
-    scaling_tests::view_work::take(&reference);
+    scaling_tests::view_work::take_for(&reference, project.path());
     let passes = resident::counters::read().engine_passes;
     assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
     let state = arm.state();
-    assert!(state.offline_first_pass.is_none(), "adopted");
+    assert!(super::super::offline_first_pass::adopted(&state), "adopted");
     assert_eq!(
         state.generation, 0,
         "adoption keeps the prepared generation"
     );
-    let work = scaling_tests::view_work::take(&reference);
+    let work = scaling_tests::view_work::take_for(&reference, project.path());
     let ran = resident::counters::read().engine_passes - passes;
     assert!(
         ran == 0 || work.engine_input < prep.served.len(),
@@ -728,7 +999,7 @@ async fn offline_first_pass_is_adopted_by_the_first_live_notice_without_a_first_
         .matches(state.prefix_input_proof.as_ref(), prefix.tail_from));
     assert_eq!(
         state.entries.first_key_value().map(|(ordinal, _)| *ordinal),
-        Some(prefix.from)
+        Some(prefix.from.max(state.lineage_first_ordinal))
     );
     assert!(prefix.context_sources.iter().all(|(ordinal, source)| state
         .entries
@@ -743,12 +1014,12 @@ async fn offline_first_pass_is_adopted_by_the_first_live_notice_without_a_first_
     // The next notice runs on the certified prefix, not the whole transcript.
     {
         let mut entries = arm.runner.entries.lock().unwrap();
-        let next = entries.len() as u64;
+        let next = entries.last().unwrap().ordinal + 1;
         let tag = highest_tag(&entries) + 1;
         entries.push(appended(&prep.session, next, tag));
     }
     assert_eq!(arm.notice(2, 0, Some(1), Vec::new()).await, "ok");
-    let work = scaling_tests::view_work::take(&reference);
+    let work = scaling_tests::view_work::take_for(&reference, project.path());
     assert!(
         work.engine_input < prep.served.len(),
         "later notices take the certified path: engine input {}",
@@ -792,7 +1063,8 @@ async fn a_changed_entry_discards_the_offline_first_pass_and_runs_the_ordinary_o
     let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
     // The runner now serves one entry differently from the export.
     let mut changed = prep.served.clone();
-    edit_entry(&mut changed, 2);
+    let changed_ordinal = changed[2].ordinal;
+    edit_entry(&mut changed, changed_ordinal);
     let arm = Arm::open(
         store.path(),
         project.path(),
@@ -807,7 +1079,7 @@ async fn a_changed_entry_discards_the_offline_first_pass_and_runs_the_ordinary_o
     );
     assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
     let state = arm.state();
-    assert!(state.offline_first_pass.is_none());
+    assert!(super::super::offline_first_pass::adopted(&state));
     assert_eq!(state.generation, 1, "the stored pass was discarded");
     assert!(
         state
@@ -831,11 +1103,21 @@ async fn a_changed_entry_discards_the_offline_first_pass_and_runs_the_ordinary_o
     assert!(views.len() >= 2, "the ordinary first pass published a view");
     assert!(!arm.announced.0.lock().unwrap().contains(&views[0].0));
 
-    // The ordinary first pass, run on the same served entries in stores that
-    // never saw the offline command, commits the same engine state.
+    // A fresh preparation on the changed entries commits the same engine state.
     let control_store = tempfile::tempdir().unwrap();
     let (control_paths, _, _) = moved_stores(control_store.path(), fixture_stores);
     pin_history_generation(&control_paths.context_db, &prep.session, &[0]);
+    let work = tempfile::tempdir().unwrap();
+    let args = command_args(
+        work.path(),
+        &control_paths,
+        &prep.session,
+        &export(&changed, LINEAGE, 7),
+        &setup_file(project.path(), &setup_request(&prep.session, "fixture")),
+    );
+    first_pass(&args, project.path(), &fixture::NoHolders)
+        .await
+        .unwrap();
     let control = Arm::open(
         control_store.path(),
         project.path(),
@@ -875,7 +1157,7 @@ async fn a_changed_entry_discards_the_offline_first_pass_and_runs_the_ordinary_o
 }
 
 #[tokio::test]
-async fn a_live_setup_that_differs_discards_the_offline_first_pass() {
+async fn a_live_setup_that_differs_refuses_without_discarding_the_preparation() {
     let _clock = crate::tests::fixed_clock();
     let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
@@ -886,33 +1168,13 @@ async fn a_live_setup_that_differs_discards_the_offline_first_pass() {
         Served::new(prep.served.clone(), 7),
         config(),
     );
-    let offline_edits = arm.edit_baselines();
+    let before = store_rows(&prep.paths);
     // Another model than the one the pass was prepared under.
     let answer = arm.setup(setup_request(&prep.session, "fixture-2")).await;
-    assert_eq!(answer["answer"], "ready", "{answer}");
-    let state = arm.state();
-    assert!(state.offline_first_pass.is_none());
-    assert_eq!(state.generation, 1);
-    assert!(state.entries.is_empty(), "no offline entry survives");
-    assert_eq!(state.setup.model, "fixture-2");
-    let empty = frozen_edits::FrozenEdits::default().json().unwrap();
-    assert!(
-        offline_edits
-            .iter()
-            .any(|(slot, json)| slot == "frozen_edits" && *json != empty),
-        "the offline pass carried the moved drops as native edits: {offline_edits:?}"
-    );
-    assert!(
-        arm.edit_baselines()
-            .iter()
-            .any(|(slot, json)| slot == "frozen_edits" && *json == empty),
-        "the offline native edits are gone: {:?}",
-        arm.edit_baselines()
-    );
-    assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
-    let state = arm.state();
-    assert_eq!(state.entries.len(), prep.served.len());
-    assert!(state.published_engine.keys().any(|version| *version > 1));
+    assert_eq!(answer["code"], "moved_session_unprepared", "{answer}");
+    assert_eq!(store_rows(&prep.paths), before);
+    assert_eq!(arm.state().generation, 0);
+    assert!(arm.announced.0.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -941,7 +1203,7 @@ async fn inputs_that_changed_after_the_offline_pass_discard_it() {
     );
     assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
     let state = arm.state();
-    assert!(state.offline_first_pass.is_none());
+    assert!(super::super::offline_first_pass::adopted(&state));
     assert_eq!(
         state.generation, 1,
         "a changed configuration discards the pass"
@@ -949,14 +1211,14 @@ async fn inputs_that_changed_after_the_offline_pass_discard_it() {
 }
 
 #[tokio::test]
-async fn an_offline_run_that_stopped_before_its_proof_is_never_adopted() {
+async fn an_offline_run_that_stopped_before_its_proof_requires_an_offline_rerun() {
     let _clock = crate::tests::fixed_clock();
     let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
     // The record as a run stopped before its last save leaves it: marked, but
     // with no proof.
     let reference = runner_session_ref(MODULE, "opencode", &prep.session);
-    let conn = rusqlite::Connection::open(store.path().join("store.db")).unwrap();
+    let conn = inspection_sql(store.path().join("store.db"));
     let raw: String = conn
         .query_row(
             "SELECT state_json FROM mc_async_compaction WHERE session_ref=?1",
@@ -975,10 +1237,6 @@ async fn an_offline_run_that_stopped_before_its_proof_is_never_adopted() {
     )
     .unwrap();
     drop(conn);
-    assert_eq!(
-        refusal_code(first_pass(&prep.args, project.path(), &fixture::NoHolders).await),
-        "offline_run_incomplete"
-    );
     let arm = Arm::open(
         store.path(),
         project.path(),
@@ -986,18 +1244,30 @@ async fn an_offline_run_that_stopped_before_its_proof_is_never_adopted() {
         Served::new(prep.served.clone(), 7),
         config(),
     );
+    let before = store_rows(&prep.paths);
     assert_eq!(
-        arm.setup(setup_request(&prep.session, "fixture")).await["answer"],
-        "ready"
+        arm.setup(setup_request(&prep.session, "fixture")).await["code"],
+        "moved_session_unprepared"
     );
-    assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
-    let state = arm.state();
-    assert!(state.offline_first_pass.is_none());
-    assert_eq!(state.generation, 1, "an unproven run is discarded");
+    assert!(arm
+        .notice(1, 0, None, Vec::new())
+        .await
+        .contains("moved_session_unprepared"));
+    assert_eq!(store_rows(&prep.paths), before);
+    assert_eq!(
+        arm.state().generation,
+        0,
+        "an unproven run is never adopted"
+    );
+    drop(arm);
+    assert!(matches!(
+        first_pass(&prep.args, project.path(), &fixture::NoHolders).await,
+        Ok(OfflineOutcome::Prepared(_))
+    ));
 }
 
 #[tokio::test]
-async fn a_rerun_leaves_the_prepared_state_unchanged_or_refuses_by_name() {
+async fn a_rerun_keeps_unchanged_preparations_and_replaces_mismatches_until_adopted() {
     let _clock = crate::tests::fixed_clock();
     let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
@@ -1023,7 +1293,8 @@ async fn a_rerun_leaves_the_prepared_state_unchanged_or_refuses_by_name() {
         );
     }
     let mut changed = prep.served.clone();
-    edit_entry(&mut changed, 2);
+    let changed_ordinal = changed[2].ordinal;
+    edit_entry(&mut changed, changed_ordinal);
     for (pages, setup) in [
         (
             export(&changed, LINEAGE, 3),
@@ -1042,39 +1313,35 @@ async fn a_rerun_leaves_the_prepared_state_unchanged_or_refuses_by_name() {
             &pages,
             &setup_file(project.path(), &setup),
         );
-        assert_eq!(
-            refusal_code(first_pass(&args, project.path(), &fixture::NoHolders).await),
-            "offline_state_differs"
-        );
-        assert!(store_rows(&prep.paths) == before, "a refused rerun wrote");
+        assert!(matches!(
+            first_pass(&args, project.path(), &fixture::NoHolders).await,
+            Ok(OfflineOutcome::Prepared(_))
+        ));
     }
 
-    // A session ck-mc already set up live is not offline work any more.
-    let live_store = tempfile::tempdir().unwrap();
-    let (paths, session, served) = moved_stores(live_store.path(), fixture_stores);
+    // Restore the original Setup and pages before adopting the last preparation.
+    assert!(matches!(
+        first_pass(&prep.args, project.path(), &fixture::NoHolders).await,
+        Ok(OfflineOutcome::Prepared(_))
+    ));
+
+    // A session a live notice adopted is not offline work any more.
     let live = Arm::open(
-        live_store.path(),
+        store.path(),
         project.path(),
-        &session,
-        Served::new(served.clone(), 7),
+        &prep.session,
+        Served::new(prep.served.clone(), 7),
         config(),
     );
     assert_eq!(
-        live.setup(setup_request(&session, "fixture")).await["answer"],
+        live.setup(setup_request(&prep.session, "fixture")).await["answer"],
         "ready"
     );
+    assert_eq!(live.notice(1, 0, None, Vec::new()).await, "ok");
     drop(live);
-    let work = tempfile::tempdir().unwrap();
-    let args = command_args(
-        work.path(),
-        &paths,
-        &session,
-        &export(&served, LINEAGE, 3),
-        &setup_file(project.path(), &setup_request(&session, "fixture")),
-    );
     assert_eq!(
-        refusal_code(first_pass(&args, project.path(), &fixture::NoHolders).await),
-        "async_record_exists"
+        refusal_code(first_pass(&prep.args, project.path(), &fixture::NoHolders).await),
+        "offline_already_adopted"
     );
 }
 
@@ -1286,7 +1553,7 @@ fn the_entry_proof_refuses_an_entry_without_served_digests() {
     let mut entries = held_entries::HeldEntries::default();
     entries.insert(0, Arc::new(HeldEntry::from_read(&entry).unwrap()));
     let error =
-        EntryInputProof::of(&entries, LINEAGE, None, codec::Codec::OpencodeAiSdk).unwrap_err();
+        EntryInputProof::of(&entries, LINEAGE, 0, None, codec::Codec::OpencodeAiSdk).unwrap_err();
     assert!(
         format!("{error:?}").contains("served_digest_missing"),
         "{error:?}"
@@ -1297,7 +1564,7 @@ fn the_entry_proof_refuses_an_entry_without_served_digests() {
         Arc::new(HeldEntry::from_read(&serve_descriptors(&entry)).unwrap()),
     );
     assert!(
-        EntryInputProof::of(&served, LINEAGE, None, codec::Codec::OpencodeAiSdk)
+        EntryInputProof::of(&served, LINEAGE, 0, None, codec::Codec::OpencodeAiSdk)
             .unwrap()
             .is_some()
     );
@@ -1312,7 +1579,7 @@ fn changed_describe() -> Value {
 }
 
 #[tokio::test]
-async fn a_live_runner_describe_that_differs_discards_the_offline_first_pass_at_setup() {
+async fn a_live_runner_describe_that_differs_refuses_at_setup_without_writes() {
     let _clock = crate::tests::fixed_clock();
     let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (prep, _) = prepared(store.path(), project.path(), fixture_stores).await;
@@ -1326,15 +1593,14 @@ async fn a_live_runner_describe_that_differs_discards_the_offline_first_pass_at_
         config(),
     );
     let answer = arm.setup(setup_request(&prep.session, "fixture")).await;
-    assert_eq!(answer["answer"], "ready", "{answer}");
-    assert_eq!(answer["checkpoint"]["tag_checkpoint"], 20, "{answer}");
+    assert_eq!(answer["code"], "moved_session_unprepared", "{answer}");
     let state = arm.state();
-    assert!(state.offline_first_pass.is_none());
+    assert!(!super::super::offline_first_pass::adopted(&state));
     assert_eq!(
-        state.generation, 1,
-        "the stored pass was discarded at Setup"
+        state.generation, 0,
+        "Setup cannot discard a prepared record into an unprepared live pass"
     );
-    assert!(state.entries.is_empty(), "no offline entry survives");
+    assert_eq!(state.entries.len(), prep.served.len());
     assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
     assert_eq!(arm.state().entries.len(), prep.served.len());
 }
@@ -1356,7 +1622,7 @@ async fn a_live_runner_describe_that_differs_discards_the_offline_first_pass_at_
     // No Setup on this module first: the notice's own check must catch it.
     assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
     let state = arm.state();
-    assert!(state.offline_first_pass.is_none());
+    assert!(super::super::offline_first_pass::adopted(&state));
     assert_eq!(
         state.generation, 1,
         "a changed runner describe discards the pass"
@@ -1433,7 +1699,7 @@ fn observed(arm: &Arm) -> Value {
         "engine": engine_state(arm.store(), &arm.reference()),
         "certificate": certificate_state(&state),
         "decisions": [state.seq, state.completed_seq, state.applied.unwrap_or(0), state.generation],
-        "offline": state.offline_first_pass.is_some(),
+        "offline": state.offline_first_pass.is_some() && !super::super::offline_first_pass::adopted(&state),
         "sends": arm.runner.sends.lock().unwrap().len(),
     })
 }
@@ -1471,8 +1737,22 @@ fn publish_summary(arm: &Arm, end: u64) {
     let mut compartments = store.load_compartments(&namespace).unwrap();
     let (sequence, start) = compartments
         .last()
-        .map_or((1, 0), |last| (last.sequence + 1, last.end_message + 1));
-    let mid = |ordinal: i64| state.entries[&(ordinal as u64)].mid.clone();
+        .map_or((1, state.lineage_first_ordinal as i64), |last| {
+            (last.sequence + 1, last.end_message + 1)
+        });
+    let mid = |ordinal: i64| {
+        state
+            .entries
+            .get(&(ordinal as u64))
+            .unwrap_or_else(|| {
+                panic!(
+                    "summary endpoint {ordinal} missing from held rows {:?}",
+                    state.entries.keys().collect::<Vec<_>>()
+                )
+            })
+            .mid
+            .clone()
+    };
     compartments.push(mc_store::StoredCompartment {
         sequence,
         start_message: start,
@@ -1491,12 +1771,10 @@ fn publish_summary(arm: &Arm, end: u64) {
     store.arm_soft_refresh(&namespace).unwrap();
 }
 
-/// Run one session both ways and compare: the offline command then the live
-/// module (`offline`), and the live module alone (`live`), on identical moved
-/// stores, identical served entries and a fixed clock. First the committed
-/// state of the offline command against the live first pass, then everything
-/// observable after the adopting notice and after `steps` further notices
-/// (appends, defers, summary publishes that force a Hard, module restarts).
+/// Compare independent preparations at a nonzero cut, then their live adoption
+/// and continuation (appends, defers, summary publishes and module restarts).
+/// The fresh control is also prepared offline: an unprepared live first pass
+/// is not an alternative way to adopt a moved session.
 async fn differential(
     label: &str,
     write: impl Fn(&Path) -> (StorePaths, String),
@@ -1511,8 +1789,14 @@ async fn differential(
         matches!(outcome, OfflineOutcome::Prepared(_)),
         "{label}: {outcome:?}"
     );
-    let (live_paths, session, served) = moved_stores(live_dir.path(), &write);
-    pin_history_generation(&live_paths.context_db, &session, &[0, 1]);
+    let OfflineOutcome::Prepared(report) = &outcome else {
+        unreachable!()
+    };
+    assert!(report.proof.origin > 0);
+    assert_eq!(report.proof.origin, prep.served[0].ordinal);
+    let (fresh, fresh_outcome) = prepared(live_dir.path(), project.path(), &write).await;
+    assert!(matches!(fresh_outcome, OfflineOutcome::Prepared(_)));
+    let (session, served) = (fresh.session, fresh.served);
     assert_eq!(
         served, prep.served,
         "{label}: both arms serve the same entries"
@@ -1532,31 +1816,10 @@ async fn differential(
         config(),
     );
     let live_setup = live.setup(setup_request(&session, "fixture")).await;
-    assert_eq!(live.notice(1, 0, None, Vec::new()).await, "ok", "{label}");
-
-    // The state the offline command committed is the state the live first
-    // pass committed on the same entries.
-    let mut prepared_state = observed(&offline);
-    let mut first_pass = observed(&live);
-    for value in [&mut prepared_state, &mut first_pass] {
-        // Only the live arm has answered a notice and announced its view, and
-        // only its notice went on to the historian cadence, which records its
-        // decision in meta after the pass.
-        for key in ["announced", "decisions", "offline"] {
-            value.as_object_mut().unwrap().remove(key);
-        }
-        value["engine"]["meta"]
-            .as_object_mut()
-            .unwrap()
-            .remove("historian");
-        for view in value["views"].as_array_mut().unwrap() {
-            view.as_array_mut().unwrap().truncate(2);
-        }
-    }
     assert_same(
-        &format!("{label} committed first pass"),
-        &prepared_state,
-        &first_pass,
+        &format!("{label} independent preparations"),
+        &observed(&offline),
+        &observed(&live),
     );
 
     // The same Setup answers the same; the first notice adopts.
@@ -1570,8 +1833,9 @@ async fn differential(
         "ok",
         "{label}"
     );
+    assert_eq!(live.notice(1, 0, None, Vec::new()).await, "ok", "{label}");
     assert!(
-        offline.state().offline_first_pass.is_none(),
+        super::super::offline_first_pass::adopted(&offline.state()),
         "{label}: adopted"
     );
     assert_same(
@@ -1593,7 +1857,10 @@ async fn differential(
                 for arm in [&offline, &live] {
                     let mut entries = arm.runner.entries.lock().unwrap();
                     for _ in 0..count {
-                        let (next, tag) = (entries.len() as u64, highest_tag(&entries) + 1);
+                        let (next, tag) = (
+                            entries.last().unwrap().ordinal + 1,
+                            highest_tag(&entries) + 1,
+                        );
                         entries.push(appended(&session, next, tag));
                     }
                 }
@@ -1618,7 +1885,7 @@ async fn differential(
                     .map_or(-1, |last| last.end_message);
                 let last = held.entries.last_key_value().map_or(0, |(n, _)| *n) as i64;
                 // A Hard over appended messages only: their one text part is block 0.
-                let first_appended = prep.served.len() as i64;
+                let first_appended = (prep.served.last().unwrap().ordinal + 1) as i64;
                 if last - 2 > coverage.max(first_appended - 1) {
                     let end = (coverage.max(first_appended - 1)
                         + 1
@@ -1651,51 +1918,28 @@ async fn differential(
 }
 
 #[tokio::test]
-async fn offline_first_pass_matches_the_live_first_pass_on_the_moved_fixture() {
+async fn offline_first_pass_matches_fresh_preparation_on_the_moved_fixture() {
     differential("fixture", fixture_stores, 7, 20).await;
 }
 
 #[tokio::test]
-async fn offline_first_pass_matches_the_live_first_pass_with_drops_and_an_arc_in_the_cut_band() {
-    let store = tempfile::tempdir().unwrap();
-    let (_, _, served) = moved_stores(store.path(), band_fixture_stores);
-    let record = {
-        let conn = rusqlite::Connection::open(store.path().join("context.db")).unwrap();
-        offline_move::read_move_record(&conn, &fixture::fixture_session())
-            .unwrap()
-            .unwrap()
-            .unwrap()
+async fn offline_first_pass_refuses_the_partial_endpoint_band_with_block_index() {
+    // Only whole-message summaries are admitted: the band's last summary ends
+    // at a block index inside m006, so the move refuses before any write. The
+    // band's queued drops on m006 and its tool arc outside coverage were the
+    // partial-endpoint shape; with whole-message endpoints that shape cannot
+    // exist (the call and result would sit inside C), and the moved-fixture
+    // differential already covers whole-message drops after the cut. No
+    // whole-message variant of this band is kept.
+    let dir = tempfile::tempdir().unwrap();
+    let (paths, session) = band_fixture_stores(dir.path());
+    let before = store_rows(&paths);
+    let outcome = offline_move::run(&paths, &session, false, &fixture::NoHolders, None);
+    let Err(offline_move::MoveError::Refused(refusal)) = outcome else {
+        panic!("expected a block_index refusal, got {outcome:?}");
     };
-    // The shape the differential is meant to cover.
-    let ordinal = |mid: &str| {
-        served
-            .iter()
-            .find(|entry| entry.mid == mid)
-            .unwrap()
-            .ordinal
-    };
-    let last = record.compartments.last().unwrap();
-    assert!(
-        ordinal(&record.cut) < ordinal(&last.end_message_id),
-        "the cut lies before C"
-    );
-    assert_eq!(
-        last.end_part.as_deref(),
-        Some("prt_m006_a"),
-        "C ends inside m006, before its tool part"
-    );
-    let band = record
-        .drops
-        .iter()
-        .filter(|drop| drop.kind == offline_move::DropKind::Queued && drop.mid == "msg_m006")
-        .map(|drop| drop.part.as_str())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        band,
-        BTreeSet::from(["prt_m006_a", "prt_m006_b"]),
-        "queued drops in (cut, C]"
-    );
-    differential("cut band fixture", band_fixture_stores, 11, 20).await;
+    assert_eq!(refusal.code, "block_index");
+    assert_eq!(store_rows(&paths), before, "a refusal wrote");
 }
 
 async fn seeded(seeds: std::ops::Range<u64>) {
@@ -1704,14 +1948,35 @@ async fn seeded(seeds: std::ops::Range<u64>) {
     }
 }
 
-#[tokio::test]
-async fn offline_first_pass_matches_the_live_first_pass_over_seeded_sessions_0_to_24() {
-    seeded(0..25).await;
+/// Run [`seeded`] on its own thread with an 8 MiB stack and a current-thread
+/// runtime, as `#[tokio::test]` would. In a debug build its offline pass, live
+/// Setup and notice sequence needs just over the 2 MiB test-thread default
+/// (measured between 2.0 and 2.25 MiB on 2026-10-31), so any small change on
+/// that path would abort the whole test binary with a stack overflow. Same
+/// pattern as `scaling_tests::acknowledgement_evicts_only_superseded_views`.
+fn seeded_on_large_stack(seeds: std::ops::Range<u64>) {
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(seeded(seeds))
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
-#[tokio::test]
-async fn offline_first_pass_matches_the_live_first_pass_over_seeded_sessions_25_to_49() {
-    seeded(25..50).await;
+#[test]
+fn offline_first_pass_matches_fresh_preparation_over_seeded_sessions_0_to_24() {
+    seeded_on_large_stack(0..25);
+}
+
+#[test]
+fn offline_first_pass_matches_fresh_preparation_over_seeded_sessions_25_to_49() {
+    seeded_on_large_stack(25..50);
 }
 
 // ── Cost on a 175,000-message moved session ──
@@ -1774,19 +2039,25 @@ async fn offline_first_pass_175k_child() {
     assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
     let adopt_ms = started.elapsed().as_millis();
     let adopted = arm.state();
-    assert!(adopted.offline_first_pass.is_none());
+    assert!(super::super::offline_first_pass::adopted(&adopted));
     assert_eq!(adopted.generation, 0, "adopted, not discarded");
     let adopt_passes = resident::counters::read().engine_passes - passes;
     {
         let mut entries = arm.runner.entries.lock().unwrap();
-        let (next, tag) = (entries.len() as u64, highest_tag(&entries) + 1);
+        let (next, tag) = (
+            entries.last().unwrap().ordinal + 1,
+            highest_tag(&entries) + 1,
+        );
         entries.push(appended(session, next, tag));
     }
     let mut later = Vec::new();
     for seq in 2..=6 {
         if seq > 2 {
             let mut entries = arm.runner.entries.lock().unwrap();
-            let (next, tag) = (entries.len() as u64, highest_tag(&entries) + 1);
+            let (next, tag) = (
+                entries.last().unwrap().ordinal + 1,
+                highest_tag(&entries) + 1,
+            );
             entries.push(appended(session, next, tag));
         }
         let started = Instant::now();
@@ -1869,13 +2140,9 @@ fn review_card() -> bool {
     std::env::var("MC_REVIEW_CARD").is_ok_and(|value| value == "1")
 }
 
-/// The first live notice of a moved session usually reports real usage: a
-/// moved session is long. The offline pass runs at zero usage (see
-/// `offline_first_pass`, which builds its notice with `est_tokens` 0), so
-/// adoption is byte-identical to the ordinary first pass only if the adopting
-/// notice then publishes exactly what an ordinary first pass at the notice's
-/// usage would. Compares everything observable after that one notice on both
-/// arms.
+/// Compare independent offline preparations when their first live notice
+/// reports real usage. Both arms must cross the preparation gate; usage may
+/// change the next view, but must not require an unprepared live first pass.
 async fn first_notice_at(
     label: &str,
     write: impl Fn(&Path) -> (StorePaths, String),
@@ -1884,13 +2151,18 @@ async fn first_notice_at(
     let _clock = crate::tests::fixed_clock();
     let project = tempfile::tempdir().unwrap();
     let (offline_dir, live_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let (_prep, outcome) = prepared(offline_dir.path(), project.path(), &write).await;
+    let (prep, outcome) = prepared(offline_dir.path(), project.path(), &write).await;
     assert!(
         matches!(outcome, OfflineOutcome::Prepared(_)),
         "{label}: {outcome:?}"
     );
-    let (live_paths, session, served) = moved_stores(live_dir.path(), &write);
-    pin_history_generation(&live_paths.context_db, &session, &[0, 1]);
+    let (fresh, fresh_outcome) = prepared(live_dir.path(), project.path(), &write).await;
+    let OfflineOutcome::Prepared(report) = fresh_outcome else {
+        panic!("{label}: {fresh_outcome:?}")
+    };
+    assert!(report.proof.origin > 0);
+    assert_eq!(prep.served, fresh.served);
+    let (session, served) = (fresh.session, fresh.served);
     let live = Arm::open(
         live_dir.path(),
         project.path(),
@@ -1914,7 +2186,7 @@ async fn first_notice_at(
             "{label} est={est}: outcomes differ: offline {offline_outcome} live {live_outcome}"
         ));
     }
-    if offline.state().offline_first_pass.is_some() {
+    if !super::super::offline_first_pass::adopted(&offline.state()) {
         return Err(format!("{label} est={est}: not adopted"));
     }
     let (offline_seen, live_seen) = (observed(&offline), observed(&live));
@@ -1945,7 +2217,7 @@ async fn first_notice_at(
             .unwrap_or_default()
     };
     Err(format!(
-        "{label} est={est}: adopted state differs from the ordinary first pass in {keys:?}; views offline {:?} live {:?}; newest view equal: {}; engine fields {:?}",
+        "{label} est={est}: independent prepared states differ in {keys:?}; views offline {:?} fresh {:?}; newest view equal: {}; engine fields {:?}",
         versions(&offline_seen),
         versions(&live_seen),
         newest_view(&offline_seen) == newest_view(&live_seen),
@@ -1956,11 +2228,10 @@ async fn first_notice_at(
     ))
 }
 
-/// Witness: adoption at the first live notice equals the ordinary first pass
-/// when that notice reports usage of 0, 30,000, 72,000, 87,000 or 96,000
-/// tokens of a 100,000-token window.
+/// Adoption of independent preparations agrees when the first live notice
+/// reports usage of 0, 30,000, 72,000, 87,000 or 96,000 tokens.
 #[tokio::test]
-async fn card_review_adoption_matches_the_ordinary_first_pass_at_live_usage() {
+async fn card_review_adoption_matches_fresh_preparation_at_live_usage() {
     if !review_card() {
         return;
     }
@@ -2001,4 +2272,78 @@ async fn card_review_offline_differential_at_new_seeds() {
         "card review: offline differential over seeds {first}..{}",
         first + count
     );
+}
+
+#[tokio::test]
+async fn prepared_view_keeps_its_snapshot_through_setup_fetch_and_adoption() {
+    let _clock = crate::tests::fixed_clock();
+    let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (prep, outcome) = prepared(store.path(), project.path(), fixture_stores).await;
+    let OfflineOutcome::Prepared(report) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(report.published_views, 1);
+    let arm = Arm::open(
+        store.path(),
+        project.path(),
+        &prep.session,
+        Served::new(prep.served.clone(), 7),
+        config(),
+    );
+    let reference = arm.reference();
+    let snapshot = arm
+        .store()
+        .load_async_compaction_views(&reference)
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|(version, _, _, _)| *version == 1)
+        .unwrap()
+        .2
+        .expect("preparation retains its engine/native-edit snapshot");
+    arm.store()
+        .retire_unannounced_async_views(&reference)
+        .unwrap();
+    assert_eq!(
+        arm.views()[0].2,
+        -1,
+        "a prepared view need not be announced before adoption"
+    );
+    assert!(arm.state().applied.is_none(), "prepared is not applied");
+    let answer = arm.setup(setup_request(&prep.session, "fixture")).await;
+    assert_eq!(answer["answer"], "ready", "{answer}");
+    assert_eq!(
+        arm.store()
+            .load_async_compaction_views(&reference)
+            .unwrap()
+            .0[0]
+            .2
+            .as_deref(),
+        Some(snapshot.as_str())
+    );
+    let fetched = response(
+        arm.h
+            .dispatch_value(
+                CHANNEL,
+                json!({"method":"view.get","params":{"session_ref":reference,"view_version":1}}),
+            )
+            .await,
+    );
+    assert_eq!(fetched["answer"], "view");
+    assert_eq!(fetched["view"]["view_version"], 1);
+    assert_eq!(arm.notice(1, 8_000, Some(1), Vec::new()).await, "ok");
+    let adopted = arm.state();
+    // Adoption keeps the preparation marker, marked adopted, so a later Setup
+    // never treats the session as unprepared again.
+    assert!(super::super::offline_first_pass::adopted(&adopted));
+    assert_eq!(adopted.applied, Some(1));
+    assert!(adopted.snapshot_unavailable.is_none());
+    assert!(!adopted.snapshot_warning_logged);
+    assert!(arm
+        .store()
+        .load_async_compaction_views(&reference)
+        .unwrap()
+        .0[0]
+        .2
+        .is_some());
 }

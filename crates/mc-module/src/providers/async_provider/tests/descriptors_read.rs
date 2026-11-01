@@ -3,6 +3,180 @@
 //! refs, and tag numbers are only ever the ones the current read shows.
 use super::*;
 
+/// The expected rows and parts are the contract's independent Pi recordings,
+/// not expectations calculated by ck-mc's codec.
+#[tokio::test]
+async fn pi_contract_vectors_cross_real_ingress_with_served_counts_and_digests() {
+    use cortexkit_role_llm_runner::{serializer_profile, vectors};
+    let file: Value = serde_json::from_str(vectors::file("pi-session.json").unwrap()).unwrap();
+    let mut cases = vec![("recording".to_string(), file["expected"].clone())];
+    cases.extend(file["synthetic"].as_array().unwrap().iter().map(|case| {
+        (
+            case["name"].as_str().unwrap().to_string(),
+            case["expected"].clone(),
+        )
+    }));
+    let mut rows = 0;
+    let mut saw_recorded_edit = false;
+    let mut empty_types = std::collections::BTreeSet::new();
+    for (name, expected) in cases {
+        let entries = expected["entries"].as_array().unwrap().iter().map(|row| {
+            let body = row["served_body"].clone();
+            let projected = match &row["projected_content"] {
+                Value::Null => vec![],
+                Value::Array(parts) => parts.clone(),
+                part => vec![part.clone()],
+            };
+            assert_eq!(serializer_profile::top_level_part_count("pi", &body).unwrap() as u64, row["part_count"].as_u64().unwrap(), "{name} {body}");
+            let keys = (0..projected.len()).map(|index| format!("part-{index}")).collect::<Vec<_>>();
+            let read: ReadMessage = serde_json::from_value(json!({
+                "ordinal":row["ordinal"], "mid":row["entry_id"], "message":body,
+                "digest":contract::digest::content_digest(&row["served_body"]),
+                "part_digests":projected.iter().zip(&keys).map(|(part,key)| json!({"part":key,"digest":contract::digest::content_digest(part)})).collect::<Vec<_>>(),
+                "tags":keys.iter().enumerate().map(|(index,key)| json!({"part":key,"tag":tags::format_tag(row["ordinal"].as_u64().unwrap()*100 + index as u64 + 1).unwrap()})).collect::<Vec<_>>()
+            })).unwrap();
+            if read.mid == "entry-019" && name == "recording" {
+                saw_recorded_edit = true;
+                assert_eq!(body["message"]["content"], json!([{"type":"text","text":"Fixture edited assistant text."}]));
+            }
+            if projected.is_empty() {
+                empty_types.insert(if body["message"]["role"] == "bashExecution" {
+                    "bashExecution".to_string()
+                } else { body["type"].as_str().unwrap().to_string() });
+            }
+            read
+        }).collect::<Vec<_>>();
+        if entries.is_empty() {
+            continue;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let rig = Rig::open(
+            dir.path(),
+            "thalamus-harness",
+            "pi",
+            json!({"serializer_profile":"pi"}),
+        )
+        .await;
+        *rig.runner.page_override.lock().unwrap() =
+            Some(json!({"lineage_id":"L","messages":entries}));
+        let mut state = rig.state();
+        rig.h
+            .read_async_resumable(&mut state, 0, Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        state
+            .reindex()
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        assert_eq!(state.entries.len(), entries.len(), "{name}");
+        let listed_tags =
+            tag_rows(&state, codec::Codec::Pi).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let inbound = entries
+            .iter()
+            .map(|entry| codec::InboundMessage {
+                mid: entry.mid.clone(),
+                ordinal: entry.ordinal,
+                message: entry.message.clone(),
+            })
+            .collect::<Vec<_>>();
+        let decoded = codec::Codec::Pi
+            .decode_entries(&inbound)
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        for (actual, original) in decoded.iter().zip(&entries) {
+            rows += 1;
+            assert_eq!(
+                (actual.mid.as_str(), actual.ordinal),
+                (original.mid.as_str(), original.ordinal)
+            );
+            assert_eq!(state.entries[&original.ordinal].read().unwrap(), *original);
+            let projected = parts(&original.message).unwrap();
+            if crate::codec::pi::is_synthesized(&original.message)
+                || original.message["type"] == "custom_message"
+            {
+                if let Some(text) = projected
+                    .first()
+                    .and_then(|part| part.as_str().or_else(|| part["text"].as_str()))
+                {
+                    let number =
+                        tags::parse_tag(original.tags[0].tag.as_deref().unwrap()).unwrap() as i64;
+                    let tag = listed_tags
+                        .iter()
+                        .find(|tag| tag.tag_number == number)
+                        .unwrap_or_else(|| {
+                            panic!("{name}: missing projected text tag for {}", original.mid)
+                        });
+                    assert_eq!(
+                        tag.source_bytes.as_ref(),
+                        text.as_bytes(),
+                        "{name} {}",
+                        original.mid
+                    );
+                    assert_eq!(
+                        tag.kind,
+                        if original.message["message"]["role"] == "bashExecution" {
+                            "tool_result"
+                        } else {
+                            "message"
+                        }
+                    );
+                }
+            }
+            assert_eq!(
+                projected.len(),
+                original.part_digests.as_ref().unwrap().len()
+            );
+            for (part, digest) in projected
+                .iter()
+                .zip(original.part_digests.as_ref().unwrap())
+            {
+                assert_eq!(
+                    contract::digest::content_digest(part),
+                    digest.digest,
+                    "{name} {}",
+                    original.mid
+                );
+            }
+        }
+        let rendered = codec::Codec::Pi
+            .render_view(
+                &transform::compaction::View {
+                    compaction_id: "pi-vector".into(),
+                    version: 1,
+                    range: transform::compaction::Range {
+                        lineage_id: "L".into(),
+                        from: 0,
+                        to: entries.last().unwrap().ordinal + 1,
+                    },
+                    replacement: decoded.into_iter().map(|entry| entry.ck).collect(),
+                },
+                "s",
+                &inbound,
+            )
+            .unwrap();
+        assert_eq!(
+            rendered.replacement,
+            entries
+                .iter()
+                .map(|entry| entry.message.clone())
+                .collect::<Vec<_>>(),
+            "{name}"
+        );
+    }
+    assert!(rows >= 20, "lost Pi vector coverage: {rows}");
+    assert!(saw_recorded_edit);
+    assert_eq!(
+        empty_types,
+        [
+            "bashExecution",
+            "branch_summary",
+            "custom_message",
+            "message"
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    );
+}
+
 /// Read Broca's message 14 (a lone tool call with an unnumbered tag row, as
 /// a Broca runner served it) through the ordinary descriptors-mode read, with
 /// its tag rows served as captured or cleared.

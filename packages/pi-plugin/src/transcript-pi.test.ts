@@ -670,6 +670,13 @@ describe("createPiTranscript", () => {
 				tagTranscript(sessionId, seed, tagger, db, { toolTokenCache });
 				seed.commit();
 				toolTokenCache.resetWrites();
+				// Force real byte-growth accounting while retaining the per-block token
+				// memo. Unchanged high-water marks no longer need any tokenization.
+				db.prepare("UPDATE tags SET byte_size = 0 WHERE session_id = ?").run(
+					sessionId,
+				);
+				tagger.cleanup(sessionId);
+				tagger.initFromDb(sessionId, db);
 
 				const replay = createPiTranscript(makeMessages(), sessionId, entryIds);
 				tagTranscript(sessionId, replay, tagger, db, {

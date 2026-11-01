@@ -52,6 +52,7 @@ import {
 	getProjectEmbeddingSnapshot,
 } from "@magic-context/core/features/magic-context/memory/embedding";
 import { isUsableProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
+import { backgroundSessionProjectIdentity } from "@magic-context/core/features/magic-context/memory/session-identity-decision";
 import type {
 	UnifiedSearchOptions,
 	UnifiedSearchResult,
@@ -61,6 +62,7 @@ import {
 	type AutoSearchHintNoHintReason,
 	getAutoSearchHintDecisions,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { readSessionMeta } from "@magic-context/core/features/magic-context/storage-meta-session";
 import {
 	AUTO_SEARCH_TIMEOUT_MS,
 	clearAutoSearchTimeoutForSession,
@@ -361,15 +363,26 @@ export async function runAutoSearchHintForPi(args: {
 				// Persisted decisions were replayed above because replay is byte restoration,
 				// not a new mutation.
 				if (found.index !== messages.length - 1) return messages;
+				const meta = readSessionMeta(db, sessionId);
+				const owner = backgroundSessionProjectIdentity(
+					db,
+					sessionId,
+					meta,
+					undefined,
+					options.projectPath,
+				);
+				const ownerUnavailable =
+					meta.cachedM0Bytes !== null && owner === undefined;
+				const projectPath = owner ?? options.projectPath;
 				// A directory outside any project has no identity to search memories,
 				// commits or history embeddings under; never search the blank key.
-				if (!isUsableProjectIdentity(options.projectPath)) return messages;
+				if (!isUsableProjectIdentity(projectPath)) return messages;
 
-				const snapshot = getProjectEmbeddingSnapshot(options.projectPath);
+				const snapshot = getProjectEmbeddingSnapshot(projectPath);
 				if (!snapshot) {
 					queueAutoSearchRegistration(
 						db,
-						options.projectPath,
+						projectPath,
 						args.ensureProjectRegistered,
 					);
 					void persistAutoSearchSkip(db, sessionId, userMsgId, "empty");
@@ -430,7 +443,8 @@ export async function runAutoSearchHintForPi(args: {
 						withAutoSearchDeadline(async (signal, checkDeadline) => {
 							args.passGuard?.assert();
 							if (checkDeadline()) return null;
-							const memoryEnabled = snapshot?.features.memoryEnabled ?? true;
+							const memoryEnabled =
+								!ownerUnavailable && (snapshot?.features.memoryEnabled ?? true);
 							// Use the snapshot's history setting for query embedding, independently
 							// of memory.enabled. Memory and git-commit retrieval have separate gates.
 							const embeddingEnabled = snapshot
@@ -449,12 +463,7 @@ export async function runAutoSearchHintForPi(args: {
 								gitCommitsEnabled,
 								embedQuery: async (text, signal) => {
 									const result = await wait(
-										embedTextForProject(
-											options.projectPath,
-											text,
-											signal,
-											"query",
-										),
+										embedTextForProject(projectPath, text, signal, "query"),
 									);
 									args.passGuard?.assert();
 									checkDeadline();
@@ -467,22 +476,18 @@ export async function runAutoSearchHintForPi(args: {
 									null,
 								// Leave primers out of automatic hints so primer updates cannot rewrite
 								// cached request prefixes. Explicit ctx_search and the dashboard expose them.
-								sources: ["memory", "message", "git_commit"],
+								sources: ownerUnavailable
+									? ["message", "git_commit"]
+									: ["memory", "message", "git_commit"],
 								// Never wait for the history-chunk pool to be built: a
 								// cold pool is warmed in the background for later turns.
 								chunkPoolWarmOnly: true,
 							};
-							return searchAutoHint(
-								db,
-								sessionId,
-								options.projectPath,
-								rawPrompt,
-								{
-									...searchOptions,
-									signal,
-									countRetrievals: false,
-								},
-							);
+							return searchAutoHint(db, sessionId, projectPath, rawPrompt, {
+								...searchOptions,
+								signal,
+								countRetrievals: false,
+							});
 						}, startedAt),
 					);
 				} catch (error) {
@@ -576,14 +581,13 @@ export async function runAutoSearchHintForPi(args: {
 
 					return messages;
 				} finally {
-					if (!lifecycleSignal.aborted && results !== null) {
+					if (
+						!ownerUnavailable &&
+						!lifecycleSignal.aborted &&
+						results !== null
+					) {
 						args.passGuard?.assert();
-						void queueAutoSearchBackfill(
-							db,
-							sessionId,
-							options.projectPath,
-							rawPrompt,
-						);
+						void queueAutoSearchBackfill(db, sessionId, projectPath, rawPrompt);
 					}
 				}
 			},

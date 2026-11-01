@@ -56,6 +56,7 @@ const SESSION_META_FALLBACK_SELECTS: Partial<
     cached_m0_mural_data_url: "NULL AS cached_m0_mural_data_url",
     cached_m0_mural_hash: "NULL AS cached_m0_mural_hash",
     cached_m1_bytes: "NULL AS cached_m1_bytes",
+    memory_block_count: "NULL AS memory_block_count",
     cached_m0_project_memory_epoch: "NULL AS cached_m0_project_memory_epoch",
     cached_m0_project_user_profile_version: "NULL AS cached_m0_project_user_profile_version",
     cached_m0_max_compartment_seq: "NULL AS cached_m0_max_compartment_seq",

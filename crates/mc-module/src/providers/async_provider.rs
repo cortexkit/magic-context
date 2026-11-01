@@ -5,6 +5,7 @@ use compact::{self as contract, ceiling::CeilingPolicy, notice, ride, view};
 use cortexkit_bus_trait::{ContentDigest, DurableOwner, Stream, StreamCursor};
 use cortexkit_role_llm_runner::{read::ReadMessage, tags};
 use serde::Deserialize;
+mod adoption_recovery;
 mod contract_policy;
 mod cut_runtime;
 mod cut_seed;
@@ -12,9 +13,11 @@ mod decision_log;
 #[cfg(test)]
 mod differential_tests;
 mod emptied_messages;
+mod engine_cache;
 mod frozen_edits;
 mod full_array_floor;
 mod held_entries;
+mod historian_cache;
 mod historian_tail;
 mod history_expand;
 mod moved_session;
@@ -22,8 +25,10 @@ pub(crate) mod offline_first_pass;
 mod pruned_reasoning;
 pub(crate) mod reminder_echoes;
 mod resident;
+mod resync_replay;
 #[cfg(test)]
 mod scaling_tests;
+mod setup_payloads;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -35,6 +40,62 @@ use moved_session::CheckpointSource;
 use resident::{EngineView, HeldEntry};
 #[cfg(test)]
 use scaling_tests::reminder_work;
+
+/// Carry the user's transform settings into a runner session's engine request,
+/// as the standalone plugin does on every pass: caveman compression of old
+/// text, and the per-model reasoning budget. Both only act on passes that are
+/// already rebuilding; a cache-hit pass replays what was served.
+pub(crate) fn apply_runner_transform_settings(
+    request: &mut TransformRequest,
+    config: &McModuleConfig,
+    model: &str,
+) {
+    request.caveman_enabled = config.caveman.enabled;
+    request.caveman_min_chars = config.caveman.min_size;
+    request.keep_reasoning_tokens_effective =
+        Some(config.resolve_keep_reasoning_tokens(Some(model)));
+}
+
+/// The history head's token budget for a runner session, sized as the
+/// TypeScript plugin sizes it (`resolveHistoryBudgetTokens`): the model's
+/// window × its execute threshold × `history_budget_percentage`. Without a
+/// known window it falls back to the renderer's default, as TypeScript does.
+pub(crate) fn async_history_budget_tokens(
+    config: &McModuleConfig,
+    context_window: u64,
+    model: &str,
+) -> f64 {
+    if context_window == 0 {
+        return crate::memory_render::DEFAULT_HISTORY_BUDGET_TOKENS;
+    }
+    let threshold = config.resolve_execute_threshold(Some(model)).percentage;
+    (context_window as f64 * (threshold / 100.0) * config.history_budget_percentage).floor()
+}
+#[cfg(test)]
+fn inspection_sql(path: impl AsRef<std::path::Path>) -> rusqlite::Connection {
+    try_inspection_sql(path).unwrap()
+}
+
+#[cfg(test)]
+fn try_inspection_sql(path: impl AsRef<std::path::Path>) -> rusqlite::Result<rusqlite::Connection> {
+    let conn = rusqlite::Connection::open(path)?;
+    McStore::install_async_compaction_inspection(&conn)?;
+    Ok(conn)
+}
+
+#[cfg(test)]
+fn guard_async_writes(path: impl AsRef<std::path::Path>, kind: &str) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let sql = match kind {
+        "cold" => "CREATE TRIGGER no_cold_payload_rewrite BEFORE UPDATE ON mc_cache_sections WHEN NEW.session_id GLOB '__ckmc_async_v2_record:*' AND NEW.section IN ('setup-initial','moved-bound-drops') BEGIN SELECT RAISE(ABORT,'unchanged cold payload rewritten'); END;
+            CREATE TRIGGER no_bound_replay BEFORE INSERT ON pending_agent_drops BEGIN SELECT RAISE(ABORT,'bound queue replayed in the same generation'); END;",
+        "initial" => "CREATE TRIGGER fail_setup_payload BEFORE UPDATE ON mc_cache_sections WHEN NEW.session_id GLOB '__ckmc_async_v2_record:*' AND NEW.section='setup-initial' BEGIN SELECT RAISE(ABORT,'interrupted answer save'); END;",
+        "entries" => "CREATE TRIGGER fail_historian_source BEFORE UPDATE ON mc_cache_sections WHEN NEW.section GLOB '__ckmc_async_v2_entry:*' BEGIN SELECT RAISE(ABORT,'source write interrupted'); END;",
+        _ => panic!("unknown async storage guard"),
+    };
+    conn.execute_batch(sql).unwrap();
+    conn
+}
 
 /// The shared session reference for a bare runner module id, harness and
 /// session, derived without `Key` so tests check the provider's keys against
@@ -214,6 +275,14 @@ pub(crate) struct Runtime {
     pub(crate) decision_lines: Mutex<Vec<String>>,
 }
 
+struct RecordStart {
+    generation: u64,
+    preparation: Option<offline_first_pass::OfflineFirstPass>,
+}
+
+/// Cold records live only in the versioned KV layout. Legacy binaries see an
+/// absent record and rebuild at Setup; exposing an undecodable cold header in
+/// the legacy table would stop their global pending-view announcement walk.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AsyncRecord {
     #[serde(default, skip_serializing_if = "user_commands::Ledger::is_empty")]
@@ -226,6 +295,16 @@ pub(crate) struct AsyncRecord {
     restored_no_new_content: bool,
     #[serde(default)]
     resync_sources: Option<ResyncSources>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    resync_replay_pending: bool,
+    #[serde(default, skip_serializing_if = "resync_replay::zero")]
+    publication_floor: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot_unavailable: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    snapshot_warning_logged: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    snapshot_recovery_used: bool,
     #[serde(default)]
     restored_head: Option<RestoredHead>,
     /// Set for a session the offline move brought over from the standalone
@@ -282,8 +361,18 @@ pub(crate) struct AsyncRecord {
     /// cleanup in it. Cleared by the first rebuild pass that succeeds.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pruned_rebuild_pending: bool,
+    /// A session moved from standalone has never been served by this runner,
+    /// so its first request writes the runner's prompt cache cold whatever ck-mc
+    /// decides. Its first engine pass therefore runs as a rebuild, as a
+    /// `ttl_expired` ride does: the imported history head and the carried drops
+    /// land in that one rebuild instead of waiting for an open signed turn to
+    /// close. Set when a moved record is created; cleared by the first pass
+    /// that publishes a view.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    moved_cold_prefix: bool,
     /// A rewrite ride (`ttl_expired`, `model_change`, `account_change`,
-    /// `surface_change`) rebuilt this conversation since the last notice
+    /// `surface_change`, `chain_reset`, `service_tier_change`) rebuilt this
+    /// conversation since the last notice
     /// completed. Its request rewrote the runner's prompt cache from the
     /// runner's own current bytes, so a prune reconciled before the next
     /// notice completes needs no second rebuild. Kept only for a session that
@@ -342,7 +431,24 @@ pub(crate) struct AsyncRecord {
     runner_identity: session_resolver::RunnerBindIdentity,
     runner_module: String,
     setup: compact::setup::SetupRequest,
+    /// Setup's answer is cold, immutable between Setup/pruning changes. Keep it
+    /// in a baseline slot, not in the record rewritten by every notice. Older
+    /// records still deserialize their inline answer and split it on next save.
+    #[serde(default, skip_serializing)]
     initial: Value,
+    /// Clear after replacing or editing `initial`; save writes its slot once.
+    #[serde(default)]
+    initial_stored: bool,
+    /// Readiness is needed by header-only adoption checks without loading the
+    /// cold answer. Save updates it atomically with the answer's slot.
+    #[serde(default)]
+    initial_ready: bool,
+    #[serde(skip)]
+    setup_payload_bytes: (usize, usize),
+    /// Missing on older records: an unknown source revision can never prove
+    /// that a resident historian prefix is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_revision: Option<u64>,
     #[serde(default)]
     cache_policy: contract_policy::CachePolicy,
     /// Only the engine's fixed-size counters are in this record; its produced
@@ -351,6 +457,10 @@ pub(crate) struct AsyncRecord {
     engine: transform::compaction::State,
     #[serde(default)]
     engine_baselines: EngineBaselines,
+    /// The independently committed engine rows must still describe the pass
+    /// that supplied this provider baseline before another view can use them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    engine_cache_witness: Option<engine_cache::Witness>,
     /// Certificate recording which earlier source input the last permitted
     /// rebuild covered. Produced and applied views remain separate; a runner
     /// acknowledgement never advances this certificate.
@@ -394,6 +504,8 @@ pub(crate) struct AsyncRecord {
     /// `fold_entries`.
     #[serde(skip)]
     aggregates: resident::Aggregates,
+    #[serde(skip)]
+    historian_cache: Arc<Mutex<historian_cache::Cache>>,
     /// Bytes held by the entries through the given ordinal, so the resident
     /// size is updated by what each operation added.
     #[serde(skip)]
@@ -409,11 +521,13 @@ pub(crate) struct AsyncRecord {
     applied: Option<u64>,
     acknowledgements: Vec<String>,
     marker_outcomes: BTreeMap<String, String>,
+    /// Canonical latest notice headers, including the raw edit-cost hint. Keep
+    /// unknown hints too: their wire spelling participates in the notice digest.
     conditions: Option<BTreeMap<String, String>>,
     resync: bool,
     generation: u64,
-    /// Set on a record `ck-mc offline first-pass` prepared, until the first
-    /// live notice adopts or discards it; see `offline_first_pass`.
+    /// Offline preparation and durable live adoption provenance, retained
+    /// across generations; see `offline_first_pass`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     offline_first_pass: Option<offline_first_pass::OfflineFirstPass>,
     /// The record format; see `cut_seed::RECORD_VERSION`. Absent on records
@@ -455,6 +569,10 @@ pub(crate) struct AsyncRecord {
     pending_parent_history: Option<cut_runtime::ParentHistory>,
     #[serde(default)]
     pending_undo_edits: bool,
+    /// Archive lookups already completed in this resident window. A restart
+    /// deliberately forgets the watermark and replays any pending recovery.
+    #[serde(skip)]
+    undo_checked_through: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cut_signature: Option<crate::tail_hygiene::signature::SignaturePrefix>,
 }
@@ -548,9 +666,11 @@ pub(crate) enum FailureState {
 
 impl AsyncRecord {
     fn failed(&self) -> bool {
-        self.failure
-            .as_ref()
-            .is_some_and(|failure| failure.state == FailureState::Failed)
+        self.snapshot_unavailable.is_some()
+            || self
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.state == FailureState::Failed)
     }
 }
 
@@ -646,6 +766,7 @@ struct Journal {
     complete: bool,
     /// Highest held ordinal already stored.
     persisted_through: Option<u64>,
+    input_epoch: u64,
     /// Highest held ordinal already in `tag_index`.
     indexed_through: Option<u64>,
     /// Stored entries to delete on the next save: after this ordinal, or all
@@ -761,6 +882,8 @@ struct ResyncSources {
     head: Option<HistoryHeadSource>,
     #[serde(default)]
     messages: Vec<SourceMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replay: Option<resync_replay::Replay>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -1042,8 +1165,12 @@ impl State {
         }
         let reference = self.reference();
         let key = self.key.store_key().conversation_key();
+        let payloads = self.setup_payload_writes()?;
         let header = serde_json::to_string(self).map_err(transient)?;
         let mut save = store.async_compaction_save(&reference, &key, &self.key.session, &header);
+        for (slot, json) in payloads {
+            save.baseline(slot, Some(json));
+        }
         save.immutable_baseline(slot, serde_json::to_string(&record).map_err(transient)?);
         save.commit().map_err(transient)?;
         Ok(())
@@ -1136,6 +1263,19 @@ impl State {
             .and_then(|view| view.publication_lineage.as_ref())
         {
             return Ok(Some(lineage.clone()));
+        }
+        if let Some(lineage) = self
+            .applied_view
+            .as_ref()
+            .filter(|view| view.publication_version == Some(version))
+            .and_then(|view| view.publication_lineage.as_ref())
+        {
+            return Ok(Some(lineage.clone()));
+        }
+        if let Some(lineage) = resync_replay::stored_view(store, &self.reference(), version)?
+            .and_then(|view| view.publication_lineage)
+        {
+            return Ok(Some(lineage));
         }
         store
             .load_async_compaction_view(&self.reference(), version)
@@ -1231,15 +1371,51 @@ impl State {
         }
         self.applied = notice.applied_view_version;
         // Repeated acknowledgements do not rewrite an unchanged baseline.
-        if let Some(applied) = self
-            .applied
-            .and_then(|version| self.published_engine.get(&version))
-            .filter(|view| Some(&view.identity.1.lineage_id) == self.lineage.as_ref())
-            .filter(|view| {
-                self.applied_view.as_ref().map(|held| &held.identity) != Some(&view.identity)
+        let acknowledged = resync_replay::acknowledged_version(store, self)?;
+        let applied = match acknowledged {
+            Some(version) => match self.published_engine.get(&version) {
+                Some(view) => Some(view.clone()),
+                None if self
+                    .applied_view
+                    .as_ref()
+                    .is_none_or(|view| view.publication_version != Some(version)) =>
+                {
+                    resync_replay::stored_view(store, &self.reference(), version)?
+                }
+                None => None,
+            },
+            None => None,
+        };
+        if applied.is_none()
+            && acknowledged.is_some_and(|version| {
+                self.applied_view
+                    .as_ref()
+                    .is_none_or(|view| view.publication_version != Some(version))
             })
         {
-            self.applied_view = Some(applied.clone());
+            resync_replay::mark_unavailable(self, acknowledged.expect("acknowledged version"));
+        }
+        if let Some(applied) =
+            applied.filter(|view| Some(&view.identity.1.lineage_id) == self.lineage.as_ref())
+        {
+            self.engine.version_high_water = self.engine.version_high_water.max(applied.identity.0);
+            if self.applied_view.as_ref().is_none_or(|held| {
+                held.identity != applied.identity
+                    || held.publication_version != applied.publication_version
+            }) {
+                self.applied_view = Some(applied);
+            }
+        }
+        if self
+            .published_engine
+            .last_key_value()
+            .is_some_and(|(version, latest)| {
+                latest.resync_reissued
+                    && acknowledged.is_none_or(|ack| ack < *version)
+                    && latest.resync_reissued_from != acknowledged
+            })
+        {
+            self.resync_replay_pending = true;
         }
         self.acknowledgements = notice.events.iter().map(notice::Event::token).collect();
         for token in &self.acknowledgements {
@@ -1296,11 +1472,36 @@ impl State {
     /// Validate and persist a completed transcript read while its provider
     /// serial is held, before returning the record to the resident cache.
     fn ingest_read(&mut self, store: &McStore, codec: codec::Codec) -> Result<(), HandlerOutcome> {
+        #[cfg(test)]
+        let step = scaling_tests::save_meter::start_kind(&self.reference(), "ingest:reindex");
         self.reindex()?;
+        #[cfg(test)]
+        drop(step);
+        #[cfg(test)]
+        let step = scaling_tests::save_meter::start_kind(&self.reference(), "ingest:restore");
         self.restore_sources(store, codec)?;
         self.restore_undo_edits(store)?;
-        self.bind_standalone_move(store, codec)?;
+        #[cfg(test)]
+        drop(step);
+        #[cfg(test)]
+        let step = scaling_tests::save_meter::start_kind(&self.reference(), "ingest:bind");
+        let bound = self
+            .offline_first_pass
+            .as_ref()
+            .is_some_and(|offline| offline.bound_generation == Some(self.generation));
+        if !bound {
+            self.bind_standalone_move(store, codec)?;
+            if let Some(offline) = &mut self.offline_first_pass {
+                offline.bound_generation = Some(self.generation);
+            }
+        }
+        #[cfg(test)]
+        drop(step);
+        #[cfg(test)]
+        let step = scaling_tests::save_meter::start_kind(&self.reference(), "ingest:tags");
         let rows = self.unsaved_tag_rows(codec)?;
+        #[cfg(test)]
+        drop(step);
         self.save(store, &rows)
     }
 
@@ -1317,6 +1518,9 @@ impl State {
         let _timer = scaling_tests::save_meter::start(&self.reference());
         if !self.journal.complete {
             return Err(transient("async record was loaded without its transcript"));
+        }
+        if self.journal.truncate_below.is_some() {
+            self.historian_cache = Arc::default();
         }
         self.reindex()?;
         let mut baselines = Vec::new();
@@ -1340,7 +1544,9 @@ impl State {
         }
         // Keep the applied version, everything newer (not yet acknowledged)
         // and any version an engine baseline names; the store also keeps the
-        // newest version.
+        // newest version. Restoration can copy a published baseline into a
+        // separate row without clearing its publication version. Recovery
+        // snapshots still reference that publication, so retain it too.
         let retain_from = self.applied.map(|applied| {
             [
                 self.engine_baselines.produced,
@@ -1351,6 +1557,12 @@ impl State {
                 Baseline::Published(version) => Some(version),
                 _ => None,
             })
+            .chain(
+                self.produced_view
+                    .iter()
+                    .chain(&self.applied_view)
+                    .filter_map(|view| view.publication_version),
+            )
             .fold(applied, u64::min)
         });
         let retain_from = retain_from.map(|floor| {
@@ -1413,8 +1625,13 @@ impl State {
         }
         let reference = self.reference();
         let key = self.key.store_key().conversation_key();
+        self.prepare_input_revision()?;
+        let payloads = self.setup_payload_writes()?;
         let state = serde_json::to_string(self).map_err(transient)?;
         let mut save = store.async_compaction_save(&reference, &key, &self.key.session, &state);
+        for (slot, json) in payloads {
+            save.baseline(slot, Some(json));
+        }
         save.retain_cut_facts(self.cut_first_ordinal);
         save.tags(&namespace, tag_rows);
         save.forget_tags_of(self.journal.forget_tags_of.clone());
@@ -1512,6 +1729,7 @@ impl State {
         self.retired_frozen.dirty = false;
         self.journal.clear_published = false;
         self.journal.persisted_through = self.entries.last_key_value().map(|(n, _)| *n);
+        self.journal.input_epoch = self.entries.mutation_epoch();
         self.journal.produced = self
             .produced_view
             .as_ref()
@@ -1523,6 +1741,21 @@ impl State {
             self.published_engine
                 .retain(|version, _| *version >= floor || Some(*version) == newest);
         }
+        Ok(())
+    }
+
+    fn prepare_input_revision(&mut self) -> Result<(), HandlerOutcome> {
+        let changed = self.journal.input_epoch != self.entries.mutation_epoch()
+            || self.journal.truncate.is_some()
+            || self.journal.truncate_below.is_some()
+            || !self.journal.replaced.is_empty();
+        self.input_revision = Some(match self.input_revision {
+            Some(prior) if changed => prior
+                .checked_add(1)
+                .ok_or_else(|| transient("historian source revision exhausted"))?,
+            Some(prior) => prior,
+            None => 0,
+        });
         Ok(())
     }
 
@@ -1701,6 +1934,7 @@ impl State {
     /// Drop held entries after `through`, or all of them for `None`, with
     /// their tag addresses; the next save deletes the stored rows.
     fn truncate_entries(&mut self, through: Option<u64>) {
+        self.historian_cache = Arc::default();
         self.cut_signature = None;
         self.logical_prefix = None;
         self.mid_index
@@ -1837,6 +2071,14 @@ impl State {
         let cache_state = self.cache_state.as_ref().map_or(0, |cached| cached.bytes);
         bytes
             + entries
+            + self.setup_payload_bytes.0
+            + self.setup_payload_bytes.1
+            + self
+                .historian_cache
+                .lock()
+                .expect("historian input cache mutex")
+                .retained_bytes()
+                .max(historian_cache::Cache::owner_bytes())
             + self.tag_index.len() * TAG_ADDRESS
             + self.mid_index.len() * 96
             + cache_state
@@ -2017,6 +2259,24 @@ impl State {
 
     fn reset(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
         self.capture_resync_sources(store)?;
+        self.resync_sources.as_mut().expect("resync sources").replay = None;
+        self.finish_reset(store)
+    }
+
+    fn reset_for_notice(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
+        engine_cache::reconcile(store, self)?;
+        // A mismatching notice requires rereading the source, not necessarily
+        // discarding the engine's cached serving state. Never reuse a baseline
+        // an earlier structural reset rejected.
+        let replay = if self.resync_sources.is_none() {
+            resync_replay::Replay::capture(self)?
+        } else {
+            None
+        };
+        self.capture_resync_sources(store)?;
+        if let Some(replay) = replay {
+            self.resync_sources.as_mut().expect("resync sources").replay = Some(replay);
+        }
         self.finish_reset(store)
     }
 
@@ -2136,6 +2396,7 @@ impl State {
                 })
             });
             self.resync_sources = Some(ResyncSources {
+                replay: None,
                 namespace,
                 lineage: self.lineage.clone(),
                 from_start: self.lineage_first_ordinal == 0
@@ -2158,10 +2419,15 @@ impl State {
     }
 
     fn finish_reset(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
+        self.undo_checked_through = None;
         self.resync = true;
+        self.resync_replay_pending = false;
         self.partial_read_seq = None;
-        // The held entries an offline proof described are gone with the reset.
-        self.offline_first_pass = None;
+        // A reset invalidates an unadopted proof, not durable adoption. An
+        // adopted conversation never needs offline preparation again.
+        if !offline_first_pass::adopted(self) {
+            self.offline_first_pass = None;
+        }
         // A runner that lost its state continues under a new lineage
         // (contract §5.3), which reaches here as a resync: the conversation
         // starts over, so an earlier protocol failure no longer applies.
@@ -2191,14 +2457,62 @@ impl State {
                 self.retired_frozen.dirty = true;
             }
         }
+        if let Some((version, _)) = self.published_engine.last_key_value() {
+            self.publication_floor = self.publication_floor.max(
+                version
+                    .checked_add(1)
+                    .ok_or_else(|| transient("async version exhausted"))?,
+            );
+        }
         self.published_engine.clear();
-        self.journal.clear_published = true;
+        // A retained view remains acknowledgeable after a reset. Keep its
+        // immutable rendering metadata with the view row, but do not count an
+        // older generation's views as new publications by this generation.
+        self.journal.clear_published = false;
         self.save(store, &[])?;
         store
             .retire_unannounced_async_views(&self.reference())
             .map_err(transient)?;
         Ok(())
     }
+}
+
+/// The Setup answer for an existing record: its stored answer, or for an
+/// unadopted offline preparation the head-only answer naming the prepared
+/// view as due. Kept out of `async_setup_inner`, whose debug-build poll frame
+/// is already near the test threads' stack limit.
+#[inline(never)]
+fn existing_setup_answer(
+    state: &State,
+    store: &McStore,
+    request: &compact::setup::SetupRequest,
+    params: &Value,
+    mut answer: Value,
+    checkpoint: Option<contract::setup::SetupCheckpoint>,
+) -> Result<Vec<u8>, HandlerOutcome> {
+    answer["request_id"] = json!(request.request_id);
+    if offline_first_pass::prepared(state) {
+        // `view_due_max_ms` (compaction-provider 0.7.10) is read from the raw
+        // request so it reaches this check on every pinned contract version.
+        let cap = params.get("view_due_max_ms").and_then(Value::as_u64);
+        match offline_first_pass::prepared_answer(state, store, request, cap, answer)? {
+            offline_first_pass::PreparedAnswer::Inline(inline) => answer = inline,
+            offline_first_pass::PreparedAnswer::Refuse(refusal) => return bytes(&refusal),
+            offline_first_pass::PreparedAnswer::Due(head_only, due) => {
+                tracing::info!(
+                    session_ref = %state.reference(),
+                    view_version = due.version,
+                    "moved session Setup answered with the prepared view due"
+                );
+                // Added after the typed rebuild in `with_checkpoint`, which
+                // keeps only the members it knows.
+                let mut built = with_checkpoint(head_only, checkpoint);
+                built["view_due"] = json!({"version": due.version, "digest": due.digest});
+                return bytes(&built);
+            }
+        }
+    }
+    bytes(&with_checkpoint(answer, checkpoint))
 }
 
 /// A `ready` Setup answer carrying a moved session's Setup checkpoint
@@ -2247,6 +2561,19 @@ fn load(store: &McStore, reference: &str) -> Result<Option<State>, HandlerOutcom
         return Ok(None);
     };
     let mut state: State = serde_json::from_str(&rows.state).map_err(transient)?;
+    let possible_applied = state.applied.or(state.frozen_edits_version);
+    if state.snapshot_unavailable.is_none()
+        && possible_applied.is_some_and(|version| {
+            !rows
+                .engine_views
+                .iter()
+                .any(|(candidate, _)| *candidate == version)
+        })
+    {
+        if let Some(version) = resync_replay::missing_snapshot(store, &state)? {
+            resync_replay::mark_unavailable(&mut state, version);
+        }
+    }
     for (ordinal, entry, index) in rows.entries {
         let entry = HeldEntry::from_stored(entry)?;
         #[cfg(test)]
@@ -2267,27 +2594,35 @@ fn load(store: &McStore, reference: &str) -> Result<Option<State>, HandlerOutcom
         state.entries.insert(ordinal, Arc::new(entry));
     }
     for (version, engine) in rows.engine_views {
-        state
-            .published_engine
-            .insert(version, EngineView::parse(engine)?);
+        if version >= state.publication_floor
+            || state.engine_baselines.produced == Baseline::Published(version)
+            || state.engine_baselines.applied == Baseline::Published(version)
+        {
+            state.published_engine.insert(
+                version,
+                EngineView::parse(engine)?.with_publication_version(version),
+            );
+        }
     }
     let mut stored = rows
         .baselines
         .into_iter()
         .collect::<BTreeMap<String, String>>();
+    state.restore_setup_payloads(|slot| Ok(stored.remove(slot)))?;
+    let blocked = state.snapshot_unavailable.is_some();
     let mut resolve = |slot: &str, baseline: Baseline| match baseline {
         Baseline::Absent => Ok(None),
-        Baseline::Published(version) => state
-            .published_engine
-            .get(&version)
-            .cloned()
-            .map(Some)
-            .ok_or_else(|| transient("async engine baseline view missing")),
+        Baseline::Published(version) => match state.published_engine.get(&version).cloned() {
+            Some(view) => Ok(Some(view)),
+            None if blocked => Ok(None),
+            None => Err(transient("async engine baseline view missing")),
+        },
         Baseline::Stored => stored
             .remove(slot)
             .map(EngineView::parse)
             .transpose()?
             .map(Some)
+            .or_else(|| blocked.then_some(None))
             .ok_or_else(|| transient("async engine baseline row missing")),
     };
     let produced = resolve("produced", state.engine_baselines.produced)?;
@@ -2308,6 +2643,20 @@ fn load(store: &McStore, reference: &str) -> Result<Option<State>, HandlerOutcom
     }
     state.produced_view = produced;
     state.applied_view = applied;
+    if state.produced_view.is_none() {
+        state.engine_baselines.produced = Baseline::Absent;
+    }
+    if state.applied_view.is_none() {
+        state.engine_baselines.applied = Baseline::Absent;
+    }
+    state
+        .published_engine
+        .retain(|version, _| *version >= state.publication_floor);
+    state.engine.version_high_water = state
+        .published_engine
+        .values()
+        .map(|view| view.identity.0)
+        .fold(state.engine.version_high_water, u64::max);
     if let Some(prefix) = &state.logical_prefix {
         state.entries.proof_before(prefix.tail_from);
     }
@@ -2315,6 +2664,7 @@ fn load(store: &McStore, reference: &str) -> Result<Option<State>, HandlerOutcom
     state.journal = Journal {
         complete: true,
         persisted_through: through,
+        input_epoch: state.entries.mutation_epoch(),
         indexed_through: through,
         truncate: None,
         truncate_below: None,
@@ -2332,6 +2682,7 @@ fn load(store: &McStore, reference: &str) -> Result<Option<State>, HandlerOutcom
             .map(|view| view.identity.clone()),
         saved_json: Some(rows.state),
     };
+    engine_cache::reconcile(store, &mut state)?;
     Ok(Some(state))
 }
 
@@ -2371,6 +2722,24 @@ fn checked_async_view(
         }
         transient(error.name())
     })?;
+    // Keep-range edits can change after native rendering. Validate their final
+    // form before publishing an edit that identifies native parts by position.
+    for range in &view.ranges {
+        if let view::ViewRange::Keep { edits, .. } = range {
+            for edit in edits {
+                if kept.get(&edit.ordinal).is_some_and(|message| {
+                    (edit.drop && message.fallback_prefix.contains(&edit.part))
+                        || ((edit.drop || edit.bytes.is_some())
+                            && message.fallback_protected.contains(&edit.part))
+                }) {
+                    return Err(error(
+                        "provider_fallback_edit_unsupported",
+                        "Cannot remove or move a provider fallback or its reasoning sequence",
+                    ));
+                }
+            }
+        }
+    }
     let splits = tool_arcs::split_pairs(codec, kept, &view.ranges);
     if !splits.is_empty() {
         return Ok(Err(splits));
@@ -2410,6 +2779,33 @@ fn apply_ride_overflow(state: &mut State, fact: OverflowFact) {
 }
 
 impl McHandler {
+    pub(super) fn binding_for_existing_setup(
+        &self,
+        binding: SessionBinding,
+        params: &Value,
+    ) -> Result<SessionBinding, HandlerOutcome> {
+        let Some(session) = params.get("session").and_then(Value::as_str) else {
+            return Ok(binding);
+        };
+        let Some(harness) = params.get("harness").and_then(Value::as_str) else {
+            return Ok(binding);
+        };
+        if !binding.session.is_empty() && binding.session != session {
+            return Ok(binding);
+        }
+        let Some(store) = self.store.get() else {
+            return Ok(binding);
+        };
+        let key = Key::new(&binding, session, harness)?;
+        let Some(state) = load_head(store, &key.reference())? else {
+            return Ok(binding);
+        };
+        let mut stored = self.async_binding(&state);
+        stored.principal = binding.principal;
+        stored.scope = binding.scope;
+        Ok(stored)
+    }
+
     /// Attach only to the durable provisioned by ck-bus. No local consumer or
     /// unauthenticated NATS fallback is created when bootstrap is unavailable.
     pub async fn start_compaction_bus<S: Stream + 'static>(
@@ -2506,7 +2902,7 @@ impl McHandler {
     ) -> Result<Vec<u8>, HandlerOutcome> {
         // Setup can hold both the old and new lineage records during recovery.
         // Keep that future off the caller's stack, including on small runtimes.
-        Box::pin(self.async_setup_inner(channel, binding, params)).await
+        Box::pin(self.async_setup_inner(channel, binding, params, None)).await
     }
 
     async fn async_setup_inner(
@@ -2514,6 +2910,7 @@ impl McHandler {
         channel: u16,
         binding: &SessionBinding,
         params: &Value,
+        preparation: Option<offline_first_pass::OfflineFirstPass>,
     ) -> Result<Vec<u8>, HandlerOutcome> {
         let request: compact::setup::SetupRequest = decode(params)?;
         let bound_session = binding.session.as_str();
@@ -2557,11 +2954,8 @@ impl McHandler {
         let pin = crate::memory_profile::resolve_session_pin(
             store,
             connection_file,
-            subc_protocol::BindIdentity::new(
-                binding.project_root.clone(),
-                &request.harness,
-                &request.session,
-            ),
+            subc_protocol::BindIdentity::new(&request.harness, &request.session),
+            &binding.project_root,
             &pin_session,
             binding
                 .scope
@@ -2571,280 +2965,483 @@ impl McHandler {
         .await
         .map_err(transient)?;
         let answer = async {
-            let runtime = &self.provider_store.async_runtime;
-            let publisher_ready = || runtime.publisher.lock().expect("async publisher").is_some();
-            if !publisher_ready() {
-                runtime.bus_link.wait_for_attach(ASYNC_BUS_SETUP_WAIT).await;
-            }
-            if !publisher_ready() {
-                self.provider_store
-                    .async_runtime
-                    .unconfigured_logged
-                    .get_or_init(|| tracing::warn!("async compaction bus not configured"));
-                let reason = format!(
-                    "Async compaction bus not ready ({})",
-                    self.provider_store.async_runtime.bus_link.describe()
-                );
-                return bytes(
-                    &compact::setup::SetupAnswer::refuse(
-                        &request.request_id,
-                        compact::errors::RefuseCode::from_code("provider_busy"),
-                        reason,
-                    )
-                    .with_provider_code("bus_not_ready"),
-                );
-            }
-            // Checked before an existing record is answered: a session the standalone
-            // plugin still owns must never be served, whatever ck-mc holds for it.
-            let standalone_move = match moved_session::setup_fence(
-                store,
-                &request.harness,
+        let runtime = &self.provider_store.async_runtime;
+        let publisher_ready = || runtime.publisher.lock().expect("async publisher").is_some();
+        if !publisher_ready() {
+            runtime.bus_link.wait_for_attach(ASYNC_BUS_SETUP_WAIT).await;
+        }
+        if !publisher_ready() {
+            self.provider_store
+                .async_runtime
+                .unconfigured_logged
+                .get_or_init(|| tracing::warn!("async compaction bus not configured"));
+            let reason = format!(
+                "Async compaction bus not ready ({})",
+                self.provider_store.async_runtime.bus_link.describe()
+            );
+            return bytes(
+                &compact::setup::SetupAnswer::refuse(
+                    &request.request_id,
+                    compact::errors::RefuseCode::from_code("provider_busy"),
+                    reason,
+                )
+                .with_provider_code("bus_not_ready"),
+            );
+        }
+        // Checked before an existing record is answered: a session the standalone
+        // plugin still owns must never be served, whatever ck-mc holds for it.
+        let standalone_move = match moved_session::setup_fence(
+            store,
+            &request.harness,
+            &request.session,
+            &request.request_id,
+        )? {
+            moved_session::Fence::Fresh => None,
+            moved_session::Fence::Moved(record) => Some(*record),
+            moved_session::Fence::Refuse(answer) => return bytes(&answer),
+        };
+        let mut live_describe = None;
+        if let Some(record) = &standalone_move {
+            let route = crate::route_targets::SessionRunnerRoute::for_principal(
+                binding.principal.as_ref(),
                 &request.session,
-                &request.request_id,
-            )? {
-                moved_session::Fence::Fresh => None,
-                moved_session::Fence::Moved(record) => Some(record),
-                moved_session::Fence::Refuse(answer) => return bytes(&answer),
+            )
+            .ok_or_else(|| invalid_field("runner", "unsupported session runner principal"))?;
+            let identity = session_resolver::RunnerBindIdentity {
+                project_root: binding.project_root.clone(),
+                harness: request.harness.clone(),
+                session: request.session.clone(),
             };
-            let reference = key.reference();
-            let existing = load_head(store, &reference)?;
-            let unsafe_existing = existing
+            let describe = self.runner_describe(&route, &identity).await?;
+            if let Some(refusal) = self
+                .refuse_checkpoint_unsupported(
+                    Some(&moved_session::checkpoint(record)),
+                    CheckpointSource::StandaloneMove,
+                    &route,
+                    &identity,
+                    &request.request_id,
+                    Some(describe.clone()),
+                )
+                .await?
+            {
+                return bytes(&refusal);
+            }
+            if let Some(refusal) = self
+                .check_moved_setup(record, &request, &route, &identity)
+                .await?
+            {
+                return bytes(&refusal);
+            }
+            live_describe = Some(describe);
+        }
+        let reference = key.reference();
+        let mut existing = load_head(store, &reference)?;
+        if let Some(state) = &mut existing {
+            state.load_setup_payloads(store)?;
+        }
+        if existing
+            .as_ref()
+            .is_some_and(|state| !offline_first_pass::proof_version_matches(state))
+        {
+            return bytes(&moved_session::setup_refusal(
+                &request.request_id,
+                "offline_proof_version",
+                "Rerun `ck-mc offline first-pass` to prepare the retained interval before live adoption.",
+            ));
+        }
+        if preparation.is_none()
+            && standalone_move.is_some()
+            && !existing.as_ref().is_some_and(|state| {
+                offline_first_pass::adopted(state) || offline_first_pass::prepared(state)
+            })
+        {
+            return bytes(&moved_session::setup_refusal(
+                &request.request_id,
+                "moved_session_unprepared",
+                "Run `ck-mc offline first-pass` before the moved session's first live adoption.",
+            ));
+        }
+        if preparation.is_none() && standalone_move.is_some() {
+            if let Some(state) = existing
                 .as_ref()
-                .map(|state| state.active_seed_is_unsafe(store))
-                .transpose()?
-                .unwrap_or(false);
-            if request.descends_from.is_some() {
-                let answer = self
-                    .setup_cut_descent(binding, &request, existing, store)
-                    .await?;
-                // A post-prune Setup can name the new lineage too: reconcile the
-                // window's held copies before the run renders from them.
-                if let Some(seen) = request.reasoning_pruned.filter(|seen| seen.valid()) {
-                    let ready = serde_json::from_slice::<Value>(&answer)
-                        .is_ok_and(|answer| answer["answer"] == "ready");
-                    if let Some(state) = load_head(store, &reference)?.filter(|state| {
-                        ready
-                            && state.lineage == request.lineage_id
-                            && state.reasoning_pruned_generation() != Some(seen.generation)
-                    }) {
-                        drop(state);
-                        let mut initial = self.reconcile_at_setup(store, &reference, seen).await?;
-                        initial["request_id"] = json!(request.request_id);
-                        return bytes(&initial);
+                .filter(|state| !offline_first_pass::adopted(state))
+            {
+                let mismatch = offline_first_pass::setup_mismatch(state, binding, &request)
+                    .or_else(|| {
+                        live_describe.as_ref().and_then(|describe| {
+                            offline_first_pass::describe_mismatch(state, describe)
+                        })
+                    });
+                if let Some(reason) = mismatch {
+                    return bytes(&moved_session::moved_unprepared_refusal(
+                        &reference,
+                        &request.request_id,
+                        reason,
+                    ));
+                }
+            }
+        }
+        // A crash inside the adoption import leaves the cut stage saved but the
+        // Setup answer incomplete. Restart from the move record in a fresh
+        // generation (a fresh namespace, so the empty head pass never sees the
+        // previous import's history) instead of answering the partial record.
+        let mut importing_restart = None;
+        if let Some(state) = existing.as_ref().filter(|state| state.is_importing_stage()) {
+            tracing::warn!(session_ref = %reference, "restarting interrupted adoption import from the move record");
+            importing_restart = Some(state.generation);
+            existing = None;
+        }
+        if let Some(old) = &existing {
+            self.authorize_async(binding, old)?;
+            if old.snapshot_unavailable.is_some()
+                || resync_replay::missing_snapshot(store, old)?.is_some()
+            {
+                let mut blocked = self
+                    .checkout(store, &reference)?
+                    .ok_or_else(|| transient("async session disappeared"))?;
+                resync_replay::park_unavailable(store, &mut blocked, None)?;
+                self.checkin(blocked);
+                existing = load_head(store, &reference)?;
+            }
+        }
+        if let Some(old) = existing
+            .as_ref()
+            .filter(|old| old.snapshot_unavailable.is_some())
+        {
+            if old.snapshot_recovery_used
+                || request.lineage_id.is_none()
+                || request.lineage_id == old.lineage
+                || request.descends_from.is_some()
+            {
+                return bytes(&compact::setup::SetupAnswer::refuse(
+                    &request.request_id,
+                    compact::errors::RefuseCode::from_code(resync_replay::SNAPSHOT_UNAVAILABLE),
+                    resync_replay::unavailable_reason(old),
+                ));
+            }
+        }
+        let recovery_flags = existing
+            .as_ref()
+            .map(|old| (old.snapshot_recovery_used, old.snapshot_warning_logged))
+            .unwrap_or_default();
+        let unsafe_existing = existing
+            .as_ref()
+            .map(|state| state.active_seed_is_unsafe(store))
+            .transpose()?
+            .unwrap_or(false);
+        if request.descends_from.is_some() {
+            let answer = self
+                .setup_cut_descent(binding, &request, existing, store)
+                .await?;
+            if (recovery_flags.0 || recovery_flags.1)
+                && serde_json::from_slice::<Value>(&answer)
+                    .is_ok_and(|answer| answer["answer"] == "ready")
+            {
+                if let Some(mut state) = self.checkout(store, &reference)? {
+                    let changed = (!state.snapshot_recovery_used && recovery_flags.0)
+                        || (!state.snapshot_warning_logged && recovery_flags.1);
+                    state.snapshot_recovery_used |= recovery_flags.0;
+                    state.snapshot_warning_logged |= recovery_flags.1;
+                    if changed {
+                        state.save(store, &[])?;
+                    }
+                    self.checkin(state);
+                }
+            }
+            // A post-prune Setup can name the new lineage too: reconcile the
+            // window's held copies before the run renders from them.
+            if let Some(seen) = request.reasoning_pruned.filter(|seen| seen.valid()) {
+                let ready = serde_json::from_slice::<Value>(&answer)
+                    .is_ok_and(|answer| answer["answer"] == "ready");
+                if let Some(state) = load_head(store, &reference)?.filter(|state| {
+                    ready
+                        && state.lineage == request.lineage_id
+                        && state.reasoning_pruned_generation() != Some(seen.generation)
+                }) {
+                    drop(state);
+                    let mut initial = self.reconcile_at_setup(store, &reference, seen).await?;
+                    initial["request_id"] = json!(request.request_id);
+                    return bytes(&initial);
+                }
+            }
+            return Ok(answer);
+        }
+        if let Some(old) = existing
+            .as_ref()
+            .filter(|old| old.lineage != request.lineage_id || unsafe_existing)
+        {
+            self.authorize_async(binding, old)?;
+            // Read before the bootstrap writes any namespace or provider state.
+            // A runner that cannot answer while Setup is outstanding can retry
+            // without finding a partial import or losing the old applied view.
+            let recovery = if let Some(record) = &standalone_move {
+                match self.read_adoption_suffix(old, &request, record).await {
+                    Ok(recovery) => Some(recovery),
+                    Err(failure) => {
+                        tracing::warn!(session_ref = %reference, ?failure, "adoption suffix unreadable during Setup");
+                        return bytes(&moved_session::setup_refusal(
+                            &request.request_id,
+                            "setup_suffix_unreadable",
+                            "The runner could not read the retained suffix during Setup; retry Setup when session.read is available.",
+                        ));
                     }
                 }
-                return Ok(answer);
-            }
-            if let Some(old) = existing
-                .as_ref()
-                .filter(|old| old.lineage != request.lineage_id || unsafe_existing)
+            } else {
+                None
+            };
+            let generation = old.next_generation()?;
+            let history = store
+                .load_compartments(&old.namespace())
+                .map_err(transient)?;
+            let mut state = self.new_async_record(
+                channel,
+                binding,
+                &request,
+                key,
+                standalone_move.clone(),
+                RecordStart {
+                    generation,
+                    preparation: preparation.clone(),
+                },
+            )?;
+            // A moved session that already bound its drops replays the durable
+            // `(mid, part, digest)` bindings in the fresh generation instead of
+            // rebinding the move record: the pending queue lives per namespace,
+            // so the fresh namespace must re-queue from the durable bindings.
+            // A session that never bound keeps the move record's pending copy
+            // for its first bind.
+            if let (Some(old_move), Some(new_move)) =
+                (old.standalone_move.as_ref(), state.standalone_move.as_mut())
             {
-                self.authorize_async(binding, old)?;
-                let generation = old.next_generation()?;
-                let history = store
-                    .load_compartments(&old.namespace())
-                    .map_err(transient)?;
-                let mut state =
-                    self.new_async_record(channel, binding, &request, key, None, generation)?;
-                // A new lineage of an existing conversation keeps its pruning
-                // permission as it was; only new conversations opt in here.
-                if !old.accepts_pruning() {
-                    state.withdraw_pruning_permission()?;
+                if old_move.pending.is_none() {
+                    new_move.pending = None;
+                    new_move.bound_drops = old_move.bound_drops.clone();
                 }
-                state.cache_policy = old.cache_policy.clone();
-                state.published_cuts = old.published_cuts.clone();
-                state.retired_cut_stages = old.retired_cut_stages.clone();
-                state.cut_history_gc_pending =
-                    old.cut_history_gc_pending || old.cut_first_ordinal.is_some();
-                state.trim_published_cut_cache();
+            }
+            state.snapshot_recovery_used =
+                old.snapshot_recovery_used || old.snapshot_unavailable.is_some();
+            state.snapshot_warning_logged = old.snapshot_warning_logged;
+            if old.snapshot_unavailable.is_some() {
+                state.seq = old.seq;
+                state.completed_seq = old.completed_seq;
+            }
+            // A new lineage of an existing conversation keeps its pruning
+            // permission as it was; only new conversations opt in here.
+            if !old.accepts_pruning() {
+                state.withdraw_pruning_permission()?;
+            }
+            state.cache_policy = old.cache_policy.clone();
+            state.offline_first_pass = old.offline_first_pass.clone();
+            state.published_cuts = old.published_cuts.clone();
+            state.retired_cut_stages = old.retired_cut_stages.clone();
+            state.cut_history_gc_pending =
+                old.cut_history_gc_pending || old.cut_first_ordinal.is_some();
+            state.trim_published_cut_cache();
+            // The adoption import already installed the manifest's exact rows in
+            // the fresh namespace; copying the old namespace over them would
+            // replace the authoritative import with whatever the old generation
+            // held. Only non-moved lineages copy history here.
+            if standalone_move.is_none() {
                 store
                     .replace_compartments(&state.namespace(), &history)
                     .map_err(transient)?;
-                self.ensure_lineage_window(&mut state, Duration::from_secs(10))
-                    .await?;
-                if state.cut_seed.is_none() {
-                    // A lineage starting at zero can undo summarized messages. Keep
-                    // only history whose original sources survive the next read.
-                    let mut prior = load(store, &reference)?
-                        .ok_or_else(|| transient("async session disappeared"))?;
-                    prior.capture_resync_sources(store)?;
-                    state.resync_sources = prior.resync_sources.take();
-                    state.frozen_edits.merge(&prior.frozen_edits);
-                    for version in prior.published_engine.keys().copied().collect::<Vec<_>>() {
-                        prior.remember_frozen_version(store, version)?;
-                    }
-                    state.retired_frozen = prior.retired_frozen;
-                    state.retired_frozen.dirty = true;
-                    if !unsafe_existing {
-                        state.native_setup_predecessor = prior
-                            .lineage
-                            .zip(request.lineage_id.clone())
-                            .map(|(lineage, replaced_by)| SetupNativePredecessor {
-                                lineage,
-                                replaced_by,
-                                ack_seq: 0,
-                                ack_version: None,
-                            });
-                    }
-                    for archive in store.load_async_undo_edits(&reference).map_err(transient)? {
-                        state
-                            .frozen_edits
-                            .merge(&frozen_edits::FrozenEdits::from_json(&archive)?);
-                    }
-                    store
-                        .replace_compartments(&state.namespace(), &[])
-                        .map_err(transient)?;
-                }
-                state.journal.truncate = Some(None);
-                state.save(store, &[])?;
-                self.provider_store
-                    .async_runtime
-                    .resident
-                    .lock()
-                    .expect("async resident cache")
-                    .forget(&reference);
-                return bytes(&state.initial);
             }
-            // A record the offline first pass prepared is kept only for the exact
-            // Setup it was prepared under; any other Setup discards it and sets the
-            // conversation up fresh in the next generation.
-            let mut discarded = existing.as_ref().and_then(|state| {
-                offline_first_pass::setup_mismatch(state, binding, &request)
-                    .map(|reason| (state.generation, reason))
-            });
-            // It is also kept only for the runner `role.describe` it was prepared
-            // against. The answer read here serves the moved session's checkpoint
-            // check below as well, so this Setup asks the runner once.
-            let mut live_describe = None;
-            if let Some(state) = existing
-                .as_ref()
-                .filter(|state| discarded.is_none() && state.offline_first_pass.is_some())
-            {
-                let describe = self
-                    .runner_describe(&state.runner()?, &state.runner_identity())
-                    .await?;
-                discarded = offline_first_pass::describe_mismatch(state, &describe)
-                    .map(|reason| (state.generation, reason));
-                live_describe = Some(describe);
+            if let Some(recovery) = recovery {
+                state.offline_first_pass = old.offline_first_pass.clone();
+                state.install_adoption_suffix(store, recovery)?;
             }
-            // A record discarded for a fresh generation keeps the floor it stored.
-            let stored_floor = existing
-                .as_ref()
-                .and_then(|state| state.full_array_floor.clone());
-            if let Some(state) = existing.filter(|_| discarded.is_none()) {
-                self.authorize_async(binding, &state)?;
-                let project = self.historian_lane_project(channel, binding, store)?;
-                self.record_session_runner_dream_target(
-                    &project,
-                    state.project(),
-                    &state.key.harness,
-                    state.runner()?,
-                );
-                if state.setup.params != request.params
-                    || state.setup.composition != request.composition
-                    || state.setup.preset != request.preset
-                {
-                    return Err(invalid_field("params", "async setup plan is frozen"));
+            self.ensure_lineage_window(&mut state, Duration::from_secs(10))
+                .await?;
+            if state.cut_seed.is_none() {
+                // A lineage starting at zero can undo summarized messages. Keep
+                // only history whose original sources survive the next read.
+                let mut prior = load(store, &reference)?
+                    .ok_or_else(|| transient("async session disappeared"))?;
+                prior.capture_resync_sources(store)?;
+                state.resync_sources = prior.resync_sources.take();
+                state.frozen_edits.merge(&prior.frozen_edits);
+                for version in prior.published_engine.keys().copied().collect::<Vec<_>>() {
+                    prior.remember_frozen_version(store, version)?;
                 }
-                // The post-prune Setup (compaction-provider §4): the runner
-                // pruned this session since ck-mc last reconciled, and calls
-                // Setup before any other call for its run. Re-read the held copies
-                // the prune can have changed before anything renders from them.
-                let reconciled = match request.reasoning_pruned.filter(|seen| seen.valid()) {
-                    Some(seen) if state.reasoning_pruned_generation() != Some(seen.generation) => {
-                        Some(self.reconcile_at_setup(store, &reference, seen).await?)
-                    }
-                    _ => None,
-                };
-                let checkpoint = state
-                    .standalone_move
-                    .as_ref()
-                    .map(moved_session::StandaloneMove::checkpoint)
-                    .or_else(|| {
-                        standalone_move.as_ref().map(|record| {
-                            contract::setup::SetupCheckpoint::new(
-                                record.tag_checkpoint,
-                                &record.cut,
-                            )
-                        })
-                    });
-                // A conversation set up with a full-array floor answers the floor
-                // it stored; the full-array state is never read again.
-                let (checkpoint, why) = match (checkpoint, &state.full_array_floor) {
-                    (Some(checkpoint), _) => (Some(checkpoint), CheckpointSource::StandaloneMove),
-                    (None, Some(floor)) => (Some(floor.checkpoint()), CheckpointSource::FullArray),
-                    (None, None) => (None, CheckpointSource::StandaloneMove),
-                };
-                if let Some(refusal) = self
-                    .refuse_checkpoint_unsupported(
-                        checkpoint.as_ref(),
-                        why,
-                        &state.runner()?,
-                        &state.runner_identity(),
-                        &request.request_id,
-                        live_describe,
-                    )
-                    .await?
-                {
-                    return bytes(&refusal);
+                state.retired_frozen = prior.retired_frozen;
+                state.retired_frozen.dirty = true;
+                if !unsafe_existing {
+                    state.native_setup_predecessor = prior
+                        .lineage
+                        .zip(request.lineage_id.clone())
+                        .map(|(lineage, replaced_by)| SetupNativePredecessor {
+                            lineage,
+                            replaced_by,
+                            ack_seq: 0,
+                            ack_version: None,
+                        });
                 }
-                let mut answer = reconciled.unwrap_or(state.initial);
-                answer["request_id"] = json!(request.request_id);
-                return bytes(&with_checkpoint(answer, checkpoint));
+                for archive in store.load_async_undo_edits(&reference).map_err(transient)? {
+                    state
+                        .frozen_edits
+                        .merge(&frozen_edits::FrozenEdits::from_json(&archive)?);
+                }
+                store
+                    .replace_compartments(&state.namespace(), &[])
+                    .map_err(transient)?;
             }
-            let checkpoint = standalone_move.as_ref().map(|record| {
-                contract::setup::SetupCheckpoint::new(record.tag_checkpoint, &record.cut)
-            });
-            // A Claude Code conversation ck-mc served on the full-array route
-            // numbers its parts above every number that route allocated for it.
-            // Read once, here, and stored with the record.
-            let full_array_floor = match (&checkpoint, stored_floor) {
-                (Some(_), _) => None,
-                (None, Some(floor)) => Some(floor),
-                (None, None) => match full_array_floor::setup_floor(
-                    store,
-                    &request.harness,
-                    &request.session,
-                    &request.request_id,
-                ) {
-                    full_array_floor::Floor::None => None,
-                    full_array_floor::Floor::Carried(floor) => Some(floor),
-                    full_array_floor::Floor::Refuse(answer) => return bytes(&answer),
-                },
+            state.journal.truncate = Some(None);
+            let codec = codec::Codec::from_params(&Value::Object(request.params.clone()))?;
+            let rows = state.unsaved_tag_rows(codec)?;
+            state.save(store, &rows)?;
+            self.provider_store
+                .async_runtime
+                .resident
+                .lock()
+                .expect("async resident cache")
+                .forget(&reference);
+            return bytes(&with_checkpoint(
+                state.initial,
+                standalone_move.as_ref().map(moved_session::checkpoint),
+            ));
+        }
+        // A record the offline first pass prepared is kept only for the exact
+        // Setup it was prepared under; any other Setup discards it and sets the
+        // conversation up fresh in the next generation.
+        let mut discarded = existing.as_ref().and_then(|state| {
+            offline_first_pass::setup_mismatch(state, binding, &request)
+                .map(|reason| (state.generation, reason))
+        });
+        // It is also kept only for the runner `role.describe` it was prepared
+        // against. The answer read here serves the moved session's checkpoint
+        // check below as well, so this Setup asks the runner once.
+        if let Some(state) = existing.as_ref().filter(|state| {
+            discarded.is_none()
+                && state.offline_first_pass.is_some()
+                && !offline_first_pass::adopted(state)
+        }) {
+            let describe = match live_describe.take() {
+                Some(describe) => describe,
+                None => {
+                    self.runner_describe(&state.runner()?, &state.runner_identity())
+                        .await?
+                }
             };
-            let (checkpoint, why) = match (checkpoint, &full_array_floor) {
+            discarded = offline_first_pass::describe_mismatch(state, &describe)
+                .map(|reason| (state.generation, reason));
+            live_describe = Some(describe);
+        }
+        if let Some((_, reason)) =
+            discarded.filter(|_| preparation.is_none() && standalone_move.is_some())
+        {
+            return bytes(&moved_session::moved_unprepared_refusal(
+                &reference,
+                &request.request_id,
+                reason,
+            ));
+        }
+        // A record discarded for a fresh generation keeps the floor it stored.
+        let stored_floor = existing
+            .as_ref()
+            .and_then(|state| state.full_array_floor.clone());
+        if let Some(mut state) = existing.filter(|_| discarded.is_none()) {
+            self.authorize_async(binding, &state)?;
+            let project = self.historian_lane_project(channel, binding, store)?;
+            self.record_session_runner_dream_target(
+                &project,
+                state.project(),
+                &state.key.harness,
+                state.runner()?,
+            );
+            adopt_setup_plan(&mut state, &request)?;
+            // The post-prune Setup (compaction-provider §4): the runner
+            // pruned this session since ck-mc last reconciled, and calls
+            // Setup before any other call for its run. Re-read the held copies
+            // the prune can have changed before anything renders from them.
+            let reconciled = match request.reasoning_pruned.filter(|seen| seen.valid()) {
+                Some(seen) if state.reasoning_pruned_generation() != Some(seen.generation) => {
+                    Some(self.reconcile_at_setup(store, &reference, seen).await?)
+                }
+                _ => None,
+            };
+            let checkpoint = state
+                .standalone_move
+                .as_ref()
+                .map(moved_session::StandaloneMove::checkpoint)
+                .or_else(|| standalone_move.as_ref().map(moved_session::checkpoint));
+            // A conversation set up with a full-array floor answers the floor
+            // it stored; the full-array state is never read again.
+            let (checkpoint, why) = match (checkpoint, &state.full_array_floor) {
                 (Some(checkpoint), _) => (Some(checkpoint), CheckpointSource::StandaloneMove),
                 (None, Some(floor)) => (Some(floor.checkpoint()), CheckpointSource::FullArray),
                 (None, None) => (None, CheckpointSource::StandaloneMove),
             };
-            if let Some(checkpoint) = &checkpoint {
-                // Refused before anything is stored, so a later Setup from a
-                // runner that declares the group sets the session up afresh.
-                let route = crate::route_targets::SessionRunnerRoute::for_principal(
-                    binding.principal.as_ref(),
-                    &request.session,
+            if let Some(refusal) = self
+                .refuse_checkpoint_unsupported(
+                    checkpoint.as_ref(),
+                    why,
+                    &state.runner()?,
+                    &state.runner_identity(),
+                    &request.request_id,
+                    live_describe,
                 )
-                .ok_or_else(|| invalid_field("runner", "unsupported session runner principal"))?;
-                let identity = session_resolver::RunnerBindIdentity {
-                    project_root: binding.project_root.clone(),
-                    harness: request.harness.clone(),
-                    session: request.session.clone(),
-                };
-                if let Some(refusal) = self
-                    .refuse_checkpoint_unsupported(
-                        Some(checkpoint),
-                        why,
-                        &route,
-                        &identity,
-                        &request.request_id,
-                        live_describe,
-                    )
-                    .await?
-                {
-                    return bytes(&refusal);
-                }
+                .await?
+            {
+                return bytes(&refusal);
             }
-            let generation = match discarded {
+            let answer = reconciled.unwrap_or_else(|| state.initial.clone());
+            return existing_setup_answer(&state, store, &request, params, answer, checkpoint);
+        }
+        let checkpoint = standalone_move.as_ref().map(moved_session::checkpoint);
+        // A Claude Code conversation ck-mc served on the full-array route
+        // numbers its parts above every number that route allocated for it.
+        // Read once, here, and stored with the record.
+        let full_array_floor = match (&checkpoint, stored_floor) {
+            (Some(_), _) => None,
+            (None, Some(floor)) => Some(floor),
+            (None, None) => match full_array_floor::setup_floor(
+                store,
+                &request.harness,
+                &request.session,
+                &request.request_id,
+            ) {
+                full_array_floor::Floor::None => None,
+                full_array_floor::Floor::Carried(floor) => Some(floor),
+                full_array_floor::Floor::Refuse(answer) => return bytes(&answer),
+            },
+        };
+        let (checkpoint, why) = match (checkpoint, &full_array_floor) {
+            (Some(checkpoint), _) => (Some(checkpoint), CheckpointSource::StandaloneMove),
+            (None, Some(floor)) => (Some(floor.checkpoint()), CheckpointSource::FullArray),
+            (None, None) => (None, CheckpointSource::StandaloneMove),
+        };
+        if let Some(checkpoint) = &checkpoint {
+            // Refused before anything is stored, so a later Setup from a
+            // runner that declares the group sets the session up afresh.
+            let route = crate::route_targets::SessionRunnerRoute::for_principal(
+                binding.principal.as_ref(),
+                &request.session,
+            )
+            .ok_or_else(|| invalid_field("runner", "unsupported session runner principal"))?;
+            let identity = session_resolver::RunnerBindIdentity {
+                project_root: binding.project_root.clone(),
+                harness: request.harness.clone(),
+                session: request.session.clone(),
+            };
+            if let Some(refusal) = self
+                .refuse_checkpoint_unsupported(
+                    Some(checkpoint),
+                    why,
+                    &route,
+                    &identity,
+                    &request.request_id,
+                    live_describe,
+                )
+                .await?
+            {
+                return bytes(&refusal);
+            }
+        }
+        let generation = if let Some(old) = importing_restart {
+            old.checked_add(1)
+                .ok_or_else(|| transient("async generation exhausted"))?
+        } else {
+            match discarded {
                 Some((generation, reason)) => {
                     offline_first_pass::log_discard(&reference, reason);
                     generation
@@ -2852,36 +3449,41 @@ impl McHandler {
                         .ok_or_else(|| transient("async generation exhausted"))?
                 }
                 None => 0,
-            };
-            let mut state = self.new_async_record(
-                channel,
-                binding,
-                &request,
-                key,
-                standalone_move,
+            }
+        };
+        let mut state = self.new_async_record(
+            channel,
+            binding,
+            &request,
+            key,
+            standalone_move,
+            RecordStart {
                 generation,
-            )?;
-            state.full_array_floor = full_array_floor;
-            if discarded.is_some() {
-                state.forget_discarded_rows();
-            }
-            // A conversation set up again under the same reference must never
-            // reuse a resident copy of an earlier one.
-            self.provider_store
-                .async_runtime
-                .resident
-                .lock()
-                .expect("async resident cache")
-                .forget(&reference);
-            state.save(store, &[])?;
-            if discarded.is_some() {
-                store
-                    .retire_unannounced_async_views(&reference)
-                    .map_err(transient)?;
-            }
-            bytes(&with_checkpoint(state.initial.clone(), checkpoint))
+                preparation,
+            },
+        )?;
+        state.snapshot_recovery_used |= recovery_flags.0;
+        state.snapshot_warning_logged |= recovery_flags.1;
+        state.full_array_floor = full_array_floor;
+        if discarded.is_some() {
+            state.forget_discarded_rows();
         }
-        .await;
+        // A conversation set up again under the same reference must never
+        // reuse a resident copy of an earlier one.
+        self.provider_store
+            .async_runtime
+            .resident
+            .lock()
+            .expect("async resident cache")
+            .forget(&reference);
+        state.save(store, &[])?;
+        if discarded.is_some() {
+            store
+                .retire_unannounced_async_views(&reference)
+                .map_err(transient)?;
+        }
+        bytes(&with_checkpoint(state.initial.clone(), checkpoint))
+        }.await;
         if let Ok(bytes) = &answer {
             let value: Value = serde_json::from_slice(bytes).map_err(transient)?;
             if value["answer"] == "ready" {
@@ -2903,7 +3505,7 @@ impl McHandler {
         request: &compact::setup::SetupRequest,
         key: Key,
         standalone_move: Option<crate::offline_move::MoveRecord>,
-        generation: u64,
+        start: RecordStart,
     ) -> Result<State, HandlerOutcome> {
         let store = self
             .store
@@ -2914,12 +3516,36 @@ impl McHandler {
         let codec = codec::Codec::from_params(&Value::Object(request.params.clone()))?;
         let chosen = preset(request.preset.as_deref())?;
         let mut engine = transform::compaction::State::new(reference.clone(), chosen);
+        let moved_cold_prefix = standalone_move.is_some();
+        let publication_floor = if start.generation > 0 {
+            store
+                .load_async_compaction_views(&reference)
+                .map_err(transient)?
+                .0
+                .iter()
+                .map(|(version, _, _, _)| *version)
+                .max()
+                .map(|version| {
+                    version
+                        .checked_add(1)
+                        .ok_or_else(|| transient("async version exhausted"))
+                })
+                .transpose()?
+                .unwrap_or(0)
+        } else {
+            0
+        };
         let mut state = State {
             commands: Default::default(),
             historian_cadence: None,
             historian_pending: false,
             restored_no_new_content: false,
             resync_sources: None,
+            resync_replay_pending: false,
+            publication_floor,
+            snapshot_unavailable: None,
+            snapshot_warning_logged: false,
+            snapshot_recovery_used: false,
             restored_head: None,
             standalone_move: standalone_move.map(moved_session::StandaloneMove::from_record),
             full_array_floor: None,
@@ -2932,6 +3558,7 @@ impl McHandler {
             pruned_parts: BTreeMap::new(),
             pruned_reconcile_cursor: None,
             pruned_rebuild_pending: false,
+            moved_cold_prefix,
             rode_since_notice: false,
             page_reasoning_pruned: None,
             last_pass: None,
@@ -2939,6 +3566,7 @@ impl McHandler {
             last_transferred_drops: 0,
             tag_index: BTreeMap::new(),
             engine_baselines: EngineBaselines::default(),
+            engine_cache_witness: None,
             logical_prefix: None,
             prefix_input_proof: None,
             journal: Journal::new_record(),
@@ -2962,6 +3590,10 @@ impl McHandler {
             runner_module,
             setup: request.clone(),
             initial: Value::Null,
+            initial_stored: false,
+            initial_ready: false,
+            setup_payload_bytes: (0, 0),
+            input_revision: None,
             cache_policy: contract_policy::CachePolicy::freeze(
                 &self.effective_config(&binding.project_root),
             ),
@@ -2977,6 +3609,7 @@ impl McHandler {
             entries: Default::default(),
             mid_index: BTreeMap::new(),
             aggregates: Default::default(),
+            historian_cache: Arc::default(),
             entry_bytes: Default::default(),
             cache_state: None,
             seq: 0,
@@ -2986,8 +3619,8 @@ impl McHandler {
             marker_outcomes: BTreeMap::new(),
             conditions: None,
             resync: false,
-            generation,
-            offline_first_pass: None,
+            generation: start.generation,
+            offline_first_pass: start.preparation,
             record_version: cut_seed::RECORD_VERSION,
             cut_first_ordinal: None,
             cut_seed: None,
@@ -3000,6 +3633,7 @@ impl McHandler {
             cut_history_gc_pending: false,
             pending_parent_history: None,
             pending_undo_edits: false,
+            undo_checked_through: None,
             cut_signature: None,
         };
         let route = state.runner()?;
@@ -3015,6 +3649,26 @@ impl McHandler {
             &state.key.harness,
             route,
         );
+        // The adoption import runs before the Setup engine pass and before any
+        // save that could expose a partial record. The manifest's compartments
+        // go in at 0..message_count-1 with only the imported sequences'
+        // artifacts, then stages the cut fields without saving the record. The
+        // engine pass renders that imported history, so a moved session's Setup
+        // `initial` already contains the history head. The caller saves it with
+        // the seed and any validated recovery rows, never a partial record.
+        let moved_record = state
+            .standalone_move
+            .as_ref()
+            .and_then(|moved| moved.pending.clone());
+        let moved_first = moved_record.as_ref().map(|record| record.message_count);
+        if let Some(record) = moved_record.clone() {
+            state.import_standalone_compartments(store, &record)?;
+            state.finish_standalone_import(store, &record)?;
+        }
+        #[cfg(test)]
+        if state.offline_first_pass.is_some() {
+            offline_first_pass::interrupt_preparation("importing", &mut state, store)?;
+        }
         let status = transform::compaction::Status {
             lineage_id: state.lineage.clone().unwrap_or_default(),
             newest_ordinal: None,
@@ -3024,12 +3678,14 @@ impl McHandler {
                 invalid_field("context_window", "async setup needs a context window")
             })?,
             prefix_rebuilding: false,
+            cold_prefix: false,
             pipeline_switch: false,
             last_applied_version: None,
             last_not_applied: None,
         };
         let (_template, output) =
             self.async_engine(channel, binding, &state, codec, &status, &mut engine)?;
+        state.engine_cache_witness = Some(engine_cache::capture(store, &state)?);
         let transform::compaction::Answer::Replacement(initial) = &output.answer else {
             return Err(transient("async setup returned no initial view"));
         };
@@ -3040,6 +3696,16 @@ impl McHandler {
             self.async_input_oracle() || state.logical_prefix.is_none(),
         )?;
         state.adopt_engine(engine)?;
+        // The imported history needs one refresh before it renders in views.
+        // Armed here, after the Setup engine pass already rendered the head
+        // from it, so the first notice refreshes once and only once.
+        if moved_record
+            .as_ref()
+            .is_some_and(|record| !record.compartments.is_empty())
+        {
+            let namespace = state.namespace();
+            store.arm_soft_refresh(&namespace).map_err(transient)?;
+        }
         // `serializer_profile` is a ck-mc extension member: the profile this
         // Setup accepted, so the runner can confirm ck-mc reads its schema.
         let mut answer = compact::setup::SetupAnswer::ready(
@@ -3059,7 +3725,13 @@ impl McHandler {
             answer = answer.with_ride_wait_ms(10_000.min(cap));
         }
         state.initial = serde_json::to_value(answer).map_err(transient)?;
+        state.initial_stored = false;
         state.initial["serializer_profile"] = json!(codec.wire_id());
+        // A moved lineage begins at its cut, not at zero: re-anchor the head
+        // insertion this pass rendered. The bytes are the imported history head.
+        if let Some(first) = moved_first.filter(|first| *first > 0) {
+            state.initial["initial"]["range"] = json!({"from": first, "to": first});
+        }
         Ok(state)
     }
 
@@ -3083,8 +3755,8 @@ impl McHandler {
 
     /// For a session with a Setup checkpoint (`checkpoint` present: moved from
     /// standalone, or carrying a full-array floor, as `why` says), the terminal
-    /// `tag_checkpoint_unsupported` refusal when its runner does not declare
-    /// llm-runner's `tag_checkpoint` group, read from the runner's own
+    /// capability refusal when its runner does not declare the required
+    /// llm-runner checkpoint groups, read from the runner's own
     /// `role.describe` (`fetched` when this Setup already read it); `None`
     /// when Setup may answer.
     async fn refuse_checkpoint_unsupported(
@@ -3105,10 +3777,16 @@ impl McHandler {
         };
         let describe = cortexkit_role_llm_runner::describe::check_describe(&reply)
             .map_err(|problems| transient(format!("runner role.describe: {problems:?}")))?;
-        Ok(
-            (!describe.declares(cortexkit_role_llm_runner::capabilities::TAG_CHECKPOINT))
-                .then(|| moved_session::tag_checkpoint_refusal(request_id, why)),
-        )
+        if !describe.declares(cortexkit_role_llm_runner::capabilities::TAG_CHECKPOINT) {
+            return Ok(Some(moved_session::tag_checkpoint_refusal(request_id, why)));
+        }
+        Ok((checkpoint.is_some_and(|checkpoint| checkpoint.message_count.is_some())
+            && !describe.declares(cortexkit_role_llm_runner::capabilities::MESSAGE_CHECKPOINT))
+            .then(|| moved_session::setup_refusal(
+                request_id,
+                compact::errors::refuse_codes::MESSAGE_CHECKPOINT_UNSUPPORTED,
+                "This moved session requires a runner declaring message_checkpoint to preserve its certified message positions.",
+            )))
     }
 
     fn async_engine(
@@ -3130,6 +3808,13 @@ impl McHandler {
                 "the stored head requires a fresh full lineage",
             ));
         }
+        let mut status = status.clone();
+        if !engine_cache::matches(store, state)? {
+            // Provider baselines own the served view. An engine cache from a
+            // different pass must rebuild before it can produce another one.
+            status.prefix_rebuilding = true;
+        }
+        let status = &status;
         let model = state
             .conditions
             .as_ref()
@@ -3139,6 +3824,7 @@ impl McHandler {
         let mut template: TransformRequest = decode(
             &json!({"v":2,"kind":"compaction.step","session_id":state.namespace(),"messages":[],"render_config":serde_json::to_string(&state.setup.params).map_err(transient)?,"model_key":model,"tool_present":false,"auto_search_enabled":false}),
         )?;
+        apply_runner_transform_settings(&mut template, &binding.config, model);
         template.source_lineage_first_ordinal = Some(state.lineage_first_ordinal);
         #[cfg(test)]
         resident::counters::engine_pass();
@@ -3262,7 +3948,7 @@ impl McHandler {
             inbound_messages(state.entries.values())?
         };
         #[cfg(test)]
-        scaling_tests::view_work::engine(&state.reference(), messages.len());
+        scaling_tests::view_work::engine(&state.reference(), state.project(), messages.len());
         // Positions count from the lineage's first ordinal, also in a
         // lineage that begins at a cut (Pi derives fallback tool ids from them).
         let source_from = state.lineage_from();
@@ -3275,6 +3961,22 @@ impl McHandler {
         )?;
         template.logical_prefix = prefix;
         template.runner_owned_reminders = true;
+        // Parts the view drops whole are gone from what the runner sends, but the
+        // engine still reads their raw bytes. Name them so reminder backlog
+        // doesn't count them.
+        if state.frozen_edits.has_whole_drops() {
+            template.view_dropped_tags = state
+                .tag_index
+                .iter()
+                .filter(|(_, address)| {
+                    state
+                        .frozen_edits
+                        .drops_whole(&address.mid, &address.part, &address.digest)
+                })
+                .filter_map(|(tag, _)| tags::parse_tag(tag))
+                .filter_map(|number| i64::try_from(number).ok())
+                .collect();
+        }
         template.pruned_reasoning_readopt = state.pruned_readopt.clone();
         template.native_reminder_strip_pending =
             state.reminder_cadence.as_ref().is_some_and(|cadence| {
@@ -3335,11 +4037,14 @@ impl McHandler {
             .unwrap_or_else(|| state.setup.model.clone());
         let mut context =
             compaction::producer_context(&work, &engine_model, status.context_window, false);
+        (context.historian_active, context.wrapup_active) =
+            self.async_summary_in_flight(store, &state.namespace());
         context.cache_ttl = "never".into();
         // On this lane the runner owns the model provider's companion edit:
         // views never remove the signed reasoning they invalidate.
         let signed = transform::compaction::SignedReasoning::RunnerCompanion;
         let previous_engine = engine.clone();
+        template.async_cache_recovery = Some(engine_cache::recovery_context(state)?);
         #[cfg(test)]
         if self
             .provider_store
@@ -3388,7 +4093,11 @@ impl McHandler {
                     .unwrap_or_default();
                 messages.extend(inbound_messages(state.entries.values())?);
                 #[cfg(test)]
-                scaling_tests::view_work::engine(&state.reference(), messages.len());
+                scaling_tests::view_work::engine(
+                    &state.reference(),
+                    state.project(),
+                    messages.len(),
+                );
                 state.reminder_echoes.prepare_with(
                     codec,
                     &mut template,
@@ -3419,6 +4128,20 @@ impl McHandler {
 }
 
 fn parts(message: &Value) -> Result<std::borrow::Cow<'_, [Value]>, HandlerOutcome> {
+    if matches!(
+        message["type"].as_str(),
+        Some("message" | "custom_message" | "branch_summary")
+    ) && (message.get("message").is_some() || message["type"] != "message")
+    {
+        let projected =
+            cortexkit_role_llm_runner::serializer_profile::pi_projected_content(message)
+                .map_err(|reason| invalid_field("message", reason))?;
+        return Ok(std::borrow::Cow::Owned(match projected {
+            Value::Null => Vec::new(),
+            Value::Array(parts) => parts,
+            part => vec![part],
+        }));
+    }
     // An Anthropic message may carry its content as one string instead of a
     // block array; the runner exposes that string as the message's one part.
     if let Some(text @ Value::String(_)) = message.get("content") {
@@ -3477,10 +4200,11 @@ fn rendered_view(
     } else {
         // Only output sources need native sidecars. Synthetic head frames have
         // no source, and covered sources cannot affect tail-native rendering.
+        // Messages the runner holds carry their ordinal, including the
+        // notices it persists as synthetic; ck-mc's own have none.
         let ordinals = view
             .replacement
             .iter()
-            .filter(|m| !m.meta.synthetic)
             .filter_map(|m| m.meta.ordinal)
             .collect::<BTreeSet<_>>();
         inbound_messages(
@@ -3490,14 +4214,14 @@ fn rendered_view(
         )?
     };
     #[cfg(test)]
-    scaling_tests::view_work::renderer(&state.reference(), entries.len());
+    scaling_tests::view_work::renderer(&state.reference(), state.project(), entries.len());
     match codec.render_view(view, &state.key.session, &entries) {
         Ok(output) => Ok(output),
         Err(_) if !full_lineage => {
             tracing::debug!(session_ref=%state.reference(), reason="native_render_context", "rendering with full-lineage sources");
             let entries = inbound_messages(state.entries.values())?;
             #[cfg(test)]
-            scaling_tests::view_work::renderer(&state.reference(), entries.len());
+            scaling_tests::view_work::renderer(&state.reference(), state.project(), entries.len());
             codec.render_view(view, &state.key.session, &entries)
         }
         Err(error) => Err(error),
@@ -3617,6 +4341,29 @@ fn ctx_reduce_summarized_details(summarized: &[u64]) -> String {
     )
 }
 
+/// A part with the leading tag notation removed from its text, wherever
+/// `render_part` would put a number. Comparing two parts this way asks whether
+/// they differ in anything except tag rendering, which is the runner's job
+/// (`llm-runner/v1` §9.6), never ck-mc's.
+fn untagged_part(part: &Value) -> Value {
+    let mut part = part.clone();
+    if let Value::String(text) = &part {
+        return json!(tags::strip_leading_tag_notation(text));
+    }
+    for pointer in [
+        "/text",
+        "/state/output",
+        "/state/error",
+        "/output/text",
+        "/content",
+    ] {
+        if let Some(value) = part.pointer_mut(pointer).filter(|v| v.is_string()) {
+            *value = json!(tags::strip_leading_tag_notation(value.as_str().unwrap()));
+        }
+    }
+    part
+}
+
 /// The part as the runner renders it to the model under `render_tags`: a
 /// numbered part's text gets its `§N§ ` prefix (`tags::render_part`), so a
 /// rendered part the engine left alone compares equal to it.
@@ -3727,9 +4474,14 @@ fn tag_rows_for<'a>(
             let number = tags::parse_tag(tag)
                 .ok_or_else(|| invalid_field("tags", "malformed runner tag"))?;
             let (kind, text) = match &block.kind {
-                ck_wire::CkKind::Text { text } => {
-                    ("message", std::borrow::Cow::Borrowed(text.as_str()))
-                }
+                ck_wire::CkKind::Text { text } => (
+                    if decoded.ck.role == "tool" {
+                        "tool_result"
+                    } else {
+                        "message"
+                    },
+                    std::borrow::Cow::Borrowed(text.as_str()),
+                ),
                 ck_wire::CkKind::ToolResult { output, .. } => match &output.kind {
                     ck_wire::CkOutputKind::Text { text }
                     | ck_wire::CkOutputKind::ErrorText { text } => {
@@ -3801,12 +4553,15 @@ fn ranges(
                 .first_key_value()
                 .map_or(0, |(ordinal, _)| *ordinal),
         );
-    let render = state
-        .setup
-        .composition
-        .get("render_tags")
-        .and_then(Value::as_bool)
-        == Some(true);
+    let held_mids = state
+        .entries
+        .values()
+        .map(|entry| entry.mid.as_str())
+        .collect::<HashSet<_>>();
+    let mut conformance = ViewConformance::default();
+    // A runner numbers a part exactly when it served a tag for it
+    // (`tags_only_on_tag_rendering_sessions`), so each part's own tag row says
+    // whether the runner renders a number on it. ck-mc never renders one.
     // The first held entry with each mid, as an ordinal-order search finds it.
     let mut by_mid = HashMap::new();
     if state.logical_prefix.is_none() {
@@ -3816,12 +4571,11 @@ fn ranges(
             by_mid.entry(entry.mid.as_str()).or_insert(*ordinal);
         }
     } else {
-        for ordinal in engine
-            .replacement
-            .iter()
-            .filter(|m| !m.meta.synthetic)
-            .filter_map(|m| m.meta.ordinal)
-        {
+        // A message the runner holds carries its ordinal; only ck-mc's own
+        // messages (the history head, a synthetic todo) have none. The
+        // `synthetic` flag is not that test: runners persist their own
+        // notices as synthetic messages too.
+        for ordinal in engine.replacement.iter().filter_map(|m| m.meta.ordinal) {
             let Some(entry) = state.entries.get(&ordinal) else {
                 continue;
             };
@@ -3839,13 +4593,16 @@ fn ranges(
             engine
                 .replacement
                 .get(position)
-                .filter(|m| !m.meta.synthetic)
                 .and_then(|m| m.meta.ordinal)
                 .and_then(|n| state.entries.get(&n))
         };
         let Some(original) = original else {
             // Messages ck-mc authors (a head, a fold of covered messages) are
             // sent as written, so a ref inside one never reaches the model.
+            // A message the runner already holds is never re-sent this way.
+            if let Some(mid) = mid.filter(|mid| held_mids.contains(mid)) {
+                conformance.runner_message_resent(mid);
+            }
             synthetic.push(crate::descriptors::without_refs(message));
             continue;
         };
@@ -3881,7 +4638,7 @@ fn ranges(
             // the part unchanged.
             let exposed = crate::descriptors::expose(part);
             let seen = exposed.as_ref().unwrap_or(part);
-            let expected = render_part(seen, row.tag.as_deref(), render);
+            let expected = render_part(seen, row.tag.as_deref(), row.tag.is_some());
             let changed = if let Some(origins) = &origins {
                 origins
                     .iter()
@@ -3903,10 +4660,13 @@ fn ranges(
                 // An edit that still holds a ref or ck-mc's stand-in for one is
                 // not sent, and the part stays as written: otherwise the model
                 // would get ck-mc's placeholder in place of the runner's payload.
+                // A part that differs only in tag rendering is unchanged: the
+                // runner renders its number, so no edit re-sends it.
                 Some(value)
                     if value != &expected
                         && value != part
                         && value != seen
+                        && untagged_part(value) != untagged_part(seen)
                         && !crate::descriptors::holds_stand_in(value) =>
                 {
                     edits.push(view::PartEdit::replace(
@@ -3942,7 +4702,42 @@ fn ranges(
             history_end,
         )?;
     }
+    conformance.finish(&state.reference());
     Ok((ranges, kept))
+}
+
+/// What a view may carry: ck-mc's own messages (the history head), ranges and
+/// part references, and edits that change a part. A message the runner already
+/// holds never travels back to it. This records any such message, so a test
+/// fails on it and production logs it, rather than a view quietly growing into
+/// a copy of the conversation.
+#[derive(Default)]
+struct ViewConformance {
+    resent: Vec<String>,
+}
+
+impl ViewConformance {
+    fn runner_message_resent(&mut self, mid: &str) {
+        self.resent.push(mid.to_owned());
+    }
+
+    fn finish(self, reference: &str) {
+        let Some(first) = self.resent.first() else {
+            return;
+        };
+        #[cfg(test)]
+        panic!(
+            "view for {reference} re-sends {} message(s) the runner holds, first {first}",
+            self.resent.len()
+        );
+        #[cfg(not(test))]
+        tracing::warn!(
+            session_ref = %reference,
+            resent = self.resent.len(),
+            first = %first,
+            "view re-sends messages the runner holds"
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4307,24 +5102,43 @@ impl McHandler {
         for (reference, version, raw) in
             store.pending_async_compaction_views().map_err(transient)?
         {
-            let view: view::CompactionView = serde_json::from_str(&raw).map_err(transient)?;
-            let Some(state) = load_head(store, &reference)? else {
-                continue;
+            let view: view::CompactionView = match serde_json::from_str(&raw) {
+                Ok(view) => view,
+                Err(error) => {
+                    tracing::warn!(session_ref=%reference, version, %error, "async view announcement skipped: unreadable view");
+                    continue;
+                }
+            };
+            let state = match load_head(store, &reference) {
+                Ok(Some(state)) => state,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(session_ref=%reference, version, ?error, "async view announcement skipped: unreadable session");
+                    continue;
+                }
             };
             let invalid_cut = if let Some(cut) = &view.cut {
-                state
-                    .published_cut_for(store, cut.through_ordinal + 1, &view.lineage_id)?
-                    .is_none_or(|held| {
+                let Some(first) = cut.through_ordinal.checked_add(1) else {
+                    tracing::warn!(session_ref=%reference, version, "async view announcement skipped: invalid cut ordinal");
+                    continue;
+                };
+                match state.published_cut_for(store, first, &view.lineage_id) {
+                    Ok(held) => held.is_none_or(|held| {
                         held.version != version
                             || held
                                 .covered_through
                                 .is_none_or(|end| end > cut.through_ordinal)
-                    })
+                    }),
+                    Err(error) => {
+                        tracing::warn!(session_ref=%reference, version, ?error, "async view announcement skipped: unreadable cut");
+                        continue;
+                    }
+                }
             } else {
                 false
             };
             if state.resync
-                || state.offline_first_pass.is_some()
+                || (state.offline_first_pass.is_some() && !offline_first_pass::adopted(&state))
                 || state.lineage.as_deref() != Some(&view.lineage_id)
                 || invalid_cut
             {
@@ -4436,6 +5250,24 @@ impl McHandler {
         state = self
             .checkout(store, &notice.session_ref)?
             .ok_or_else(|| transient("async session disappeared"))?;
+        if state.standalone_move.is_some()
+            && !offline_first_pass::adopted(&state)
+            && !offline_first_pass::prepared(&state)
+        {
+            return Err(offline_first_pass::unprepared());
+        }
+        if resync_replay::park_unavailable(store, &mut state, Some(notice.seq))? {
+            self.checkin(state);
+            return Ok(());
+        }
+        if state.snapshot_recovery_used
+            && !state.resync_replay_pending
+            && notice.seq <= state.completed_seq
+            && state.lineage.as_deref() != Some(notice.lineage_id.as_str())
+        {
+            self.checkin(state);
+            return Ok(());
+        }
         if state.active_seed_is_unsafe(store)? {
             return Err(error(
                 "unsafe_cut_seed",
@@ -4485,7 +5317,7 @@ impl McHandler {
         // A record the offline first pass prepared is checked against what the
         // runner serves now, once, before anything else: it is either adopted
         // whole or discarded for a fresh record.
-        if state.offline_first_pass.is_some() {
+        if state.offline_first_pass.is_some() && !offline_first_pass::adopted(&state) {
             // Boxed: this one-time check reads the whole transcript, and an
             // inline future of that size would grow every notice's future.
             state =
@@ -4685,7 +5517,7 @@ impl McHandler {
                 state.reminder_echoes.finish_resync();
                 break;
             }
-            state.reset(store)?;
+            state.reset_for_notice(store)?;
             state.save(store, &[])?;
             resynced = true;
             if attempt == 1 {
@@ -4719,7 +5551,17 @@ impl McHandler {
         state.record_restored_ack_descent(store)?;
         #[cfg(test)]
         let phase = scaling_tests::save_meter::start_kind(&notice.session_ref, "phase:index");
+        #[cfg(test)]
+        let index_step = scaling_tests::save_meter::start_kind(&notice.session_ref, "index:ingest");
         state.ingest_read(store, codec)?;
+        #[cfg(test)]
+        drop(index_step);
+        if resync_replay::park_unavailable(store, &mut state, Some(notice.seq))? {
+            self.checkin(state);
+            return Ok(());
+        }
+        #[cfg(test)]
+        let index_step = scaling_tests::save_meter::start_kind(&notice.session_ref, "index:ack");
         if state.completed_seq < notice.seq || resuming {
             // Reset clears the read lineage, and ingestion normalizes served
             // source parts. Validate acknowledgements only after both recover.
@@ -4731,6 +5573,8 @@ impl McHandler {
                 state.save(store, &[])?;
             }
         }
+        #[cfg(test)]
+        drop(index_step);
         #[cfg(test)]
         drop(phase);
         #[cfg(test)]
@@ -4764,8 +5608,12 @@ impl McHandler {
             .len();
         #[cfg(test)]
         let skip_phase = scaling_tests::save_meter::start_kind(&notice.session_ref, "phase:skip");
-        let run_engine = (state.completed_seq < notice.seq || resynced)
-            && (resynced || !self.async_engine_can_skip(&state, &notice)?);
+        // A pending resync replay remains owed even if an earlier attempt completed
+        // the notice without publishing. The engine must still authorize any
+        // rewrite of history already sent to the model.
+        let run_engine = state.resync_replay_pending
+            || ((state.completed_seq < notice.seq || resynced)
+                && (resynced || !self.async_engine_can_skip(&state, &notice)?));
         #[cfg(test)]
         if self
             .provider_store
@@ -4782,7 +5630,8 @@ impl McHandler {
         state.last_pass = None;
         let mut waiting_for_result = false;
         if run_engine {
-            match self.publish_async(0, &mut state, codec, resynced) {
+            let rebuild = resynced && !state.resync_replay_pending;
+            match self.publish_async(0, &mut state, codec, rebuild) {
                 Ok(_) => state.engine_failed = false,
                 // The newest assistant turn ends in a tool call whose result
                 // is not written yet. The runner sends a notice after every
@@ -4808,8 +5657,12 @@ impl McHandler {
                 }
             }
         }
+        if resync_replay::park_unavailable(store, &mut state, Some(notice.seq))? {
+            self.checkin(state);
+            return Ok(());
+        }
         let (decision, why) = match &state.last_pass {
-            Some(pass) if pass.published => (
+            Some(pass) if pass.published && !pass.replayed => (
                 decision_log::Decision::Execute,
                 decision_log::pass_why(pass),
             ),
@@ -4830,7 +5683,14 @@ impl McHandler {
         };
         self.log_decision(decision_log::line(
             &notice.session_ref,
-            &format!("notice seq={}", notice.seq),
+            &format!(
+                "notice seq={} history_edit_cost={:?}",
+                notice.seq,
+                notice
+                    .history_edit_cost
+                    .as_ref()
+                    .map_or("absent", |cost| cost.as_str())
+            ),
             decision,
             &why,
             &facts,
@@ -5020,6 +5880,12 @@ impl McHandler {
                     #[cfg(test)]
                     let held = held.counted_as(state.reference());
                     state.entries.insert(entry.ordinal, Arc::new(held));
+                    if state
+                        .undo_checked_through
+                        .is_some_and(|through| entry.ordinal <= through)
+                    {
+                        state.undo_checked_through = entry.ordinal.checked_sub(1);
+                    }
                     state.record_pruned_parts(
                         entry.ordinal,
                         pruned.get(&entry.mid).map_or(&[][..], Vec::as_slice),
@@ -5181,7 +6047,14 @@ impl McHandler {
             baseline_refreshed: prior_generation != loaded_generation,
             hard_fold_coverage_advanced: base.coverage_ordinal > cadence.meta.coverage_ordinal,
             user_message_id: user.map(|message| message.mid.as_str()),
-            temporal_enabled: config.temporal_awareness,
+            // A time marker only means something in front of the user message
+            // whose gap it measures. A runner send can't put it there: it lands
+            // after that turn, on the next tool result or, on an idle session,
+            // as a separate user turn that starts a run and reads to the model as
+            // silence (seen live on a moved head). So the runner lane sends no
+            // time marker, whatever `temporal_awareness` says, until runners
+            // render the marker on the user message themselves.
+            temporal_enabled: false,
             gap_ms,
             ready_search_hint: None,
         };
@@ -5303,6 +6176,12 @@ impl McHandler {
 
     fn async_binding(&self, state: &State) -> SessionBinding {
         let identity = state.runner_identity();
+        let config = self.effective_config(&identity.project_root).clone();
+        let history_budget_tokens = async_history_budget_tokens(
+            &config,
+            state.setup.context_window.unwrap_or(0),
+            &state.setup.model,
+        );
         SessionBinding {
             principal: Some(subc_protocol::Principal::Reserved {
                 module_id: state.runner_module.clone(),
@@ -5312,8 +6191,8 @@ impl McHandler {
             harness: identity.harness,
             session: identity.session,
             model_key: None,
-            config: self.effective_config(&identity.project_root).clone(),
-            history_budget_tokens: 4_000.0,
+            config,
+            history_budget_tokens,
         }
     }
 
@@ -5325,17 +6204,18 @@ impl McHandler {
         ride: bool,
     ) -> Result<Option<view::CompactionView>, HandlerOutcome> {
         state.last_pass = None;
-        if state.resync || state.entries.is_empty() {
+        if state.resync || state.failed() || state.entries.is_empty() {
             return Ok(None);
         }
-        // Held copies the runner pruned make this one pass a rebuild, as a
-        // rewrite ride does.
-        let pruned_rebuild = state.pruned_rebuild_pending && !ride;
-        let ride = ride || state.pruned_rebuild_pending;
         let store = self
             .store
             .get()
             .ok_or_else(|| transient("store unavailable"))?;
+        engine_cache::reconcile(store, state)?;
+        // Reconciled archive-pruned copies request one rebuilding pass rather
+        // than reuse of the rendering captured before the prune.
+        let pruned_rebuild = state.pruned_rebuild_pending && !ride;
+        let ride = ride || state.pruned_rebuild_pending || state.moved_cold_prefix;
         state.cleanup_pending_cut_stage(store)?;
         state.forward_parent_history(store)?;
         state.restore_undo_edits(store)?;
@@ -5376,6 +6256,7 @@ impl McHandler {
                 .or(notice.window.or(state.setup.context_window))
                 .ok_or_else(|| invalid("window unknown"))?,
             prefix_rebuilding: ride,
+            cold_prefix: state.moved_cold_prefix,
             pipeline_switch: false,
             last_applied_version: None,
             last_not_applied: None,
@@ -5386,6 +6267,7 @@ impl McHandler {
 
         let (template, output) =
             self.async_engine(channel, &binding, state, codec, &status, &mut engine)?;
+        state.engine_cache_witness = Some(engine_cache::capture(store, state)?);
         // The pass committed the pruned messages' identities and ran as the
         // rebuild the prune called for.
         state.pruned_readopt.clear();
@@ -5396,6 +6278,7 @@ impl McHandler {
             rebuild: ride,
             pruned_rebuild,
             published: false,
+            replayed: false,
         });
 
         #[cfg(test)]
@@ -5476,11 +6359,11 @@ impl McHandler {
         }
         let transform::compaction::Answer::Replacement(mut candidate) = output.answer else {
             state.adopt_engine(engine)?;
-            return Ok(None);
+            return resync_replay::reissue_applied(store, state, output.prefix_bust_permitted);
         };
         if !ride && !output.prefix_bust_permitted {
             state.adopt_engine(engine)?;
-            return Ok(None);
+            return resync_replay::reissue_applied(store, state, false);
         }
         #[cfg(test)]
         drop(meter);
@@ -5499,7 +6382,11 @@ impl McHandler {
             rendered_view(codec, &candidate, state, false)?
         } else {
             #[cfg(test)]
-            scaling_tests::view_work::renderer(&state.reference(), template.messages.len());
+            scaling_tests::view_work::renderer(
+                &state.reference(),
+                state.project(),
+                template.messages.len(),
+            );
             match codec.render_prepared_view(&candidate, &state.key.session, &template) {
                 Ok(wire) => wire,
                 Err(_) => rendered_view(codec, &candidate, state, true)?,
@@ -5688,12 +6575,16 @@ impl McHandler {
             native_frozen_edits: &'a frozen_edits::FrozenEdits,
             history_through: Option<u64>,
             publication_lineage: &'a str,
+            publication_version: u64,
+            engine_cache_snapshot: engine_cache::Snapshot,
         }
         let engine_json: Arc<str> = serde_json::to_string(&PublishedEngine {
             view: &candidate,
             native_frozen_edits: &frozen_edits,
             history_through: coverage,
             publication_lineage: &view.lineage_id,
+            publication_version: version,
+            engine_cache_snapshot: engine_cache::snapshot(store, state, &engine, Some(&candidate))?,
         })
         .map_err(transient)?
         .into();
@@ -5709,7 +6600,8 @@ impl McHandler {
             version,
             EngineView::with_json(&candidate, Arc::clone(&engine_json))
                 .with_frozen_edits(frozen_edits)
-                .with_publication_lineage(view.lineage_id.clone()),
+                .with_publication_lineage(view.lineage_id.clone())
+                .with_publication_version(version),
         );
         // The produced baseline is this published view; adopting after the
         // insert shares its serialized form instead of serializing it again.
@@ -5737,12 +6629,15 @@ impl McHandler {
         if let Some(pass) = &mut state.last_pass {
             pass.published = true;
         }
+        // The moved session's cold first request is now covered by this view.
+        state.moved_cold_prefix = false;
+        state.resync_replay_pending = false;
         Ok(Some(view))
     }
 
     pub(super) async fn async_view_get(
         &self,
-        binding: &SessionBinding,
+        principal: Option<&subc_protocol::Principal>,
         params: &Value,
     ) -> Result<Vec<u8>, HandlerOutcome> {
         let request: view::ViewGetRequest = decode(params)?;
@@ -5755,7 +6650,7 @@ impl McHandler {
                 &json!({"answer":"refuse","code":"unknown_session","reason":"Unknown async conversation"}),
             );
         };
-        self.authorize_async(binding, &state)?;
+        self.authorize_async_principal(principal, &state)?;
         if state.active_seed_is_unsafe(store)? {
             return bytes(
                 &json!({"answer":"refuse","code":"unsafe_cut_seed","reason":"Set up a fresh full lineage before reading views."}),
@@ -5767,6 +6662,15 @@ impl McHandler {
         {
             Some(raw) => {
                 let view: view::CompactionView = serde_json::from_str(&raw).map_err(transient)?;
+                // The fetch an unadopted moved session's first step depends on,
+                // logged so a stalled first turn shows whether it arrived.
+                if offline_first_pass::prepared(&state) {
+                    tracing::info!(
+                        session_ref = %request.session_ref,
+                        view_version = request.view_version,
+                        "moved session prepared view served"
+                    );
+                }
                 bytes(&view::ViewGetAnswer::view(view))
             }
             None => bytes(
@@ -5780,9 +6684,18 @@ impl McHandler {
         binding: &SessionBinding,
         state: &State,
     ) -> Result<(), HandlerOutcome> {
+        self.authorize_async_principal(binding.principal.as_ref(), state)
+    }
+
+    fn authorize_async_principal(
+        &self,
+        principal: Option<&subc_protocol::Principal>,
+        state: &State,
+    ) -> Result<(), HandlerOutcome> {
         // Only the attested runner owns the conversation; the route's folder
         // spelling is metadata and may differ from the one Setup arrived on.
-        if records::attested_runner(binding) != Some(state.key.runner.as_str()) {
+        if !matches!(principal, Some(subc_protocol::Principal::Reserved { module_id }) if module_id == &state.key.runner)
+        {
             return Err(invalid_field(
                 "session_ref",
                 "async conversation is owned by another runner",
@@ -5793,7 +6706,7 @@ impl McHandler {
 
     pub(super) async fn async_ride(
         &self,
-        binding: &SessionBinding,
+        principal: Option<&subc_protocol::Principal>,
         params: &Value,
     ) -> Result<Vec<u8>, HandlerOutcome> {
         let request: ride::RideRequest = decode(params)?;
@@ -5801,6 +6714,7 @@ impl McHandler {
             // A missing or malformed account label is refused by its own
             // member; the label itself is never echoed.
             ride::RideProblem::Account => invalid_field("account", e.name()),
+            ride::RideProblem::ServiceTier => invalid_field("service_tier", e.name()),
             _ => invalid_field("deadline_ms", e.name()),
         })?;
         if matches!(request.cause, ride::RideCause::Unknown(_)) {
@@ -5823,8 +6737,10 @@ impl McHandler {
             let Some(mut state) = load_head(store, &request.session_ref)? else {
                 return bytes(&ride::RideAnswer::nothing());
             };
-            self.authorize_async(binding, &state)?;
-            if let Some(failure) = state.failure.as_ref().filter(|_| state.failed()) {
+            self.authorize_async_principal(principal, &state)?;
+            if let Some(failure) = state.failure.as_ref().filter(|failure| {
+                failure.state == FailureState::Failed && state.snapshot_unavailable.is_none()
+            }) {
                 return Err(HandlerOutcome::ErrorWithDetail {
                     code: FAILED_ERROR.into(),
                     message: format!("async compaction failed: {}", failure.reason),
@@ -5842,9 +6758,16 @@ impl McHandler {
             state = self
                 .checkout(store, &request.session_ref)?
                 .ok_or_else(|| transient("async session disappeared"))?;
+            if resync_replay::park_unavailable(store, &mut state, None)? {
+                let refusal = resync_replay::unavailable_error(&state);
+                self.checkin(state);
+                return Err(refusal);
+            }
             // An offline-prepared record serves nothing until a notice has
             // checked it against the runner's transcript.
-            if state.resync || state.offline_first_pass.is_some() {
+            if state.resync
+                || (state.offline_first_pass.is_some() && !offline_first_pass::adopted(&state))
+            {
                 let answer = ride::RideAnswer::nothing().with_cache_ttl(state.cache_ttl());
                 self.checkin(state);
                 return bytes(&answer);
@@ -5876,11 +6799,15 @@ impl McHandler {
             let reference = request.session_ref.clone();
             // A rewrite ride's request rewrites the runner's prompt cache from
             // its own current bytes; a prune reconciled before the next
-            // notice completes then needs no rebuild of its own.
+            // notice completes then needs no rebuild of its own. A service tier
+            // is part of the provider's cache key, so a tier change loses the
+            // cache exactly like a model change.
             let rewrite = matches!(
                 request.cause,
                 ride::RideCause::TtlExpired
+                    | ride::RideCause::ChainReset
                     | ride::RideCause::ModelChange
+                    | ride::RideCause::ServiceTierChange
                     | ride::RideCause::AccountChange
                     | ride::RideCause::SurfaceChange
             );
@@ -5895,6 +6822,11 @@ impl McHandler {
                     }
                 };
                 state.engine_failed = false;
+                if resync_replay::park_unavailable(&store, &mut state, None)? {
+                    let refusal = resync_replay::unavailable_error(&state);
+                    worker.checkin(state);
+                    return Err(refusal);
+                }
                 if rewrite && state.last_pass.is_some() && state.accepts_pruning() {
                     state.rode_since_notice = true;
                 }
@@ -5959,6 +6891,11 @@ impl McHandler {
         let mut state = self
             .checkout(store, &state.reference())?
             .ok_or_else(|| transient("async session disappeared"))?;
+        if resync_replay::park_unavailable(store, &mut state, None)? {
+            let refusal = resync_replay::unavailable_error(&state);
+            self.checkin(state);
+            return Err(refusal);
+        }
         let codec = codec::Codec::from_params(&Value::Object(state.setup.params.clone()))?;
         let resolve = |state: &State| -> Result<_, HandlerOutcome> {
             let mut targets = Vec::new();
@@ -6066,6 +7003,48 @@ struct AsyncHistoryFence {
 }
 
 impl AsyncHistoryFence {
+    fn prepare_cached_input(
+        &self,
+        mut source: historian_cache::Source<'_>,
+        parsed: &mut TransformRequest,
+        cache: &Mutex<historian_cache::Cache>,
+    ) -> Result<(historian_cache::Prepared, u64), HandlerOutcome> {
+        let store = source.store;
+        let head = load_head(store, &self.reference)?
+            .ok_or_else(|| transient("async conversation disappeared"))?;
+        if head.generation != self.generation || head.resync {
+            return Err(transient("async historian lineage changed"));
+        }
+        source.stamp.refresh_head(&head);
+        #[cfg(test)]
+        let timer = scaling_tests::save_meter::start_kind(&self.reference, "hist:projection");
+        let input = cache
+            .lock()
+            .expect("historian input cache mutex")
+            .prepare(source, parsed)?;
+        #[cfg(test)]
+        drop(timer);
+        #[cfg(test)]
+        let _timer = scaling_tests::save_meter::start_kind(&self.reference, "hist:identities");
+        let version = store
+            .load_meta(&parsed.session_id)
+            .map_err(transient)?
+            .row_version
+            .ok_or_else(|| transient("async historian cache state missing"))?;
+        // The returned revision proves that the prefix rows we filled still
+        // exist. Any intervening writer makes us fill the full window again.
+        let identities = if input.reused && input.known_version == Some(version) {
+            &input.delta
+        } else {
+            &input.projection.identity_by_mid
+        };
+        let version = store
+            .commit_missing_block_identities(&parsed.session_id, version, identities)
+            .map_err(transient)?;
+        Ok((input, version))
+    }
+
+    #[cfg(test)]
     /// The caller holds the conversation serial through source preparation.
     fn prepare_input(
         &self,
@@ -6081,6 +7060,8 @@ impl AsyncHistoryFence {
         if head.generation != self.generation || head.resync {
             return Err(transient("async historian lineage changed"));
         }
+        #[cfg(test)]
+        let timer = scaling_tests::save_meter::start_kind(&self.reference, "hist:projection");
         let projection = historian_tail::prepare_cut_input(
             store,
             &self.reference,
@@ -6090,6 +7071,10 @@ impl AsyncHistoryFence {
             echoes,
             prelude,
         )?;
+        #[cfg(test)]
+        drop(timer);
+        #[cfg(test)]
+        let _timer = scaling_tests::save_meter::start_kind(&self.reference, "hist:identities");
         let version = store
             .load_meta(&parsed.session_id)
             .map_err(transient)?
@@ -6215,6 +7200,28 @@ impl crate::historian::HistorianPublicationFence for AsyncHistoryFence {
 }
 
 impl McHandler {
+    /// Whether a summary can still come for this async conversation: a historian run this
+    /// process is firing, a stored run in any phase but idle, or a wrap-up in flight. The
+    /// engine pass then holds queued drops for that summary's own rebuild instead of
+    /// rebuilding for them now (invariant 3's bounded execute exception), as the
+    /// TypeScript plugin does with `compartmentRunning` and `compartmentInProgress`.
+    fn async_summary_in_flight(&self, store: &McStore, namespace: &str) -> (bool, bool) {
+        let historian = self
+            .live_historian_sessions
+            .lock()
+            .expect("live historian mutex")
+            .contains_key(namespace)
+            || store.load_meta(namespace).is_ok_and(|snapshot| {
+                snapshot.meta.historian.state != mc_store::HistorianPhase::Idle
+            });
+        let wrapup = self
+            .wrapup_sessions
+            .lock()
+            .expect("wrapup sessions mutex")
+            .contains_key(namespace);
+        (historian, wrapup)
+    }
+
     fn schedule_async_historian(&self, state: &State) -> Result<(), HandlerOutcome> {
         if state.engine.preset != transform::compaction::Preset::Head {
             return Ok(());
@@ -6251,6 +7258,9 @@ impl McHandler {
                 "async historian scheduled before its entries were stored",
             ));
         }
+        let window = from.through(through);
+        let input_stamp = historian_cache::Stamp::of(state, codec, window)?;
+        let input_cache = Arc::clone(&state.historian_cache);
         let store = Arc::clone(
             self.store
                 .get()
@@ -6302,24 +7312,31 @@ impl McHandler {
             let serial = worker.provider_serial.lock_for(&key).await;
             let result = tokio::task::spawn_blocking(move || {
                 let _serial = serial;
-                let projection = fence.prepare_input(
-                    &store,
-                    from.through(through),
-                    codec,
+                let (mut input, _version) = fence.prepare_cached_input(
+                    historian_cache::Source {
+                        store: &store,
+                        reference: &fence.reference,
+                        window,
+                        codec,
+                        echoes: &reminder_echoes,
+                        prelude: historian_seed
+                            .as_ref()
+                            .and_then(|seed| seed.historian_prelude.as_ref()),
+                        stamp: input_stamp,
+                    },
                     &mut parsed,
-                    &reminder_echoes,
-                    historian_seed
-                        .as_ref()
-                        .and_then(|seed| seed.historian_prelude.as_ref()),
+                    &input_cache,
                 )?;
                 let mut timings = HistorianTriggerTimings::default();
-                Ok::<_, HandlerOutcome>(prepare.prepare_historian_fire(
-                    store,
+                #[cfg(test)]
+                let _timer = scaling_tests::save_meter::start_kind(&fence.reference, "hist:fire");
+                let action = prepare.prepare_async_historian_fire(
+                    Arc::clone(&store),
                     &parsed,
                     &binding,
                     &binding.project_root.to_string_lossy(),
-                    &projection,
-                    HistorianPrepareContext {
+                    &input.projection,
+                    (HistorianPrepareContext {
                         rust_background_enabled: None,
                         now: now_ms(),
                         publication_fence: Some(fence),
@@ -6327,8 +7344,24 @@ impl McHandler {
                         reclaim_ride_available: false,
                         runner_lane: true,
                         timings: &mut timings,
-                    },
-                ))
+                    }, &mut input.boundary),
+                );
+                #[cfg(test)]
+                if std::env::var_os("MC_HISTORIAN_PROFILE_DETAIL").is_some() {
+                    eprintln!("HISTORIAN_DETAIL boundary_ms={:.3} trigger_ms={:.3} cache_ms={:.3} hits={} misses={}",
+                        timings.boundary_build_ms, timings.trigger_eval_ms, timings.cache_store_ms,
+                        timings.token_cache_hits, timings.tokenized_blocks);
+                }
+                let mut cache = input_cache.lock().expect("historian input cache mutex");
+                if matches!(action, PreparedHistorianAction::Complete(_)) {
+                    // No-fire diagnostics may advance scalar meta under this
+                    // serial, without removing the identities just filled.
+                    let known = store.load_meta(&parsed.session_id).ok().and_then(|meta| meta.row_version);
+                    cache.finish(input, &mut parsed, known);
+                } else {
+                    cache.clear();
+                }
+                Ok::<_, HandlerOutcome>(action)
             })
             .await;
             match result {
@@ -6709,6 +7742,7 @@ impl McHandler {
             (meta.last_model_key != model, "model_changed"),
             (state.engine_failed, "previous_engine_pass_failed"),
             (state.pruned_rebuild_pending, "pruned_reasoning_rebuild"),
+            (state.moved_cold_prefix, "moved_cold_prefix"),
             (state.restored_head.is_some(), "restored_head"),
             (
                 state.engine.preset != transform::compaction::Preset::Head,
@@ -6775,6 +7809,8 @@ impl McHandler {
         // engine pass, so the preflight sees the inputs the pass would.
         let work = self.provider_work(0, store, binding.clone(), state.key.clone())?;
         let mut context = compaction::producer_context(&work, model, window, false);
+        (context.historian_active, context.wrapup_active) =
+            self.async_summary_in_flight(store, &namespace);
         context.cache_ttl = "never".into();
         let facts = transform::compaction::skip_facts_with(
             store, &namespace, &context, model, window, true,
@@ -6822,11 +7858,19 @@ impl McHandler {
         state = self
             .checkout(store, reference)?
             .ok_or_else(|| transient("async session disappeared"))?;
+        if resync_replay::park_unavailable(store, &mut state, None)? {
+            self.checkin(state);
+            return Ok(());
+        }
         let codec = codec::Codec::from_params(&Value::Object(state.setup.params.clone()))?;
         let facts = self.decision_facts(&state);
         self.publish_async(0, &mut state, codec, false)?;
+        if resync_replay::park_unavailable(store, &mut state, None)? {
+            self.checkin(state);
+            return Ok(());
+        }
         let (decision, why) = match &state.last_pass {
-            Some(pass) if pass.published => (
+            Some(pass) if pass.published && !pass.replayed => (
                 decision_log::Decision::Execute,
                 decision_log::pass_why(pass),
             ),
@@ -6892,6 +7936,27 @@ impl McHandler {
             .is_some_and(|store| route_records(store, binding).is_ok_and(|rows| !rows.is_empty()))
     }
 
+    /// For a runner's `pre_user` hook: the conversation's namespace, and when
+    /// the runner wrote the newest message ck-mc holds. `None` when the route
+    /// has no single compaction record.
+    pub(crate) fn pre_user_context(
+        &self,
+        binding: &SessionBinding,
+    ) -> Option<(String, Option<u64>, bool)> {
+        let store = self.store.get()?;
+        let rows = route_records(store, binding).ok()?;
+        let [raw] = rows.as_slice() else {
+            return None;
+        };
+        let state: State = serde_json::from_str(raw).ok()?;
+        let newest = store
+            .newest_async_entry_written_at(&state.reference())
+            .ok()
+            .flatten();
+        let head = state.engine.preset == transform::compaction::Preset::Head;
+        Some((state.namespace(), newest, head))
+    }
+
     pub(crate) fn async_compaction_namespace(
         &self,
         binding: &SessionBinding,
@@ -6925,6 +7990,29 @@ impl AsyncRecord {
         let Some(source) = &self.resync_sources else {
             return Ok(());
         };
+        let replay_engine = if let Some(replay) = &source.replay {
+            let captured = replay.cache_witness.as_ref().or_else(|| {
+                self.engine_cache_witness
+                    .as_ref()
+                    .filter(|witness| witness.names(&source.namespace))
+            });
+            let cache_matches = match captured {
+                Some(witness) => witness.validates(store, &source.namespace)?,
+                // Older replay records predate independent cache witnesses.
+                None => true,
+            };
+            if source.lineage == self.lineage && replay.matches(self)? && cache_matches {
+                Some(replay.engine.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let retained_views = replay_engine
+            .as_ref()
+            .map(|_| resync_replay::retained_views(store, &self.reference()))
+            .transpose()?;
         // Restoring sources after a resync is rare; it reads every held
         // message once.
         let held = self
@@ -7001,7 +8089,10 @@ impl AsyncRecord {
         store
             .replace_compartments(&namespace, &retained)
             .map_err(transient)?;
-        if let Some(seed) = self.recovery_seed(store)? {
+        if let Some(seed) = self
+            .recovery_seed(store)?
+            .filter(|_| replay_engine.is_none())
+        {
             // Keep the covered boundary available even when an incomplete
             // tool arc makes the first engine pass wait for another message.
             let mut bootstrap = seed.as_ref().clone();
@@ -7010,7 +8101,7 @@ impl AsyncRecord {
                 bootstrap.boundary_id = last.end_message_id.clone();
                 bootstrap.compartment_seq = last.sequence;
             }
-            self.initialize_cut_namespace(store, &bootstrap)?;
+            self.engine_cache_witness = Some(self.initialize_cut_namespace(store, &bootstrap)?);
         }
         let copied = store
             .copy_async_history_artifacts(&source.namespace, &namespace, &sequences)
@@ -7109,6 +8200,31 @@ impl AsyncRecord {
             });
         if !self.restored_no_new_content {
             self.historian_pending = true;
+        }
+        if let Some(engine) = replay_engine {
+            // A reset still advances the generation, invalidating in-flight
+            // work. Carry only the verified serving state into its new
+            // namespace so verification does not bootstrap a cold engine.
+            let source_namespace = source.namespace.clone();
+            self.adopt_engine(engine)?;
+            resync_replay::restore_baselines(
+                store,
+                self,
+                &retained_views.expect("verified view metadata"),
+            )?;
+            self.resync_replay_pending = self.snapshot_unavailable.is_none();
+            if !engine_cache::reconcile(store, self)? {
+                // A retry may already have committed this generation's cache
+                // and view. Do not replace that explained state with its parent.
+                let mut served = store.load(&source_namespace).map_err(transient)?;
+                let target = store.load(&namespace).map_err(transient)?;
+                // Historian claims belong to their namespace, not served bytes.
+                served.meta.historian = target.meta.historian;
+                store
+                    .commit(&namespace, target.row_version, &served.core, &served.meta)
+                    .map_err(transient)?;
+                self.engine_cache_witness = Some(engine_cache::capture(store, self)?);
+            }
         }
         tracing::info!(session_ref=%self.reference(),history_compartments=retained.len(),copied_chunk_embeddings=copied,transferred_drops=transferred,discarded_drops=self.last_discarded_drops,"async lineage sources revalidated");
         self.resync_sources = None;
@@ -7333,4 +8449,30 @@ pub(crate) fn serve_descriptors(entry: &ReadMessage) -> ReadMessage {
     let budget = DESCRIPTOR_MESSAGE_MAX - serde_json::to_vec(&envelope).unwrap().len();
     served.message = describe(&entry.message, &payloads, budget).expect("describable test message");
     served
+}
+
+/// A runner head's plan changes between lineages: core recomposes it on a
+/// schedule and sends `session.refresh` when a provider's tools change, and the
+/// runner reports that as `surface_change` (compaction-provider §4). The next
+/// lineage's Setup carries the plan in effect, so its composition is adopted.
+/// The message format (`params`) and the preset identify the session itself and
+/// still refuse a change.
+fn adopt_setup_plan(
+    state: &mut State,
+    request: &compact::setup::SetupRequest,
+) -> Result<(), HandlerOutcome> {
+    if state.setup.params != request.params || state.setup.preset != request.preset {
+        return Err(invalid_field(
+            "params",
+            "the session's message format or preset changed; set up a new session",
+        ));
+    }
+    if state.setup.composition != request.composition {
+        tracing::info!(
+            session_ref = %state.reference(),
+            "async setup: adopted the plan composition in effect"
+        );
+        state.setup.composition = request.composition.clone();
+    }
+    Ok(())
 }

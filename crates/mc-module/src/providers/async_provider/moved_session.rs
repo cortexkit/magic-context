@@ -7,9 +7,6 @@ use crate::offline_move::{self, DropKind, MoveRecord};
 /// The harness OpenCode 1 sessions are set up under. Only these can hold
 /// standalone plugin state.
 const OPENCODE1_HARNESS: &str = "opencode";
-/// Setup refusal for a moved record that exists but cannot be read. The session
-/// was handed away from standalone, so ck-mc must not set it up as a fresh one.
-const MOVED_RECORD_UNREADABLE: &str = "moved_session_record_unreadable";
 
 /// What the offline move left for this conversation.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -20,17 +17,44 @@ pub(super) struct StandaloneMove {
     pub tag_checkpoint: u64,
     /// The boundary user message the standalone marker cuts at.
     pub cut: String,
+    /// Counted prefix length and the runner-certified last message in that prefix.
+    pub message_count: u64,
+    pub head_cut: cortexkit_role_llm_runner::read::HeadCut,
     /// The imported summaries and drops, until the first read binds them to held
-    /// entries. Cleared once bound.
+    /// entries. Cleared once bound; the authoritative move record in
+    /// `context.db` is never touched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<MoveRecord>,
+    /// Drops already bound to a served `(mid, part, digest)`. The pending queue
+    /// lives per engine namespace (one per generation), so a fresh generation
+    /// replays these instead of reading the move record again.
+    #[serde(default, skip_serializing)]
+    pub bound_drops: Vec<BoundDrop>,
+    /// Cleared by binding so the next save stores the new durable bindings.
+    #[serde(default)]
+    pub bound_drops_stored: bool,
+}
+
+/// One drop the first read bound to the runner's served part, kept so a later
+/// lineage can replay it. The digest is the runner's own served digest of that
+/// part, so a replay can tell a removed target from changed content: a missing
+/// target is skipped, a changed digest is left visible, and only a same-digest
+/// target that lost its tag still refuses.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(super) struct BoundDrop {
+    pub mid: String,
+    pub part: String,
+    pub digest: String,
+    pub kind: DropKind,
+    #[serde(default)]
+    pub queued_at_ms: Option<i64>,
 }
 
 pub(super) enum Fence {
     /// No standalone state and no move: an ordinary new conversation.
     Fresh,
     /// The offline move completed; set up from its record.
-    Moved(MoveRecord),
+    Moved(Box<MoveRecord>),
     /// Refuse setup with this answer.
     Refuse(Value),
 }
@@ -47,20 +71,30 @@ pub(super) fn setup_fence(
     if harness != OPENCODE1_HARNESS || !store.has_context_domain() {
         return Ok(Fence::Fresh);
     }
-    let (record, standalone) = store
+    let (raw, record, standalone) = store
         .with_context_read(|conn| {
             Ok((
+                offline_move::read_move_record_raw(conn, session)?,
                 offline_move::read_move_record(conn, session)?,
                 offline_move::has_standalone_state(conn, session)?,
             ))
         })
         .map_err(transient)?;
     Ok(match record {
-        Some(Ok(record)) => Fence::Moved(record),
+        Some(Ok(record)) if record.state == offline_move::MoveState::Moved => {
+            Fence::Moved(Box::new(record))
+        }
+        Some(Ok(_)) => Fence::Refuse(setup_refusal(
+            request_id,
+            "move_in_progress",
+            "The offline move has not finished; rerun `ck-mc offline move-session` first.",
+        )),
         Some(Err(reason)) => Fence::Refuse(
             serde_json::to_value(contract::setup::SetupAnswer::refuse(
                 request_id,
-                contract::errors::RefuseCode::from_code(MOVED_RECORD_UNREADABLE),
+                contract::errors::RefuseCode::from_code(offline_move::classify_record_error(
+                    raw.as_deref().unwrap_or_default(),
+                )),
                 format!("The moved record for this session cannot be read: {reason}"),
             ))
             .map_err(transient)?,
@@ -119,120 +153,159 @@ impl StandaloneMove {
     /// The Setup checkpoint every Setup answer for this session carries.
     pub(super) fn checkpoint(&self) -> contract::setup::SetupCheckpoint {
         contract::setup::SetupCheckpoint::new(self.tag_checkpoint, &self.cut)
+            .with_message_checkpoint(self.message_count, self.head_cut.clone())
     }
 
     pub(super) fn from_record(record: MoveRecord) -> Self {
         Self {
             tag_checkpoint: record.tag_checkpoint,
             cut: record.cut.clone(),
+            message_count: record.message_count,
+            head_cut: certified_head(&record),
             pending: Some(record),
+            bound_drops: Vec::new(),
+            bound_drops_stored: false,
         }
     }
 }
 
+pub(super) fn certified_head(record: &MoveRecord) -> cortexkit_role_llm_runner::read::HeadCut {
+    cortexkit_role_llm_runner::read::HeadCut::new(
+        &record.head_cut.mid,
+        &record.head_cut.digest,
+        record.head_cut.written_at,
+    )
+}
+
+pub(super) fn checkpoint(record: &MoveRecord) -> contract::setup::SetupCheckpoint {
+    contract::setup::SetupCheckpoint::new(record.tag_checkpoint, &record.cut)
+        .with_message_checkpoint(record.message_count, certified_head(record))
+}
+
+/// A moved session's Setup that does not match its offline preparation. The
+/// refusal and its log line name which half differs: `setup_differs` (the
+/// request) or `runner_describe_differs` (the runner's `role.describe`), so an
+/// operator knows whether to re-export the Setup or the runner's describe.
+pub(super) fn moved_unprepared_refusal(reference: &str, request_id: &str, why: &str) -> Value {
+    tracing::warn!(
+        session_ref = %reference,
+        why,
+        "moved session Setup refused: it differs from the offline preparation"
+    );
+    setup_refusal(
+        request_id,
+        "moved_session_unprepared",
+        &format!(
+            "Setup differs from the preparation ({why}); rerun `ck-mc offline first-pass` with this Setup and the live runner's role.describe."
+        ),
+    )
+}
+
+pub(super) fn setup_refusal(request_id: &str, code: &str, reason: &str) -> Value {
+    serde_json::to_value(contract::setup::SetupAnswer::refuse(
+        request_id,
+        contract::errors::RefuseCode::from_code(code),
+        reason,
+    ))
+    .expect("Setup refusal serializes")
+}
+
+impl McHandler {
+    /// Validate the manifest's codec and certified prefix before an engine pass
+    /// or import can expose a provider record. Native descents validate their
+    /// own newer cut instead of the original adoption boundary.
+    pub(super) async fn check_moved_setup(
+        &self,
+        record: &MoveRecord,
+        request: &compact::setup::SetupRequest,
+        route: &crate::route_targets::SessionRunnerRoute,
+        identity: &session_resolver::RunnerBindIdentity,
+    ) -> Result<Option<Value>, HandlerOutcome> {
+        let codec_matches = codec::Codec::from_params(&Value::Object(request.params.clone()))
+            .is_ok_and(|codec| {
+                codec.wire_id() == record.codec_profile.serializer
+                    && record.codec_profile.native_index == "part_index"
+            });
+        if !codec_matches {
+            return Ok(Some(setup_refusal(
+                &request.request_id,
+                "moved_session_codec_mismatch",
+                "Setup's codec differs from the offline move manifest.",
+            )));
+        }
+        if request.descends_from.is_some() {
+            return Ok(None);
+        }
+        let raw = self
+            .provider_runner
+            .call_for_identity(
+                route,
+                identity,
+                "session.head",
+                json!({}),
+                Duration::from_secs(10),
+            )
+            .await
+            .map_err(runner_error)?;
+        let head: cortexkit_role_llm_runner::read::HeadMeta = decode(&raw)?;
+        let code = if head.first_ordinal.unwrap_or(0) < record.message_count {
+            Some("moved_session_reverted_below_import")
+        } else if head.first_ordinal != Some(record.message_count)
+            || head.cut.as_ref() != Some(&certified_head(record))
+            || head.lineage_id != request.lineage_id
+        {
+            Some("moved_session_head_mismatch")
+        } else {
+            None
+        };
+        Ok(code.map(|code| setup_refusal(
+            &request.request_id,
+            code,
+            "The runner's head does not match the offline-certified prefix; rerun the offline preparation after restoring the moved history.",
+        )))
+    }
+}
+
 impl AsyncRecord {
-    /// On the first read after a moved session's setup, bind the imported
-    /// compartments to held ordinals by message id and carry the drops onto the
-    /// parts the runner served, taking each digest from that served part. A
-    /// compartment that cannot be placed refuses the import by name, as a protocol
-    /// error; nothing partial is imported. A carried drop whose part was not served
-    /// is dropped with a log line.
-    pub(super) fn bind_standalone_move(
+    /// Place the offline move's compartments before the Setup engine pass, so
+    /// the head it renders is the imported history. The runner never serves
+    /// anything below the cut, so the import cannot bind by served ordinals: it
+    /// places the manifest's compartments at ordinals `0..message_count-1` with
+    /// the offline-computed CK block ids and copies only the imported
+    /// sequences' retrieval artifacts. No seed is set yet, so this pass still
+    /// answers the empty-window head insertion.
+    pub(super) fn import_standalone_compartments(
         &mut self,
         store: &McStore,
-        codec: codec::Codec,
+        record: &MoveRecord,
     ) -> Result<(), HandlerOutcome> {
-        let Some(pending) = self
-            .standalone_move
-            .as_ref()
-            .and_then(|moved| moved.pending.clone())
-        else {
-            return Ok(());
-        };
-        let Some(first) = self
-            .entries
-            .first_key_value()
-            .map(|(n, e)| (*n, e.mid.clone()))
-        else {
-            return Ok(());
-        };
-        let reference = self.reference();
-        let refuse = |code: &str, reason: String| {
-            tracing::error!(session_ref=%reference, code, reason, "moved session import refused");
-            error(PROTOCOL_ERROR, format!("{code}: {reason}"))
-        };
-        if let Some(compartment) = pending.compartments.first() {
-            if compartment.start_message_id != first.1 {
-                return Err(refuse(
-                    "moved_session_read_starts_after_history",
-                    format!(
-                        "the first held message is {}, but the first summary starts at {}",
-                        first.1, compartment.start_message_id
-                    ),
-                ));
-            }
-        }
-        let mut retained = Vec::new();
-        let mut sequences = Vec::new();
-        let mut previous: Option<(u64, bool)> = None;
-        for compartment in &pending.compartments {
-            let ordinal = |mid: &str| {
-                self.mid_index.get(mid).copied().ok_or_else(|| {
-                    refuse(
-                        "moved_session_history_unrepresentable",
-                        format!(
-                            "summary {} names message {mid}, which the runner did not serve",
-                            compartment.sequence
-                        ),
-                    )
-                })
+        let namespace = self.namespace();
+        let mut retained = Vec::with_capacity(record.compartments.len());
+        for compartment in &record.compartments {
+            let start_ordinal = compartment
+                .start_position
+                .checked_sub(1)
+                .ok_or_else(|| transient("move manifest has a zero start position"))?
+                as i64;
+            let end_ordinal = compartment
+                .end_position
+                .checked_sub(1)
+                .ok_or_else(|| transient("move manifest has a zero end position"))?
+                as i64;
+            let start_id = match compartment.start_block {
+                Some(block) => format!("{}#{block}", compartment.start_message_id),
+                None => compartment.start_message_id.clone(),
             };
-            let start = ordinal(&compartment.start_message_id)?;
-            let end = ordinal(&compartment.end_message_id)?;
-            let contiguous = match previous {
-                None => start == first.0,
-                Some((prior_end, prior_partial)) => {
-                    prior_end.checked_add(1) == Some(start)
-                        || (prior_partial && compartment.start_part.is_some() && prior_end == start)
-                }
+            let end_id = match compartment.end_block {
+                Some(block) => format!("{}#{block}", compartment.end_message_id),
+                None => compartment.end_message_id.clone(),
             };
-            if !contiguous || end < start {
-                return Err(refuse(
-                    "moved_session_history_unrepresentable",
-                    format!(
-                        "summary {} covers held ordinals {start}..={end}, which do not follow the previous summary",
-                        compartment.sequence
-                    ),
-                ));
-            }
-            let start_block = self
-                .edge_block(codec, start, compartment.start_part.as_deref(), false)?
-                .ok_or_else(|| {
-                    refuse(
-                        "moved_session_history_unrepresentable",
-                        format!(
-                            "summary {} starts where no block is served",
-                            compartment.sequence
-                        ),
-                    )
-                })?;
-            let end_block = self
-                .edge_block(codec, end, compartment.end_part.as_deref(), true)?
-                .ok_or_else(|| {
-                    refuse(
-                        "moved_session_history_unrepresentable",
-                        format!(
-                            "summary {} ends where no block is served",
-                            compartment.sequence
-                        ),
-                    )
-                })?;
             retained.push(mc_store::StoredCompartment {
                 sequence: compartment.sequence,
-                start_message: start as i64,
-                end_message: end as i64,
-                start_message_id: format!("{}#{start_block}", compartment.start_message_id),
-                end_message_id: format!("{}#{end_block}", compartment.end_message_id),
+                start_message: start_ordinal,
+                end_message: end_ordinal,
+                start_message_id: start_id,
+                end_message_id: end_id,
                 start_date: None,
                 end_date: None,
                 title: compartment.title.clone(),
@@ -246,21 +319,164 @@ impl AsyncRecord {
                 legacy: compartment.legacy,
                 created_at: compartment.created_at,
             });
-            sequences.push((compartment.sequence, compartment.sequence));
-            previous = Some((end, compartment.end_part.is_some()));
         }
-        let namespace = self.namespace();
         store
             .replace_compartments(&namespace, &retained)
             .map_err(transient)?;
-        // The standalone rows keep their chunk embeddings; copy them so retrieval
-        // over the imported summaries needs no embedding call.
-        let copied = store
-            .copy_async_history_artifacts(&pending.session, &namespace, &sequences)
+        let sequences = record
+            .compartments
+            .iter()
+            .map(|compartment| (compartment.sequence, compartment.sequence))
+            .collect::<Vec<_>>();
+        let _ = store
+            .copy_async_history_artifacts(&record.session, &namespace, &sequences)
             .map_err(transient)?;
-        if !retained.is_empty() {
-            store.arm_soft_refresh(&namespace).map_err(transient)?;
+        // Do not arm a refresh before the Setup engine pass: it renders the
+        // head insertion from these rows, and a pending refresh would leave it
+        // without its frames. The seed finish arms it for the first notice.
+        Ok(())
+    }
+
+    /// The adoption seed for the manifest, without touching the record. Setup
+    /// stages it before the engine pass so that pass renders the imported head.
+    fn standalone_seed(record: &MoveRecord) -> Result<cut_seed::CutSeed, HandlerOutcome> {
+        let last = record
+            .compartments
+            .last()
+            .ok_or_else(|| transient("move manifest has no compartments"))?;
+        let boundary_id = match last.end_block {
+            Some(block) => format!("{}#{block}", last.end_message_id),
+            None => last.end_message_id.clone(),
+        };
+        let mut seed = cut_seed::CutSeed::without_rows(
+            record.message_count,
+            record.head_cut.mid.clone(),
+            last.sequence,
+            boundary_id,
+        );
+        seed.cut_digest = record.head_cut.digest.clone();
+        seed.time_basis = Some((i64::try_from(record.head_cut.written_at).ok(), None));
+        if record.tag_checkpoint > 0 {
+            seed.pre_cut_tags = vec![(1, record.tag_checkpoint)];
         }
+        seed.max_tag = record.tag_checkpoint;
+        Ok(seed)
+    }
+
+    /// Build the adoption seed from the certified head without saving a partial
+    /// provider record. Setup commits the seed with the complete answer. It sets
+    /// `lineage_first_ordinal`, `cut_digest` and `time_basis` from the certified
+    /// `head_cut`, and `pre_cut_tags`/`max_tag` from the tag checkpoint, so an
+    /// old `ctx_reduce` tag answers as already in the history summary.
+    ///
+    /// The caller arms the soft refresh after its Setup engine pass. The Setup
+    /// pass renders the head from these imported rows; arming the refresh
+    /// before that pass would leave the rendered head without its frames. Armed
+    /// after the pass, the first notice refreshes the imported history once.
+    pub(super) fn finish_standalone_import(
+        &mut self,
+        store: &McStore,
+        record: &MoveRecord,
+    ) -> Result<(), HandlerOutcome> {
+        let seed = Self::standalone_seed(record)?;
+        self.lineage_first_ordinal = record.message_count;
+        self.stage_fresh_cut(store, seed)?;
+        Ok(())
+    }
+
+    /// Whether this record stopped inside the adoption import: the cut stage is
+    /// saved but the Setup answer with a complete `initial` is not. A repeat
+    /// Setup restarts from the move record instead of answering the partial
+    /// record.
+    pub(super) fn is_importing_stage(&self) -> bool {
+        let pending = self
+            .standalone_move
+            .as_ref()
+            .is_some_and(|moved| moved.pending.is_some());
+        pending
+            && self.cut_first_ordinal.is_some()
+            && !self.initial_ready
+            && !self
+                .initial
+                .get("answer")
+                .and_then(Value::as_str)
+                .is_some_and(|answer| answer == "ready")
+    }
+
+    /// The drops-only first-read binding. Compartments are already imported at
+    /// Setup, so this only carries drops onto the parts the runner served,
+    /// taking each digest from that served part, and records the
+    /// `(mid, part, digest)` bindings durably for later generations. The
+    /// authoritative move record in `context.db` is never cleared; only this
+    /// record's pending copy is.
+    ///
+    /// A target the pass cannot bind, or whose served part has no tag, refuses
+    /// `drop_target_unbound` instead of skipping: admission already proved every
+    /// carried target resolvable, so a missing binding at runtime is a defect.
+    /// A second bind in the same namespace adds no duplicate edit or queue row.
+    pub(super) fn bind_standalone_move(
+        &mut self,
+        store: &McStore,
+        codec: codec::Codec,
+    ) -> Result<(), HandlerOutcome> {
+        let (pending, bound) = match &self.standalone_move {
+            None => return Ok(()),
+            Some(moved) => (moved.pending.clone(), moved.bound_drops.clone()),
+        };
+        if let Some(pending) = pending {
+            return self.bind_first_drops(store, codec, &pending);
+        }
+        if bound.is_empty() {
+            return Ok(());
+        }
+        self.replay_bound_drops(store, codec, &bound)
+    }
+
+    /// The runner's key for a carried drop's part. The offline move records
+    /// each target by the host's own part id (OpenCode's `prt_…`), but a tag
+    /// row's `part` is the runner's opaque key for the part, which may be its
+    /// position instead (llm-runner `PartTag`). Rows come in the message's
+    /// part order, so a host id resolves through the held message's parts to
+    /// the row at the same position. A target already named by the runner's
+    /// key is returned as is; `None` when the message or the part isn't held.
+    fn runner_part_key(&self, mid: &str, part: &str) -> Result<Option<String>, HandlerOutcome> {
+        let Some(held) = self
+            .mid_index
+            .get(mid)
+            .and_then(|ordinal| self.entries.get(ordinal))
+        else {
+            return Ok(None);
+        };
+        let entry = held.read()?;
+        if entry.tags.iter().any(|row| row.part == part) {
+            return Ok(Some(part.to_owned()));
+        }
+        let native = parts(&entry.message)?;
+        let Some(index) = native
+            .iter()
+            .position(|value| value.get("id").and_then(Value::as_str) == Some(part))
+        else {
+            return Ok(None);
+        };
+        Ok(entry.tags.get(index).map(|row| row.part.clone()))
+    }
+
+    /// Bind the move record's carried drops on the first read, fail closed.
+    /// Every target must resolve to a served tagged part with a droppable block
+    /// for queued drops; anything else refuses `drop_target_unbound`. Success
+    /// clears this record's pending copy and stores the served digests durably,
+    /// so later generations replay them without the move record.
+    fn bind_first_drops(
+        &mut self,
+        store: &McStore,
+        codec: codec::Codec,
+        pending: &MoveRecord,
+    ) -> Result<(), HandlerOutcome> {
+        let reference = self.reference();
+        let refuse = |code: &str, reason: String| {
+            tracing::error!(session_ref=%reference, code, reason, "moved session drop refused");
+            error(PROTOCOL_ERROR, format!("{code}: {reason}"))
+        };
         let served: HashMap<(String, String), (String, String)> = self
             .tag_index
             .iter()
@@ -271,28 +487,40 @@ impl AsyncRecord {
                 )
             })
             .collect();
-        let (mut applied, mut queued, mut missing) = (0, 0, 0);
+        let namespace = self.namespace();
+        let mut bound = Vec::with_capacity(pending.drops.len());
+        let (mut applied, mut queued) = (0, 0);
         for drop in &pending.drops {
-            let Some((tag, digest)) = served.get(&(drop.mid.clone(), drop.part.clone())) else {
-                missing += 1;
-                tracing::warn!(session_ref=%reference, mid=%drop.mid, part=%drop.part, kind=?drop.kind, source_tag=drop.source_tag, "moved session drop not carried: the runner did not serve its part with a tag");
-                continue;
+            let part = self
+                .runner_part_key(&drop.mid, &drop.part)?
+                .unwrap_or_else(|| drop.part.clone());
+            let Some((tag, digest)) = served.get(&(drop.mid.clone(), part.clone())) else {
+                return Err(refuse(
+                    "drop_target_unbound",
+                    format!("drop target {}:{} has no served tag", drop.mid, drop.part),
+                ));
             };
             match drop.kind {
                 DropKind::Applied => {
-                    self.frozen_edits.insert_drop(&drop.mid, &drop.part, digest);
+                    self.frozen_edits.insert_drop(&drop.mid, &part, digest);
                     applied += 1;
                 }
                 DropKind::Queued => {
-                    let row = tags::parse_tag(tag)
-                        .map(|number| tag_row(self, codec, number))
-                        .transpose()?
-                        .flatten();
-                    let Some(row) = row else {
-                        missing += 1;
-                        tracing::warn!(session_ref=%reference, mid=%drop.mid, part=%drop.part, "moved session queued drop not carried: its part has no droppable block");
-                        continue;
-                    };
+                    let number = tags::parse_tag(tag).ok_or_else(|| {
+                        refuse(
+                            "drop_target_unbound",
+                            format!("drop target {}:{} has a malformed tag", drop.mid, drop.part),
+                        )
+                    })?;
+                    let row = tag_row(self, codec, number)?.ok_or_else(|| {
+                        refuse(
+                            "drop_target_unbound",
+                            format!(
+                                "queued drop target {}:{} has no droppable block",
+                                drop.mid, drop.part
+                            ),
+                        )
+                    })?;
                     store
                         .append_pending_agent_drops(
                             &namespace,
@@ -303,65 +531,139 @@ impl AsyncRecord {
                     queued += 1;
                 }
             }
+            // Bound under the runner's key, so later generations replay against
+            // the served rows without resolving host ids again.
+            bound.push(BoundDrop {
+                mid: drop.mid.clone(),
+                part,
+                digest: digest.clone(),
+                kind: drop.kind,
+                queued_at_ms: drop.queued_at_ms,
+            });
         }
-        tracing::info!(session_ref=%reference, compartments=retained.len(), copied_chunk_embeddings=copied, applied_drops=applied, queued_drops=queued, missing_drops=missing, tag_checkpoint=pending.tag_checkpoint, "moved standalone session imported");
+        tracing::info!(session_ref=%reference, applied_drops=applied, queued_drops=queued, tag_checkpoint=pending.tag_checkpoint, "moved standalone drops bound");
         if let Some(moved) = &mut self.standalone_move {
             moved.pending = None;
+            moved.bound_drops = bound;
+            moved.bound_drops_stored = false;
         }
         Ok(())
     }
 
-    /// The CK block index where a summary starts (`end == false`) or ends inside
-    /// the held entry at `ordinal`. `part` names the OpenCode part of a partial
-    /// edge; without it the edge is the message's first or last block. Blocks map
-    /// to the served parts through the codec's native part index, so parts the
-    /// runner leaves out (the compaction part) never shift the edge.
-    fn edge_block(
-        &self,
+    /// Replay durable `(mid, part, digest)` bindings in the current namespace.
+    /// A target the new lineage no longer serves is skipped and logged; a
+    /// target whose digest changed is not dropped, so its new content stays
+    /// visible, and that is logged too. An old drop is never applied to changed
+    /// content. A same-digest target that lost its tag or its droppable block
+    /// refuses `drop_target_unbound` before any model call, as the first bind
+    /// would. The pending queue insert ignores existing rows, so a second bind
+    /// adds no duplicate.
+    fn replay_bound_drops(
+        &mut self,
+        store: &McStore,
         codec: codec::Codec,
-        ordinal: u64,
-        part: Option<&str>,
-        end: bool,
-    ) -> Result<Option<usize>, HandlerOutcome> {
-        let entry = self
-            .entries
-            .get(&ordinal)
-            .ok_or_else(|| transient("held entry missing"))?
-            .read()?;
-        let limit = match part {
-            None => None,
-            Some(part) => match entry.tags.iter().position(|row| row.part == part) {
-                Some(index) => Some(index),
-                None => return Ok(None),
-            },
+        bound: &[BoundDrop],
+    ) -> Result<(), HandlerOutcome> {
+        let reference = self.reference();
+        let refuse = |code: &str, reason: String| {
+            tracing::error!(session_ref=%reference, code, reason, "moved session drop replay refused");
+            error(PROTOCOL_ERROR, format!("{code}: {reason}"))
         };
-        let decoded = decoded_entry(
-            codec,
-            &InboundMessage {
-                ordinal,
-                mid: entry.mid.clone(),
-                message: entry.message.clone(),
-            },
-        )?;
-        let blocks = decoded.ck.content.iter().enumerate().map(|(index, block)| {
-            let native = block
-                .provider_extras
-                .get("_cortexkit_codec")
-                .and_then(|extras| extras.get("nativeIndex"))
-                .and_then(Value::as_u64)
-                .map_or(index, |native| native as usize);
-            (index, native)
-        });
-        Ok(if end {
-            blocks
-                .filter(|(_, native)| limit.is_none_or(|limit| *native <= limit))
-                .map(|(index, _)| index)
-                .next_back()
-        } else {
-            let mut blocks = blocks;
-            blocks
-                .find(|(_, native)| limit.is_none_or(|limit| *native >= limit))
-                .map(|(index, _)| index)
-        })
+        let namespace = self.namespace();
+        let served: HashMap<(String, String), (String, String)> = self
+            .tag_index
+            .iter()
+            .map(|(tag, address)| {
+                (
+                    (address.mid.clone(), address.part.clone()),
+                    (tag.clone(), address.digest.clone()),
+                )
+            })
+            .collect();
+        let (mut applied, mut queued, mut skipped) = (0, 0, 0);
+        for drop in bound {
+            if let Some((tag, digest)) = served.get(&(drop.mid.clone(), drop.part.clone())) {
+                if digest != &drop.digest {
+                    skipped += 1;
+                    tracing::warn!(session_ref=%reference, mid=%drop.mid, part=%drop.part, "moved session drop not replayed: the served digest changed, leaving the new content visible");
+                    continue;
+                }
+                match drop.kind {
+                    DropKind::Applied => {
+                        self.frozen_edits.insert_drop(&drop.mid, &drop.part, digest);
+                        applied += 1;
+                    }
+                    DropKind::Queued => {
+                        let number = tags::parse_tag(tag).ok_or_else(|| {
+                            refuse(
+                                "drop_target_unbound",
+                                format!(
+                                    "replayed drop target {}:{} has a malformed tag",
+                                    drop.mid, drop.part
+                                ),
+                            )
+                        })?;
+                        let row = tag_row(self, codec, number)?.ok_or_else(|| {
+                            refuse(
+                                "drop_target_unbound",
+                                format!(
+                                    "replayed queued drop target {}:{} has no droppable block",
+                                    drop.mid, drop.part
+                                ),
+                            )
+                        })?;
+                        store
+                            .append_pending_agent_drops(
+                                &namespace,
+                                std::slice::from_ref(&row.block_id),
+                                drop.queued_at_ms.unwrap_or_else(now_ms),
+                            )
+                            .map_err(transient)?;
+                        queued += 1;
+                    }
+                }
+                continue;
+            }
+            let held = self
+                .mid_index
+                .get(&drop.mid)
+                .and_then(|ordinal| self.entries.get(ordinal));
+            let Some(held) = held else {
+                skipped += 1;
+                tracing::warn!(session_ref=%reference, mid=%drop.mid, part=%drop.part, "moved session drop not replayed: its target is gone");
+                continue;
+            };
+            let entry = held.read()?;
+            let Some(_row) = entry.tags.iter().find(|row| row.part == drop.part) else {
+                skipped += 1;
+                tracing::warn!(session_ref=%reference, mid=%drop.mid, part=%drop.part, "moved session drop not replayed: its target is gone");
+                continue;
+            };
+            let current = served_part_digest(&entry, &drop.part).map_err(|_| {
+                refuse(
+                    "drop_target_unbound",
+                    format!(
+                        "replayed drop target {}:{} has no served digest",
+                        drop.mid, drop.part
+                    ),
+                )
+            })?;
+            if current != drop.digest {
+                skipped += 1;
+                tracing::warn!(session_ref=%reference, mid=%drop.mid, part=%drop.part, "moved session drop not replayed: the served digest changed, leaving the new content visible");
+                continue;
+            }
+            return Err(refuse(
+                "drop_target_unbound",
+                format!(
+                    "replayed drop target {}:{} has no served tag",
+                    drop.mid, drop.part
+                ),
+            ));
+        }
+        if skipped > 0 || applied > 0 || queued > 0 {
+            tracing::info!(session_ref=%reference, applied_drops=applied, queued_drops=queued, skipped_drops=skipped, "moved standalone drops replayed");
+        }
+        Ok(())
     }
 }

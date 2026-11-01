@@ -462,15 +462,20 @@ it("a stale hydration retries with a fresh worker and serves the turn", async ()
 it("a clone prewarm queues behind the active session and its first turn is served", async () => {
 	const h = harness();
 	h.slowWorker(100);
-	prewarmPiTagSnapshot(h.db, h.sessionId);
-	prewarmPiTagSnapshot(h.db, "startup-clone");
+	prewarmPiTagSnapshot(h.db, h.sessionId, "pass");
+	prewarmPiTagSnapshot(h.db, "startup-clone", "pass");
 	await h.call();
 	expect(h.refusals).toEqual([]);
 	expect(h.dispatches).toBe(1);
 	expect(getPiTagSnapshotView(h.db, h.sessionId)).toEqual(
 		getTagsBySession(h.db, h.sessionId),
 	);
-	await ensurePiTagSnapshotReady(h.db, "startup-clone", new PiContextBudget());
+	await ensurePiTagSnapshotReady(
+		h.db,
+		"startup-clone",
+		new PiContextBudget(),
+		"pass",
+	);
 	await drainPiTagSnapshotSession("startup-clone");
 	expect(h.starts).toBe(2);
 });

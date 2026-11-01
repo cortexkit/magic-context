@@ -9,6 +9,8 @@ pub(super) struct ReminderEchoes {
     blocks: Vec<Echo>,
     #[serde(default)]
     awaiting_resync: Vec<Echo>,
+    #[serde(skip)]
+    preparation_epoch: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -48,6 +50,7 @@ pub(crate) fn accounting(message: &ck_wire::CkWireMessage, index: usize) -> Opti
 
 impl ReminderEchoes {
     pub(super) fn truncate(&mut self, through: Option<u64>) {
+        self.preparation_epoch = self.preparation_epoch.wrapping_add(1);
         if let Some(through) = through {
             self.blocks.retain(|echo| echo.ordinal <= through);
         } else {
@@ -59,12 +62,20 @@ impl ReminderEchoes {
     // Only cut capture and pruning (`cut_seed`) call this; only tests drive them so far.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn truncate_below(&mut self, first: u64) {
+        self.preparation_epoch = self.preparation_epoch.wrapping_add(1);
         self.blocks.retain(|echo| echo.ordinal >= first);
         self.awaiting_resync.retain(|echo| echo.ordinal >= first);
     }
 
     pub(super) fn finish_resync(&mut self) {
+        if !self.awaiting_resync.is_empty() {
+            self.preparation_epoch = self.preparation_epoch.wrapping_add(1);
+        }
         self.awaiting_resync.clear();
+    }
+
+    pub(super) fn preparation_epoch(&self) -> u64 {
+        self.preparation_epoch
     }
 
     pub(super) fn retained_bytes(&self) -> usize {
@@ -103,6 +114,7 @@ impl ReminderEchoes {
             }
         });
         if restored {
+            self.preparation_epoch = self.preparation_epoch.wrapping_add(1);
             return Ok(());
         }
         if ledger.is_empty() {
@@ -147,6 +159,7 @@ impl ReminderEchoes {
                     if let Some(index) = ck_index {
                         used.insert(index);
                     }
+                    self.preparation_epoch = self.preparation_epoch.wrapping_add(1);
                     self.blocks.push(Echo {
                         ordinal: entry.ordinal,
                         mid: entry.mid.clone(),
@@ -180,6 +193,7 @@ impl ReminderEchoes {
                             continue;
                         };
                         if let Some(sent) = ledger.recognize(text, now, entry.written_at) {
+                            self.preparation_epoch = self.preparation_epoch.wrapping_add(1);
                             self.blocks.push(Echo {
                                 ordinal: entry.ordinal,
                                 mid: entry.mid.clone(),
@@ -360,6 +374,7 @@ impl ReminderEchoes {
         kept: &tool_arcs::KeptMessages,
         ranges: &mut [view::ViewRange],
     ) -> Result<(), HandlerOutcome> {
+        self.preparation_epoch = self.preparation_epoch.wrapping_add(1);
         for range in ranges {
             let view::ViewRange::Keep { from, to, edits } = range else {
                 continue;
@@ -517,6 +532,7 @@ mod tests {
                 frozen: true,
             }],
             awaiting_resync: Vec::new(),
+            preparation_epoch: 0,
         };
         let mut ranges = vec![view::ViewRange::keep_with_edits(
             0,

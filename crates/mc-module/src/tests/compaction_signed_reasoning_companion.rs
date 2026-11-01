@@ -42,6 +42,7 @@ fn compaction_views_strip_later_signed_reasoning_unless_the_runner_owns_the_comp
             request_tokens: 0,
             context_window: 100_000,
             prefix_rebuilding: false,
+            cold_prefix: false,
             pipeline_switch: false,
             last_applied_version: None,
             last_not_applied: None,

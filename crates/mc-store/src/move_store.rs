@@ -186,11 +186,16 @@ pub(crate) fn install_writer_guards(conn: &Connection) -> rusqlite::Result<()> {
                 _ => &["OLD"],
             };
             let allowed = draining_exception(table.table, action, table.columns);
-            let conditions = sides.iter().map(|side| format!(
+            let conditions = sides.iter().map(|side| {
+                if table.table == "mc_cache_sections" {
+                    let owner = crate::async_compaction_layout::owner_expression(side);
+                    return format!("({owner}) IS NULL OR EXISTS(SELECT 1 FROM mc_move_fences f WHERE f.session_id=({owner}) AND CASE WHEN f.phase='draining' AND ({allowed}) THEN 0 ELSE 1 END)");
+                }
+                format!(
                 // CASE fails closed if a JSON field needed by the exception is
                 // missing (SQL NULL must not become a terminalization permit).
                 "EXISTS(SELECT 1 FROM mc_move_fences f WHERE f.session_id = {side}.{} AND CASE WHEN f.phase = 'draining' AND ({allowed}) THEN 0 ELSE 1 END)", codec::quoted(owner)
-            )).collect::<Vec<_>>().join(" OR ");
+            )}).collect::<Vec<_>>().join(" OR ");
             conn.execute_batch(&format!(
                 "CREATE TEMP TRIGGER IF NOT EXISTS {} BEFORE {action} ON main.{} WHEN {conditions} BEGIN SELECT RAISE(ABORT, 'session_moving'); END;",
                 codec::quoted(&format!("mc_move_guard_{}_{}", table.table, action.to_lowercase())), codec::quoted(table.table)
@@ -996,8 +1001,13 @@ impl MoveStore {
             };
             // Tag deletion triggers keep summaries alive; delete that summary
             // last. No parent FK cascades can delete an unbounded half here.
+            let order = if table.table == "mc_cache_sections" {
+                // Keep v2 ownership headers until every dependent KV row has
+                // been removed; later batches still need their selector.
+                format!("ORDER BY CASE WHEN session_id='{}' THEN 1 ELSE 0 END", crate::async_compaction_layout::HEADERS)
+            } else { String::new() };
             let sql = format!(
-                "DELETE FROM {} WHERE rowid IN (SELECT rowid FROM {} WHERE {predicate} LIMIT 1)",
+                "DELETE FROM {} WHERE rowid IN (SELECT rowid FROM {} WHERE ({predicate}) {order} LIMIT 1)",
                 codec::quoted(table.table),
                 codec::quoted(table.table)
             );
@@ -1129,6 +1139,15 @@ fn validate_row_owner(
     row: &[Value],
     session: &str,
 ) -> Result<(), MoveError> {
+    if table.table == "mc_cache_sections" {
+        if let Some(owned) = crate::async_compaction_layout::special_owner(row, session) {
+            return if owned {
+                Ok(())
+            } else {
+                Err(MoveError::refusal("identity_mismatch"))
+            };
+        }
+    }
     let owner = table
         .session_column()
         .ok_or_else(|| MoveError::refusal("inventory_mismatch"))?;
@@ -1159,8 +1178,9 @@ fn staged_conversation_catalogue(
     for table in codec::ship_tables(store) {
         let count = codec::read_section(&mut input, table)?;
         let conversation = table.table == "mc_provider_conversations_v2";
+        let async_sections = store == Store::Module && table.table == "mc_cache_sections";
         let columns = table.shipped_columns();
-        if conversation {
+        if conversation || async_sections {
             catalogue.execute_batch(&format!(
                 "CREATE TABLE {} ({})",
                 codec::quoted(table.table),
@@ -1173,7 +1193,10 @@ fn staged_conversation_catalogue(
         }
         for _ in 0..count {
             let row = codec::read_row(&mut input, table)?;
-            if conversation {
+            let async_header = async_sections
+                && row.first()
+                    == Some(&Value::Text(crate::async_compaction_layout::HEADERS.into()));
+            if conversation || async_header {
                 validate_row_owner(table, &row, session)?;
                 catalogue.execute(
                     &format!(

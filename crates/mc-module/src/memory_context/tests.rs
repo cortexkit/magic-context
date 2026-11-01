@@ -508,14 +508,7 @@ async fn fake_endpoint(mode: Mode, hold_first: bool) -> FakeEndpoint {
 }
 
 fn reader(file: Option<PathBuf>) -> MemoryContextReader {
-    MemoryContextReader::new(
-        file,
-        BindIdentity::new(
-            PathBuf::from("/fixture/project"),
-            "test-harness",
-            "instance",
-        ),
-    )
+    MemoryContextReader::new(file, BindIdentity::new("test-harness", "instance"))
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-//! One non-blocking persistence lane for registered project pins.
+//! One non-blocking writer for registered pins and obsolete worktree-record cleanup.
 
 use super::{sidecar_path, IdentityRecord};
 use mc_store::private_permissions::write_file_atomic;
@@ -17,13 +17,13 @@ struct Pin {
     private: bool,
     revision: u64,
     persisted: bool,
+    remove_if_unchanged: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
 struct State {
-    // This is the process's identity cache, not a work queue. Failed and overflowed
-    // pins stay visible and are retried when their folder is next bound. Keeping
-    // completed pins also prevents a concurrent late answer replacing the first pin.
+    // Failed and overflowed pins stay visible until persisted. Completed destinations
+    // reject late publications but are never returned by overlay lookups.
     pins: HashMap<PathBuf, Pin>,
     queued: HashMap<PathBuf, Pin>,
     active: Option<(PathBuf, u64)>,
@@ -89,6 +89,9 @@ impl PinWriter {
     pub(super) fn lookup(&self, path: &Path) -> Option<IdentityRecord> {
         let mut state = self.shared.state.lock().unwrap();
         let pin = state.pins.get(path)?.clone();
+        if pin.persisted {
+            return None;
+        }
         Self::schedule(&mut state, path, pin.clone());
         self.shared.changed.notify_all();
         Some(pin.record)
@@ -101,20 +104,44 @@ impl PinWriter {
             .unwrap()
             .pins
             .iter()
-            .filter(|(path, _)| path.parent() == Some(sidecars))
+            .filter(|(path, pin)| !pin.persisted && path.parent() == Some(sidecars))
             .map(|(_, pin)| (pin.record.directory.clone(), pin.record.clone()))
             .collect()
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        self.shared.state.lock().unwrap().revision
     }
 
     pub(super) fn publish(&self, sidecars: &Path, record: IdentityRecord, private: bool) {
         let path = sidecar_path(sidecars, Path::new(&record.directory));
         let mut state = self.shared.state.lock().unwrap();
-        // Two concurrent accepted answers must not replace the first process pin.
+        // Two concurrent accepted answers must not replace the first pending pin.
         if let Some(pin) = state.pins.get(&path).cloned() {
             Self::schedule(&mut state, &path, pin);
         } else {
             Self::enqueue_latest(&mut state, path, record, private);
         }
+        self.shared.changed.notify_all();
+    }
+
+    pub(super) fn remove_if_unchanged(&self, path: PathBuf, bytes: Vec<u8>) {
+        let mut state = self.shared.state.lock().unwrap();
+        if state.pins.contains_key(&path) {
+            return;
+        }
+        let Ok(record) = serde_json::from_slice(&bytes) else {
+            return;
+        };
+        state.revision += 1;
+        let pin = Pin {
+            record,
+            private: false,
+            revision: state.revision,
+            persisted: false,
+            remove_if_unchanged: Some(bytes),
+        };
+        Self::schedule(&mut state, &path, pin);
         self.shared.changed.notify_all();
     }
 
@@ -125,6 +152,7 @@ impl PinWriter {
             private,
             revision: state.revision,
             persisted: false,
+            remove_if_unchanged: None,
         };
         state.pins.insert(path.clone(), pin.clone());
         Self::schedule(state, &path, pin);
@@ -147,16 +175,30 @@ impl PinWriter {
             };
             // Serialization and all filesystem work happen without holding the
             // overlay lock: neither a slow disk nor fsync can stall a bind.
-            let result = serde_json::to_vec(&pin.record)
-                .map_err(std::io::Error::other)
-                .and_then(|bytes| write(&path, &bytes, pin.private));
+            let result = if let Some(expected) = &pin.remove_if_unchanged {
+                match std::fs::read(&path) {
+                    Ok(bytes) if bytes == *expected => std::fs::remove_file(&path).inspect(|()| {
+                        tracing::info!(path = %path.display(), "Removed stale worktree identity; borrowing checkout project pin");
+                    }),
+                    Ok(_) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error),
+                }
+            } else {
+                serde_json::to_vec(&pin.record)
+                    .map_err(std::io::Error::other)
+                    .and_then(|bytes| write(&path, &bytes, pin.private))
+            };
             let mut state = shared.state.lock().unwrap();
             state.active = None;
             if result.is_ok() {
-                if let Some(current) = state.pins.get_mut(&path) {
-                    if current.revision == pin.revision {
-                        current.persisted = true;
-                    }
+                if state
+                    .pins
+                    .get(&path)
+                    .is_some_and(|current| current.revision == pin.revision)
+                {
+                    state.pins.get_mut(&path).unwrap().persisted = true;
+                    state.revision += 1;
                 }
             } else {
                 tracing::warn!(path = %path.display(), error = ?result.err(), "Project pin persistence failed; retaining process pin");
@@ -257,7 +299,43 @@ mod tests {
             directory: super::super::project_directory_key(directory),
             identity: identity.into(),
             git_common_dir: None,
+            via: None,
         }
+    }
+
+    #[test]
+    fn worktree_cleanup_preserves_a_changed_sidecar_and_does_not_publish_a_pin() {
+        let temp = temp();
+        let sidecars = temp.path().join("sidecars");
+        let directory = temp.path().join("worktree");
+        let path = sidecar_path(&sidecars, &directory);
+        let bytes = serde_json::to_vec(&record(&directory, "git:abcdef123")).unwrap();
+        write_file_atomic(&path, &bytes, false).unwrap();
+        let (writer, gate) = blocked_writer();
+        writer.publish(
+            &sidecars,
+            record(&temp.path().join("other"), "pj-OTHER"),
+            false,
+        );
+        gate.wait_for_write();
+        writer.remove_if_unchanged(path.clone(), bytes.clone());
+        write_file_atomic(
+            &path,
+            &serde_json::to_vec(&record(&directory, "pj-NEW")).unwrap(),
+            false,
+        )
+        .unwrap();
+        gate.release();
+        assert!(writer.flush(Duration::from_secs(5)));
+        assert_eq!(
+            read_record(&sidecars, &directory).unwrap().identity,
+            "pj-NEW"
+        );
+        assert!(writer.lookup(&path).is_none());
+        write_file_atomic(&path, &bytes, false).unwrap();
+        writer.remove_if_unchanged(path.clone(), bytes);
+        assert!(writer.flush(Duration::from_secs(5)));
+        assert!(!path.exists());
     }
 
     async fn bind(resolver: &ProjectIdentityResolver, folder: &Path, identity: &str) -> String {
@@ -265,6 +343,7 @@ mod tests {
             ResolveAnswer::Registered {
                 project_id: identity.into(),
                 canonical_root: Some(folder.to_path_buf()),
+                root_registered: false,
             }
         })
         .await
@@ -323,6 +402,35 @@ mod tests {
         assert_eq!(resolver.common_dir_pin(&child).as_deref(), Some("pj-root"));
         resolver.pin_live_answer(&child, "pj-nested", Some(&child));
         assert!(resolver.common_dir_pin(&child).is_none());
+        gate.release();
+        assert!(writer.shutdown(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn publishing_a_pin_invalidates_a_cached_worktree_miss_before_persistence() {
+        let temp = temp();
+        let sidecars = temp.path().join("sidecars");
+        let main = temp.path().join("repo");
+        let worktree = temp.path().join("worktree");
+        let gitdir = main.join(".git/worktrees/linked");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::create_dir(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        let (writer, gate) = blocked_writer();
+        let resolver = ProjectIdentityResolver::with_pin_writer(sidecars.clone(), writer.clone());
+        assert!(resolver.common_dir_pin(&worktree).is_none());
+        resolver.pin_live_answer(&main, "pj-PENDING", Some(&main));
+        gate.wait_for_write();
+        assert!(!sidecar_path(&sidecars, &main).exists());
+        assert_eq!(
+            resolver.common_dir_pin(&worktree).as_deref(),
+            Some("pj-PENDING")
+        );
         gate.release();
         assert!(writer.shutdown(Duration::from_secs(5)));
     }

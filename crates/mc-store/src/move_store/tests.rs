@@ -7,6 +7,9 @@ use cortexkit_cache_core::CoreState;
 use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "async_layout_tests.rs"]
+mod async_layout_tests;
+
 fn open(dir: &Path) -> McStore {
     McStore::open(&StorageDescriptor {
         module_id: "magic-context".into(),

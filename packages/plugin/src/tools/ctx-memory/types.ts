@@ -42,7 +42,7 @@ export interface CtxMemoryToolDeps {
     db: Database;
     ensureProjectRegistered?: (directory: string, db: Database) => Promise<void>;
     /**
-     * Resolve the project identity for the active session's directory.
+     * Read the session's recorded identity, awaiting its first decision if necessary.
      *
      * Why a function instead of a baked string: OpenCode's top-level
      * `ctx.directory` is the directory the OpenCode process was started
@@ -52,7 +52,10 @@ export interface CtxMemoryToolDeps {
      * `ctx_memory` operates on the session's project, not the launch
      * directory's project.
      */
-    resolveProjectPath: (directory: string) => string | undefined;
+    resolveProjectPath: (
+        directory: string,
+        sessionId: string,
+    ) => string | undefined | Promise<string | undefined>;
     memoryEnabled?: boolean;
     embeddingEnabled?: boolean;
     allowedActions?: CtxMemoryAction[];

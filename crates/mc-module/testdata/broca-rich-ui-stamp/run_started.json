@@ -1,0 +1,1 @@
+{"kind":"control","cursor":{"wal_seq":1,"sub_index":0},"unit":{"type":"run_started","run_id":"r1"},"seq":1,"event":{"type":"run_started","run_id":"r1","rich_ui":{"dialect":"1.0","catalog_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}

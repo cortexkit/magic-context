@@ -53,7 +53,7 @@ impl Server {
                 key: key.clone(),
                 daemon_id,
                 pid: std::process::id(),
-                daemon_ver: "describe-fixture".into(),
+                daemon_ver: "0.39.0".into(),
             },
         )
         .unwrap();
@@ -141,6 +141,7 @@ impl Server {
             handshake_timeout: Duration::from_secs(2),
             request_timeout: Duration::from_secs(2),
             await_timeout: Duration::from_secs(2),
+            child_scope: Some(crate::child_scopes::test_selector(self.root.path())),
         }
     }
 }

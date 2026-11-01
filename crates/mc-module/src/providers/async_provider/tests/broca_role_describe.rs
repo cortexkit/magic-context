@@ -246,7 +246,9 @@ async fn broca_role_describe_setup_checkpoint() {
     for (name, writer, answer) in captures() {
         let dir = tempfile::tempdir().unwrap();
         let session = fixture::fixture_session();
-        let paths = fixture::write_stores(dir.path());
+        // The move's apply step needs the marker on the selected cut message
+        // before it writes.
+        let paths = fixture::write_moved_session_stores(dir.path());
         offline_move::run(&paths, &session, false, &fixture::NoHolders, None).unwrap();
         let mut served = None;
         let (rig, result) = Rig::try_setup_with_model(
@@ -271,15 +273,16 @@ async fn broca_role_describe_setup_checkpoint() {
             1,
             "{name}"
         );
-        if writer {
-            assert_eq!(result["answer"], "ready", "{name}: {result}");
+        // These captured releases predate message_checkpoint, so even a writer
+        // with tag_checkpoint cannot adopt a message-numbered moved session.
+        {
             assert_eq!(
-                result["checkpoint"]["tag_checkpoint"], 20,
-                "{name}: {result}"
-            );
-        } else {
-            assert_eq!(
-                result["code"], "tag_checkpoint_unsupported",
+                result["code"],
+                if writer {
+                    "message_checkpoint_unsupported"
+                } else {
+                    "tag_checkpoint_unsupported"
+                },
                 "{name}: {result}"
             );
             let decoded: contract::setup::SetupAnswer =

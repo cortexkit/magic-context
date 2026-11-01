@@ -1,3 +1,4 @@
+use cortexkit_role_llm_runner::serializer_profile::{pi_projected_content, pi_served_body, PiEdit};
 use serde_json::{json, Map, Value};
 
 use crate::ck_wire::{
@@ -16,6 +17,18 @@ use super::sidecar::{
 pub type PiSessionEntryJson = Value;
 
 const HARNESS: &str = "pi";
+
+pub fn is_synthesized(entry: &Value) -> bool {
+    entry["type"] == "branch_summary" || entry["message"]["role"] == "bashExecution"
+}
+
+pub fn whole_row_drop(message: &CkWireMessage) -> bool {
+    message.content.is_empty()
+        || message
+            .content
+            .iter()
+            .all(crate::transform::is_dropped_placeholder_block)
+}
 
 pub fn decode_pi(entries: &[PiSessionEntryJson]) -> DecodedHarnessMessages {
     decode_pi_with_sidecar(entries, None)
@@ -62,7 +75,16 @@ fn decode_pi_with_origins(
         }
 
         let Some(message) = pi_message(raw_entry) else {
-            if is_pi_opaque_entry(raw_entry) {
+            if matches!(
+                raw_entry["type"].as_str(),
+                Some("custom_message" | "branch_summary")
+            ) {
+                decoded.push(decode_notice_entry(
+                    raw_entry,
+                    ordinals.map_or((decoded.len() + 1) as u64, |o| o[entry_index]),
+                    &mut sidecar,
+                ));
+            } else if is_pi_opaque_entry(raw_entry) {
                 decoded.push(decode_opaque_entry(
                     raw_entry,
                     ordinals.map_or((decoded.len() + 1) as u64, |o| o[entry_index]),
@@ -94,10 +116,27 @@ fn decode_pi_with_origins(
         };
 
         match role.as_str() {
-            "user" => decode_user_message(message, ordinal, &mut content, &mut block_metas),
+            "user" | "system" => {
+                decode_user_message(message, ordinal, &mut content, &mut block_metas)
+            }
+            "bashExecution" => {
+                if let Ok(projected) = pi_projected_content(raw_entry) {
+                    decode_user_message(
+                        &json!({"content":projected}),
+                        ordinal,
+                        &mut content,
+                        &mut block_metas,
+                    );
+                }
+            }
             "assistant" => {
                 decode_assistant_message(message, ordinal, &mut content, &mut block_metas)
             }
+            "toolResult"
+                if raw_entry["type"] == "message"
+                    && cortexkit_role_llm_runner::serializer_profile::top_level_part_count(
+                        "pi", raw_entry,
+                    ) == Ok(0) => {}
             "toolResult" => {
                 decode_tool_result_message(message, ordinal, &mut content, &mut block_metas)
             }
@@ -107,7 +146,7 @@ fn decode_pi_with_origins(
             }
         }
 
-        let ck_role = if role == "toolResult" {
+        let ck_role = if matches!(role.as_str(), "toolResult" | "bashExecution") {
             "tool"
         } else {
             role.as_str()
@@ -205,6 +244,10 @@ fn decode_user_message(
                     }
                 }
             }
+        }
+        Some(reference @ Value::Object(_)) if reference["type"] == "text_ref" => {
+            let block = opaque_block("text_ref", reference.clone(), None);
+            push_block(content, block_metas, block, 0, reference, "text_ref");
         }
         _ => {}
     }
@@ -370,7 +413,7 @@ fn decode_opaque_entry(
     let mut blocks = Vec::new();
     push_block(&mut content, &mut blocks, block, 0, raw_entry, "opaque");
     let ck = CkWireMessage::from_parts(
-        "user",
+        "notice",
         content,
         None,
         ProviderExtras::new(),
@@ -395,9 +438,79 @@ fn decode_opaque_entry(
     CkIngressMessage { mid, ordinal, ck }
 }
 
+fn decode_notice_entry(raw: &Value, ordinal: u64, sidecar: &mut DecodeSidecar) -> CkIngressMessage {
+    let stable_key = string_field(raw, "id")
+        .unwrap_or_else(|| format!("pi-entry-{}", stable_hash_prefix(raw, 24)));
+    let mid = sidecar
+        .inherit_pin(&stable_key)
+        .unwrap_or_else(|| stable_key.clone());
+    sidecar.pin_mid(stable_key.clone(), mid.clone());
+    let mut content = Vec::new();
+    let mut blocks = Vec::new();
+    if let Ok(projected) = pi_projected_content(raw) {
+        decode_user_message(
+            &json!({"content":projected}),
+            ordinal,
+            &mut content,
+            &mut blocks,
+        );
+    }
+    let ck = CkWireMessage::from_parts(
+        "notice",
+        content,
+        None,
+        ProviderExtras::new(),
+        HarnessMeta {
+            harness_id: Some(mid.clone()),
+            ordinal: Some(ordinal),
+            ..Default::default()
+        },
+    );
+    sidecar.remember_message(
+        mid.clone(),
+        HarnessMessageMeta {
+            mid: mid.clone(),
+            ordinal,
+            role: raw["type"].as_str().unwrap().into(),
+            raw: raw.clone(),
+            stable_key: Some(stable_key),
+            blocks,
+        },
+    );
+    CkIngressMessage { mid, ordinal, ck }
+}
+
 fn encode_with_meta(msg: &CkWireMessage, meta: &HarnessMessageMeta) -> Option<Value> {
     let mut raw = meta.raw.clone();
     let matched_metas = match_block_metas(&msg.content, &meta.blocks, false, block_matches_meta);
+    if msg.content.len() == meta.blocks.len()
+        && msg
+            .content
+            .iter()
+            .zip(&matched_metas.by_block)
+            .all(|(block, meta)| meta.is_some_and(|meta| block_is_unchanged(block, meta)))
+    {
+        return Some(raw);
+    }
+    if is_synthesized(&raw) {
+        // Pi builds shell and branch text from native fields but provides no
+        // way to write edited model text back into those fields. The provider
+        // refuses partial edits before encoding; whole-row drops omit the row
+        // like tool results. Direct codec callers must obey the same rule.
+        assert!(
+            whole_row_drop(msg),
+            "pi_synthesized_edit_unsupported: {}",
+            meta.mid
+        );
+        return None;
+    }
+    if msg.content.is_empty() && raw["type"] != Value::Null && meta.role != "toolResult" {
+        return pi_served_body(&raw, PiEdit::Removed).ok();
+    }
+    if raw["type"] == "custom_message" {
+        update_pi_message_content(&mut raw, msg, &matched_metas);
+        return Some(raw);
+    }
     if meta.role == "toolResult" || raw.get("role").and_then(Value::as_str) == Some("toolResult") {
         let (block, matched_meta) = msg
             .content
@@ -473,10 +586,7 @@ fn update_pi_message_content(
     msg: &CkWireMessage,
     matched_metas: &MatchedBlockMetas<'_>,
 ) {
-    if msg.role == "user"
-        && msg.content.len() == 1
-        && message.get("content").is_some_and(Value::is_string)
-    {
+    if msg.content.len() == 1 && message.get("content").is_some_and(Value::is_string) {
         if let Some(CkWireBlock {
             kind: CkKind::Text { text },
             ..
@@ -750,7 +860,8 @@ fn pi_stable_key(raw_entry: &Value, message: &Value, entry_index: usize) -> Stri
 }
 
 fn first_sight_pi_mid(raw_entry: &Value, message: &Value, stable_key: &str) -> String {
-    string_field(message, "responseId")
+    string_field(raw_entry, "id")
+        .or_else(|| string_field(message, "responseId"))
         .or_else(|| message_timestamp(message).map(|ts| format!("pi-ts-{ts}")))
         .or_else(|| entry_timestamp(raw_entry).map(|ts| format!("pi-ts-{ts}")))
         .unwrap_or_else(|| stable_key.to_string())
@@ -1092,7 +1203,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn response_id_arriving_later_does_not_replace_pinned_timestamp_mid() {
+    fn journal_id_survives_later_response_id() {
         let first = vec![json!({
             "type": "message",
             "id": "entry-a",
@@ -1108,7 +1219,7 @@ mod tests {
             }
         })];
         let decoded_first = decode_pi(&first);
-        assert_eq!(decoded_first.messages[0].mid, "pi-ts-42");
+        assert_eq!(decoded_first.messages[0].mid, "entry-a");
 
         let settled = vec![json!({
             "type": "message",
@@ -1126,7 +1237,7 @@ mod tests {
             }
         })];
         let decoded_settled = decode_pi_with_sidecar(&settled, Some(&decoded_first.sidecar));
-        assert_eq!(decoded_settled.messages[0].mid, "pi-ts-42");
+        assert_eq!(decoded_settled.messages[0].mid, "entry-a");
     }
 
     #[test]

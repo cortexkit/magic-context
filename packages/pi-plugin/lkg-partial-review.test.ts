@@ -41,6 +41,10 @@ for (const position of [0,1,2]) test(`cache review partial-commit LKG: position 
   let restarted:any, restartError:any; try {restarted=await pass();}catch(e){restartError=e;}
    restartSpy.mockRestore();releaseGate();
   expect(result).toBeDefined();
+   // A heuristic tag-write failure rolls back the entire authorization/drop lane;
+   // only the unchanged last-served fallback may escape, never speculative edits.
+   expect(JSON.stringify(result.messages)).toBe(JSON.stringify(before.messages));
+   expect(getTagsBySession(db,session).filter(t=>t.type==='tool' && t.status==='dropped')).toHaveLength(0);
   expect(restarted).toBeDefined();
   expect(gate).toEqual({foldDue:false,foldExecuted:false,foldBustsServedPrefix:false,shouldApplyPendingOps:false,shouldRunHeuristics:false,shouldRunReasoningCleanup:false});
   expect(JSON.stringify(restarted.messages)).toBe(JSON.stringify(result.messages));

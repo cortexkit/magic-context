@@ -1,5 +1,25 @@
-use super::super::setup_checkpoint::broca_role_describe::{capture_logs, captures};
+use super::super::setup_checkpoint::broca_role_describe::{
+    capture_logs, captures as historical_captures,
+};
 use super::*;
+
+fn captures() -> Vec<(&'static str, bool, Value)> {
+    historical_captures()
+        .into_iter()
+        .map(|(name, writer, mut describe)| {
+            // Historical releases predate message_checkpoint. These positive
+            // offline fixtures model the same descriptions after that capability
+            // is added; the raw captures remain covered by Setup refusal tests.
+            if writer {
+                describe["capabilities"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!("message_checkpoint"));
+            }
+            (name, writer, describe)
+        })
+        .collect()
+}
 
 async fn prepare_capture(
     store: &Path,
@@ -57,7 +77,10 @@ async fn broca_role_describe_offline_cli_and_matching_first_notice() {
         );
         assert!(arm.state().offline_first_pass.is_some(), "{name}");
         assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok", "{name}");
-        assert!(arm.state().offline_first_pass.is_none(), "{name}");
+        assert!(
+            super::super::super::offline_first_pass::adopted(&arm.state()),
+            "{name}"
+        );
         assert_eq!(
             arm.state().generation,
             0,
@@ -89,14 +112,17 @@ async fn broca_role_describe_first_notice_decodes_every_capture() {
             config(),
         );
         assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok", "{name}");
-        assert!(arm.state().offline_first_pass.is_none(), "{name}");
+        assert!(
+            super::super::super::offline_first_pass::adopted(&arm.state()),
+            "{name}"
+        );
         assert_eq!(arm.state().generation, if writer { 0 } else { 1 }, "{name}");
         assert_eq!(arm.state().entries.len(), prep.served.len(), "{name}");
     }
 }
 
 #[tokio::test]
-async fn broca_role_describe_offline_rerun_pins_the_description_without_writing() {
+async fn broca_role_describe_offline_rerun_reprepares_changed_supported_descriptions() {
     let _clock = crate::tests::fixed_clock();
     for (name, writer, description) in captures() {
         let (store, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -118,24 +144,33 @@ async fn broca_role_describe_offline_rerun_pins_the_description_without_writing(
                 matches!(result, Ok(OfflineOutcome::Unchanged(_))),
                 "{name}: {result:?}"
             );
+            assert_eq!(
+                store_rows(&prep.paths),
+                before,
+                "{name}: unchanged rerun wrote"
+            );
             setup["runner_describe"] = if name.ends_with("before") {
                 captures()[1].2.clone()
             } else {
                 captures()[0].2.clone()
             };
             std::fs::write(&prep.args.setup, setup.to_string()).unwrap();
-            assert_eq!(
-                refusal_code(first_pass(&prep.args, project.path(), &fixture::NoHolders).await),
-                "offline_state_differs",
-                "{name}: an upgrade or downgrade cannot reuse a different receipt"
+            let result = first_pass(&prep.args, project.path(), &fixture::NoHolders).await;
+            assert!(
+                matches!(result, Ok(OfflineOutcome::Prepared(ref report)) if report.generation == 1),
+                "{name}: an upgrade or downgrade needs a new preparation: {result:?}"
             );
         } else {
-            assert_eq!(refusal_code(result), "offline_state_differs", "{name}");
+            assert!(
+                format!("{result:?}").contains("checkpoint_unsupported"),
+                "{name}: {result:?}"
+            );
+            assert_eq!(
+                store_rows(&prep.paths),
+                before,
+                "{name}: refused rerun wrote"
+            );
         }
-        assert!(
-            store_rows(&prep.paths) == before,
-            "{name}: neither unchanged nor refused reruns write"
-        );
     }
 }
 
@@ -186,12 +221,16 @@ async fn broca_role_describe_upgrade_discards_receipt_once_at_setup_or_notice() 
         );
         if at_setup {
             let answer = arm.setup(setup_request(&prep.session, "fixture")).await;
-            assert_eq!(answer["answer"], "ready", "{answer}");
-            assert!(arm.state().entries.is_empty());
-            assert!(arm.state().offline_first_pass.is_none());
+            assert_eq!(answer["code"], "moved_session_unprepared", "{answer}");
+            assert_eq!(arm.state().entries.len(), prep.served.len());
+            assert!(!super::super::super::offline_first_pass::adopted(
+                &arm.state()
+            ));
         }
         assert_eq!(arm.notice(1, 0, None, Vec::new()).await, "ok");
-        assert!(arm.state().offline_first_pass.is_none());
+        assert!(super::super::super::offline_first_pass::adopted(
+            &arm.state()
+        ));
         assert_eq!(arm.state().generation, 1);
         assert_eq!(
             arm.state().entries.len(),

@@ -4,10 +4,7 @@ import {
     isCompartmentLeaseHeld,
     releaseCompartmentLeaseBestEffort,
 } from "../../features/magic-context/compartment-lease";
-import {
-    type Compartment,
-    getCompartments,
-} from "../../features/magic-context/compartment-storage";
+import type { Compartment } from "../../features/magic-context/compartment-storage";
 import { queueM0Mutation } from "../../features/magic-context/storage-m0-mutation-log";
 import {
     clearPendingPiCompactionMarkerStateIf,
@@ -16,6 +13,7 @@ import {
     type PendingPiCompactionMarker,
 } from "../../features/magic-context/storage-meta-persisted";
 import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
+import { getTableColumnNames } from "../../features/magic-context/storage-schema-helpers";
 import { sessionRenderCacheValueSql } from "../../features/magic-context/storage-session-cache";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
@@ -92,6 +90,34 @@ interface BaselineRow {
 
 type HistoryBoundary = Pick<Compartment, "sequence" | "endMessageId">;
 type HistoryAnchor = HistoryBoundary & Pick<Compartment, "endMessage">;
+
+/** Keep getCompartments' row validation without transferring the summary bodies. */
+function readStoreBoundaries(db: Database, sessionId: string): HistoryBoundary[] {
+    const columns = getTableColumnNames(db, "compartments");
+    // Mirror isCompartmentRow, including optional columns on older stores.
+    const numbers = ["id", "sequence", "start_message", "end_message", "created_at"];
+    const strings = ["session_id", "start_message_id", "end_message_id", "title", "content"];
+    const predicates = [...numbers, ...strings].every((column) => columns.has(column))
+        ? [
+              ...numbers.map((column) => `typeof(${column}) IN ('integer', 'real')`),
+              ...strings.map((column) => `typeof(${column}) = 'text'`),
+          ]
+        : ["0"];
+    for (const column of ["p1", "p2", "p3", "p4", "episode_type"]) {
+        if (columns.has(column)) predicates.push(`typeof(${column}) IN ('text', 'null')`);
+    }
+    for (const column of ["importance", "legacy"]) {
+        if (columns.has(column))
+            predicates.push(`typeof(${column}) IN ('integer', 'real', 'null')`);
+    }
+    return db
+        .prepare(
+            `SELECT sequence, ${columns.has("end_message_id") ? "end_message_id" : "NULL"} AS endMessageId
+             FROM compartments WHERE session_id = ? AND ${predicates.join(" AND ")}
+             ORDER BY sequence ASC`,
+        )
+        .all(sessionId) as HistoryBoundary[];
+}
 
 function readBaseline(db: Database, sessionId: string): BaselineRow {
     const row = db
@@ -215,7 +241,7 @@ export function repairMissingHistoryBoundary(args: {
                       "SELECT sequence, COALESCE(end_message_id, '') AS endMessageId FROM compartments WHERE session_id = ? ORDER BY sequence",
                   )
                   .all(sessionId) as HistoryBoundary[])
-            : getCompartments(db, sessionId);
+            : readStoreBoundaries(db, sessionId);
     // The boundary is the newest compartment that has an end id at all. Newer
     // compartments without one (legacy rows, or rows carried into a forked
     // session) are not the boundary: they keep rendering, and the boundary
@@ -267,9 +293,9 @@ export function repairMissingHistoryBoundary(args: {
         let dropped: number[] | null;
         let anchorForDrop = anchor as HistoryAnchor | null;
         try {
-            // An intact branch check never reads summary bodies or ordinals.
+            // An intact boundary check never reads summary bodies or ordinals.
             // Only an actual retirement needs the surviving anchor's ordinal.
-            if (scope === "active-branch" && anchor) {
+            if (anchor) {
                 const row = db
                     .prepare(
                         "SELECT end_message AS endMessage FROM compartments WHERE session_id = ? AND sequence = ?",

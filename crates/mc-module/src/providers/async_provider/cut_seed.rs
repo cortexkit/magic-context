@@ -1397,7 +1397,7 @@ impl AsyncRecord {
     pub(super) fn begin_at_cut(
         &mut self,
         store: &McStore,
-        mut seed: CutSeed,
+        seed: CutSeed,
         start: CutStart,
     ) -> Result<(), HandlerOutcome> {
         if !self.entries.is_empty() {
@@ -1405,7 +1405,33 @@ impl AsyncRecord {
                 "a conversation begins at a cut only before it holds rows",
             ));
         }
-        if seed.summary_end().is_none() && start == CutStart::Fresh {
+        if start == CutStart::Descending {
+            if !seed.boundary_safe() {
+                return Err(error(
+                    "unsafe_cut_seed",
+                    "the stored head requires a fresh full lineage",
+                ));
+            }
+            return self.adopt_folded_head(store, seed);
+        }
+        self.stage_fresh_cut(store, seed)?;
+        self.save(store, &[])
+    }
+
+    /// Initialize the namespace and stage fresh cut fields without saving the
+    /// provider record. Setup saves the complete answer and validated window
+    /// together, so a retry cannot see a half-started lineage.
+    pub(super) fn stage_fresh_cut(
+        &mut self,
+        store: &McStore,
+        mut seed: CutSeed,
+    ) -> Result<(), HandlerOutcome> {
+        if !self.entries.is_empty() {
+            return Err(invalid(
+                "a conversation begins at a cut only before it holds rows",
+            ));
+        }
+        if seed.summary_end().is_none() {
             seed.set_recovery_history(
                 store
                     .load_compartments(&self.namespace())
@@ -1422,10 +1448,7 @@ impl AsyncRecord {
                 "the stored head requires a fresh full lineage",
             ));
         }
-        if start == CutStart::Descending {
-            return self.adopt_folded_head(store, seed);
-        }
-        self.initialize_cut_namespace(store, &seed)?;
+        self.engine_cache_witness = Some(self.initialize_cut_namespace(store, &seed)?);
         if let Some(json) = &seed.window.frozen_edits {
             self.frozen_edits = frozen_edits::FrozenEdits::from_json(json)?;
             self.frozen_edits.dirty = true;
@@ -1451,14 +1474,14 @@ impl AsyncRecord {
         self.cut_seed = Some(Arc::new(seed));
         self.aggregates = self.base_aggregates();
         self.journal.cut_seed_dirty = true;
-        self.save(store, &[])
+        Ok(())
     }
 
     pub(super) fn initialize_cut_namespace(
         &self,
         store: &McStore,
         seed: &CutSeed,
-    ) -> Result<(), HandlerOutcome> {
+    ) -> Result<engine_cache::Witness, HandlerOutcome> {
         // Commit the history's coverage through the cut in the engine
         // namespace first, as the fold that made the cut did: the seeded
         // boundary adopts it from the compartments, and the engine's first
@@ -1542,7 +1565,10 @@ impl AsyncRecord {
                 loaded.meta.shadow_seq = seq_before;
             })?;
         }
-        Ok(())
+        // Installing a certified cut intentionally replaces the engine's
+        // baseline. Record the replacement's digest so later passes validate
+        // against it, not against the parent namespace's last pass.
+        engine_cache::capture(store, self)
     }
 
     /// Whether a Setup that names `descends_from` continues from a cut this
@@ -1708,6 +1734,7 @@ impl AsyncRecord {
         self.journal.cut_seed_dirty = true;
         let codec = codec::Codec::from_params(&Value::Object(self.setup.params.clone()))?;
         let rows = tag_rows(self, codec)?;
+        self.engine_cache_witness = Some(engine_cache::capture(store, self)?);
         self.save(store, &rows)
     }
 

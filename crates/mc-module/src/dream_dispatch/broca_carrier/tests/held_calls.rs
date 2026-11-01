@@ -13,6 +13,7 @@ async fn broca_held_calls_dreamer_real_port_and_carrier() {
             let fixture = Fixture::new(BASE);
             let server = capture_server(capture, child_runner_describe(), true).await;
             let port = SubcBroca {
+                child_scopes: crate::child_scopes::test_service(),
                 connection_file: server.connection_file.clone(),
                 route_targets: RouteTargetConfig::runner_module("llm-runner"),
                 project_root: fixture.context.config.directory.clone(),
@@ -62,6 +63,18 @@ async fn broca_held_calls_dreamer_real_port_and_carrier() {
                 Some(completion.text)
             };
             let result_calls = server.result_calls().await;
+            let routes = server.child_route_metadata().await;
+            assert!(!routes.is_empty());
+            for (identity, scope) in routes {
+                assert!(identity.get("project_root").is_none());
+                assert!(identity.get("project_id").is_none());
+                assert_eq!(
+                    scope,
+                    Some(crate::child_scopes::test_selector(
+                        &fixture.context.config.directory
+                    ))
+                );
+            }
             assert_eq!(result_calls, usize::from(!capture.listed()));
             outcomes.push((text, result_calls));
         }

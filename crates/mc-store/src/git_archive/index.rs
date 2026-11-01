@@ -347,7 +347,7 @@ pub fn latest_indexed_sha(
     .optional()
 }
 
-fn upsert_batch(
+pub(super) fn upsert_batch(
     db: &Connection,
     project_identity: &str,
     commits: &[GitCommit],

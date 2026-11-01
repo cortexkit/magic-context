@@ -15,11 +15,20 @@ import { rememberPinnedProjectIdentity } from "@magic-context/core/features/magi
 import {
 	__resetSessionIdentityDecisionsForTests,
 	readSessionIdentityDecision,
+	resolveSessionProjectIdentity,
 } from "@magic-context/core/features/magic-context/memory/session-identity-decision";
 import {
 	closeDatabase,
 	openDatabase,
 } from "@magic-context/core/features/magic-context/storage";
+import {
+	readSessionMeta,
+	updateSessionMeta,
+} from "@magic-context/core/features/magic-context/storage-meta-session";
+import {
+	_resetHarnessForTesting,
+	setHarness,
+} from "@magic-context/core/shared/harness";
 import * as logger from "@magic-context/core/shared/logger";
 import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
 import {
@@ -30,6 +39,7 @@ import {
 	trackSessionForProject,
 } from "./context-handler";
 import extension, { __test as indexTest } from "./index";
+import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import {
 	createIdentityPeer,
 	registeredProjectId,
@@ -75,6 +85,9 @@ afterEach(async () => {
 	__resetProjectIdentityForTests();
 	indexTest.clearPiStartupMaintenanceClaim();
 	indexTest.clearPiInProcessSubagentInitContext();
+	__setPiHarnessKindForTesting(undefined);
+	_resetHarnessForTesting();
+	setHarness("pi");
 	for (const key of envKeys) {
 		if (originalEnv[key] === undefined) delete process.env[key];
 		else process.env[key] = originalEnv[key];
@@ -108,7 +121,7 @@ function row(sessionId: string) {
 	)?.project_path;
 }
 
-async function runtime(directory: string) {
+async function runtime(directory: string, dreamerEnabled = false) {
 	const peer = await createIdentityPeer(temp.dir, directory);
 	cleanups.push(() => peer.close());
 	const configDir = join(process.env.XDG_CONFIG_HOME as string, "cortexkit");
@@ -118,7 +131,7 @@ async function runtime(directory: string) {
 		JSON.stringify({
 			subc: { connection_file: peer.connectionFile },
 			memory: { enabled: true },
-			dreamer: { disable: true },
+			dreamer: { disable: !dreamerEnabled },
 			embedding: { provider: "off" },
 		}),
 	);
@@ -180,6 +193,286 @@ async function runtime(directory: string) {
 }
 
 describe("Pi session identity decisions", () => {
+	it("keeps search and smart notes on the served owner during a pending move", async () => {
+		const a = folder("search-served");
+		const b = folder("search-pending");
+		const host = await runtime(a, true);
+		const sessionId = "pi-search-owner";
+		const ctx = context(sessionId, a);
+		await host.start(ctx);
+		await host.pass(ctx);
+		rememberPinnedProjectIdentity(b, "pj-PENDING");
+		const moved = context(sessionId, b);
+		await host.tools.get("ctx_memory")!.execute(
+			"write",
+			{
+				action: "write",
+				category: "PROJECT_RULES",
+				content: "Unrendered gateway upload rule.",
+			},
+			undefined,
+			undefined,
+			moved,
+		);
+		const db = openDatabase()!;
+		const memory = db
+			.prepare("SELECT id FROM memories WHERE content = ?")
+			.get("Unrendered gateway upload rule.") as { id: number };
+		const search = await host.tools
+			.get("ctx_search")!
+			.execute(
+				"search",
+				{ query: String(memory.id) },
+				undefined,
+				undefined,
+				moved,
+			);
+		expect(JSON.stringify(search)).toContain("Unrendered gateway upload rule.");
+		await host.tools.get("ctx_note")!.execute(
+			"smart",
+			{
+				action: "write",
+				content: "Served-owner smart note.",
+				surface_condition: "When editing upload limits",
+			},
+			undefined,
+			undefined,
+			moved,
+		);
+		expect(
+			db
+				.prepare("SELECT project_path FROM notes WHERE content = ?")
+				.get("Served-owner smart note."),
+		).toEqual({ project_path: registeredProjectId });
+	});
+
+	it("recovers an upgraded owner from cached bytes without changing the prefix", async () => {
+		const directory = folder("proven-upgrade");
+		const host = await runtime(directory);
+		const sessionId = "pi-proven-upgrade";
+		const ctx = context(sessionId, directory);
+		await host.start(ctx);
+		await host.pass(ctx);
+		const db = openDatabase()!;
+		const served = readSessionMeta(db, sessionId);
+		updateSessionMeta(db, sessionId, { cachedM0ProjectIdentity: null });
+		expect(
+			await resolveSessionProjectIdentity(sessionId, directory, { db }),
+		).toBe(registeredProjectId);
+		const recovered = readSessionMeta(db, sessionId);
+		expect(recovered.cachedM0ProjectIdentity).toBe(registeredProjectId);
+		expect(recovered.cachedM0Bytes).toEqual(served.cachedM0Bytes);
+		expect(recovered.cachedM1Bytes).toEqual(served.cachedM1Bytes);
+		expect(recovered.cachedM0MaterializedAt).toBe(
+			served.cachedM0MaterializedAt,
+		);
+	});
+
+	for (const harness of ["pi", "omp"] as const) {
+		it(`${harness}: unknown-owner refusal clears at the next admitted rebuild without restart`, async () => {
+			__setPiHarnessKindForTesting(harness);
+			_resetHarnessForTesting();
+			setHarness(harness);
+			const directory = folder(`${harness}-upgrade-rebuild`);
+			const host = await runtime(directory, true);
+			const sessionId = `${harness}-upgrade-rebuild`;
+			const ctx = context(sessionId, directory);
+			await host.start(ctx);
+			await host.pass(ctx);
+			const db = openDatabase()!;
+			await host.tools.get("ctx_note")!.execute(
+				"smart-before-upgrade",
+				{
+					action: "write",
+					content: "Existing smart note.",
+					surface_condition: "When editing upload limits",
+				},
+				undefined,
+				undefined,
+				ctx,
+			);
+			const smart = db
+				.prepare("SELECT id FROM notes WHERE content = ?")
+				.get("Existing smart note.") as { id: number };
+			updateSessionMeta(db, sessionId, { cachedM0ProjectIdentity: null });
+			db.prepare(
+				"DELETE FROM memory_applied_snapshots WHERE session_id = ?",
+			).run(sessionId);
+			const baseline = readSessionMeta(db, sessionId);
+			const execute = (name: string, params: Record<string, unknown>) =>
+				host.tools
+					.get(name)!
+					.execute("upgrade", params, undefined, undefined, ctx);
+			expect(
+				JSON.stringify(
+					await execute("ctx_memory", {
+						action: "write",
+						category: "PROJECT_RULES",
+						content: "Allowed only after rebuilding.",
+					}),
+				),
+			).toContain("ctx_memory write refused");
+			expect(
+				JSON.stringify(
+					await execute("ctx_note", {
+						action: "write",
+						content: "Smart note must wait.",
+						surface_condition: "When editing upload limits",
+					}),
+				),
+			).toContain("ctx_note write refused");
+			for (const action of ["read", "update", "dismiss"]) {
+				expect(
+					JSON.stringify(
+						await execute("ctx_note", {
+							action,
+							note_ids: [smart.id],
+							content: "Must not update.",
+						}),
+					),
+				).toContain(`ctx_note ${action} refused`);
+			}
+			expect(
+				JSON.stringify(
+					await execute("ctx_search", {
+						query: "Existing smart note",
+						sources: ["memory", "primer", "note"],
+					}),
+				),
+			).toContain("ctx_search memory refused");
+			const sessionNote = await execute("ctx_note", {
+				action: "write",
+				content: "Session notes still work.",
+			});
+			expect(sessionNote.isError).not.toBe(true);
+			const note = db
+				.prepare("SELECT id FROM notes WHERE content = ?")
+				.get("Session notes still work.") as { id: number };
+			for (const action of ["read", "update", "dismiss"]) {
+				expect(
+					(
+						await execute("ctx_note", {
+							action,
+							note_ids: [note.id],
+							content: "Updated session note.",
+						})
+					).isError,
+				).not.toBe(true);
+			}
+			await host.pass(ctx);
+			const deferred = readSessionMeta(db, sessionId);
+			expect(deferred.cachedM0ProjectIdentity).toBeNull();
+			expect(deferred.cachedM0Bytes).toEqual(baseline.cachedM0Bytes);
+			expect(deferred.cachedM1Bytes).toEqual(baseline.cachedM1Bytes);
+			// A changed system prompt independently admits the next prefix rebuild.
+			updateSessionMeta(db, sessionId, {
+				systemPromptHash: "new-system-prompt",
+			});
+			await host.pass(ctx);
+			expect(readSessionMeta(db, sessionId).cachedM0ProjectIdentity).toBe(
+				registeredProjectId,
+			);
+			expect(
+				db
+					.prepare("SELECT harness FROM session_projects WHERE session_id = ?")
+					.get(sessionId),
+			).toEqual({ harness });
+			expect(
+				(
+					await execute("ctx_memory", {
+						action: "write",
+						category: "PROJECT_RULES",
+						content: "Allowed only after rebuilding.",
+					})
+				).isError,
+			).not.toBe(true);
+			expect(
+				db
+					.prepare("SELECT project_path FROM memories WHERE content = ?")
+					.get("Allowed only after rebuilding."),
+			).toEqual({ project_path: registeredProjectId });
+		});
+	}
+
+	it("review: Pi memory writes must follow the served prefix rather than a pending directory move", async () => {
+		const a = folder("served-project");
+		const b = folder("pending-project");
+		const host = await runtime(a);
+		const sessionId = "pi-review-served-owner";
+		const ctx = context(sessionId, a);
+		await host.start(ctx);
+		await host.tools.get("ctx_memory")!.execute(
+			"review-baseline-write",
+			{
+				action: "write",
+				category: "PROJECT_RULES",
+				content: "The served project keeps upload limits in its gateway.",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		await host.pass(ctx);
+		const db = openDatabase()!;
+		const served = readSessionMeta(db, sessionId);
+		expect(served.cachedM0ProjectIdentity).toBe(registeredProjectId);
+		expect(served.cachedM0Bytes).not.toBeNull();
+		expect(served.cachedM0Bytes!.toString()).toContain(
+			"The served project keeps upload limits in its gateway.",
+		);
+		rememberPinnedProjectIdentity(b, "pj-PENDING");
+		await host.tools.get("ctx_memory")!.execute(
+			"review-move-write",
+			{
+				action: "write",
+				category: "PROJECT_RULES",
+				content: "Pi served-owner witness",
+			},
+			undefined,
+			undefined,
+			context(sessionId, b),
+		);
+		expect(readSessionMeta(db, sessionId).cachedM0Bytes).toEqual(
+			served.cachedM0Bytes,
+		);
+		const saved = db
+			.prepare("SELECT project_path FROM memories WHERE content = ?")
+			.get("Pi served-owner witness") as { project_path: string } | null;
+		expect(saved).not.toBeNull();
+		expect(saved!.project_path).toBe(registeredProjectId);
+	});
+
+	it("review: Pi memory writes must refuse an unproven upgraded prefix", async () => {
+		const directory = folder("legacy-project");
+		const host = await runtime(directory);
+		const sessionId = "pi-review-unproven-owner";
+		const ctx = context(sessionId, directory);
+		await host.start(ctx);
+		await host.pass(ctx);
+		const db = openDatabase()!;
+		updateSessionMeta(db, sessionId, { cachedM0ProjectIdentity: null });
+		db.prepare("DELETE FROM memory_applied_snapshots WHERE session_id = ?").run(
+			sessionId,
+		);
+		expect(readSessionMeta(db, sessionId).cachedM0Bytes).not.toBeNull();
+		const result = await host.tools.get("ctx_memory")!.execute(
+			"review-unproven-write",
+			{
+				action: "write",
+				category: "PROJECT_RULES",
+				content: "Pi unknown-owner witness",
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		const saved = db
+			.prepare("SELECT project_path FROM memories WHERE content = ?")
+			.get("Pi unknown-owner witness");
+		expect(saved).toBeNull();
+		expect(JSON.stringify(result)).toContain("ctx_memory write refused");
+	});
+
 	it("keeps A's git decision after B rebuilds the same directory's config cache", async () => {
 		const directory = folder("shared");
 		const host = await runtime(directory);

@@ -29,7 +29,7 @@ use crate::{dream_dispatch::broca_carrier::PortError, model_work::RoutingCatalog
 pub struct ProductionWire {
     connection_file: PathBuf,
     module_id: String,
-    scopes: Scopes,
+    scopes: Arc<Scopes>,
     runners: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<RunnerPort>>>>,
 }
 
@@ -58,7 +58,7 @@ impl ProductionWire {
         Self {
             connection_file,
             module_id,
-            scopes: Scopes::default(),
+            scopes: Arc::new(Scopes::default()),
             runners: tokio::sync::Mutex::default(),
         }
     }
@@ -66,6 +66,12 @@ impl ProductionWire {
     /// Must be called after polling the registered connection's serve future.
     pub async fn initialize(&self, handle: ModuleHandle) -> Result<(), WireRefusal> {
         self.scopes.initialize(handle).await
+    }
+
+    /// Child and dream scopes share one full-snapshot publisher, so publishing
+    /// either kind cannot end the other kind's live scopes.
+    pub fn install_child_scopes(&self, child_scopes: &crate::child_scopes::ChildScopes) {
+        child_scopes.install_publisher(self.scopes.clone());
     }
 
     pub(super) fn selector(&self, scope: &DreamScope) -> ScopeSelector {
@@ -91,7 +97,6 @@ impl ProductionWire {
                 Arc::new(tokio::sync::Mutex::new(RunnerPort::new(
                     self.connection_file.clone(),
                     self.selector(scope),
-                    scope.workdir.clone(),
                     bind.clone(),
                 )))
             })
@@ -115,7 +120,7 @@ impl ProductionWire {
             let route = consumer
                 .open_route_scoped(
                     crate::route_targets::routed_module_target(provider),
-                    BindIdentity::new(scope.workdir.clone(), "magic-context", scope.scope_ref()),
+                    BindIdentity::new("magic-context", scope.scope_ref()),
                     self.selector(scope),
                     options.clone(),
                 )

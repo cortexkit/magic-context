@@ -67,6 +67,7 @@ export async function cleanupLegacyHiddenChildren(
                             );
                         }),
                     ]);
+                    note(`[magic-context] legacy hidden child ${child.id} removed`);
                 } catch (error) {
                     if (!isSessionNotFound(error)) throw error;
                 }

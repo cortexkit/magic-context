@@ -111,6 +111,10 @@ interface RunCompartmentPhaseArgs {
     fallbackModelId?: string;
     ensureProjectRegistered?: (directory: string, db: ContextDatabase) => Promise<void>;
     projectPath?: string;
+    /** Owner this pass is authorized to serve, including a held prefix's owner. */
+    projectIdentity?: string;
+    /** Recheck ownership in the runner: summaries continue while this session's memory pauses. */
+    projectOwnerUnavailable?: boolean;
     injectionBudgetTokens?: number;
     getNotificationParams?: () => import("./send-session-notification").NotificationParams;
     /** True when this pass is already safe for background compression to run. */
@@ -436,6 +440,9 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                     historianMaxOutputTokens: args.historianMaxOutputTokens,
                     fallbackModels: args.fallbackModels,
                     directory: args.compartmentDirectory,
+                    ...(!args.projectOwnerUnavailable && "projectIdentity" in args
+                        ? { projectIdentity: args.projectIdentity }
+                        : {}),
                     fallbackModelId: args.fallbackModelId,
                     ensureProjectRegistered: args.ensureProjectRegistered,
                     getNotificationParams: args.getNotificationParams,
@@ -503,6 +510,9 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                 historianMaxOutputTokens: args.historianMaxOutputTokens,
                 fallbackModels: args.fallbackModels,
                 directory: args.compartmentDirectory,
+                ...(!args.projectOwnerUnavailable && "projectIdentity" in args
+                    ? { projectIdentity: args.projectIdentity }
+                    : {}),
                 fallbackModelId: args.fallbackModelId,
                 ensureProjectRegistered: args.ensureProjectRegistered,
                 getNotificationParams: args.getNotificationParams,

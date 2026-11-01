@@ -131,6 +131,7 @@ impl Clock for SystemClock {
 
 /// Process-wide state of the Rust dreamer.
 pub struct DreamRuns {
+    child_scopes: Arc<crate::child_scopes::ChildScopes>,
     targets: Mutex<HashMap<String, DreamTarget>>,
     in_flight: Arc<Mutex<HashSet<String>>>,
     timer: AtomicBool,
@@ -151,8 +152,13 @@ pub struct DreamRuns {
 }
 
 impl DreamRuns {
-    pub fn new(connection_file: Option<PathBuf>, route_targets: &RouteTargetConfig) -> Self {
+    pub fn new(
+        connection_file: Option<PathBuf>,
+        route_targets: &RouteTargetConfig,
+        child_scopes: Arc<crate::child_scopes::ChildScopes>,
+    ) -> Self {
         Self {
+            child_scopes,
             targets: Mutex::default(),
             in_flight: Arc::default(),
             timer: AtomicBool::new(false),
@@ -573,6 +579,9 @@ impl Run<'_> {
         captured: Arc<super::context::CapturedConfig>,
         manual: Option<ManualRun>,
     ) -> Result<RunReport, String> {
+        if manual.is_none() {
+            self.index_git(&captured);
+        }
         // An explicit `broca` keeps a runner lane on the configured Broca module;
         // `host` or no choice means the conversation's own runner.
         let session_runner = self
@@ -627,6 +636,7 @@ impl Run<'_> {
                         project_root: captured.directory.clone(),
                         harness: self.harness.to_owned(),
                         session_runner: Some(route.clone()),
+                        child_scopes: Arc::clone(&self.handles.runs.child_scopes),
                     },
                     routes: self.handles.broca_routes.clone(),
                     module_id: self.handles.module_id.clone(),
@@ -655,6 +665,7 @@ impl Run<'_> {
                         project_root: captured.directory.clone(),
                         harness: self.harness.to_owned(),
                         session_runner: None,
+                        child_scopes: Arc::clone(&self.handles.runs.child_scopes),
                     },
                     routes: self.handles.broca_routes.clone(),
                     module_id: self.handles.module_id.clone(),
@@ -680,6 +691,36 @@ impl Run<'_> {
             }
         }
         Ok(report)
+    }
+
+    fn index_git(&self, captured: &super::context::CapturedConfig) {
+        let settings = &captured.effective["memory"]["git_commit_indexing"];
+        if settings["enabled"].as_bool() != Some(true) {
+            return;
+        }
+        let options = mc_store::git_archive::index::IndexOptions {
+            since_days: settings["since_days"].as_f64().unwrap_or(365.0),
+            max_commits: settings["max_commits"].as_f64().unwrap_or(2000.0),
+        };
+        let clock = self.handles.runs.clock();
+        match self.store.index_git_commits(
+            self.project,
+            &captured.directory,
+            &options,
+            clock.now_ms(),
+            || clock.now_ms(),
+        ) {
+            Ok(Some(result)) => tracing::info!(
+                project = self.project,
+                new_commits = result.inserted,
+                scanned = result.scanned,
+                evicted = result.evicted,
+                non_indexable = result.non_indexable,
+                "git index"
+            ),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(project = self.project, %error, "git index failed"),
+        }
     }
 
     fn task_config(
@@ -717,11 +758,7 @@ impl Run<'_> {
             .with_project_context(
                 Arc::new(crate::memory_context::MemoryContextReader::new(
                     self.handles.runs.connection_file.clone(),
-                    subc_protocol::BindIdentity::new(
-                        captured.directory.clone(),
-                        self.harness,
-                        self.session,
-                    ),
+                    subc_protocol::BindIdentity::new(self.harness, self.session),
                 )),
                 captured.directory.clone(),
                 self.harness,
@@ -880,7 +917,7 @@ impl RoutedRun<'_> {
                     OPERATIONAL_TASKS,
                 ).with_project_context(Arc::new(crate::memory_context::MemoryContextReader::new(
                     self.handles.runs.connection_file.clone(),
-                    subc_protocol::BindIdentity::new(captured.directory.clone(), "magic-context", ROUTED_STORE_SESSION),
+                    subc_protocol::BindIdentity::new("magic-context", ROUTED_STORE_SESSION),
                 )), captured.directory.clone(), ""),
             };
             drive(
@@ -941,3 +978,7 @@ mod concurrency_tests {
         assert_eq!(ROUTED_RUNS.load(Ordering::Acquire), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "git_tick_tests.rs"]
+mod git_tests;

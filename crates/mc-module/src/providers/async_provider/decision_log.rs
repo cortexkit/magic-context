@@ -4,7 +4,7 @@
 //! A notice is decided `execute` (its engine pass published a new view) or
 //! `defer` (it published nothing: the engine deferred, or there was no work
 //! to run the engine for). A ride is decided `ride` (a rewrite cause:
-//! `ttl_expired`, `model_change`, `account_change` or `surface_change`) or
+//! `ttl_expired`, `model_change`, `account_change`, `surface_change` or `chain_reset`) or
 //! `ceiling`. Every line carries the usage figure the decision saw, the
 //! execute threshold it was compared with, and whether a finished summary is
 //! waiting to be published. The lines are logging only: computing them reads
@@ -28,6 +28,8 @@ pub(super) struct Pass {
     pub pruned_rebuild: bool,
     /// The pass published a new view.
     pub published: bool,
+    /// Publication only reissued verified serving bytes after a resync.
+    pub replayed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

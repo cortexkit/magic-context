@@ -427,6 +427,9 @@ fn runtime_projection(config: crate::config::McModuleConfig) -> Value {
         historian_context_limit_known,
         memory_budget_tokens,
         user_profile_budget_tokens,
+        // Not in the published config read yet: adding it changes the pinned
+        // app-read samples, which go out as their own sample release.
+        history_budget_percentage: _,
         inject_docs,
         temporal_awareness,
         prompt_surface_guidance_override: _, // Guidance contains arbitrary user prompt text and is not exposed.

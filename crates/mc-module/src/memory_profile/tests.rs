@@ -626,12 +626,23 @@ fn handler_fixture() -> (crate::McHandler, tempfile::TempDir) {
 }
 
 async fn route_bind(handler: &crate::McHandler, root: &Path, harness: &str, session: &str) {
-    let request = subc_client_rs::RouteBindRequest::new(
+    let mut request = subc_client_rs::RouteBindRequest::new(
         subc_client_rs::RouteHandle::detached(7, 1),
         subc_protocol::RouteTarget::ToolProvider {
             module_id: "magic-context".into(),
         },
-        subc_protocol::BindIdentity::new(root.to_path_buf(), harness, session),
+        subc_protocol::BindIdentity::new(harness, session),
+    );
+    request.scope = Some(
+        subc_protocol::scope::ScopeStamp::new(
+            subc_protocol::Principal::Reserved {
+                module_id: "thalamus-harness".into(),
+            },
+            "memory-profile-fixture",
+            1,
+            subc_protocol::scope::ScopeKind::Ephemeral,
+        )
+        .with_workdir(Some(root.to_string_lossy().into_owned())),
     );
     <crate::McHandler as subc_client_rs::ModuleHandler>::on_bind(handler, &request).await;
 }

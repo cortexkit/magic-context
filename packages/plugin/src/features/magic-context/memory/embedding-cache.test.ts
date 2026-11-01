@@ -31,6 +31,29 @@ afterEach(() => {
 });
 
 describe("embedding-cache", () => {
+    it("reloads pj- project embeddings when that project's epoch changes", () => {
+        db = createTestDb();
+        const projectPath = "pj-embedding-cache";
+        const memory = insertMemory(db, {
+            projectPath,
+            category: "ARCHITECTURE_DECISIONS",
+            content: "Reload vectors after a dashboard edit.",
+        });
+        saveEmbedding(db, memory.id, new Float32Array([1, 0]), "mock:model");
+        const initial = getProjectEmbeddings(db, projectPath, "mock:model");
+        expect(toNumbers(initial.get(memory.id))).toEqual([1, 0]);
+
+        saveEmbedding(db, memory.id, new Float32Array([0, 1]), "mock:model");
+        expect(getProjectEmbeddings(db, projectPath, "mock:model")).toBe(initial);
+        db.prepare(
+            "INSERT INTO project_state (project_path, project_memory_epoch) VALUES (?, 1)",
+        ).run(projectPath);
+
+        const reloaded = getProjectEmbeddings(db, projectPath, "mock:model");
+        expect(reloaded).not.toBe(initial);
+        expect(toNumbers(reloaded.get(memory.id))).toEqual([0, 1]);
+    });
+
     it("reloads project embeddings after TTL expiry", async () => {
         db = createTestDb();
         setEmbeddingCacheTtlForTests(10);

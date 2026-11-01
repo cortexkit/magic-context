@@ -304,6 +304,74 @@ async fn pruned_reread_after_an_account_change_ride_does_not_rebuild_again() {
     );
 }
 
+#[tokio::test]
+async fn chain_reset_lands_cleanup_like_ttl_and_does_not_rebuild_again_after_pruning() {
+    let ttl_dir = tempfile::tempdir().unwrap();
+    let reset_dir = tempfile::tempdir().unwrap();
+    let (ttl, ttl_reasoning, _, ttl_pruned) = pruning_rig(ttl_dir.path()).await;
+    let (reset, reset_reasoning, _, reset_pruned) = pruning_rig(reset_dir.path()).await;
+    serve_pruned(&ttl, ttl_pruned, "0", kinds::REASONING, &ttl_reasoning);
+    serve_pruned(
+        &reset,
+        reset_pruned,
+        "0",
+        kinds::REASONING,
+        &reset_reasoning,
+    );
+    let ttl_view = ttl.ride("ttl_expired").await.expect("TTL cache-loss ride");
+    let reset_view = reset
+        .ride("chain_reset")
+        .await
+        .expect("predictable full-resend ride");
+    assert_eq!(reset_view.ranges, ttl_view.ranges);
+    assert_eq!(reset.render(&reset_view), ttl.render(&ttl_view));
+    assert_eq!(reset.state().cache_ttl(), ttl.state().cache_ttl());
+    for (rig, view) in [(&ttl, ttl_view), (&reset, reset_view)] {
+        assert!(
+            rig.pending_targets().is_empty(),
+            "the ride must land queued cleanup"
+        );
+        // The response to the full resend queues new cleanup while its cache is warm.
+        rig.queue(&[178]).await;
+        let pending = rig.pending_targets();
+        assert!(try_notice(rig, 2, 1_000, Some(view.view_version)).await);
+        assert_eq!(
+            rig.newest(),
+            Some(view.view_version),
+            "prune reconciliation must not cause a second rebuild"
+        );
+        assert_eq!(rig.pending_targets(), pending);
+        assert!(try_notice(rig, 3, 1_000, Some(view.view_version)).await);
+        assert_eq!(
+            rig.newest(),
+            Some(view.view_version),
+            "quiet notices must keep the cache warm"
+        );
+        assert_eq!(rig.pending_targets(), pending);
+    }
+    let lines = reset
+        .h
+        .provider_store
+        .async_runtime
+        .decision_lines
+        .lock()
+        .unwrap();
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("+rebuild"))
+            .count(),
+        1,
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("ride cause=chain_reset")),
+        "{lines:#?}"
+    );
+}
+
 /// The `signature` kind removes a signature from a non-reasoning part; the
 /// llm-runner contract (§9.14.1) keeps that part's text byte-identical and
 /// says "a `signature`-kind text part keeps its number and its exact text".

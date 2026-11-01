@@ -1,0 +1,10 @@
+{
+  "applied_view_version": "1",
+  "est_tokens": "311",
+  "lineage_id": "ccf8b6de-edba-4f52-affb-bc844ccda580",
+  "model": "conformance-model-cf-part-edit-1161",
+  "seq": "4",
+  "session_ref": "828b10bbe380c69080b5d1c081f5b3cf",
+  "through_digest": "b4db47310b28f02357a902ecf9682bf56791201304f8c40384b26c4160b203a2",
+  "through_ordinal": "3"
+}

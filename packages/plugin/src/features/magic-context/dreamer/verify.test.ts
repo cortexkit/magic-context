@@ -37,8 +37,8 @@ import {
     applyVerifyManifest,
     computeVerifyBatchSliceMs,
     runVerify,
+    VERIFY_BATCH_DEFAULT_MS,
     VERIFY_BATCH_FLOOR_MS,
-    VERIFY_RUN_SLICE_MS,
     type VerifyArgs,
 } from "./verify";
 
@@ -958,9 +958,12 @@ describe("runVerify disposition", () => {
         }
     });
 
-    test("computeVerifyBatchSliceMs caps the slice and never exceeds the budget", () => {
-        expect(computeVerifyBatchSliceMs(20 * 60_000, 10)).toBe(VERIFY_RUN_SLICE_MS);
-        expect(computeVerifyBatchSliceMs(20 * 60_000, 2)).toBe(VERIFY_RUN_SLICE_MS);
+    test("computeVerifyBatchSliceMs keeps the default or a larger fair share within the deadline", () => {
+        // Four minutes is still the default, but no longer caps a longer task's fair share.
+        expect(computeVerifyBatchSliceMs(20 * 60_000, 10)).toBe(VERIFY_BATCH_DEFAULT_MS);
+        expect(computeVerifyBatchSliceMs(20 * 60_000, 2)).toBe(10 * 60_000);
+        expect(computeVerifyBatchSliceMs(20 * 60_000, 1)).toBe(20 * 60_000);
+        expect(computeVerifyBatchSliceMs(VERIFY_BATCH_DEFAULT_MS, 1)).toBe(240_000);
         expect(computeVerifyBatchSliceMs(VERIFY_BATCH_FLOOR_MS + 1, 5)).toBe(
             VERIFY_BATCH_FLOOR_MS + 1,
         );

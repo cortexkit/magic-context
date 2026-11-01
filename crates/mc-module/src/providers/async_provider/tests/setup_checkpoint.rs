@@ -13,18 +13,26 @@ pub(super) mod broca_role_describe;
 
 const MODULE: &str = "thalamus-harness";
 
+#[path = "message_checkpoint.rs"]
+pub(super) mod message_checkpoint;
+
 #[tokio::test]
 async fn a_moved_session_answers_setup_with_its_checkpoint_and_the_runner_anchors_at_its_cut() {
     let dir = tempfile::tempdir().unwrap();
     let (rig, answer) = moved_rig(dir.path(), true).await;
-    let expected = &fixture::fixture()["expected"];
-    let cut = expected["cut"].as_str().unwrap();
+    // The selected cut is msg_m007, the newest eligible user carrier
+    // immediately after the fold end msg_m006; it has no neighbour at its time
+    // or time + 1.
+    let cut = "msg_m007";
     let decoded: SetupAnswer = serde_json::from_value(answer.clone()).unwrap();
     let checkpoint = decoded
         .checkpoint()
         .cloned()
         .expect("a moved session's checkpoint");
-    assert_eq!(checkpoint, contract::setup::SetupCheckpoint::new(20, cut));
+    let record = rig.state().standalone_move.unwrap();
+    assert_eq!(checkpoint, record.checkpoint());
+    assert_eq!(checkpoint.message_count, Some(6));
+    assert_eq!(checkpoint.head_cut.as_ref().unwrap().mid, "msg_m006");
     assert!(answer.get("tag_checkpoint").is_none() && answer.get("cut").is_none());
     assert!(
         rig.runner
@@ -89,7 +97,9 @@ async fn a_runner_without_tag_checkpoint_never_gets_the_checkpoint() {
 async fn a_first_setup_without_tag_checkpoint_is_refused_and_stores_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let session = fixture::fixture_session();
-    let paths = fixture::write_stores(dir.path());
+    // The fixture puts the marker on the selected cut message; otherwise the
+    // move's apply step would refuse with `source_changed`.
+    let paths = fixture::write_moved_session_stores(dir.path());
     offline_move::run(&paths, &session, false, &fixture::NoHolders, None).unwrap();
     let (rig, answer) = Rig::try_setup_with_model(
         dir.path(),

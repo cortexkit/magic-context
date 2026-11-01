@@ -139,7 +139,7 @@ export interface TranscriptPart {
      *
      * For non-tool parts both byte fields are undefined/0.
      */
-    getToolMetadata(): {
+    getToolMetadata(options?: { skipInputTokenCount?: boolean }): {
         toolName: string | undefined;
         inputByteSize: number;
         inputTokenCount: number;

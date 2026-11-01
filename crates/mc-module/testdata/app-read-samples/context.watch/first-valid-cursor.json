@@ -1,0 +1,29 @@
+{
+  "name": "first notice with replayable cursor is changes since that cursor",
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "cursor": "abc:0",
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  },
+  "response": {
+    "cursor": "abc:1",
+    "kind": "changes",
+    "op": "context.watch",
+    "schema": 1,
+    "sessions": [
+      {
+        "harness": "opencode",
+        "runner": "opencode",
+        "session": "s"
+      }
+    ]
+  }
+}

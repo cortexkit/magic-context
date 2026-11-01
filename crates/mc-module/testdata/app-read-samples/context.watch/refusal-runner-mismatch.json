@@ -1,0 +1,28 @@
+{
+  "name": "a session named with another runner is watched; its own read refuses",
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "other",
+          "session": "s"
+        }
+      ]
+    }
+  },
+  "response": {
+    "cursor": "abc:0",
+    "kind": "resync",
+    "op": "context.watch",
+    "schema": 1,
+    "sessions": [
+      {
+        "harness": "opencode",
+        "runner": "other",
+        "session": "s"
+      }
+    ]
+  }
+}

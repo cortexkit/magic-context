@@ -5,7 +5,6 @@ import { promisify } from "node:util";
 
 import {
     assertNoDuplicateManifestIds,
-    assertParsedManifestNonEmpty,
     describeUnrecognizedManifestShape,
     extractCompleteManifestBody,
 } from "./manifest-parser";
@@ -261,16 +260,15 @@ export function parseMapMemoriesManifest(text: string): ParsedMemoryMapping[] {
     return out;
 }
 
-/** Retry responses must contain a non-empty manifest with syntactically valid
- *  entries and a closing root element, so the response is complete rather than
- *  truncated. The mapper commits valid expected ids and retries only omissions.
+/** Responses must contain a closed manifest with syntactically valid entries.
+ *  A closed empty manifest is valid when no memory's mapping could be confirmed.
+ *  The mapper commits valid expected ids; omissions follow its retry/backoff policy.
  *  Duplicate expected ids are rejected; duplicate unknown ids are ignored. */
 export function validateMapMemoriesManifest(
     text: string,
     expectedIds: ReadonlySet<number>,
 ): ParsedMemoryMapping[] {
     const parsed = parseMapMemoriesManifest(text);
-    assertParsedManifestNonEmpty(parsed.length, expectedIds.size, text, "mappings", "memory");
     assertNoDuplicateManifestIds(
         parsed.filter((entry) => expectedIds.has(entry.id)).map((entry) => entry.id),
         "mappings",

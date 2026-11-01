@@ -161,6 +161,49 @@ mod tests {
             vec!["entry"]
         );
     }
+
+    #[test]
+    fn rerank_timeout_accepts_integer_valued_json_numbers() {
+        let input = json!({"rerank": {"timeout_ms": 100.0}});
+        let (parsed, issues) = schema_parse(&schema()["config"], Some(&input), "");
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(parsed.unwrap()["rerank"]["timeout_ms"], json!(100));
+    }
+
+    #[test]
+    fn rerank_timeout_clamps_out_of_range_values() {
+        for (timeout, expected) in [(-1, 50), (1, 50), (90_000, 15_000)] {
+            let input = json!({"rerank": {"timeout_ms": timeout}});
+            let (parsed, issues) = schema_parse(&schema()["config"], Some(&input), "");
+            assert!(issues.is_empty(), "{issues:?}");
+            assert_eq!(parsed.unwrap()["rerank"]["timeout_ms"], json!(expected));
+        }
+    }
+
+    #[test]
+    fn rerank_remote_refinement_requires_endpoint_and_model() {
+        let valid = json!({"rerank": {"provider": "remote", "endpoint": "https://example.invalid/rerank", "model": "reranker"}});
+        let (_, issues) = schema_parse(&schema()["config"], Some(&valid), "");
+        assert!(issues.is_empty(), "{issues:?}");
+        for (rerank, expected) in [
+            (
+                json!({"provider": "remote", "model": "reranker"}),
+                vec!["rerank.endpoint"],
+            ),
+            (
+                json!({"provider": "remote", "endpoint": "https://example.invalid/rerank", "model": " "}),
+                vec!["rerank.model"],
+            ),
+            (
+                json!({"provider": "remote"}),
+                vec!["rerank.endpoint", "rerank.model"],
+            ),
+        ] {
+            let (_, issues) =
+                schema_parse(&schema()["config"], Some(&json!({"rerank": rerank})), "");
+            assert_eq!(issues, expected);
+        }
+    }
 }
 
 /// Host UI and transport choices (such as toast lifetime) are carried to the bridge,

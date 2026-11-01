@@ -129,6 +129,37 @@ export function estimateExecuteReclaimTokens(args: {
     }, 0);
 }
 
+/**
+ * The pure rule behind `originateExecuteReclaim`. A primary execute pass that
+ * nothing else rebuilds, and on which no summary can come, rebuilds itself once
+ * the queued work it can actually remove is worth it: at least 2% of the usable
+ * window, or the third consecutive such pass holding that work. `heldPasses` is
+ * the persisted count before this pass; the result is the count to persist.
+ */
+export function decideExecuteReclaim(args: {
+    heldPasses: number;
+    primaryExecute: boolean;
+    summaryCanCome: boolean;
+    alreadyBusting: boolean;
+    reclaimableTokens: number;
+    usableWindow: number;
+}): { heldPasses: number; admitted: boolean } {
+    const heldPasses =
+        args.primaryExecute && args.reclaimableTokens > 0 && !args.alreadyBusting
+            ? args.heldPasses + 1
+            : 0;
+    return {
+        heldPasses,
+        admitted:
+            args.primaryExecute &&
+            !args.alreadyBusting &&
+            !args.summaryCanCome &&
+            args.reclaimableTokens > 0 &&
+            ((args.usableWindow > 0 && args.reclaimableTokens >= args.usableWindow * 0.02) ||
+                heldPasses >= 3),
+    };
+}
+
 /** Drops and cleanup may share an execute rebuild only when no historian run or unrendered summary is expected. */
 export function originateExecuteReclaim(args: {
     db: Database;
@@ -141,17 +172,8 @@ export function originateExecuteReclaim(args: {
 }): boolean {
     if (failedWrites.get(args.db)?.has(args.sessionId)) return false;
     const state = readExecuteReclaimState(args.db, args.sessionId);
-    const heldPasses =
-        args.primaryExecute && args.reclaimableTokens > 0 && !args.alreadyBusting
-            ? state.heldPasses + 1
-            : 0;
-    if (!writeExecuteReclaimState(args.db, args.sessionId, { heldPasses })) return false;
-    return (
-        args.primaryExecute &&
-        !args.alreadyBusting &&
-        !args.summaryCanCome &&
-        args.reclaimableTokens > 0 &&
-        ((args.usableWindow > 0 && args.reclaimableTokens >= args.usableWindow * 0.02) ||
-            heldPasses >= 3)
-    );
+    const decision = decideExecuteReclaim({ ...args, heldPasses: state.heldPasses });
+    if (!writeExecuteReclaimState(args.db, args.sessionId, { heldPasses: decision.heldPasses }))
+        return false;
+    return decision.admitted;
 }

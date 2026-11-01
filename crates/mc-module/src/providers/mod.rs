@@ -8,6 +8,7 @@ mod async_bus;
 #[cfg(test)]
 mod async_contract_vectors;
 mod async_provider;
+mod step_transform;
 pub(crate) use async_provider::offline_first_pass as offline_first_pass_engine;
 pub(crate) use async_provider::reminder_echoes::accounting as runner_accounting;
 pub(crate) use async_provider::reminder_echoes::origin as runner_origin;
@@ -15,6 +16,7 @@ pub(crate) use async_provider::reminder_echoes::origin as runner_origin;
 pub(crate) use async_provider::serve_descriptors;
 #[cfg(test)]
 pub(crate) use async_provider::{render_published_history, render_published_history_with_memory};
+pub(crate) use step_transform::declare as step_transform_declare;
 #[cfg(test)]
 mod describe_fixture_tests;
 
@@ -119,6 +121,10 @@ pub fn describe() -> HandlerOutcome {
     answer["majors"]
         .as_array_mut()
         .expect("role majors")
+        .push(serde_json::to_value(step_transform::describe_major()).expect("step role major"));
+    answer["majors"]
+        .as_array_mut()
+        .expect("role majors")
         .push(json!({
             "version": compact::PROVIDES,
             "ops": ["role.describe", "compaction.setup", "view.get", "compaction.ride"],
@@ -148,12 +154,32 @@ impl McHandler {
         method: &str,
         params: &Value,
     ) -> HandlerOutcome {
-        let binding = match self.facade_binding(channel) {
-            Ok(binding) => binding,
-            Err(_) => return error("route_unbound", "compaction requires a bound runner route"),
+        if method == "compaction.setup"
+            && self.route_identity(channel).is_some_and(|route| {
+                crate::route_binding::ScopedProject::from_stamp(route.scope.as_ref()).is_none()
+            })
+        {
+            return error(
+                "setup_route_unscoped",
+                "compaction.setup requires a project in the route scope",
+            );
+        }
+        let route = self.route_identity(channel);
+        let trusted_binding = if route.is_none() {
+            self.facade_binding(channel).ok()
+        } else {
+            None
         };
+        let principal = route
+            .as_ref()
+            .and_then(|route| route.principal.as_ref())
+            .or_else(|| {
+                trusted_binding
+                    .as_ref()
+                    .and_then(|binding| binding.principal.as_ref())
+            });
         if !matches!(
-            binding.principal.as_ref(),
+            principal,
             Some(subc_protocol::Principal::Reserved { module_id })
                 if crate::route_targets::SESSION_RUNNER_MODULE_IDS
                     .contains(&module_id.as_str())
@@ -163,15 +189,30 @@ impl McHandler {
                 "compaction requires an attested session runner",
             );
         }
-        if let Some(session) = params.get("session").and_then(Value::as_str) {
-            if let Some(refusal) = self.provider_store.catalog_refusal(&binding, session) {
-                return refusal;
-            }
-        }
+        // Provider operations hold large working records across awaits. Keep
+        // their futures off the parent request's stack, including unused arms.
         let result = match method {
-            "compaction.setup" => self.async_setup(channel, &binding, params).await,
-            "view.get" => self.async_view_get(&binding, params).await,
-            "compaction.ride" => self.async_ride(&binding, params).await,
+            "compaction.setup" => {
+                let Some(binding) = route
+                    .as_ref()
+                    .and_then(|route| self.scoped_binding(route))
+                    .or(trusted_binding)
+                else {
+                    return error("route_unbound", "compaction requires a bound runner route");
+                };
+                let binding = match self.binding_for_existing_setup(binding, params) {
+                    Ok(binding) => binding,
+                    Err(error) => return error,
+                };
+                if let Some(session) = params.get("session").and_then(Value::as_str) {
+                    if let Some(refusal) = self.provider_store.catalog_refusal(&binding, session) {
+                        return refusal;
+                    }
+                }
+                Box::pin(self.async_setup(channel, &binding, params)).await
+            }
+            "view.get" => Box::pin(self.async_view_get(principal, params)).await,
+            "compaction.ride" => Box::pin(self.async_ride(principal, params)).await,
             _ => Err(invalid("unknown compaction operation")),
         };
         match result {
@@ -186,13 +227,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discovery_does_not_advertise_retired_step_or_native_capabilities() {
+    fn discovery_restores_pre_user_without_native_capabilities() {
         let HandlerOutcome::Response(bytes) = describe() else {
             panic!("role discovery failed")
         };
         let answer: Value = serde_json::from_slice(&bytes).unwrap();
         let majors = answer["majors"].as_array().unwrap();
-        assert!(!majors
+        // The role is restored for pre_user time markers and auto memory.
+        assert!(majors
             .iter()
             .any(|major| major["version"] == "step-transform-provider/v1"));
         let compaction = majors
@@ -226,14 +268,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retired_step_and_hook_methods_are_unrecognized() {
+    async fn retired_compaction_methods_are_unrecognized() {
         let handler = McHandler::new();
         for method in [
             "compaction.step",
             "compaction.delete",
             "compaction.view.read",
-            "transform.declare",
-            "transform.hook",
+            // The step-transform role is restored for pre_user time markers and auto memory.
         ] {
             let answer = handler
                 .dispatch_value(1, json!({"method":method,"params":{}}))

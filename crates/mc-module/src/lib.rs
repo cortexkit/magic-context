@@ -45,6 +45,7 @@ mod app_read_test_store;
 pub mod boundary;
 pub mod caveman;
 mod child_retention;
+pub mod child_scopes;
 pub mod ck_wire;
 pub mod classify;
 pub mod codec;
@@ -329,6 +330,7 @@ pub mod m1_compose;
 pub mod memory_render;
 pub mod memory_tool;
 mod memory_verification;
+mod offline_async_downgrade;
 pub mod offline_first_pass;
 pub mod offline_move;
 mod ops_facade;
@@ -350,6 +352,7 @@ pub use transport_handler::McTransportHandler;
 pub mod edit_admission;
 pub mod engram_catalog;
 mod reclaim_distance;
+mod route_binding;
 pub mod route_targets;
 pub mod runner_choices;
 pub mod runner_reminders;
@@ -448,8 +451,10 @@ pub mod test_support;
 mod differential_goldens;
 use transform::{HistorianDiagnostics, SerializedOutputCache, TransformRequest};
 
-/// The per-route binding: the project, harness, session-slot value, and fallback render
-/// budget frozen at bind. Transform routes carry the durable session in `session`. Facade
+/// A project-bearing session binding. Its directory comes from the scope stamp for
+/// a new session, or the durable state created by the compaction.setup operation
+/// for an existing session.
+/// Project-free discovery routes keep only a RouteIdentity. Facade
 /// routes accept a runner-attested durable session, an observed OpenCode transform session,
 /// or a Claude Code wrapper instance token that must be resolved before its project memory
 /// is read.
@@ -1539,8 +1544,14 @@ struct RouteProject {
     memory_paused: Option<String>,
 }
 
-/// Identity state belongs to a channel, not a session or directory: a fresh binding
+/// The channel ck-mc passes for work that runs without a route of its own:
+/// runner-session passes, notices and offline passes. subc reserves channel 0
+/// for control, so no route ever binds it.
+pub(crate) const INTERNAL_CHANNEL: u16 = 0;
+
+/// Identity state belongs to a route binding, not a directory: a fresh binding
 /// may adopt a newer host decision without changing an already-served prefix.
+/// Work on [`INTERNAL_CHANNEL`] keeps one per session instead.
 #[derive(Default)]
 struct BindingProject {
     initial: Option<Result<String, project_identity::ProjectIdentityError>>,
@@ -1855,6 +1866,7 @@ struct RuntimeStoreError {
 /// The module handler. Holds the single store handle (opened once in `on_hello_ack`)
 /// and the per-route session bindings (route channel → {project, session}).
 pub struct McHandler {
+    child_scopes: Arc<child_scopes::ChildScopes>,
     agent_data: Option<agent_data::AgentDataService>,
     app_channels: Mutex<HashMap<u16, app_read::admission::AppCaller>>,
     context_watches: Arc<app_read::watch::Hub>,
@@ -1891,6 +1903,10 @@ pub struct McHandler {
     entorhinal: entorhinal_resolve::EntorhinalResolver,
     memory_sync: Arc<memory_sync::Service>,
     binding_projects: Mutex<HashMap<u16, BindingProject>>,
+    /// The same per-binding project decision for work that runs without a route:
+    /// runner-session passes, notices and offline passes use [`INTERNAL_CHANNEL`].
+    /// That channel serves every session, so its decision is kept per session.
+    internal_binding_projects: Mutex<HashMap<String, BindingProject>>,
     active_project_roots: Mutex<HashMap<String, PathBuf>>,
     /// Route roots inside a git checkout whose identity git could not give, with the
     /// reason. Their history keeps being served, but every memory feature is paused until
@@ -1964,6 +1980,7 @@ pub struct McHandler {
     /// lock-free map) is appropriate because writes are rare (once per route open/close)
     /// and reads are one cheap lookup per transform.
     bindings: Mutex<HashMap<u16, SessionBinding>>,
+    route_identities: Mutex<HashMap<u16, route_binding::RouteIdentity>>,
     threshold_logged_routes: Mutex<HashSet<u16>>,
     /// Validated transform channel → (session, route root). The root is part of provenance;
     /// a cache row for the same session cannot authenticate a facade opened on another root.
@@ -2030,6 +2047,7 @@ struct RealHistorianProducerFactory {
     connection_file: PathBuf,
     route_targets: RouteTargetConfig,
     summary_routing: Arc<historian_routed::SubcSummaryRouting>,
+    child_scopes: Arc<child_scopes::ChildScopes>,
 }
 
 fn session_runner_historian_config(
@@ -2054,8 +2072,19 @@ impl HistorianProducerFactory for RealHistorianProducerFactory {
         &self,
         project_root: &Path,
     ) -> Result<Box<dyn HistorianProducerDriver + Send>, HistorianProducerError> {
+        let child_scope = self
+            .child_scopes
+            .for_project(project_root)
+            .await
+            .map_err(|error| {
+                HistorianProducerError::Subc(historian_producer::ProducerErrorBody::untagged(
+                    error.code,
+                    error.message,
+                ))
+            })?;
         Ok(Box::new(
             HistorianProducer::connect(HistorianProducerConfig {
+                child_scope: Some(child_scope),
                 handshake_timeout: Duration::from_secs(2),
                 route_targets: self.route_targets.clone(),
                 ..HistorianProducerConfig::new(
@@ -2073,16 +2102,24 @@ impl HistorianProducerFactory for RealHistorianProducerFactory {
         identity: &session_resolver::RunnerBindIdentity,
         route: &SessionRunnerRoute,
     ) -> Result<Box<dyn HistorianProducerDriver + Send>, HistorianProducerError> {
+        let mut config = session_runner_historian_config(
+            self.connection_file.clone(),
+            self.route_targets.clone(),
+            identity,
+        );
+        config.child_scope = Some(
+            self.child_scopes
+                .for_project(&identity.project_root)
+                .await
+                .map_err(|error| {
+                    HistorianProducerError::Subc(historian_producer::ProducerErrorBody::untagged(
+                        error.code,
+                        error.message,
+                    ))
+                })?,
+        );
         Ok(Box::new(
-            HistorianProducer::connect_to_session_runner(
-                session_runner_historian_config(
-                    self.connection_file.clone(),
-                    self.route_targets.clone(),
-                    identity,
-                ),
-                route.clone(),
-            )
-            .await?,
+            HistorianProducer::connect_to_session_runner(config, route.clone()).await?,
         ))
     }
 
@@ -2647,6 +2684,10 @@ impl McHandler {
         self.provider_runner.as_ref()
     }
 
+    pub fn child_scopes(&self) -> Arc<child_scopes::ChildScopes> {
+        Arc::clone(&self.child_scopes)
+    }
+
     pub fn new_with_connection_file(connection_file: Option<PathBuf>) -> Self {
         Self::new_with_connection_file_and_route_targets(
             connection_file,
@@ -2670,9 +2711,11 @@ impl McHandler {
         route_targets: RouteTargetConfig,
         module_id: String,
     ) -> Self {
+        let child_scopes = Arc::new(child_scopes::ChildScopes::new(module_id.clone()));
         let dream_runs = Arc::new(dream_dispatch::tick::DreamRuns::new(
             connection_file.clone(),
             &route_targets,
+            Arc::clone(&child_scopes),
         ));
         let retrieval_reranker = connection_file.as_ref().map(|path| {
             Arc::new(retrieval_store::RerankTransport {
@@ -2687,9 +2730,11 @@ impl McHandler {
                 summary_routing: Arc::new(historian_routed::SubcSummaryRouting::new(
                     path.clone(),
                     route_targets.clone(),
+                    Arc::clone(&child_scopes),
                 )),
                 connection_file: path,
                 route_targets: route_targets.clone(),
+                child_scopes: Arc::clone(&child_scopes),
             }),
             None => Arc::new(MissingProducerFactory),
         };
@@ -2728,6 +2773,7 @@ impl McHandler {
             .lock()
             .expect("bus connection file") = bus_connection_file;
         McHandler {
+            child_scopes,
             agent_data,
             app_channels: Mutex::default(),
             memory_sync: memory_sync::Service::new(connection_file.clone(), module_id.clone()),
@@ -2750,6 +2796,7 @@ impl McHandler {
             project_identities: Arc::new(project_identity::ProjectIdentityResolver::new()),
             entorhinal,
             binding_projects: Mutex::default(),
+            internal_binding_projects: Mutex::default(),
             active_project_roots: Mutex::default(),
             memory_paused_routes: Arc::default(),
             #[cfg(test)]
@@ -2801,6 +2848,7 @@ impl McHandler {
             classification_before_apply_hook: Mutex::new(None),
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
             bindings: Mutex::new(HashMap::new()),
+            route_identities: Mutex::default(),
             threshold_logged_routes: Mutex::new(HashSet::new()),
             transform_route_channels: Mutex::new(HashMap::new()),
             transform_session_roots: Mutex::new(HashMap::new()),
@@ -3143,6 +3191,7 @@ impl McHandler {
                 historian_context_limit_known: false,
                 memory_budget_tokens: 4_000.0,
                 user_profile_budget_tokens: 4_000.0,
+                history_budget_percentage: crate::config::DEFAULT_HISTORY_BUDGET_PERCENTAGE,
                 inject_docs: true,
                 temporal_awareness: true,
                 prompt_surface_guidance_override: None,
@@ -3171,6 +3220,7 @@ impl McHandler {
         config: McModuleConfig,
         session_resolver: Arc<dyn SessionResolver>,
     ) -> Self {
+        let child_scopes = Arc::new(child_scopes::ChildScopes::new(DEFAULT_MODULE_ID));
         let store = Arc::new(OnceLock::new());
         let provider_store = Arc::new(providers::Storage::new(Arc::clone(&store)));
         let move_visibility = Arc::new(agent_data::MoveVisibility::default());
@@ -3182,6 +3232,7 @@ impl McHandler {
             )
         });
         McHandler {
+            child_scopes: Arc::clone(&child_scopes),
             agent_data,
             move_visibility,
             registered_module_id: DEFAULT_MODULE_ID.into(),
@@ -3201,12 +3252,14 @@ impl McHandler {
             dream_runs: Arc::new(dream_dispatch::tick::DreamRuns::new(
                 None,
                 &RouteTargetConfig::default(),
+                child_scopes,
             )),
             runner_choices: Arc::new(Mutex::new(runner_choices::RunnerChoiceLog::default())),
             project_identities: Arc::new(project_identity::ProjectIdentityResolver::new()),
             entorhinal: entorhinal_resolve::EntorhinalResolver::new(None),
             memory_sync: memory_sync::Service::new(None, DEFAULT_MODULE_ID.into()),
             binding_projects: Mutex::default(),
+            internal_binding_projects: Mutex::default(),
             active_project_roots: Mutex::default(),
             memory_paused_routes: Arc::default(),
             #[cfg(test)]
@@ -3249,6 +3302,7 @@ impl McHandler {
             classification_before_apply_hook: Mutex::new(None),
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
             bindings: Mutex::new(HashMap::new()),
+            route_identities: Mutex::default(),
             threshold_logged_routes: Mutex::new(HashSet::new()),
             transform_route_channels: Mutex::new(HashMap::new()),
             transform_session_roots: Mutex::new(HashMap::new()),
@@ -3311,6 +3365,10 @@ impl McHandler {
 
     /// Remove a route and evict process-local session state after its final binding closes.
     fn unbind_route(&self, channel: u16) {
+        self.route_identities
+            .lock()
+            .expect("route identities")
+            .remove(&channel);
         self.binding_projects
             .lock()
             .expect("binding project mutex")
@@ -3406,18 +3464,38 @@ impl McHandler {
         channel: u16,
         request_session: &str,
     ) -> Result<SessionBinding, BindingError> {
-        let map = self.bindings.lock().expect("bindings mutex");
-        let binding = map.get(&channel).ok_or(BindingError::Unbound)?;
+        let binding = self.facade_binding(channel)?;
         if binding.session != request_session {
             return Err(BindingError::SessionMismatch);
         }
-        Ok(binding.clone())
+        Ok(binding)
     }
 
     /// Return the channel binding without comparing a request session. OpenCode Rust facade
     /// routes bind a real session id, while Claude Code facade routes bind an instance token;
     /// `resolve_facade_scope` applies the corresponding identity mode before touching the store.
     fn facade_binding(&self, channel: u16) -> Result<SessionBinding, BindingError> {
+        if let Some(route) = self.route_identity(channel) {
+            if let Some(project) = self
+                .stored_async_project(&route)
+                .map_err(|_| BindingError::Unbound)?
+            {
+                return Ok(self.project_binding(&route, &project));
+            }
+            if !self
+                .bindings
+                .lock()
+                .expect("bindings mutex")
+                .contains_key(&channel)
+            {
+                if let Some(project) = self
+                    .stored_project(&route)
+                    .map_err(|_| BindingError::Unbound)?
+                {
+                    return Ok(self.project_binding(&route, &project));
+                }
+            }
+        }
         self.bindings
             .lock()
             .expect("bindings mutex")
@@ -3518,8 +3596,44 @@ impl McHandler {
         store: &McStore,
         binding: &SessionBinding,
     ) -> Result<RouteProject, HandlerOutcome> {
+        let route = route_binding::RouteIdentity {
+            principal: binding.principal.clone(),
+            scope: binding.scope.clone(),
+            harness: binding.harness.clone(),
+            session: binding.session.clone(),
+        };
+        let stored = self.stored_async_project(&route)?;
+        let scoped_id = if stored.is_none() {
+            route_binding::ScopedProject::from_stamp(binding.scope.as_ref())
+                .and_then(|project| project.project_id)
+        } else {
+            None
+        };
+        if let Some(project) = stored {
+            if let Some(key) = project.key {
+                self.active_project_roots
+                    .lock()
+                    .expect("active project roots mutex")
+                    .insert(binding.session.clone(), project.workdir);
+                let memory_paused = key.starts_with("unresolved:").then(|| {
+                    "Project identity was unavailable when this session was set up".to_string()
+                });
+                return Ok(RouteProject { key, memory_paused });
+            }
+        }
         let mut projects = self.binding_projects.lock().expect("binding project mutex");
-        let project = projects.entry(channel).or_default();
+        let mut internal = self
+            .internal_binding_projects
+            .lock()
+            .expect("internal binding project mutex");
+        // A route's channel names one session, so its decision is kept per
+        // channel. The internal channel serves every runner session, so keying it
+        // by channel would hand one session the project another session set first.
+        let project = if channel == INTERNAL_CHANNEL {
+            internal.entry(binding.session.clone()).or_default()
+        } else {
+            projects.entry(channel).or_default()
+        };
         let moved = self
             .active_project_roots
             .lock()
@@ -3538,7 +3652,7 @@ impl McHandler {
                 if let Some(pin) = self
                     .project_identities
                     .pinned_identity(&directory)
-                    .or_else(|| self.project_identities.common_dir_pin(&directory))
+                    .or_else(|| self.project_identities.borrowed_identity(&directory))
                 {
                     project.initial = Some(Ok(pin));
                 }
@@ -3553,7 +3667,10 @@ impl McHandler {
             })?;
         let candidate = match row {
             Some(identity) => RouteProject::resolved(identity),
-            None => self.binding_fallback_project(store, binding, project)?,
+            None => match scoped_id {
+                Some(identity) => RouteProject::resolved(identity),
+                None => self.binding_fallback_project(store, binding, project)?,
+            },
         };
         if let Some(served) = &project.served {
             if served.key != candidate.key
@@ -4063,6 +4180,48 @@ impl McHandler {
         projection: &crate::ck_wire::FlatProjection,
         prepare: HistorianPrepareContext<'_>,
     ) -> PreparedHistorianAction {
+        self.prepare_historian_fire_inner(
+            store,
+            parsed,
+            binding,
+            project_path,
+            projection,
+            (prepare, None),
+        )
+    }
+
+    fn prepare_async_historian_fire(
+        &self,
+        store: Arc<McStore>,
+        parsed: &TransformRequest,
+        binding: &SessionBinding,
+        project_path: &str,
+        projection: &crate::ck_wire::FlatProjection,
+        prepare: (HistorianPrepareContext<'_>, &mut AsyncHistorianBoundary),
+    ) -> PreparedHistorianAction {
+        self.prepare_historian_fire_inner(
+            store,
+            parsed,
+            binding,
+            project_path,
+            projection,
+            (prepare.0, Some(prepare.1)),
+        )
+    }
+
+    fn prepare_historian_fire_inner(
+        &self,
+        store: Arc<McStore>,
+        parsed: &TransformRequest,
+        binding: &SessionBinding,
+        project_path: &str,
+        projection: &crate::ck_wire::FlatProjection,
+        prepare: (
+            HistorianPrepareContext<'_>,
+            Option<&mut AsyncHistorianBoundary>,
+        ),
+    ) -> PreparedHistorianAction {
+        let (prepare, async_boundary) = prepare;
         profile_start!(_perf_trigger, "trigger_ms");
         let HistorianPrepareContext {
             rust_background_enabled,
@@ -4185,7 +4344,18 @@ impl McHandler {
         let boundary_build_started_at = Instant::now();
         profile_start!(perf_boundary, "trigger_boundary_build");
         profile_start!(_perf_fallback, "rt19_fallback_tag_load");
-        let tags = if async_coverage.is_some() {
+        // Priming ignores tags once this session is warm. Avoid fetching their
+        // window-sized source payloads just to discard them on every notice.
+        let warm_async_tokens = async_coverage.is_some()
+            && self
+                .boundary_tokens
+                .lock()
+                .expect("boundary token cache mutex")
+                .sessions
+                .contains_key(&parsed.session_id);
+        let tags = if warm_async_tokens {
+            Ok(Vec::new())
+        } else if async_coverage.is_some() {
             let blocks = projection
                 .blocks
                 .iter()
@@ -4203,12 +4373,38 @@ impl McHandler {
                 .expect("boundary token cache mutex")
                 .prime_from_persisted_tags(&parsed.session_id, &tags);
         }
-        let CachedBoundaryMessages {
-            messages: boundary_messages,
+        let mut ordinary;
+        let (
+            boundary_messages,
+            trigger_cache,
             token_cache_hits,
             tokenized_blocks,
             mut token_cache_snapshot,
-        } = boundary_messages(parsed, projection, &self.boundary_tokens);
+        ) = if let Some(cache) = async_boundary {
+            let (snapshot, hits, misses) = cache.prepare(
+                parsed,
+                projection,
+                &self.boundary_tokens,
+                !warm_async_tokens,
+            );
+            (
+                cache.messages.as_slice(),
+                Some(&mut cache.trigger),
+                hits,
+                misses,
+                snapshot,
+            )
+        } else {
+            ordinary = boundary_messages(parsed, projection, &self.boundary_tokens);
+            let built = &mut ordinary;
+            (
+                built.messages.as_slice(),
+                None,
+                built.token_cache_hits,
+                built.tokenized_blocks,
+                std::mem::take(&mut built.token_cache_snapshot),
+            )
+        };
         trigger_timer.timings.boundary_build_ms +=
             boundary_build_started_at.elapsed().as_secs_f64() * 1_000.0;
         profile_end!(perf_boundary);
@@ -4279,7 +4475,7 @@ impl McHandler {
                 .unwrap_or_default()
         };
         let projected_post_drop_percentage = projected_post_drop_percentage(
-            &boundary_messages,
+            boundary_messages,
             &pending_drops,
             &pending_frozen_units,
             input_tokens,
@@ -4295,42 +4491,42 @@ impl McHandler {
             } else {
                 boundary::check_compartment_trigger_with_token_estimator
             };
-            check(
-                &boundary_messages,
-                &TriggerContext {
-                    boundary: BoundaryContext {
-                        calibration: Some(
-                            loaded
-                                .meta
-                                .decision_calibration
-                                .as_ref()
-                                .and_then(decision_calibration::DecisionCalibration::from_frozen)
-                                .unwrap_or_else(decision_calibration::DecisionCalibration::neutral),
-                        ),
-                        context_limit,
-                        // Historian preparation reloads module config independently, but a host-
-                        // resolved request threshold is still authoritative for this pass.
-                        execute_threshold_percentage: parsed.execute_threshold_or(
-                            cfg.resolve_execute_threshold(parsed.model_key.as_deref())
-                                .percentage,
-                        ),
-                        usage_percentage,
-                        usage_input_tokens: input_tokens,
-                        last_compartment_end_ordinal,
-                        prior_boundary_ordinal: last_compartment_end_ordinal.unwrap_or(0),
-                        migration_floor_active: last_compartment_end_ordinal.unwrap_or(0) > 0,
-                        emergency_tail_scale: None,
-                        trigger_budget: None,
-                        fold_is_only_reclaim,
-                    },
-                    projected_post_drop_percentage,
-                    reclaim_ride_available,
-                    compartment_in_progress: loaded.meta.historian.state != HistorianPhase::Idle,
-                    commit_cluster_trigger_enabled: DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED,
-                    min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS,
+            let context = TriggerContext {
+                boundary: BoundaryContext {
+                    calibration: Some(
+                        loaded
+                            .meta
+                            .decision_calibration
+                            .as_ref()
+                            .and_then(decision_calibration::DecisionCalibration::from_frozen)
+                            .unwrap_or_else(decision_calibration::DecisionCalibration::neutral),
+                    ),
+                    context_limit,
+                    // Host-resolved thresholds remain authoritative.
+                    execute_threshold_percentage: parsed.execute_threshold_or(
+                        cfg.resolve_execute_threshold(parsed.model_key.as_deref())
+                            .percentage,
+                    ),
+                    usage_percentage,
+                    usage_input_tokens: input_tokens,
+                    last_compartment_end_ordinal,
+                    prior_boundary_ordinal: last_compartment_end_ordinal.unwrap_or(0),
+                    migration_floor_active: last_compartment_end_ordinal.unwrap_or(0) > 0,
+                    emergency_tail_scale: None,
+                    trigger_budget: None,
+                    fold_is_only_reclaim,
                 },
-                &mut formatted_token_estimator,
-            )
+                projected_post_drop_percentage,
+                reclaim_ride_available,
+                compartment_in_progress: loaded.meta.historian.state != HistorianPhase::Idle,
+                commit_cluster_trigger_enabled: DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED,
+                min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS,
+            };
+            if let Some(cache) = trigger_cache {
+                cache.check(boundary_messages, &context, &mut formatted_token_estimator)
+            } else {
+                check(boundary_messages, &context, &mut formatted_token_estimator)
+            }
         };
         trigger_timer.timings.trigger_eval_ms +=
             trigger_eval_started_at.elapsed().as_secs_f64() * 1_000.0;
@@ -5830,8 +6026,8 @@ impl McHandler {
     }
 
     fn handle_session_delete_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
-        let (session_id, binding) =
-            match self.management_binding(channel, request, "session.delete") {
+        let (session_id, _binding, project_key) =
+            match self.management_session_project(channel, request, "session.delete") {
                 Ok(scope) => scope,
                 Err(outcome) => return outcome,
             };
@@ -5839,7 +6035,11 @@ impl McHandler {
             Some(store) => store,
             None => return self.store_refusal(),
         };
-        match store.delete_session(&session_id, &binding.project_root.to_string_lossy()) {
+        let deleted = match project_key {
+            Some(project) => store.delete_session(&session_id, &project),
+            None => store.delete_session_without_project(&session_id),
+        };
+        match deleted {
             Ok(deleted_rows) => {
                 self.runtime_store_errors
                     .lock()
@@ -5902,15 +6102,22 @@ impl McHandler {
     /// [`subagent_invocations_read`] for the queries and their bounds.
     fn handle_subagent_invocations_read(&self, channel: u16, request: &Value) -> HandlerOutcome {
         // The caller is judged from the daemon's bind stamp, before any argument is read.
-        let admitted = match self.bindings.lock().expect("route bindings").get(&channel) {
-            Some(binding) => subagent_invocations_read::authorize_caller(
-                binding.principal.as_ref(),
-                binding.scope.as_ref(),
-            ),
-            None => Err(format!(
-                "{} on a channel with no binding",
-                subagent_invocations_read::METHOD
-            )),
+        let admitted = if let Some(route) = self.route_identity(channel) {
+            subagent_invocations_read::authorize_caller(
+                route.principal.as_ref(),
+                route.scope.as_ref(),
+            )
+        } else {
+            match self.bindings.lock().expect("route bindings").get(&channel) {
+                Some(binding) => subagent_invocations_read::authorize_caller(
+                    binding.principal.as_ref(),
+                    binding.scope.as_ref(),
+                ),
+                None => Err(format!(
+                    "{} on a channel with no binding",
+                    subagent_invocations_read::METHOD
+                )),
+            }
         };
         if let Err(message) = admitted {
             return HandlerOutcome::Error {
@@ -5938,8 +6145,8 @@ impl McHandler {
     }
 
     fn handle_session_status_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
-        let (session_id, binding) =
-            match self.management_binding(channel, request, "session.status") {
+        let (session_id, binding, project_key) =
+            match self.management_session_project(channel, request, "session.status") {
                 Ok(scope) => scope,
                 Err(outcome) => return outcome,
             };
@@ -6048,16 +6255,22 @@ impl McHandler {
         // Structured fields accompany the prose so reconciliation code can determine
         // completion without parsing the summary or issuing another operation: a retained
         // delivered-command record includes its coverage, row version, and current wrapup state.
-        let m1_signal = match crate::m1_compose::m1_revision_signal_parts_for_pass(
-            store,
-            &binding.project_root.to_string_lossy(),
-            &binding.project_root.to_string_lossy(),
-            &session_id,
-            loaded.meta.user_profile_version,
-            !loaded.meta.memory_disabled,
-            now_ms(),
-        ) {
-            Ok(signal) => Some(signal),
+        let m1_signal = match binding
+            .as_ref()
+            .map(|binding| {
+                crate::m1_compose::m1_revision_signal_parts_for_pass(
+                    store,
+                    project_key.as_deref().expect("project-bearing binding"),
+                    &binding.project_root.to_string_lossy(),
+                    &session_id,
+                    loaded.meta.user_profile_version,
+                    !loaded.meta.memory_disabled,
+                    now_ms(),
+                )
+            })
+            .transpose()
+        {
+            Ok(signal) => signal,
             Err(error) => {
                 return HandlerOutcome::Error {
                     code: "store_load_failed".to_string(),
@@ -6129,24 +6342,32 @@ impl McHandler {
         // Which runner this session's completions used and why. A session with no
         // completion in this process yet reports what its route resolves to now.
         let (historian_runner_status, dreamer_runner_status) = {
-            let config = self.effective_config(&binding.project_root);
+            let config = binding
+                .as_ref()
+                .map(|binding| binding.config.clone())
+                .unwrap_or_else(|| self.user_config());
+            let harness = binding
+                .as_ref()
+                .map(|binding| binding.harness.clone())
+                .or_else(|| self.route_identity(channel).map(|route| route.harness))
+                .unwrap_or_default();
             let log = self
                 .runner_choices
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let status = |role, resolved| match log.get(role, &session_id) {
                 Some(choice) => choice.to_value("last_completion"),
-                None => runner_choices::RunnerChoice::new(resolved, &binding.harness)
+                None => runner_choices::RunnerChoice::new(resolved, &harness)
                     .to_value("resolved_for_route"),
             };
             (
                 status(
                     runner_choices::RunnerRole::Historian,
-                    config.historian_runner_for(&binding.harness),
+                    config.historian_runner_for(&harness),
                 ),
                 status(
                     runner_choices::RunnerRole::Dreamer,
-                    config.dreamer_runner_for(&binding.harness),
+                    config.dreamer_runner_for(&harness),
                 ),
             )
         };
@@ -7705,19 +7926,33 @@ impl McHandler {
     /// `tool.catalog`: the catalog and guidance text for the request's plan item,
     /// resolved against the configuration of the project the route is bound to.
     async fn handle_tool_catalog_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
-        let Ok(binding) = self.facade_binding(channel) else {
+        if let Some(route) = self.route_identity(channel) {
+            if let Err(error) = self.stored_async_project(&route) {
+                return error;
+            }
+        }
+        let binding = self.facade_binding(channel).ok();
+        if binding.is_none() && self.route_identity(channel).is_none() {
             return HandlerOutcome::Error {
                 code: "route_unbound".to_string(),
                 message: "tool.catalog on a channel with no route binding".to_string(),
             };
-        };
-        let config = tool_catalog::CatalogConfig::from_module_config(&binding.config);
+        }
+        // An unscoped preflight cannot see project config. Callers needing the
+        // project's exact tool set must open under their parent session's scope,
+        // whose stamp carries that project's directory.
+        let config = binding
+            .as_ref()
+            .map(|binding| binding.config.clone())
+            .unwrap_or_else(|| self.user_config());
+        let config = tool_catalog::CatalogConfig::from_module_config(&config);
         let arguments = request.get("arguments").unwrap_or(&Value::Null);
         match tool_catalog::catalog_answer_bytes(arguments, &config) {
             Ok(bytes) => {
-                if arguments.get("composition").is_some_and(Value::is_object)
-                    && arguments.get("digest_only") != Some(&Value::Bool(true))
-                {
+                if let Some(binding) = binding.filter(|_| {
+                    arguments.get("composition").is_some_and(Value::is_object)
+                        && arguments.get("digest_only") != Some(&Value::Bool(true))
+                }) {
                     // These bytes were just produced by the catalog, not supplied
                     // by a caller. Retain only the facts needed to admit calls.
                     let answer: Value = serde_json::from_slice(&bytes).expect("catalog JSON");
@@ -7780,23 +8015,29 @@ impl McHandler {
         if !name.starts_with("ctx_") {
             return Ok(());
         }
-        if matches!(name, "ctx_reduce" | "ctx_expand") {
-            if let Ok(binding) = self.facade_binding(channel) {
+        // A runner-attested session compacts exactly when ck-mc holds its
+        // compaction record. Core fetches the head's catalog through its own
+        // preflight session, so the hosted session usually has no frozen catalog
+        // of its own (WERNI: `frozen=false compacting=false record_exists=true`).
+        let runner_compacting = match self.facade_binding(channel) {
+            Ok(binding)
                 if route_targets::SessionRunnerRoute::for_principal(
                     binding.principal.as_ref(),
                     &binding.session,
                 )
-                .is_some()
-                    && self.async_compaction_namespace(&binding, true)?.is_none()
-                {
-                    return Err(HandlerOutcome::Error {
-                        code: "compaction_inactive".into(),
-                        message: format!(
-                            "{name} is unavailable: compaction is not active for this session"
-                        ),
-                    });
-                }
+                .is_some() =>
+            {
+                Some(self.async_compaction_namespace(&binding, true)?.is_some())
             }
+            _ => None,
+        };
+        if matches!(name, "ctx_reduce" | "ctx_expand") && runner_compacting == Some(false) {
+            return Err(HandlerOutcome::Error {
+                code: "compaction_inactive".into(),
+                message: format!(
+                    "{name} is unavailable: compaction is not active for this session"
+                ),
+            });
         }
         let preset = match request.get("preset") {
             Some(Value::String(name)) => {
@@ -7834,7 +8075,8 @@ impl McHandler {
         if preset.is_none() && frozen.is_none() {
             return Ok(());
         }
-        let compacting = frozen.as_ref().is_some_and(|catalog| catalog.compacting);
+        let compacting = runner_compacting
+            .unwrap_or_else(|| frozen.as_ref().is_some_and(|catalog| catalog.compacting));
         let served = preset
             .unwrap_or(tool_catalog::Preset::Head)
             .serves(name, compacting)
@@ -7842,6 +8084,16 @@ impl McHandler {
                 .as_ref()
                 .is_none_or(|catalog| catalog.tools.contains(name));
         if !served {
+            // Name what decided, so a refused tool on a live head can be traced
+            // without reproducing the route.
+            tracing::info!(
+                tool = %name,
+                preset = ?preset.map(|preset| preset.as_str()),
+                frozen = frozen.is_some(),
+                compacting,
+                frozen_tools = ?frozen.as_ref().map(|catalog| &catalog.tools),
+                "mc-module: tool call not in the session's catalog"
+            );
             let body = cortexkit_role_tool_provider::errors::unknown_tool(name);
             return Err(HandlerOutcome::ErrorWithDetail {
                 code: body.code,
@@ -8029,11 +8281,8 @@ impl McHandler {
         memory_profile::bind_session(
             self.store.get().expect("proven facade store"),
             connection_file,
-            subc_protocol::BindIdentity::new(
-                binding.project_root.clone(),
-                &binding.harness,
-                &binding.session,
-            ),
+            subc_protocol::BindIdentity::new(&binding.harness, &binding.session),
+            &binding.project_root,
             &conversation_key,
             binding
                 .scope
@@ -8879,10 +9128,16 @@ impl McHandler {
             Err(refusal) => return refusal.into_facade_outcome(),
         };
         let session_id = facade_scope.conversation_key.as_str();
-        let expand_mode = match resolve_ctx_expand_mode(args) {
+        let mut expand_mode = match resolve_ctx_expand_mode(args) {
             Ok(mode) => mode,
             Err(error) => return tool_error_result(error),
         };
+        // A runner session's messages are held by ck-mc, never in the standalone
+        // chunk transcripts the fallbacks below read.
+        let runner_binding = facade_scope
+            .async_conversation
+            .then(|| self.facade_binding(channel).ok())
+            .flatten();
         if let CtxExpandMode::Tag(number) = expand_mode {
             let tags = match store.load_tags_for_session(session_id) {
                 Ok(tags) => tags,
@@ -8891,6 +9146,17 @@ impl McHandler {
             let Some(tag) = tags.iter().find(|tag| tag.tag_number == number) else {
                 return mcp_text_result(format!("no tag {number} in this session; if {number} came from a <session-history> heading or a ctx_search hit, it is an ordinal: use message={number}"), false);
             };
+            if let (Some(binding), Some((mid, _))) =
+                (&runner_binding, ck_wire::split_block_id(&tag.block_id))
+            {
+                match self.async_held_expand(binding, session_id, |_, held| held == mid) {
+                    Ok(Some(messages)) if !messages.is_empty() => {
+                        return mcp_text_result(render_tag_expand(tag, &messages), false);
+                    }
+                    Ok(_) => {}
+                    Err(outcome) => return outcome,
+                }
+            }
             let transcripts = match store.load_chunk_transcripts_for_range(session_id, 0, i64::MAX)
             {
                 Ok(rows) => rows,
@@ -8898,6 +9164,24 @@ impl McHandler {
             };
             let messages = durable_expand_messages(&transcripts);
             return mcp_text_result(render_tag_expand(tag, &messages), false);
+        }
+        if let (CtxExpandMode::Message(message), Some(binding)) = (&expand_mode, &runner_binding) {
+            let message = *message;
+            let wanted = u64::try_from(message).ok();
+            match self.async_held_expand(binding, session_id, |ordinal, _| Some(ordinal) == wanted)
+            {
+                Ok(Some(messages)) if !messages.is_empty() => {
+                    return mcp_text_result(render_cached_message_expand(&messages[0]), false);
+                }
+                Ok(_) => {}
+                Err(outcome) => return outcome,
+            }
+            // Not held: folded history, which only the runner's history serves.
+            expand_mode = CtxExpandMode::Range {
+                start: message,
+                end: message,
+                verbose: false,
+            };
         }
         if let CtxExpandMode::Message(message) = expand_mode {
             return match store.load_chunk_transcript_for_message(session_id, message) {
@@ -9381,6 +9665,7 @@ impl ModuleHandler for McHandler {
     /// the path isn't known until the ACK lands. Opening runs off the request lane so a
     /// predecessor's live single-writer lease cannot block transform dispatch.
     async fn on_hello_ack(&self, ack: &ModuleHelloAckBody) {
+        self.child_scopes.reconnected();
         let (descriptor, origin) = resolve_descriptor_with_origin(ack.storage.as_ref());
         if let StorageBackend::Sqlite { path } = &descriptor.backend {
             let configured = match &self.agent_data {
@@ -9420,9 +9705,8 @@ impl ModuleHandler for McHandler {
         report
     }
 
-    /// Record the route's {project_root, session} so the transform path can resolve the
-    /// project from the daemon-controlled channel (never a per-pass request field). Accept
-    /// session routes. The independent app service authorizes its caller first.
+    /// Accept project-free discovery routes as well as scoped session routes.
+    /// Only the scope stamp or an existing session record can supply a project.
     async fn on_bind(&self, req: &RouteBindRequest) -> subc_client_rs::BindDecision {
         self.context_watches.remove_channel(req.handle.channel);
         self.app_channels
@@ -9503,61 +9787,71 @@ impl ModuleHandler for McHandler {
                     .insert(req.handle.channel);
             }
         }
-        let config = self.effective_config(&req.identity.project_root);
-        // Hosts record their project identity before opening the route. Without
-        // that row, resolve through Entorhinal once the store can check managed projects.
-        let host_identity = self.store.get().and_then(|store| {
-            store
-                .session_project_identity(&req.identity.session)
-                .ok()
-                .flatten()
-        });
-        let initial = match host_identity {
-            Some(identity) => Ok(identity),
-            None => {
-                if let Some(store) = self.store.get() {
-                    self.entorhinal
-                        .resolve_for_session(
-                            &self.project_identities,
-                            &req.identity.project_root,
-                            &req.identity.harness,
-                            &req.identity.session,
-                            Some(store.as_ref()),
-                        )
-                        .await
-                } else {
-                    // Without an open store we cannot read context.db's authority_managed
-                    // marker, which prevents identity merges until the single-store migration.
-                    // Keep the existing identity rather than authorizing a new pin.
-                    project_identity::log_once(
-                        format!("entorhinal-authority-unavailable:{}", req.identity.project_root.display()),
-                        "Keeping project identity; authority check unavailable until the store opens",
-                    );
-                    self.project_identities.resolve(&req.identity.project_root)
-                }
+        let route = route_binding::RouteIdentity {
+            principal: req.principal.clone(),
+            scope: req.scope.clone(),
+            harness: req.identity.harness.clone(),
+            session: req.identity.session.clone(),
+        };
+        let stored = match self.stored_project(&route) {
+            Ok(project) => project,
+            Err(HandlerOutcome::Error { code, .. }) if code == "session_unresolved" => None,
+            Err(_) => {
+                return subc_client_rs::BindDecision::reject(
+                    "session_unresolved",
+                    "session project is ambiguous or unavailable",
+                )
             }
         };
-        self.bind_route(
-            req.handle.channel,
-            SessionBinding {
-                principal: req.principal.clone(),
-                scope: req.scope.clone(),
-                project_root: req.identity.project_root.clone(),
-                harness: req.identity.harness.clone(),
-                session: req.identity.session.clone(),
-                model_key: None,
-                config,
-                // Use the default until a request supplies the history budget
-                // computed by the harness for that pass.
-                history_budget_tokens: memory_render::DEFAULT_HISTORY_BUDGET_TOKENS,
-            },
-        );
-        self.binding_projects
+        let scoped = route_binding::ScopedProject::from_stamp(route.scope.as_ref());
+        let async_project = self.stored_async_project(&route).ok().flatten();
+        let binding = async_project
+            .as_ref()
+            .map(|project| self.project_binding(&route, project))
+            .or_else(|| self.scoped_binding(&route))
+            .or_else(|| {
+                stored
+                    .as_ref()
+                    .map(|project| self.project_binding(&route, project))
+            });
+        self.unbind_route(req.handle.channel);
+        if let Some(binding) = binding {
+            let initial_key = stored.and_then(|project| project.key).or_else(|| {
+                if async_project.is_none() {
+                    scoped.and_then(|project| project.project_id)
+                } else {
+                    None
+                }
+            });
+            let initial = match initial_key {
+                Some(key) => Ok(key),
+                None => match self.store.get() {
+                    Some(store) => {
+                        self.entorhinal
+                            .resolve_for_session(
+                                &self.project_identities,
+                                &binding.project_root,
+                                &binding.harness,
+                                &binding.session,
+                                Some(store.as_ref()),
+                            )
+                            .await
+                    }
+                    None => self.project_identities.resolve(&binding.project_root),
+                },
+            };
+            self.bind_route(req.handle.channel, binding);
+            self.binding_projects
+                .lock()
+                .expect("binding project mutex")
+                .get_mut(&req.handle.channel)
+                .expect("newly bound route")
+                .initial = Some(initial);
+        }
+        self.route_identities
             .lock()
-            .expect("binding project mutex")
-            .get_mut(&req.handle.channel)
-            .expect("newly bound route")
-            .initial = Some(initial);
+            .expect("route identities")
+            .insert(req.handle.channel, route);
         self.record_route_role_versions(req.handle.channel, req.role_versions.as_ref());
         if let Ok(binding) = self.facade_binding(req.handle.channel) {
             if let Some(service) = &self.agent_data {
@@ -9567,25 +9861,28 @@ impl ModuleHandler for McHandler {
                 }
             }
         }
-        if self.module_knows_transform_session(&req.identity.session, &req.identity.project_root) {
-            if let Ok(store) = self.store_for_request().await {
-                let connection_file = self
-                    .provider_store
-                    .async_runtime
-                    .connection_file
-                    .lock()
-                    .expect("connection file mutex")
-                    .clone();
-                memory_profile::bind_session(
-                    &store,
-                    connection_file,
-                    req.identity.clone(),
-                    &req.identity.session,
-                    req.scope
-                        .as_ref()
-                        .and_then(|scope| scope.attributes.agent_id.as_deref()),
-                )
-                .await;
+        if let Ok(binding) = self.facade_binding(req.handle.channel) {
+            if self.module_knows_transform_session(&req.identity.session, &binding.project_root) {
+                if let Ok(store) = self.store_for_request().await {
+                    let connection_file = self
+                        .provider_store
+                        .async_runtime
+                        .connection_file
+                        .lock()
+                        .expect("connection file mutex")
+                        .clone();
+                    memory_profile::bind_session(
+                        &store,
+                        connection_file,
+                        req.identity.clone(),
+                        &binding.project_root,
+                        &req.identity.session,
+                        req.scope
+                            .as_ref()
+                            .and_then(|scope| scope.attributes.agent_id.as_deref()),
+                    )
+                    .await;
+                }
             }
         }
         subc_client_rs::BindDecision::accept()
@@ -9790,11 +10087,12 @@ impl McHandler {
             .is_some_and(|method| app_read::APP_READ_METHODS.contains(&method))
         {
             return HandlerOutcome::Error {
-                code: if self
-                    .bindings
-                    .lock()
-                    .expect("route bindings")
-                    .contains_key(&channel)
+                code: if self.route_identity(channel).is_some()
+                    || self
+                        .bindings
+                        .lock()
+                        .expect("route bindings")
+                        .contains_key(&channel)
                 {
                     "app_caller_forbidden"
                 } else {
@@ -9843,6 +10141,11 @@ const FLOW_ROUTE_METHODS: &[&str] = &[subagent_invocations_read::METHOD];
 impl McHandler {
     /// Whether the daemon bound `channel` under a flow's scope (`flow_id` in the stamp).
     fn flow_scoped(&self, channel: u16) -> bool {
+        if let Some(route) = self.route_identity(channel) {
+            return route
+                .scope
+                .is_some_and(|scope| scope.attributes.flow_id.is_some());
+        }
         self.bindings
             .lock()
             .expect("route bindings")
@@ -9926,6 +10229,9 @@ impl McHandler {
                 )
                 .await;
         }
+        if let Some(refusal) = self.unscoped_project_refusal(channel, &request) {
+            return refusal;
+        }
         let _move_pass = match self
             .move_visibility
             .request_pass(self, channel, &request, method)
@@ -10001,6 +10307,19 @@ impl McHandler {
         // admitted task tools (plus read-only discovery), whatever the request says.
         if let Some(outcome) = self.broca_dream_route(channel, method, &request) {
             return outcome;
+        }
+        match method {
+            Some("transform.declare") => {
+                return providers::step_transform_declare(
+                    request.get("params").unwrap_or(&Value::Null),
+                );
+            }
+            Some("transform.hook") => {
+                return self
+                    .handle_step_transform(channel, request.get("params").unwrap_or(&Value::Null))
+                    .await;
+            }
+            _ => {}
         }
         let catalog_request = method.is_none()
             && request.get("name").and_then(Value::as_str) == Some("tool.catalog")
@@ -12549,6 +12868,191 @@ struct CachedBoundaryMessages {
     token_cache_snapshot: BoundaryTokenCacheSnapshot,
 }
 
+#[derive(Default)]
+pub(crate) struct AsyncHistorianBoundary {
+    messages: Vec<BoundaryMsg>,
+    source_messages: usize,
+    source_blocks: usize,
+    seen: HashSet<String>,
+    trigger: boundary::AsyncTriggerCache,
+    message_heap_bytes: usize,
+    seen_key_bytes: usize,
+}
+
+impl AsyncHistorianBoundary {
+    #[cfg(test)]
+    fn retained_heap_bytes_walk(&self) -> usize {
+        self.messages
+            .capacity()
+            .saturating_mul(std::mem::size_of::<BoundaryMsg>())
+            .saturating_add(
+                self.messages
+                    .iter()
+                    .map(async_boundary_message_heap_bytes)
+                    .sum::<usize>(),
+            )
+            .saturating_add(crate::retained_size::hash_set_allocation_bytes(&self.seen))
+            .saturating_add(self.seen.iter().map(String::capacity).sum::<usize>())
+            .saturating_add(self.trigger.retained_heap_bytes_walk())
+    }
+
+    fn retained_heap_bytes(&self) -> usize {
+        self.messages
+            .capacity()
+            .saturating_mul(std::mem::size_of::<BoundaryMsg>())
+            .saturating_add(self.message_heap_bytes)
+            .saturating_add(crate::retained_size::hash_set_allocation_bytes(&self.seen))
+            .saturating_add(self.seen_key_bytes)
+            .saturating_add(self.trigger.retained_heap_bytes())
+    }
+
+    fn prepare(
+        &mut self,
+        parsed: &TransformRequest,
+        projection: &crate::ck_wire::FlatProjection,
+        token_cache: &Mutex<BoundaryTokenCache>,
+        cold_tokens: bool,
+    ) -> (BoundaryTokenCacheSnapshot, usize, usize) {
+        let mut unique = HashSet::new();
+        let duplicate = parsed
+            .messages
+            .get(self.source_messages..)
+            .is_none_or(|messages| {
+                messages.iter().any(|message| {
+                    self.seen.contains(&message.mid) || !unique.insert(message.mid.clone())
+                })
+            });
+        if cold_tokens
+            || self.source_messages == 0
+            || self.source_blocks > projection.blocks.len()
+            || duplicate
+        {
+            let built = boundary_messages(parsed, projection, token_cache);
+            self.messages = built.messages;
+            self.source_messages = parsed.messages.len();
+            self.source_blocks = projection.blocks.len();
+            self.seen = parsed
+                .messages
+                .iter()
+                .map(|message| message.mid.clone())
+                .collect();
+            self.message_heap_bytes = self
+                .messages
+                .iter()
+                .map(async_boundary_message_heap_bytes)
+                .sum();
+            self.seen_key_bytes = self.seen.iter().map(String::capacity).sum();
+            self.trigger = boundary::AsyncTriggerCache::default();
+            return (
+                built.token_cache_snapshot,
+                built.token_cache_hits,
+                built.tokenized_blocks,
+            );
+        }
+        let mut snapshot = token_cache
+            .lock()
+            .expect("boundary token cache mutex")
+            .snapshot(&parsed.session_id);
+        let mut ranges = HashMap::<&str, std::ops::Range<usize>>::new();
+        for (index, block) in projection
+            .blocks
+            .iter()
+            .enumerate()
+            .skip(self.source_blocks)
+        {
+            ranges
+                .entry(block.mid.as_str())
+                .and_modify(|range| range.end = index + 1)
+                .or_insert(index..index + 1);
+        }
+        for message in &parsed.messages[self.source_messages..] {
+            if self.seen.insert(message.mid.clone()) {
+                self.seen_key_bytes += self
+                    .seen
+                    .get(&message.mid)
+                    .expect("inserted message id")
+                    .capacity();
+            }
+            if message.ck.meta.synthetic || message.ck.role == "system" {
+                continue;
+            }
+            let prepared = BoundaryMsg {
+                message_ordinal: message.ordinal,
+                message_id: message.mid.clone(),
+                role: Role::from_provider(&message.ck.role),
+                blocks: ranges
+                    .get(message.mid.as_str())
+                    .into_iter()
+                    .flat_map(|range| projection.blocks[range.clone()].iter())
+                    .filter(|block| block.mid == message.mid && !block.synthetic)
+                    .map(|block| BoundaryBlock {
+                        id: block.id.clone(),
+                        ordinal: block.ordinal,
+                        kind: sel_kind_for_flat(block),
+                        provider_executed: block.provider_executed,
+                        byte_size: block.bytes.len(),
+                        arc_id: block.arc_id.clone(),
+                        original_token_count: boundary_block_tokens(block, &mut snapshot),
+                        original: Arc::clone(&block.bytes),
+                        rendered: None,
+                        ignored: false,
+                    })
+                    .collect(),
+            };
+            self.message_heap_bytes = self
+                .message_heap_bytes
+                .saturating_add(async_boundary_message_heap_bytes(&prepared));
+            self.messages.push(prepared);
+        }
+        self.source_messages = parsed.messages.len();
+        self.source_blocks = projection.blocks.len();
+        snapshot.retain_projection(projection);
+        let (hits, misses) = (snapshot.hits, snapshot.misses);
+        (snapshot, hits, misses)
+    }
+}
+
+fn async_boundary_message_heap_bytes(message: &BoundaryMsg) -> usize {
+    use crate::retained_size::value_heap_bytes;
+    let role = match &message.role {
+        Role::Other(role) => role.capacity(),
+        _ => 0,
+    };
+    message
+        .message_id
+        .capacity()
+        .saturating_add(role)
+        .saturating_add(
+            message
+                .blocks
+                .capacity()
+                .saturating_mul(std::mem::size_of::<BoundaryBlock>()),
+        )
+        .saturating_add(
+            message
+                .blocks
+                .iter()
+                .map(|block| {
+                    let kind = match &block.kind {
+                        SelKind::ToolCall { name, input } => {
+                            name.capacity().saturating_add(value_heap_bytes(input))
+                        }
+                        SelKind::ToolResult { tool_name } => tool_name.capacity(),
+                        _ => 0,
+                    };
+                    // `original` is an Arc clone of the projection's canonical bytes,
+                    // whose allocation is already charged by the projection owner.
+                    block
+                        .id
+                        .capacity()
+                        .saturating_add(kind)
+                        .saturating_add(block.arc_id.as_ref().map_or(0, String::capacity))
+                        .saturating_add(block.rendered.as_ref().map_or(0, String::capacity))
+                })
+                .sum::<usize>(),
+        )
+}
+
 fn cached_boundary_messages(
     parsed: &TransformRequest,
     projection: &crate::ck_wire::FlatProjection,
@@ -12952,6 +13456,13 @@ pub fn manifest_with_route_targets(
 /// an MCP facade may bind a runner's conversation by its session alone.
 pub const MCP_CONVERSATION_BINDING_V1: &str = "mcp-conversation-binding/v1";
 
+pub(crate) fn project_bind_capabilities() -> Vec<String> {
+    vec![
+        subc_protocol::scope::BIND_NO_PROJECT_CAPABILITY.to_string(),
+        subc_protocol::scope::SCOPE_WORKDIR_CAPABILITY.to_string(),
+    ]
+}
+
 pub fn manifest_with_route_targets_and_smart_notes(
     module_id: &str,
     resolved_routes: &RouteTargetConfig,
@@ -12971,6 +13482,7 @@ pub fn manifest_with_route_targets_and_smart_notes(
         // claim, before it calls role.describe. Without it, core never composes
         // Magic Context into a worker plan: no tools and no compaction.
         cortexkit_role_tool_provider::PROVIDES.to_string(),
+        cortexkit_role_step_transform_provider::PROVIDES.to_string(),
         MCP_CONVERSATION_BINDING_V1.to_string(),
         // basal reaches `subagent_invocations.read` over the calling flow's own
         // scoped route, which the daemon opens only to a module declaring this.
@@ -12978,6 +13490,8 @@ pub fn manifest_with_route_targets_and_smart_notes(
         // kept by the dispatcher's flow fence and the op's caller check.
         subc_protocol::scope::FLOW_SCOPES_CAPABILITY.to_string(),
     ];
+    // The daemon omits scope project fields unless the receiver opts in.
+    capabilities.extend(project_bind_capabilities());
     let mut provides = vec![
         ProviderRole::ToolProvider {
             tools,
@@ -13148,6 +13662,7 @@ mod tests {
     // read as one argument instead of being scattered through this module.
     mod broca_0_7_samples;
     mod broca_contract;
+    pub(crate) mod broca_rich_ui_stamp;
     mod guidance_get_golden;
     mod per_pass_cost;
     mod perf_audit_wire;
@@ -13166,6 +13681,10 @@ mod tests {
         per_pass_cost::fixed_clock()
     }
     mod catalog_startup;
+    #[path = "connection_project_source.rs"]
+    mod connection_project_source;
+    #[path = "scope_projects.rs"]
+    mod scope_projects;
     mod tool_catalog;
     mod tool_catalog_conformance;
     // The per-harness default runner, driven through real passes.
@@ -15100,9 +15619,11 @@ mod tests {
         let mut expected_capabilities = vec![
             "compaction-provider/v1".to_string(),
             "tool-provider/v1".to_string(),
+            "step-transform-provider/v1".to_string(),
             "mcp-conversation-binding/v1".to_string(),
             "flow-scopes/v1".to_string(),
         ];
+        expected_capabilities.extend(project_bind_capabilities());
         if agent_data::ENABLED {
             expected_capabilities.push(cortexkit_role_agent_data::PROVIDES.to_string());
         }
@@ -15212,7 +15733,7 @@ mod tests {
                         key: key.clone(),
                         daemon_id,
                         pid: std::process::id(),
-                        daemon_ver: "fake".into(),
+                        daemon_ver: "0.39.0".into(),
                     },
                 )
                 .unwrap();
@@ -15331,16 +15852,22 @@ mod tests {
         }
 
         async fn bind(handler: &McHandler, project: &Path, channel: u16) {
-            let identity = serde_json::from_value(json!({
-                "project_root": project, "harness": "opencode", "session": "ses"
-            }))
-            .unwrap();
+            let identity = subc_protocol::BindIdentity::new("opencode", "ses");
             let request = RouteBindRequest::new(
                 RouteHandle::detached(channel, 1),
                 RouteTargetConfig::runner_module("magic-context")
                     .target(route_targets::RegisteredRoute::HistorianRunner)
                     .unwrap(),
                 identity,
+            )
+            .with_scope(
+                subc_protocol::scope::ScopeStamp::new(
+                    subc_protocol::Principal::Direct,
+                    "fixture",
+                    1,
+                    subc_protocol::scope::ScopeKind::Head,
+                )
+                .with_workdir(Some(project.to_string_lossy().into_owned())),
             );
             let _decision = handler.on_bind(&request).await;
             assert!(handler.bindings.lock().unwrap().contains_key(&channel));
@@ -15358,6 +15885,70 @@ mod tests {
                 .route_project(channel, store, &binding)
                 .unwrap_or_else(|_| panic!("project resolution failed"))
                 .key
+        }
+
+        #[tokio::test]
+        async fn route_worktree_retires_git_sidecar_and_borrows_root_pin_without_common_metadata() {
+            use sha2::Digest;
+            let (mut handler, store, temp, project) = fixture();
+            let git = |args: &[&str]| {
+                let output = std::process::Command::new("git")
+                    .current_dir(&project)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            };
+            git(&["init", "-q"]);
+            git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "fixture",
+            ]);
+            let worktree = temp.path().join("linked-worktree");
+            git(&["worktree", "add", "--detach", worktree.to_str().unwrap()]);
+            let path_for = |directory: &Path| {
+                temp.path().join("sidecars").join(format!(
+                    "{:x}.json",
+                    sha2::Sha256::digest(
+                        project_identity::project_directory_key(directory).as_bytes()
+                    )
+                ))
+            };
+            let old = handler.project_identities.resolve(&worktree).unwrap();
+            assert!(old.starts_with("git:"));
+            handler.entorhinal =
+                entorhinal_resolve::EntorhinalResolver::new(Some(temp.path().join("absent.json")));
+            bind(&handler, &worktree, 6).await;
+            assert_eq!(served(&handler, &store, 6), old);
+            let stale = path_for(&worktree);
+            assert!(stale.exists());
+            println!(
+                "route fallback wrote {}: {}",
+                stale.display(),
+                std::fs::read_to_string(&stale).unwrap()
+            );
+            std::fs::write(path_for(&project), serde_json::to_vec(&json!({"directory": project_identity::project_directory_key(&project), "identity": "pj-ROOT"})).unwrap()).unwrap();
+            handler.entorhinal =
+                entorhinal_resolve::EntorhinalResolver::new(Some(temp.path().join("absent.json")));
+            bind(&handler, &worktree, 7).await;
+            assert_eq!(served(&handler, &store, 7), "pj-ROOT");
+            assert_eq!(served(&handler, &store, 6), old);
+            handler.project_identities.flush_pins();
+            assert!(!stale.exists());
+            assert_eq!(
+                handler.project_identities.resolve(&worktree).unwrap(),
+                "pj-ROOT"
+            );
         }
 
         #[tokio::test]
@@ -15936,6 +16527,34 @@ mod tests {
             }
         }
 
+        /// Runner sessions in different projects all pass through the internal
+        /// channel. One session's served project must never become another's: a
+        /// moved head was served the first worker's project memories this way.
+        #[tokio::test]
+        async fn internal_channel_keeps_each_sessions_own_project() {
+            let (handler, store, _temp, project) = fixture();
+            store
+                .with_context_conn_for_test(|db| {
+                    db.execute_batch(
+                        "INSERT INTO session_projects (session_id, harness, project_path, updated_at) VALUES
+                         ('worker', 'opencode', 'pj-worker-project', 1),
+                         ('head', 'opencode', 'pj-head-project', 1);",
+                    )
+                })
+                .unwrap();
+            let root = project.to_string_lossy();
+            let served = |session: &str| {
+                handler
+                    .route_project(INTERNAL_CHANNEL, &store, &super::binding(&root, session))
+                    .unwrap()
+                    .key
+            };
+            assert_eq!(served("worker"), "pj-worker-project");
+            assert_eq!(served("head"), "pj-head-project");
+            assert_eq!(served("worker"), "pj-worker-project");
+            assert_eq!(served("head"), "pj-head-project");
+        }
+
         #[tokio::test]
         async fn move_between_pins_uses_new_binding_and_return_refreshes_row() {
             let (handler, store, temp, project) = fixture();
@@ -15980,7 +16599,17 @@ mod tests {
     fn binding_with_harness(root: &str, harness: &str, session: &str) -> SessionBinding {
         SessionBinding {
             principal: None,
-            scope: None,
+            scope: (harness == "claude-code").then(|| {
+                subc_protocol::scope::ScopeStamp::new(
+                    subc_protocol::Principal::Reserved {
+                        module_id: "prefrontal-core".into(),
+                    },
+                    "claude-code-fixture",
+                    1,
+                    subc_protocol::scope::ScopeKind::Ephemeral,
+                )
+                .with_workdir(Some(root.to_owned()))
+            }),
             project_root: PathBuf::from(root),
             harness: harness.to_string(),
             session: session.to_string(),
@@ -16712,6 +17341,7 @@ mod tests {
             historian_context_limit_known: true,
             memory_budget_tokens: 4_000.0,
             user_profile_budget_tokens: 4_000.0,
+            history_budget_percentage: crate::config::DEFAULT_HISTORY_BUDGET_PERCENTAGE,
             inject_docs: true,
             temporal_awareness: true,
             prompt_surface_guidance_override: None,

@@ -6,8 +6,8 @@
 //! (with `app_read.allow_direct` on, as the local desktop binds), then the
 //! request bytes go through `app_read::handle` exactly as the daemon would
 //! deliver them. The files only record what the handlers served; nothing in
-//! them is hand-written. Watch notices/refusals come from the live subscription
-//! hub; the daemon subscription tests separately check their StreamData framing.
+//! them is hand-written. Watch samples use the real daemon, provider dispatch
+//! and consumer subscription, including management StreamData wrapping.
 //!
 //! Layout: `testdata/app-read-samples/<op>/<case>.json` plus `SHA256SUMS`
 //! (`sha256sum` format, sorted by path) and a `README.md` that lists each
@@ -82,7 +82,7 @@ fn direct_caller() -> AppCaller {
     let request = RouteBindRequest::new(
         RouteHandle::detached(1, 1),
         crate::route_targets::app_read_target_for_test(crate::DEFAULT_MODULE_ID),
-        BindIdentity::new(PathBuf::from("caller-chosen"), "desktop", "ignored-session"),
+        BindIdentity::new("desktop", "ignored-session"),
     )
     .with_principal(Principal::Direct);
     assert!(request.scope.is_none(), "samples bind carries no scope");
@@ -680,6 +680,19 @@ fn session_data_records() -> Vec<Record> {
             "",
             json!({"session": opencode_session("host"), "section": "token_breakdown"}),
         ),
+        // Calibrated sidebar buckets exhaust the provider's measured input total.
+        plain(
+            "token-breakdown-calibrated",
+            "session_data.read/token-breakdown-calibrated.json",
+            "session_data.read",
+            "INSERT INTO session_meta(session_id,harness,last_response_time,last_input_tokens,system_prompt_tokens,total_input_tokens,new_work_tokens) \
+             VALUES('calibrated','opencode',1700000000200,448000,18000,448000,0); \
+             CREATE TABLE IF NOT EXISTS session_render_cache(session_id TEXT, cache_key TEXT, value BLOB, PRIMARY KEY(session_id,cache_key)) WITHOUT ROWID; \
+             INSERT INTO session_render_cache VALUES('calibrated','host_token_breakdown', \
+             '{\"version\":2,\"measured_at\":1700000000000,\"tolerance\":{\"ratio\":0.01,\"tokens\":500},\"last_user_message_in_history_raw\":true,\"parts\":{\"system_prompt\":27207,\"tool_definitions\":33275,\"history_summaries\":1572,\"memory\":3144,\"project_docs\":4715,\"user_profile\":786,\"history_raw\":188650,\"tool_calls_results\":188651,\"last_user_message\":0}}');",
+            "",
+            json!({"session": opencode_session("calibrated"), "section": "token_breakdown"}),
+        ),
         // No provider total was recorded, so the legacy estimate stands in.
         plain(
             "token-breakdown-estimate",
@@ -824,35 +837,30 @@ fn all_records() -> Vec<Record> {
     records.extend(dreamer_records());
     records.extend(health_records());
     records.extend(config_records());
-    for (name, params, result) in super::watch::samples() {
-        let (file, served) = match result {
-            Ok(value) => (
-                if name == "resync" {
-                    "context.watch/resync.json"
-                } else {
-                    "context.watch/changes.json"
-                },
-                Served::Reply(value),
-            ),
+    for sample in super::watch::samples() {
+        let served = match sample.result {
+            Ok(value) => Served::Reply(value),
             Err(HandlerOutcome::ErrorWithDetail {
                 code,
                 message,
                 detail,
-            }) => (
-                "context.watch/refusal.json",
-                Served::Refusal {
-                    code,
-                    message,
-                    detail,
-                },
-            ),
+            }) => Served::Refusal {
+                code,
+                message,
+                detail,
+            },
+            Err(HandlerOutcome::Error { code, message }) => Served::Refusal {
+                code,
+                message,
+                detail: Value::Null,
+            },
             Err(other) => panic!("unexpected watch refusal {other:?}"),
         };
         records.push(Record {
-            name,
-            file,
+            name: sample.name,
+            file: sample.file,
             method: super::watch::METHOD,
-            params,
+            params: sample.params,
             served,
         });
     }

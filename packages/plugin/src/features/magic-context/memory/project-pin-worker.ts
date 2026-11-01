@@ -1,20 +1,17 @@
 import { parentPort } from "node:worker_threads";
-import {
-    setStoragePrivatePermissionEnforcement,
-    writeStorageFileAtomicSync,
-} from "../../../shared/storage-permissions";
 import type { ProjectIdentityRecord } from "./project-identity-cache";
+import { persistPinRequest } from "./project-pin-persistence";
 
 export interface PinWriteRequest {
     destination: string;
     record: ProjectIdentityRecord;
     privateStorage: boolean;
+    removeIfUnchanged?: string;
 }
 
 parentPort?.on("message", (request: PinWriteRequest) => {
     try {
-        setStoragePrivatePermissionEnforcement(request.privateStorage);
-        writeStorageFileAtomicSync(request.destination, JSON.stringify(request.record));
+        persistPinRequest(request);
         parentPort?.postMessage({ ok: true });
     } catch (error) {
         parentPort?.postMessage({ ok: false, error: String(error) });

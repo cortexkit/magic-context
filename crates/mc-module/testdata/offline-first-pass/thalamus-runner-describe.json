@@ -1,0 +1,104 @@
+{
+  "capabilities": [
+    "output_refs",
+    "call_identity",
+    "transcript_reads",
+    "host_history",
+    "history_display",
+    "client_message_id",
+    "run_ops",
+    "run_status",
+    "held_calls",
+    "run_cancel",
+    "run_cancel_by_interrupt",
+    "queue",
+    "steer",
+    "interrupt",
+    "retract",
+    "streaming",
+    "live_events",
+    "step_events",
+    "plans",
+    "system_text_default",
+    "retention",
+    "delivery_order",
+    "send_status",
+    "run_tool_calls",
+    "run_usage",
+    "turn_directives",
+    "interrupt_reason",
+    "tags",
+    "compaction",
+    "tag_checkpoint",
+    "message_checkpoint",
+    "user_commands",
+    "attachments",
+    "adopt",
+    "structured_output",
+    "submit_streamed_siblings",
+    "structured_output_per_session",
+    "session_usage",
+    "head_sender",
+    "session_change",
+    "refresh_relaunch",
+    "rich_ui_stamp"
+  ],
+  "delivery_order_modes": [
+    "tool_result",
+    "steer",
+    "idle_start"
+  ],
+  "extensions": [
+    "harness.host_start"
+  ],
+  "implementation_version": "0.1.0",
+  "majors": [
+    {
+      "ops": [
+        "session.output_refs",
+        "session.output_ref_read",
+        "role.describe",
+        "session.baseline",
+        "session.send",
+        "send.status",
+        "session.read",
+        "session.history",
+        "session.head",
+        "run.result",
+        "run.status",
+        "run.cancel",
+        "session.retract",
+        "session.subscribe",
+        "run.tool_calls",
+        "session.resolve",
+        "session.user_command",
+        "session.user_command_status",
+        "session.upload_begin",
+        "session.upload_append",
+        "session.upload_status",
+        "session.upload_commit",
+        "session.media_read",
+        "session.adopt",
+        "session.refresh",
+        "session.refresh_policy",
+        "session.flush_prefix"
+      ],
+      "stability": "alpha",
+      "version": "llm-runner/v1"
+    }
+  ],
+  "max_bytes": {
+    "default": 1048576,
+    "maximum": 3145728
+  },
+  "retention": {
+    "delete_within_ms": 300000,
+    "max_seconds": 31536000
+  },
+  "session_capabilities_from": "admission",
+  "steer_receipt": "confirm",
+  "step_events": {
+    "granularity": "per_completed_step",
+    "history_key": "harness"
+  }
+}

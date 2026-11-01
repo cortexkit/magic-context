@@ -1,0 +1,21 @@
+{
+  "name": "cursor must have epoch and version syntax",
+  "refusal": {
+    "code": "cursor_invalid",
+    "detail": null,
+    "message": "The watch cursor must have the form <epoch>:<version>."
+  },
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "cursor": "not-a-cursor",
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  }
+}

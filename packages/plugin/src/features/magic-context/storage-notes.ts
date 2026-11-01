@@ -55,7 +55,7 @@ export interface GetNotesOptions {
 
 export interface NoteMutationScope {
     sessionId: string;
-    projectPath: string;
+    projectPath: string | undefined;
 }
 
 export type DismissNoteOutcome = "dismissed" | "not_found" | "not_owned" | "already_dismissed";
@@ -296,7 +296,7 @@ function noteBelongsToScope(note: Note, scope: NoteMutationScope): boolean {
         return note.sessionId === scope.sessionId;
     }
 
-    return note.projectPath === scope.projectPath;
+    return scope.projectPath !== undefined && note.projectPath === scope.projectPath;
 }
 
 function buildStatusClause(status: GetNotesOptions["status"]): {

@@ -81,17 +81,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Build complete dists
-        run: |
-          bun run build
-          bun run --cwd packages/pi-plugin build:e2e-argv
-          bun run --cwd packages/dashboard build
+        run: bash scripts/ci/preflight-build-complete-dists.sh
       - name: Check compiled contracts
-        run: |
-          bun run --cwd packages/plugin check:tui-compiled
-          bun crates/mc-module/gen/gen-historian-prompt-golden.ts --check
-          bun crates/mc-module/gen/gen-memory-actions-golden.ts --check
-          bun crates/mc-module/gen/gen-curate-undo-golden.ts --check
-          bun test packages/e2e-tests/scripts/ci-dists.test.ts
+        run: bash scripts/ci/preflight-check-compiled-contracts.sh
       - name: Package same-commit dists
         run: |
           tar -czf ci-dists.tar.gz packages/plugin/dist packages/pi-plugin/dist packages/cli/dist packages/retina-local-fs/dist packages/dashboard/dist tests/docker/.generated
@@ -112,44 +104,23 @@ jobs:
       # checks. CI (required) still rejects any failed preflight check.
       - name: Layout, manifest and shard contracts
         if: ${{ !cancelled() }}
-        run: |
-          bash scripts/check-cortexkit-layout.sh
-          bash scripts/check-docs-layout.sh
-          bash scripts/check-docs-layout.test.sh
-          python3 scripts/cargo-lock-pins.py --self-test
-          python3 scripts/check-nextest-inventory.py --self-test
-          python3 scripts/wait-ci-artifact.py --self-test
-          python3 scripts/download-ci-artifact.py --self-test
-          timeout 180s python3 scripts/ci-gate.test.py -v
-          timeout 180s python3 scripts/release.test.py -v
-          timeout 180s python3 scripts/merge-pr.test.py -v
-          timeout 180s python3 scripts/check-cargo-path-dependencies.py
-          timeout 180s python3 scripts/check-cargo-path-dependencies.py --self-test
-          bun packages/e2e-tests/scripts/validate-mode-manifest.ts
-          cd packages/e2e-tests
-          bun test scripts/validate-mode-manifest.test.ts scripts/select-rust-shard.test.ts scripts/select-host-shard.test.ts scripts/select-unit-shard.test.ts scripts/ci-workflow.test.ts scripts/run-slow-unit-tests.test.ts
-          bun scripts/run-slow-unit-tests.ts --dry-run
+        env:
+          GATE_PREFLIGHT_PHASE: independent
+        run: bash scripts/ci/preflight-layout-manifest-and-shard-contracts.sh
+      - name: Pins and lockfiles
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/preflight-pins-and-lockfiles.sh
       - name: Format check
         if: ${{ !cancelled() }}
-        run: cargo fmt --check
+        env:
+          GATE_PREFLIGHT_PHASE: independent
+        run: bash scripts/ci/preflight-format-check.sh
       - name: TypeScript typecheck
         if: ${{ !cancelled() }}
-        run: |
-          status=0
-          for package in plugin cli retina-local-fs pi-plugin dashboard; do
-            bun run --cwd "packages/$package" typecheck || status=1
-          done
-          bun run --cwd packages/e2e-tests tsc --noEmit -p tsconfig.ci.json || status=1
-          exit "$status"
+        run: bash scripts/ci/preflight-typescript-typecheck.sh
       - name: Lint
         if: ${{ !cancelled() }}
-        run: |
-          status=0
-          for package in plugin cli retina-local-fs pi-plugin dashboard; do
-            bun run --cwd "packages/$package" lint || status=1
-          done
-          exit "$status"
-
+        run: bash scripts/ci/preflight-lint.sh
   check-docs-layout:
     name: Check (public documentation layout)
     runs-on: ubuntu-latest
@@ -188,22 +159,14 @@ jobs:
       - name: Test (CLI and retina, normal and debug assertions)
         # Bun has no --no-fail-fast flag. Collect package/mode statuses explicitly;
         # each package wrapper still owns its preload, JSC flags and timeout.
-        run: |
-          status=0
-          for package in cli retina-local-fs; do
-            bun run --cwd "packages/$package" test || status=1
-          done
-          MAGIC_CONTEXT_DEBUG_ASSERTIONS=1 bun run --cwd packages/cli test || status=1
-          MAGIC_CONTEXT_DEBUG_ASSERTIONS=1 bun run --cwd packages/retina-local-fs test --timeout=60000 || status=1
-          exit "$status"
-
+        run: bash scripts/ci/check-plugin-compat-test-cli-and-retina-normal-and-debug-assertions.sh
       # Exercise the node:sqlite branch of shared/sqlite.ts under REAL Node —
       # bun test only covers the bun:sqlite branch, so the transaction() shim,
       # readonly→readOnly mapping, and the array-bind normalization (#151) would
       # otherwise ship unverified on Pi/Desktop.
       - name: Smoke (node:sqlite backend)
         if: ${{ !cancelled() && steps.dists.outcome == 'success' }}
-        run: node packages/plugin/scripts/smoke-node-sqlite.ts
+        run: bash scripts/ci/check-plugin-compat-smoke-node-sqlite-backend.sh
 
       # The smart-note QuickJS sandbox loads a ~1MB WASM. `bun test` runs it from
       # src (wasm resolves via node_modules), so it cannot catch a BUNDLING break
@@ -211,7 +174,7 @@ jobs:
       # like the package build and runs a real check against the bundle.
       - name: Smoke (smart-note wasm bundle)
         if: ${{ !cancelled() && steps.dists.outcome == 'success' }}
-        run: bun packages/plugin/scripts/smoke-smartnote-wasm.ts
+        run: bash scripts/ci/check-plugin-compat-smoke-smart-note-wasm-bundle.sh
 
       # The raw-TSX ./tui entry imports @opentui/solid's JSX runtime. `bun test`
       # never imports it, so a missing/mismatched OpenTUI or Solid dep (as broke
@@ -219,7 +182,7 @@ jobs:
       # Import the entry the way OpenCode loads the ./tui export to catch it.
       - name: Smoke (TUI entry import)
         if: ${{ !cancelled() && steps.dists.outcome == 'success' }}
-        run: bun packages/plugin/scripts/smoke-tui-import.ts
+        run: bash scripts/ci/check-plugin-compat-smoke-tui-entry-import.sh
 
       # The dev-path import above cannot catch packaging breaks: OpenTUI's Solid
       # transform skips node_modules sources, so only a packed PROD install
@@ -227,14 +190,14 @@ jobs:
       # shipped without runtime deps and passed every dev-path check).
       - name: Smoke (TUI packaged install import)
         if: ${{ !cancelled() && steps.dists.outcome == 'success' }}
-        run: bun packages/plugin/scripts/smoke-tui-pack-install.ts --skip-build
+        run: bash scripts/ci/check-plugin-compat-smoke-tui-packaged-install-import.sh
 
       # Tokenizer loading is lazy, so an import-only smoke misses resolution
       # failures. Pack + npm-install prod deps, then exercise an estimate from a
       # compiled Bun host matching OpenCode's /$bunfs/root runtime.
       - name: Smoke (tokenizer packaged install estimate)
         if: ${{ !cancelled() && steps.dists.outcome == 'success' }}
-        run: bun packages/plugin/scripts/smoke-tokenizer-pack-install.ts --skip-build
+        run: bash scripts/ci/check-plugin-compat-smoke-tokenizer-packaged-install-estimate.sh
 
   unit-plugin:
     name: Unit (plugin ${{ matrix.mode }} ${{ matrix.shard }}/4)
@@ -263,13 +226,7 @@ jobs:
       - name: Run whole-file plugin shard
         env:
           UNIT_MODE: ${{ matrix.mode }}
-        run: |
-          bun packages/e2e-tests/scripts/select-unit-shard.ts plugin "$UNIT_MODE" "${{ matrix.shard }}/4" > "$RUNNER_TEMP/unit-files.txt"
-          mapfile -t files < "$RUNNER_TEMP/unit-files.txt"
-          test "${#files[@]}" -gt 0
-          printf '%s\n' "${files[@]}"
-          if [[ "$UNIT_MODE" == assertions ]]; then export MAGIC_CONTEXT_DEBUG_ASSERTIONS=1; fi
-          bun run --cwd packages/plugin test --reporter=junit --reporter-outfile "$GITHUB_WORKSPACE/unit-junit.xml" "${files[@]}"
+        run: bash scripts/ci/unit-plugin-run-whole-file-plugin-shard.sh "${{ matrix.shard }}"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
@@ -296,10 +253,7 @@ jobs:
       - name: Run full corpora and isolated timing checks once per mode
         env:
           UNIT_MODE: ${{ matrix.mode }}
-        run: |
-          if [[ "$UNIT_MODE" == assertions ]]; then export MAGIC_CONTEXT_DEBUG_ASSERTIONS=1; fi
-          bun packages/e2e-tests/scripts/run-slow-unit-tests.ts
-
+        run: bash scripts/ci/slow-unit-run-full-corpora-and-isolated-timing-checks-once-per-mode.sh
   unit-pi-plugin:
     name: Unit (pi-plugin ${{ matrix.mode }} ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
@@ -322,16 +276,7 @@ jobs:
         env:
           UNIT_MODE: ${{ matrix.mode }}
         # Assertion shards keep one worker and the existing 60-second timeout.
-        run: |
-          bun packages/e2e-tests/scripts/select-unit-shard.ts pi-plugin "$UNIT_MODE" "${{ matrix.shard }}/4" > "$RUNNER_TEMP/unit-files.txt"
-          mapfile -t files < "$RUNNER_TEMP/unit-files.txt"
-          test "${#files[@]}" -gt 0
-          printf '%s\n' "${files[@]}"
-          if [[ "$UNIT_MODE" == assertions ]]; then
-            MAGIC_CONTEXT_DEBUG_ASSERTIONS=1 bun run --cwd packages/pi-plugin test --parallel=1 --timeout=60000 --reporter=junit --reporter-outfile "$GITHUB_WORKSPACE/unit-junit.xml" "${files[@]}"
-          else
-            bun run --cwd packages/pi-plugin test --reporter=junit --reporter-outfile "$GITHUB_WORKSPACE/unit-junit.xml" "${files[@]}"
-          fi
+        run: bash scripts/ci/unit-pi-plugin-run-whole-file-pi-shard.sh "${{ matrix.shard }}"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
@@ -389,7 +334,7 @@ jobs:
       # ConfigEditor coverage manifest doesn't account for, so the form can't
       # silently drift out of sync with the schema again.
       - name: Test
-        run: bun run --cwd packages/dashboard test
+        run: bash scripts/ci/check-dashboard-test.sh
 
   e2e-opencode:
     name: E2E (OpenCode, Docker)
@@ -407,15 +352,9 @@ jobs:
       - uses: ./.github/actions/restore-ci-dists
 
       - name: Build E2E image
-        run: |
-          docker build \
-            --platform linux/amd64 \
-            -f tests/docker/Dockerfile.opencode \
-            -t mc-e2e-opencode \
-            .
-
+        run: bash scripts/ci/e2e-opencode-build-e2e-image.sh
       - name: Run E2E
-        run: docker run --rm --platform linux/amd64 mc-e2e-opencode
+        run: bash scripts/ci/e2e-opencode-run-e2e.sh
 
   e2e-opencode2:
     name: E2E (OpenCode 2.0.22, Docker)
@@ -436,7 +375,7 @@ jobs:
       # plugin, fails if Docker or opencode2 is missing, and runs the exact-pinned
       # GA host through a real transform, host fold, database check, and TUI boot.
       - name: Run pinned OpenCode 2 container lane
-        run: tests/docker/opencode2/run.sh
+        run: bash scripts/ci/e2e-opencode2-run-pinned-opencode-2-container-lane.sh
 
   e2e-pi:
     name: E2E (Pi, Docker)
@@ -457,15 +396,9 @@ jobs:
         # The Pi Dockerfile installs runtime deps fresh inside the image
         # (better-sqlite3 builds against linux/amd64), so no host-side
         # `npm install` is needed.
-        run: |
-          docker build \
-            --platform linux/amd64 \
-            -f tests/docker/Dockerfile.pi \
-            -t mc-e2e-pi \
-            .
-
+        run: bash scripts/ci/e2e-pi-build-e2e-image.sh
       - name: Run E2E
-        run: docker run --rm --platform linux/amd64 mc-e2e-pi
+        run: bash scripts/ci/e2e-pi-run-e2e.sh
 
   e2e-omp:
     name: E2E (Oh My Pi, real Docker)
@@ -483,15 +416,9 @@ jobs:
       - uses: ./.github/actions/restore-ci-dists
 
       - name: Build real OMP E2E image
-        run: |
-          docker build \
-            --platform linux/amd64 \
-            -f tests/docker/Dockerfile.omp \
-            -t mc-e2e-omp \
-            .
-
+        run: bash scripts/ci/e2e-omp-build-real-omp-e2e-image.sh
       - name: Run real OMP install and session smoke
-        run: docker run --rm --platform linux/amd64 mc-e2e-omp
+        run: bash scripts/ci/e2e-omp-run-real-omp-install-and-session-smoke.sh
 
   e2e-host-opencode:
     name: E2E (OpenCode, host behavior ${{ matrix.shard }}/4)
@@ -522,12 +449,9 @@ jobs:
         # known-bad upstream release can turn CI red for unrelated PRs — if that
         # happens, temporarily re-pin with `--version X.Y.Z` here until it's
         # resolved upstream.
-        run: |
-          OPENCODE_VERSION=latest bash tests/docker/install-opencode.sh
-          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
-
+        run: bash scripts/ci/e2e-host-opencode-install-opencode.sh
       - name: Verify opencode on PATH
-        run: opencode --version
+        run: bash scripts/ci/e2e-host-opencode-verify-opencode-on-path.sh
 
       - uses: ./.github/actions/restore-ci-dists
         id: dists
@@ -540,16 +464,7 @@ jobs:
           NODE_ENV: ""
           MC_E2E_MODE: ts
           MC_E2E_HOST: opencode
-        run: |
-          cd packages/e2e-tests
-          # A validator failure must fail the job, never fall through to an empty
-          # list: `bun test` with no files runs every file in the package.
-          set -o pipefail
-          files=$(bun scripts/select-host-shard.ts opencode "${{ matrix.shard }}/4" | tr '\n' ' ')
-          if [ -z "${files// /}" ]; then echo 'mode manifest selected no files'; exit 1; fi
-           echo "Running OpenCode host tests from mode manifest: $files"
-           # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
-           bun test --timeout 600000 $files
+        run: bash scripts/ci/e2e-host-opencode-run-host-e2e-suite-opencode-tests-only.sh "${{ matrix.shard }}"
       # This oracle is outside tests/**/*.test.ts and runs once even if a host suite fails.
       - name: Cache analysis oracle
         if: ${{ !cancelled() && matrix.shard == 0 && steps.dists.outcome == 'success' }}
@@ -557,7 +472,7 @@ jobs:
           NODE_ENV: ""
           MC_E2E_MODE: ts
           MC_E2E_HOST: opencode
-        run: cd packages/e2e-tests && bun test --timeout 600000 src/cache-analysis.test.ts
+        run: bash scripts/ci/e2e-host-opencode-cache-analysis-oracle.sh
 
   e2e-host-pi:
     name: E2E (Pi, host behavior)
@@ -581,12 +496,9 @@ jobs:
       # opencode on PATH too. Float to LATEST like the OpenCode host job
       # (see that step for the rationale + re-pin escape hatch).
       - name: Install opencode
-        run: |
-          OPENCODE_VERSION=latest bash tests/docker/install-opencode.sh
-          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
-
+        run: bash scripts/ci/e2e-host-pi-install-opencode.sh
       - name: Verify opencode on PATH
-        run: opencode --version
+        run: bash scripts/ci/e2e-host-pi-verify-opencode-on-path.sh
 
       - uses: ./.github/actions/restore-ci-dists
 
@@ -599,17 +511,7 @@ jobs:
           NODE_ENV: ""
           MC_E2E_MODE: ts
           MC_E2E_HOST: pi
-        run: |
-          cd packages/e2e-tests
-          # A validator failure must fail the job, never fall through to an empty
-          # list: `bun test` with no files runs every file in the package.
-          set -o pipefail
-          files=$(bun scripts/validate-mode-manifest.ts --mode ts --harness pi | tr '\n' ' ')
-          if [ -z "${files// /}" ]; then echo 'mode manifest selected no files'; exit 1; fi
-           echo "Running Pi host tests from mode manifest: $files"
-           # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
-           bun test --timeout 600000 $files
-
+        run: bash scripts/ci/e2e-host-pi-run-host-e2e-suite-pi-tests-from-mode-manifest.sh
   e2e-host-opencode2:
     name: E2E (OpenCode ${{ matrix.version }}, host behavior ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
@@ -640,19 +542,11 @@ jobs:
       # and can exit 0 without installing; the repo's installer pins, retries and
       # asserts the binary runs.
       - name: Install OpenCode 1 for conversion coverage
-        run: |
-          OPENCODE_VERSION=1.18.31 bash tests/docker/install-opencode.sh
-          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
-
+        run: bash scripts/ci/e2e-host-opencode2-install-opencode-1-for-conversion-coverage.sh
       - name: Install the selected exact host
-        run: |
-          mkdir -p target/oc2-host
-          printf '{"private":true,"dependencies":{"@opencode/cli":"%s"},"trustedDependencies":["@opencode/cli"]}\n' '${{ matrix.version }}' > target/oc2-host/package.json
-          bun install --cwd target/oc2-host
-          echo "MC_E2E_OPENCODE2_CLI=$PWD/target/oc2-host/node_modules/@opencode/cli/bin/opencode.exe" >> "$GITHUB_ENV"
-
+        run: bash scripts/ci/e2e-host-opencode2-install-the-selected-exact-host.sh "${{ matrix.version }}"
       - name: Verify the GA host binary
-        run: bun -e "const { CLI } = await import('./packages/e2e-tests/src/opencode2-runner/spawn.ts'); const { execFileSync } = await import('node:child_process'); const version = execFileSync(CLI, ['--version']).toString().trim(); console.log(CLI, version); if (version !== 'opencode v' + process.env.MC_E2E_OPENCODE2_VERSION) throw new Error('OpenCode 2 host lane requires its exact matrix version')"
+        run: bash scripts/ci/e2e-host-opencode2-verify-the-ga-host-binary.sh
 
       - uses: ./.github/actions/restore-ci-dists
         id: dists
@@ -662,15 +556,7 @@ jobs:
           NODE_ENV: ""
           MC_E2E_MODE: ts
           MC_E2E_HOST: opencode2
-        run: |
-          cd packages/e2e-tests
-          set -o pipefail
-          files=$(bun scripts/select-host-shard.ts opencode2 "${{ matrix.shard }}/2" | tr '\n' ' ')
-          if [ -z "${files// /}" ]; then echo 'mode manifest selected no files'; exit 1; fi
-          echo "Running OpenCode 2 host tests from mode manifest: $files"
-          # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
-          bun test --timeout 600000 $files
-
+        run: bash scripts/ci/e2e-host-opencode2-run-host-e2e-suite-opencode-2-tests-from-mode-manifest.sh "${{ matrix.shard }}"
       # These long-lived dual-host fixtures manipulate separate throwaway stores,
       # but run sequentially to avoid contending with one another's live hosts.
       - name: Run OC2 conversion and marker regressions
@@ -679,13 +565,7 @@ jobs:
           NODE_ENV: ""
           MC_E2E_MODE: ts
           MC_E2E_HOST: opencode2
-        run: |
-          cd packages/e2e-tests
-          status=0
-          bun test --timeout 600000 tests/opencode2/store-generation-conversion.test.ts || status=1
-          bun test --timeout 600000 tests/opencode2/marker-s3-runtime.test.ts || status=1
-          exit "$status"
-
+        run: bash scripts/ci/e2e-host-opencode2-run-oc2-conversion-and-marker-regressions.sh
   e2e-host-omp:
     name: E2E (Oh My Pi, host behavior)
     runs-on: ubuntu-latest
@@ -704,10 +584,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Install opencode
-        run: |
-          OPENCODE_VERSION=latest bash tests/docker/install-opencode.sh
-          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
-
+        run: bash scripts/ci/e2e-host-omp-install-opencode.sh
       - uses: ./.github/actions/restore-ci-dists
 
       - name: Run host e2e suite (OMP tests from mode manifest)
@@ -715,15 +592,7 @@ jobs:
           NODE_ENV: ""
           MC_E2E_MODE: ts
           MC_E2E_HOST: omp
-        run: |
-          cd packages/e2e-tests
-          set -o pipefail
-          files=$(bun scripts/validate-mode-manifest.ts --mode ts --harness omp | tr '\n' ' ')
-          if [ -z "${files// /}" ]; then echo 'mode manifest selected no files'; exit 1; fi
-          echo "Running OMP host tests from mode manifest: $files"
-          # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
-          bun test --timeout 600000 $files
-
+        run: bash scripts/ci/e2e-host-omp-run-host-e2e-suite-omp-tests-from-mode-manifest.sh
   rust-mc-module-integration:
     name: Rust (mc-module integration)
     # mc-module integration tests build ck-subc from the locked source revision.
@@ -734,6 +603,8 @@ jobs:
     # multiplied by nextest's process-per-test execution model.
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      MC_TEST_SUBCONSCIOUS_SOURCE: ${{ github.workspace }}/.siblings/subconscious
     permissions:
       contents: read
       actions: read
@@ -776,26 +647,12 @@ jobs:
           ref: ${{ steps.cargo-pins.outputs.subc_revision }}
           fetch-depth: 0
 
-      # These integration tests use ../subconscious to build ck-subc. Cargo now
-      # resolves commons crates from the registry/Git lock instead of ../commons.
-      - name: Link locked daemon source for integration tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          ln -sfn "$GITHUB_WORKSPACE/.siblings/subconscious" "$GITHUB_WORKSPACE/../subconscious"
-          test -f "$GITHUB_WORKSPACE/../subconscious/Cargo.lock"
-
       - uses: ./.github/actions/restore-ci-dists
       - uses: ./.github/actions/restore-conformance-oracle
       - name: Run system-prompt-delivery integration test
-        run: MC_SYSTEM_DELIVERY_FIXTURE_BINARY="$MC_CONFORMANCE_ORACLE_BINARY" bun test --timeout 120000 packages/plugin/src/hooks/magic-context/system-prompt-delivery.integration.test.ts
+        run: bash scripts/ci/rust-mc-module-integration-run-system-prompt-delivery-integration-test.sh
       - name: Test mc-module (integration, binary and doctest targets)
-        run: |
-          status=0
-          cargo test --locked -p mc-module --test '*' --bins --no-fail-fast || status=1
-          cargo test --locked -p mc-module --doc --no-fail-fast || status=1
-          exit "$status"
-
+        run: bash scripts/ci/rust-mc-module-integration-test-mc-module-integration-binary-and-doctest-targets.sh
   rust-clippy:
     name: Rust (clippy)
     runs-on: ubuntu-latest
@@ -806,7 +663,7 @@ jobs:
         with:
           components: clippy
       - name: Clippy (including integration targets)
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: bash scripts/ci/rust-clippy-clippy-including-integration-targets.sh
 
   rust-workspace-crates:
     name: Rust (remaining crates)
@@ -822,7 +679,7 @@ jobs:
         run: bun install --frozen-lockfile
       - uses: ./.github/actions/restore-ci-dists
       - name: Test the remaining workspace crates
-        run: cargo test --locked --workspace --exclude mc-module --no-fail-fast
+        run: bash scripts/ci/rust-workspace-crates-test-the-remaining-workspace-crates.sh
 
   rust-lib-archive:
     name: Rust (mc-module lib archive)
@@ -835,22 +692,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.138
       - name: Compile the complete lib once and prove inventory equality
-        run: |
-          mkdir -p ci-rust-lib
-          cargo nextest --version
-          cargo nextest archive --locked -p mc-module --lib --cargo-profile ci-test --archive-file ci-rust-lib/archive.tar.zst
-          cargo test --locked -p mc-module --lib --profile ci-test -- --list > ci-rust-lib/cargo-list.txt
-          cargo test --locked -p mc-module --lib --profile ci-test -- --list --ignored > ci-rust-lib/cargo-ignored.txt
-          cargo nextest list --archive-file ci-rust-lib/archive.tar.zst --run-ignored all --message-format json > ci-rust-lib/all.json
-          for shard in 1 2 3 4; do
-            cargo nextest list --archive-file ci-rust-lib/archive.tar.zst --run-ignored all --partition "hash:$shard/4" -E "not ($MC_PARITY_FILTER)" --message-format json > "ci-rust-lib/lib-$shard.json"
-          done
-          cargo nextest list --archive-file ci-rust-lib/archive.tar.zst --run-ignored all -E "$MC_PARITY_FILTER" --message-format json > ci-rust-lib/parity.json
-          python3 scripts/check-nextest-inventory.py ci-rust-lib
-          diff -u ci-rust-lib/cargo-names.txt ci-rust-lib/union-names.txt
-          rustc -vV > ci-rust-lib/rustc.txt
-          printf '%s\n' "$GITHUB_SHA" > ci-rust-lib/commit.txt
-          sha256sum ci-rust-lib/archive.tar.zst > ci-rust-lib/archive.sha256
+        run: bash scripts/ci/rust-lib-archive-compile-the-complete-lib-once-and-prove-inventory-equality.sh
       - name: Package conformance oracle test binary
         shell: bash
         run: |
@@ -936,10 +778,10 @@ jobs:
           sha256sum --check ci-rust-lib/archive.sha256
           rustc -vV | diff - ci-rust-lib/rustc.txt
       - name: Run lib partition
-        run: cargo nextest run --archive-file ci-rust-lib/archive.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --profile ci --no-fail-fast --failure-output immediate-final --partition "hash:${{ matrix.shard }}/4" -E "not ($MC_PARITY_FILTER)"
+        run: bash scripts/ci/rust-mc-module-lib-run-lib-partition.sh "${{ matrix.shard }}"
       - name: Check every selected test executed
         if: ${{ !cancelled() }}
-        run: python3 scripts/check-nextest-inventory.py --junit ci-rust-lib "lib-${{ matrix.shard }}" target/nextest/ci/junit.xml
+        run: bash scripts/ci/rust-mc-module-lib-check-every-selected-test-executed.sh "${{ matrix.shard }}"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
@@ -981,10 +823,10 @@ jobs:
         # The differential is #[ignore]d for local runs, so it is selected with
         # --run-ignored. Selecting no tests means MC_PARITY_FILTER no longer
         # matches its name and must fail this job.
-        run: cargo nextest run --archive-file ci-rust-lib/archive.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --profile ci --no-fail-fast --failure-output immediate-final --run-ignored all -E "$MC_PARITY_FILTER"
+        run: bash scripts/ci/rust-mc-module-lib-run-lib-partition.sh parity
       - name: Check every selected parity test executed
         if: ${{ !cancelled() }}
-        run: python3 scripts/check-nextest-inventory.py --junit ci-rust-lib parity target/nextest/ci/junit.xml
+        run: bash scripts/ci/rust-mc-module-lib-check-every-selected-test-executed.sh parity
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
@@ -1091,21 +933,7 @@ jobs:
 
       - name: Build hermetic binary pair (including fault-injection variant)
         shell: bash
-        run: |
-          set -euo pipefail
-          target="$GITHUB_WORKSPACE/packages/e2e-tests/.cache/rust-e2e-cargo-target"
-          mkdir -p "$target/prebuilt"
-          CARGO_TARGET_DIR="$target" cargo build --release -p mc-module --bin ck-mc --example transform_replay
-          cp "$target/release/ck-mc" "$target/prebuilt/ckdev-mc-e2e"
-          cp "$target/release/examples/transform_replay" "$target/prebuilt/rust-raw-replay-probe"
-          CARGO_TARGET_DIR="$target" cargo build --release -p mc-module --features drive-fault
-          cp "$target/release/ck-mc" "$target/prebuilt/ckdev-mc-e2e-drive-fault"
-          (cd "$GITHUB_WORKSPACE/.siblings/subconscious" && CARGO_TARGET_DIR="$target" cargo build --release -p subc-core --bins)
-          cp "$target/release/ck-subc" "$target/prebuilt/ckdev-subc"
-          printf '%s\n' "$GITHUB_SHA" > "$target/prebuilt/commit.txt"
-          tar -czf "$RUNNER_TEMP/rust-hermetic-binaries.tar.gz" -C "$target/prebuilt" .
-          (cd "$RUNNER_TEMP" && sha256sum rust-hermetic-binaries.tar.gz > rust-hermetic-binaries.sha256)
-
+        run: bash scripts/ci/e2e-rust-hermetic-build-build-hermetic-binary-pair-including-fault-injection-variant.sh
       - uses: actions/upload-artifact@v4
         with:
           name: rust-hermetic-binaries-${{ github.sha }}-${{ github.run_attempt }}
@@ -1136,10 +964,13 @@ jobs:
           bun-version: latest
       - name: Install workspace dependencies
         run: bun install --frozen-lockfile
+      - name: Verify pinned OpenCode 2 default
+        # The Rust manifest also includes OC2 cases, which need a real OpenCode 2 host
+        # at the default general-availability release.
+        # Verify cached lifecycle output or install the same exact host as the matrix lane.
+        run: bash scripts/ci/prepare-default-opencode2.sh
       - name: Install pinned OpenCode
-        run: |
-          OPENCODE_VERSION=1.18.32 bash tests/docker/install-opencode.sh
-          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+        run: bash scripts/ci/e2e-rust-hermetic-install-pinned-opencode.sh
       - uses: ./.github/actions/restore-ci-dists
       - uses: ./.github/actions/wait-ci-artifact
         id: binaries
@@ -1171,7 +1002,7 @@ jobs:
           MC_E2E_CK_MC_PREBUILT_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e
           MC_E2E_CK_MC_DRIVE_FAULT_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e-drive-fault
           MC_E2E_CK_SUBC_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-subc
-        run: scripts/run-rust-hermetic-e2e.sh
+        run: bash scripts/ci/e2e-rust-hermetic-run-manifest-shard.sh
 
   # Rust (raw replay review) is retired. Its only witnesses were the plugin
   # review tests rust-cache-review, rust-cache-r2 and rust-cache-restart, which

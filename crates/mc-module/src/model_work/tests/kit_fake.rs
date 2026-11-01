@@ -242,8 +242,10 @@ impl RoutingRoute for FakeRoute {
                 Reply::Response(String::from_utf8(wire::reply_body(&answer).unwrap()).unwrap())
             }
             Err(refusal) => Reply::Error(
-                ErrorBody::new(refusal.code.as_str(), refusal.message)
-                    .with_detail(Value::Object(refusal.detail)),
+                serde_json::from_value(serde_json::to_value(
+                    ErrorBody::new(refusal.code.as_str(), refusal.message)
+                        .with_detail(Value::Object(refusal.detail)),
+                ).unwrap()).unwrap(),
             ),
         })
     }

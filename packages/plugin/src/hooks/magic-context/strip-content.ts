@@ -3,6 +3,7 @@ import {
     MERGED_REASONING_PARTS_PREFIX,
     readFrozenMergedReasoningParts,
 } from "../../features/magic-context/merged-reasoning-decisions";
+import { isMarkerOnlyText } from "../../shared/marker-only-text";
 import { createProcessedImageEligibility } from "../../shared/processed-image-eligibility";
 import { isRecord } from "../../shared/record-type-guard";
 import {
@@ -16,12 +17,8 @@ import { markServedShapeRepair } from "./served-shape-repair";
 import { stripWellFormedLeadingTagPrefix } from "./tag-content-primitives";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 
-const MARKER_ONLY_PATTERN = /^(?:(?:§\d+§|\[dropped(?: §\d+§)?\]|\[cleared\])\s*)+$/;
+export { isMarkerOnlyText } from "../../shared/marker-only-text";
 
-export function isMarkerOnlyText(text: string): boolean {
-    const trimmed = text.trim();
-    return trimmed.length > 0 && MARKER_ONLY_PATTERN.test(trimmed);
-}
 const TAG_PREFIX_PATTERN = /^§\d+§\s*/;
 
 // Patterns that identify system-injected messages (notifications, reminders, etc.)

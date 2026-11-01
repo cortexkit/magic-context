@@ -1107,11 +1107,7 @@ async fn not_answering_uses_no_placement_and_does_not_stall_tick() {
     // The real reader has the same no-provider fast path and 500 ms bound.
     let reader = MemoryContextReader::new(
         None,
-        subc_protocol::BindIdentity::new(
-            rig.dispatcher.config.directory.clone(),
-            "magic-context",
-            "dream",
-        ),
+        subc_protocol::BindIdentity::new("magic-context", "dream"),
     );
     let answer = tokio::time::timeout(
         Duration::from_secs(1),

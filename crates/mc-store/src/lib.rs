@@ -39,6 +39,11 @@ pub use historian_claim::with_historian_claim_fixture_entropy;
 mod historian_telemetry;
 pub use historian_telemetry::{HistorianInvocation, HistorianRunTelemetry};
 mod async_compaction;
+pub use async_compaction::{engine_cache_digest, AsyncCacheReceipt, AsyncCacheRecovery};
+mod async_compaction_layout;
+pub const ASYNC_COMPACTION_ENTRY_LOOKUP_SQL: &str = async_compaction_layout::ENTRY_LOOKUP_SQL;
+pub const ASYNC_COMPACTION_EXISTS_FOR_SESSION_SQL: &str =
+    async_compaction_layout::EXISTS_FOR_SESSION_SQL;
 mod cut_head;
 pub use cut_head::NamespaceHead;
 pub mod memory_history;
@@ -133,6 +138,11 @@ use std::time::Instant;
 pub type ProviderExtras = BTreeMap<String, BTreeMap<String, Value>>;
 
 static NEXT_TAG_CACHE_NAMESPACE: AtomicU64 = AtomicU64::new(1);
+
+/// Resolved storage keys must never be interpreted as filesystem paths.
+pub fn is_resolved_project_id(value: &str) -> bool {
+    value.starts_with("git:") || value.starts_with("dir:") || value.starts_with("pj-")
+}
 
 /// Canonicalize a filesystem route root before using it as lineage state.
 ///
@@ -5424,6 +5434,12 @@ pub struct ModuleMeta {
     /// Whether the emergency idempotence sample is valid.
     #[serde(default)]
     pub has_prior_emergency_drop: bool,
+    /// Consecutive primary execute passes that held queued agent drops because the queued
+    /// work was below 2% of the usable window and no other rebuild was happening. The third
+    /// such pass rebuilds when no summary can come. Omitted while zero so stored records
+    /// that never held keep their bytes.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub execute_reclaim_held_passes: u64,
     /// Last evaluated emergency target and candidate exhaustion, retained through sub-margin dips.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emergency_drop_assessment: Option<EmergencyDropAssessment>,
@@ -8653,6 +8669,14 @@ impl McStore {
         Self::open_with_private_permissions(descriptor, true)
     }
 
+    /// The fence epoch of the single-writer lease this store holds. A fenced
+    /// write is rejected when the database was claimed at a higher epoch, so an
+    /// offline tool compares this against the database's stored fence to prove
+    /// it opened under the same lease as the module that last wrote it.
+    pub fn lease_epoch(&self) -> u64 {
+        self.inner.epoch()
+    }
+
     /// Open with the real opener but only the migrations up to `ceiling`, which
     /// stands in for an older ck-mc build. A store at or below `ceiling` migrates
     /// normally; a store recorded at a newer version is refused, never downgraded.
@@ -9320,6 +9344,20 @@ impl McStore {
         &self,
         session_id: &str,
         project_path: &str,
+    ) -> Result<usize, McStoreError> {
+        self.delete_session_with_project(session_id, Some(project_path))
+    }
+
+    /// Delete session-only state when no durable project association exists.
+    /// Notes belonging to a project are deliberately left untouched.
+    pub fn delete_session_without_project(&self, session_id: &str) -> Result<usize, McStoreError> {
+        self.delete_session_with_project(session_id, None)
+    }
+
+    fn delete_session_with_project(
+        &self,
+        session_id: &str,
+        project_path: Option<&str>,
     ) -> Result<usize, McStoreError> {
         self.check_session_not_moving(session_id)?;
         // The session's history rows in context.db first, then every store.db cache row.
@@ -12021,7 +12059,7 @@ impl McStore {
         request: TransformCommit<'_>,
         provider_policy: Option<&provider_records::ProviderEnginePolicy>,
     ) -> Result<u64, McStoreError> {
-        self.commit_transform_scoped(session_id, request, provider_policy, false, None)
+        self.commit_transform_scoped(session_id, request, provider_policy, false, None, None)
     }
 
     /// A certified logical-prefix pass read only its live identities. Preserve
@@ -12032,7 +12070,29 @@ impl McStore {
         request: TransformCommit<'_>,
         provider_policy: Option<&provider_records::ProviderEnginePolicy>,
     ) -> Result<u64, McStoreError> {
-        self.commit_transform_scoped(session_id, request, provider_policy, true, None)
+        self.commit_transform_scoped(session_id, request, provider_policy, true, None, None)
+    }
+
+    /// Couple an async provider's provenance receipt to the engine CAS. Other
+    /// transform callers retain the same commit and perform no provider writes.
+    pub fn commit_transform_with_async_recovery(
+        &self,
+        session_id: &str,
+        request: TransformCommit<'_>,
+        provider_policy: Option<&provider_records::ProviderEnginePolicy>,
+        recovery: Option<&AsyncCacheRecovery>,
+    ) -> Result<u64, McStoreError> {
+        self.commit_transform_scoped(session_id, request, provider_policy, false, None, recovery)
+    }
+
+    pub fn commit_logical_transform_with_async_recovery(
+        &self,
+        session_id: &str,
+        request: TransformCommit<'_>,
+        provider_policy: Option<&provider_records::ProviderEnginePolicy>,
+        recovery: Option<&AsyncCacheRecovery>,
+    ) -> Result<u64, McStoreError> {
+        self.commit_transform_scoped(session_id, request, provider_policy, true, None, recovery)
     }
 
     fn commit_transform_scoped(
@@ -12042,6 +12102,7 @@ impl McStore {
         provider_policy: Option<&provider_records::ProviderEnginePolicy>,
         partial_identities: bool,
         adopted_head: Option<&cut_head::NamespaceHead>,
+        async_recovery: Option<&AsyncCacheRecovery>,
     ) -> Result<u64, McStoreError> {
         let TransformCommit {
             expected,
@@ -12334,6 +12395,9 @@ impl McStore {
             };
             if let Some(head) = adopted_head {
                 head.write_overlays_tx(tx, session_id)?;
+            }
+            if let Some(recovery) = async_recovery {
+                async_compaction::save_engine_receipt_tx(tx, session_id, recovery, core, meta)?;
             }
             // Every accepted transform owns the current-pass value: stable passes write NULL
             // rather than leaving an older divergence looking like a present observation.

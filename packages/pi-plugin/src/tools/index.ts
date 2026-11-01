@@ -79,10 +79,10 @@ export interface RegisterToolsOptions {
 	gitCommitsEnabled?: boolean;
 	rerankConnectionFile?: string;
 	rerankConfig?: import("@magic-context/core/config/schema/magic-context").RerankConfig;
-	/** Resolve the current directory's project identity using the user-level home-project setting. */
+	/** Resolve the served prefix's owner, using the directory only before a prefix exists. */
 	resolveProjectIdentity?: (
 		ctx: Pick<ExtensionContext, "cwd" | "sessionManager">,
-	) => string | undefined;
+	) => string | undefined | Promise<string | undefined>;
 	/** When true, register the separate ctx_memory_list tool and enable Curate-only
 	 *  execution fields. Set only by the lean dreamer subagent extension. */
 	allowDreamerActions?: boolean;

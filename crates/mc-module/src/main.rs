@@ -49,7 +49,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         std::process::exit(mc_module::single_store_repair::cli_main(&args));
     }
     // The offline move of a standalone OpenCode 1 session to mode 3 runs in a
-    // restart window with every host and ck-mc stopped.
+    // restart window with every host and ck-mc stopped. `move-session --plan`
+    // uses only read-only store connections and prints U, P and message_count.
     if std::env::args().nth(1).as_deref() == Some("offline") {
         let args: Vec<String> = std::env::args().skip(2).collect();
         std::process::exit(mc_module::offline_move::cli_main(&args));
@@ -97,34 +98,40 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             module_id.clone(),
         ),
     );
-    let (handle, serving) = subc_client_rs::serve_with_handle(
+    let handler = McHandler::new_with_connection_file_route_targets_and_module_id(
+        Some(connection_file.clone()),
+        route_targets.clone(),
+        module_id.clone(),
+    )
+    .with_dream_wire(dream_wire.clone())
+    .with_startup_smart_notes_enabled(smart_notes_enabled)
+    .with_log_directory(logger.logs_dir().to_path_buf());
+    let child_scopes = handler.child_scopes();
+    dream_wire.install_child_scopes(&child_scopes);
+    let serving = subc_client_rs::serve_with_handle(
         &connection_file,
         manifest_with_route_targets_and_smart_notes(
             &module_id,
             &route_targets,
             smart_notes_enabled,
         ),
-        McTransportHandler::new(
-            McHandler::new_with_connection_file_route_targets_and_module_id(
-                Some(connection_file.clone()),
-                route_targets,
-                module_id,
-            )
-            .with_dream_wire(dream_wire.clone())
-            .with_startup_smart_notes_enabled(smart_notes_enabled)
-            .with_log_directory(logger.logs_dir().to_path_buf()),
-        ),
+        McTransportHandler::new(handler),
     )
-    .await?;
-    let serving = tokio::spawn(serving);
-    if let Err(refusal) = dream_wire.initialize(handle).await {
-        tracing::warn!(
-            code = refusal.code,
-            detail = refusal.detail,
-            "routed dreams unavailable; retaining legacy transports"
-        );
-    }
-    let result = serving.await?;
+    .await;
+    let result = match serving {
+        Ok((handle, serve)) => {
+            let serving = tokio::spawn(serve);
+            if let Err(refusal) = dream_wire.initialize(handle).await {
+                tracing::warn!(
+                    code = refusal.code,
+                    detail = refusal.detail,
+                    "routed dreams unavailable; retaining legacy transports"
+                );
+            }
+            serving.await?
+        }
+        Err(error) => Err(error),
+    };
     mc_module::project_identity::shutdown_pin_writes();
     result?;
     Ok(())

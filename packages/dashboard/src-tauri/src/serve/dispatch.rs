@@ -24,15 +24,19 @@ struct GetMemoriesArgs {
     status: Option<String>,
     category: Option<String>,
     search: Option<String>,
+    exclude_archived: Option<bool>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ProjectWorkspaceArgs {
+struct MemoryStatsArgs {
     project: Option<String>,
     workspace_id: Option<i64>,
+    status: Option<String>,
+    search: Option<String>,
+    include_archived: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -307,13 +311,14 @@ pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value,
             let a: GetMemoriesArgs = parse_args(args)?;
             let conn = open_readonly(state)?;
             json(
-                db::get_memories(
+                db::get_memories_filtered(
                     &conn,
                     a.project.as_deref(),
                     a.workspace_id,
                     a.status.as_deref(),
                     a.category.as_deref(),
                     a.search.as_deref(),
+                    a.exclude_archived.unwrap_or(false),
                     a.limit.unwrap_or(100),
                     a.offset.unwrap_or(0),
                 )
@@ -321,11 +326,20 @@ pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value,
             )
         }
         "get_memory_stats" => {
-            let a: ProjectWorkspaceArgs = parse_args(args)?;
+            let a: MemoryStatsArgs = parse_args(args)?;
             let conn = open_readonly(state)?;
             json(
-                db::get_memory_stats(&conn, a.project.as_deref(), a.workspace_id)
-                    .map_err(to_command)?,
+                db::get_memory_stats_scoped(
+                    &conn,
+                    db::MemoryStatsScope {
+                        project: a.project.as_deref(),
+                        workspace_id: a.workspace_id,
+                        status: a.status.as_deref().filter(|value| !value.is_empty()),
+                        search: a.search.as_deref().filter(|value| !value.trim().is_empty()),
+                        include_archived: a.include_archived.unwrap_or(false),
+                    },
+                )
+                .map_err(to_command)?,
             )
         }
         "get_primers" => {

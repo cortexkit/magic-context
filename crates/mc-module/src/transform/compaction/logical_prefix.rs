@@ -417,13 +417,20 @@ impl LogicalPrefix {
         meta: &ModuleMeta,
         first_window_ordinal: Option<u64>,
     ) -> bool {
+        // A cut prefix with no live-tail row (its Setup's initial pass) still
+        // certifies the omitted boundary: `None` means no message at or after
+        // the cut, while the cut prefix and imported boundary prove the trim.
+        // Certification still requires the matching cut and coverage, the
+        // unchanged revert epoch, and the same boundary identity, so allowing
+        // `None` for the missing live tail does not bypass those checks.
+        let window_ok = first_window_ordinal.is_none_or(|first| first == self.tail_from);
         self.is_cut()
             && self.coverage.checked_add(1) == Some(self.tail_from)
             && meta.coverage_ordinal == Some(self.coverage)
             && meta.revert_epoch == self.revert_epoch
             && !self.boundary.is_empty()
             && core.boundary_id == self.boundary
-            && first_window_ordinal == Some(self.tail_from)
+            && window_ok
     }
 
     pub(crate) fn declared_cut_trim(&self) -> Option<DeclaredTrim> {
@@ -510,6 +517,22 @@ impl LogicalPrefix {
         status: &Status,
         messages: &[CkIngressMessage],
     ) -> Result<Range, TransformError> {
+        // A lineage that begins at a cut with no live rows yet (its Setup's
+        // initial pass) has nothing to fold: the head insertion at the cut.
+        // The imported compartments already cover everything below the cut,
+        // so there is no anchor to miss. The served insertion is re-anchored
+        // to the cut by the caller; the engine keeps its origin-based range.
+        if messages.is_empty()
+            && status.newest_ordinal.is_none()
+            && self.is_cut()
+            && self.lineage == status.lineage_id
+        {
+            return Ok(Range {
+                lineage_id: status.lineage_id.clone(),
+                from: self.from,
+                to: self.from,
+            });
+        }
         if self.lineage != status.lineage_id
             || status
                 .newest_ordinal

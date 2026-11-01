@@ -46,6 +46,231 @@ function findUserPromptText(msg: MessageLike): string {
 }
 
 for (const host of ["opencode", "opencode2"] as const) {
+    test(`unproven automatic recall keeps message/git results and drops memory/primer ${host}`, async () => {
+        const fixture = createAutoSearchReplayFixture(host, "unproven-owner-cap");
+        const state = autoSearchTestSnapshot(fixture.projectPath);
+        const snapshot = spyOn(embedding, "getProjectEmbeddingSnapshot").mockReturnValue({
+            ...state,
+            gitCommitEnabled: true,
+            features: { ...state.features, gitCommitEnabled: true },
+        });
+        const search = spyOn(searchModule, "searchAutoHint").mockResolvedValue([
+            {
+                source: "memory",
+                memoryId: 777,
+                category: "USER_DIRECTIVES",
+                content: "owner-memory-secret payload",
+                score: 1,
+                matchType: "fts",
+            },
+            {
+                source: "primer",
+                primerId: 778,
+                question: "owner-primer-secret",
+                content: "owner-primer-secret answer",
+                score: 1,
+                support: 1,
+                lastObservedAt: null,
+                matchType: "fts",
+            },
+            {
+                source: "message",
+                messageId: "m-safe",
+                messageOrdinal: 1,
+                role: "user",
+                content: "Cache ownership owner-message-key describes the earlier decision.",
+                score: 0.95,
+            },
+            {
+                source: "git_commit",
+                sha: "a".repeat(40),
+                shortSha: "aaaaaaa",
+                author: null,
+                committedAtMs: 1,
+                content: "owner-git-key records the completed change.",
+                score: 0.94,
+                matchType: "fts",
+            },
+        ]);
+        try {
+            const messages = [makeUserMsg("owner-cap-user", replayPrompt)];
+            await runAutoSearchHint({
+                sessionId: fixture.sessionId,
+                db: fixture.db,
+                messages,
+                options: {
+                    enabled: true,
+                    scoreThreshold: 0,
+                    minPromptChars: 1,
+                    projectPath: fixture.projectPath,
+                    memoryOwnerUnavailable: true,
+                },
+            });
+            const options = search.mock.calls[0]?.[4];
+            expect(options?.memoryEnabled).toBe(false);
+            expect(options?.gitCommitsEnabled).toBe(true);
+            expect(options?.sources).toEqual(["message", "git_commit"]);
+            const text = findUserPromptText(messages[0]);
+            expect(text).toContain("owner-message-key");
+            expect(text).toContain("owner-git-key");
+            expect(text).not.toContain("owner-memory-secret");
+            expect(text).not.toContain("owner-primer-secret");
+        } finally {
+            search.mockRestore();
+            snapshot.mockRestore();
+            fixture.close();
+        }
+    });
+
+    test(`an ownerless turn keeps its captured empty hint across restart and later proof ${host}`, async () => {
+        const fixture = createAutoSearchReplayFixture(host, "ownerless-empty-hint");
+        const snapshot = spyOn(embedding, "getProjectEmbeddingSnapshot").mockReturnValue(
+            autoSearchTestSnapshot(fixture.projectPath),
+        );
+        const search = spyOn(searchModule, "searchAutoHint").mockResolvedValue([replayHint]);
+        try {
+            const first = [makeUserMsg("ownerless-user", replayPrompt)];
+            await runAutoSearchHint({
+                sessionId: fixture.sessionId,
+                db: fixture.db,
+                messages: first,
+                options: {
+                    enabled: true,
+                    scoreThreshold: 0,
+                    minPromptChars: 1,
+                    memoryOwnerUnavailable: true,
+                },
+            });
+            const captured = JSON.stringify(first);
+            expect(captured).toBe(JSON.stringify([makeUserMsg("ownerless-user", replayPrompt)]));
+            expect(search).not.toHaveBeenCalled();
+            fixture.reopen();
+            const proven = [makeUserMsg("ownerless-user", replayPrompt)];
+            await runAutoSearchHint({
+                sessionId: fixture.sessionId,
+                db: fixture.db,
+                messages: proven,
+                options: {
+                    enabled: true,
+                    scoreThreshold: 0,
+                    minPromptChars: 1,
+                    projectPath: fixture.projectPath,
+                },
+            });
+            expect(JSON.stringify(proven)).toBe(captured);
+            expect(search).not.toHaveBeenCalled();
+        } finally {
+            search.mockRestore();
+            snapshot.mockRestore();
+            fixture.close();
+        }
+    });
+
+    for (const restart of [false, true]) {
+        test(`a hint captured before owner proof stays byte-identical after proof restart=${restart} ${host}`, async () => {
+            const fixture = createAutoSearchReplayFixture(host, `owner-proof-replay-${restart}`);
+            const snapshot = spyOn(embedding, "getProjectEmbeddingSnapshot").mockReturnValue(
+                autoSearchTestSnapshot(fixture.projectPath),
+            );
+            const search = spyOn(searchModule, "searchAutoHint").mockResolvedValue([
+                {
+                    source: "message",
+                    content: "Cache ownership retains this captured decision.",
+                    score: 0.95,
+                    messageId: "owner-replay-result",
+                    messageOrdinal: 1,
+                    role: "user",
+                },
+            ]);
+            try {
+                const invoke = async (unproven: boolean) => {
+                    const messages = [makeUserMsg("owner-proof-user", replayPrompt)];
+                    await runAutoSearchHint({
+                        sessionId: fixture.sessionId,
+                        db: fixture.db,
+                        messages,
+                        options: {
+                            enabled: true,
+                            scoreThreshold: 0,
+                            minPromptChars: 1,
+                            projectPath: unproven ? fixture.projectPath : "pj-PROVEN-REPLAY",
+                            memoryOwnerUnavailable: unproven,
+                        },
+                    });
+                    return JSON.stringify(messages);
+                };
+                const captured = await invoke(true);
+                expect(getAutoSearchHintDecisions(fixture.db, fixture.sessionId)[0]?.decision).toBe(
+                    "hint",
+                );
+                expect(search).toHaveBeenCalledTimes(1);
+                if (restart) fixture.reopen();
+                search.mockResolvedValue([]);
+                expect(await invoke(false)).toBe(captured);
+                expect(search).toHaveBeenCalledTimes(1);
+            } finally {
+                search.mockRestore();
+                snapshot.mockRestore();
+                fixture.close();
+            }
+        });
+    }
+
+    test(`an existing memory hint replays unchanged when owner proof later becomes unavailable ${host}`, async () => {
+        const fixture = createAutoSearchReplayFixture(host, "old-memory-owner-hint");
+        const snapshot = spyOn(embedding, "getProjectEmbeddingSnapshot").mockReturnValue(
+            autoSearchTestSnapshot(fixture.projectPath),
+        );
+        const search = spyOn(searchModule, "searchAutoHint").mockResolvedValue([
+            {
+                source: "memory",
+                memoryId: 777,
+                category: "USER_DIRECTIVES",
+                content: "previously-captured-memory-marker stays in this hint.",
+                score: 1,
+                matchType: "fts",
+            },
+        ]);
+        try {
+            const first = [makeUserMsg("old-owner-hint", replayPrompt)];
+            const options = {
+                enabled: true,
+                scoreThreshold: 0,
+                minPromptChars: 1,
+                projectPath: fixture.projectPath,
+            };
+            await runAutoSearchHint({
+                sessionId: fixture.sessionId,
+                db: fixture.db,
+                messages: first,
+                options,
+            });
+            const captured = JSON.stringify(first);
+            expect(getAutoSearchHintDecisions(fixture.db, fixture.sessionId)[0]?.decision).toBe(
+                "hint",
+            );
+            expect(captured).not.toBe(
+                JSON.stringify([makeUserMsg("old-owner-hint", replayPrompt)]),
+            );
+            fixture.reopen();
+            const replayed = [makeUserMsg("old-owner-hint", replayPrompt)];
+            await runAutoSearchHint({
+                sessionId: fixture.sessionId,
+                db: fixture.db,
+                messages: replayed,
+                options: { ...options, projectPath: undefined, memoryOwnerUnavailable: true },
+            });
+            expect(JSON.stringify(replayed)).toBe(captured);
+            expect(search).toHaveBeenCalledTimes(1);
+        } finally {
+            search.mockRestore();
+            snapshot.mockRestore();
+            fixture.close();
+        }
+    });
+}
+
+for (const host of ["opencode", "opencode2"] as const) {
     test(`review exception CAS failure still freezes served omission ${host}`, async () => {
         const fixture = createAutoSearchReplayFixture(host, "failed-omission-save");
         const { sessionId, projectPath } = fixture;

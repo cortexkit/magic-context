@@ -86,7 +86,12 @@ export async function ensureProjectRegisteredFromPiDirectory(
 		registrationFingerprintsByDatabase.set(db, registrationFingerprints);
 	}
 	const cached = registrationFingerprints.get(projectIdentity);
-	if (cached && configFingerprint(cached.paths) === cached.fingerprint) {
+	// Pooling metadata can become available without a configuration change.
+	if (
+		!options.preflightLocalPooling &&
+		cached &&
+		configFingerprint(cached.paths) === cached.fingerprint
+	) {
 		// Config caching must not cache away resumable database maintenance.
 		await drainProjectEmbeddingIdentityMaintenance(db, projectIdentity);
 		return;

@@ -19,6 +19,7 @@ use tokio::net::{TcpListener, TcpStream};
 #[derive(Default)]
 struct DaemonState {
     scopes: HashMap<String, subc_protocol::scope::ScopeRecord>,
+    summary_project: Option<PathBuf>,
     snapshots: Vec<Value>,
     opens: Vec<Value>,
     calls: Vec<Value>,
@@ -209,37 +210,48 @@ async fn socket(mut stream: TcpStream, state: Arc<Mutex<DaemonState>>, fake: Arc
         let method = body["method"].as_str().unwrap();
         state.lock().unwrap().calls.push(body.clone());
         if method == "resolve" {
-            assert_eq!(
-                body["params"]["canonicalRoot"],
-                json!(identity.project_root)
-            );
+            assert!(body["params"]["canonicalRoot"].as_str().is_some());
+            assert!(serde_json::to_value(&identity)
+                .unwrap()
+                .get("project_root")
+                .is_none());
             let via = state.lock().unwrap().via.clone();
             let id = if via == "implicit" {
                 "pj-implicit1-placeholder"
             } else {
                 ENTORHINAL_ID
             };
-            if !reply(&mut stream, &frame, FrameType::Response, json!({"projectId":id,"via":via,"canonicalRoot":identity.project_root,"gone":false,"generation":1})).await { break; }
+            if !reply(&mut stream, &frame, FrameType::Response, json!({"projectId":id,"via":via,"canonicalRoot":body["params"]["canonicalRoot"],"gone":false,"generation":1})).await { break; }
             continue;
         }
         let selector = selector.expect("routed work must carry a scope selector");
-        let record = state
-            .lock()
-            .unwrap()
-            .scopes
-            .get(&selector.scope_ref)
-            .cloned()
-            .unwrap_or_else(|| {
-                let mut scope = DreamScope::new(
-                    EntorhinalProjectId::from_lookup_answer(ENTORHINAL_ID).unwrap(),
-                    &identity.project_root,
-                );
-                scope.record.scope_ref = selector.scope_ref.clone();
-                scope.record
-            });
+        let record = {
+            let state = state.lock().unwrap();
+            state
+                .scopes
+                .get(&selector.scope_ref)
+                .cloned()
+                .unwrap_or_else(|| {
+                    assert!(
+                        routing_module,
+                        "child route must have a registered scope: {selector:?}"
+                    );
+                    // Routing discovery needs no filesystem work. Child runner routes
+                    // must instead resolve the workdir published by ChildScopes.
+                    let mut scope = DreamScope::new(
+                        EntorhinalProjectId::from_lookup_answer(ENTORHINAL_ID).unwrap(),
+                        state
+                            .summary_project
+                            .as_deref()
+                            .unwrap_or_else(|| Path::new("/")),
+                    );
+                    scope.record.scope_ref = selector.scope_ref.clone();
+                    scope.record
+                })
+        };
         let scope = DreamScope {
             project_id: EntorhinalProjectId::from_lookup_answer(
-                record.project_id.as_deref().unwrap(),
+                record.project_id.as_deref().unwrap_or(ENTORHINAL_ID),
             )
             .unwrap(),
             workdir: PathBuf::from(record.workdir.as_ref().unwrap()),
@@ -422,7 +434,30 @@ impl Daemon {
         (wire, task, result)
     }
 
+    fn child_scopes(&self) -> Arc<crate::child_scopes::ChildScopes> {
+        struct Published(Arc<Mutex<DaemonState>>);
+        #[async_trait]
+        impl crate::child_scopes::ScopePublisher for Published {
+            async fn sync(
+                &self,
+                _: u64,
+                scopes: Vec<subc_protocol::scope::ScopeRecord>,
+            ) -> Result<(), crate::child_scopes::ScopeError> {
+                let mut state = self.0.lock().unwrap();
+                for scope in scopes {
+                    state.scopes.insert(scope.scope_ref.clone(), scope);
+                }
+                Ok(())
+            }
+        }
+        Arc::new(crate::child_scopes::ChildScopes::with_publisher(
+            crate::DEFAULT_MODULE_ID,
+            Arc::new(Published(self.state.clone())),
+        ))
+    }
+
     fn summary_scope(&self, project: &Path) -> SummaryScope {
+        self.state.lock().unwrap().summary_project = Some(project.to_path_buf());
         SummaryScope {
             stamp: subc_protocol::scope::ScopeStamp::new(
                 Principal::Reserved {
@@ -431,7 +466,8 @@ impl Daemon {
                 "live-session",
                 1,
                 ScopeKind::Head,
-            ),
+            )
+            .with_workdir(Some(project.to_string_lossy().into_owned())),
             identity: crate::session_resolver::RunnerBindIdentity {
                 project_root: project.to_path_buf(),
                 harness: "claude-code".into(),
@@ -484,7 +520,11 @@ async fn live_dream_gate_requires_the_registered_scope_authority() {
 async fn live_summary_gate_requires_one_provider_and_an_admitted_scoped_route() {
     let rig = CarrierRig::new(vec![candidate("broca", "model-a", Some("claude-code"))]);
     let daemon = Daemon::new(rig.wire.clone()).await;
-    let routing = SubcSummaryRouting::new(daemon.connection.clone(), RouteTargetConfig::default());
+    let routing = SubcSummaryRouting::new(
+        daemon.connection.clone(),
+        RouteTargetConfig::default(),
+        daemon.child_scopes(),
+    );
     let scope = daemon.summary_scope(&rig.f.context.config.directory);
     for (providers, refuse_open, passed) in [
         (vec![PROVIDER.into()], false, true),
@@ -623,6 +663,7 @@ async fn live_shape_runs_one_dream_and_one_summary_select_send_report_and_releas
     let routing = Arc::new(SubcSummaryRouting::new(
         daemon.connection.clone(),
         RouteTargetConfig::default(),
+        daemon.child_scopes(),
     ));
     crate::tests::summary_routing::run_live_summary(routing, |text| {
         rig.wire
@@ -661,6 +702,7 @@ async fn hold_ok_is_sent_only_to_a_declaring_live_provider() {
         let routing = Arc::new(SubcSummaryRouting::new(
             daemon.connection.clone(),
             RouteTargetConfig::default(),
+            daemon.child_scopes(),
         ));
         crate::tests::summary_routing::run_live_summary(routing, |text| {
             rig.wire
@@ -750,6 +792,7 @@ async fn ready_summary_recovers_after_catalog_outages_without_rebind_and_logs_on
             let routing = Arc::new(SubcSummaryRouting::new(
                 daemon.connection.clone(),
                 RouteTargetConfig::default(),
+                daemon.child_scopes(),
             ));
             let session = crate::tests::summary_routing::LiveSummarySession::new(routing).await;
             {
@@ -812,7 +855,11 @@ async fn ready_summary_recovers_after_catalog_outages_without_rebind_and_logs_on
 async fn accepted_scope_proof_is_not_evicted_by_other_sessions() {
     let rig = CarrierRig::new(vec![candidate("broca", "model-a", Some("claude-code"))]);
     let daemon = Daemon::new(rig.wire.clone()).await;
-    let routing = SubcSummaryRouting::new(daemon.connection.clone(), RouteTargetConfig::default());
+    let routing = SubcSummaryRouting::new(
+        daemon.connection.clone(),
+        RouteTargetConfig::default(),
+        daemon.child_scopes(),
+    );
     let first = daemon.summary_scope(&rig.f.context.config.directory);
     routing.observe_scope(&first).await;
     for n in 0..256 {

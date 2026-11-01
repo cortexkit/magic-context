@@ -102,11 +102,11 @@
     },
     {
       "language": "co",
-      "name": "Corsican (corsu)"
+      "name": "Corsican"
     },
     {
       "language": "cr",
-      "name": "Cree (ᓀᐦᐃᖬᐍᐏᐣ)"
+      "name": "Cree"
     },
     {
       "language": "cs",
@@ -134,11 +134,11 @@
     },
     {
       "language": "dv",
-      "name": "Dhivehi (ދިވެހިބަސް)"
+      "name": "Divehi"
     },
     {
       "language": "dz",
-      "name": "Dzongkha (རྫོང་ཁ་)"
+      "name": "Dzongkha (རྫོང་ཁ)"
     },
     {
       "language": "ee",
@@ -210,7 +210,7 @@
     },
     {
       "language": "gn",
-      "name": "Guarani (avañe’ẽ)"
+      "name": "Guarani"
     },
     {
       "language": "gu",
@@ -242,11 +242,11 @@
     },
     {
       "language": "ht",
-      "name": "Haitian Creole (Kreyòl Ayisyen)"
+      "name": "Haitian Creole"
     },
     {
       "language": "hu",
-      "name": "Hungarian (Magyar)"
+      "name": "Hungarian (magyar)"
     },
     {
       "language": "hy",
@@ -274,7 +274,7 @@
     },
     {
       "language": "ii",
-      "name": "Liangshan Yi (ꆈꌠꉙ)"
+      "name": "Sichuan Yi (ꆈꌠꉙ)"
     },
     {
       "language": "ik",
@@ -298,7 +298,7 @@
     },
     {
       "language": "iu",
-      "name": "Inuktitut (ᐃᓄᒃᑎᑐᑦ)"
+      "name": "Inuktitut"
     },
     {
       "language": "iw",
@@ -450,7 +450,7 @@
     },
     {
       "language": "ms",
-      "name": "Malay (Bahasa Melayu)"
+      "name": "Malay (Melayu)"
     },
     {
       "language": "mt",
@@ -498,7 +498,7 @@
     },
     {
       "language": "nv",
-      "name": "Navajo (Diné Bizaad)"
+      "name": "Navajo"
     },
     {
       "language": "ny",
@@ -582,7 +582,7 @@
     },
     {
       "language": "se",
-      "name": "North Sámi (davvisámegiella)"
+      "name": "Northern Sami (davvisámegiella)"
     },
     {
       "language": "sg",
@@ -606,7 +606,7 @@
     },
     {
       "language": "sm",
-      "name": "Samoan (Gagana faʻa Sāmoa)"
+      "name": "Samoan"
     },
     {
       "language": "sn",
@@ -626,7 +626,7 @@
     },
     {
       "language": "ss",
-      "name": "Swati (siSwati)"
+      "name": "Swati"
     },
     {
       "language": "st",
@@ -686,7 +686,7 @@
     },
     {
       "language": "ts",
-      "name": "Tsonga (Xitsonga)"
+      "name": "Tsonga"
     },
     {
       "language": "tt",
@@ -718,7 +718,7 @@
     },
     {
       "language": "ve",
-      "name": "Venda (Tshivenḓa)"
+      "name": "Venda"
     },
     {
       "language": "vi",
@@ -730,7 +730,7 @@
     },
     {
       "language": "wa",
-      "name": "Walloon (walon)"
+      "name": "Walloon"
     },
     {
       "language": "wo",

@@ -38,6 +38,7 @@ import {
 import { createMemoryVisibilityPolicy } from "../../features/magic-context/memory/memory-visibility";
 import { computeNormalizedHash } from "../../features/magic-context/memory/normalize-hash";
 import { describeUnresolvedProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import { UnprovenCachedProjectOwnerError } from "../../features/magic-context/memory/session-identity-decision";
 import {
     getMemoriesForList,
     ModuleMemoryAuthorityError,
@@ -422,11 +423,18 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 return `Error: Action '${args.action}' is not allowed in this context.`;
             }
 
-            // Resolve the session's actual project from `toolContext.directory`
-            // each call. OpenCode's top-level `ctx.directory` (the launch dir)
-            // can differ from the session's working directory when the user
-            // runs `opencode -s <id>` from outside the project.
-            const projectPath = deps.resolveProjectPath(toolContext.directory);
+            // Await the session's injection decision before reading or writing memories.
+            let projectPath: string | undefined;
+            try {
+                projectPath = await deps.resolveProjectPath(
+                    toolContext.directory,
+                    toolContext.sessionID,
+                );
+            } catch (error) {
+                if (error instanceof UnprovenCachedProjectOwnerError)
+                    return error.refusal("ctx_memory", args.action);
+                throw error;
+            }
             if (!projectPath) {
                 return `Error: Could not resolve project identity for memory action: ${describeUnresolvedProjectIdentity(toolContext.directory)}`;
             }

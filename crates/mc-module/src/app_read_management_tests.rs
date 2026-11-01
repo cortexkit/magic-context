@@ -84,6 +84,10 @@ async fn handler(dir: &Path) -> McHandler {
         .ok()
         .unwrap();
     for req in [admission::tests::phone_bind(), management_bind(2)] {
+        assert!(
+            req.scope.is_none(),
+            "app reads deliberately have no route project"
+        );
         let decision = handler.on_bind(&req).await;
         assert!(format!("{decision:?}").contains("Accept"), "{decision:?}");
     }
@@ -92,6 +96,61 @@ async fn handler(dir: &Path) -> McHandler {
         "INSERT INTO session_meta(session_id, harness) VALUES ('ses', 'opencode');",
     );
     handler
+}
+
+#[tokio::test]
+async fn unscoped_management_session_data_read_uses_the_named_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let handler = handler(dir.path()).await;
+    let body = management_payload(&response_bytes(
+        call(
+            &handler,
+            2,
+            "session_data.read",
+            json!({"session":session(),"section":"meta"}),
+        )
+        .await,
+    ));
+    assert_eq!(body["row"]["session_id"], "ses");
+    assert!(handler.bindings.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unscoped_management_cache_why_uses_the_named_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let handler = handler(dir.path()).await;
+    tests_support::apply_sql(&dir.path().join("context.db"), "INSERT INTO transform_decisions(session_id,harness,message_id,ts_ms,decision) VALUES('ses','opencode','owned',10,'execute'),('other','opencode','foreign',10,'execute')");
+    let body = management_payload(&response_bytes(
+        call(
+            &handler,
+            2,
+            "context.cache_why",
+            json!({"session":session(),"window":{}}),
+        )
+        .await,
+    ));
+    assert_eq!(body["decisions"].as_array().unwrap().len(), 1);
+    assert_eq!(body["decisions"][0]["producer_ref"], "owned");
+}
+
+#[tokio::test]
+async fn unscoped_management_search_uses_the_named_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let handler = handler(dir.path()).await;
+    let db = rusqlite::Connection::open(dir.path().join("context.db")).unwrap();
+    seed_message(&db, 1, "owned");
+    let body = management_payload(&response_bytes(
+        call(
+            &handler,
+            2,
+            "context.search",
+            json!({"query":"needle","scope":{"session":session()},"sources":["message"]}),
+        )
+        .await,
+    ));
+    assert_eq!(body["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(body["hits"][0]["snippet"], "needle");
+    assert!(handler.bindings.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

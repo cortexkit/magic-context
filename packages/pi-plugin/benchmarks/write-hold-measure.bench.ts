@@ -1,5 +1,7 @@
 // Run explicitly with bun test benchmarks/write-hold-measure.bench.ts.
 // HOLD_PASSES controls the number of measured passes of each kind (default 200).
+// HOLD_TAGS pads the seed with historical drops; HOLD_DROPS sets how many active
+// tool tags are queued for dropping in each busting pass.
 import { expect, it, spyOn } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,6 +12,7 @@ import {
     queuePendingOp,
     updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import { saveNativeToolInputs } from "@magic-context/core/features/magic-context/storage-native-replay";
 import * as logger from "@magic-context/core/shared/logger";
 import * as timing from "@magic-context/core/shared/write-transaction-timing";
 import { measuredPassSchedule } from "../../../scripts/paired-write-hold-protocol";
@@ -18,6 +21,7 @@ import {
     registerPiContextHandler,
     signalPiPendingMaterialization,
 } from "../src/context-handler";
+import { NATIVE_TOOL_REMOVAL_MARKER } from "../src/native-replay-pi";
 import {
     createFakePi,
     createTestDb,
@@ -34,6 +38,8 @@ const MODEL = {
     reasoning: true,
 };
 const TURNS = Number(process.env.HOLD_TURNS ?? 1300);
+const DROPS = Number(process.env.HOLD_DROPS ?? 1);
+const SEED_TAGS = Number(process.env.HOLD_TAGS ?? 0);
 
 /**
  * Times every write-lock hold on this connection, independent of which code
@@ -268,6 +274,9 @@ it("pi write-lock hold per pass", async () => {
         },
     );
     const rows: unknown[] = [];
+    const bustingHolds: number[] = [];
+    const pairedHolds: number[] = [];
+    let seededTags = 0;
     const pass = async (kind: string) => {
         holds.length = 0;
         lockHolds.length = 0;
@@ -287,11 +296,15 @@ it("pi write-lock hold per pass", async () => {
         };
         const start = Date.now();
         const started = performance.now();
-        await handler({ messages: source }, ctx as never);
+        let failed = false;
+        let failure: unknown;
+        try {
+            await handler({ messages: source }, ctx as never);
+        } catch (error) {
+            failed = true;
+            failure = error;
+        }
         const wall = performance.now() - started;
-        if (busted === undefined) throw new Error("Benchmark pass did not reach postprocess");
-        if (kind === "busting")
-            expect(holds.some((hold) => hold.site === "paired_thinking_edit")).toBe(true);
         const row = {
             kind,
             start,
@@ -310,6 +323,14 @@ it("pi write-lock hold per pass", async () => {
             sites: holds.map((h) => `${h.site}:${h.held.toFixed(2)}`),
         };
         rows.push(row);
+        if (kind === "busting") {
+            bustingHolds.push(row.lockMax);
+            pairedHolds.push(Math.max(0, ...row.paired.map((hold) => hold.held)));
+        }
+        if (failed) throw failure;
+        if (busted === undefined) throw new Error("Benchmark pass did not reach postprocess");
+        if (kind === "busting")
+            expect(holds.some((hold) => hold.site === "paired_thinking_edit")).toBe(true);
         return row;
     };
     try {
@@ -326,6 +347,27 @@ it("pi write-lock hold per pass", async () => {
                     throw error;
                 }
             } else await pass("warm");
+            const tags = getTagsBySession(db, sessionId);
+            if (SEED_TAGS > 0) {
+                if (tags.length > SEED_TAGS) throw new Error("Seed exceeds HOLD_TAGS");
+                const insert = db.prepare(`INSERT INTO tags
+                    (session_id, tag_number, message_id, type, status, byte_size)
+                    VALUES (?, ?, ?, 'tool', 'dropped', 4000)`);
+                const native = new Map<string, string>();
+                let number = Math.max(0, ...tags.map((tag) => tag.tagNumber));
+                db.transaction(() => {
+                    for (let index = tags.length; index < SEED_TAGS; index++) {
+                        const id = `historical-call-${index}`;
+                        insert.run(sessionId, ++number, id);
+                        native.set(id, NATIVE_TOOL_REMOVAL_MARKER);
+                    }
+                    // Existing saved native tool inputs make repeated document merges expensive;
+                    // the measured lane must append to a realistic session history.
+                    saveNativeToolInputs(db, sessionId, native);
+                }).immediate();
+            }
+            seededTags = getTagsBySession(db, sessionId).length;
+            if (SEED_TAGS > 0) expect(seededTags).toBe(SEED_TAGS);
         };
         let turn = 0;
         await measuredPassSchedule({
@@ -339,13 +381,22 @@ it("pi write-lock hold per pass", async () => {
                 const i = turn++;
                 assistant([{ type: "text", text: `Finished ${i}.` }]);
                 user(`Next task ${i}`);
-                const old = getTagsBySession(db, sessionId).find(
-                    (tag) => tag.type === "tool" && tag.status === "active",
-                );
-                if (!old) throw new Error("Benchmark ran out of active tools to drop");
-                queuePendingOp(db, sessionId, old.tagNumber, "drop");
+                const old = getTagsBySession(db, sessionId)
+                    .filter((tag) => tag.type === "tool" && tag.status === "active")
+                    .slice(0, DROPS);
+                if (old.length !== DROPS)
+                    throw new Error("Benchmark ran out of active tools to drop");
+                db.transaction(() => {
+                    for (const tag of old) queuePendingOp(db, sessionId, tag.tagNumber, "drop");
+                }).immediate();
                 signalPiPendingMaterialization(sessionId);
                 const row = await pass("busting");
+                const dropped = new Set(
+                    getTagsBySession(db, sessionId)
+                        .filter((tag) => tag.status === "dropped")
+                        .map((tag) => tag.tagNumber),
+                );
+                expect(old.every((tag) => dropped.has(tag.tagNumber))).toBe(true);
                 tool();
                 return row;
             },
@@ -355,9 +406,25 @@ it("pi write-lock hold per pass", async () => {
         stageLog.mockRestore();
         clearContextHandlerSession(sessionId);
         db.close();
+        const out = process.env.HOLD_OUT ?? join(dir, "rows.json");
+        const summary = (samples: number[]) => {
+            const sorted = [...samples].sort((a, b) => a - b);
+            return {
+                max: Math.max(...sorted),
+                p90: sorted[Math.ceil(sorted.length * 0.9) - 1],
+                p95: sorted[Math.ceil(sorted.length * 0.95) - 1],
+                samples: sorted.length,
+            };
+        };
+        const measurement = {
+            seededTags,
+            dropsPerLane: DROPS,
+            connectionHoldMs: summary(bustingHolds),
+            pairedHoldMs: summary(pairedHolds),
+        };
+        writeFileSync(out, JSON.stringify({ ...measurement, messages: messages.length, rows }));
+        console.log(`HOLD_SUMMARY ${JSON.stringify(measurement)}`);
+        console.log(`HOLD_ROWS ${out} messages=${messages.length} rows=${rows.length}`);
     }
-    const out = process.env.HOLD_OUT ?? join(dir, "rows.json");
-    writeFileSync(out, JSON.stringify({ messages: messages.length, rows }));
-    console.log(`HOLD_ROWS ${out} messages=${messages.length} rows=${rows.length}`);
     expect(rows.length).toBe(1 + 2 * PASSES);
 }, 1_800_000);

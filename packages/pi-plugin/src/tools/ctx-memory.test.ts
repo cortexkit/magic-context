@@ -1,19 +1,108 @@
 import { describe, expect, it } from "bun:test";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { writeTaskStateJson } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
 import { _resetProjectEmbeddingRegistryForTests } from "@magic-context/core/features/magic-context/memory/embedding";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
+import { resolveSessionProjectIdentity } from "@magic-context/core/features/magic-context/memory/session-identity-decision";
 import {
 	getMemoryById,
 	insertMemory,
 } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import { getMemoryMutationsForRender } from "@magic-context/core/features/magic-context/storage";
+import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta-session";
 import { handleUntrustedLoad } from "@magic-context/core/plugin/embedding-bootstrap-helpers";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
 import { Value } from "typebox/value";
 import { createTestDb, fakeContext } from "../test-utils.test";
 import { createCtxMemoryListTool, createCtxMemoryTool } from "./ctx-memory";
 
 describe("createCtxMemoryTool", () => {
+	it.each([
+		"update",
+		"archive",
+	] as const)("Pi ctx_memory %s logs the served pj- owner", async (action) => {
+		const db = createTestDb();
+		const sessionID = `ses-pi-served-${action}`;
+		const projectPath = "pj-pi-served-owner";
+		const temp = createTestTempDir("pi-served-owner-");
+		const previousCwd = process.cwd();
+		try {
+			// Make accidental path resolution observable instead of a caught missing-path error.
+			mkdirSync(join(temp.dir, projectPath));
+			process.chdir(temp.dir);
+			updateSessionMeta(db, sessionID, {
+				cachedM0Bytes: Buffer.from(
+					"<project-memory>Served memory block</project-memory>",
+				),
+				cachedM0ProjectIdentity: projectPath,
+				cachedM0MaterializedAt: 1,
+			});
+			expect(
+				await resolveSessionProjectIdentity(
+					sessionID,
+					fakeContext(sessionID).cwd,
+					{ db },
+				),
+			).toBe(projectPath);
+			const memory = insertMemory(db, {
+				projectPath,
+				category: "USER_DIRECTIVES",
+				content: "Original served memory.",
+			});
+			const tool = createCtxMemoryTool({
+				db,
+				resolveProjectIdentity: (directory, ctx) =>
+					resolveSessionProjectIdentity(
+						ctx.sessionManager.getSessionId(),
+						directory,
+						{ db },
+					),
+				memoryEnabled: true,
+				embeddingEnabled: false,
+			});
+			const result = await tool.execute(
+				`call-${action}`,
+				{
+					action,
+					ids: [memory.id],
+					...(action === "update" ? { content: "Updated served memory." } : {}),
+				},
+				new AbortController().signal,
+				undefined,
+				fakeContext(sessionID) as never,
+			);
+			expect(result.isError).not.toBe(true);
+			expect(result.content[0]?.text).not.toStartWith("Error:");
+			expect(getMemoryById(db, memory.id)?.projectPath).toBe(projectPath);
+			if (action === "update")
+				expect(getMemoryById(db, memory.id)?.content).toBe(
+					"Updated served memory.",
+				);
+			expect(getMemoryById(db, memory.id)?.status).toBe(
+				action === "archive" ? "archived" : "active",
+			);
+			expect(
+				db
+					.prepare(
+						"SELECT project_path, mutation_type, target_memory_id FROM memory_mutation_log",
+					)
+					.all(),
+			).toEqual([
+				{
+					project_path: projectPath,
+					mutation_type: action,
+					target_memory_id: memory.id,
+				},
+			]);
+		} finally {
+			process.chdir(previousCwd);
+			closeQuietly(db);
+			temp.cleanup();
+		}
+	});
+
 	it("names the invalid embedding field when an untrusted first load disables memory", async () => {
 		const db = createTestDb();
 		_resetProjectEmbeddingRegistryForTests();

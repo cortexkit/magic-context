@@ -8,6 +8,12 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../../..");
 function sourceFixture(): string {
+  const sourceArg = process.argv.indexOf("--source");
+  if (sourceArg !== -1) {
+    const path = process.argv[sourceArg + 1];
+    if (!path || path.startsWith("--")) throw new Error("--source requires a fixture path");
+    return resolve(repoRoot, path);
+  }
   const relative = resolve(repoRoot, "../llm-runner/crates/llmr-ck/tests/fixtures/ck_wire_golden.json");
   if (existsSync(relative)) return relative;
   const commonDir = execFileSync("git", ["rev-parse", "--git-common-dir"], { cwd: repoRoot, encoding: "utf8" }).trim();

@@ -72,9 +72,11 @@ export interface AutoSearchRunnerOptions {
     scoreThreshold: number;
     minPromptChars: number;
     directory?: string;
-    projectPath: string;
+    projectPath?: string;
     ensureProjectRegistered?: (directory: string, db: Database) => Promise<void>;
     memoryEnabled?: boolean;
+    /** Only new hint computation is capped; captured hint bytes always replay unchanged. */
+    memoryOwnerUnavailable?: boolean;
     embeddingEnabled?: boolean;
     gitCommitsEnabled?: boolean;
     /** Memory ids already rendered in the injected <session-history> block —
@@ -277,17 +279,27 @@ export async function runAutoSearchHint(args: {
                 return AUTO_SEARCH_OK;
             }
 
-            const embeddingSnapshot = getProjectEmbeddingSnapshot(options.projectPath);
+            const projectPath = options.projectPath;
+            if (!projectPath) {
+                // Existing captures replay above without a namespace. A fresh
+                // ownerless turn freezes an empty hint rather than inventing one later.
+                void persistAutoSearchSkip(db, sessionId, userMsgId, "empty");
+                return AUTO_SEARCH_OK;
+            }
+            const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);
             if (!embeddingSnapshot) {
-                queueAutoSearchRegistration(
-                    db,
-                    options.projectPath,
-                    options.directory && options.ensureProjectRegistered
-                        ? () =>
-                              options.ensureProjectRegistered?.(options.directory as string, db) ??
-                              Promise.resolve()
-                        : undefined,
-                );
+                if (!options.memoryOwnerUnavailable)
+                    queueAutoSearchRegistration(
+                        db,
+                        projectPath,
+                        options.directory && options.ensureProjectRegistered
+                            ? () =>
+                                  options.ensureProjectRegistered?.(
+                                      options.directory as string,
+                                      db,
+                                  ) ?? Promise.resolve()
+                            : undefined,
+                    );
                 void persistAutoSearchSkip(db, sessionId, userMsgId, "empty");
                 return AUTO_SEARCH_OK;
             }
@@ -339,8 +351,9 @@ export async function runAutoSearchHint(args: {
             try {
                 results = await withAutoSearchDeadline(async (signal, checkDeadline) => {
                     if (checkDeadline()) return null;
-                    const memoryEnabled =
-                        embeddingSnapshot?.features.memoryEnabled ?? options.memoryEnabled;
+                    const memoryEnabled = options.memoryOwnerUnavailable
+                        ? false
+                        : (embeddingSnapshot?.features.memoryEnabled ?? options.memoryEnabled);
                     // Use the snapshot's history setting for query embedding, independently
                     // of memory.enabled. Memory and git-commit retrieval have separate gates.
                     const embeddingEnabled = embeddingSnapshot
@@ -357,7 +370,7 @@ export async function runAutoSearchHint(args: {
                         gitCommitsEnabled,
                         embedQuery: async (text, signal) => {
                             const result = await embedTextForProject(
-                                options.projectPath,
+                                projectPath,
                                 text,
                                 signal,
                                 "query",
@@ -373,12 +386,14 @@ export async function runAutoSearchHint(args: {
                             options.visibleMemoryIds ?? options.resolveVisibleMemoryIds?.() ?? null,
                         // Leave primers out of automatic hints so primer updates cannot rewrite
                         // cached request prefixes. Explicit ctx_search and the dashboard expose them.
-                        sources: ["memory", "message", "git_commit"],
+                        sources: options.memoryOwnerUnavailable
+                            ? ["message", "git_commit"]
+                            : ["memory", "message", "git_commit"],
                         // Never wait for the history-chunk pool to be built: a
                         // cold pool is warmed in the background for later turns.
                         chunkPoolWarmOnly: true,
                     };
-                    return searchAutoHint(db, sessionId, options.projectPath, rawPrompt, {
+                    return searchAutoHint(db, sessionId, projectPath, rawPrompt, {
                         ...searchOptions,
                         signal,
                         countRetrievals: false,
@@ -407,6 +422,10 @@ export async function runAutoSearchHint(args: {
 
             if (lifecycleSignal.aborted) return AUTO_SEARCH_OK;
             try {
+                if (options.memoryOwnerUnavailable && results !== null)
+                    results = results.filter(
+                        (result) => result.source !== "memory" && result.source !== "primer",
+                    );
                 if (results === null) {
                     // Freeze the served skip for this turn. Retrying could add a hint to a
                     // user message already sent to the provider, rewriting its cached bytes.
@@ -476,8 +495,8 @@ export async function runAutoSearchHint(args: {
                 );
                 return AUTO_SEARCH_OK;
             } finally {
-                if (!lifecycleSignal.aborted && results !== null)
-                    void queueAutoSearchBackfill(db, sessionId, options.projectPath, rawPrompt);
+                if (!lifecycleSignal.aborted && results !== null && !options.memoryOwnerUnavailable)
+                    void queueAutoSearchBackfill(db, sessionId, projectPath, rawPrompt);
             }
         },
         () => {

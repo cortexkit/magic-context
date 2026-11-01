@@ -52,6 +52,27 @@ impl Default for Scopes {
     }
 }
 
+#[subc_client_rs::async_trait]
+impl crate::child_scopes::ScopePublisher for Scopes {
+    async fn sync(
+        &self,
+        _generation: u64,
+        scopes: Vec<ScopeRecord>,
+    ) -> Result<(), crate::child_scopes::ScopeError> {
+        // Child project scopes are append-only. Upsert them through the same
+        // registry and generation counter that holds the transient dream scopes.
+        for record in scopes {
+            self.update(&record, false)
+                .await
+                .map_err(|error| crate::child_scopes::ScopeError {
+                    code: error.code,
+                    message: error.detail,
+                })?;
+        }
+        Ok(())
+    }
+}
+
 impl Scopes {
     pub async fn initialize(&self, handle: ModuleHandle) -> Result<(), WireRefusal> {
         let mut state = self.state.lock().await;

@@ -19,6 +19,10 @@ import {
     shouldSkipHomeProjectMemory,
 } from "../../features/magic-context/memory/project-identity";
 import {
+    resolveSessionProjectIdentity,
+    UnprovenCachedProjectOwnerError,
+} from "../../features/magic-context/memory/session-identity-decision";
+import {
     getMemoriesByProject,
     ModuleMemoryAuthorityError,
 } from "../../features/magic-context/memory/storage-memory";
@@ -793,7 +797,41 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         const producerContext = producerWindow.contextLimitTokens;
         const producerLimits = { input: producerWindow.inputLimitTokens };
         const producerReserve = producerWindow.maxOutputTokens;
-        const projectPath = resolveProjectIdentity(directory ?? process.cwd());
+        // Direct callers may not have the transform's host-resolved directory.
+        const parentSessionResponse = await client?.session
+            .get({ path: { id: sessionId } })
+            .catch(() => null);
+        const parentSession = normalizeSDKResponse(
+            parentSessionResponse,
+            null as { directory?: string } | null,
+            { preferResponseOnMissingData: true },
+        );
+        const sessionDirectory = parentSession?.directory ?? directory;
+        let projectPath = "";
+        let memoryOwnerAvailable = true;
+        try {
+            projectPath =
+                ("projectIdentity" in deps
+                    ? deps.projectIdentity
+                    : await resolveSessionProjectIdentity(
+                          sessionId,
+                          sessionDirectory || process.cwd(),
+                          { db },
+                      )) ?? "";
+        } catch (error) {
+            if (!(error instanceof UnprovenCachedProjectOwnerError)) throw error;
+            // Pause memory, not history compaction, when the cached memory block's
+            // owner cannot be proven. The current directory cannot prove who owned it.
+            memoryOwnerAvailable = false;
+            sessionLog(
+                sessionId,
+                "historian memory paused: reason=unproven_cached_project_owner; compartments publish without memory reads, extraction or promotion",
+            );
+        }
+        const memoryEnabled = deps.memoryEnabled !== false && memoryOwnerAvailable;
+        const userObservationsRequested = memoryOwnerAvailable
+            ? deps.userObservationsRequested
+            : false;
         // On an `enabled` turn-one lane (see `TurnOneLane`) with memory on, the
         // historian gets no project-memory block and anchors every fact to its source
         // lines; the anchor is stored with the fact's candidate row, and a later
@@ -814,7 +852,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             return;
         }
         if (turnOneLane === "dormant" && selection.lane === "enabled") await sweep();
-        const anchoredFacts = turnOneLane === "enabled" && deps.memoryEnabled !== false;
+        const anchoredFacts = turnOneLane === "enabled" && memoryEnabled;
         // Every configured attempt sends this same prompt, so size it for each
         // of their windows too, resolved as their pre-send check resolves them.
         const fallbackWindows = [
@@ -840,10 +878,12 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 priorCompartments,
             ),
             memories: () =>
-                anchoredFacts ? [] : getMemoriesByProject(db, projectPath, ["active", "permanent"]),
-            memoryEnabled: deps.memoryEnabled !== false,
+                !memoryEnabled || anchoredFacts || !projectPath
+                    ? []
+                    : getMemoriesByProject(db, projectPath, ["active", "permanent"]),
+            memoryEnabled,
             anchoredFacts,
-            userObservationsRequested: deps.userObservationsRequested,
+            userObservationsRequested,
         });
         if (!promptFit.ok) {
             telemetry.failureReason = promptFit.reason;
@@ -1055,31 +1095,17 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 sessionReferences: promptFit.sessionReferences,
                 projectMemory: anchoredFacts ? "" : promptFit.projectMemory,
                 inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunkText}`,
-                memoryEnabled: deps.memoryEnabled !== false,
+                memoryEnabled,
                 anchoredFacts,
-                userObservationsRequested: deps.userObservationsRequested,
+                userObservationsRequested,
             }) + (turnOneLane === "enabled" ? `\n\n${authorizationRequest.formatInstruction}` : "");
-
-        // Intentional: session.get failure is non-fatal — we fall back to deps.directory
-        const parentSessionResponse = await client?.session
-            .get({ path: { id: sessionId } })
-            .catch(() => null);
-        const parentSession = normalizeSDKResponse(
-            parentSessionResponse,
-            null as { directory?: string } | null,
-            { preferResponseOnMissingData: true },
-        );
-        const sessionDirectory = parentSession?.directory ?? directory;
 
         // Persist turn one's send record, with the publication id the compartment
         // transaction will commit under, before dispatching the historian. A run that
         // fails before publishing leaves the id for the session's next run, so one
         // chunk's candidates and activity are published under one id however many
         // sends it takes.
-        const publicationDirectory = sessionDirectory || deps.directory;
-        const publicationProjectPath = publicationDirectory
-            ? resolveProjectIdentity(publicationDirectory)
-            : projectPath;
+        const publicationProjectPath = projectPath;
         let turnOneSend: TurnOneSend;
         try {
             turnOneSend = allocateTurnOneSend(db, {
@@ -1319,10 +1345,8 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         const lastCompartmentEnd = lastNewEnd;
         const lastNewEndMessageId = newCompartments[newCompartments.length - 1]?.endMessageId;
 
-        // Use the RESOLVED session directory for memory project identity, not
-        // raw deps.directory. deps.directory can be empty even
-        // when the session has a valid directory (resolved via session.get
-        // above); using it directly made promotion + embedding silently no-op.
+        // The host directory is used for launching children and registration;
+        // memory ownership stays with the session decision used to build the prompt.
         const promotionDirectory = sessionDirectory || deps.directory;
 
         // Unanchored promotion (facts/observations/primers) is skipped in two
@@ -1354,12 +1378,9 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         //  - promotionActive: writing facts as project memories requires the
         //    memory feature AND auto_promote (a user who disabled auto-promotion
         //    still wants search/embedding, just not auto-written memories).
-        const embeddingActive = !!promotionDirectory;
-        const promotionActive =
-            embeddingActive && deps.memoryEnabled !== false && deps.autoPromote !== false;
-        const promotionProjectIdentity = promotionDirectory
-            ? resolveProjectIdentity(promotionDirectory)
-            : "";
+        const embeddingActive = !!promotionDirectory && !!projectPath;
+        const promotionActive = embeddingActive && memoryEnabled && deps.autoPromote !== false;
+        const promotionProjectIdentity = projectPath;
 
         // discard-last: drop events anchored to the discarded provisional
         // compartment (atCompartment is a 1-based index into the EMITTED list;
@@ -1503,7 +1524,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             );
             const candidateFacts =
                 turnOneLane === "enabled"
-                    ? deps.memoryEnabled !== false
+                    ? memoryEnabled
                         ? keptFacts
                         : []
                     : promotionActive && !memoryAuthorityHere
@@ -1788,6 +1809,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         // tail has weak lookahead; token-capped chunks still promote observations
         // so facts from a never-re-read persisted range are not lost.
         if (
+            memoryOwnerAvailable &&
             deps.experimentalUserMemories === true &&
             !skipUnanchoredPromotion &&
             validatedPass.userObservations &&
@@ -1897,7 +1919,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                 child,
                 harness: deps.hiddenCompletionExecutor?.capabilities.harness ?? "opencode",
                 carrier: deps.hiddenCompletionExecutor ? "hidden-completion" : "opencode-session",
-                memoryEnabled: deps.memoryEnabled !== false,
+                memoryEnabled,
                 autoPromote: deps.autoPromote !== false,
                 timeoutMs: historianTimeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
                 validatedProfiles: selection.validatedProfiles,

@@ -2,6 +2,7 @@
 
 pub mod fts;
 pub mod index;
+mod maintenance;
 
 use crate::parity_schema_manifest::*;
 use rusqlite::Connection;

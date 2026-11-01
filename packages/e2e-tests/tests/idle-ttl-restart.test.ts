@@ -524,14 +524,32 @@ export default async (ctx) => {
 		const second = await turn("next warm turn");
 		inventories.push(assertContained(h));
 		// Pi binds a pending decision at the NEXT context pass, once the host's
-		// branch includes the assistant. Read only after that pass, but retain
-		// the original decision timestamp interval and exact assistant id.
-		const decisions = h
-			.contextDb()
-			.prepare(
-				"SELECT * FROM transform_decisions WHERE session_id = ? AND harness = ? ORDER BY ts_ms",
-			)
-			.all(session, host === "omp" ? "pi" : h.harnessId) as Decision[];
+		// branch includes the assistant. The row can be persisted after the provider
+		// reply and after the context pass is logged, so wait for the expired pass's
+		// durable row, not network idle.
+		const readDecisions = () =>
+			harness
+				.contextDb()
+				.prepare(
+					"SELECT * FROM transform_decisions WHERE session_id = ? AND harness = ? ORDER BY ts_ms",
+				)
+				.all(session, host === "omp" ? "pi" : harness.harnessId) as Decision[];
+		if (host !== "opencode2") {
+			await h.waitFor(
+				() =>
+					readDecisions().some(
+						(row) =>
+							row.ts_ms >= first.start &&
+							row.ts_ms <= first.end &&
+							["ttl_idle", "ttl_expiry"].includes(row.materialize_reason ?? ""),
+					),
+				{
+					timeoutMs: 5_000,
+					label: `persisted idle TTL decision for ${session} in ${first.start}..${first.end}`,
+				},
+			);
+		}
+		const decisions = readDecisions();
 		const expiredDecision = decisions.find(
 			(row) => row.ts_ms >= first.start && row.ts_ms <= first.end,
 		);

@@ -16,6 +16,9 @@ use cortexkit_role_llm_runner::describe::check_describe;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+#[path = "broca_session_change.rs"]
+mod session_change;
+
 /// Exact bytes of each capture (no added newline). The table below is
 /// checked byte for byte: a fixture that drifts from the capture fails here,
 /// not somewhere downstream.

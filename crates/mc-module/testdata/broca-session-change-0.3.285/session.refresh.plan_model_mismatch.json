@@ -1,0 +1,1 @@
+{"code":"plan_model_mismatch","message":"pending refresh generation 1: provider fixture has a plan model different from the send model","detail":{"class":"permanent","generation":1,"plan_model":{"id":"other","provider":"fake"},"provider":"fixture","send_model":{"id":"fake","provider":"fake"}}}

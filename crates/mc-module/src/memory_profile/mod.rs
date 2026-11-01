@@ -23,14 +23,23 @@ pub(crate) async fn bind_session(
     store: &mc_store::McStore,
     connection_file: Option<std::path::PathBuf>,
     identity: subc_protocol::BindIdentity,
+    project_root: &std::path::Path,
     session_id: &str,
     agent_id: Option<&str>,
 ) {
-    let result =
-        match resolve_session_pin(store, connection_file, identity, session_id, agent_id).await {
-            Ok(pin) => persist_session_pin(store, session_id, &pin),
-            Err(error) => Err(error),
-        };
+    let result = match resolve_session_pin(
+        store,
+        connection_file,
+        identity,
+        project_root,
+        session_id,
+        agent_id,
+    )
+    .await
+    {
+        Ok(pin) => persist_session_pin(store, session_id, &pin),
+        Err(error) => Err(error),
+    };
     if let Err(error) = result {
         tracing::warn!(%error, session = session_id, "memory-profile context could not be persisted at bind");
     }
@@ -41,10 +50,11 @@ pub(crate) async fn resolve_session_pin(
     store: &mc_store::McStore,
     connection_file: Option<std::path::PathBuf>,
     identity: subc_protocol::BindIdentity,
+    project_root: &std::path::Path,
     session_id: &str,
     agent_id: Option<&str>,
 ) -> std::result::Result<MemoryContext, mc_store::McStoreError> {
-    let folder = identity.project_root.to_string_lossy().into_owned();
+    let folder = project_root.to_string_lossy().into_owned();
     let source = crate::memory_context::MemoryContextReader::new(connection_file, identity);
     resolve::resolve_session_pin(&source, store, session_id, &folder, agent_id).await
 }

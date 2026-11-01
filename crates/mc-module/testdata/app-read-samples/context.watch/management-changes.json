@@ -1,0 +1,30 @@
+{
+  "name": "management changes notice is wrapped",
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  },
+  "response": {
+    "result": {
+      "cursor": "abc:1",
+      "kind": "changes",
+      "op": "context.watch",
+      "schema": 1,
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "first notice with current cursor is changes with no sessions",
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "cursor": "abc:1",
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  },
+  "response": {
+    "cursor": "abc:1",
+    "kind": "changes",
+    "op": "context.watch",
+    "schema": 1,
+    "sessions": []
+  }
+}

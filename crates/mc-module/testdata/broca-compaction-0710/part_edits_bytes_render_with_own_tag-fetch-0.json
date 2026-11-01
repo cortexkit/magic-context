@@ -1,0 +1,37 @@
+{
+  "answer": {
+    "answer": "view",
+    "view": {
+      "covers_through": {
+        "mid": "m1",
+        "ordinal": 1
+      },
+      "digest": "28f0919bd42985c026b08cea8f18537a860609c48c213f064533f40adc646197",
+      "lineage_id": "60f9b56e-484e-4f30-a1b0-d63dc5f75768",
+      "ranges": [
+        {
+          "edits": [
+            {
+              "bytes": "{\"text\":\"cf-provider-edited-text-1168\",\"type\":\"text\"}",
+              "mid": "m1",
+              "ordinal": 1,
+              "part": "m1#0"
+            }
+          ],
+          "from": 0,
+          "kind": "keep",
+          "to": 2
+        }
+      ],
+      "session_ref": "47f53f82a562b197e220e5b3fcd93450",
+      "view_version": 1
+    }
+  },
+  "request": {
+    "method": "view.get",
+    "params": {
+      "session_ref": "47f53f82a562b197e220e5b3fcd93450",
+      "view_version": 1
+    }
+  }
+}

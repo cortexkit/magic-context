@@ -35,11 +35,7 @@ impl Wire {
             module_id: self.module_id.clone(),
             launch_nonce: nonce.value().to_owned(),
         };
-        let identity = subc_protocol::BindIdentity::new(
-            std::path::PathBuf::from("/"),
-            "memory-sync",
-            "memory-sync",
-        );
+        let identity = subc_protocol::BindIdentity::new("memory-sync", "memory-sync");
         let target = crate::route_targets::RouteTargetConfig::default()
             .target(crate::route_targets::RegisteredRoute::EngramDeviceStreams)
             .expect("device-streams route");

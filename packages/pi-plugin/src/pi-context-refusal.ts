@@ -882,6 +882,7 @@ export function registerPiGuardedContext(
 					result.messages,
 					fenceEnabled ? ctx.model : undefined,
 					fenceEnabled,
+					ctx.cwd,
 				);
 				if (prepared.messages !== result.messages)
 					result.messages = prepared.messages;

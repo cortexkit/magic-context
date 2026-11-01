@@ -141,7 +141,7 @@ pub(super) fn project_paths<'a>(
 }
 
 pub(super) fn is_project_identity(value: &str) -> bool {
-    value.starts_with("git:") || value.starts_with("dir:") || value.starts_with("pj-")
+    mc_store::is_resolved_project_id(value)
 }
 
 pub(super) fn normalize_project_path(raw: &str) -> String {
@@ -1283,6 +1283,13 @@ mod tests {
         );
         same(
             body(include_str!("project_memory.rs"), "is_project_identity"),
+            syn::parse_quote!({ mc_store::is_resolved_project_id(value) }),
+        );
+        same(
+            body(
+                include_str!("../../../mc-store/src/lib.rs"),
+                "is_resolved_project_id",
+            ),
             syn::parse_quote!({
                 value.starts_with("git:") || value.starts_with("dir:") || value.starts_with("pj-")
             }),

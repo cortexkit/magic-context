@@ -807,6 +807,7 @@ async fn production_summaries_keep_the_chain_path_without_a_scoped_preflight() {
     let production = crate::historian_routed::SubcSummaryRouting::new(
         dir.path().join("subc.json"),
         RouteTargetConfig::default(),
+        crate::child_scopes::test_service(),
     );
     let refusal =
         crate::historian_routed::SummaryRouting::routing_support(&production).unwrap_err();

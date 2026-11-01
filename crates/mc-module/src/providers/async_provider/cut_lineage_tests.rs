@@ -799,15 +799,97 @@ struct FreshStart {
     /// for instance after a signed turn ends.
     pending: bool,
     served: Option<Vec<u8>>,
+    execute: FreshExecutePermission,
+}
+
+#[derive(Default)]
+struct FreshExecutePermission {
+    held: u64,
+}
+
+impl FreshExecutePermission {
+    // ARCHITECTURE invariant 3 permits a primary Execute to rebuild when no summary
+    // can come and removable queued work reaches 2% of the window or its third
+    // held pass. Observe the admission inputs, but never read the engine's held
+    // counter or verdict: this counter and rule must catch premature rebuilds.
+    fn observe(
+        &mut self,
+        inputs: Option<crate::transform::execute_reclaim_observer::Inputs>,
+        independently_busting: bool,
+    ) -> bool {
+        let Some(inputs) =
+            inputs.filter(|input| !independently_busting && input.reclaimable_tokens > 0.0)
+        else {
+            self.held = 0;
+            return false;
+        };
+        self.held += 1;
+        !inputs.summary_can_come
+            && !inputs.signed_prefix_hold
+            && ((inputs.usable_window > 0.0
+                && inputs.reclaimable_tokens >= inputs.usable_window / 50.0)
+                || self.held >= 3)
+    }
+}
+
+#[test]
+fn fresh_start_bounded_execute_permission_rejects_early_rebuilds() {
+    use crate::transform::execute_reclaim_observer::Inputs;
+
+    let small = Inputs {
+        summary_can_come: false,
+        signed_prefix_hold: false,
+        reclaimable_tokens: 1_999.0,
+        usable_window: 100_000.0,
+    };
+    let mut oracle = FreshExecutePermission::default();
+    assert!(!oracle.observe(Some(small), false));
+    assert!(
+        !oracle.observe(Some(small), false),
+        "second held pass is not a permission"
+    );
+    assert!(oracle.observe(Some(small), false));
+    assert!(
+        !oracle.observe(None, false),
+        "a non-execute pass resets the count"
+    );
+    assert!(!oracle.observe(Some(small), false));
+    assert!(oracle.observe(
+        Some(Inputs {
+            reclaimable_tokens: 2_000.0,
+            ..small
+        }),
+        false
+    ));
+    assert!(!oracle.observe(
+        Some(Inputs {
+            summary_can_come: true,
+            ..small
+        }),
+        false
+    ));
+    assert!(!oracle.observe(
+        Some(Inputs {
+            reclaimable_tokens: 0.0,
+            ..small
+        }),
+        false
+    ));
 }
 
 impl FreshStart {
     fn new(pair: &Pair) -> Self {
         let served = Self::newest(pair, &pair.resident);
+        for side in [&pair.resident, &pair.oracle] {
+            let _ = crate::transform::execute_reclaim_observer::take(
+                side.store() as *const McStore as usize,
+            );
+        }
         Self {
             model: pair.model.clone(),
             pending: false,
             served,
+            execute: FreshExecutePermission::default(),
         }
     }
 
@@ -841,7 +923,18 @@ impl FreshStart {
             self.pending |= est >= 72_000 || model != self.model;
             self.model = model;
         }
-        let permitted = self.pending;
+        let execute_inputs = crate::transform::execute_reclaim_observer::take(
+            pair.resident.store() as *const McStore as usize,
+        );
+        let _ = crate::transform::execute_reclaim_observer::take(pair.oracle.store()
+            as *const McStore
+            as usize);
+        let execute_permitted = if passes.is_empty() {
+            false
+        } else {
+            self.execute.observe(execute_inputs, self.pending)
+        };
+        let permitted = self.pending || execute_permitted;
         let rebuilt = passes
             .iter()
             .any(|pass| pass.starts_with("action=HARD") || pass.starts_with("action=SOFT "));
@@ -863,6 +956,7 @@ impl FreshStart {
         self.served = served;
         if rebuilt {
             self.pending = false;
+            self.execute.held = 0;
         }
         for (_, json) in pair.resident.views(&pair.reference).0 {
             let view: view::CompactionView = serde_json::from_str(&json).unwrap();
@@ -1167,7 +1261,7 @@ async fn pruning_below_a_cut_leaves_no_row_below_it_in_any_table() {
                     .iter()
                     .any(|mid| text == mid || text.contains(&format!("{mid}#")))
         };
-        let conn = rusqlite::Connection::open(&side.db).unwrap();
+        let conn = inspection_sql(&side.db);
         let tables = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table'")
             .unwrap()
@@ -1293,7 +1387,7 @@ async fn a_record_from_before_cut_seeds_is_rebuilt() {
     let mut rng = Rng(5);
     pair.notice(&mut rng, None).await;
     for side in [&pair.resident, &pair.oracle] {
-        let conn = rusqlite::Connection::open(&side.db).unwrap();
+        let conn = inspection_sql(&side.db);
         conn.execute(
             "UPDATE mc_async_compaction SET state_json=json_remove(state_json,'$.record_version') WHERE session_ref=?1",
             [&pair.reference],

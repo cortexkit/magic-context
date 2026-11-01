@@ -2,6 +2,41 @@
 use super::*;
 
 impl McHandler {
+    /// The current lineage's held messages that `wanted` selects (by ordinal and
+    /// message id), decoded the same way as the range form, for `ctx_expand` by
+    /// tag or message on a runner session. Messages below the lineage's first
+    /// ordinal are folded history: only `async_history_expand` reaches them.
+    pub(crate) fn async_held_expand(
+        &self,
+        binding: &SessionBinding,
+        namespace: &str,
+        wanted: impl Fn(u64, &str) -> bool,
+    ) -> Result<Option<Vec<ck_wire::CkIngressMessage>>, HandlerOutcome> {
+        let store = self
+            .store
+            .get()
+            .ok_or_else(|| transient("store unavailable"))?;
+        let rows = super::route_records(store, binding)?;
+        let Some(raw) = rows.first() else {
+            return Ok(None);
+        };
+        let header: State = serde_json::from_str(raw).map_err(transient)?;
+        if header.namespace() != namespace {
+            return Ok(None);
+        }
+        let Some(state) = load(store, &header.reference())? else {
+            return Ok(None);
+        };
+        let codec = codec::Codec::from_params(&Value::Object(state.setup.params.clone()))?;
+        let mut found = Vec::new();
+        for (ordinal, entry) in state.entries.iter() {
+            if wanted(*ordinal, &entry.mid) {
+                found.push(decoded_entry(codec, &entry.inbound()?)?);
+            }
+        }
+        Ok(Some(found))
+    }
+
     pub(crate) async fn async_history_expand(
         &self,
         binding: &SessionBinding,

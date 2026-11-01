@@ -27,17 +27,15 @@ pub fn decode_messages_with_ordinals(
 ) -> Result<crate::codec::DecodedHarnessMessages, HandlerOutcome> {
     for message in messages {
         if message.message.get("id").and_then(Value::as_str) != Some(message.mid.as_str())
-            || !matches!(
-                message
-                    .message
-                    .pointer("/message/role")
-                    .and_then(Value::as_str),
-                Some("user" | "assistant" | "toolResult")
+            || cortexkit_role_llm_runner::serializer_profile::top_level_part_count(
+                "pi",
+                &message.message,
             )
+            .is_err()
         {
             return Err(error(
                 "history_unreadable",
-                "Pi provider requires stable message entries",
+                "Pi provider requires stable served entries",
             ));
         }
     }
@@ -84,12 +82,43 @@ pub fn encode_view(
         })
         .collect::<Vec<_>>();
     let sidecar = decode_messages_from(&source, view.range.from)?.sidecar;
+    validate_synthesized_edits(&view.replacement, &sidecar)?;
     Ok(codec::OutboundMessage::new(
         &view.compaction_id,
         view.version,
         codec::MessageRange::new(view.range.from, view.range.to),
         crate::codec::encode_pi(&view.replacement, &sidecar),
     ))
+}
+
+fn validate_synthesized_edits(
+    messages: &[ck_wire::CkWireMessage],
+    sidecar: &crate::codec::DecodeSidecar,
+) -> Result<(), HandlerOutcome> {
+    for (index, message) in messages.iter().enumerate() {
+        let Some(meta) = crate::codec::sidecar::meta_for_ck(sidecar, message, index) else {
+            continue;
+        };
+        if !crate::codec::pi::is_synthesized(&meta.raw) || crate::codec::pi::whole_row_drop(message)
+        {
+            continue;
+        }
+        if message.content.len() != meta.blocks.len()
+            || !message
+                .content
+                .iter()
+                .zip(&meta.blocks)
+                .all(|(block, meta)| crate::codec::sidecar::block_is_unchanged(block, meta))
+        {
+            let reason = format!(
+                "pi_synthesized_edit_unsupported: {} permits only whole-row drops",
+                meta.mid
+            );
+            eprintln!("mc-module: refusing Pi view: {reason}");
+            return Err(error("pi_synthesized_edit_unsupported", reason));
+        }
+    }
+    Ok(())
 }
 
 /// Pi stores tool results separately from their assistant's calls. Read the
@@ -137,6 +166,195 @@ pub fn decode_hook_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn served_entry(body: Value) -> codec::InboundMessage {
+        codec::InboundMessage {
+            mid: "row".into(),
+            ordinal: 19,
+            message: body,
+        }
+    }
+
+    fn assert_served_row(body: Value, count: usize, role: &str) {
+        let entry = served_entry(body);
+        let decoded = codec::Codec::Pi.decode_message(&entry).unwrap();
+        assert_eq!(
+            (
+                decoded.mid.as_str(),
+                decoded.ordinal,
+                decoded.ck.role.as_str()
+            ),
+            ("row", 19, role)
+        );
+        assert_eq!(
+            cortexkit_role_llm_runner::serializer_profile::top_level_part_count(
+                "pi",
+                &entry.message
+            )
+            .unwrap(),
+            count
+        );
+        assert_eq!(decoded.ck.content.len(), count);
+    }
+
+    #[test]
+    fn served_pi_shell_runs_are_tool_output_with_projected_parts() {
+        assert_served_row(
+            json!({"type":"message","id":"row","message":{
+                "role":"bashExecution","command":"printf hi","output":"hi","exitCode":0,
+                "images":[{"type":"image","data":"AA==","mimeType":"image/png"}]
+            }}),
+            2,
+            "tool",
+        );
+        assert_served_row(
+            json!({"type":"message","id":"row","message":{
+                "role":"bashExecution","command":"printf hidden","output":"hidden","excludeFromContext":true
+            }}),
+            0,
+            "tool",
+        );
+    }
+
+    #[test]
+    fn served_pi_extension_messages_are_not_person_turns() {
+        assert_served_row(
+            json!({"type":"custom_message","id":"row","content":[
+                {"type":"text","text":"extension notice"},{"type":"text","text":"another notice"}
+            ]}),
+            2,
+            "notice",
+        );
+        assert_served_row(
+            json!({"type":"custom_message","id":"row","content":[]}),
+            0,
+            "notice",
+        );
+    }
+
+    #[test]
+    fn served_pi_branch_summaries_read_summary_not_content() {
+        assert_served_row(
+            json!({"type":"branch_summary","id":"row","summary":"earlier branch"}),
+            1,
+            "notice",
+        );
+        assert_served_row(
+            json!({"type":"branch_summary","id":"row","summary":""}),
+            0,
+            "notice",
+        );
+    }
+
+    #[test]
+    fn removed_pi_tool_results_keep_their_zero_part_message_number() {
+        let body = json!({"type":"message","id":"row","message":{
+            "role":"toolResult","toolCallId":"call","toolName":"read","content":[]
+        }});
+        assert_served_row(body.clone(), 0, "tool");
+        let entry = served_entry(body.clone());
+        assert_eq!(
+            render_edited(&entry, |_| {}).unwrap().replacement,
+            vec![body]
+        );
+    }
+
+    fn render_edited(
+        entry: &codec::InboundMessage,
+        edit: impl FnOnce(&mut ck_wire::CkWireMessage),
+    ) -> Result<codec::OutboundMessage, HandlerOutcome> {
+        let mut message = codec::Codec::Pi.decode_message(entry).unwrap().ck;
+        edit(&mut message);
+        codec::Codec::Pi.render_view(
+            &transform::compaction::View {
+                compaction_id: "edit".into(),
+                version: 1,
+                range: transform::compaction::Range {
+                    lineage_id: "L".into(),
+                    from: 19,
+                    to: 20,
+                },
+                replacement: vec![message],
+            },
+            "s",
+            std::slice::from_ref(entry),
+        )
+    }
+
+    #[test]
+    fn synthesized_pi_rows_drop_whole_and_refuse_partial_edits() {
+        for body in [
+            json!({"type":"message","id":"row","message":{"role":"bashExecution","command":"ls","output":"output"}}),
+            json!({"type":"branch_summary","id":"row","summary":"branch history"}),
+        ] {
+            let entry = served_entry(body.clone());
+            assert_eq!(
+                render_edited(&entry, |_| {}).unwrap().replacement,
+                vec![body]
+            );
+            assert!(render_edited(&entry, |m| m.content.clear())
+                .unwrap()
+                .replacement
+                .is_empty());
+            assert!(
+                render_edited(&entry, |m| m.content[0].kind = ck_wire::CkKind::Text {
+                    text: "[dropped §5§]".into()
+                })
+                .unwrap()
+                .replacement
+                .is_empty()
+            );
+            for text in ["partial rewrite", "§5§ tagged prefix"] {
+                let error = render_edited(&entry, |m| {
+                    m.content[0].kind = ck_wire::CkKind::Text { text: text.into() }
+                })
+                .unwrap_err();
+                assert!(format!("{error:?}").contains("pi_synthesized_edit_unsupported"));
+            }
+            let error = render_edited(&entry, |m| {
+                m.meta.harness_id = None;
+                m.content[0].kind = ck_wire::CkKind::Text {
+                    text: "partial without an id".into(),
+                };
+            })
+            .unwrap_err();
+            assert!(format!("{error:?}").contains("pi_synthesized_edit_unsupported"));
+        }
+    }
+
+    #[test]
+    fn custom_pi_part_edits_and_removals_preserve_the_served_shape() {
+        let entry = served_entry(
+            json!({"type":"custom_message","id":"row","customType":"extension","display":true,"content":[
+                {"type":"text","text":"first","extra":"keep-first"},
+                {"type":"text","text":"second","extra":"keep-second"}
+            ]}),
+        );
+        let edited = render_edited(&entry, |m| {
+            m.content.remove(0);
+            m.content[0].kind = ck_wire::CkKind::Text {
+                text: "placeholder".into(),
+            };
+        })
+        .unwrap();
+        assert_eq!(
+            edited.replacement,
+            vec![
+                json!({"type":"custom_message","id":"row","customType":"extension","display":true,"content":[
+                    {"type":"text","text":"placeholder","extra":"keep-second"}
+                ]})
+            ]
+        );
+        let removed = render_edited(&entry, |m| m.content.clear()).unwrap();
+        assert_eq!(
+            removed.replacement[0],
+            cortexkit_role_llm_runner::serializer_profile::pi_served_body(
+                &entry.message,
+                cortexkit_role_llm_runner::serializer_profile::PiEdit::Removed
+            )
+            .unwrap()
+        );
+    }
 
     #[test]
     fn suffix_decode_preserves_full_bytes_and_fallback_tool_ids() {

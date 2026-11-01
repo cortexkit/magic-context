@@ -132,10 +132,16 @@ fn manifest_before_participant(
             cortexkit_role_compaction_provider::PROVIDES.to_string(),
             // Core discovers tool providers by this claim; agent-data changes nothing here.
             cortexkit_role_tool_provider::PROVIDES.to_string(),
+            // Restored for the pre_user hook (time markers and auto memory);
+            // agent-data changes nothing here.
+            cortexkit_role_step_transform_provider::PROVIDES.to_string(),
             crate::MCP_CONVERSATION_BINDING_V1.to_string(),
             // Declared with the flow fence; the agent-data feature changes nothing here.
             subc_protocol::scope::FLOW_SCOPES_CAPABILITY.to_string(),
-        ],
+        ]
+        .into_iter()
+        .chain(crate::project_bind_capabilities())
+        .collect(),
         requires: vec![],
         must_never_reach: vec![],
     }))
@@ -233,9 +239,10 @@ async fn review_feature_off_ignores_registry_failure_on_an_ordinary_bind() {
         RouteTarget::ManagementSurface {
             module_id: DEFAULT_MODULE_ID.into(),
         },
-        BindIdentity::new(PathBuf::from(ROOT), "opencode", SESSION),
+        BindIdentity::new("opencode", SESSION),
     )
-    .with_principal(Principal::Direct);
+    .with_principal(Principal::Direct)
+    .with_scope(project_scope());
     let decision = h.on_bind(&request).await;
     assert!(format!("{decision:?}").contains("Accept"), "{decision:?}");
     assert!(h.bindings.lock().unwrap().contains_key(&1));
@@ -427,7 +434,7 @@ async fn review_feature_off_refuses_internal_service_without_an_intent() {
             module_id: DEFAULT_MODULE_ID.into(),
             service_id: role::SERVICE_ID.into(),
         },
-        BindIdentity::new(PathBuf::from(ROOT), "agent-data", "driver"),
+        BindIdentity::new("agent-data", "driver"),
     )
     .with_principal(Principal::Reserved {
         module_id: "entorhinal".into(),
@@ -790,7 +797,7 @@ async fn review_effective_registration_id_controls_bind_and_item_stream() {
             module_id: h.registered_module_id.clone(),
             service_id: role::SERVICE_ID.into(),
         },
-        BindIdentity::new(PathBuf::from(ROOT), "agent-data", "driver"),
+        BindIdentity::new("agent-data", "driver"),
     )
     .with_principal(Principal::Reserved {
         module_id: "entorhinal".into(),

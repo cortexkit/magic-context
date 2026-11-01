@@ -816,7 +816,7 @@ function createPiAssistantPart(
 			// part is always a programming error.
 			throw new Error("setToolOutput on assistant part");
 		},
-		getToolMetadata(): {
+		getToolMetadata(options?: { skipInputTokenCount?: boolean }): {
 			toolName: string | undefined;
 			inputByteSize: number;
 			inputTokenCount: number;
@@ -831,7 +831,10 @@ function createPiAssistantPart(
 			try {
 				const serialized = JSON.stringify(p.arguments);
 				inputByteSize = serialized.length;
-				inputTokenCount = serialized ? estimateTokens(serialized) : 0;
+				inputTokenCount =
+					serialized && !options?.skipInputTokenCount
+						? estimateTokens(serialized)
+						: 0;
 			} catch {
 				inputByteSize = 0;
 				inputTokenCount = 0;

@@ -13,7 +13,6 @@ use subc_protocol::{scope::ScopeSelector, BindIdentity};
 pub(super) struct RunnerPort {
     connection: PathBuf,
     scope: ScopeSelector,
-    root: PathBuf,
     bind: RunnerBind,
     consumer: Option<SubcConsumer>,
     route: Option<RouteHandle>,
@@ -42,11 +41,10 @@ fn call_error(e: CallError) -> PortError {
 }
 
 impl RunnerPort {
-    pub fn new(connection: PathBuf, scope: ScopeSelector, root: PathBuf, bind: RunnerBind) -> Self {
+    pub fn new(connection: PathBuf, scope: ScopeSelector, bind: RunnerBind) -> Self {
         Self {
             connection,
             scope,
-            root,
             bind,
             consumer: None,
             route: None,
@@ -64,11 +62,7 @@ impl RunnerPort {
         let route = consumer
             .open_route_scoped(
                 crate::route_targets::routed_module_target(&self.bind.module),
-                BindIdentity::new(
-                    self.root.clone(),
-                    self.bind.harness.clone(),
-                    self.bind.session.clone(),
-                ),
+                BindIdentity::new(self.bind.harness.clone(), self.bind.session.clone()),
                 self.scope.clone(),
                 CallOptions {
                     role_versions: Some(crate::session_resolver::llm_runner_role_versions()),

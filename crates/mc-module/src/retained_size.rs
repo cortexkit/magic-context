@@ -5,7 +5,7 @@
 //! so tree entries use a documented three-word node/slack allowance. The same routines feed cache
 //! admission and telemetry; the numbers are estimates, but they cannot diverge between those paths.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
 
 use mc_store::{
@@ -38,6 +38,11 @@ pub(crate) fn hash_map_allocation_bytes<K, V>(map: &HashMap<K, V>) -> usize {
             .saturating_add(size_of::<V>())
             .saturating_add(1),
     )
+}
+
+pub(crate) fn hash_set_allocation_bytes<T>(set: &HashSet<T>) -> usize {
+    let buckets = set.capacity().saturating_mul(8).saturating_add(6) / 7;
+    buckets.saturating_mul(size_of::<T>().saturating_add(1))
 }
 
 pub(crate) fn value_retained_bytes(value: &Value) -> usize {

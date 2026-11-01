@@ -1,0 +1,21 @@
+{
+  "name": "cursor must be a bounded nonempty string",
+  "refusal": {
+    "code": "cursor_invalid",
+    "detail": null,
+    "message": "The watch cursor must be a nonempty string of at most 512 bytes."
+  },
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "cursor": false,
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  }
+}

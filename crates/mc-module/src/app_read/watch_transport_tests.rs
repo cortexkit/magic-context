@@ -41,12 +41,15 @@ impl Drop for Rig {
 }
 impl Rig {
     async fn start() -> Self {
+        Self::start_configured(|_, _| {}).await
+    }
+    async fn start_configured(configure: impl FnOnce(&mut McHandler, &std::path::Path)) -> Self {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
             mc_store::private_permissions::tighten_directory(dir.path(), true).failures,
             0
         );
-        let handler = Arc::new(McHandler::new());
+        let mut handler = McHandler::new();
         handler
             .store
             .set(super::super::tests_support::open_store(dir.path()))
@@ -56,6 +59,8 @@ impl Rig {
             &dir.path().join("context.db"),
             "INSERT INTO session_meta(session_id,harness) VALUES('s','opencode');",
         );
+        configure(&mut handler, dir.path());
+        let handler = Arc::new(handler);
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
@@ -70,7 +75,7 @@ impl Rig {
             key: generate_key().unwrap(),
             daemon_id: generate_daemon_id().unwrap(),
             pid: std::process::id(),
-            daemon_ver: "context-watch-test".into(),
+            daemon_ver: "0.39.0".into(),
         };
         write_atomic(&file, &connection).unwrap();
         let connected = ConnectedClients::new();
@@ -95,7 +100,7 @@ impl Rig {
         let consumer = SubcConsumer::connect(&file, ConsumerOptions::default())
             .await
             .unwrap();
-        let identity = BindIdentity::new(dir.path().to_path_buf(), "desktop", "ignored");
+        let identity = BindIdentity::new("desktop", "ignored");
         Self {
             consumer,
             handler,
@@ -153,6 +158,9 @@ impl Rig {
         .unwrap();
     }
 }
+
+#[path = "watch_samples.rs"]
+pub(super) mod sample_fixtures;
 async fn event(sub: &mut subc_client_rs::Subscription, management: bool) -> Value {
     let bytes = tokio::time::timeout(Duration::from_secs(5), sub.events().recv())
         .await
@@ -165,6 +173,34 @@ async fn event(sub: &mut subc_client_rs::Subscription, management: bool) -> Valu
     } else {
         value
     }
+}
+
+#[tokio::test]
+async fn unscoped_management_watch_uses_the_named_session() {
+    if super::super::tests::isolated(
+        "app_read::watch::transport_tests::unscoped_management_watch_uses_the_named_session",
+    ) {
+        return;
+    }
+    let rig = Rig::start().await;
+    let mut watch = rig.subscribe(true, None).await;
+    let initial = event(&mut watch, true).await;
+    assert_eq!(initial["kind"], "resync");
+    assert!(rig
+        .handler
+        .route_identities
+        .lock()
+        .unwrap()
+        .values()
+        .all(|route| route.scope.is_none()));
+    assert!(rig.handler.bindings.lock().unwrap().is_empty());
+    super::super::tests_support::apply_sql(
+        &rig.dir.path().join("context.db"),
+        "UPDATE session_meta SET counter=1 WHERE session_id='s'",
+    );
+    assert_eq!(event(&mut watch, true).await["kind"], "changes");
+    watch.unsubscribe().unwrap();
+    rig.slots(0).await;
 }
 
 #[tokio::test]

@@ -1,2 +1,9 @@
 [env]
 LIBSQLITE3_FLAGS = "-DSQLITE_DEFAULT_MEMSTATUS=0"
+# Debug-build test threads get 8 MiB instead of the 2 MiB default. ck-mc's
+# provider tests drive Setup, notices and views through unoptimized async
+# frames that already need about 2 MiB (measured 2.0-2.25 MiB on 2026-10-31),
+# so any small change on those paths aborted the whole test binary with a
+# stack overflow, one test at a time. Release builds use far smaller frames;
+# this changes no production stack size.
+RUST_MIN_STACK = "8388608"

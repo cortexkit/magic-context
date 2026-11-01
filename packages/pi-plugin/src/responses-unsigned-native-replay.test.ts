@@ -24,6 +24,7 @@ const environment = {
 	XDG_DATA_HOME: join(root, "data"),
 	XDG_CACHE_HOME: join(root, "cache"),
 	XDG_STATE_HOME: join(root, "state"),
+	XDG_RUNTIME_DIR: join(root, "runtime"),
 	MAGIC_CONTEXT_STORAGE_DIR: join(root, "storage"),
 	PI_CODING_AGENT_DIR: join(root, "agent"),
 	TMPDIR: join(root, "tmp"),
@@ -59,6 +60,14 @@ const hostDefinitions = [
 		ai: "omp-pi-ai-18126",
 		agent: "omp-coding-agent-18126",
 		version: "18.12.6",
+	},
+	{ ai: "omp-pi-ai-1889", version: "18.8.9" },
+	{ ai: "omp-pi-ai-1811", version: "18.11.3" },
+	{ ai: "omp-pi-ai-1813", version: "18.13.0" },
+	{
+		ai: "omp-pi-ai-18132",
+		agent: "omp-coding-agent-18132",
+		version: "18.13.2",
 	},
 ];
 const ompLoggerAliases = hostDefinitions.flatMap((host) =>
@@ -286,6 +295,41 @@ describe("unsigned Responses native replay", () => {
 			test(`${host.version} ${api}: the real rewrite drops the signature without breaking replay`, async () => {
 				admits(host, [user, await rewritten(host, api)], model(api));
 			});
+			test(`${host.version} ${api}: same-tag reply retains commentary after the real hook`, async () => {
+				const message = await rewritten(
+					host,
+					api,
+					"§12§ Hello",
+					"commentary",
+					1,
+				);
+				message.content[0].text = "§12§ Hello";
+				const messages = [user, message];
+				const before = JSON.stringify(messages);
+				const prepared = preparePiDispatch(messages, model(api), true);
+				expect(JSON.stringify(prepared.messages)).toBe(before);
+				const input = encode(host, prepared.messages, model(api));
+				expect(
+					piPreparedStructureMismatch({ input }, prepared.structure),
+				).toBeUndefined();
+				expect(piResponsesAssistantTexts(message, model(api), "omp")).toEqual([
+					'["§12§ Hello","commentary"]',
+				]);
+				expect(input[1].content[0].text).toBe("§12§ Hello");
+				expect(input[1].phase).toBe("commentary");
+				expect(JSON.stringify(input)).toBe(
+					JSON.stringify(encode(host, messages, model(api))),
+				);
+				const cold = encode(host, prepared.messages, model(api), false);
+				expect(
+					piPreparedStructureMismatch({ input: cold }, prepared.structure),
+				).toBeUndefined();
+				const altered = structuredClone(input);
+				altered[1].phase = "final_answer";
+				expect(
+					piPreparedStructureMismatch({ input: altered }, prepared.structure),
+				).toContain("comparison=content");
+			});
 			test(`${host.version} ${api}: fork alone and fork then rename admit the first converter request`, async () => {
 				const manager = host.SessionManager.inMemory(root);
 				manager.appendMessage(user);
@@ -427,11 +471,10 @@ describe("unsigned native projection guards", () => {
 			expected: ['["§99§ Hello",null]'],
 		},
 		{
-			name: "genuine raw difference",
+			name: "native text untouched by cleanup",
 			change: (m) => {
-				m.content[0].text = "§12§ Hello";
+				native(m).content[0].text = "Hello";
 			},
-			expected: ['["§12§ Hello",null]'],
 		},
 	];
 	for (const check of rejects) {

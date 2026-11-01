@@ -1,0 +1,14 @@
+{
+  "answer": {
+    "answer": "refuse",
+    "code": "unknown_view",
+    "reason": "view not held"
+  },
+  "request": {
+    "method": "view.get",
+    "params": {
+      "session_ref": "eafcdcc51dd90a29d902371a300445b2",
+      "view_version": 1
+    }
+  }
+}

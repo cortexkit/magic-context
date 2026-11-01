@@ -821,6 +821,14 @@ body {
   font-weight: 400;
 }
 
+.category-page-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 4px 4px;
+  font-size: 12px;
+}
+
 /* ── Memory card with checkbox column ─────────────────── */
 .memory-card {
   display: flex;

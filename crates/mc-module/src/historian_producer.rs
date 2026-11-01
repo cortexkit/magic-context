@@ -383,7 +383,17 @@ impl ProducerErrorBody {
         self.class_field_present
     }
 
-    fn from_value(value: Value) -> Self {
+    /// The `detail.field` an `invalid_params` refusal names (llm-runner refusal
+    /// bodies carry every field but `code` and `message` inside `detail`).
+    fn detail_field(&self) -> Option<&str> {
+        self.retry_metadata
+            .as_ref()?
+            .get("detail")?
+            .get("field")?
+            .as_str()
+    }
+
+    pub(crate) fn from_value(value: Value) -> Self {
         let code = value
             .get("code")
             .and_then(Value::as_str)
@@ -560,6 +570,7 @@ pub struct HistorianProducerConfig {
     pub handshake_timeout: Duration,
     pub request_timeout: Duration,
     pub await_timeout: Duration,
+    pub child_scope: Option<subc_protocol::scope::ScopeSelector>,
 }
 
 impl HistorianProducerConfig {
@@ -576,6 +587,7 @@ impl HistorianProducerConfig {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             await_timeout: DEFAULT_AWAIT_TIMEOUT,
+            child_scope: None,
         }
     }
 }
@@ -764,6 +776,19 @@ impl HistorianProducerError {
 
     pub(crate) fn is_expired(&self) -> bool {
         matches!(self, HistorianProducerError::Subc(body) if body.code == "expired")
+    }
+
+    /// The runner cannot serve the model it was sent (`invalid_params` with
+    /// `detail.field: "model"`, as a runner whose hosts lack that provider
+    /// answers), so the firing moves on to the next configured model. It is not
+    /// a runner refusal for the shared cache: that cache is keyed by model
+    /// across every runner, and another runner may serve this model.
+    pub fn refuses_model(&self) -> bool {
+        matches!(
+            self,
+            HistorianProducerError::Subc(body)
+                if body.code == "invalid_params" && body.detail_field() == Some("model")
+        )
     }
 
     /// Parse a route-open refusal while preserving the runner's code and message verbatim.
@@ -976,18 +1001,31 @@ pub struct HistorianProducer {
     /// When set, every route opens to this session's own runner instead of the
     /// configured runner module. The child session remains its own bind identity.
     session_runner: Option<SessionRunnerRoute>,
-    /// When set, every route opens to the runner module routing answered, under
-    /// the conversation's scope. Takes precedence over `session_runner`.
+    /// The runner refused `generation.temperature` on this producer, so later
+    /// sends leave it out.
+    temperature_refused: bool,
+    /// When set, every route opens to the runner module routing answered.
+    /// Child routes still use `config.child_scope`; this takes precedence over
+    /// `session_runner` only when choosing the runner module.
     routed_runner: Option<RoutedRunnerTarget>,
 }
 
-/// The runner module a `route.select` answer named and the scope the answer
-/// was given under. Child routes open under that same scope, so the runner
-/// sees the same project and session routing placed the work for.
+/// The runner module a `route.select` answer named and its selection scope.
+/// Selection and reporting use the conversation scope; child runner routes use
+/// ck-mc's own project scope from `HistorianProducerConfig`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutedRunnerTarget {
     pub module_id: String,
     pub scope: subc_protocol::scope::ScopeSelector,
+}
+
+/// A runner's `invalid_params` refusal naming `generation.temperature`, the
+/// one way llm-runner §9 lets a runner decline a member no describe group
+/// declares.
+fn refuses_temperature(body: &ProducerErrorBody) -> bool {
+    body.code == "invalid_params"
+        && (body.detail_field() == Some("generation.temperature")
+            || body.message.contains("generation.temperature"))
 }
 
 impl HistorianProducer {
@@ -1150,6 +1188,7 @@ impl HistorianProducer {
             released: None,
             session_runner: None,
             routed_runner: None,
+            temperature_refused: false,
         })
     }
 
@@ -1263,18 +1302,37 @@ impl HistorianProducer {
         // a distinct session id. Use that durable attempt identity as `send_id`, not a
         // connection nonce or frame correlation id: resending after a lost reply must
         // deduplicate, while a new attempt after a classified failure must start a new run.
-        let body = session_send_request(
-            session_id,
-            system,
-            prompt,
-            model,
-            variant,
-            max_output_tokens,
-            temperature,
-            retention,
-        )?
-        .for_session_runner(self.route_limits)?;
-        let response = self.unary_json(route, body).await?;
+        // No describe group declares `generation.temperature`, so a runner may
+        // refuse it as `invalid_params` naming the field (llm-runner §9). A
+        // refused send is never admitted, so resend once without it, and keep
+        // omitting it on this route.
+        let temperature = temperature.filter(|_| !self.temperature_refused);
+        let limits = self.route_limits;
+        let send = |temperature| {
+            session_send_request(
+                session_id,
+                system,
+                prompt,
+                model,
+                variant,
+                max_output_tokens,
+                temperature,
+                retention,
+            )?
+            .for_session_runner(limits)
+        };
+        let response = match self.unary_json(route, send(temperature)?).await {
+            Err(HistorianProducerError::Subc(body))
+                if temperature.is_some() && refuses_temperature(&body) =>
+            {
+                tracing::info!(
+                    "mc-module: historian runner refused generation.temperature; sending without it"
+                );
+                self.temperature_refused = true;
+                self.unary_json(route, send(None)?).await?
+            }
+            other => other?,
+        };
         match send_outcome(&response) {
             SendOutcome::Active(run_id) => Ok(RunHandle { run_id }),
             SendOutcome::Queued(submission_id) => {
@@ -1569,21 +1627,16 @@ impl HistorianProducer {
         };
         let request = ClientControlRequest::RouteOpen {
             target,
-            identity: BindIdentity::new(
-                self.config.project_root.clone(),
-                self.config.harness.clone(),
-                session,
-            ),
+            identity: BindIdentity::new(self.config.harness.clone(), session),
             consumer_identity: consumer_identity_from_launch(),
             consumer_capabilities: None,
             admission_facts: None,
-            // A routed summary runs under the conversation's scope, the same stamp
-            // routing selected under. Other historian routes carry no scope and
-            // run under the module's own identity.
-            scope: self
-                .routed_runner
-                .as_ref()
-                .map(|routed| routed.scope.clone()),
+            scope: Some(self.config.child_scope.clone().ok_or_else(|| {
+                HistorianProducerError::Subc(ProducerErrorBody::untagged(
+                    "child_scope_unavailable",
+                    "historian child requires a module-owned project scope",
+                ))
+            })?),
             // The historian runner is an llm-runner management surface.
             role_versions: Some(crate::session_resolver::llm_runner_role_versions()),
         };
@@ -2791,7 +2844,8 @@ pub(crate) mod tests {
 
     #[derive(Debug, Default)]
     struct ServerLog {
-        route_project_roots: Vec<String>,
+        route_identities: Vec<Value>,
+        route_scopes: Vec<Option<subc_protocol::scope::ScopeSelector>>,
         route_harnesses: Vec<String>,
         route_sessions: Vec<String>,
         route_targets: Vec<subc_protocol::RouteTarget>,
@@ -2916,6 +2970,18 @@ pub(crate) mod tests {
     }
 
     impl FakeServer {
+        pub(crate) async fn child_route_metadata(
+            &self,
+        ) -> Vec<(Value, Option<subc_protocol::scope::ScopeSelector>)> {
+            let log = self.log.lock().await;
+            assert_eq!(log.route_identities.len(), log.route_scopes.len());
+            log.route_identities
+                .iter()
+                .cloned()
+                .zip(log.route_scopes.iter().cloned())
+                .collect()
+        }
+
         pub(crate) async fn follow_counts(&self) -> (usize, usize) {
             let log = self.log.lock().await;
             (log.statuses.len(), log.results.len())
@@ -3033,7 +3099,7 @@ pub(crate) mod tests {
                 key: key.clone(),
                 daemon_id,
                 pid: std::process::id(),
-                daemon_ver: "fake".to_string(),
+                daemon_ver: "0.39.0".to_string(),
             },
         )
         .unwrap();
@@ -3077,6 +3143,7 @@ pub(crate) mod tests {
                                 identity,
                                 target,
                                 role_versions,
+                                scope,
                                 ..
                             } = req
                             {
@@ -3084,9 +3151,10 @@ pub(crate) mod tests {
                                 next_route += 1;
                                 route_sessions.insert(route, identity.session.clone());
                                 let mut log = log_task.lock().await;
-                                log.route_project_roots
-                                    .push(identity.project_root.to_string_lossy().into());
+                                log.route_identities
+                                    .push(serde_json::to_value(&identity).unwrap());
                                 log.route_harnesses.push(identity.harness);
+                                log.route_scopes.push(scope);
                                 log.route_sessions.push(identity.session);
                                 log.route_targets.push(target);
                                 log.route_role_versions.push(role_versions);
@@ -3142,6 +3210,21 @@ pub(crate) mod tests {
                                     } else {
                                         responses.front().unwrap().clone()
                                     };
+                                    // A scripted `{"__error": body}` answers the send
+                                    // with an ERROR frame carrying that body.
+                                    if let Some(body) = response.get("__error") {
+                                        let frame = Frame::build(
+                                            FrameType::Error,
+                                            Flags::new(false, Priority::Interactive, false),
+                                            frame.header.channel,
+                                            frame.header.epoch,
+                                            frame.header.corr,
+                                            serde_json::to_vec(body).unwrap(),
+                                        )
+                                        .unwrap();
+                                        write_frame(&mut stream, &frame).await.unwrap();
+                                        continue;
+                                    }
                                     send_response_frame(
                                         &mut stream,
                                         frame.header.channel,
@@ -3361,6 +3444,9 @@ pub(crate) mod tests {
             handshake_timeout: Duration::from_secs(2),
             request_timeout: Duration::from_secs(2),
             await_timeout: Duration::from_secs(2),
+            child_scope: Some(crate::child_scopes::test_selector(
+                &std::env::current_dir().unwrap(),
+            )),
         })
         .await
         .unwrap()
@@ -3880,6 +3966,9 @@ pub(crate) mod tests {
                 request_timeout: Duration::from_secs(2),
                 await_timeout: Duration::from_secs(2),
                 route_targets: RouteTargetConfig::default(),
+                child_scope: Some(crate::child_scopes::test_selector(
+                    &std::env::current_dir().unwrap(),
+                )),
                 ..HistorianProducerConfig::new(
                     server.connection_file.clone(),
                     std::env::current_dir().unwrap(),
@@ -3907,6 +3996,7 @@ pub(crate) mod tests {
             request_timeout: Duration::from_secs(2),
             await_timeout: Duration::from_secs(2),
             route_targets: RouteTargetConfig::default(),
+            child_scope: Some(crate::child_scopes::test_selector(&identity.project_root)),
             ..HistorianProducerConfig::new(
                 server.connection_file.clone(),
                 identity.project_root.clone(),
@@ -3953,13 +4043,16 @@ pub(crate) mod tests {
             "a runner route declares it speaks llm-runner/v1"
         );
         assert_eq!(
-            log.route_project_roots,
-            vec![std::env::current_dir()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()]
+            log.route_identities,
+            vec![json!({"harness":"claude-code", "session":"mc-hist-1"})]
         );
         assert_eq!(log.route_harnesses, vec!["claude-code"]);
+        assert_eq!(
+            log.route_scopes,
+            vec![Some(crate::child_scopes::test_selector(
+                &std::env::current_dir().unwrap()
+            ))]
+        );
         assert_eq!(log.route_sessions, vec!["mc-hist-1".to_string()]);
         let send = &log.sends[0];
         assert!(send.get("parent").is_none(), "{send}");
@@ -4023,8 +4116,14 @@ pub(crate) mod tests {
             }]
         );
         assert_eq!(
-            log.route_project_roots,
-            vec![identity.project_root.to_string_lossy().into_owned()]
+            log.route_identities,
+            vec![json!({"harness":identity.harness, "session":identity.session})]
+        );
+        assert_eq!(
+            log.route_scopes,
+            vec![Some(crate::child_scopes::test_selector(
+                &identity.project_root
+            ))]
         );
         assert_eq!(log.route_harnesses, vec![identity.harness.clone()]);
         assert_eq!(log.route_sessions, vec![child_session.to_string()]);
@@ -4187,6 +4286,74 @@ pub(crate) mod tests {
                 json!(temperature)
             );
         }
+    }
+
+    /// llm-runner §9 lets a runner refuse an undeclared member as
+    /// `invalid_params` naming it. THALAMUS's runner refuses
+    /// `generation.temperature`, which failed every historian firing on a
+    /// runner-hosted head while the user config set a historian temperature.
+    #[tokio::test]
+    async fn a_runner_that_refuses_temperature_gets_the_send_again_without_it() {
+        let server = fake_server(
+            json!([
+                {"__error":{"code":"invalid_params","message":"invalid or unsupported parameter generation.temperature"}},
+                {"state":"active","run_id":"run-without-temperature"},
+            ]),
+            Vec::new(),
+        )
+        .await;
+        let mut client = client(&server).await;
+        let handle = client
+            .start_with_temperature(
+                "mc-historian:proj:1",
+                "role guidance",
+                "prompt",
+                "prov/model-a",
+                None,
+                Some(0.1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.run_id, "run-without-temperature");
+        assert!(client.temperature_refused);
+        client.close().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let log = server.log.lock().await;
+        assert_eq!(log.sends.len(), 2, "one refused send, one resend");
+        assert_eq!(log.sends[0]["generation"]["temperature"], json!(0.1));
+        assert!(
+            log.sends[1]["generation"].get("temperature").is_none(),
+            "{}",
+            log.sends[1]
+        );
+    }
+
+    /// Any other `invalid_params` refusal still fails the send, unretried.
+    #[tokio::test]
+    async fn other_invalid_params_refusals_are_not_retried() {
+        let server = fake_server(
+            json!([
+                {"__error":{"code":"invalid_params","message":"invalid parameter model"}},
+                {"state":"active","run_id":"never"},
+            ]),
+            Vec::new(),
+        )
+        .await;
+        let mut client = client(&server).await;
+        let refused = client
+            .start_with_temperature(
+                "mc-historian:proj:1",
+                "role guidance",
+                "prompt",
+                "prov/model-a",
+                None,
+                Some(0.1),
+            )
+            .await;
+        assert!(matches!(refused, Err(HistorianProducerError::Subc(_))));
+        client.close().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(server.log.lock().await.sends.len(), 1);
     }
 
     /// Broca's own `session.send` goldens, vendored byte-for-byte; see
@@ -4768,6 +4935,44 @@ pub(crate) mod tests {
             crate::runner_follow::FollowCapabilities::from_describe(&after).missing(),
             None
         );
+    }
+
+    #[test]
+    fn rich_ui_stamp_summarizer_describe() {
+        let describe = crate::tests::broca_rich_ui_stamp::answer("role.describe.json");
+        assert!(matches!(
+            retention_from_role_describe(&describe),
+            crate::child_retention::ChildRetention::Seconds(_)
+        ));
+        assert_eq!(
+            crate::runner_follow::FollowCapabilities::from_describe(&describe).missing(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn rich_ui_stamp_summarizer_run_started() {
+        let server = fake_server(
+            json!({"state":"active","run_id":"r1"}),
+            vec![crate::tests::broca_rich_ui_stamp::sample(
+                "run_started.json",
+            )],
+        )
+        .await;
+        {
+            let mut answers = server.answers.lock().await;
+            answers.statuses = [json!({"state":"active"}), json!({"state":"completed"})].into();
+            answers.result = Some(json!({"run_id":"r1","state":"completed",
+                "final_message":{"ordinal":1,"mid":"answer","text":"fixture final"}}));
+        }
+        let mut producer = client(&server).await;
+        producer
+            .start("rich-ui-child", "", "prompt", "prov/model-a")
+            .await
+            .unwrap();
+        let output = producer.await_output("r1").await.unwrap();
+        assert_eq!(output.text, "fixture final");
+        producer.close().await;
     }
 
     #[tokio::test]

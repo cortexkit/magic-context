@@ -81,6 +81,7 @@ export function createNativeHiddenChildren(
     const remove = (child: PersistedHiddenChild): Promise<void> => {
         const inFlight = removing.get(child.id);
         if (inFlight) return inFlight;
+        options.log(`[magic-context] hidden child ${child.id} removing`);
         const done = (async () => {
             try {
                 let timer: ReturnType<typeof setTimeout> | undefined;
@@ -97,6 +98,7 @@ export function createNativeHiddenChildren(
                 } finally {
                     if (timer) clearTimeout(timer);
                 }
+                options.log(`[magic-context] hidden child ${child.id} removed`);
             } catch (error) {
                 if (isSessionNotFound(error)) return;
                 options.log(
@@ -110,20 +112,28 @@ export function createNativeHiddenChildren(
         return done;
     };
 
+    const noteCreated = (sessionID: string, role: HiddenChildRole, parentID: string) => {
+        options.log(
+            `[magic-context] hidden child ${sessionID} created role=${role} parent=${parentID} keep_subagents=${options.keepSubagents}`,
+        );
+    };
+
     /**
      * Reads the new session back, because a host can accept `parentID` and silently drop it,
      * and refuses a child the host bound to another plugin instance's location.
      */
-    const confirmPlacement = async (sessionID: string, parentID: string) => {
+    const confirmPlacement = async (sessionID: string, parentID: string, role: HiddenChildRole) => {
         let stored: Awaited<ReturnType<HiddenChildHost["get"]>>;
         try {
             stored = await host.get({ sessionID });
         } catch (error) {
+            noteCreated(sessionID, role, "unknown");
             options.log(
                 `[magic-context] could not read back hidden child ${sessionID} to confirm its parent: ${errorText(error)}`,
             );
             return;
         }
+        noteCreated(sessionID, role, stored.parentID ?? "none");
         const directory = stored.location?.directory;
         // Compared by spelling-normalized equality: the host can write this
         // instance's own directory as `D:/work/app` while the instance knows it
@@ -178,11 +188,13 @@ export function createNativeHiddenChildren(
         // passed to the host above.
         if (parentID) {
             try {
-                await confirmPlacement(created.id, parentID);
+                await confirmPlacement(created.id, parentID, role);
             } catch (error) {
                 await remove(child);
                 throw error;
             }
+        } else {
+            noteCreated(created.id, role, "none");
         }
         return child;
     };
@@ -194,14 +206,22 @@ export function createNativeHiddenChildren(
         open: create,
         create,
         retire(child) {
-            if (!kept(child)) void remove(child);
+            if (kept(child)) {
+                options.log(`[magic-context] hidden child ${child.id} kept (keep_subagents)`);
+            } else {
+                void remove(child);
+            }
         },
         async finish(child, retired) {
             if (retired) {
                 await removing.get(child.id);
                 return;
             }
-            if (!kept(child)) await remove(child);
+            if (kept(child)) {
+                options.log(`[magic-context] hidden child ${child.id} kept (keep_subagents)`);
+            } else {
+                await remove(child);
+            }
         },
         updateModel: (child, model) => ({ ...child, model }),
         markEverSettled: (child) => ({ ...child, ever_settled: true }),

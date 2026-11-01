@@ -464,7 +464,7 @@ for (const [count, busy] of [
 			expect(observed.begins).toBe(1);
 			expect(observed.commits).toBe(0);
 			expect(observed.rollbacks).toBe(busy ? 0 : 1);
-			expect(observed.writes).toBe(busy ? 0 : count);
+			expect(observed.writes).toBe(busy ? 0 : 1);
 			if (busy) {
 				expect(observed.tokens).toBe(0);
 				expect(getPendingOps(db, id)).toHaveLength(count);

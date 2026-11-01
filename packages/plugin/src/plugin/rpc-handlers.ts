@@ -64,7 +64,6 @@ import {
     SESSION_RENDER_CACHE_COLUMNS,
     sessionRenderCacheSelect,
 } from "../features/magic-context/storage-session-cache";
-import { getMeasuredToolDefinitionTokens } from "../features/magic-context/tool-definition-tokens";
 import {
     computeOpenCodeWorkMetricsIncremental,
     emptyWorkMetricsCarry,
@@ -87,19 +86,10 @@ import { formatEmbedStatusText } from "../hooks/magic-context/format-embed-statu
 import { getLiveNotificationParams } from "../hooks/magic-context/hook-handlers";
 import type { LiveSessionState } from "../hooks/magic-context/live-session-state";
 import { getLkgSlotHeapStats } from "../hooks/magic-context/lkg-slot";
-import { computeM0BlockTokens } from "../hooks/magic-context/m0-token-breakdown";
-
-import {
-    findLastAssistantModelFromOpenCodeDb,
-    openCodeDbExists,
-    withReadOnlySessionDb,
-} from "../hooks/magic-context/read-session-db";
+import { openCodeDbExists, withReadOnlySessionDb } from "../hooks/magic-context/read-session-db";
 import { getTokenizerNativeMemoryStats } from "../hooks/magic-context/read-session-formatting";
 import type { ManagedRecompContext } from "../hooks/magic-context/recomp-orchestrator";
-import {
-    calibrateBuckets,
-    resolveModelCalibration,
-} from "../hooks/magic-context/tokenizer-calibration";
+import { buildOpenCodeTokenAttribution } from "../hooks/magic-context/session-token-attribution";
 import {
     ANNOUNCEMENT_FEATURES,
     ANNOUNCEMENT_FOOTER,
@@ -266,15 +256,6 @@ export function buildSidebarSnapshot(
             persistedNewWork,
             persistedTotalInput,
         );
-        const systemPromptTokens = meta ? Number(meta.system_prompt_tokens ?? 0) : 0;
-        // messagesBlockTokens = token estimate of text/reasoning/image parts
-        // in output.messages[] after transform, persisted by transform.ts.
-        // Includes injected compartments/facts/memories (they're in message[0]).
-        const messagesBlockTokens = meta ? Number(meta.conversation_tokens ?? 0) : 0;
-        // toolCallTokensRaw = token estimate of tool_use/tool_result/tool/
-        // tool-invocation parts in output.messages[], persisted by transform.
-        // These are tool call I/O inside conversation (not tool schemas).
-        const toolCallTokensRaw = meta ? Number(meta.tool_call_tokens ?? 0) : 0;
         const compartmentInProgress = meta ? Boolean(meta.compartment_in_progress) : false;
         const cacheTtl = meta ? String(meta.cache_ttl ?? "5m") : "5m";
         const memoryBlockCount = meta ? Number(meta.memory_block_count ?? 0) : 0;
@@ -335,29 +316,24 @@ export function buildSidebarSnapshot(
             }
         }
 
-        // Token estimates via real Claude tokenizer (ai-tokenizer). The m[0]
-        // per-block attribution (docs / user-profile / project-memory /
-        // session-history) is computed by the SHARED helper so the OpenCode
-        // sidebar and the Pi /ctx-status dialog can never diverge on what the
-        // categories are or how they're measured.
-        const decodeCachedBytes = (bytes: unknown): string =>
-            bytes instanceof Uint8Array
-                ? Buffer.from(bytes).toString("utf8")
-                : typeof bytes === "string"
-                  ? bytes
-                  : "";
-        const m0Blocks = computeM0BlockTokens(db, sessionId, {
-            m0Text: decodeCachedBytes(meta?.cached_m0_bytes),
-            m1Text: decodeCachedBytes(meta?.cached_m1_bytes),
-            projectIdentity,
-            injectionBudgetTokens,
-            memoryBlockCount,
-        });
-        const compartmentTokens = m0Blocks.compartmentTokens;
-        const factTokens = m0Blocks.factTokens;
-        const memoryTokens = m0Blocks.memoryTokens;
-        const docsTokens = m0Blocks.docsTokens;
-        const profileTokens = m0Blocks.profileTokens;
+        const {
+            buckets: calibrated,
+            activeProviderID,
+            activeModelID,
+            recoveredModel,
+            recoveredAgent,
+        } = buildOpenCodeTokenAttribution(
+            db,
+            sessionId,
+            meta,
+            { projectIdentity, injectionBudgetTokens },
+            liveSessionState,
+        );
+        // Sidebar polls retain their cold-start route cache; background attribution is read-only.
+        if (liveSessionState) {
+            if (recoveredModel) liveSessionState.liveModelBySession.set(sessionId, recoveredModel);
+            if (recoveredAgent) liveSessionState.agentBySession.set(sessionId, recoveredAgent);
+        }
 
         let lastDreamerRunAt: number | null = null;
         let dreamerBacklog: DreamTaskBacklogMap | undefined;
@@ -395,69 +371,6 @@ export function buildSidebarSnapshot(
                 );
             } catch {
                 // task_schedule_state may not exist on a pre-V2 DB
-            }
-        }
-
-        // Display-layer attribution.
-        //
-        // Local raw counts come from ai-tokenizer. Per-model calibration in
-        // tokenizer-calibration.ts captures the empirically-measured drift
-        // between local raw counts and the API's actual token counts (varies
-        // significantly across providers and model generations). We:
-        //   1. scale stable buckets (system, tool defs) by per-model ratios,
-        //   2. compute the dynamic remainder as inputTokens - calibrated_stable,
-        //   3. proportionally distribute the remainder to dynamic buckets so
-        //      they sum to exactly inputTokens. Overhead becomes 0.
-        //
-        // messagesBlockTokens persisted by transform.ts includes the injected
-        // <session-history> block (compartments + facts + memories live in
-        // message[0]). Subtract those so "conversationLocal" reflects real
-        // user/assistant dialog only.
-        const injectedInMessages =
-            compartmentTokens + factTokens + memoryTokens + docsTokens + profileTokens;
-        const conversationLocal = Math.max(0, messagesBlockTokens - injectedInMessages);
-        const toolCallsLocal = Math.max(0, toolCallTokensRaw);
-
-        // Measured tool schema cost. Resolved via the live-session-state latch
-        // (session → agent/model). When the in-memory map is empty (post-restart,
-        // before this session's first chat.message has fired in this process)
-        // fall back to OpenCode's SQLite DB to recover provider/model/agent
-        // from the last assistant message, mirroring the model-recovery path
-        // already in place for hook.ts. Populate the cache so subsequent reads
-        // hit memory directly. This eliminates the "Tool Defs shows 0 until
-        // next chat.message" cold-start gap.
-        let measuredToolDefTokens = 0;
-        let activeProviderID: string | undefined;
-        let activeModelID: string | undefined;
-        if (liveSessionState) {
-            let model = liveSessionState.liveModelBySession.get(sessionId);
-            let agent = liveSessionState.agentBySession.get(sessionId);
-            if (!model || !agent) {
-                const recovered = findLastAssistantModelFromOpenCodeDb(sessionId);
-                if (recovered) {
-                    if (!model) {
-                        model = {
-                            providerID: recovered.providerID,
-                            modelID: recovered.modelID,
-                        };
-                        liveSessionState.liveModelBySession.set(sessionId, model);
-                    }
-                    if (!agent && recovered.agent) {
-                        agent = recovered.agent;
-                        liveSessionState.agentBySession.set(sessionId, agent);
-                    }
-                }
-            }
-            if (model) {
-                activeProviderID = model.providerID;
-                activeModelID = model.modelID;
-                measuredToolDefTokens =
-                    getMeasuredToolDefinitionTokens(
-                        model.providerID,
-                        model.modelID,
-                        agent,
-                        sessionId,
-                    ) ?? 0;
             }
         }
 
@@ -514,24 +427,9 @@ export function buildSidebarSnapshot(
             nativeContextLimit > 0 ? (inputTokens / nativeContextLimit) * 100 : undefined;
 
         const hostLimitations = activeHostLimitations();
-        const calibration = resolveModelCalibration(activeProviderID, activeModelID);
         const tailHygiene = resolveTailHygieneStatus(
             liveSessionState?.channel1StateBySession.get(sessionId),
         );
-
-        const calibrated = calibrateBuckets({
-            inputTokens,
-            systemLocal: systemPromptTokens,
-            toolDefsLocal: measuredToolDefTokens,
-            compartmentsLocal: compartmentTokens,
-            factsLocal: factTokens,
-            memoriesLocal: memoryTokens,
-            docsLocal: docsTokens,
-            profileLocal: profileTokens,
-            conversationLocal,
-            toolCallsLocal,
-            calibration,
-        });
 
         const fresh: SidebarSnapshot = {
             sessionId,

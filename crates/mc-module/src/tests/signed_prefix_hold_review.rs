@@ -657,14 +657,17 @@ const REVIEW_UNHELD_CASES: [(&str, bool, bool); 6] = [
 
 /// Pin the intended unheld-session output with distance-based age reclaim.
 /// These snapshots retain current-task tool bodies; signed-prefix hold checks
-/// remain independent of this unheld policy golden.
+/// remain independent of this unheld policy golden. Queued tools now freeze the
+/// paired call shape TypeScript uses: small recent calls keep their real arguments
+/// and result placeholders, without relying on an automatic age sweep to supply
+/// the call shell. Those frozen bytes change all six subsequent serve histories.
 const REVIEW_UNHELD_GOLDEN: [&str; 6] = [
-    "379e07c15ef75bc0e0809bb4c4c9021b767fa988a0cf10d367635cb562e9c6d0",
-    "a06635735bfd78bd1ed09d54c39a0c0e32c645ec6d4e1e6269c828b8358c7bdb",
-    "4baf5c57ddcf064b7f9cd87ca213ae14bd7bf31ed52b6dd00f29bf3a5c80bfa9",
-    "ac945ae6c10a2a023795b58cb3d82e867c9afa864d6d688345fb87d1caa71a69",
-    "e252f0b3697f7fc44ac5429fee0789a5f3f56b7462bec0cb6ad49468b2e22762",
-    "25ef18164f09a5f9e6d5a4a6a89a49f3e4372828a6c60965b4f72de6d4a2c8de",
+    "c2d6b885738ee7fc8b2999a1f51e2a41f38e32171a650081af139966ade79b04",
+    "880141bfa84dda9728dea93cd8d2a83229eb2390d9a3092e54804287f6b20188",
+    "aa2d33d14b4cb9c1526fc51ec8c2fa0272fc5da4444682734d1517aa81ffb446",
+    "3bfc760238306de18f313b139b7cceedb978468c6de0652a81e519e8faa850f9",
+    "fa8f5517fbf9c2a71488d0e2681dbaae25e392123ad2103009d46097848812f0",
+    "f6442e8e17ab52bcc3c0d68578bd2d30720f19cf4a5603169f00aaf89fbc9d16",
 ];
 
 #[test]

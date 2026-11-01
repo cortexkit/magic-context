@@ -1,12 +1,17 @@
 import { createHash } from "node:crypto";
 import { getHostTokenBreakdownMemo } from "../../features/magic-context/host-token-breakdown-state";
-import { getSessionToolDefinitionTokens } from "../../features/magic-context/tool-definition-tokens";
 import type { Database } from "../../shared/sqlite";
-import { extractM0Block } from "./decay-render";
+import type { M0BlockTokens } from "./m0-token-breakdown";
 import { estimateFixedPromptTokens, hasTokenizerForFit } from "./read-session-formatting";
+import {
+    type AttributionPrefix,
+    readAttributionBlocks,
+    type TokenAttribution,
+    tokenAttributionParts,
+} from "./session-token-attribution";
 
 export const HOST_BREAKDOWN_KEY = "host_token_breakdown";
-export const HOST_BREAKDOWN_VERSION = 1;
+export const HOST_BREAKDOWN_VERSION = 2;
 export const HOST_BREAKDOWN_TOLERANCE = { ratio: 0.01, tokens: 500 } as const;
 
 /** Hash-keyed measurements shared with sidebar/status reads; no prompt bytes are retained. */
@@ -64,16 +69,12 @@ export interface HostTokenBreakdown {
     parts: Record<string, number | null>;
 }
 
-export interface HostTokenPass {
+export interface HostTokenPass extends AttributionPrefix {
     measuredAt: number;
     /** An executed fold or m[1] refresh, not merely a scheduler request to rebuild. */
     prefixChanged: boolean;
-    conversationTokens: number;
-    toolCallTokens: number;
-    /** Existing OpenCode measurement: OC2's exact request set or OC1's recent route activity. */
-    toolDefinitionTokens?: number;
-    /** Pi reads schemas only in the deferred task, after returning its messages. */
-    readToolSchemas?: () => readonly string[];
+    /** Invoked off the transform path, with prefix counts reused until the next prefix write. */
+    readAttribution: (blocks: M0BlockTokens) => TokenAttribution;
 }
 
 /** Compare to the last persisted value, not the previous pass, so small changes accumulate. */
@@ -134,38 +135,23 @@ export function persistHostTokenBreakdown(
             /* No usable measurement has been saved yet. */
         }
         if (memo.previous && memo.previous.measured_at > pass.measuredAt) return false;
-        const m0 = text("cached_m0_bytes");
-        const m1 = text("cached_m1_bytes");
-        const block = (source: string, tag: string): number => {
-            const rendered = extractM0Block(source, tag);
-            return rendered ? measureHostTokenText(rendered) : 0;
-        };
-        const docs = block(m0, "project-docs");
-        const profile = block(m0, "user-profile");
-        const memory = block(m0, "project-memory");
-        const history = block(m0, "session-history") + block(m1, "new-compartments");
-        memo.blocks = { docs, profile, memory, history };
+        memo.blocks = readAttributionBlocks(
+            db,
+            sessionId,
+            {
+                cached_m0_bytes: text("cached_m0_bytes"),
+                cached_m1_bytes: text("cached_m1_bytes"),
+            },
+            pass,
+        );
         memo.prefixDirty = false;
     }
-    const { docs, profile, memory, history } = memo.blocks;
-    const injected = docs + profile + memory + history;
-    const tools =
-        pass.toolDefinitionTokens ??
-        (pass.readToolSchemas ? measureHostToolDefinitions(pass.readToolSchemas()) : undefined);
     const next: HostTokenBreakdown = {
         version: HOST_BREAKDOWN_VERSION,
         measured_at: pass.measuredAt,
         tolerance: HOST_BREAKDOWN_TOLERANCE,
         last_user_message_in_history_raw: true,
-        parts: {
-            tool_definitions: tools ?? null,
-            project_docs: docs,
-            user_profile: profile,
-            history_raw: Math.max(0, pass.conversationTokens - injected),
-            tool_calls_results: pass.toolCallTokens,
-            // The existing pass total includes the last user message; do not tokenize it again.
-            last_user_message: 0,
-        },
+        parts: tokenAttributionParts(pass.readAttribution(memo.blocks)),
     };
     if (!hostBreakdownChanged(memo.previous, next)) return false;
     const written =
@@ -192,11 +178,7 @@ export function scheduleHostTokenBreakdown(
     const timer = setTimeout(() => {
         memo.pending = undefined;
         try {
-            persistHostTokenBreakdown(db, sessionId, {
-                ...pass,
-                toolDefinitionTokens:
-                    pass.toolDefinitionTokens ?? getSessionToolDefinitionTokens(sessionId),
-            });
+            persistHostTokenBreakdown(db, sessionId, pass);
         } catch {
             // Ignore deferred-write failures, including a session database that has already closed.
         }

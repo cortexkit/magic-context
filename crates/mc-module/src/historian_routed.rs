@@ -948,11 +948,12 @@ const ROUTING_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Routing and runner transport over subc: the catalog read on channel 0,
 /// `route.select`/`route.report` on a route to the provider opened under the
-/// conversation's scope, and producers bound to the answered runner under the
-/// same scope.
+/// conversation's scope. Child producers use ck-mc's project scope so the child
+/// belongs to ck-mc rather than inheriting its parent's session scope.
 pub struct SubcSummaryRouting {
     pub connection_file: PathBuf,
     pub route_targets: crate::route_targets::RouteTargetConfig,
+    child_scopes: Arc<crate::child_scopes::ChildScopes>,
     readiness: Mutex<HashMap<String, Result<bool, RoutingSupportRefusal>>>,
 }
 
@@ -960,10 +961,12 @@ impl SubcSummaryRouting {
     pub fn new(
         connection_file: PathBuf,
         route_targets: crate::route_targets::RouteTargetConfig,
+        child_scopes: Arc<crate::child_scopes::ChildScopes>,
     ) -> Self {
         Self {
             connection_file,
             route_targets,
+            child_scopes,
             readiness: Mutex::default(),
         }
     }
@@ -1037,7 +1040,6 @@ impl SubcSummaryRouting {
             .map_err(|error| unavailable(error.to_string()))?;
         let target = crate::route_targets::routed_module_target(provider);
         let identity = subc_protocol::BindIdentity::new(
-            scope.identity.project_root.clone(),
             scope.identity.harness.as_str(),
             scope.identity.session.as_str(),
         );
@@ -1210,6 +1212,16 @@ impl SummaryRouting for SubcSummaryRouting {
         let config = crate::historian_producer::HistorianProducerConfig {
             handshake_timeout: Duration::from_secs(2),
             route_targets: self.route_targets.clone(),
+            child_scope: Some(
+                self.child_scopes
+                    .for_project(&scope.identity.project_root)
+                    .await
+                    .map_err(|error| {
+                        HistorianProducerError::Subc(
+                            subc_protocol::ErrorBody::new(error.code, error.message).into(),
+                        )
+                    })?,
+            ),
             ..crate::historian_producer::HistorianProducerConfig::new(
                 self.connection_file.clone(),
                 scope.identity.project_root.clone(),

@@ -40,6 +40,7 @@ pub struct SubcBroca {
     pub harness: String,
     /// When set, children go to this conversation's own runner, not the configured one.
     pub session_runner: Option<SessionRunnerRoute>,
+    pub child_scopes: std::sync::Arc<crate::child_scopes::ChildScopes>,
 }
 
 impl SubcBroca {
@@ -57,6 +58,7 @@ impl BrocaPorts for SubcBroca {
             config: self.clone(),
             consumer: None,
             subscription: None,
+            routes: std::collections::HashMap::new(),
         }
     }
 }
@@ -65,6 +67,7 @@ pub struct SubcBrocaPort {
     config: SubcBroca,
     consumer: Option<SubcConsumer>,
     subscription: Option<(String, Subscription)>,
+    routes: std::collections::HashMap<String, subc_client_rs::RouteHandle>,
 }
 
 fn port_error(code: &str, message: impl Into<String>, outcome_unknown: bool) -> PortError {
@@ -121,25 +124,51 @@ impl SubcBrocaPort {
         };
         Ok((
             target,
-            BindIdentity::new(
-                self.config.project_root.clone(),
-                self.config.harness.clone(),
-                session,
-            ),
+            BindIdentity::new(self.config.harness.clone(), session),
         ))
+    }
+
+    async fn route_handle(
+        &mut self,
+        session: &str,
+    ) -> Result<subc_client_rs::RouteHandle, PortError> {
+        let (target, identity) = self.route(session)?;
+        let scope = self
+            .config
+            .child_scopes
+            .for_project(&self.config.project_root)
+            .await
+            .map_err(|error| port_error(&error.code, error.message, false))?;
+        let handle = self
+            .consumer()
+            .await?
+            .open_route_scoped(
+                target,
+                identity,
+                scope,
+                CallOptions {
+                    timeout: OP_TIMEOUT,
+                    route_retry_deadline: OP_TIMEOUT,
+                    role_versions: Some(llm_runner_role_versions()),
+                    ..CallOptions::default()
+                },
+            )
+            .await
+            .map_err(call_error)?;
+        self.routes.insert(session.to_owned(), handle);
+        Ok(handle)
     }
 }
 
 impl BrocaPort for SubcBrocaPort {
     async fn call(&mut self, session: &str, op: &str, params: Value) -> Result<Value, PortError> {
-        let (target, identity) = self.route(session)?;
+        let handle = self.route_handle(session).await?;
         let body = serde_json::to_vec(&json!({"method": op, "params": params}))
             .map_err(|e| port_error("invalid_params", e.to_string(), false))?;
         let consumer = self.consumer().await?;
         let bytes = consumer
-            .call(
-                target,
-                identity,
+            .request(
+                &handle,
                 body,
                 CallOptions {
                     timeout: OP_TIMEOUT,
@@ -160,16 +189,15 @@ impl BrocaPort for SubcBrocaPort {
             .as_ref()
             .is_none_or(|(subscribed, _)| subscribed != session)
         {
-            let (target, identity) = self.route(session)?;
+            let handle = self.route_handle(session).await?;
             let body = serde_json::to_vec(
                 &json!({"method": "session.subscribe", "params": {"from": "start"}}),
             )
             .map_err(|e| port_error("invalid_params", e.to_string(), false))?;
             let consumer = self.consumer().await?;
             let subscription = consumer
-                .subscribe(
-                    target,
-                    identity,
+                .subscribe_route(
+                    &handle,
                     body,
                     SubscribeOptions {
                         route_open_timeout: OP_TIMEOUT,
@@ -203,11 +231,10 @@ impl BrocaPort for SubcBrocaPort {
         if let Some((_, subscription)) = self.subscription.take() {
             let _ = subscription.unsubscribe();
         }
-        if let (Ok((target, identity)), Some(consumer)) = (self.route(session), &self.consumer) {
-            consumer
-                .close_route(
-                    target,
-                    identity,
+        if let (Some(handle), Some(consumer)) = (self.routes.remove(session), &self.consumer) {
+            let _ = consumer
+                .close_handle(
+                    &handle,
                     CloseRouteOptions {
                         role_versions: Some(llm_runner_role_versions()),
                         ..CloseRouteOptions::default()
@@ -244,6 +271,7 @@ mod tests {
             module_id: "broca".into(),
         };
         let runner = SubcBroca {
+            child_scopes: crate::child_scopes::test_service(),
             connection_file: PathBuf::new(),
             route_targets: RouteTargetConfig::default(),
             project_root: root.clone(),
@@ -261,7 +289,10 @@ mod tests {
                 module_id: "broca".into()
             }
         );
-        assert_eq!(identity.project_root, root);
+        assert!(serde_json::to_value(&identity)
+            .unwrap()
+            .get("project_root")
+            .is_none());
         assert_eq!(identity.harness, "claude-code");
         assert_eq!(identity.session, "dream-child");
     }

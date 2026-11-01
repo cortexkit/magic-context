@@ -97,6 +97,90 @@ function bytes(path: string): string {
 }
 
 describe("doctor project-ids plan", () => {
+    it("plans registered raw absolute-path keys and reports unresolved paths and orphan git ids", async () => {
+        const registered = [folder("engram"), folder("astrocyte"), folder("aft")];
+        const implicit = folder("implicit");
+        const unavailable = folder("not-answering");
+        const missing = join(root, "missing");
+        for (const identity of [...registered, implicit, unavailable, missing, "git:orphan"]) {
+            db.prepare("INSERT INTO project_state(project_path) VALUES (?)").run(identity);
+        }
+        for (const [index, directory] of registered.entries()) {
+            const count = [32, 19, 6][index];
+            for (let i = 0; i < count; i++)
+                db.prepare(`INSERT INTO memories
+                (project_path, category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at)
+                VALUES (?, 'CONSTRAINTS', ?, ?, 1, 1, 1, 1)`).run(
+                    directory,
+                    `memory-${index}-${i}`,
+                    `hash-${index}-${i}`,
+                );
+        }
+        const calls: string[] = [];
+        const result = await plan(async (directory) => {
+            calls.push(directory);
+            if (registered.includes(directory))
+                return resolved(`pj-${directory.split("/").at(-1)}`);
+            return directory === implicit
+                ? { status: "implicit" }
+                : { status: "not_answering", reason: "transport" };
+        });
+        expect(
+            result.pairs.map(({ from, to, rowsByTable }) => ({
+                from,
+                to,
+                rows: rowsByTable.project_state,
+            })),
+        ).toEqual(
+            [...registered]
+                .sort()
+                .map((from) => ({ from, to: `pj-${from.split("/").at(-1)}`, rows: 1 })),
+        );
+        expect(result.unchanged).toEqual(
+            expect.arrayContaining([
+                { identity: implicit, reason: "implicit" },
+                { identity: unavailable, reason: "not_answering" },
+                { identity: missing, reason: "no_existing_folder" },
+                { identity: "git:orphan", reason: "no_existing_folder" },
+            ]),
+        );
+        expect(
+            result.pairs.map(({ from, rowsByTable }) => [
+                from.split("/").at(-1),
+                rowsByTable.memories,
+            ]),
+        ).toEqual([
+            ["aft", 6],
+            ["astrocyte", 19],
+            ["engram", 32],
+        ]);
+        expect(calls.sort()).toEqual([...registered, implicit, unavailable].sort());
+        expect(db.prepare("SELECT COUNT(*) AS n FROM project_state").get()).toEqual({ n: 7 });
+        const log = spyOn(console, "log").mockImplementation(() => {});
+        try {
+            expect(
+                await runProjectIdsCli(["plan", "--db", dbPath], {
+                    now,
+                    resolve: async (directory) =>
+                        registered.includes(directory)
+                            ? resolved(`pj-${directory.split("/").at(-1)}`)
+                            : directory === implicit
+                              ? { status: "implicit" }
+                              : { status: "not_answering", reason: "transport" },
+                }),
+            ).toBe(0);
+            const written = JSON.parse(
+                readFileSync(
+                    join(root, `project-id-plan-${plannedAt.replaceAll(":", "-")}.json`),
+                    "utf8",
+                ),
+            ) as ProjectIdPlan;
+            expect(written.pairs).toEqual(result.pairs);
+            expect(written.unchanged).toEqual(result.unchanged);
+        } finally {
+            log.mockRestore();
+        }
+    });
     it("writes version 1 beside the canonical store, with host-first full inventory and no database or pin changes", async () => {
         const first = folder("a-host");
         const missing = join(root, "a-missing");

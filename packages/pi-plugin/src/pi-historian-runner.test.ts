@@ -5,6 +5,7 @@ import {
 	getCompartments,
 	getSessionFacts,
 } from "@magic-context/core/features/magic-context/compartment-storage";
+import { writeHardProjection } from "@magic-context/core/features/magic-context/memory/applied-projection";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	getMemoriesByProject,
@@ -20,6 +21,7 @@ import {
 	loadProtectedTailMeta,
 	recordOverflowDetected,
 	reserveProtectedTailDrainTokens,
+	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { getUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import { producerPromptFailureReason } from "@magic-context/core/hooks/magic-context/producer-window-guard";
@@ -328,6 +330,123 @@ async function runHistorianWith(args: {
 	});
 	return { db, runner };
 }
+
+it("summarizes and promotes from the served owner instead of the historian directory", async () => {
+	const { db, runner } = await runHistorianWith({
+		outputs: [successXml("New served-owner fact.")],
+		beforeRun: (db) => {
+			updateSessionMeta(db, "ses-historian", {
+				cachedM0Bytes: Buffer.from("served prefix"),
+				cachedM0ProjectIdentity: "pj-SERVED",
+			});
+			insertMemory(db, {
+				projectPath: "pj-SERVED",
+				category: "PROJECT_RULES",
+				content: "Served project dedup rule.",
+			});
+			insertMemory(db, {
+				projectPath: resolveProjectIdentity(process.cwd()),
+				category: "PROJECT_RULES",
+				content: "Pending directory dedup rule.",
+			});
+		},
+	});
+	try {
+		expect(attemptedUserMessages(runner)[0]).toContain(
+			"Served project dedup rule.",
+		);
+		expect(attemptedUserMessages(runner)[0]).not.toContain(
+			"Pending directory dedup rule.",
+		);
+		expect(
+			db
+				.prepare("SELECT project_path FROM memories WHERE content = ?")
+				.get("New served-owner fact."),
+		).toEqual({ project_path: "pj-SERVED" });
+	} finally {
+		closeQuietly(db);
+	}
+});
+
+it("keeps independently attributable history indexing for a proven memory-off frame", async () => {
+	const registered = mock(async () => {});
+	const { db } = await runHistorianWith({
+		outputs: [successXml()],
+		memoryEnabled: false,
+		ensureProjectRegistered: registered,
+		beforeRun: (db) => {
+			const m0Text =
+				"<session-history>Only session history was rendered.</session-history>";
+			updateSessionMeta(db, "ses-historian", {
+				cachedM0Bytes: Buffer.from(m0Text),
+				cachedM0ProjectIdentity: null,
+				memoryBlockCount: 0,
+			});
+			writeHardProjection(db, {
+				sessionId: "ses-historian",
+				projectPath: undefined,
+				m0Text,
+				hardMemoryBlock: "",
+				fragmentWatermark: 0,
+				revisions: new Map(),
+				textMemories: [],
+				cueMemories: [],
+				deltaMemories: [],
+			});
+		},
+	});
+	try {
+		expect(getCompartments(db, "ses-historian")).toHaveLength(1);
+		expect(registered).toHaveBeenCalledTimes(1);
+		expect(db.prepare("SELECT COUNT(*) AS n FROM memories").get()).toEqual({
+			n: 0,
+		});
+	} finally {
+		closeQuietly(db);
+	}
+});
+
+it("publishes a summary with an unproven owner without writing memory", async () => {
+	let published = 0;
+	const { db, runner } = await runHistorianWith({
+		outputs: [
+			successXmlWithUserObservation("User prefers explicit upload caps."),
+		],
+		memoryEnabled: true,
+		autoPromote: true,
+		userMemoriesEnabled: true,
+		onPublished: () => {
+			published++;
+		},
+		beforeRun: (db) =>
+			updateSessionMeta(db, "ses-historian", {
+				cachedM0Bytes: Buffer.from(
+					"<session-history>Unattributed upgraded prefix</session-history>",
+				),
+				cachedM0ProjectIdentity: null,
+			}),
+	});
+	try {
+		expect(published).toBe(1);
+		expect(getCompartments(db, "ses-historian").map((c) => c.title)).toEqual([
+			"Initial Pi slice",
+		]);
+		expect(attemptedUserMessages(runner)[0]).not.toContain("<project-memory>");
+		for (const table of [
+			"memories",
+			"memory_pending_facts",
+			"memory_stage_attempts",
+			"primer_candidates",
+			"user_memory_candidates",
+		]) {
+			expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).toEqual({
+				n: 0,
+			});
+		}
+	} finally {
+		closeQuietly(db);
+	}
+});
 
 function latestHistorianFailureReason(
 	db: ReturnType<typeof createTestDb>,

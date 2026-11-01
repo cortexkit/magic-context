@@ -1,0 +1,20 @@
+{
+  "name": "store must be open before subscribing",
+  "refusal": {
+    "code": "store_unavailable",
+    "detail": null,
+    "message": "The session store is not open."
+  },
+  "request": {
+    "method": "context.watch",
+    "params": {
+      "sessions": [
+        {
+          "harness": "opencode",
+          "runner": "opencode",
+          "session": "s"
+        }
+      ]
+    }
+  }
+}

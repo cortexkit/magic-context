@@ -30,12 +30,17 @@ test("legacy cleanup removes active and retired children idempotently and record
     const db = store();
     const removed: string[] = [];
     const logs: string[] = [];
+    const removalLogs: string[] = [];
     const remove = async ({ sessionID }: { sessionID: string }) => {
         removed.push(sessionID);
         if (sessionID === "missing") throw new Error("Session not found");
     };
+    const note = (message: string) => {
+        if (message.endsWith(" removed")) removalLogs.push(message);
+        else logs.push(message);
+    };
     try {
-        await cleanupLegacyHiddenChildren(db, remove, (message) => logs.push(message));
+        await cleanupLegacyHiddenChildren(db, remove, note);
         expect(removed).toEqual(["active", "retired", "missing"]);
         expect(pending(db)).toEqual([]);
         expect(
@@ -50,7 +55,7 @@ test("legacy cleanup removes active and retired children idempotently and record
             "opencode2_hidden_children:after-completion",
             JSON.stringify({ active: { historian: { id: "late" } } }),
         );
-        await cleanupLegacyHiddenChildren(db, remove, (message) => logs.push(message));
+        await cleanupLegacyHiddenChildren(db, remove, note);
         expect(removed).toHaveLength(3);
         expect(pending(db)).toHaveLength(1);
         expect(
@@ -61,6 +66,10 @@ test("legacy cleanup removes active and retired children idempotently and record
                 .get(),
         ).toEqual({ retained: 1 });
         expect(logs).toEqual([]);
+        expect(removalLogs).toEqual([
+            "[magic-context] legacy hidden child active removed",
+            "[magic-context] legacy hidden child retired removed",
+        ]);
     } finally {
         db.close();
     }

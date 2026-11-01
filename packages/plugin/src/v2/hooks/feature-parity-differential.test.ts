@@ -221,7 +221,16 @@ test("v2 autoSearch first-attaches only to a fresh user tail and replays its exa
     const snapshot = spyOn(embedding, "getProjectEmbeddingSnapshot").mockReturnValue(
         autoSearchTestSnapshot(project),
     );
-    const lookup = spyOn(search, "searchAutoHint").mockResolvedValue([replayHint]);
+    const lookup = spyOn(search, "searchAutoHint").mockResolvedValue([
+        {
+            source: "message",
+            content: "Review the implementation and verify the results carefully.",
+            score: replayHint.score,
+            messageOrdinal: 0,
+            messageId: "prior-message",
+            role: "assistant",
+        },
+    ]);
     const run = transform(wiredDb, session, () => "defer", {
         ...createV2TransformFeatureDeps(enabled, false, dir),
         projectPath: project,

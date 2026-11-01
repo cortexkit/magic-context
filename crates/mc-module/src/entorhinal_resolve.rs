@@ -32,6 +32,7 @@ pub enum ResolveAnswer {
     Registered {
         project_id: String,
         canonical_root: Option<PathBuf>,
+        root_registered: bool,
     },
 }
 
@@ -146,7 +147,7 @@ impl EntorhinalResolver {
         let mut lease = ConsumerLease(Some(consumer));
         let consumer = lease.0.as_ref().unwrap();
         let root = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
-        let identity = BindIdentity::new(root.clone(), harness, instance_token);
+        let identity = BindIdentity::new(harness, instance_token);
         let response = consumer
             .call(
                 route_target(),
@@ -236,6 +237,7 @@ pub(crate) fn decode_reply(bytes: &[u8]) -> ResolveAnswer {
             ResolveAnswer::Registered {
                 project_id: reply.project_id,
                 canonical_root: reply.canonical_root,
+                root_registered: reply.via == "root",
             }
         }
         Ok(reply) => {
@@ -296,6 +298,7 @@ async fn resolve_with_store_attempt(
         ResolveAnswer::Registered {
             project_id,
             canonical_root,
+            root_registered,
         } => {
             if let Some(store) = store {
                 let fallback = identities.resolve(&directory)?;
@@ -318,11 +321,16 @@ async fn resolve_with_store_attempt(
                     }
                 }
             }
-            identities.pin_live_answer(&directory, &project_id, canonical_root.as_deref());
+            identities.pin_live_answer_with_root(
+                &directory,
+                &project_id,
+                canonical_root.as_deref(),
+                root_registered,
+            );
             Ok(project_id)
         }
         ResolveAnswer::NotAnswering | ResolveAnswer::Implicit => {
-            if let Some(pin) = identities.common_dir_pin(&directory) {
+            if let Some(pin) = identities.borrowed_identity(&directory) {
                 return Ok(pin);
             }
             identities.resolve(&directory)
@@ -387,7 +395,7 @@ mod tests {
                 key: key.clone(),
                 daemon_id,
                 pid: std::process::id(),
-                daemon_ver: "fake".to_string(),
+                daemon_ver: "0.39.0".to_string(),
             },
         )
         .unwrap();
@@ -428,8 +436,9 @@ mod tests {
                                 assert_eq!(target, route_target());
                                 assert_eq!(identity.session, "instance");
                                 let bind = serde_json::to_value(&identity).unwrap();
-                                assert_eq!(bind["project_root"].as_str(), project.to_str());
-                                assert_eq!(bind["harness"].as_str(), Some("test-harness"));
+                                assert!(bind.get("project_root").is_none());
+                                assert!(bind.get("project_id").is_none());
+                                assert_eq!(identity.harness, "test-harness");
                                 (
                                     FrameType::Response,
                                     serde_json::to_vec(&ClientControlResponse::RouteOpen {
@@ -446,9 +455,9 @@ mod tests {
                             if disconnect_next.swap(false, Ordering::SeqCst) {
                                 break;
                             }
-                            log.lock()
-                                .unwrap()
-                                .push(serde_json::from_slice(&frame.body).unwrap());
+                            let request: Value = serde_json::from_slice(&frame.body).unwrap();
+                            assert_eq!(request["params"]["canonicalRoot"], json!(project));
+                            log.lock().unwrap().push(request);
                             match &mode {
                             Mode::Reply(bytes) => (FrameType::Response, bytes.clone()),
                             Mode::ModuleError(code) => (FrameType::Error, serde_json::to_vec(&json!({ "code": code, "message": "fake error", "detail": null })).unwrap()),

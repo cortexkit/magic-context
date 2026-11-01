@@ -23,10 +23,7 @@ import {
     createFailClosedController,
     getLastHookInitFailure,
 } from "./features/magic-context/fail-closed-block";
-import {
-    resolveProjectIdentityForSession,
-    setHomeProjectPermission,
-} from "./features/magic-context/memory/project-identity";
+import { setHomeProjectPermission } from "./features/magic-context/memory/project-identity";
 import { createMovedSessionCheck } from "./features/magic-context/mode3-move-record";
 import { backfillSessionActivity } from "./features/magic-context/session-activity";
 import { runSessionProjectBackfill } from "./features/magic-context/session-project-backfill";
@@ -556,10 +553,7 @@ const server: Plugin = async (ctx) => {
     // so overnight dreaming works even when the user isn't chatting.
     if (pluginConfig.enabled) {
         const dreamerRunnable = isDreamerRunnable(pluginConfig);
-        const timerProjectIdentity = resolveProjectIdentityForSession(
-            ctx.directory,
-            pluginConfig.allow_home_project,
-        );
+        const timerProjectIdentity = hooks.magicContext?.launchIdentityDecision.identity;
         if (!timerProjectIdentity) {
             log(
                 "[magic-context] dream timer skipped: no project identity is bound for this directory",

@@ -16,9 +16,9 @@
 //! - `--pages`: THALAMUS's export, one `session.read` page per line. Each line
 //!   is the bare `ReadPage` body (`cortexkit-role-llm-runner` 0.4.0
 //!   `read::ReadPage`) that a descriptors-mode `session.read` would answer,
-//!   never wrapped in a reply envelope, and the pages chain from ordinal 0 to
-//!   the end of the transcript. Every message carries the runner's `digest`
-//!   and `part_digests`.
+//!   never wrapped in a reply envelope, and the pages chain from the move's
+//!   `message_count` to the end of the transcript. Every message carries the
+//!   runner's `digest` and `part_digests`.
 //! - `--setup`: `{"project_root": <abs path>, "runner_module": <module id>,
 //!   "runner_describe": <the runner's role.describe answer>,
 //!   "request": <the exact compaction.setup request the runner will send>}`.
@@ -40,11 +40,13 @@
 //!
 //! **Rerun.** On a session it already prepared from the same pages, Setup and
 //! inputs it writes nothing and answers `unchanged`; anything else is refused
-//! by name.
+//! by name. An unadopted record with an older proof version is prepared again
+//! from the authoritative move checkpoint in a fresh generation.
 //!
 //! **Refusals.** `usage`, `stores_in_use`, `offline_exclusivity_unproven`,
 //! `store_missing`, `store_unreadable`, `session_not_moved`,
-//! `moved_session_record_unreadable`, `setup_unreadable`,
+//! `moved_session_record_unreadable`, `moved_session_codec_mismatch`,
+//! `setup_unreadable`,
 //! `setup_session_mismatch`, `pages_unreadable`,
 //! `pages_bare_wrapped_mismatch`, `pages_not_chained`, `served_digest_missing`,
 //! `checkpoint_mismatch`, `tag_checkpoint_unsupported`, `setup_refused`,
@@ -109,14 +111,18 @@ fn refusal(code: &'static str, detail: impl Into<String>) -> Refusal {
 /// under `codec`'s serializer profile, keyed exactly as its tag rows are and
 /// in the same order, as a live descriptors-mode read requires; a message
 /// without them is refused as `served_digest_missing`, because ck-mc never
-/// computes them in the runner's place. The pages must chain: the first starts at
-/// ordinal 0, ordinals are contiguous inside and across pages, every page but
-/// the last names the next page's first ordinal in `next_from_ordinal`, the
-/// last names none, and every page carries the same lineage.
-pub(crate) fn parse_pages(reader: impl BufRead, codec: Codec) -> Result<Pages, Refusal> {
+/// computes them in the runner's place. The pages must chain: the first starts
+/// at the move checkpoint's `origin`, ordinals are contiguous inside and across
+/// pages, every page but the last names the next page's first ordinal in
+/// `next_from_ordinal`, the last names none, and every page carries the same lineage.
+pub(crate) fn parse_pages(
+    reader: impl BufRead,
+    codec: Codec,
+    origin: u64,
+) -> Result<Pages, Refusal> {
     let mut served: Vec<ServedPage> = Vec::new();
     let mut lineage: Option<String> = None;
-    let mut expected = 0u64;
+    let mut expected = origin;
     let mut pending_next: Option<u64> = None;
     let mut finished = false;
     let mut lowest_tag: Option<u64> = None;
@@ -247,7 +253,7 @@ pub(crate) fn parse_pages(reader: impl BufRead, codec: Codec) -> Result<Pages, R
     Ok(Pages {
         lineage,
         served,
-        entries: expected,
+        entries: expected - origin,
         lowest_tag,
     })
 }
@@ -272,8 +278,18 @@ pub(crate) fn check_checkpoint(record: &MoveRecord, pages: &Pages) -> Result<(),
 fn read_setup(path: &Path, session: &str) -> Result<OfflineSetup, Refusal> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| refusal("setup_unreadable", format!("{}: {error}", path.display())))?;
-    let file: SetupFile = serde_json::from_str(&text)
+    let mut file: SetupFile = serde_json::from_str(&text)
         .map_err(|error| refusal("setup_unreadable", error.to_string()))?;
+    // `request_id` and `now` differ on every call, so an export made before the
+    // live Setup cannot know them, and the Setup identity digest leaves both
+    // out (`setup_identity_digest`). Fill them only when absent so the contract
+    // type decodes; a value the export did carry is kept as written.
+    if let Value::Object(fields) = &mut file.request {
+        fields
+            .entry("request_id")
+            .or_insert_with(|| Value::String("offline-first-pass".into()));
+        fields.entry("now").or_insert(Value::from(0u64));
+    }
     let request: SetupRequest = serde_json::from_value(file.request)
         .map_err(|error| refusal("setup_unreadable", format!("request: {error}")))?;
     if !file.project_root.is_absolute() {
@@ -349,13 +365,21 @@ pub(crate) fn check(args: &Args, holders: &dyn HolderCheck) -> Result<Checked, R
                 format!("request.params.serializer_profile: {error:?}"),
             )
         })?;
+    if codec.wire_id() != record.codec_profile.serializer
+        || record.codec_profile.native_index != "part_index"
+    {
+        return Err(refusal(
+            "moved_session_codec_mismatch",
+            "Setup's codec differs from the offline move manifest",
+        ));
+    }
     let file = std::fs::File::open(&args.pages).map_err(|error| {
         refusal(
             "pages_unreadable",
             format!("{}: {error}", args.pages.display()),
         )
     })?;
-    let pages = parse_pages(std::io::BufReader::new(file), codec)?;
+    let pages = parse_pages(std::io::BufReader::new(file), codec, record.message_count)?;
     check_checkpoint(&record, &pages)?;
     Ok(Checked {
         record,
@@ -364,23 +388,85 @@ pub(crate) fn check(args: &Args, holders: &dyn HolderCheck) -> Result<Checked, R
     })
 }
 
+/// The storage namespaces a module's `store.db` lease can be keyed under: the
+/// one the daemon's `ack.storage` names for a managed install, then the
+/// standalone fallback (`dev_descriptor`).
+const STORE_NAMESPACES: [&str; 2] = ["default", "mc_cache"];
+
+/// The epoch at which a writer last claimed `store.db` (`cortexkit_fence`), or
+/// 0 when no fenced write has run yet.
+fn stored_fence_epoch(store_db: &Path) -> Result<u64, String> {
+    let conn = rusqlite::Connection::open_with_flags(
+        store_db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| error.to_string())?;
+    let table: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'cortexkit_fence'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if table == 0 {
+        return Ok(0);
+    }
+    conn.query_row(
+        "SELECT COALESCE((SELECT epoch FROM cortexkit_fence WHERE id = 0), 0)",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|epoch| epoch as u64)
+    .map_err(|error| error.to_string())
+}
+
 /// Open the two ck-mc stores as the module does at startup: `store.db`, with
 /// `context.db` attached as its domain.
+///
+/// The store's single-writer lease must be the one the module last wrote under.
+/// The daemon names the module's namespace in `ack.storage`, which a command
+/// line can't see, and a lease keyed under another namespace starts its own
+/// epoch below the database's fence, so every fenced write of the pass would be
+/// rejected. So each candidate namespace is tried, and the first whose lease
+/// epoch reaches the stored fence is used; a store no candidate covers is
+/// refused instead of opened under the wrong lease.
 fn open_store(paths: &StorePaths) -> Result<mc_store::McStore, String> {
     let private = crate::config::private_storage_permissions_enabled();
-    let descriptor = cortexkit_store_types::StorageDescriptor {
-        module_id: crate::DEFAULT_MODULE_ID.into(),
-        storage_namespace: "mc_cache".into(),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: paths.store_db.to_string_lossy().into_owned(),
-        },
+    let fence = if paths.store_db.exists() {
+        stored_fence_epoch(&paths.store_db)?
+    } else {
+        0
     };
-    let store = mc_store::McStore::open_with_private_permissions(&descriptor, private)
+    let mut tried = Vec::new();
+    for namespace in STORE_NAMESPACES {
+        let descriptor = cortexkit_store_types::StorageDescriptor {
+            module_id: crate::DEFAULT_MODULE_ID.into(),
+            storage_namespace: namespace.into(),
+            isolation: cortexkit_store_types::Isolation::Module,
+            backend: cortexkit_store_types::StorageBackend::Sqlite {
+                path: paths.store_db.to_string_lossy().into_owned(),
+            },
+        };
+        let store = mc_store::McStore::open_with_private_permissions(&descriptor, private)
+            .map_err(|error| error.to_string())?;
+        let epoch = store.lease_epoch();
+        if epoch < fence {
+            tried.push(format!("{namespace}: lease epoch {epoch}"));
+            continue;
+        }
+        crate::single_store_reads::attach_with_private_permissions(
+            &store,
+            &paths.context_db,
+            private,
+        )
         .map_err(|error| error.to_string())?;
-    crate::single_store_reads::attach_with_private_permissions(&store, &paths.context_db, private)
-        .map_err(|error| error.to_string())?;
-    Ok(store)
+        return Ok(store);
+    }
+    Err(format!(
+        "no store lease reaches the database's fence epoch {fence} ({}); \
+         the module last wrote it under another lease",
+        tried.join(", ")
+    ))
 }
 
 /// What one run ended in, with what the CLI prints.
@@ -424,10 +510,13 @@ pub fn run(args: &Args, holders: &dyn HolderCheck) -> Result<Value, RunError> {
         .map_err(|reason| RunError::Refused(refusal("store_unreadable", reason)))?;
     let mut handler = crate::McHandler::new();
     handler.store.set(Arc::new(store)).ok();
-    handler.provider_runner = Arc::new(PagesRunner::new(
-        std::mem::take(&mut checked.pages.served),
-        checked.setup.runner_describe.clone(),
-    ));
+    handler.provider_runner = Arc::new(
+        PagesRunner::new(
+            std::mem::take(&mut checked.pages.served),
+            checked.setup.runner_describe.clone(),
+        )
+        .with_move_record(&checked.record),
+    );
     // The engine pass is synchronous work inside async functions; a runtime of
     // its own on its own thread keeps it apart from the caller's.
     let outcome = std::thread::scope(|scope| {
@@ -482,9 +571,11 @@ fn report(outcome: &OfflineOutcome, checked: &Checked, started: Instant) -> Valu
 }
 
 const USAGE: &str = "usage: ck-mc offline first-pass --session <id> --pages <jsonl> \
-     --setup <json> --opencode-db <path> --context-db <path> --store-db <path>";
+     --setup <json> --opencode-db <path> --context-db <path> --store-db <path> \
+     [--shared-context-db]";
 
-fn parse_args(args: &[String]) -> Result<Args, String> {
+fn parse_args(args: &[String]) -> Result<(Args, bool), String> {
+    let mut shared_context = false;
     let (mut session, mut pages, mut setup) = (None, None, None);
     let (mut opencode_db, mut context_db, mut store_db) = (None, None, None);
     let mut iter = args.iter();
@@ -501,6 +592,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--opencode-db" => opencode_db = Some(PathBuf::from(value()?)),
             "--context-db" => context_db = Some(PathBuf::from(value()?)),
             "--store-db" => store_db = Some(PathBuf::from(value()?)),
+            "--shared-context-db" => shared_context = true,
             other => return Err(format!("unknown argument {other:?}; {USAGE}")),
         }
     }
@@ -512,24 +604,27 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             Some(opencode_db),
             Some(context_db),
             Some(store_db),
-        ) => Ok(Args {
-            paths: StorePaths {
-                opencode_db,
-                context_db,
-                store_db,
+        ) => Ok((
+            Args {
+                paths: StorePaths {
+                    opencode_db,
+                    context_db,
+                    store_db,
+                },
+                session,
+                pages,
+                setup,
             },
-            session,
-            pages,
-            setup,
-        }),
+            shared_context,
+        )),
         _ => Err(USAGE.into()),
     }
 }
 
 /// `ck-mc offline first-pass <args>`.
 pub fn cli_main(args: &[String]) -> i32 {
-    let args = match parse_args(args) {
-        Ok(args) => args,
+    let (args, shared_context) = match parse_args(args) {
+        Ok(parsed) => parsed,
         Err(usage) => {
             println!(
                 "{}",
@@ -539,7 +634,12 @@ pub fn cli_main(args: &[String]) -> i32 {
         }
     };
     let session = args.session.clone();
-    match run(&args, &Lsof) {
+    // See `SharedContextLsof`: only the host copy and store.db need exclusivity then.
+    let shared = crate::offline_move::SharedContextLsof {
+        context_db: args.paths.context_db.clone(),
+    };
+    let holders: &dyn HolderCheck = if shared_context { &shared } else { &Lsof };
+    match run(&args, holders) {
         Ok(report) => {
             let verdict = if report["status"] == "unchanged" {
                 "SESSION UNCHANGED"

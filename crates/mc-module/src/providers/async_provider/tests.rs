@@ -1,6 +1,11 @@
 use super::*;
 use cortexkit_bus_inmemory::{InMemoryBus, InMemoryConfig};
+mod adoption_recovery;
 mod broca_0_7;
+mod broca_account_change_samples;
+mod broca_compaction_0710;
+mod broca_provider_fallback;
+mod broca_rich_ui_stamp;
 mod broca_tag_rows;
 mod contract_update;
 mod contract_update_review;
@@ -8,20 +13,32 @@ mod conversation_identity_probe;
 mod descriptors_read;
 mod full_array_setup;
 mod held_copies_probe;
+mod historian_input_cache;
+mod history_budget;
 mod moved_session;
+mod notice_signals;
 mod offline_first_pass;
 mod open_tool_notice;
+mod pass_decision_review;
+mod placed_rollback_probe;
 mod plain_head_tools;
+mod pre_user;
 mod pruned_reasoning_review;
 mod pruned_reasoning_tests;
 mod published_contract;
+mod quiet_notice;
 mod read_outcomes;
 mod read_resume;
 mod reminder_replay;
 mod reminders;
 mod reply_shape;
+mod resync_lineage_guard;
+mod resync_replay;
+mod rollback_layout;
 mod route_identity_vectors;
+mod scope_projects;
 mod setup_checkpoint;
+mod thin_view;
 mod user_commands_tests;
 mod wrapup;
 
@@ -77,10 +94,14 @@ struct Runner {
     module: String,
     entries: Mutex<Vec<ReadMessage>>,
     lineage: Mutex<String>,
+    /// During Setup, `session.head` and `session.read` report the requested
+    /// lineage before it becomes the runner's active lineage.
+    setup_lineage: Mutex<Option<String>>,
     read_delay_ms: std::sync::atomic::AtomicU64,
     routed_reads: std::sync::atomic::AtomicU64,
     sent: Mutex<Vec<Value>>,
     read_unavailable: std::sync::atomic::AtomicBool,
+    refuses_setup_read: std::sync::atomic::AtomicBool,
     read_gate: Mutex<Option<Arc<ReadGate>>>,
     reads: Mutex<Vec<Value>>,
     bind_identities: Mutex<Vec<session_resolver::RunnerBindIdentity>>,
@@ -89,6 +110,10 @@ struct Runner {
     page_size: std::sync::atomic::AtomicUsize,
     /// Leave llm-runner's `tag_checkpoint` group out of `role.describe`.
     withholds_tag_checkpoint: std::sync::atomic::AtomicBool,
+    withholds_message_checkpoint: std::sync::atomic::AtomicBool,
+    marker_db: Option<PathBuf>,
+    setup_checkpoint: Mutex<Option<contract::setup::SetupCheckpoint>>,
+    heads: std::sync::atomic::AtomicU64,
     /// Every `role.describe` this runner answered.
     describes: std::sync::atomic::AtomicU64,
     /// A page to answer every `session.read` with, verbatim.
@@ -103,6 +128,8 @@ struct Runner {
     /// once something was pruned.
     reasoning_pruned: Mutex<Option<Value>>,
     history_requests: Mutex<Vec<Value>>,
+    /// A raw history page to serve without regenerating its message rows.
+    history_override: Mutex<Option<Value>>,
 }
 
 #[derive(Default)]
@@ -205,7 +232,7 @@ impl session_resolver::ProviderRunner for Runner {
     async fn call(
         &self,
         _: &Path,
-        _: &str,
+        session: &str,
         method: &str,
         params: Value,
         _: Duration,
@@ -225,16 +252,47 @@ impl session_resolver::ProviderRunner for Runner {
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
                 capabilities.push("tag_checkpoint");
+                if !self
+                    .withholds_message_checkpoint
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    capabilities.push("message_checkpoint");
+                }
             }
             return Ok(
                 json!({"majors":[{"version":"llm-runner/v1","ops":["role.describe","session.baseline","session.send","session.read","session.resolve"]}],"implementation_version":"fake","session_capabilities_from":"baseline","capabilities":capabilities}),
             );
         }
         if method == "session.head" {
+            self.heads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(head) = self.head_override.lock().unwrap().clone() {
                 return Ok(head);
             }
-            let mut head = json!({"first_ordinal":0});
+            // Setup can request `session.head` before its answer exists. Prefer the
+            // newest marker key, then the checkpoint from an earlier answer.
+            let checkpoint = self
+                .marker_db
+                .as_ref()
+                .and_then(|path| moved_session::newest_marker_checkpoint(path, session))
+                .and_then(|key| key.message_count.zip(key.head_cut))
+                .or_else(|| {
+                    self.setup_checkpoint
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .and_then(|key| key.message_count.zip(key.head_cut.clone()))
+                });
+            let mut head = match checkpoint {
+                Some((count, cut)) => json!({"first_ordinal":count,"cut":cut}),
+                None => json!({"first_ordinal":0}),
+            };
+            head["lineage_id"] = json!(self
+                .setup_lineage
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| self.lineage.lock().unwrap().clone()));
             if let Some(state) = self.reasoning_pruned.lock().unwrap().clone() {
                 head["reasoning_pruned"] = state;
             }
@@ -242,6 +300,9 @@ impl session_resolver::ProviderRunner for Runner {
         }
         if method == "session.history" {
             self.history_requests.lock().unwrap().push(params.clone());
+            if let Some(page) = self.history_override.lock().unwrap().clone() {
+                return Ok(page);
+            }
             let entries = self.entries.lock().unwrap();
             let start = if let Some(mid) = params["from_mid"].as_str() {
                 entries
@@ -268,6 +329,16 @@ impl session_resolver::ProviderRunner for Runner {
         }
         assert_eq!(method, "session.read");
         self.reads.lock().unwrap().push(params.clone());
+        if self
+            .refuses_setup_read
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && self.setup_lineage.lock().unwrap().is_some()
+        {
+            return Err(SessionResolveError::Refused {
+                code: "setup_outstanding".into(),
+                message: "session.read is unavailable while Setup is outstanding".into(),
+            });
+        }
         if let Some(page) = self.page_override.lock().unwrap().clone() {
             return Ok(page);
         }
@@ -288,7 +359,12 @@ impl session_resolver::ProviderRunner for Runner {
         if delay > 0 {
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
-        let lineage = self.lineage.lock().unwrap().clone();
+        let lineage = self
+            .setup_lineage
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| self.lineage.lock().unwrap().clone());
         if params["lineage_id"]
             .as_str()
             .is_some_and(|held| held != lineage)
@@ -519,6 +595,10 @@ impl Rig {
         let runner = Arc::new(Runner {
             module: module.into(),
             lineage: Mutex::new("L".into()),
+            marker_db: dir
+                .join("opencode.db")
+                .exists()
+                .then(|| dir.join("opencode.db")),
             ..Default::default()
         });
         let mut h = McHandler::new();
@@ -572,11 +652,26 @@ impl Rig {
         }
     }
     async fn op(&self, method: &str, params: Value) -> Value {
-        response(
+        if method == "compaction.setup" {
+            *self.runner.setup_lineage.lock().unwrap() =
+                params["lineage_id"].as_str().map(str::to_owned);
+        }
+        let answer = response(
             self.h
                 .dispatch_value(7, json!({"method":method,"params":params}))
                 .await,
-        )
+        );
+        if method == "compaction.setup" {
+            *self.runner.setup_lineage.lock().unwrap() = None;
+        }
+        if method == "compaction.setup" && answer["answer"] == "ready" {
+            *self.runner.setup_checkpoint.lock().unwrap() =
+                serde_json::from_value::<contract::setup::SetupAnswer>(answer.clone())
+                    .unwrap()
+                    .checkpoint()
+                    .cloned();
+        }
+        answer
     }
     fn state(&self) -> State {
         load(self.h.store.get().unwrap(), &self.reference)
@@ -1407,7 +1502,7 @@ async fn fork_descent_preserves_only_verified_prefix_state() {
 }
 
 #[tokio::test]
-async fn ordinary_execute_with_only_drops_defers_but_m1_refresh_publishes() {
+async fn ordinary_execute_without_summary_rebuilds_for_drops_and_m1_refresh_publishes() {
     let dir = tempfile::tempdir().unwrap();
     let rig = Rig::new(dir.path()).await;
     rig.fill(40);
@@ -1417,14 +1512,20 @@ async fn ordinary_execute_with_only_drops_defers_but_m1_refresh_publishes() {
     let baseline = rig.newest().unwrap();
     rig.queue(&[163, 166, 169]).await;
     rig.notice(3, 75_000, Some(baseline)).await;
-    assert_eq!(
-        rig.newest(),
-        Some(baseline),
-        "ordinary Execute does not originate a bust for drops alone"
+    // Invariant 3's bounded execute exception, as in the TypeScript plugin: no summary
+    // can come and the queued work is worth at least 2% of the window, so the execute
+    // pass rebuilds instead of waiting, and the queued drops land on it.
+    let drained = rig.newest().unwrap();
+    assert!(
+        drained > baseline,
+        "an execute pass with no summary to wait for rebuilds and carries the queued drops"
     );
     let namespace = rig.state().namespace();
     let store = rig.h.store.get().unwrap();
-    assert_eq!(store.load_pending_agent_drops(&namespace).unwrap().len(), 3);
+    assert!(store
+        .load_pending_agent_drops(&namespace)
+        .unwrap()
+        .is_empty());
     let mut rows = store.load_compartments(&namespace).unwrap();
     rows.push(mc_store::StoredCompartment {
         sequence: 2,
@@ -1438,22 +1539,18 @@ async fn ordinary_execute_with_only_drops_defers_but_m1_refresh_publishes() {
         ..Default::default()
     });
     store.replace_compartments(&namespace, &rows).unwrap();
-    rig.notice(4, 1_000, Some(baseline)).await;
+    rig.notice(4, 1_000, Some(drained)).await;
     assert_eq!(
         rig.newest(),
-        Some(baseline),
+        Some(drained),
         "M1 delta remains queued below Execute"
     );
-    rig.notice(5, 75_000, Some(baseline)).await;
+    rig.notice(5, 75_000, Some(drained)).await;
     let version = rig.newest().unwrap();
     assert!(
-        version > baseline,
-        "ordinary Execute publishes an M1 refresh, carrying queued drops"
+        version > drained,
+        "ordinary Execute publishes an M1 refresh"
     );
-    assert!(store
-        .load_pending_agent_drops(&namespace)
-        .unwrap()
-        .is_empty());
     let _ = rig.render(&rig.get(version).await);
 }
 
@@ -2085,22 +2182,24 @@ async fn restored_lineage_reuses_history_embeddings_and_reanchors_only_surviving
         "restored history head must remain byte-identical"
     );
     assert!(after.tag_index.contains_key("§9063§"));
-    // m21's only part is that tool part, so the view either drops the part
-    // or removes the emptied message whole (`emptied_messages::shape`).
+    // The transferred drop keeps this small recent call's real arguments and
+    // replaces its result, just as TypeScript's queued-tool shape policy does.
     let dropped = restored.ranges.iter().any(|range| match range {
-        view::ViewRange::Keep { edits, .. } => edits
-            .iter()
-            .any(|edit| edit.mid == "m21" && edit.part == "0" && edit.drop),
-        view::ViewRange::Replace {
-            from: 21,
-            to: 22,
-            bytes,
-        } => bytes == "[]",
+        view::ViewRange::Keep { edits, .. } => edits.iter().any(|edit| {
+            edit.mid == "m21"
+                && edit.part == "0"
+                && !edit.drop
+                && edit.bytes.as_deref().is_some_and(|bytes| {
+                    let part: Value = serde_json::from_str(bytes).unwrap();
+                    part["state"]["input"] == json!({"path":"file21"})
+                        && part["state"]["output"] == "[dropped §9063§]"
+                })
+        }),
         _ => false,
     });
     assert!(
         dropped,
-        "the tool-part tag must remove the whole native pair, not a CK block numbered 0 or 1"
+        "the transferred tool tag must keep the paired call and exact result placeholder in its native part"
     );
     assert!(store.load_pending_agent_drops(&source).unwrap().is_empty());
     let target = after.namespace();
@@ -2286,6 +2385,8 @@ async fn anthropic_messages_session_publishes_part_edits_beside_signed_thinking(
         .filter(|edit| edit.ordinal == 21 || edit.ordinal == 22)
         .map(|edit| (edit.ordinal, edit.part.as_str(), edit.drop))
         .collect();
+    // Queued drops use the newest-tool skeleton window independently of the age
+    // sweep: this small recent call keeps its real arguments beside the thinking.
     assert_eq!(
         near,
         [(21, "1", false), (22, "0", false)],
@@ -2305,7 +2406,7 @@ async fn anthropic_messages_session_publishes_part_edits_beside_signed_thinking(
     let rendered = rig.render_anthropic(&view);
     let applied = rendered
         .iter()
-        .find(|message| message["content"][2]["id"] == "toolu_21")
+        .find(|message| message["content"][0]["signature"] == "EqQBsig21+/==")
         .expect("message 21 stays in the rendered request");
     assert_eq!(
         bytes(&applied["content"][0]).unwrap(),
@@ -2533,6 +2634,84 @@ async fn any_bind_harness_resolves_the_async_conversation_first() {
         0,
         "an async conversation never reaches the harness's session resolver"
     );
+}
+
+/// `ctx_expand` by tag or by message on a runner session reads ck-mc's held
+/// messages. It never reads the standalone chunk transcripts, which hold no
+/// runner session's messages (WERNI: "Tag 15109's original block is no longer
+/// in stored history").
+#[tokio::test]
+async fn ctx_expand_by_tag_and_message_reads_the_held_lineage() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::open(
+        dir.path(),
+        "thalamus",
+        "claude-code",
+        json!({"serializer_profile":"anthropic-messages"}),
+    )
+    .await;
+    *rig.runner.entries.lock().unwrap() = anthropic_transcript(12);
+    rig.notice(1, 1_000, None).await;
+    let by_tag = rig
+        .tool(7, "ctx_expand", json!({"tag": anthropic_tag(9, 1)}))
+        .await;
+    let text = by_tag.to_string();
+    assert!(text.contains("reading file 9"), "{by_tag}");
+    assert!(!text.contains("no longer in stored history"), "{by_tag}");
+    let by_message = rig.tool(7, "ctx_expand", json!({"message": 8})).await;
+    let text = by_message.to_string();
+    assert!(text.contains("message 8"), "{by_message}");
+    assert!(!text.contains("no longer recoverable"), "{by_message}");
+}
+
+/// An OpenCode message holding reasoning, a tool part (its call and result in
+/// one part) and a Magic Context reminder that rode the tool result as the
+/// next part. Each tag expands to the part the runner's tag rows name, so a
+/// riding reminder never answers for its carrier's tag.
+#[tokio::test]
+async fn ctx_expand_tag_finds_a_tool_result_carrying_a_reminder_on_opencode() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(dir.path()).await;
+    let mut entries = (0..4u64)
+        .map(|n| {
+            ReadMessage::new(
+                n,
+                format!("m{n}"),
+                json!({"info":{"id":format!("m{n}"),"role":if n % 2 == 0 {"user"} else {"assistant"},"time":{"created":1}},
+                       "parts":[{"id":format!("p{n}"),"type":"text","text":format!("message {n} ")+&"durable words ".repeat(16)}]}),
+            )
+            .with_tags(vec![tags::PartTag::tagged("0", format!("§{}§", 100 + n))])
+        })
+        .collect::<Vec<_>>();
+    entries.push(
+        ReadMessage::new(
+            4,
+            "m4".to_string(),
+            json!({"info":{"id":"m4","role":"assistant","time":{"created":1}},"parts":[
+                {"id":"r4","type":"reasoning","text":"thinking about the search"},
+                {"id":"t4","type":"tool","tool":"grep","callID":"call4","state":{"status":"completed","input":{"pattern":"project_root"},"output":"grep found project_root here"}},
+                {"id":"x4","type":"text","synthetic":true,"text":"<system-reminder>Your next step: call ctx_reduce</system-reminder>"}
+            ]}),
+        )
+        .with_tags(vec![
+            tags::PartTag::untagged("0"),
+            tags::PartTag::tagged("1", "§15109§"),
+            tags::PartTag::tagged("2", "§15110§"),
+        ]),
+    );
+    *rig.runner.entries.lock().unwrap() = entries;
+    rig.notice(1, 1_000, None).await;
+    let tool = rig
+        .tool(7, "ctx_expand", json!({"tag": 15109}))
+        .await
+        .to_string();
+    assert!(tool.contains("grep found project_root here"), "{tool}");
+    assert!(!tool.contains("Your next step"), "{tool}");
+    let reminder = rig
+        .tool(7, "ctx_expand", json!({"tag": 15110}))
+        .await
+        .to_string();
+    assert!(reminder.contains("Your next step"), "{reminder}");
 }
 
 /// With no asynchronous conversation for the bind's session, a non-runner

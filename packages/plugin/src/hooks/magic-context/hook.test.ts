@@ -24,6 +24,7 @@ import {
     __setProjectIdentityTestHooks,
     resolveProjectIdentity,
 } from "../../features/magic-context/memory/project-identity";
+import { rememberPinnedProjectIdentity } from "../../features/magic-context/memory/project-identity-cache";
 import {
     __resetMessageIndexAsyncForTests,
     __setIncrementalIndexSettledForTests,
@@ -44,9 +45,11 @@ import {
     setPendingCompactionMarkerState,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
-import type { Tagger } from "../../features/magic-context/tagger";
+import { createTagger, type Tagger } from "../../features/magic-context/tagger";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
+import * as autoEmbed from "./auto-embed-session";
+import * as autoSearch from "./auto-search-runner";
 import {
     autoEmbedAttemptedBySession,
     autoEmbedRetryAfterBySession,
@@ -585,6 +588,104 @@ describe("magic-context hook", () => {
         };
         expect(notification.body?.noReply).toBe(true);
         expect(notification.body?.parts?.[0]?.ignored).toBe(true);
+    });
+
+    it("auto-embedding stays on the served owner during a held project move", async () => {
+        process.env.XDG_DATA_HOME = makeTempDir("hook-served-embed-data-");
+        const a = makeTempDir("hook-served-embed-a-"),
+            b = makeTempDir("hook-served-embed-b-");
+        rememberPinnedProjectIdentity(a, "pj-HOOK-EMBED-A");
+        rememberPinnedProjectIdentity(b, "pj-HOOK-EMBED-B");
+        const sessionId = "hook-served-embed";
+        const model = { providerID: "anthropic", modelID: "claude-sonnet-5-5" };
+        const deps = createMockDeps();
+        deps.directory = a;
+        deps.config = {
+            ...deps.config,
+            memory: { enabled: true, injection_budget_tokens: 500, auto_promote: false },
+        } as MagicContextDeps["config"];
+        deps.tagger = createTagger();
+        deps.liveSessionState = createLiveSessionState();
+        deps.liveSessionState.sessionDirectoryBySession.set(sessionId, a);
+        deps.liveSessionState.liveModelBySession.set(sessionId, model);
+        const db = openDatabase();
+        insertMemory(db, {
+            projectPath: "pj-HOOK-EMBED-A",
+            category: "USER_DIRECTIVES",
+            content: "hook served alpha memory",
+        });
+        insertMemory(db, {
+            projectPath: "pj-HOOK-EMBED-B",
+            category: "USER_DIRECTIVES",
+            content: "hook pending beta memory",
+        });
+        const scheduled: string[] = [];
+        const spy = spyOn(autoEmbed, "maybeAutoEmbedSessionBackfill").mockImplementation(
+            (args, session) => {
+                if (session === sessionId) scheduled.push(args.projectIdentity);
+            },
+        );
+        const searched: string[] = [];
+        const searchSpy = spyOn(autoSearch, "runAutoSearchHint").mockImplementation(
+            async (args) => {
+                if (args.sessionId === sessionId) searched.push(args.options.projectPath);
+                return { ok: true };
+            },
+        );
+        try {
+            const hook = requireHook(createMagicContextHook(deps));
+            const user = {
+                info: { id: "embed-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "continue" }],
+            };
+            const first = { messages: [structuredClone(user)] };
+            await hook["experimental.chat.messages.transform"]!({}, first);
+            const head = JSON.stringify(first.messages.slice(0, 2));
+            expect(head).toContain("hook served alpha memory");
+            const raw = [
+                user,
+                {
+                    info: {
+                        id: "embed-thinking",
+                        role: "assistant",
+                        sessionID: sessionId,
+                        ...model,
+                        tokens: { input: 0, output: 1600, reasoning: 1600 },
+                    },
+                    parts: [
+                        { type: "reasoning", text: "signed thought" },
+                        {
+                            type: "tool",
+                            tool: "read",
+                            callID: "embed-call",
+                            state: { status: "completed", output: "contents" },
+                        },
+                    ],
+                },
+            ];
+            deps.liveSessionState.sessionDirectoryBySession.set(sessionId, b);
+            const held = { messages: structuredClone(raw) };
+            await hook["experimental.chat.messages.transform"]!({}, held);
+            expect(JSON.stringify(held.messages.slice(0, 2))).toBe(head);
+            expect(scheduled.at(-1)).toBe("pj-HOOK-EMBED-A");
+            expect(searched.at(-1)).toBe("pj-HOOK-EMBED-A");
+            const released = {
+                messages: [
+                    ...structuredClone(raw),
+                    {
+                        info: { id: "embed-next", role: "user", sessionID: sessionId },
+                        parts: [{ type: "text", text: "next project" }],
+                    },
+                ],
+            };
+            await hook["experimental.chat.messages.transform"]!({}, released);
+            expect(JSON.stringify(released.messages)).toContain("hook pending beta memory");
+            expect(scheduled.at(-1)).toBe("pj-HOOK-EMBED-B");
+            expect(searched.at(-1)).toBe("pj-HOOK-EMBED-B");
+        } finally {
+            searchSpy.mockRestore();
+            spy.mockRestore();
+        }
     });
 
     it("silently embeds seven compartments on idle and latches subsequent drains", async () => {

@@ -607,18 +607,67 @@ describe("strip-content", () => {
     });
 
     describe("stripDroppedPlaceholderMessages (sentinel-based)", () => {
+        for (const text of [
+            "[dropped ]",
+            "[dropped  ]",
+            "[dropped 42]",
+            "[dropped\t]",
+            "[dropped\n]",
+            "[dropped §§]",
+            "§775§ [dropped ]",
+            "§775§ [dropped ]\n[dropped §12§]",
+        ]) {
+            it(`neutralizes a model-written blank or numeric dropped marker: ${JSON.stringify(text)}`, () => {
+                const assistant = message("blank-tag", "assistant", [{ type: "text", text }]);
+                expect(stripDroppedPlaceholderMessages([assistant], "anthropic")).toEqual({
+                    stripped: 1,
+                    sentineledIds: ["blank-tag"],
+                });
+                expect(assistant.parts).toEqual([SENTINEL]);
+                expect(isMarkerOnlyText(text)).toBe(true);
+            });
+        }
+
+        for (const parts of [
+            [{ type: "text", text: "Done. [dropped ]" }],
+            [{ type: "text", text: "```\n[dropped ]\n```" }],
+            [
+                { type: "text", text: "[dropped ]" },
+                { type: "tool", name: "run" },
+            ],
+            [
+                { type: "text", text: "[dropped ]" },
+                { type: "reasoning", text: "Let me check the source." },
+            ],
+        ]) {
+            it(`keeps blank dropped markers accompanied by content: ${JSON.stringify(parts)}`, () => {
+                const messages = [message("keep", "assistant", parts)];
+                const wire = JSON.stringify(messages);
+                expect(stripDroppedPlaceholderMessages(messages, "anthropic")).toEqual({
+                    stripped: 0,
+                    sentineledIds: [],
+                });
+                expect(JSON.stringify(messages)).toBe(wire);
+            });
+        }
+
         it("classifies the shared marker-only parity examples", () => {
             for (const text of markerParity.positive) expect(isMarkerOnlyText(text)).toBe(true);
             for (const text of markerParity.negative) expect(isMarkerOnlyText(text)).toBe(false);
         });
 
         it("neutralizes the shared blank and marker part combinations", () => {
-            for (const parts of markerParity.positivePartCombinations) {
-                const assistant = message(
-                    "mixed",
-                    "assistant",
-                    parts.map((text) => ({ type: "text", text })),
-                );
+            for (const parts of [
+                ...markerParity.positivePartCombinations,
+                ...markerParity.positive.map((text) => [text]),
+            ]) {
+                // Step metadata makes the message eligible for marker-only detection;
+                // a lone [dropped] text part is treated as an already-neutralized
+                // message and skipped.
+                const assistant = message("mixed", "assistant", [
+                    ...parts.map((text) => ({ type: "text", text })),
+                    { type: "step-start" },
+                ]);
                 expect(
                     stripDroppedPlaceholderMessages([assistant], "openai-compatible").sentineledIds,
                 ).toEqual(["mixed"]);

@@ -307,6 +307,44 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 		}
 	}, 20_000);
 
+	it("logs historian fallback models with their thinking levels", async () => {
+		const root = isolatedConfig({
+			historian: {
+				pi: {
+					model: "google-antigravity/antigravity-gemini-3.8-flash",
+					fallback_models: [
+						"ollama-cloud/deepseek-v4.1-flash",
+						{ model: "openai-codex/gpt-6.1-sol", thinking_level: "high" },
+					],
+				},
+			},
+			dreamer: { disable: true },
+		});
+		const logs: string[] = [];
+		spyOn(loggerModule, "log").mockImplementation((message: unknown) => {
+			logs.push(String(message));
+		});
+		const runtime = createPi();
+		await magicContextPiExtension(runtime.pi);
+		await runtime.emit("session_start", {
+			cwd: root,
+			hasUI: false,
+			modelRegistry: registry(),
+			sessionManager: { getSessionId: () => "ses-chain-fallback-log" },
+			ui: { notify: () => undefined, setStatus: () => undefined },
+		});
+
+		const lines = triggerLines(logs);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain(
+			"model=google-antigravity/antigravity-gemini-3.8-flash",
+		);
+		expect(lines[0]).toContain(
+			"fallbacks=ollama-cloud/deepseek-v4.1-flash,openai-codex/gpt-6.1-sol (thinking_level=high)",
+		);
+		expect(lines[0]).not.toContain("[object Object]");
+	});
+
 	it("notifies once per process and logs the validated historian chain", async () => {
 		const root = isolatedConfig({
 			historian: { pi: HISTORIAN_CHAIN },

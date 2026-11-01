@@ -114,6 +114,9 @@ pub(super) struct EngineView {
     pub(super) json: Arc<str>,
     pub(super) frozen_edits: Option<Arc<frozen_edits::FrozenEdits>>,
     pub(super) publication_lineage: Option<String>,
+    pub(super) publication_version: Option<u64>,
+    pub(super) resync_reissued: bool,
+    pub(super) resync_reissued_from: Option<u64>,
 }
 
 impl EngineView {
@@ -130,6 +133,9 @@ impl EngineView {
             json,
             frozen_edits: None,
             publication_lineage: None,
+            publication_version: None,
+            resync_reissued: false,
+            resync_reissued_from: None,
         }
     }
 
@@ -140,6 +146,11 @@ impl EngineView {
 
     pub(super) fn with_publication_lineage(mut self, lineage: String) -> Self {
         self.publication_lineage = Some(lineage);
+        self
+    }
+
+    pub(super) fn with_publication_version(mut self, version: u64) -> Self {
+        self.publication_version = Some(version);
         self
     }
 
@@ -155,6 +166,12 @@ impl EngineView {
             native_frozen_edits: Option<frozen_edits::FrozenEdits>,
             #[serde(default)]
             publication_lineage: Option<String>,
+            #[serde(default)]
+            publication_version: Option<u64>,
+            #[serde(default)]
+            resync_reissued: bool,
+            #[serde(default)]
+            resync_reissued_from: Option<u64>,
         }
         let head: Head = serde_json::from_str(&json).map_err(transient)?;
         Ok(Self {
@@ -162,6 +179,9 @@ impl EngineView {
             json: json.into(),
             frozen_edits: head.native_frozen_edits.map(Arc::new),
             publication_lineage: head.publication_lineage,
+            publication_version: head.publication_version,
+            resync_reissued: head.resync_reissued,
+            resync_reissued_from: head.resync_reissued_from,
         })
     }
 

@@ -32,15 +32,10 @@ import {
 	getStrippedPlaceholderIds,
 } from "@magic-context/core/features/magic-context/storage";
 import { sessionLog } from "@magic-context/core/shared/logger";
+import { isMarkerOnlyText as isPiMarkerOnlyText } from "@magic-context/core/shared/marker-only-text";
 import { resolvePiStableId } from "./read-session-pi";
 
-const MARKER_ONLY_PATTERN =
-	/^(?:(?:§\d+§|\[dropped(?: §\d+§)?\]|\[cleared\])\s*)+$/;
-
-export function isPiMarkerOnlyText(text: string): boolean {
-	const trimmed = text.trim();
-	return trimmed.length > 0 && MARKER_ONLY_PATTERN.test(trimmed);
-}
+export { isMarkerOnlyText as isPiMarkerOnlyText } from "@magic-context/core/shared/marker-only-text";
 
 function messageIsPlaceholderOnly(message: unknown): boolean {
 	if (!message || typeof message !== "object") return false;
