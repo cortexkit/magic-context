@@ -1,5 +1,5 @@
-import { Worker } from "node:worker_threads";
 import { getHarness } from "../../shared/harness";
+import { reuseWorker } from "../../shared/reusable-worker";
 import { type Database, getSqliteDatabasePath, inRootAsyncContext } from "../../shared/sqlite";
 import { createWorkerShutdown } from "../../shared/worker-shutdown";
 import type {
@@ -49,8 +49,8 @@ export function createChunkEmbeddingWriter(db: Database) {
         import.meta.url,
     );
     const timeout = (db.prepare("PRAGMA busy_timeout").get() as { timeout: number }).timeout;
-    const worker = inRootAsyncContext(
-        () => new Worker(entry, { workerData: { path, harness: getHarness(), timeout } }),
+    const worker = inRootAsyncContext(() =>
+        reuseWorker(entry, { workerData: { path, harness: getHarness(), timeout } }),
     );
     // The worker reads the close request between operations. One operation may
     // first wait up to this connection's busy timeout for the writer lock and
