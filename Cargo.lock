@@ -95,6 +95,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-module"
+version = "0.1.0"
+dependencies = [
+ "ck-contract-draft",
+ "mc-mock-runner",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
