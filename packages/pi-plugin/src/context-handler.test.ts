@@ -50,6 +50,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import {
+	addMergedReasoningStrippedIds,
 	DRAIN_WINDOW_MS,
 	getEmergencyInputSample,
 	getMergedReasoningStrippedIds,
@@ -57,6 +58,7 @@ import {
 	recordDetectedContextLimit,
 	recordOverflowDetected,
 	setPersistedNoteNudgeTriggerMessageId,
+	thinkingBindingRecoveryFrozenId,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import {
@@ -2786,6 +2788,133 @@ describe("registerPiContextHandler", () => {
 				expect(getPendingOps(db, sessionId)).toHaveLength(1);
 			} finally {
 				restoreHistorian?.();
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+	}
+
+	for (const [isSubagent, thinking] of [
+		[true, false],
+		[true, true],
+		[false, false],
+	] as const) {
+		it(`issue 643 retires old skeletons only on subagent rebuilds (subagent=${isSubagent}, thinking=${thinking})`, async () => {
+			const db = createTestDb();
+			const sessionId = `skeleton-retirement-${isSubagent}-${thinking}`;
+			try {
+				getOrCreateSessionMeta(db, sessionId);
+				updateSessionMeta(db, sessionId, {
+					isSubagent,
+					lastResponseTime: Date.now(),
+					cacheTtl: "59m",
+				});
+				const fake = createFakePi();
+				registerPiContextHandler(fake.pi as never, {
+					db,
+					protectedTags: 0,
+					heuristics: { keepReasoningTokens: 100000 },
+				});
+				const handler = fake.handlers.get("context") as (
+					event: { messages: never[] },
+					ctx: never,
+				) => Promise<{ messages: never[] }>;
+				let passTokens = 20000;
+				const ctx = {
+					...fakeContext(sessionId),
+					getContextUsage: () => ({
+						tokens: passTokens,
+						percent: passTokens / 1000,
+						contextWindow: 100000,
+					}),
+				};
+				const source = [
+					userMessage("work", 1),
+					...Array.from({ length: 60 }, (_, i) => [
+						{
+							role: "assistant",
+							timestamp: 2 + i * 2,
+							content: [
+								...(thinking && i === 0
+									? [
+											{
+												type: "thinking",
+												thinking: "signed thought",
+												thinkingSignature: "signature",
+											},
+										]
+									: []),
+								{
+									type: "toolCall",
+									id: `call-${i}`,
+									name: "bash",
+									arguments: { command: `echo ${i}` },
+								},
+							],
+						},
+						{
+							role: "toolResult",
+							toolCallId: `call-${i}`,
+							toolName: "bash",
+							timestamp: 3 + i * 2,
+							content: [{ type: "text", text: `output ${i}` }],
+						},
+					]).flat(),
+					userMessage("continue", 200),
+				];
+				const pass = () =>
+					handler(
+						{ messages: structuredClone(source) as never[] },
+						ctx as never,
+					);
+				await pass();
+				const tags = getTagsBySession(db, sessionId).filter(
+					(tag) => tag.type === "tool",
+				);
+				expect(tags).toHaveLength(60);
+				for (const tag of tags) {
+					updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
+					updateTagDropMode(db, sessionId, tag.tagNumber, "skeleton_real");
+				}
+				if (thinking) {
+					expect(tags[0].toolOwnerMessageId).toBeTruthy();
+					addMergedReasoningStrippedIds(db, sessionId, [
+						thinkingBindingRecoveryFrozenId(tags[0].toolOwnerMessageId!),
+					]);
+				}
+				const modes = () =>
+					getTagsBySession(db, sessionId)
+						.filter((tag) => tag.type === "tool")
+						.map((tag) => tag.dropMode);
+				await pass();
+				expect(modes()).toEqual(Array(60).fill("skeleton_real"));
+				passTokens = 70000;
+				if (!isSubagent) signalPiPendingMaterialization(sessionId);
+				const rebuilt = (await pass()).messages;
+				expect(modes()).toEqual(
+					isSubagent
+						? [...Array(40).fill("full"), ...Array(20).fill("skeleton_real")]
+						: Array(60).fill("skeleton_real"),
+				);
+				if (isSubagent) {
+					const calls = (
+						rebuilt as Array<{
+							content?: Array<{ type?: string; id?: string }>;
+						}>
+					)
+						.flatMap((message) =>
+							Array.isArray(message.content) ? message.content : [],
+						)
+						.filter((part) => part.type === "toolCall");
+					expect(calls.map((part) => part.id)).toEqual(
+						Array.from({ length: 20 }, (_, i) => `call-${i + 40}`),
+					);
+					passTokens = 20000;
+					expect(JSON.stringify((await pass()).messages)).toBe(
+						JSON.stringify(rebuilt),
+					);
+				}
+			} finally {
 				clearContextHandlerSession(sessionId);
 				closeQuietly(db);
 			}
