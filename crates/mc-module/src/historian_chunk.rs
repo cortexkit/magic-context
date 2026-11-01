@@ -88,6 +88,7 @@ pub struct HistorianBuiltChunk {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MessageMeta {
     ordinal: u64,
+    commit_hashes: Vec<String>,
     message_id: String,
     anchorable: bool,
 }
@@ -266,6 +267,15 @@ impl Builder {
         let last_block_id = last_block_id(message);
         let meta = MessageMeta {
             ordinal: message.ordinal,
+            commit_hashes: message
+                .blocks
+                .iter()
+                .flat_map(|block| {
+                    serde_json::from_str::<Value>(&block.bytes)
+                        .map(|value| crate::historian_hashes::raw_commit_hashes(&value))
+                        .unwrap_or_default()
+                })
+                .collect(),
             message_id: last_block_id.clone().unwrap_or_default(),
             anchorable: last_block_id.is_some(),
         };
@@ -515,6 +525,7 @@ impl Builder {
         self.line_meta
             .extend(block.meta.iter().map(|meta| ChunkLine {
                 ordinal: meta.ordinal,
+                commit_hashes: meta.commit_hashes.clone(),
                 message_id: meta.message_id.clone(),
                 anchorable: meta.anchorable,
             }));
@@ -691,6 +702,7 @@ pub fn build_historian_chunk_with_expansions(
                             .drain(..=index)
                             .map(|meta| ChunkLine {
                                 ordinal: meta.ordinal,
+                                commit_hashes: meta.commit_hashes,
                                 message_id: meta.message_id,
                                 anchorable: meta.anchorable,
                             }),
@@ -2551,6 +2563,85 @@ mod tests {
 <meta><messages_processed>{start}-{end}</messages_processed><unprocessed_from>{unprocessed_from}</unprocessed_from></meta>
 </output>"#
         )
+    }
+
+    #[test]
+    fn issue_774_split_compartments_keep_only_their_own_raw_hashes() {
+        let later = "402da536440123456789abcdef0123456789abcd";
+        assert_eq!(later.len(), 40);
+        let messages = vec![
+            msg("u1", 1, "user", vec![text("Review the fix.")]),
+            msg("a2", 2, "assistant", vec![text("Committed\nd3714d6a9b.")]),
+            msg(
+                "a3",
+                3,
+                "assistant",
+                vec![text(&format!("Committed {later}."))],
+            ),
+            msg("u4", 4, "user", vec![text("Accepted.")]),
+        ];
+        let built = project_and_build(&messages, 1, 10_000, 5);
+        let xml = format!(
+            r#"<output>
+<compartment start="1" end="2" title="fix {later}"><p1>Committed `d3714d6a9b`; later `{later}`; typo `d3714a6a9b`.</p1><p2>Own D3714D6A9B; later {later}.</p2><p3>Own d3714d6; later {later}.</p3><p4>fix {later}</p4></compartment>
+<compartment start="3" end="4" title="later {later}"><p1>Committed `{later}`.</p1><p2>{later}</p2><p3>{later}</p3><p4>{later}</p4></compartment>
+</output>"#
+        );
+        let result = crate::historian_validate::validate_historian_output(
+            &xml,
+            &built.chunk,
+            &[],
+            ValidateOptions {
+                force_keep_last_compartment: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.compartments.len(), 2);
+        let first = &result.compartments[0];
+        assert_eq!(first.title, "fix ");
+        assert_eq!(first.content, "Committed `d3714d6a9b`; later ; typo .");
+        assert_eq!(
+            first.p1.as_deref(),
+            Some("Committed `d3714d6a9b`; later ; typo .")
+        );
+        assert_eq!(first.p2.as_deref(), Some("Own D3714D6A9B; later ."));
+        assert_eq!(first.p3.as_deref(), Some("Own d3714d6; later ."));
+        assert_eq!(first.p4.as_deref(), Some("fix "));
+        let second = &result.compartments[1];
+        assert_eq!(second.title, format!("later {later}"));
+        assert_eq!(second.content, format!("Committed `{later}`."));
+        assert_eq!(second.p1.as_deref(), Some(second.content.as_str()));
+        assert_eq!(second.p2.as_deref(), Some(later));
+        assert_eq!(second.p3.as_deref(), Some(later));
+        assert_eq!(second.p4.as_deref(), Some(later));
+    }
+
+    #[test]
+    fn issue_774_validation_preserves_text_without_hashes() {
+        let messages = vec![msg("u1", 1, "user", vec![text("Keep the timing.")])];
+        let built = project_and_build(&messages, 1, 10_000, 2);
+        let result = crate::historian_validate::validate_historian_output(
+            r#"<output><compartment start="1" end="1" title="ordinary prose"><p1>U: Keep 128.68 s.
+A: Done; no hashes.</p1><p2>Keep 128.68 s.</p2><p3>Done.</p3><p4/></compartment></output>"#,
+            &built.chunk,
+            &[],
+            ValidateOptions::default(),
+        )
+        .unwrap();
+        let compartment = &result.compartments[0];
+        assert_eq!(compartment.title, "ordinary prose");
+        assert_eq!(
+            compartment.content,
+            "U: Keep 128.68 s.\nA: Done; no hashes."
+        );
+        assert_eq!(
+            compartment.p1.as_deref(),
+            Some("U: Keep 128.68 s.\nA: Done; no hashes.")
+        );
+        assert_eq!(compartment.p2.as_deref(), Some("Keep 128.68 s."));
+        assert_eq!(compartment.p3.as_deref(), Some("Done."));
+        assert_eq!(compartment.p4.as_deref(), Some(""));
     }
 
     fn project_and_build(

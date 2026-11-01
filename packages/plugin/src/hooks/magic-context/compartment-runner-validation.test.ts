@@ -9,6 +9,79 @@ import {
 } from "./compartment-runner-validation";
 import { readSessionChunk, setRawMessageProvider } from "./read-session-chunk";
 
+test("issue 774: split compartments retain only their own raw commit hashes at every tier", () => {
+    const sessionId = "ses-hash-provenance";
+    const later = "402da536440123456789abcdef0123456789abcd";
+    expect(later).toHaveLength(40);
+    const unregister = setRawMessageProvider(sessionId, {
+        readMessages: () => [
+            {
+                id: "m1",
+                ordinal: 1,
+                role: "user",
+                parts: [{ type: "text", text: "Review the fix." }],
+            },
+            {
+                id: "m2",
+                ordinal: 2,
+                role: "assistant",
+                parts: [{ type: "text", text: "Committed\nd3714d6a9b." }],
+            },
+            {
+                id: "m3",
+                ordinal: 3,
+                role: "assistant",
+                parts: [{ type: "text", text: `Committed ${later}.` }],
+            },
+            { id: "m4", ordinal: 4, role: "user", parts: [{ type: "text", text: "Accepted." }] },
+        ],
+    });
+    try {
+        const chunk = readSessionChunk(sessionId, 10_000, 1);
+        const xml = `<output>
+<compartment start="1" end="2" title="fix ${later}"><p1>Committed \`d3714d6a9b\`; later \`${later}\`; typo \`d3714a6a9b\`.</p1><p2>Own D3714D6A9B; later ${later}.</p2><p3>Own d3714d6; later ${later}.</p3><p4>fix ${later}</p4></compartment>
+<compartment start="3" end="4" title="later ${later}"><p1>Committed \`${later}\`.</p1><p2>${later}</p2><p3>${later}</p3><p4>${later}</p4></compartment>
+</output>`;
+        const result = validateHistorianOutput(xml, sessionId, chunk, [], 0);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.compartments[0]).toMatchObject({
+            title: "fix ",
+            content: "Committed `d3714d6a9b`; later ; typo .",
+            p1: "Committed `d3714d6a9b`; later ; typo .",
+            p2: "Own D3714D6A9B; later .",
+            p3: "Own d3714d6; later .",
+            p4: "fix ",
+        });
+        expect(result.compartments[1]).toMatchObject({
+            title: `later ${later}`,
+            content: `Committed \`${later}\`.`,
+            p1: `Committed \`${later}\`.`,
+            p2: later,
+            p3: later,
+            p4: later,
+        });
+    } finally {
+        unregister();
+    }
+});
+
+test("issue 774: validation leaves text without hashes byte-identical", () => {
+    const xml = `<output><compartment start="1" end="2" title="ordinary prose"><p1>U: Keep 128.68 s.\nA: Done; no hashes.</p1><p2>Keep 128.68 s.</p2><p3>Done.</p3><p4/></compartment></output>`;
+    const result = validateHistorianOutput(xml, "ses-plain", buildChunk(1, 2), [], 0);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+        expect(result.compartments[0]).toMatchObject({
+            title: "ordinary prose",
+            content: "U: Keep 128.68 s.\nA: Done; no hashes.",
+            p1: "U: Keep 128.68 s.\nA: Done; no hashes.",
+            p2: "Keep 128.68 s.",
+            p3: "Done.",
+            p4: "",
+        });
+    }
+});
+
 describe("buildHistorianFailureNotice", () => {
     test("renders the stable historian code without raw transient detail", () => {
         const raw = "Historian returned no assistant output.";
