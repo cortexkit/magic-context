@@ -1,17 +1,20 @@
 import { EventEmitter } from "node:events";
+import * as timers from "node:timers";
 import { Worker, type WorkerOptions } from "node:worker_threads";
 import { registerExitAbort, unregisterExitAbort } from "./exit-abort-registry";
 import { inRootAsyncContext } from "./sqlite";
 
 const pools = new Map<string, Slot>();
+const liveSlots = new Set<Slot>();
 let nextId = 0;
 const IDLE_MS = 60_000;
 
 interface Slot {
     worker: Worker;
+    controller: AbortController;
     queue: Lease[];
     active?: Lease;
-    idle?: ReturnType<typeof setTimeout>;
+    idle?: ReturnType<typeof timers.setTimeout>;
     advance(): void;
 }
 
@@ -73,8 +76,27 @@ export function reuseWorker(entry: URL | string, options: WorkerOptions, idleMs 
     return lease as unknown as Worker;
 }
 
+/** End test-owned pools before another test can replace their timers or databases. */
+export async function resetReusableWorkersForTests(): Promise<void> {
+    while (liveSlots.size) {
+        const slots = [...liveSlots];
+        pools.clear();
+        await Promise.all(
+            slots.map(
+                (slot) =>
+                    new Promise<void>((resolve) => {
+                        timers.clearTimeout(slot.idle);
+                        slot.idle = undefined;
+                        slot.worker.once("exit", () => resolve());
+                        slot.controller.abort();
+                    }),
+            ),
+        );
+    }
+}
+
 function enqueue(slot: Slot, lease: Lease): void {
-    clearTimeout(slot.idle);
+    timers.clearTimeout(slot.idle);
     lease.slot = slot;
     slot.queue.push(lease);
     // Let callers attach their listeners before a queued job starts.
@@ -94,17 +116,20 @@ function acquireSlot(entry: URL | string, options: WorkerOptions, idleMs: number
         const worker = inRootAsyncContext(
             () => new Worker(entry, { ...options, workerData: { reusableWorker: true } }),
         );
-        slot = { worker, queue: [], advance: () => {} };
+        const controller = new AbortController();
+        slot = { worker, controller, queue: [], advance: () => {} };
         pools.set(key, slot);
+        liveSlots.add(slot);
         const owned = slot;
         const advance = () => {
-            if (owned.active) return;
-            clearTimeout(owned.idle);
+            if (controller.signal.aborted || owned.active) return;
+            timers.clearTimeout(owned.idle);
             const lease = owned.queue.shift();
             owned.active = lease;
             if (!lease) {
                 worker.unref();
-                owned.idle = setTimeout(() => {
+                // A caller's temporary clock must not own a shared pool's lifetime.
+                owned.idle = timers.setTimeout(() => {
                     if (pools.get(key) === owned) pools.delete(key);
                     void worker.terminate();
                 }, idleMs);
@@ -140,7 +165,8 @@ function acquireSlot(entry: URL | string, options: WorkerOptions, idleMs: number
             owned.active?.emit("error", error);
         });
         worker.on("exit", (code) => {
-            clearTimeout(owned.idle);
+            liveSlots.delete(owned);
+            timers.clearTimeout(owned.idle);
             if (pools.get(key) === owned) pools.delete(key);
             const active = owned.active;
             owned.active = undefined;
@@ -171,7 +197,6 @@ function acquireSlot(entry: URL | string, options: WorkerOptions, idleMs: number
                 }
             }
         });
-        const controller = new AbortController();
         controller.signal.addEventListener(
             "abort",
             () => {
