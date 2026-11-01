@@ -23,6 +23,29 @@ Magic Context rewrites the message array and system prompt the host is about to 
 - **Maintenance.** The dreamer runs scheduled background tasks: verifying memories against code, curating and classifying them, and the other tasks listed under Dreamer.
 - **Pressure.** Reduction normally rides a bust that happens anyway. Near the limit a force band (about 85%) applies queued work and runs emergency reclaim; at a provider-proven 95% with nothing folded, the turn is refused rather than sent over the limit.
 
+## Terms
+
+- **Pass:** one run of the transform. It runs once per model request, so once per step of a turn.
+- **Prefix:** the part of the request the provider has cached: system prompt, tool definitions, `m[0]`, `m[1]`, then the older messages. Changing any byte in it makes the provider read everything after that byte again at full price.
+- **Rebuild (bust):** a pass that changes bytes inside the cached prefix. Every reduction lands on a rebuild; appending at the end of the request is the only change a non-rebuilding pass makes.
+- **Defer pass (cache hit; "SOFT+" in the pass taxonomy below):** a pass that may not change the prefix. It replays every earlier decision byte for byte.
+- **Rebuild permission:** the single per-pass answer to "may this pass rebuild?". Every lane asks the same permission (invariant 4).
+- **Ride:** a reduction landing on a pass that is already rebuilding for another reason, instead of causing a rebuild of its own.
+- **Lane:** one kind of reduction, such as queued drops, routine heuristics, reasoning clearing, the emergency tool drop or a history refresh.
+- **Execute threshold:** the context usage at which the scheduler says "execute" (`execute_threshold_percentage`, default 65%, per model or as tokens).
+- **Execute pass:** a pass whose scheduler decision is "execute": usage is at or above the execute threshold, or the cache's idle lifetime has passed. For a subagent an execute pass is a rebuild permission. For a primary session it is one only when no summary can come (no historian run in progress or waiting to publish, and the historian not allowed to start) and either the queued `ctx_reduce` drops are worth at least 2% of the usable window or this is the third execute pass in a row that held them (invariant 3). Otherwise its work rides the next bust.
+- **Force band:** usage at or above `max(85%, execute threshold + 2)`. Queued work applies and the tiered emergency tool drop runs.
+- **Emergency (95%):** usage at or above 95%, or a provider overflow error. A primary session waits for its historian, and a request that still cannot fit is refused rather than sent.
+- **Tag:** the number `§N§` given to each message part. `ctx_reduce` names tags.
+- **Drop:** replacing a tagged part with `[dropped §N§]`, or removing an old tool call with its result. `ctx_expand` brings the original back. A **queued drop** is what `ctx_reduce` records; it lands on the next rebuild.
+- **Historian:** the hidden child session that summarizes older raw history into **compartments** (summaries of a stretch of messages). **Publication** stores new compartments and changes nothing in the request by itself.
+- **`m[0]` / `m[1]`:** the two synthetic user messages at the start of the request: `m[0]` is the frozen baseline (docs, profile, memories, history), and `m[1]` is everything added since `m[0]` was last rebuilt.
+- **History refresh (SOFT):** a rebuild that re-renders `m[1]` with newly published summaries while `m[0]` stays byte-identical.
+- **Fold (HARD):** a rebuild that re-renders `m[0]`: `m[1]` merges into a new baseline, summaries are re-tiered by age, and `m[1]` resets. It happens when the provider cache is already lost (model or system-prompt change, idle expiry) or `m[0]`'s own content must change (see the `mustMaterialize` triggers).
+- **Cut:** the point before which raw messages are no longer sent, because summaries in `m[0]`/`m[1]` cover them. It moves on a history refresh or a fold, never on a defer pass. On OpenCode 1 a compaction marker in the host's store also stops the host loading those messages.
+- **Primary session / subagent:** a primary session is one a person works in (a top-level OpenCode or Pi session, or a head session hosted by a runner in mode 3; see Where the transform runs). A subagent is a session another agent started (an OpenCode child session, a mode-3 worker or reader).
+- **Signed thinking, prefix-bound model:** Anthropic thinking blocks carry signatures bound to the bytes before them. On prefix-bound models (Fable 5.1, Opus 5.5, Sonnet 5.5) any edit before a kept block invalidates it. A **hold** is a pass that deliberately does not rebuild, to keep that thinking right after heavy reasoning.
+
 ## Code map
 
 | Layer | Where | Role |
@@ -144,7 +167,7 @@ The TypeScript transform decides a session's mode from `sessionMeta.isSubagent` 
 | Lane | Primary session | Subagent | Compaction off |
 |---|---|---|---|
 | Tags, `§N§` prefixes, `ctx_reduce` | when the tool is callable | when the tool is callable | no |
-| Permission to rebuild the prefix | rides a bust (invariants 3 and 4) | every execute pass | none |
+| Permission to rebuild the prefix | a bust it rides (fold, history refresh, `/ctx-flush`, force band, idle expiry), or its own execute pass when no summary can come and enough drops are queued (see Execute pass in Terms) | every execute pass | none |
 | Queued `ctx_reduce` drops land | on a rebuild | every execute pass | no |
 | Routine heuristics: dedup, supersession, injection strip (`applyHeuristicCleanup`) | once per turn, on a rebuild | every execute pass | no |
 | Reasoning clearing beyond `keep_reasoning_tokens` (`[cleared]` on canonical Anthropic; removal for other providers and for prefix-bound models, oldest contiguous run only) | with routine cleanup, on a rebuild | every execute pass | no |
@@ -155,7 +178,7 @@ The TypeScript transform decides a session's mode from `sessionMeta.isSubagent` 
 | Caveman compression, auto-search, note nudges | yes | no | no |
 | `ctx_reduce` nudges, time markers | yes | yes | no |
 
-For a primary session most of the reduction comes from the historian: once a summary publishes, the next rebuild cuts every summarized message, its reasoning and tool output included. A subagent has no historian, so the lanes marked yes for it are all it has. On reasoning-heavy models most of a long subagent's context is its own past reasoning, which only reasoning clearing removes.
+Every kind of session shrinks the same way: on a pass with rebuild permission, every lane that has work lands in that one rebuild. Two things differ. The first is where the permission comes from: a primary session rebuilds on a bust that happens anyway, or on an execute pass of its own when no summary can come and enough drops are queued (see Execute pass in Terms); a subagent rebuilds on every execute pass. The second is which lanes exist: a primary session also has its historian, whose cut removes every summarized message once a history refresh or fold renders the summary. A subagent has no historian, so the lanes marked yes for it are all it has. On reasoning-heavy models most of a long subagent's context is its own past reasoning, which only reasoning clearing removes.
 
 Compaction off (`compaction.enabled: false`, user config, restart required) keeps memories, docs, notes, search and expand, and leaves context management to the host.
 
