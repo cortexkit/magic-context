@@ -328,6 +328,32 @@ export function renderVerboseRange(
     return { text: out.join("\n\n"), lastOrdinal, truncated };
 }
 
+export function renderVerboseRangeForTool(
+    sessionId: string,
+    start: number,
+    end: number,
+    tokenBudget: number,
+    expandTools?: ToolExpansionMap,
+    attachments?: RecoveryAttachments,
+): string {
+    const v = renderVerboseRange(sessionId, start, end, tokenBudget, expandTools, attachments);
+    if (!v.text) {
+        return `No messages found in range ${start}-${end}. The range may be outside this session's history.`;
+    }
+    const out = [
+        `Messages ${start}-${v.lastOrdinal} (verbose). Recover any one in full with ctx_expand(message=<ordinal>):`,
+        "",
+        v.text,
+    ];
+    if (v.truncated) {
+        out.push(
+            "",
+            `Truncated at message ${v.lastOrdinal} (budget: ~${tokenBudget} tokens). Call again with start=${v.lastOrdinal + 1} end=${end} verbose=true for more.`,
+        );
+    }
+    return out.join("\n");
+}
+
 /** Resolve a transcript handle by persisted ownership, never by message ordinal. */
 export function renderItemByTag(
     db: ContextDatabase,

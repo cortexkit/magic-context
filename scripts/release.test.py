@@ -28,6 +28,7 @@ class ReleaseTests(unittest.TestCase):
         self.repo.mkdir()
         self.env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
         self.env.update(TEST_ROOT=str(self.root), REAL_GIT=str(REAL_GIT), REAL_BUN=str(REAL_BUN),
+                        TMPDIR=str(self.root),
                         GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
                         PYTHONDONTWRITEBYTECODE="1", HOME=str(self.root / "home"),
                         CI_GATE_MISSING_RUN_RETRY_SECONDS="0")
@@ -183,6 +184,8 @@ class ReleaseTests(unittest.TestCase):
         )
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertTrue(any(args[:2] == ["tag", "-a"] for args in self.commands("git")))
+        self.assertEqual(self.git("worktree", "list", "--porcelain").count("worktree "), 1)
+        self.assertEqual(list(self.root.glob("magic-context-release.*")), [])
         self.assertTrue(any(args[:2] == ["run", "watch"] for args in self.commands("gh")))
 
     def assert_stale_generated_refused(self, path, stale, fresh):

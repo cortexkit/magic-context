@@ -1506,13 +1506,23 @@ export function peekCompartmentChunkSearchPool(
     projectPath: string,
     modelId: string,
     dateRange: { from: number; to: number } | null = null,
+    diagnostic?: Pick<import("./auto-search-diagnostics").AutoSearchDiagnostics, "peek">,
 ): StoredCompartmentChunkEmbedding[] | null {
-    if (!modelId) return null;
+    if (!modelId) {
+        if (diagnostic) diagnostic.peek = "no-model";
+        return null;
+    }
     trackSearchPool(db, sessionId, projectPath, modelId);
     const entry = getDecodedSearchPool(db).get(searchPoolKey(sessionId, projectPath, modelId));
-    if (!entry || searchPoolInTransaction(db)) return null;
-    if (!sameSessionSignature(readSessionChunkSignature(db, sessionId), entry.sessionSignature))
+    if (!entry || searchPoolInTransaction(db)) {
+        if (diagnostic) diagnostic.peek = entry ? "transaction" : "missing";
         return null;
+    }
+    if (!sameSessionSignature(readSessionChunkSignature(db, sessionId), entry.sessionSignature)) {
+        if (diagnostic) diagnostic.peek = "signature-changed";
+        return null;
+    }
+    if (diagnostic) diagnostic.peek = "hit";
     touchDecodedSearchPoolEntry(entry);
     return filterSearchPoolDates(entry.rows, dateRange);
 }

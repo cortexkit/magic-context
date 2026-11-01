@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { join } from "node:path";
 
 import { runMigrations } from "../../features/magic-context/migrations";
@@ -8,6 +8,7 @@ import { setBoundedRawMessageProvider } from "../../hooks/magic-context/read-ses
 import { Database } from "../../shared/sqlite";
 import { createTestTempDir } from "../../shared/test-temp-dir";
 import { createCtxExpandTools } from "../../tools/ctx-expand/tools";
+import { stopV2ArchiveReader } from "../../tools/ctx-expand/v2-archive-reader";
 import { V2StoreReader } from "../store-reader";
 import { createV2RecoveryAttachments } from "./expand-attachments";
 import { createV2RawMessageProvider, createV2RawMessageReader } from "./store";
@@ -52,10 +53,10 @@ describe("OpenCode 2 ctx_expand ordinal resolution", () => {
         const { dir: root, cleanup } = createTestTempDir("mc-v2-expand-files-");
         const path = join(root, "opencode.db");
         const db = createSessionDatabase(path);
-        const contextDb = new Database(":memory:");
+        const contextDb = new Database(join(root, "context.db"));
         initializeDatabase(contextDb);
         runMigrations(contextDb);
-        const reader = createV2RawMessageReader(() => new V2StoreReader(path));
+        const reader = createV2RawMessageReader(() => new V2StoreReader(path), path);
         const sharedBefore = JSON.stringify(reader.findById(SESSION_ID, "user-1"));
         const files = [
             {
@@ -74,31 +75,43 @@ describe("OpenCode 2 ctx_expand ordinal resolution", () => {
         db.prepare("UPDATE session_message SET data = ? WHERE id = 'user-1'").run(
             JSON.stringify({ text: FIRST_MESSAGE_TEXT, files }),
         );
-        const unregister = setBoundedRawMessageProvider(
-            SESSION_ID,
-            createV2RawMessageProvider(reader, SESSION_ID),
-        );
+        const provider = createV2RawMessageProvider(reader, SESSION_ID);
+        const byId = spyOn(provider, "readMessageById");
+        const page = spyOn(provider, "readMessagePage");
+        const range = spyOn(provider, "readMessageIdOrdinalsForRange");
+        const unregister = setBoundedRawMessageProvider(SESSION_ID, provider);
         try {
             expect(JSON.stringify(reader.findById(SESSION_ID, "user-1"))).toBe(sharedBefore);
             expect(JSON.stringify(reader.readPage(SESSION_ID, 0, 1, 3)[0])).toBe(sharedBefore);
-            const recoveryAttachments = createV2RecoveryAttachments(() => new V2StoreReader(path));
-            expect(recoveryAttachments(SESSION_ID, "user-1")).toEqual([
-                {
-                    type: "file",
-                    filename: "report.pdf",
-                    mime: "application/pdf",
-                    url: "file:///work/report.pdf",
-                    partIndex: 1,
+            const metadataReader = new V2StoreReader(path);
+            try {
+                expect(createV2RecoveryAttachments(metadataReader)(SESSION_ID, "user-1")).toEqual([
+                    {
+                        type: "file",
+                        filename: "report.pdf",
+                        mime: "application/pdf",
+                        url: "file:///work/report.pdf",
+                        partIndex: 1,
+                    },
+                    {
+                        type: "file",
+                        filename: "screenshot.png",
+                        mime: "image/png",
+                        url: undefined,
+                        partIndex: 2,
+                    },
+                ]);
+            } finally {
+                metadataReader.close();
+            }
+            const expand = createCtxExpandTools({
+                db: contextDb,
+                recoveryAttachments: () => {
+                    throw new Error(
+                        "OpenCode 2 recovery must not read attachments on the main thread",
+                    );
                 },
-                {
-                    type: "file",
-                    filename: "screenshot.png",
-                    mime: "image/png",
-                    url: undefined,
-                    partIndex: 2,
-                },
-            ]);
-            const expand = createCtxExpandTools({ db: contextDb, recoveryAttachments }).ctx_expand;
+            }).ctx_expand;
             const ctx = { sessionID: SESSION_ID } as never;
             const notices = [
                 "[file] report.pdf (application/pdf) — stored location: file:///work/report.pdf; content not recovered. If needed, ask the user to attach it again.",
@@ -109,21 +122,28 @@ describe("OpenCode 2 ctx_expand ordinal resolution", () => {
                 for (const args of [
                     { tag: index + 1 },
                     { message: 1 },
-                    { start: 1, end: 1, verbose: true },
+                    { start: 1, end: 3, verbose: true },
                 ]) {
                     const output = await expand.execute(args, ctx);
                     expect(output).toContain(notice);
                     expect(output).not.toContain("secret-");
                 }
             }
+            expect(byId).not.toHaveBeenCalled();
+            expect(page).not.toHaveBeenCalled();
+            expect(range).not.toHaveBeenCalled();
             expect(JSON.stringify(reader.findById(SESSION_ID, "user-1"))).toBe(sharedBefore);
         } finally {
+            await stopV2ArchiveReader();
+            byId.mockRestore();
+            page.mockRestore();
+            range.mockRestore();
             unregister();
             contextDb.close();
             db.close();
             cleanup();
         }
-    });
+    }, 30_000);
 
     it("does not relabel the first source message as an out-of-range ordinal", async () => {
         const { dir: root, cleanup } = createTestTempDir("mc-v2-ctx-expand-ordinal-");

@@ -3,9 +3,11 @@ import { getLastCompartmentEndMessage } from "../../features/magic-context/compa
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import {
     prepareRawSessionOrdinals,
+    rawMessageWorkerSource,
     readSessionChunk,
 } from "../../hooks/magic-context/read-session-chunk";
 import type { ToolExpansionMap } from "../../shared/historian-tool-template";
+import { getSqliteDatabasePath } from "../../shared/sqlite";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_EXPAND_DESCRIPTION, CTX_EXPAND_TOKEN_BUDGET } from "./constants";
 import { resolveCtxExpandMode } from "./mode";
@@ -13,10 +15,11 @@ import {
     type RecoveryAttachments,
     renderItemByTag,
     renderMessageByOrdinal,
-    renderVerboseRange,
+    renderVerboseRangeForTool,
 } from "./render";
 import { renderSearchArchiveOffThread } from "./search-archive";
 import type { CtxExpandArgs } from "./types";
+import { readV2ArchiveOffThread } from "./v2-archive-reader";
 
 export { CTX_EXPAND_LIGHT_DESCRIPTION } from "../light-descriptions";
 
@@ -99,7 +102,22 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
             if (mode.kind === "error") {
                 return mode.message;
             }
+            const source = rawMessageWorkerSource(sessionId);
+            const path = getSqliteDatabasePath(deps.db);
             if (mode.kind === "tag") {
+                if (source) {
+                    if (!path)
+                        throw new Error(
+                            "Search archive worker unavailable: private archive has no off-thread source",
+                        );
+                    const text = await readV2ArchiveOffThread(path, source.path, sessionId, {
+                        kind: "tag",
+                        tag: mode.tag,
+                    });
+                    if (text === null)
+                        throw new Error("Search archive worker unavailable: unexpected tag reply");
+                    return text;
+                }
                 return renderItemByTag(
                     deps.db,
                     sessionId,
@@ -109,6 +127,22 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                 );
             }
             if (mode.kind === "message") {
+                if (source) {
+                    if (!path)
+                        throw new Error(
+                            "Search archive worker unavailable: private archive has no off-thread source",
+                        );
+                    const text = await readV2ArchiveOffThread(path, source.path, sessionId, {
+                        kind: "message",
+                        message: mode.message,
+                        tokenBudget: CTX_EXPAND_TOKEN_BUDGET,
+                    });
+                    if (text === null)
+                        throw new Error(
+                            "Search archive worker unavailable: unexpected message reply",
+                        );
+                    return text;
+                }
                 return (
                     (await renderSearchArchiveOffThread(
                         deps.db,
@@ -131,6 +165,22 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                 return `Range ${start}-${end} is entirely within the live tail (after the last compacted message ${lastCompartmentEnd}); those messages are already visible in context.`;
             }
             const effectiveEnd = lastCompartmentEnd >= 0 ? Math.min(end, lastCompartmentEnd) : end;
+            if (verbose && source) {
+                if (!path)
+                    throw new Error(
+                        "Search archive worker unavailable: private archive has no off-thread source",
+                    );
+                const text = await readV2ArchiveOffThread(path, source.path, sessionId, {
+                    kind: "verbose",
+                    start,
+                    end: effectiveEnd,
+                    tokenBudget: CTX_EXPAND_TOKEN_BUDGET,
+                    expandTools: deps.expandTools,
+                });
+                if (text === null)
+                    throw new Error("Search archive worker unavailable: unexpected verbose reply");
+                return text;
+            }
             const archived = await renderSearchArchiveOffThread(
                 deps.db,
                 sessionId,
@@ -142,7 +192,7 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
 
             // Verbose mode: each message separate, with ids + per-part previews.
             if (verbose) {
-                const v = renderVerboseRange(
+                return renderVerboseRangeForTool(
                     sessionId,
                     start,
                     effectiveEnd,
@@ -150,21 +200,6 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                     deps.expandTools,
                     deps.recoveryAttachments,
                 );
-                if (!v.text) {
-                    return `No messages found in range ${start}-${effectiveEnd}. The range may be outside this session's history.`;
-                }
-                const out = [
-                    `Messages ${start}-${v.lastOrdinal} (verbose). Recover any one in full with ctx_expand(message=<ordinal>):`,
-                    "",
-                    v.text,
-                ];
-                if (v.truncated) {
-                    out.push(
-                        "",
-                        `Truncated at message ${v.lastOrdinal} (budget: ~${CTX_EXPAND_TOKEN_BUDGET} tokens). Call again with start=${v.lastOrdinal + 1} end=${effectiveEnd} verbose=true for more.`,
-                    );
-                }
-                return out.join("\n");
             }
 
             const chunk = readSessionChunk(

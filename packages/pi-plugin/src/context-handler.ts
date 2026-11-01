@@ -6077,6 +6077,26 @@ export function registerPiContextHandler(
 					});
 				}
 			}
+			if (
+				options.autoSearch &&
+				!options.autoSearch.enabled &&
+				!options.compactionOff &&
+				result.prefixMutationAllowed
+			) {
+				await runAutoSearchHintForPi({
+					sessionId,
+					db: options.db,
+					messages: outputMessages,
+					entryIds: strictEntryIds,
+					entryIdByRef: result.postCommitEntryIdByRef,
+					options: {
+						enabled: false,
+						scoreThreshold: options.autoSearch.scoreThreshold,
+						minPromptChars: options.autoSearch.minPromptChars,
+						projectPath: projectIdentity,
+					},
+				});
+			}
 			logTransformTiming(sessionId, "autoSearch", tAutoSearch);
 
 			// Synthetic todowrite injection — Pi parity with OpenCode's

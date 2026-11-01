@@ -181,6 +181,7 @@ async function run(jobInput: AutoSearchWorkerInput): Promise<void> {
         } else {
             const jobStarted = performance.now();
             const steps: UnifiedSearchStepTimings = {};
+            const diagnostics = input.options.autoSearchDiagnostics;
             const results = await unifiedSearch(
                 db,
                 input.sessionId,
@@ -195,6 +196,13 @@ async function run(jobInput: AutoSearchWorkerInput): Promise<void> {
                         (await request({ kind: "query", text })).result ?? null,
                     isEmbeddingRuntimeEnabled: () => input.embeddingRuntimeEnabled,
                     stepTimings: steps,
+                    onAutoSearchDiagnostics: diagnostics
+                        ? () =>
+                              port.postMessage({
+                                  kind: "diagnostics",
+                                  diagnostics,
+                              } satisfies AutoSearchWorkerReply)
+                        : undefined,
                 },
             );
             port.postMessage({

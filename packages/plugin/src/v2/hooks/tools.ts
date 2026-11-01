@@ -10,7 +10,6 @@ import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import { subagentToolRefusal } from "../../plugin/subagent-tool-policy";
 import { type Database, withAsyncPrivilegedWriter } from "../../shared/sqlite";
 import { createCtxExpandTools } from "../../tools/ctx-expand";
-import type { RecoveryAttachments } from "../../tools/ctx-expand/render";
 import { createCtxMemoryListTools, createCtxMemoryTools } from "../../tools/ctx-memory";
 import { createCtxNoteTools } from "../../tools/ctx-note";
 import { createCtxReduceTools } from "../../tools/ctx-reduce";
@@ -33,7 +32,6 @@ export async function registerTools(
     rustToolBackends?: RustToolBackends,
     isInternalChild?: (sessionId: string) => boolean,
     ensureProjectRegistered = ensureProjectRegisteredFromOpenCodeDirectory,
-    recoveryAttachments?: RecoveryAttachments,
 ) {
     const compaction = isCompactionEnabled(config);
     setCtxReduceRegisteredGlobally(compaction);
@@ -61,7 +59,6 @@ export async function registerTools(
             db,
             expandTools: config.historian?.expand_tools,
             transformMode: config.transform_mode,
-            recoveryAttachments,
         }),
         ...createCtxNoteTools({
             ...project,

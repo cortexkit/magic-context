@@ -188,7 +188,6 @@ import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { registerV2DreamScheduleTimer } from "./dream-timer";
 import { startDreamTrigger } from "./dream-trigger";
 import { createV2EmbeddingScope } from "./embedding-lifecycle";
-import { createV2RecoveryAttachments } from "./expand-attachments";
 import { generateReplayAnchor, V2GenerateReplay } from "./generate";
 import { HiddenChildHook, hiddenToolCallRefusal, registerHiddenChildAgents } from "./hidden-child";
 import { hiddenTerminalError } from "./hidden-terminal-error";
@@ -888,8 +887,6 @@ export async function registerContext(context: V2Context) {
                   moduleToolBackends?.backends,
                   (id) => hiddenChildHook.owns(id),
                   embeddings.ensureRegistered,
-                  (sessionId, messageId) =>
-                      createV2RecoveryAttachments(openStoreReader)(sessionId, messageId),
               )
             : undefined;
     const usage: TransformDeps["contextUsageMap"] = new Map();
@@ -1164,7 +1161,10 @@ export async function registerContext(context: V2Context) {
             log("[magic-context] v2 Channel 2 delivery deferred", error);
         }
     });
-    const pagedRead = createV2RawMessageReader(openStoreReader);
+    const pagedRead = createV2RawMessageReader(
+        openStoreReader,
+        gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
+    );
     // Commands can precede the first context pass after a restart. Their background
     // historian reads need the same durable v2 source as automatic historian work.
     const prepareHistorySession = (sessionID: string): void => {
