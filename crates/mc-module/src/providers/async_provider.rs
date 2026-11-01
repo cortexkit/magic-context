@@ -2873,6 +2873,21 @@ impl McHandler {
                     {
                         cursor.term(Some("malformed_compaction_notice")).await
                     }
+                    // A notice whose lineage this record cannot certify fails the
+                    // same way on every redelivery, and each attempt resets the
+                    // record into a fresh generation first. Retrying it only
+                    // multiplies those resets, so end this delivery; the
+                    // runner's next Setup or notice starts from the reset record.
+                    Err(
+                        HandlerOutcome::Error { ref code, .. }
+                        | HandlerOutcome::ErrorWithDetail { ref code, .. },
+                    ) if code == "cut_rebootstrap_required" => {
+                        tracing::warn!(
+                            %code,
+                            "async compaction notice ended: lineage cannot be certified"
+                        );
+                        cursor.term(Some("cut_rebootstrap_required")).await
+                    }
                     Err(error) => {
                         tracing::warn!(?error, "async compaction ingest retry");
                         cursor.nak(Duration::from_secs(1)).await
