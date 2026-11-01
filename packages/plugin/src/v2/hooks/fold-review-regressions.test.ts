@@ -58,6 +58,59 @@ test("kept and hidden repeated instructions preserve coordinates and adjacent ef
     }
 }, 60000);
 
+for (const keptCount of [2, 3]) {
+    test(`leading effort occurrences retain hidden equals and ${keptCount} kept suffix controls`, async () => {
+        const f = await oc2ContextFixture(9740 + keptCount, {
+            area: "fold-review-regressions",
+            instructions: false,
+            temporal: false,
+            cacheTtl: "never",
+        });
+        try {
+            const hiddenID = f.rows[1]!.id;
+            const keptID = f.rows.at(-1)!.id;
+            let folded = false;
+            const controls = [
+                { type: "effort", effort: "low", previous: "high" },
+                { type: "effort", effort: "high", previous: "low" },
+                { type: "effort", effort: "low", previous: "high" },
+            ];
+            const efforts = (draft: SessionContext) => {
+                for (const [id, parts] of [
+                    [hiddenID, controls.slice(0, 1)],
+                    [keptID, folded ? controls.slice(-keptCount) : controls],
+                ] as const) {
+                    const at = draft.messages.findIndex((message) => message.id === id);
+                    if (at >= 0)
+                        draft.messages.splice(
+                            at,
+                            0,
+                            ...parts.map((part) => ({
+                                role: "system" as const,
+                                content: [{ ...part }],
+                            })),
+                        );
+                }
+            };
+            const before = await f.pass(efforts);
+            expect((await f.pass(efforts)).bytes).toBe(before.bytes);
+            await f.nativeFold(3, 1, "");
+            folded = true;
+            const after = await f.pass(efforts);
+            expect(
+                after.draft.messages.filter((message) =>
+                    message.content.some((part) => part.type === "effort"),
+                ),
+            ).toHaveLength(4);
+            expect(after.bytes).toBe(before.bytes);
+            await f.restart();
+            expect((await f.pass(efforts)).bytes).toBe(before.bytes);
+        } finally {
+            await f.cleanup();
+        }
+    }, 60000);
+}
+
 test("a staged V2 upgrade waits for independent expiry before committing once", async () => {
     const f = await oc2ContextFixture(9732, {
         area: "fold-review-regressions",

@@ -145,6 +145,18 @@ export class NativeFoldReplay {
     private readonly metadata = new Map<string, V2RowStamp[]>();
     private readonly metadataThrough = new Map<string, number>();
     private readonly metadataAfter = new Map<string, number | undefined>();
+    // Keep one identity-only most-recently-used entry outside the optional
+    // transcript budget. Large transcripts may be evicted after every request;
+    // their unchanged source stamps must not be queried again on every warm capture.
+    // Source identity, range and edit invalidation still fence reuse, and switching
+    // sessions replaces this entry rather than retaining unbounded per-session metadata.
+    private stampMRU?: {
+        sessionID: string;
+        source: string;
+        through: number;
+        after: number | undefined;
+        rows: V2RowStamp[];
+    };
     private readonly loaded = new Map<string, number>();
     private readonly sources = new Map<string, string>();
     private readonly staleHeads = new Set<string>();
@@ -200,6 +212,7 @@ export class NativeFoldReplay {
             this.invalidate(sessionID);
     }
     invalidate(sessionID: string, suppressNomination = false): void {
+        if (this.stampMRU?.sessionID === sessionID) this.stampMRU = undefined;
         if (suppressNomination) this.unavailable.add(sessionID);
         this.dirty.add(sessionID);
         this.changed.add(sessionID);
@@ -1020,8 +1033,21 @@ export class NativeFoldReplay {
         reader: V2StoreReader,
         after?: number,
     ): Omit<NativeRowRecord, "revision">[] {
-        let metadata = this.metadata.get(sessionID);
         const through = reader.latestSequence(sessionID);
+        const retained = this.stampMRU;
+        let metadata = this.metadata.get(sessionID);
+        if (
+            !metadata &&
+            retained?.sessionID === sessionID &&
+            retained.source === reader.hostIdentity() &&
+            retained.after === after &&
+            retained.through === through
+        ) {
+            metadata = retained.rows;
+            this.metadata.set(sessionID, metadata);
+            this.metadataThrough.set(sessionID, through);
+            this.metadataAfter.set(sessionID, after);
+        }
         const known = new Set(metadata?.map((row) => row.id));
         if (
             !metadata ||
@@ -1034,6 +1060,14 @@ export class NativeFoldReplay {
             this.metadataThrough.set(sessionID, through);
             this.metadataAfter.set(sessionID, after);
         }
+        if (this.options.protocol === 3)
+            this.stampMRU = {
+                sessionID,
+                source: reader.hostIdentity(),
+                through,
+                after,
+                rows: metadata,
+            };
         const byID = new Map(metadata.map((row) => [row.id, row]));
         const grouped = new Map<V2RowStamp, V2Message[]>();
         const anchorIndex = native.findIndex((message) => {
@@ -1118,6 +1152,7 @@ export class NativeFoldReplay {
                     // controls must use those source identities, not a text match.
                     replay = { ...replay, blocked: false };
                     const replayAfter = replay.floor.after;
+                    const replayStart = replay.floor.kind === "start";
                     captured = native.filter((message) => {
                         if (effortPart(message)) return false;
                         const id = nativeRowID(message);
@@ -1131,6 +1166,7 @@ export class NativeFoldReplay {
                                     (part) => part.type === "text" && part.text === baseline,
                                 )
                             );
+                        if (replayStart) return true;
                         const seq = reader.sequenceForId(draft.sessionID, id);
                         return seq === undefined || seq > replayAfter;
                     });
@@ -1593,6 +1629,7 @@ export class NativeFoldReplay {
         this.staleHeads.delete(sessionID);
     }
     async forget(sessionID: string): Promise<void> {
+        if (this.stampMRU?.sessionID === sessionID) this.stampMRU = undefined;
         this.unprovenControls.delete(sessionID);
         this.cancelLegacyUpgrade(sessionID);
         this.cancelEditedAdmission(sessionID);

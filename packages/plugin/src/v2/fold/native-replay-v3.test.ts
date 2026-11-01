@@ -7,7 +7,7 @@ import { Database } from "../../shared/sqlite";
 import { HEAD_IDS } from "../hooks/payload";
 import type { SessionContext, V2Message } from "../hooks/types";
 import type { StoreRow, V2StoreReader } from "../store-reader";
-import { nativeFoldCache } from "./memory-cache";
+import { type NativeFoldBudget, nativeFoldCache } from "./memory-cache";
 import { NativeFoldReplay } from "./native-replay";
 import { encodeAdmissionV3, IMPORTED_MC_SUMMARY, validAdmissionV3 } from "./native-replay-v3";
 import { foldDigest } from "./owner";
@@ -31,7 +31,7 @@ const context = (messages: V2Message[]): SessionContext => ({
     options: {},
     messages,
 });
-function fixture(count = 2, imported = 0) {
+function fixture(count = 2, imported = 0, budget?: NativeFoldBudget) {
     const db = new Database(":memory:");
     initializeDatabase(db);
     runMigrations(db);
@@ -114,7 +114,7 @@ function fixture(count = 2, imported = 0) {
         },
     };
     const logs: string[] = [];
-    const cache = nativeFoldCache(db);
+    const cache = nativeFoldCache(db, budget);
     const make = (version: 2 | 3 = 3) =>
         new NativeFoldReplay(nativeFoldCache(db), () => reader, storage, {
             protocol: version,
@@ -142,6 +142,51 @@ function fixture(count = 2, imported = 0) {
     };
     return { db, rows, reader, loads, kv, storage, logs, cache, replay, make, begin, finish };
 }
+
+test("v3 warm capture reuses evicted identity stamps but reloads changed source coordinates", async () => {
+    const f = fixture(3, 0, { maxSessions: 1, maxSessionBytes: 1 });
+    const stamps = spyOn(f.reader, "rowStampsThrough");
+    const sequences = spyOn(f.reader, "sequenceForId");
+    const capture = () => {
+        const raw = f.rows.map((row) => message(row.id, row.data.text as string));
+        return f.replay.capture(context([message(HEAD_IDS[0], "head"), ...raw]), raw);
+    };
+    try {
+        await capture();
+        expect(stamps).toHaveBeenCalledTimes(1);
+        expect(f.cache.usage()).toEqual({ sessions: 0, bytes: 0 });
+        stamps.mockClear();
+        sequences.mockClear();
+        for (let pass = 0; pass < 3; pass++) await capture();
+        expect(stamps).not.toHaveBeenCalled();
+        expect(sequences).not.toHaveBeenCalled();
+        expect(f.cache.tail("s")).toBeUndefined();
+
+        f.rows.push({ id: "new", seq: 4, session_id: "s", type: "user", data: { text: "new" } });
+        await capture();
+        expect(stamps).toHaveBeenCalledTimes(1);
+        stamps.mockClear();
+        f.replay.invalidate("s");
+        await capture();
+        expect(stamps).toHaveBeenCalledTimes(1);
+        stamps.mockClear();
+
+        const identity = spyOn(f.reader, "hostIdentity").mockReturnValue("replacement-host");
+        try {
+            await capture();
+            expect(stamps).toHaveBeenCalledTimes(1);
+        } finally {
+            identity.mockRestore();
+        }
+        stamps.mockClear();
+        await f.replay.forget("s");
+        await capture();
+        expect(stamps).toHaveBeenCalledTimes(1);
+    } finally {
+        stamps.mockRestore();
+        sequences.mockRestore();
+    }
+});
 
 test("v3 cold migrated replay never reads below the imported host checkpoint", async () => {
     const f = fixture(32000, 31738);

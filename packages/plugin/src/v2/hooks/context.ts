@@ -326,6 +326,36 @@ function bindKeptInstructionCoordinates(
     bind();
 }
 
+function controlSuffixKeys(
+    messages: readonly V2Message[],
+    skip?: V2Message,
+): Map<V2Message, string> {
+    const keys = new Map<V2Message, string>();
+    let before: string | undefined;
+    let occurrence = 0;
+    for (let index = messages.length - 1; index >= 0; index--) {
+        const message = messages[index];
+        if (!message || message === skip) continue;
+        const part = effortPart(message);
+        if (part) {
+            if (before)
+                keys.set(
+                    message,
+                    JSON.stringify({
+                        before,
+                        occurrence: occurrence++,
+                        effort: part.effort,
+                        previous: part.previous,
+                    }),
+                );
+        } else {
+            before = nativeRowID(message);
+            occurrence = 0;
+        }
+    }
+    return keys;
+}
+
 function restoreNativeCheckpointInput(
     messages: readonly V2Message[],
     incoming: V2Message,
@@ -336,10 +366,21 @@ function restoreNativeCheckpointInput(
     bindKeptInstructionCoordinates(messages, incoming, reader, sessionID);
     const present = new Set(messages.flatMap((message) => nativeRowID(message) ?? []));
     const currentControls = new Map<string, number>();
+    const currentSuffixKeys = controlSuffixKeys(messages, incoming);
+    const restoredSuffixKeys = controlSuffixKeys(restored);
+    const leadingControls = new Set<string>();
     let after: string | undefined;
     for (const message of messages) {
         const part = effortPart(message);
         if (part) {
+            // At the kept suffix's leading edge the left source row is hidden.
+            // Align controls backwards from the next source row instead, so equal
+            // controls at different positions remain distinct occurrences.
+            const suffixKey = currentSuffixKeys.get(message);
+            if (!after && suffixKey) {
+                leadingControls.add(suffixKey);
+                continue;
+            }
             const key = controlKey({
                 after,
                 effort: part.effort as string | undefined,
@@ -349,6 +390,8 @@ function restoreNativeCheckpointInput(
         } else if (message !== incoming && nativeRowID(message)) after = nativeRowID(message);
     }
     const hidden = restored.filter((message) => {
+        const suffixKey = restoredSuffixKeys.get(message);
+        if (suffixKey && leadingControls.delete(suffixKey)) return false;
         const key = rememberedControlKey(message);
         const count = key ? (currentControls.get(key) ?? 0) : 0;
         if (key && count > 0) {
