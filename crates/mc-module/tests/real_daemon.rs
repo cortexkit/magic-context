@@ -591,7 +591,7 @@ async fn hostless_store_init_first_request_through_real_daemon() {
     let consumer = SubcConsumer::connect(&daemon.connection_file, fast_consumer_options())
         .await
         .unwrap();
-    let identity = BindIdentity::new(project, "mc-module-test", "hostless");
+    let identity = BindIdentity::new("mc-module-test", "hostless");
     let target = RouteTarget::ToolProvider {
         module_id: MODULE_ID.to_string(),
     };

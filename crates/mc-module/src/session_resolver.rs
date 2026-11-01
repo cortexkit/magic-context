@@ -165,11 +165,7 @@ impl RealProviderRunner {
         params: Value,
         budget: Duration,
     ) -> Result<Value, SessionResolveError> {
-        let bind_identity = BindIdentity::new(
-            identity.project_root.clone(),
-            identity.harness.as_str(),
-            identity.session.as_str(),
-        );
+        let bind_identity = BindIdentity::new(identity.harness.as_str(), identity.session.as_str());
         let work = async {
             let mut options = consumer_options();
             options.handshake_timeout = budget;
@@ -328,12 +324,12 @@ impl RealSessionResolver {
 
     async fn resolve_once(
         &self,
-        project_root: &Path,
+        _project_root: &Path,
         harness: &str,
         instance_token: &str,
     ) -> Result<Option<ResolvedSession>, SessionResolveError> {
         let target = self.route_target();
-        let identity = BindIdentity::new(project_root.to_path_buf(), harness, instance_token);
+        let identity = BindIdentity::new(harness, instance_token);
         let consumer = SubcConsumer::connect(&self.connection_file, consumer_options())
             .await
             .map_err(|error| SessionResolveError::Transport(error.to_string()))?;
@@ -553,7 +549,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct SeenRoute {
         target: Option<RouteTarget>,
-        project_root: String,
+        identity: Value,
         harness: String,
         session: String,
         role_versions: Option<std::collections::BTreeMap<String, String>>,
@@ -611,7 +607,7 @@ mod tests {
                 key: key.clone(),
                 daemon_id,
                 pid: std::process::id(),
-                daemon_ver: "fake".into(),
+                daemon_ver: "0.39.0".into(),
             },
         )
         .unwrap();
@@ -643,7 +639,7 @@ mod tests {
                             let mut log = log.lock().unwrap();
                             log.push(SeenRoute {
                                 target: Some(target),
-                                project_root: identity.project_root.to_string_lossy().into(),
+                                identity: serde_json::to_value(&identity).unwrap(),
                                 harness: identity.harness,
                                 session: identity.session,
                                 role_versions,
@@ -818,10 +814,10 @@ mod tests {
             .unwrap();
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2, "{seen:?}");
-        assert_eq!(seen[0].project_root, project.to_string_lossy());
+        assert!(seen[0].identity.get("project_root").is_none());
         assert_eq!(seen[0].harness, RUNNER_BIND_HARNESS);
         assert_eq!(seen[0].session, "s");
-        assert_eq!(seen[1].project_root, project.to_string_lossy());
+        assert!(seen[1].identity.get("project_root").is_none());
         assert_eq!(seen[1].harness, "claude-code");
         assert_eq!(seen[1].session, "parent");
         let expected = Some(std::collections::BTreeMap::from([(

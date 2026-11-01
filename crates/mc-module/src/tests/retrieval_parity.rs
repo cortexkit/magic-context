@@ -1769,14 +1769,20 @@ mod ts_store_reference {
     }
 }
 
-struct SharedRetrievalHandler(Arc<McHandler>);
+struct SharedRetrievalHandler {
+    handler: Arc<McHandler>,
+    scope: subc_protocol::scope::ScopeStamp,
+}
 #[async_trait]
 impl ModuleHandler for SharedRetrievalHandler {
     async fn on_bind(&self, request: &RouteBindRequest) -> subc_client_rs::BindDecision {
-        self.0.on_bind(request).await
+        // This fixture tests retrieval transport, not scope authorization.
+        // Supply the project stamp a scoped caller receives from the daemon.
+        let request = request.clone().with_scope(self.scope.clone());
+        self.handler.on_bind(&request).await
     }
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
-        self.0.handle(ctx, body).await
+        self.handler.handle(ctx, body).await
     }
 }
 struct AbortRoutes(Vec<tokio::task::AbortHandle>);
@@ -1813,7 +1819,7 @@ async fn module_registers_and_serves_ts_baseline_without_synapse_loaded() {
         key: generate_key().unwrap(),
         daemon_id: generate_daemon_id().unwrap(),
         pid: std::process::id(),
-        daemon_ver: "retrieval-parity".into(),
+        daemon_ver: "0.39.0".into(),
     };
     write_atomic(&connection_file, &connection).unwrap();
     let clients = ConnectedClients::new();
@@ -1833,7 +1839,18 @@ async fn module_registers_and_serves_ts_baseline_without_synapse_loaded() {
     let (_, serve) = subc_client_rs::serve_with_handle(
         &connection_file,
         manifest(DEFAULT_MODULE_ID),
-        SharedRetrievalHandler(Arc::new(handler)),
+        SharedRetrievalHandler {
+            handler: Arc::new(handler),
+            scope: subc_protocol::scope::ScopeStamp::new(
+                subc_protocol::Principal::Reserved {
+                    module_id: "prefrontal-core".into(),
+                },
+                "retrieval-fixture",
+                1,
+                subc_protocol::scope::ScopeKind::Ephemeral,
+            )
+            .with_workdir(Some(project.to_string_lossy().into_owned())),
+        },
     )
     .await
     .unwrap();
@@ -1847,7 +1864,6 @@ async fn module_registers_and_serves_ts_baseline_without_synapse_loaded() {
         .call(
             route_targets::catalog_provider_target_for_test(),
             subc_protocol::BindIdentity::new(
-                project,
                 session_resolver::RUNNER_BIND_HARNESS,
                 "retrieval-session",
             ),

@@ -82,7 +82,7 @@ fn direct_caller() -> AppCaller {
     let request = RouteBindRequest::new(
         RouteHandle::detached(1, 1),
         crate::route_targets::app_read_target_for_test(crate::DEFAULT_MODULE_ID),
-        BindIdentity::new(PathBuf::from("caller-chosen"), "desktop", "ignored-session"),
+        BindIdentity::new("desktop", "ignored-session"),
     )
     .with_principal(Principal::Direct);
     assert!(request.scope.is_none(), "samples bind carries no scope");

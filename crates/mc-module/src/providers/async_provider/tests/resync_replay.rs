@@ -515,7 +515,7 @@ async fn an_announced_legacy_applied_snapshot_refuses_once_and_recovers_once() {
     let refusal = rig
         .h
         .async_ride(
-            &binding,
+            binding.principal.as_ref(),
             &json!({"session_ref":rig.reference,"cause":"ceiling","deadline_ms":10_000}),
         )
         .await

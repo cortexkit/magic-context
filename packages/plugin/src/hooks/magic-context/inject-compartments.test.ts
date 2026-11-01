@@ -48,6 +48,7 @@ import { sessionRenderCacheSelect } from "../../features/magic-context/storage-s
 import { sessionMetaCollectionSelect } from "../../features/magic-context/storage-session-collections";
 import { insertUserMemory } from "../../features/magic-context/user-memory/storage-user-memory";
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
+import { scaleTest } from "../../shared/slow-test";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
@@ -145,96 +146,104 @@ for (const host of ["opencode", "opencode2"] as const) {
             _resetHarnessForTesting();
         }
     });
-    it(`${host} applied compaction bounds auto-search blob across 20000 user messages`, () => {
-        _resetHarnessForTesting();
-        setHarness(host);
-        db = makeDb();
-        let live: MessageLike[] = [];
-        const window = 100;
-        const total = 20000;
-        const id = (number: number) => `user-${number}`;
-        let maxEntries = 0;
-        let maxBytes = 0;
-        const readBlob = db.prepare(
-            `SELECT ${sessionMetaCollectionSelect("auto_search_hint_decisions", "blob", db)} FROM session_meta WHERE session_id = ?`,
-        );
-        try {
-            for (let number = 1; number <= total; number++) {
-                live.push({
-                    info: { id: id(number), role: "user" },
-                    parts: [{ type: "text", text: `Question ${number}` }],
-                } as MessageLike);
-                expect(
-                    appendAutoSearchHintDecision(
+    scaleTest(
+        `${host} applied compaction bounds auto-search blob across user messages`,
+        (slow) => {
+            _resetHarnessForTesting();
+            setHarness(host);
+            db = makeDb();
+            let live: MessageLike[] = [];
+            const window = 100;
+            // Twenty windows exercise repeated retirement in the unit lane; the nightly
+            // slow lane keeps the full 20,000-message run without changing the bound.
+            const total = slow ? 20000 : 2000;
+            const id = (number: number) => `user-${number}`;
+            let maxEntries = 0;
+            let maxBytes = 0;
+            const readBlob = db.prepare(
+                `SELECT ${sessionMetaCollectionSelect("auto_search_hint_decisions", "blob", db)} FROM session_meta WHERE session_id = ?`,
+            );
+            try {
+                for (let number = 1; number <= total; number++) {
+                    live.push({
+                        info: { id: id(number), role: "user" },
+                        parts: [{ type: "text", text: `Question ${number}` }],
+                    } as MessageLike);
+                    expect(
+                        appendAutoSearchHintDecision(
+                            db,
+                            SESSION_ID,
+                            number % 3 === 0
+                                ? { messageId: id(number), decision: "hint", text: "h".repeat(512) }
+                                : {
+                                      messageId: id(number),
+                                      decision: "no-hint",
+                                      reason: number % 2 ? "error" : "timeout",
+                                  },
+                        ),
+                    ).toMatchObject({ ok: true, kind: "appended" });
+                    if (number % window !== 0) continue;
+                    const before = (readBlob.get(SESSION_ID) as { blob: string }).blob;
+                    const count = JSON.parse(before).length;
+                    expect(count).toBe(live.length);
+                    expect(count).toBeLessThanOrEqual(window * 2);
+                    maxEntries = Math.max(maxEntries, count);
+                    maxBytes = Math.max(maxBytes, Buffer.byteLength(before));
+                    if (number === window) continue;
+                    const cutoff = number - window;
+                    appendCompartments(db, SESSION_ID, [
+                        {
+                            sequence: number / window - 2,
+                            startMessage: cutoff - window,
+                            endMessage: cutoff - 1,
+                            startMessageId: id(cutoff - window + 1),
+                            endMessageId: id(cutoff),
+                            title: "Compacted questions",
+                            content: "Earlier questions were answered.",
+                        },
+                    ]);
+                    const options = {
+                        db,
+                        sessionId: SESSION_ID,
+                        state: getOrCreateSessionMeta(db, SESSION_ID),
+                        injectDocs: false,
+                    };
+                    materializeM0(options);
+                    const result = injectM0M1({
+                        ...options,
+                        state: getOrCreateSessionMeta(db, SESSION_ID),
+                        messages: live,
+                        prefixTrimSourceOrder:
+                            host === "opencode2" ? capturePrefixTrimSourceOrder(live) : undefined,
+                    });
+                    expect(result.prefixTrimStatus).toBe("applied");
+                    live = live.filter((message) => typeof message.info.id === "string");
+                    // Match postprocessing when the host permits rebuilding the request prefix.
+                    flushAutoSearchHintDecisionRetirement(
                         db,
                         SESSION_ID,
-                        number % 3 === 0
-                            ? { messageId: id(number), decision: "hint", text: "h".repeat(512) }
-                            : {
-                                  messageId: id(number),
-                                  decision: "no-hint",
-                                  reason: number % 2 ? "error" : "timeout",
-                              },
-                    ),
-                ).toMatchObject({ ok: true, kind: "appended" });
-                if (number % window !== 0) continue;
-                const before = (readBlob.get(SESSION_ID) as { blob: string }).blob;
-                const count = JSON.parse(before).length;
-                expect(count).toBe(live.length);
-                expect(count).toBeLessThanOrEqual(window * 2);
-                maxEntries = Math.max(maxEntries, count);
-                maxBytes = Math.max(maxBytes, Buffer.byteLength(before));
-                if (number === window) continue;
-                const cutoff = number - window;
-                appendCompartments(db, SESSION_ID, [
-                    {
-                        sequence: number / window - 2,
-                        startMessage: cutoff - window,
-                        endMessage: cutoff - 1,
-                        startMessageId: id(cutoff - window + 1),
-                        endMessageId: id(cutoff),
-                        title: "Compacted questions",
-                        content: "Earlier questions were answered.",
-                    },
-                ]);
-                const options = {
-                    db,
-                    sessionId: SESSION_ID,
-                    state: getOrCreateSessionMeta(db, SESSION_ID),
-                    injectDocs: false,
-                };
-                materializeM0(options);
-                const result = injectM0M1({
-                    ...options,
-                    state: getOrCreateSessionMeta(db, SESSION_ID),
-                    messages: live,
-                    prefixTrimSourceOrder:
-                        host === "opencode2" ? capturePrefixTrimSourceOrder(live) : undefined,
-                });
-                expect(result.prefixTrimStatus).toBe("applied");
-                live = live.filter((message) => typeof message.info.id === "string");
-                // Match postprocessing when the host permits rebuilding the request prefix.
-                flushAutoSearchHintDecisionRetirement(
-                    db,
-                    SESSION_ID,
-                    new Set(live.map((message) => message.info.id as string)),
+                        new Set(live.map((message) => message.info.id as string)),
+                    );
+                    expect(live).toHaveLength(window);
+                    const after = (readBlob.get(SESSION_ID) as { blob: string }).blob;
+                    expect(
+                        JSON.parse(after).map(
+                            (decision: { messageId: string }) => decision.messageId,
+                        ),
+                    ).toEqual(Array.from({ length: window }, (_, index) => id(cutoff + index + 1)));
+                    expect(Buffer.byteLength(after)).toBeLessThanOrEqual(window * 800);
+                }
+                expect(getAutoSearchHintDecisions(db, SESSION_ID)).toHaveLength(window);
+                console.log(
+                    `AUTO_SEARCH_BOUNDED ${host} users=${total} live=${window} maxEntries=${maxEntries} maxBytes=${maxBytes}`,
                 );
-                expect(live).toHaveLength(window);
-                const after = (readBlob.get(SESSION_ID) as { blob: string }).blob;
-                expect(
-                    JSON.parse(after).map((decision: { messageId: string }) => decision.messageId),
-                ).toEqual(Array.from({ length: window }, (_, index) => id(cutoff + index + 1)));
-                expect(Buffer.byteLength(after)).toBeLessThanOrEqual(window * 800);
+            } finally {
+                clearInjectionCache(SESSION_ID);
+                _resetHarnessForTesting();
             }
-            expect(getAutoSearchHintDecisions(db, SESSION_ID)).toHaveLength(window);
-            console.log(
-                `AUTO_SEARCH_BOUNDED ${host} users=${total} live=${window} maxEntries=${maxEntries} maxBytes=${maxBytes}`,
-            );
-        } finally {
-            clearInjectionCache(SESSION_ID);
-            _resetHarnessForTesting();
-        }
-    }, 30000);
+        },
+        30000,
+    );
 }
 
 function makeDb(): Database {

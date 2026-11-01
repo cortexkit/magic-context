@@ -136,7 +136,7 @@ impl EntorhinalResolver {
         let mut lease = ConsumerLease(Some(consumer));
         let consumer = lease.0.as_ref().unwrap();
         let root = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
-        let identity = BindIdentity::new(root.clone(), harness, instance_token);
+        let identity = BindIdentity::new(harness, instance_token);
         let response = consumer
             .call(
                 route_target(),
@@ -384,7 +384,7 @@ mod tests {
                 key: key.clone(),
                 daemon_id,
                 pid: std::process::id(),
-                daemon_ver: "fake".to_string(),
+                daemon_ver: "0.39.0".to_string(),
             },
         )
         .unwrap();
@@ -424,9 +424,10 @@ mod tests {
                             {
                                 assert_eq!(target, route_target());
                                 assert_eq!(identity.session, "instance");
-                                let bind = serde_json::to_value(&identity).unwrap().to_string();
-                                assert!(bind.contains(project.to_str().unwrap()));
-                                assert!(bind.contains("test-harness"));
+                                let bind = serde_json::to_value(&identity).unwrap();
+                                assert!(bind.get("project_root").is_none());
+                                assert!(bind.get("project_id").is_none());
+                                assert_eq!(identity.harness, "test-harness");
                                 (
                                     FrameType::Response,
                                     serde_json::to_vec(&ClientControlResponse::RouteOpen {
@@ -443,9 +444,9 @@ mod tests {
                             if disconnect_next.swap(false, Ordering::SeqCst) {
                                 break;
                             }
-                            log.lock()
-                                .unwrap()
-                                .push(serde_json::from_slice(&frame.body).unwrap());
+                            let request: Value = serde_json::from_slice(&frame.body).unwrap();
+                            assert_eq!(request["params"]["canonicalRoot"], json!(project));
+                            log.lock().unwrap().push(request);
                             match &mode {
                             Mode::Reply(bytes) => (FrameType::Response, bytes.clone()),
                             Mode::ModuleError(code) => (FrameType::Error, serde_json::to_vec(&json!({ "code": code, "message": "fake error", "detail": null })).unwrap()),

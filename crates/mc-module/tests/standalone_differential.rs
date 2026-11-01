@@ -390,7 +390,7 @@ async fn absent_module(directory: &Path) -> AbsentModule {
             key: key.clone(),
             daemon_id,
             pid: std::process::id(),
-            daemon_ver: "fake".into(),
+            daemon_ver: "0.39.0".into(),
         },
     )
     .unwrap();

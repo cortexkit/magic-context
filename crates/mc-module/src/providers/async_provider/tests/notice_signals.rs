@@ -1,6 +1,33 @@
 //! Optional compaction-provider notice signals: digest-preserving reads, no new pricing policy.
 use super::*;
 
+#[tokio::test]
+async fn service_tier_condition_decodes_and_survives_notice_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = Rig::new(dir.path()).await;
+    rig.fill(40);
+    rig.notice(1, 1_000, None).await;
+    let mut notice = message(&rig, 2, 1_000, None);
+    notice.headers.insert("service_tier".into(), "fast".into());
+    notice
+        .headers
+        .insert("events".into(), "service_tier_change:fast".into());
+    notice.digest = notice::notice_digest(&notice.headers).parse().unwrap();
+    rig.h.advance_compaction("fixture", &notice).await.unwrap();
+    let saved = rig.state();
+    let headers = saved.conditions.as_ref().unwrap();
+    assert_eq!(
+        headers.get("service_tier").map(String::as_str),
+        Some("fast")
+    );
+    let decoded = notice::AdvanceNotice::from_headers(headers).unwrap();
+    assert_eq!(
+        decoded.events,
+        vec![notice::Event::ServiceTierChange("fast".into())]
+    );
+    assert_eq!(decoded.to_headers(), notice.headers);
+}
+
 #[test]
 fn history_edit_cost_and_chain_reset_match_published_vectors() {
     let vectors: Value = serde_json::from_str(include_str!(concat!(

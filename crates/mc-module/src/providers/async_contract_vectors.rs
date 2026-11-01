@@ -204,6 +204,7 @@ fn the_largest_well_formed_notice_fits_the_header_bound() {
     .with_events(events);
     let mut encoded = notice.to_headers();
     encoded.insert("history_edit_cost".into(), "x".repeat(1024));
+    assert_eq!(encoded[notice::headers::SERVICE_TIER], "ultrafast");
     assert!(encoded[notice::headers::EVENTS].len() <= notice::MAX_HEADER_VALUE_BYTES);
     assert_eq!(notice.check(), Ok(()));
     assert_eq!(

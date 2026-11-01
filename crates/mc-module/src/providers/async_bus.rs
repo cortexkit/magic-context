@@ -114,7 +114,6 @@ pub(crate) trait Issuer: Send + Sync + 'static {
 struct SubcIssuer {
     consumer: SubcConsumer,
     identity: ConsumerIdentity,
-    connection: PathBuf,
 }
 
 impl SubcIssuer {
@@ -130,11 +129,7 @@ impl SubcIssuer {
         let consumer = SubcConsumer::connect(&connection, ConsumerOptions::default())
             .await
             .map_err(|e| e.to_string())?;
-        Ok(Self {
-            consumer,
-            identity,
-            connection,
-        })
+        Ok(Self { consumer, identity })
     }
 }
 
@@ -149,11 +144,7 @@ impl Issuer for SubcIssuer {
                 RouteTargetConfig::default()
                     .target(RegisteredRoute::CompactionBus)
                     .expect("compaction bus route is registered"),
-                BindIdentity::new(
-                    self.connection.parent().unwrap_or(Path::new("/")),
-                    "runner",
-                    "async-compaction-bus",
-                ),
+                BindIdentity::new("runner", "async-compaction-bus"),
                 body,
                 CallOptions {
                     timeout: Duration::from_secs(5),

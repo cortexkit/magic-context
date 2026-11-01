@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 export const slowPattern = "\\[slow\\] ";
 export const slowUnits = [
     ["plugin", "src/hooks/magic-context/auto-embed-session.test.ts", ["re-embeds old chunks under busy active passes without draining inactive sessions or blocking a turn"]],
+    ["plugin", "src/hooks/magic-context/inject-compartments.test.ts", ["opencode", "opencode2"].map((host) => `${host} applied compaction bounds auto-search blob across user messages`)],
     ["plugin", "src/features/magic-context/search-pool.test.ts", ["cold full rebuild returns every row across cooperative slices", "heartbeat CPU samples observe synchronous busy work", "heartbeat stops sampling when the measured operation ends"]],
     ["plugin", "src/shared/stable-json-linear.test.ts", ["copies a deeply nested value once, not once per level"]],
     ["plugin", "src/features/magic-context/smart-notes/http-timeout.test.ts", ["slow sweeps admit fewer notes instead of cutting the next request short"]],
@@ -57,7 +58,7 @@ async function run(dry: boolean) {
             }
         }
     }
-    console.log(dry ? `Dry selection passed: ${selected} registrations (21 normal, 23 slow), no test bodies executed` : "Slow unit lane passed");
+    console.log(dry ? `Dry selection passed: ${selected} registrations (23 normal, 25 slow), no test bodies executed` : "Slow unit lane passed");
 }
 
 if (import.meta.main) {

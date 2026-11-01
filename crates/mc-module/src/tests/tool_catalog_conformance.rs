@@ -198,6 +198,7 @@ async fn the_role_conformance_suite_passes_every_case_magic_context_can_run() {
         "catalog_schema_digest_stable",
         "catalog_digest_only",
         "catalog_unknown_preset_refused",
+        "catalog_listed_presets_served",
         "terminal_frame_on_success",
         "terminal_frame_on_refusal",
     ];
@@ -207,6 +208,14 @@ async fn the_role_conformance_suite_passes_every_case_magic_context_can_run() {
             assert_eq!(
                 outcome,
                 Some(&CaseOutcome::Passed),
+                "{}\n{rendered}",
+                spec.name
+            );
+        } else if spec.name == "system_text_default_served" {
+            // MC serves explicitly requested text, but does not promise to
+            // attach default system text to every catalog response.
+            assert!(
+                matches!(outcome, Some(CaseOutcome::Inapplicable { reason }) if reason.contains("system-text-default/v1")),
                 "{}\n{rendered}",
                 spec.name
             );
