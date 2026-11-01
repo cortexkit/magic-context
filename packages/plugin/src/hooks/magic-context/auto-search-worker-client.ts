@@ -32,6 +32,7 @@ import {
 import { isEmbeddingHostBusy } from "../../shared/embedding-activity";
 import { getHarness, type HarnessId } from "../../shared/harness";
 import { log } from "../../shared/logger";
+import { reuseWorker } from "../../shared/reusable-worker";
 import {
     assertTransformWrite,
     type Database,
@@ -189,6 +190,7 @@ export function retryUnpublishedAutoSearchNoHint(
 }
 
 export interface AutoSearchWorkerInput {
+    jobId?: number;
     persistent?: boolean;
     job?: "search" | "backfill" | "messages";
     path: string;
@@ -213,7 +215,7 @@ export interface AutoSearchWorkerInput {
     /** The message-history lane to run, for the "messages" job. */
     messageRequest?: MessageHistorySearchRequest;
 }
-export type AutoSearchWorkerReply =
+export type AutoSearchWorkerReply = { jobId?: number } & (
     | { kind: "diagnostics"; diagnostics: AutoSearchDiagnostics }
     | { kind: "result"; results: UnifiedSearchResult[]; timings?: AutoSearchJobTimings }
     | { kind: "messages"; outcome: MessageHistorySearchOutcome }
@@ -221,7 +223,8 @@ export type AutoSearchWorkerReply =
     | { kind: "accepted" }
     | { kind: "error"; error: string }
     | { kind: "query"; id: number; text: string }
-    | { kind: "batch"; id: number; texts: string[]; purpose: EmbeddingPurpose };
+    | { kind: "batch"; id: number; texts: string[]; purpose: EmbeddingPurpose }
+);
 /** Where a search job spent its time, reported with its result. Durations and counts only. */
 export interface AutoSearchJobTimings {
     steps: UnifiedSearchStepTimings;
@@ -230,6 +233,7 @@ export interface AutoSearchJobTimings {
     lastPoolWarm: CompartmentChunkPoolWarmReport | null;
 }
 export type AutoSearchEmbeddingReply = {
+    jobId?: number;
     id: number;
     embeddingHostBusy?: boolean;
     result?: CapturedQueryEmbedding | Float32Array | null;
@@ -401,8 +405,10 @@ async function acquireSearchWorker(
         }
         const fresh = !slot;
         if (!slot) {
-            const worker = inRootAsyncContext(
-                () => new Worker(entry, { workerData: { ...input, persistent: true } }),
+            const worker = inRootAsyncContext(() =>
+                input.job === "backfill" && entry.href === defaultAutoSearchWorkerEntry().href
+                    ? reuseWorker(entry, { workerData: input })
+                    : new Worker(entry, { workerData: { ...input, persistent: true } }),
             );
             const shutdown = createWorkerShutdown(
                 worker,
@@ -508,6 +514,7 @@ export function queueAutoSearchBackfill(
     return work;
 }
 
+let nextSearchJobId = 0;
 async function executeAutoSearchWorker(
     db: Database,
     sessionId: string,
@@ -536,6 +543,7 @@ async function executeAutoSearchWorker(
         : lifecycle.signal;
     const snapshot = getProjectEmbeddingSnapshot(projectPath);
     const input: AutoSearchWorkerInput = {
+        jobId: ++nextSearchJobId,
         job,
         path,
         harness: getHarness(),
@@ -663,6 +671,8 @@ async function executeAutoSearchWorker(
             finish([], new Error(`auto-search worker exited (${code})`));
         const onMessage = async (reply: AutoSearchWorkerReply) => {
             if (released) return;
+            if (entry.href === defaultAutoSearchWorkerEntry().href && reply.jobId !== input.jobId)
+                return;
             if (reply.kind === "diagnostics") {
                 if (!settled && options.autoSearchDiagnostics) {
                     const workerStarted = options.autoSearchDiagnostics.workerStarted;
@@ -701,7 +711,7 @@ async function executeAutoSearchWorker(
             }
             // Only the "messages" job answers with these.
             if (reply.kind === "messages" || reply.kind === "accepted") return;
-            const response: AutoSearchEmbeddingReply = { id: reply.id };
+            const response: AutoSearchEmbeddingReply = { id: reply.id, jobId: input.jobId };
             // After the deadline, answer at once without a vector so the job
             // can finish; nobody uses its result.
             if (!signal.aborted) {
@@ -937,7 +947,11 @@ export function searchMessageHistoryOffThread(
             deadline.unref?.();
         };
         try {
-            worker = inRootAsyncContext(() => new Worker(entry, { workerData: input }));
+            worker = inRootAsyncContext(() =>
+                entry.href === defaultAutoSearchWorkerEntry().href
+                    ? reuseWorker(entry, { workerData: input })
+                    : new Worker(entry, { workerData: input }),
+            );
             shutdown = createWorkerShutdown(
                 worker,
                 "message-search",

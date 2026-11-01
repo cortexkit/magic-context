@@ -25,6 +25,7 @@ import type {
 import { registerExitAbort } from "../../shared/exit-abort-registry";
 import type { HarnessId } from "../../shared/harness";
 import { log } from "../../shared/logger";
+import { reuseWorker } from "../../shared/reusable-worker";
 import { type Database, getSqliteDatabasePath, releaseIndexOwner } from "../../shared/sqlite";
 import { createWorkerShutdown, type WorkerShutdown } from "../../shared/worker-shutdown";
 import {
@@ -221,11 +222,14 @@ export function runSessionWarmupWorker(
         }
         options.signal?.addEventListener("abort", abort, { once: true });
         try {
-            worker = inRootAsyncContext(
-                () =>
-                    new Worker(options.entry ?? defaultEntry(), {
-                        workerData: { ...input, openCancellation: openCancellation.buffer },
-                    }),
+            worker = inRootAsyncContext(() =>
+                options.entry
+                    ? new Worker(options.entry, {
+                          workerData: { ...input, openCancellation: openCancellation.buffer },
+                      })
+                    : reuseWorker(defaultEntry(), {
+                          workerData: { ...input, openCancellation: openCancellation.buffer },
+                      }),
             );
             shutdown = createWorkerShutdown(worker, "raw-ordinal-warmup", WARMUP_CLOSE_DEADLINE_MS);
         } catch (error) {
