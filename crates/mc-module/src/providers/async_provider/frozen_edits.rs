@@ -157,6 +157,15 @@ impl FrozenEdits {
             .collect()
     }
 
+    pub(super) fn message_ids(&self) -> Vec<String> {
+        self.parts
+            .values()
+            .map(|part| part.mid.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     /// Only the edits of the messages `mids`: a window's acknowledged edits,
     /// carried into a lineage that begins at a cut.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -416,6 +425,43 @@ mod tests {
         let mut reversed = old;
         reversed.merge(&current);
         assert_eq!(merged.json().unwrap(), reversed.json().unwrap());
+    }
+
+    #[test]
+    fn batched_message_archive_preserves_point_merge_bytes() {
+        let prior = FrozenEdits::from_json(&json!([
+            {"mid":"mA","part":"0","digest":"same","bytes":"newer acknowledgement","ack_version":6},
+            {"mid":"mA","part":"1","digest":"old-source","bytes":"old branch","ack_version":1},
+            {"mid":"mB","part":"0","digest":"source","bytes":"old bytes","ack_version":1},
+            {"mid":"outside","part":"0","digest":"other","bytes":"unrelated","ack_version":3}
+        ]).to_string()).unwrap();
+        let current = FrozenEdits::from_json(
+            &json!([
+                {"mid":"mA","part":"0","digest":"same","bytes":"older cut","ack_version":2},
+                {"mid":"mA","part":"1","digest":"new-source","bytes":null,"ack_version":2},
+                {"mid":"mB","part":"0","digest":"source","bytes":null,"ack_version":4}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(current.message_ids(), ["mA", "mB"]);
+        let stored: BTreeMap<_, _> = prior.message_snapshots().unwrap().into_iter().collect();
+        let expected: Vec<_> = current
+            .message_snapshots()
+            .unwrap()
+            .into_iter()
+            .map(|(mid, raw)| {
+                let mut point = FrozenEdits::from_json(&stored[&mid]).unwrap();
+                point.merge(&FrozenEdits::from_json(&raw).unwrap());
+                (mid, point.json().unwrap())
+            })
+            .collect();
+        let mut batch = FrozenEdits::default();
+        for mid in current.message_ids() {
+            batch.merge(&FrozenEdits::from_json(&stored[&mid]).unwrap());
+        }
+        batch.merge(&current);
+        assert_eq!(batch.message_snapshots().unwrap(), expected);
     }
 
     /// An Anthropic assistant message of `count` text parts keyed "0", "1",

@@ -162,9 +162,7 @@ pub(super) fn prepared_answer(
             // The head-only insertion at the lineage start: the runner never
             // renders it while the view is due, but it stays well formed.
             let head = head_insertion(store, &state.reference(), due.version)?;
-            let from = answer["initial"]["range"]["from"].clone();
-            answer["initial"]["range"] = json!({"from": from, "to": from});
-            answer["initial"]["replacement"] = head;
+            answer = due_answer(answer, head, &due);
             Ok(PreparedAnswer::Due(answer, due))
         }
         (_, _) if serde_json::to_vec(&answer).map_err(transient)?.len() > SETUP_FRAME_BUDGET => {
@@ -180,6 +178,21 @@ pub(super) fn prepared_answer(
         }
         _ => Ok(PreparedAnswer::Inline(answer)),
     }
+}
+
+/// Keep Setup well formed while a published view supplies the retained window.
+pub(super) fn head_only_answer(mut answer: Value, head: Value) -> Value {
+    let from = answer["initial"]["range"]["from"].clone();
+    answer["initial"]["range"] = json!({"from": from, "to": from});
+    answer["initial"]["replacement"] = head;
+    answer
+}
+
+/// The shared Setup form when the runner will fetch a published view.
+pub(super) fn due_answer(answer: Value, head: Value, due: &DueView) -> Value {
+    let mut answer = head_only_answer(answer, head);
+    answer["view_due"] = json!({"version":due.version,"digest":due.digest});
+    answer
 }
 
 /// The history head the prepared view inserts at the lineage start: the

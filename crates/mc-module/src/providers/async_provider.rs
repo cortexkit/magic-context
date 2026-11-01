@@ -28,6 +28,7 @@ mod resident;
 mod resync_replay;
 #[cfg(test)]
 mod scaling_tests;
+mod setup_delivery;
 mod setup_payloads;
 #[cfg(test)]
 mod tests;
@@ -532,6 +533,10 @@ pub(crate) struct AsyncRecord {
     /// written before cut seeds existed.
     #[serde(default)]
     record_version: u32,
+    /// Each generation stores summaries under its own database key. Remember
+    /// which notice reset it so redelivery reuses that key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notice_reset_seq: Option<u64>,
     /// The first ordinal of a lineage that begins at a cut. Its compact prefix
     /// facts are stored in the `cut:<first ordinal>` slot. Archived window seeds
     /// are stored separately and loaded when a lineage selects their cut;
@@ -2258,7 +2263,7 @@ impl State {
     fn reset(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
         self.capture_resync_sources(store)?;
         self.resync_sources.as_mut().expect("resync sources").replay = None;
-        self.finish_reset(store)
+        self.finish_reset(store, true)
     }
 
     fn reset_for_notice(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
@@ -2275,7 +2280,13 @@ impl State {
         if let Some(replay) = replay {
             self.resync_sources.as_mut().expect("resync sources").replay = Some(replay);
         }
-        self.finish_reset(store)
+        let advance_generation = self.notice_reset_seq != Some(self.seq);
+        self.notice_reset_seq = Some(self.seq);
+        if !advance_generation {
+            tracing::warn!(session_ref=%self.reference(), seq=self.seq,
+                "async notice reset reused: generation unchanged");
+        }
+        self.finish_reset(store, advance_generation)
     }
 
     fn capture_resync_sources(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
@@ -2416,7 +2427,11 @@ impl State {
         Ok(())
     }
 
-    fn finish_reset(&mut self, store: &McStore) -> Result<(), HandlerOutcome> {
+    fn finish_reset(
+        &mut self,
+        store: &McStore,
+        advance_generation: bool,
+    ) -> Result<(), HandlerOutcome> {
         self.undo_checked_through = None;
         self.resync = true;
         self.resync_replay_pending = false;
@@ -2438,11 +2453,13 @@ impl State {
         self.truncate_entries(None);
         self.todo_scan = None;
         self.lineage = None;
-        let prior_namespace = self.namespace();
-        self.generation = self.next_generation()?;
-        store
-            .carry_session_data(&prior_namespace, &self.namespace())
-            .map_err(transient)?;
+        if advance_generation {
+            let prior_namespace = self.namespace();
+            self.generation = self.next_generation()?;
+            store
+                .carry_session_data(&prior_namespace, &self.namespace())
+                .map_err(transient)?;
+        }
         self.engine = transform::compaction::State::new(self.reference(), self.engine.preset);
         self.produced_view = None;
         self.applied_view = None;
@@ -2506,11 +2523,7 @@ fn existing_setup_answer(
                     view_version = due.version,
                     "moved session Setup answered with the prepared view due"
                 );
-                // Added after the typed rebuild in `with_checkpoint`, which
-                // keeps only the members it knows.
-                let mut built = with_checkpoint(head_only, checkpoint);
-                built["view_due"] = json!({"version": due.version, "digest": due.digest});
-                return bytes(&built);
+                return bytes(&with_checkpoint(head_only, checkpoint));
             }
         }
     }
@@ -2537,6 +2550,9 @@ fn with_checkpoint(answer: Value, checkpoint: Option<contract::setup::SetupCheck
     }
     if let Some(wait) = decoded.ride_wait_ms() {
         built = built.with_ride_wait_ms(wait);
+    }
+    if let Some(due) = decoded.view_due() {
+        built = built.with_view_due(due.clone());
     }
     // The pruning permission goes out exactly as the session's stored answer
     // has it: absent for a session set up before ck-mc accepted pruning.
@@ -2850,11 +2866,10 @@ impl McHandler {
                     {
                         cursor.term(Some("malformed_compaction_notice")).await
                     }
-                    // A notice whose lineage this record cannot certify fails the
-                    // same way on every redelivery, and each attempt resets the
-                    // record into a fresh generation first. Retrying it only
-                    // multiplies those resets, so end this delivery; the
-                    // runner's next Setup or notice starts from the reset record.
+                    // Redelivery cannot recreate the published cut and saved
+                    // summaries needed to prove the unreadable prefix. End
+                    // this notice; the runner must retry Setup naming the
+                    // publishing lineage or begin a full lineage.
                     Err(
                         HandlerOutcome::Error { ref code, .. }
                         | HandlerOutcome::ErrorWithDetail { ref code, .. },
@@ -2892,7 +2907,8 @@ impl McHandler {
     ) -> Result<Vec<u8>, HandlerOutcome> {
         // Setup can hold both the old and new lineage records during recovery.
         // Keep that future off the caller's stack, including on small runtimes.
-        Box::pin(self.async_setup_inner(channel, binding, params, None)).await
+        let reply = Box::pin(self.async_setup_inner(channel, binding, params, None)).await?;
+        Box::pin(setup_delivery::finish(self, binding, params, reply)).await
     }
 
     async fn async_setup_inner(
@@ -3624,6 +3640,7 @@ impl McHandler {
             generation: start.generation,
             offline_first_pass: start.preparation,
             record_version: cut_seed::RECORD_VERSION,
+            notice_reset_seq: None,
             cut_first_ordinal: None,
             cut_seed: None,
             lineage_first_ordinal: 0,
@@ -5252,6 +5269,38 @@ impl McHandler {
         state = self
             .checkout(store, &notice.session_ref)?
             .ok_or_else(|| transient("async session disappeared"))?;
+        // Setup is durable before its reply is delivered. Until the runner
+        // receives that reply it can still announce the publishing parent.
+        // Such a notice is not a fork and must not discard the retained cut.
+        let interrupted_parent = if state
+            .lineage
+            .as_deref()
+            .is_some_and(|lineage| lineage != notice.lineage_id)
+            && state.setup.lineage_id.as_deref() == Some(notice.lineage_id.as_str())
+        {
+            match state.cut_first_ordinal {
+                Some(first) => state
+                    .published_cut_for(store, first, &notice.lineage_id)?
+                    .is_some(),
+                None => false,
+            }
+        } else {
+            false
+        };
+        if interrupted_parent
+            || (state.setup.lineage_id.as_deref() != Some(notice.lineage_id.as_str())
+                && state
+                    .setup
+                    .descends_from
+                    .as_ref()
+                    .is_some_and(|parent| parent.lineage_id == notice.lineage_id))
+        {
+            state.catch_up_moved_session_data(store)?;
+            tracing::info!(session_ref=%notice.session_ref, seq=notice.seq,
+                "async notice parked: awaiting cut Setup delivery to the runner");
+            self.checkin(state);
+            return Ok(());
+        }
         if state.standalone_move.is_some()
             && !offline_first_pass::adopted(&state)
             && !offline_first_pass::prepared(&state)
@@ -5505,6 +5554,14 @@ impl McHandler {
                 return Ok(());
             }
             let read = read.map(|_| ());
+            if matches!(&read, Err(HandlerOutcome::Error { code, .. }) if code == "cut_rebootstrap_required")
+            {
+                // Repeating the read cannot reconstruct a prefix the runner
+                // no longer serves and no retained published cut covers.
+                // Return the named error to the bus consumer, which ends the
+                // delivery instead of repeatedly resetting the same notice.
+                return read;
+            }
             let verified = read.is_ok()
                 && state
                     .entries
@@ -5556,6 +5613,9 @@ impl McHandler {
         let phase = scaling_tests::save_meter::start_kind(&notice.session_ref, "phase:index");
         #[cfg(test)]
         let index_step = scaling_tests::save_meter::start_kind(&notice.session_ref, "index:ingest");
+        // Persist the end of the failed-read cycle before any engine pass can
+        // populate this generation with a newly served prefix.
+        state.notice_reset_seq = None;
         state.ingest_read(store, codec)?;
         #[cfg(test)]
         drop(index_step);
