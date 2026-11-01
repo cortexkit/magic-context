@@ -11,7 +11,12 @@ import { getSqliteDatabasePath } from "../../shared/sqlite";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_EXPAND_DESCRIPTION, CTX_EXPAND_TOKEN_BUDGET } from "./constants";
 import { resolveCtxExpandMode } from "./mode";
-import { renderItemByTag, renderMessageByOrdinal, renderVerboseRange } from "./render";
+import {
+    type RecoveryAttachments,
+    renderItemByTag,
+    renderMessageByOrdinal,
+    renderVerboseRangeForTool,
+} from "./render";
 import { renderSearchArchiveOffThread } from "./search-archive";
 import type { CtxExpandArgs } from "./types";
 import { readV2ArchiveOffThread } from "./v2-archive-reader";
@@ -21,6 +26,7 @@ export { CTX_EXPAND_LIGHT_DESCRIPTION } from "../light-descriptions";
 export interface CtxExpandToolDeps {
     db: ContextDatabase;
     expandTools?: ToolExpansionMap;
+    recoveryAttachments?: RecoveryAttachments;
     /**
      * The resolved transform mode of this plugin process. In Rust mode the ck-mc
      * module numbers the §N§ tags the agent sees, in its own store (`store.db`),
@@ -96,9 +102,9 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
             if (mode.kind === "error") {
                 return mode.message;
             }
+            const source = rawMessageWorkerSource(sessionId);
+            const path = getSqliteDatabasePath(deps.db);
             if (mode.kind === "tag") {
-                const source = rawMessageWorkerSource(sessionId);
-                const path = getSqliteDatabasePath(deps.db);
                 if (source) {
                     if (!path)
                         throw new Error(
@@ -112,9 +118,31 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                         throw new Error("Search archive worker unavailable: unexpected tag reply");
                     return text;
                 }
-                return renderItemByTag(deps.db, sessionId, mode.tag);
+                return renderItemByTag(
+                    deps.db,
+                    sessionId,
+                    mode.tag,
+                    "part",
+                    deps.recoveryAttachments,
+                );
             }
             if (mode.kind === "message") {
+                if (source) {
+                    if (!path)
+                        throw new Error(
+                            "Search archive worker unavailable: private archive has no off-thread source",
+                        );
+                    const text = await readV2ArchiveOffThread(path, source.path, sessionId, {
+                        kind: "message",
+                        message: mode.message,
+                        tokenBudget: CTX_EXPAND_TOKEN_BUDGET,
+                    });
+                    if (text === null)
+                        throw new Error(
+                            "Search archive worker unavailable: unexpected message reply",
+                        );
+                    return text;
+                }
                 return (
                     (await renderSearchArchiveOffThread(
                         deps.db,
@@ -122,7 +150,7 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                         mode.message,
                         mode.message,
                         CTX_EXPAND_TOKEN_BUDGET,
-                    )) ?? renderMessageByOrdinal(sessionId, mode.message)
+                    )) ?? renderMessageByOrdinal(sessionId, mode.message, deps.recoveryAttachments)
                 );
             }
             const { start, end, verbose } = mode;
@@ -137,6 +165,22 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                 return `Range ${start}-${end} is entirely within the live tail (after the last compacted message ${lastCompartmentEnd}); those messages are already visible in context.`;
             }
             const effectiveEnd = lastCompartmentEnd >= 0 ? Math.min(end, lastCompartmentEnd) : end;
+            if (verbose && source) {
+                if (!path)
+                    throw new Error(
+                        "Search archive worker unavailable: private archive has no off-thread source",
+                    );
+                const text = await readV2ArchiveOffThread(path, source.path, sessionId, {
+                    kind: "verbose",
+                    start,
+                    end: effectiveEnd,
+                    tokenBudget: CTX_EXPAND_TOKEN_BUDGET,
+                    expandTools: deps.expandTools,
+                });
+                if (text === null)
+                    throw new Error("Search archive worker unavailable: unexpected verbose reply");
+                return text;
+            }
             const archived = await renderSearchArchiveOffThread(
                 deps.db,
                 sessionId,
@@ -148,28 +192,14 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
 
             // Verbose mode: each message separate, with ids + per-part previews.
             if (verbose) {
-                const v = renderVerboseRange(
+                return renderVerboseRangeForTool(
                     sessionId,
                     start,
                     effectiveEnd,
                     CTX_EXPAND_TOKEN_BUDGET,
                     deps.expandTools,
+                    deps.recoveryAttachments,
                 );
-                if (!v.text) {
-                    return `No messages found in range ${start}-${effectiveEnd}. The range may be outside this session's history.`;
-                }
-                const out = [
-                    `Messages ${start}-${v.lastOrdinal} (verbose). Recover any one in full with ctx_expand(message=<ordinal>):`,
-                    "",
-                    v.text,
-                ];
-                if (v.truncated) {
-                    out.push(
-                        "",
-                        `Truncated at message ${v.lastOrdinal} (budget: ~${CTX_EXPAND_TOKEN_BUDGET} tokens). Call again with start=${v.lastOrdinal + 1} end=${effectiveEnd} verbose=true for more.`,
-                    );
-                }
-                return out.join("\n");
             }
 
             const chunk = readSessionChunk(

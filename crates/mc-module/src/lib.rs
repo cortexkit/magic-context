@@ -17160,8 +17160,49 @@ fn paired_expand_tool<'a>(
     (id == result_id).then_some((name.as_str(), id.as_str(), input, output))
 }
 
-fn expand_file_label(filename: Option<&str>) -> String {
-    filename.map_or_else(|| "  [file]".to_string(), |name| format!("  [file] {name}"))
+fn expand_file_notice(
+    filename: Option<&str>,
+    mime: Option<&str>,
+    location: Option<&str>,
+) -> String {
+    let field = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.replace(['\r', '\n'], " "))
+    };
+    let mut notice = "  [file]".to_string();
+    if let Some(name) = field(filename) {
+        notice.push_str(&format!(" {name}"));
+    }
+    if let Some(mime) = field(mime) {
+        notice.push_str(&format!(" ({mime})"));
+    }
+    if let Some(location) = field(location).filter(|value| {
+        let lower = value.to_ascii_lowercase();
+        !lower.starts_with("data:") && !lower.starts_with("blob:")
+    }) {
+        notice.push_str(&format!(" — stored location: {location}"));
+    }
+    notice.push_str("; content not recovered. If needed, ask the user to attach it again.");
+    notice
+}
+
+fn expand_attachment_location(part: &Value) -> Option<&str> {
+    [
+        part.get("url"),
+        part.get("path"),
+        part.get("source").and_then(|source| source.get("uri")),
+        part.get("source").and_then(|source| source.get("url")),
+        part.get("source").and_then(|source| source.get("path")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .find(|value| {
+        let lower = value.trim().to_ascii_lowercase();
+        !lower.is_empty() && !lower.starts_with("data:") && !lower.starts_with("blob:")
+    })
 }
 
 fn render_cached_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
@@ -17181,14 +17222,27 @@ fn render_cached_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
             "  [tool: {tool_name} #{id}]\n  output:\n{}",
             expand_tool_output_text(output)
         )),
-        ck_wire::CkKind::Media(media) => Some(expand_file_label(media.filename.as_deref())),
-        ck_wire::CkKind::Opaque(opaque) if opaque.kind == "file" => Some(expand_file_label(
-            opaque
-                .raw
-                .get("filename")
-                .or_else(|| opaque.raw.get("url"))
-                .and_then(Value::as_str),
+        ck_wire::CkKind::Media(media) => Some(expand_file_notice(
+            media.filename.as_deref(),
+            Some(&media.media_type),
+            expand_attachment_location(&media.source),
         )),
+        ck_wire::CkKind::Opaque(opaque) if opaque.kind == "file" || opaque.kind == "image" => {
+            Some(expand_file_notice(
+                opaque
+                    .raw
+                    .get("filename")
+                    .or_else(|| opaque.raw.get("name"))
+                    .and_then(Value::as_str),
+                opaque
+                    .raw
+                    .get("mime")
+                    .or_else(|| opaque.raw.get("mimeType"))
+                    .or_else(|| opaque.raw.get("mediaType"))
+                    .and_then(Value::as_str),
+                expand_attachment_location(&opaque.raw),
+            ))
+        }
         ck_wire::CkKind::Text { .. }
         | ck_wire::CkKind::Reasoning { .. }
         | ck_wire::CkKind::RedactedReasoning { .. }
@@ -17604,12 +17658,17 @@ fn render_verbose_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
             "    • [reasoning] {}",
             truncate_expand_preview(text, CTX_EXPAND_VERBOSE_REASONING_PREVIEW_CHARS)
         )),
-        ck_wire::CkKind::Media(_) => Some("    • [file]".to_string()),
+        ck_wire::CkKind::Media(_) => {
+            render_cached_expand_part(part).map(|notice| format!("    • {}", notice.trim_start()))
+        }
         ck_wire::CkKind::RedactedReasoning { .. } => Some("    • [redacted_reasoning]".to_string()),
         ck_wire::CkKind::Opaque(opaque)
             if opaque.kind == "step-start" || opaque.kind == "step-finish" =>
         {
             None
+        }
+        ck_wire::CkKind::Opaque(opaque) if opaque.kind == "file" || opaque.kind == "image" => {
+            render_cached_expand_part(part).map(|notice| format!("    • {}", notice.trim_start()))
         }
         ck_wire::CkKind::Opaque(opaque) => Some(format!("    • [{}]", opaque.kind)),
     }
@@ -41183,6 +41242,90 @@ mod tests {
             .text
             .contains("[7] tool results\n    • tool bash → output ~"));
         assert_eq!(rendered.last_ordinal, 7);
+    }
+
+    async fn assert_ctx_expand_attachment_notice(mode: &str, image: bool) {
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
+        );
+        let media = if image {
+            json!({"kind":"image", "media_type":"image/png", "filename":"screenshot.png",
+                "source":{"type":"data_base64", "data":"secret-inline-bytes"}})
+        } else {
+            json!({"kind":"document", "media_type":"application/pdf", "filename":"report.pdf",
+                "source":{"type":"url", "url":"file:///work/report.pdf"}})
+        };
+        let mut message = ck_with_role("attachment", 1, "user", "");
+        message.ck.content = vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Media(
+            serde_json::from_value(media).unwrap(),
+        ))];
+        let messages = vec![message];
+        publish_ctx_expand_fixture(&store, "ses", project.to_str().unwrap(), &messages);
+        store
+            .seed_tags_for_test(
+                "ses",
+                &[mc_store::TagMintInput {
+                    block_id: "attachment#0".to_string(),
+                    kind: "message".to_string(),
+                    token_count: 10,
+                    source_bytes: b"original".to_vec(),
+                }],
+                1,
+            )
+            .unwrap();
+        let args = match mode {
+            "tag" => json!({"tag":1}),
+            "message" => json!({"message":1}),
+            _ => json!({"start":1, "end":1, "verbose":true}),
+        };
+        let output = tool_text(call_facade(&handler, "ctx_expand", args).await);
+        let expected = if image {
+            "[file] screenshot.png (image/png); content not recovered. If needed, ask the user to attach it again."
+        } else {
+            "[file] report.pdf (application/pdf) — stored location: file:///work/report.pdf; content not recovered. If needed, ask the user to attach it again."
+        };
+        assert!(output.contains(expected), "{output}");
+        assert!(!output.contains("secret-inline-bytes"), "{output}");
+    }
+
+    macro_rules! attachment_recovery_test {
+        ($name:ident, $mode:literal, $image:literal) => {
+            #[tokio::test(flavor = "current_thread")]
+            async fn $name() {
+                assert_ctx_expand_attachment_notice($mode, $image).await;
+            }
+        };
+    }
+
+    attachment_recovery_test!(ctx_expand_tag_file_content_not_recovered, "tag", false);
+    attachment_recovery_test!(ctx_expand_tag_image_content_not_recovered, "tag", true);
+    attachment_recovery_test!(
+        ctx_expand_message_file_content_not_recovered,
+        "message",
+        false
+    );
+    attachment_recovery_test!(
+        ctx_expand_message_image_content_not_recovered,
+        "message",
+        true
+    );
+    attachment_recovery_test!(ctx_expand_range_file_content_not_recovered, "range", false);
+    attachment_recovery_test!(ctx_expand_range_image_content_not_recovered, "range", true);
+
+    #[test]
+    fn ctx_expand_text_rendering_is_unchanged() {
+        let message = ck_with_role("text", 1, "user", " exact\ntext ");
+        assert_eq!(
+            render_cached_message_expand(&message),
+            "[1] U (user) — full recovery:\n\n  [text]\n exact\ntext "
+        );
+        assert_eq!(
+            render_verbose_range_expand(&[message], 1, 1).text,
+            "[1] U (user)\n    • exact\ntext"
+        );
     }
 
     #[test]

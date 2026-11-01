@@ -153,7 +153,16 @@
               "type": "file",
               "filename": "artifact.txt",
               "mime": "text/plain",
-              "url": "data:text/plain;base64,YXJ0aWZhY3Q="
+              "url": "data:text/plain;base64,YXJ0aWZhY3Q=",
+              "source": {
+                "type": "file",
+                "path": "/work/artifact.txt"
+              }
+            },
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "c2NyZWVuc2hvdA=="
             }
           ]
         },
@@ -193,7 +202,23 @@
                     "type": "file",
                     "filename": "artifact.txt",
                     "mime": "text/plain",
-                    "url": "data:text/plain;base64,YXJ0aWZhY3Q="
+                    "url": "data:text/plain;base64,YXJ0aWZhY3Q=",
+                    "source": {
+                      "type": "file",
+                      "path": "/work/artifact.txt"
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": "opencode",
+                  "kind": "image",
+                  "raw": {
+                    "type": "image",
+                    "mimeType": "image/png",
+                    "data": "c2NyZWVuc2hvdA=="
                   }
                 }
               }
@@ -234,7 +259,7 @@
         "full": [
           {
             "ordinal": 10,
-            "text": "[10] U (user) — full recovery:\n\n  [text]\nInspect this artifact.\n  [file] artifact.txt"
+            "text": "[10] U (user) — full recovery:\n\n  [text]\nInspect this artifact.\n  [file] artifact.txt (text/plain) — stored location: /work/artifact.txt; content not recovered. If needed, ask the user to attach it again.\n  [file] (image/png); content not recovered. If needed, ask the user to attach it again."
           },
           {
             "ordinal": 11,
@@ -242,7 +267,7 @@
           }
         ],
         "verbose": {
-          "text": "[10] U (user)\n    • Inspect this artifact.\n    • [file]\n\n[11] A (assistant)\n    • Artifact inspected.",
+          "text": "[10] U (user)\n    • Inspect this artifact.\n    • [file] artifact.txt (text/plain) — stored location: /work/artifact.txt; content not recovered. If needed, ask the user to attach it again.\n    • [file] (image/png); content not recovered. If needed, ask the user to attach it again.\n\n[11] A (assistant)\n    • Artifact inspected.",
           "lastOrdinal": 11,
           "truncated": false
         }

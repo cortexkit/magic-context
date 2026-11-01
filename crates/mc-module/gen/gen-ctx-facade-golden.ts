@@ -60,6 +60,12 @@ const cases = [
                         filename: "artifact.txt",
                         mime: "text/plain",
                         url: "data:text/plain;base64,YXJ0aWZhY3Q=",
+                        source: { type: "file", path: "/work/artifact.txt" },
+                    },
+                    {
+                        type: "image",
+                        mimeType: "image/png",
+                        data: "c2NyZWVuc2hvdA==",
                     },
                 ],
             },

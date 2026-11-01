@@ -32,6 +32,29 @@ import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
 import { expandToolPart } from "../../shared/historian-tool-expansions";
 import type { ToolExpansionMap } from "../../shared/historian-tool-template";
 
+export type RecoveryAttachments = (sessionId: string, messageId: string) => readonly unknown[];
+
+function recoveryParts(sessionId: string, message: RawMessage, attachments?: RecoveryAttachments) {
+    return attachments ? [...message.parts, ...attachments(sessionId, message.id)] : message.parts;
+}
+
+function attachmentNotice(part: Record<string, unknown>): string {
+    const field = (value: unknown): string =>
+        typeof value === "string" ? value.trim().replace(/[\r\n]+/g, " ") : "";
+    const source = isRecord(part.source) ? part.source : {};
+    // Inline bytes and process-local blob URLs are not locations another tool can reopen.
+    const location = [part.url, part.path, source.uri, source.url, source.path]
+        .map(field)
+        .find((value) => value && !/^(data|blob):/i.test(value));
+    const name = field(part.filename) || field(part.name);
+    const mime = field(part.mime) || field(part.mimeType) || field(part.mediaType);
+    return (
+        `[file]${name ? ` ${name}` : ""}${mime ? ` (${mime})` : ""}` +
+        `${location ? ` — stored location: ${location}` : ""}` +
+        "; content not recovered. If needed, ask the user to attach it again."
+    );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -177,7 +200,7 @@ function renderPartPreview(part: unknown, expandTools?: ToolExpansionMap): strin
     const reasoning = reasoningOf(part);
     if (reasoning !== null) return `    • [reasoning] ${truncate(reasoning, 120)}`;
     const type = typeof part.type === "string" ? part.type : "part";
-    if (type === "file") return "    • [file]";
+    if (type === "file" || type === "image") return `    • ${attachmentNotice(part)}`;
     if (type === "step-start" || type === "step-finish") return null;
     return `    • [${type}]`;
 }
@@ -211,13 +234,7 @@ function renderPartFull(part: unknown): string | null {
     }
 
     const type = typeof part.type === "string" ? part.type : "part";
-    if (type === "file") {
-        const name =
-            (typeof part.filename === "string" && part.filename) ||
-            (typeof part.url === "string" && part.url) ||
-            "";
-        return `  [file]${name ? ` ${name}` : ""}`;
-    }
+    if (type === "file" || type === "image") return `  ${attachmentNotice(part)}`;
 
     // step-start, step-finish (token/cost metadata), reasoning, and any other
     // structural part: noise for recovery — skip.
@@ -230,7 +247,11 @@ function renderPartFull(part: unknown): string | null {
  * hits, the verbose range view). Returns a "deleted" message when no message sits
  * at that ordinal (pruned/reverted or wrong ordinal).
  */
-export function renderMessageByOrdinal(sessionId: string, ordinal: number): string {
+export function renderMessageByOrdinal(
+    sessionId: string,
+    ordinal: number,
+    attachments?: RecoveryAttachments,
+): string {
     // Read only the one message, never the whole session.
     const found: RawMessage[] = [];
     visitRawSessionMessages(sessionId, ordinal, ordinal, (m) => {
@@ -245,7 +266,9 @@ export function renderMessageByOrdinal(sessionId: string, ordinal: number): stri
             `Re-run the tool if you still need the data.`
         );
     }
-    const rendered = msg.parts.map(renderPartFull).filter((l): l is string => l !== null);
+    const rendered = recoveryParts(sessionId, msg, attachments)
+        .map(renderPartFull)
+        .filter((l): l is string => l !== null);
 
     const lines: string[] = [`[${msg.ordinal}] ${roleLabel(msg.role)} — full recovery:`, ""];
     if (rendered.length === 0) {
@@ -275,6 +298,7 @@ export function renderVerboseRange(
     end: number,
     tokenBudget: number,
     expandTools?: ToolExpansionMap,
+    attachments?: RecoveryAttachments,
 ): VerboseRangeResult {
     const out: string[] = [];
     let usedTokens = 0;
@@ -285,7 +309,7 @@ export function renderVerboseRange(
     // over a long session never loads every message and tool output at once.
     visitRawSessionMessages(sessionId, start, end, (msg: RawMessage) => {
         const header = `[${msg.ordinal}] ${verboseRoleLabel(msg)}`;
-        const partLines = msg.parts
+        const partLines = recoveryParts(sessionId, msg, attachments)
             .map((part) => renderPartPreview(part, expandTools))
             .filter((l): l is string => l !== null);
         const block = partLines.length > 0 ? `${header}\n${partLines.join("\n")}` : header;
@@ -304,12 +328,39 @@ export function renderVerboseRange(
     return { text: out.join("\n\n"), lastOrdinal, truncated };
 }
 
+export function renderVerboseRangeForTool(
+    sessionId: string,
+    start: number,
+    end: number,
+    tokenBudget: number,
+    expandTools?: ToolExpansionMap,
+    attachments?: RecoveryAttachments,
+): string {
+    const v = renderVerboseRange(sessionId, start, end, tokenBudget, expandTools, attachments);
+    if (!v.text) {
+        return `No messages found in range ${start}-${end}. The range may be outside this session's history.`;
+    }
+    const out = [
+        `Messages ${start}-${v.lastOrdinal} (verbose). Recover any one in full with ctx_expand(message=<ordinal>):`,
+        "",
+        v.text,
+    ];
+    if (v.truncated) {
+        out.push(
+            "",
+            `Truncated at message ${v.lastOrdinal} (budget: ~${tokenBudget} tokens). Call again with start=${v.lastOrdinal + 1} end=${end} verbose=true for more.`,
+        );
+    }
+    return out.join("\n");
+}
+
 /** Resolve a transcript handle by persisted ownership, never by message ordinal. */
 export function renderItemByTag(
     db: ContextDatabase,
     sessionId: string,
     number: number,
     textIndexDomain: "part" | "text" = "part",
+    attachments?: RecoveryAttachments,
 ): string {
     const tag = getTagById(db, sessionId, number);
     if (!tag)
@@ -346,15 +397,21 @@ export function renderItemByTag(
             ? rendered.join("\n")
             : `Tag ${number}'s original tool call is no longer in stored history.`;
     }
-    const scoped = /^(.*):p(\d+)$/.exec(tag.messageId);
+    const scoped = /^(.*):(?:p|file)(\d+)$/.exec(tag.messageId);
     const derived = /^(.*):mc-text-v1:([a-f0-9]+):([a-f0-9]+):o(\d+)$/.exec(tag.messageId);
     const owner = scoped?.[1] ?? derived?.[1] ?? tag.messageId;
     const message = readRawSessionMessageById(sessionId, owner);
     if (!message) return `Tag ${number}'s original text is no longer in stored history.`;
     const index = scoped ? Number(scoped[2]) : 0;
     // Text tag locators count all message parts in OpenCode, but only text parts in Pi.
-    const piText = message.parts.filter((part) => isRecord(part) && part.type === "text");
-    const part = message.parts[index];
+    const attached = attachments?.(sessionId, message.id) ?? [];
+    const parts = [...message.parts, ...attached];
+    const piText = parts.filter((part) => isRecord(part) && part.type === "text");
+    const part =
+        tag.type === "file"
+            ? (attached.find((part) => isRecord(part) && part.partIndex === index) ??
+              message.parts[index])
+            : parts[index];
     const matching = derived
         ? piText.filter(
               (part) =>
@@ -365,7 +422,7 @@ export function renderItemByTag(
         : [];
     const selected = derived
         ? matching[Number(derived[4])]
-        : textIndexDomain === "text"
+        : textIndexDomain === "text" && tag.type !== "file"
           ? piText[index]
           : part;
     return selected

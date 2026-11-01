@@ -1,11 +1,21 @@
 import { type MessagePort, Worker } from "node:worker_threads";
+
 import { registerExitAbort } from "../../shared/exit-abort-registry";
+import type { ToolExpansionMap } from "../../shared/historian-tool-template";
 import { inRootAsyncContext } from "../../shared/sqlite";
 import { createWorkerShutdown, type WorkerShutdown } from "../../shared/worker-shutdown";
 
 type ArchiveRead =
     | { kind: "archive"; start: number; end: number; tokenBudget: number; archiveOnly: boolean }
-    | { kind: "tag"; tag: number };
+    | { kind: "tag"; tag: number }
+    | { kind: "message"; message: number; tokenBudget: number }
+    | {
+          kind: "verbose";
+          start: number;
+          end: number;
+          tokenBudget: number;
+          expandTools?: ToolExpansionMap;
+      };
 
 interface Request {
     kind: "v2-archive-read";
@@ -172,8 +182,9 @@ export async function serveV2ArchiveReads(
         { V2StoreReaderPool },
         { createV2RawMessageReader, createV2RawMessageProvider },
         { setBoundedRawMessageProvider },
-        { renderItemByTag },
+        { renderItemByTag, renderMessageByOrdinal, renderVerboseRangeForTool },
         { renderSearchArchive },
+        { createV2RecoveryAttachments },
     ] = await Promise.all([
         import("../../shared/sqlite"),
         import("../../v2/store-reader"),
@@ -181,6 +192,7 @@ export async function serveV2ArchiveReads(
         import("../../hooks/magic-context/read-session-chunk"),
         import("./render"),
         import("./search-archive"),
+        import("../../v2/hooks/expand-attachments"),
     ]);
     const pool = new V2StoreReaderPool();
     openConnections.add(pool);
@@ -188,34 +200,59 @@ export async function serveV2ArchiveReads(
         if (request.kind !== "v2-archive-read") return;
         let db: InstanceType<typeof Database> | undefined;
         let unregister: (() => void) | undefined;
+        let rawReader: ReturnType<typeof pool.open> | undefined;
         let reply: Reply;
         try {
             db = new Database(request.path, { readonly: true, fileMustExist: true });
             openConnections.add(db);
             db.exec("PRAGMA busy_timeout = 250");
-            const reader = createV2RawMessageReader(() => pool.open(request.rawPath));
+            const raw = pool.open(request.rawPath);
+            rawReader = raw;
+            const reader = createV2RawMessageReader(
+                () => raw,
+                undefined,
+                () => {},
+            );
+            const attachments = createV2RecoveryAttachments(raw);
             unregister = setBoundedRawMessageProvider(
                 request.sessionId,
                 createV2RawMessageProvider(reader, request.sessionId),
             );
             const read = request.read;
-            const text =
-                read.kind === "tag"
-                    ? renderItemByTag(db, request.sessionId, read.tag)
-                    : renderSearchArchive(
-                          db,
-                          request.sessionId,
-                          read.start,
-                          read.end,
-                          read.tokenBudget,
-                          read.archiveOnly,
-                          () => reader.ordinalMapForRange(request.sessionId, read.start, read.end),
-                      );
+            let text: string | null;
+            if (read.kind === "tag") {
+                text = renderItemByTag(db, request.sessionId, read.tag, "part", attachments);
+            } else {
+                const start = read.kind === "message" ? read.message : read.start;
+                const end = read.kind === "message" ? read.message : read.end;
+                text = renderSearchArchive(
+                    db,
+                    request.sessionId,
+                    start,
+                    end,
+                    read.tokenBudget,
+                    read.kind === "archive" && read.archiveOnly,
+                    () => reader.ordinalMapForRange(request.sessionId, start, end),
+                );
+                if (text === null && read.kind === "message") {
+                    text = renderMessageByOrdinal(request.sessionId, read.message, attachments);
+                } else if (text === null && read.kind === "verbose") {
+                    text = renderVerboseRangeForTool(
+                        request.sessionId,
+                        start,
+                        end,
+                        read.tokenBudget,
+                        read.expandTools,
+                        attachments,
+                    );
+                }
+            }
             reply = { kind: "v2-archive-result", id: request.id, text };
         } catch (error) {
             reply = { kind: "v2-archive-result", id: request.id, text: null, error: String(error) };
         } finally {
             unregister?.();
+            rawReader?.close();
             if (db) openConnections.delete(db);
             db?.close();
         }
