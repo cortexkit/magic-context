@@ -6744,10 +6744,23 @@ impl McHandler {
             let _serial = if matches!(request.cause, ride::RideCause::Ceiling) {
                 self.provider_serial.lock_for(&state.key).await
             } else {
-                let Ok(guard) = self.provider_serial.try_lock_for(&state.key) else {
-                    return bytes(&ride::RideAnswer::nothing().with_cache_ttl(state.cache_ttl()));
-                };
-                guard
+                match self.provider_serial.try_lock_for(&state.key) {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        // The provider cache is already gone. Wait within the
+                        // ride deadline so held work lands in this rebuild,
+                        // not a second rebuild after the racing job finishes.
+                        self.log_decision(decision_log::line(
+                            &request.session_ref,
+                            &format!("ride cause={}", request.cause.as_str()),
+                            decision_log::Decision::Ride,
+                            "provider_busy+waiting",
+                            &self.decision_facts(&state),
+                            &[],
+                        ));
+                        self.provider_serial.lock_for(&state.key).await
+                    }
+                }
             };
             state = self
                 .checkout(store, &request.session_ref)?
@@ -6858,6 +6871,18 @@ impl McHandler {
         tokio::time::timeout(budget, work)
             .await
             .unwrap_or_else(|_| {
+                self.log_decision(decision_log::line(
+                    &request.session_ref,
+                    &format!("ride cause={}", request.cause.as_str()),
+                    if matches!(request.cause, ride::RideCause::Ceiling) {
+                        decision_log::Decision::Ceiling
+                    } else {
+                        decision_log::Decision::Ride
+                    },
+                    "deadline_elapsed+nothing",
+                    &decision_log::Facts::default(),
+                    &[],
+                ));
                 bytes(&match fallback_ttl {
                     Some(ttl) => ride::RideAnswer::nothing().with_cache_ttl(ttl),
                     None => ride::RideAnswer::nothing(),

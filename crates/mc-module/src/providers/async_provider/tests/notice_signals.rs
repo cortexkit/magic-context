@@ -330,7 +330,10 @@ async fn chain_reset_and_ttl_drain_held_summary_and_drops_then_replay_identicall
         let rig = held_summary_and_drops(dir.path()).await;
         rig.notice(2, 1_000, None).await;
         assert_eq!(rig.newest(), None, "the finished summary must be held");
-        let view = rig.ride(cause).await.expect("cache-loss rewrite view");
+        let view = rig
+            .ride(cause)
+            .await
+            .unwrap_or_else(|| panic!("cache-loss rewrite view; decisions: {:#?}", lines(&rig)));
         let bytes = rig.render(&view);
         assert!(String::from_utf8_lossy(&bytes).contains("held finished summary"));
         assert!(rig.pending_targets().is_empty());
@@ -360,6 +363,100 @@ async fn chain_reset_and_ttl_drain_held_summary_and_drops_then_replay_identicall
             1
         );
     }
+}
+
+#[tokio::test]
+async fn cache_loss_ride_waits_for_busy_historian_serial_and_drains_once() {
+    for cause in ["ttl_expired", "chain_reset"] {
+        let dir = tempfile::tempdir().unwrap();
+        let rig = held_summary_and_drops(dir.path()).await;
+        rig.notice(2, 1_000, None).await;
+        assert_eq!(rig.newest(), None, "the finished summary must be held");
+        let pending = rig.pending_targets();
+        assert!(!pending.is_empty());
+
+        // The background summarizer holds this serial while preparing or
+        // publishing history.
+        // Keep that critical section occupied until the ride is waiting for it.
+        let historian = rig.h.provider_serial.lock_for(&rig.state().key).await;
+        let mut ride = Box::pin(rig.ride(cause));
+        std::future::poll_fn(|cx| {
+            let result = std::future::Future::poll(ride.as_mut(), cx);
+            assert!(
+                result.is_pending(),
+                "cache-loss ride returned while the historian serial was held: {result:?}; decisions: {:#?}",
+                lines(&rig)
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(lines(&rig).iter().any(|line| {
+            line.contains(&format!("ride cause={cause}")) && line.contains("provider_busy+waiting")
+        }));
+        assert_eq!(rig.newest(), None);
+        assert_eq!(rig.pending_targets(), pending);
+        drop(historian);
+
+        let view = ride
+            .await
+            .expect("the waiting cache-loss ride must rebuild");
+        let bytes = rig.render(&view);
+        assert!(String::from_utf8_lossy(&bytes).contains("held finished summary"));
+        assert!(rig.pending_targets().is_empty());
+        rig.queue(&[178]).await;
+        let pending = rig.pending_targets();
+        rig.notice(3, 1_000, Some(view.view_version)).await;
+        assert_eq!(rig.newest(), Some(view.view_version));
+        assert_eq!(rig.pending_targets(), pending);
+        let replay = rig.get(view.view_version).await;
+        assert_eq!(
+            serde_json::to_vec(&replay).unwrap(),
+            serde_json::to_vec(&view).unwrap()
+        );
+        assert_eq!(rig.render(&replay), bytes);
+        assert_eq!(
+            lines(&rig)
+                .iter()
+                .filter(|line| line.contains("+rebuild"))
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn cache_loss_ride_serial_wait_obeys_deadline_without_consuming_held_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let rig = held_summary_and_drops(dir.path()).await;
+    rig.notice(2, 1_000, None).await;
+    let pending = rig.pending_targets();
+    assert!(!pending.is_empty());
+    let historian = rig.h.provider_serial.lock_for(&rig.state().key).await;
+    tokio::time::pause();
+    let mut ride = Box::pin(rig.op(
+        "compaction.ride",
+        json!({"session_ref":rig.reference,"cause":"ttl_expired","deadline_ms":100}),
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(ride.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    tokio::time::advance(Duration::from_millis(100)).await;
+    let answer = ride.await;
+    assert_eq!(answer["answer"], "nothing");
+    assert_eq!(answer["cache_ttl"]["ms"], 300_000);
+    assert_eq!(rig.newest(), None);
+    assert_eq!(rig.pending_targets(), pending);
+    assert!(lines(&rig)
+        .iter()
+        .any(|line| line.contains("deadline_elapsed+nothing")));
+    drop(historian);
+    tokio::time::resume();
+
+    let view = rig.ride("ttl_expired").await.expect("retry after deadline");
+    assert!(String::from_utf8_lossy(&rig.render(&view)).contains("held finished summary"));
+    assert!(rig.pending_targets().is_empty());
 }
 
 /// compaction-provider 0.7.12: a service tier is part of the provider's cache
