@@ -433,6 +433,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
         expect(notifText).toContain("Context at 97%");
     });
     it("bounds a stuck historian join at 60 seconds and adopts its later publication", async () => {
+        const log = spyOn(logger, "sessionLog").mockImplementation(() => {});
         const sessionId = "ses-bounded-historian-join";
         const db = openDatabase();
         const deferredHistoryRefreshSessions = new Set<string>();
@@ -474,6 +475,11 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
             expect(performance.now() - started).toBeLessThan(250);
             expect(timedOut.historianJoinTimedOut).toBe(true);
             expect(timedOut.historianJoinBudgetMs).toBe(15);
+            const lines = log.mock.calls.map((call) => String(call[1]));
+            expect(lines).toContain(
+                "transform: historian join timed out — reclaim and final fit checks continue; historian keeps running in the background",
+            );
+            expect(lines.some((line) => line.includes("proceeding after 95% timeout"))).toBe(false);
 
             appendCompartments(db, sessionId, [
                 {
@@ -498,6 +504,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
             expect(nextPass.pendingCompartmentInjection?.block).toContain("Published later");
         } finally {
             finishHistorian();
+            log.mockRestore();
         }
     });
 

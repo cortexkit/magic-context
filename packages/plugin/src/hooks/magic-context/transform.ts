@@ -114,6 +114,7 @@ import {
 } from "./event-resolvers";
 import { maintainExecuteFloorMark } from "./execute-reclaim";
 import { omitIncompleteFileTokenTotals } from "./file-token-coverage";
+import { createFinalWireIncompleteLogger } from "./final-wire-completeness";
 import {
     createFinalWireUsageTracker,
     describeFinalWireTail,
@@ -3303,6 +3304,7 @@ export function createTransform(deps: TransformDeps) {
         // A persisted latch is cleared by the off-transition, never consumed
         // here; overflow propagates to native compaction instead of blocking.
         const finalWireTail = describeFinalWireTail(messages);
+        const logIncompleteFinalWire = createFinalWireIncompleteLogger(sessionId);
         // The durable refusal marker remembers, across restarts, that a held
         // signed turn could not be made to fit. It applies only to a held pass:
         // an unheld pass strips and drains like any model without prefix-bound
@@ -3362,6 +3364,7 @@ export function createTransform(deps: TransformDeps) {
                       )
                     : undefined);
             if (finalWireEstimate) {
+                logIncompleteFinalWire(finalWireEstimate, messages);
                 sessionLog(
                     sessionId,
                     `transform: final-wire telemetry estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} conversation=${finalWireEstimate.messageTokens.conversation} tools=${finalWireEstimate.messageTokens.toolCall} system=${finalWireEstimate.systemTokens} toolDefinitions=${finalWireEstimate.toolDefinitionTokens ?? "unknown"} tail=${finalWireTail}`,
@@ -3658,6 +3661,7 @@ export function createTransform(deps: TransformDeps) {
                 }
             }
         }
+        logIncompleteFinalWire(finalWireEstimate, messages);
         if (!finalWireEstimate) {
             sessionLog(
                 sessionId,

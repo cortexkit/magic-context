@@ -26,18 +26,14 @@ import {
     setHomeProjectPermission,
 } from "../../features/magic-context/memory/project-identity";
 import { scheduleClearAndReindex } from "../../features/magic-context/message-index-async";
-import { detectOverflow } from "../../features/magic-context/overflow-detection";
 import { v2ToolDefinitionsHash } from "../../features/magic-context/request-tool-definitions";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import { backfillSessionActivity } from "../../features/magic-context/session-activity";
 import {
     getOrCreateSessionMeta,
-    getOverflowState,
     isDatabasePersisted,
     markSessionCleanupPending,
     type openDatabase,
-    recordDetectedContextLimit,
-    recordOverflowDetected,
 } from "../../features/magic-context/storage";
 import { getPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
 import { clearSession } from "../../features/magic-context/storage-meta-session";
@@ -193,6 +189,7 @@ import { HiddenChildHook, hiddenToolCallRefusal, registerHiddenChildAgents } fro
 import { hiddenTerminalError } from "./hidden-terminal-error";
 import { type V2LkgCheckpointHead, type V2LkgHostInput, V2LkgSystemReplay } from "./lkg-system";
 import { modelLimitCacheWarm, warmModelLimitCacheFromCatalog } from "./model-limit-cache";
+import { V2OverflowRecovery } from "./overflow-recovery";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { RestoredRowCache } from "./restore-rows";
@@ -877,7 +874,30 @@ export async function registerContext(context: V2Context) {
               })
             : undefined;
     const hiddenChildHook = new HiddenChildHook();
-    await context.session.hook("http.request", (draft) => hiddenChildHook.cacheRequest(draft));
+    const usage: TransformDeps["contextUsageMap"] = new Map();
+    const overflowRecovery = new V2OverflowRecovery({
+        database: () => db ?? null,
+        compactionOff,
+        isHidden: (sessionID) => hiddenChildHook.owns(sessionID),
+        onInputTokens: (sessionID, inputTokens, limit) =>
+            usage.set(sessionID, {
+                usage: { inputTokens, percentage: limit > 0 ? (inputTokens / limit) * 100 : 100 },
+                hasUsageTokens: true,
+                updatedAt: Date.now(),
+            }),
+    });
+    await context.session.hook("http.request", async (draft) => {
+        await hiddenChildHook.cacheRequest(draft);
+        if (draft.kind !== "primary" || hiddenChildHook.owns(draft.sessionID)) return;
+        const selectedModel = liveModels.get(draft.sessionID);
+        // The failing assistant may not be stored until after HTTP dispatch. Do not
+        // bind this request to the previous reply returned by latestAssistant().
+        if (selectedModel)
+            overflowRecovery.begin({
+                ...draft,
+                model: { providerID: selectedModel.providerID, id: selectedModel.modelID },
+            });
+    });
     const tools =
         db && isDatabasePersisted(db)
             ? await registerTools(
@@ -889,51 +909,14 @@ export async function registerContext(context: V2Context) {
                   embeddings.ensureRegistered,
               )
             : undefined;
-    const usage: TransformDeps["contextUsageMap"] = new Map();
     const generateReplay = new V2GenerateReplay();
     await context.session.hook("http.response", async (draft) => {
         if (!db || draft.kind !== "primary" || draft.response.ok) return;
-        const detection = detectOverflow(await draft.response.clone().text());
-        if (!detection.isOverflow) return;
-        const modelKey = `${draft.model.providerID}/${draft.model.id}`;
-        if (compactionOff) {
-            if (detection.reportedLimit)
-                recordDetectedContextLimit(
-                    db,
-                    draft.sessionID,
-                    detection.reportedLimit,
-                    modelKey,
-                    detection.reportedLimitProvenance,
-                );
-        } else {
-            recordOverflowDetected(
-                db,
-                draft.sessionID,
-                detection.reportedLimit,
-                modelKey,
-                "provider_overflow",
-                detection.reportedLimitProvenance,
-                detection.reportedInputTokens,
-            );
-            if (detection.reportedInputTokens) {
-                const provenLimit = getOverflowState(
-                    db,
-                    draft.sessionID,
-                    modelKey,
-                ).detectedContextLimit;
-                usage.set(draft.sessionID, {
-                    usage: {
-                        inputTokens: detection.reportedInputTokens,
-                        percentage:
-                            provenLimit > 0
-                                ? (detection.reportedInputTokens / provenLimit) * 100
-                                : 100,
-                    },
-                    hasUsageTokens: true,
-                    updatedAt: Date.now(),
-                });
-            }
-        }
+        overflowRecovery.observe({
+            ...draft,
+            error: await draft.response.clone().text(),
+            status: draft.response.status,
+        });
     });
     await registerHiddenChildAgents(context.agent);
     // Registered before anything can start a hidden run. A hidden child's tool
@@ -1442,6 +1425,19 @@ export async function registerContext(context: V2Context) {
                         }
                         if (!event.data?.sessionID) continue;
                         const sessionID = event.data.sessionID;
+                        overflowRecovery.observeTerminal(event, (id, messageID) => {
+                            const reader = openStoreReader();
+                            try {
+                                const latest = reader.latestAssistant(id);
+                                if (messageID && latest?.id !== messageID) return undefined;
+                                const row = messageID ? reader.messageById(id, messageID) : latest;
+                                return row
+                                    ? { id: row.id, model: row.data.model, error: row.data.error }
+                                    : undefined;
+                            } finally {
+                                reader.close();
+                            }
+                        });
                         if (db && event.type === "session.revert.committed") {
                             // A committed revert deletes raw rows, invalidating both
                             // indexed ordinals and the cached append count/anchor.
@@ -1493,6 +1489,7 @@ export async function registerContext(context: V2Context) {
                             continue;
                         }
                         if (event.type === "session.deleted") {
+                            overflowRecovery.forget(sessionID);
                             clearLkgMeasuredRequest(sessionID);
                             deletedSessions.add(sessionID);
                             // A failed store clear (a busy writer lock, say) must not skip
@@ -2087,6 +2084,8 @@ export async function registerContext(context: V2Context) {
             providerID: draft.model.providerID,
             modelID: draft.model.id,
         });
+        // Keep the outgoing model even when a provider transport has no HTTP hook.
+        overflowRecovery.begin({ sessionID: draft.sessionID, kind: "primary", model: draft.model });
         variants.set(draft.sessionID, draft.model.variant);
         if (!modelLimitCacheWarm())
             void withoutSqliteTransformPass(() => warmModelLimitCacheFromCatalog(context));
