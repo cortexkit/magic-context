@@ -1,0 +1,15 @@
+[package]
+name = "mc-mock-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Reference llm-runner for the mode-3 contract draft, with mock model providers, used to test a compaction provider end to end."
+
+[dependencies]
+ck-contract-draft = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

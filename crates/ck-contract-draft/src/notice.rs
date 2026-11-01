@@ -62,7 +62,9 @@ pub enum Event {
     /// Entries from this ordinal on may differ from what the provider saw
     /// before: a revert, a branch switch, or a host that changed stored
     /// messages. The provider re-reads from there; edits naming messages that
-    /// are gone leave its next view.
+    /// are gone leave its next view. Until that view arrives, the runner
+    /// renders with the edits that still apply
+    /// ([`crate::view::edits_for_transcript`]).
     TranscriptChanged { from_ordinal: u64 },
     /// The runner wrote the host's own compaction marker for this view, so the
     /// host stops loading the messages the view leaves out at the start.

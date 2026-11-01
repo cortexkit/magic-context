@@ -1,0 +1,471 @@
+//! Tests of the runner against an in-process provider whose answers each test
+//! scripts.
+
+use std::sync::Mutex;
+
+use ck_contract_draft::notice::{Event, NoticeAnswer, NoticeRequest};
+use ck_contract_draft::part::{PartBody, ToolStatus};
+use ck_contract_draft::read::SessionRef;
+use ck_contract_draft::ride::{RideAnswer, RideCause, RideRequest};
+use ck_contract_draft::rules::{
+    invalid_signed_parts, EditCost, ProviderRules, RuleBreak, SignedReasoning,
+};
+use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
+use ck_contract_draft::view::{
+    Edit, EditOp, View, ViewDelivery, ViewGetRequest, ViewPublishAnswer, ViewPublishRequest,
+    ViewRefusal,
+};
+use serde_json::{json, Value};
+
+use crate::model::{Kind, ModelError};
+use crate::runner::{CallError, Host, Provider, Runner, SessionConfig, UserEdit};
+use crate::script::{Step, ToolCall, Turn};
+
+type Decide = Box<dyn FnMut(&Host) -> Option<Vec<Edit>> + Send>;
+
+/// A decision that fires the first time it returns edits, and never again.
+fn once(mut decide: impl FnMut(&Host) -> Option<Vec<Edit>> + Send + 'static) -> Decide {
+    let mut fired = false;
+    Box::new(move |host: &Host| {
+        if fired {
+            return None;
+        }
+        let edits = decide(host);
+        fired = edits.is_some();
+        edits
+    })
+}
+
+/// A provider whose decisions are closures over the runner's state. It
+/// publishes whatever `on_notice` returns after each notice, and answers a
+/// ride with whatever `on_ride` returns.
+struct TestProvider {
+    host: Mutex<Option<Host>>,
+    on_notice: Mutex<Option<Decide>>,
+    on_ride: Mutex<Option<Decide>>,
+    version: Mutex<u64>,
+    published: Mutex<Vec<ViewPublishAnswer>>,
+    notices: Mutex<Vec<NoticeRequest>>,
+}
+
+impl TestProvider {
+    fn new() -> Self {
+        Self {
+            host: Mutex::new(None),
+            on_notice: Mutex::new(None),
+            on_ride: Mutex::new(None),
+            version: Mutex::new(0),
+            published: Mutex::new(Vec::new()),
+            notices: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn attach(&self, host: Host) {
+        *self.host.lock().unwrap() = Some(host);
+    }
+
+    fn next_view(&self, edits: Vec<Edit>) -> View {
+        let mut version = self.version.lock().unwrap();
+        *version += 1;
+        View::seal(*version, edits)
+    }
+
+    fn version(&self) -> u64 {
+        *self.version.lock().unwrap()
+    }
+}
+
+impl Provider for TestProvider {
+    async fn setup(&self, _: SetupRequest) -> Result<SetupAnswer, CallError> {
+        Ok(SetupAnswer::Ready)
+    }
+
+    async fn notice(&self, request: NoticeRequest) -> Result<NoticeAnswer, CallError> {
+        self.notices.lock().unwrap().push(request);
+        let host = self.host.lock().unwrap().clone();
+        if let Some(host) = host {
+            let edits = self
+                .on_notice
+                .lock()
+                .unwrap()
+                .as_mut()
+                .and_then(|decide| decide(&host));
+            if let Some(edits) = edits {
+                let view = self.next_view(edits);
+                let answer = host.publish(ViewPublishRequest {
+                    session: host.session(),
+                    delivery: ViewDelivery::Inline { view },
+                });
+                self.published.lock().unwrap().push(answer);
+            }
+        }
+        Ok(NoticeAnswer::Received)
+    }
+
+    async fn ride(&self, _: RideRequest) -> Result<RideAnswer, CallError> {
+        let host = self.host.lock().unwrap().clone().expect("attached");
+        let edits = self
+            .on_ride
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|decide| decide(&host));
+        Ok(match edits {
+            Some(edits) => RideAnswer::View {
+                delivery: ViewDelivery::Inline {
+                    view: self.next_view(edits),
+                },
+            },
+            None => RideAnswer::Nothing,
+        })
+    }
+
+    async fn view_get(&self, _: ViewGetRequest) -> Result<View, CallError> {
+        Err(CallError("not used".into()))
+    }
+
+    async fn tool(&self, _: &SessionRef, name: &str, _: &Value) -> Result<String, CallError> {
+        Ok(format!("{name} done"))
+    }
+
+    async fn pre_user(&self, _: &SessionRef, _: &str) -> Result<UserEdit, CallError> {
+        Ok(UserEdit::default())
+    }
+}
+
+const ANTHROPIC_BOUND: ProviderRules = ProviderRules {
+    signed_reasoning: SignedReasoning::Bound,
+    history_edit_cost: EditCost::Suffix,
+};
+
+const FREE: ProviderRules = ProviderRules {
+    signed_reasoning: SignedReasoning::None,
+    history_edit_cost: EditCost::Suffix,
+};
+
+fn config(kind: Kind, rules: ProviderRules, window: u64) -> SessionConfig {
+    SessionConfig {
+        session: SessionRef {
+            runner: "mock-runner".into(),
+            harness: "mock".into(),
+            session: "s1".into(),
+        },
+        preset: "head".into(),
+        model: ModelRef {
+            provider: "anthropic".into(),
+            model: "claude-test".into(),
+            variant: None,
+            service_tier: None,
+        },
+        context_window: window,
+        output_reserve: 1_000,
+        rules,
+        kind,
+        cache_ttl_ms: 300_000,
+        system_tokens: 500,
+        first_tag: 1,
+        start_ms: 1_000_000,
+    }
+}
+
+async fn start(config: SessionConfig) -> Runner<TestProvider> {
+    let runner = Runner::start(config, TestProvider::new()).await.unwrap();
+    runner.provider().attach(runner.host().clone());
+    runner
+}
+
+fn user(text: &str) -> Step {
+    Step::User { text: text.into() }
+}
+
+/// A model step with reasoning, a sentence, and one tool call returning
+/// `output_bytes` bytes.
+fn work(reasoning: u64, output_bytes: usize) -> Step {
+    Step::Model(Turn {
+        reasoning_tokens: Some(reasoning),
+        text: Some("Looking at the file.".into()),
+        tools: vec![ToolCall::ok(
+            "read",
+            json!({"path": "a.rs"}),
+            "x".repeat(output_bytes),
+        )],
+        output_tokens: 20,
+        ..Turn::default()
+    })
+}
+
+fn answer() -> Step {
+    Step::Model(Turn {
+        text: Some("Done.".into()),
+        output_tokens: 5,
+        ..Turn::default()
+    })
+}
+
+/// The (mid, part) of every finished tool part in the transcript, oldest
+/// first. A running call cannot be dropped.
+fn tool_parts(host: &Host) -> Vec<(String, String)> {
+    host.entries()
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .parts
+                .iter()
+                .filter(|part| matches!(&part.body, PartBody::Tool(tool) if tool.status != ToolStatus::Running))
+                .map(move |part| (entry.mid.clone(), part.id.clone()))
+        })
+        .collect()
+}
+
+fn drop_edit(since: u64, (mid, part): &(String, String)) -> Edit {
+    Edit::new(
+        since,
+        EditOp::Drop {
+            mid: mid.clone(),
+            part: Some(part.clone()),
+        },
+    )
+}
+
+#[tokio::test]
+async fn between_views_every_request_extends_the_previous_one() {
+    let mut runner = start(config(Kind::Anthropic, ANTHROPIC_BOUND, 100_000)).await;
+    runner
+        .play(&[
+            user("start"),
+            work(100, 2_000),
+            work(100, 2_000),
+            answer(),
+            user("next"),
+            answer(),
+        ])
+        .await;
+    let report = &runner.report;
+    assert!(report.model_errors.is_empty(), "{:?}", report.model_errors);
+    assert_eq!(report.requests.len(), 4);
+    for pair in report.requests.windows(2) {
+        let (before, after) = (&pair[0].usage, &pair[1].usage);
+        assert_eq!(after.cache_read_tokens, before.prompt_tokens, "{pair:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_view_costs_one_cache_write_and_reading_resumes_after_it() {
+    let mut runner = start(config(Kind::OpenAi, FREE, 100_000)).await;
+    let provider = runner.provider();
+    *provider.on_notice.lock().unwrap() = Some(once(|host: &Host| {
+        let tools = tool_parts(host);
+        // Once three tools exist, drop the first.
+        (tools.len() == 3).then(|| vec![drop_edit(1, &tools[0])])
+    }));
+    runner
+        .play(&[
+            user("start"),
+            work(100, 8_000),
+            work(100, 8_000),
+            work(100, 8_000),
+            answer(),
+            answer(),
+        ])
+        .await;
+    let report = &runner.report;
+    assert!(report.model_errors.is_empty(), "{:?}", report.model_errors);
+    assert_eq!(
+        runner.provider().published.lock().unwrap()[..],
+        [ViewPublishAnswer::Accepted]
+    );
+    let after: Vec<_> = report
+        .requests
+        .iter()
+        .filter(|record| record.view == Some(1))
+        .collect();
+    assert_eq!(after.len(), 2);
+    // The first request under the view reads only up to the first changed
+    // part: the first request, which ended before the dropped tool. The next
+    // one reads all of it again.
+    assert_eq!(
+        after[0].usage.cache_read_tokens,
+        report.requests[0].usage.prompt_tokens
+    );
+    assert_eq!(
+        after[1].usage.cache_read_tokens,
+        after[0].usage.prompt_tokens
+    );
+}
+
+#[tokio::test]
+async fn a_view_breaking_signed_reasoning_is_refused_and_its_fixed_form_accepted() {
+    let mut runner = start(config(Kind::Anthropic, ANTHROPIC_BOUND, 100_000)).await;
+    let provider = runner.provider();
+    *provider.on_notice.lock().unwrap() = Some(once(|host: &Host| {
+        let tools = tool_parts(host);
+        (tools.len() == 3).then(|| vec![drop_edit(1, &tools[0])])
+    }));
+    runner
+        .play(&[
+            user("start"),
+            work(100, 4_000),
+            work(100, 4_000),
+            work(100, 4_000),
+        ])
+        .await;
+    {
+        let published = runner.provider().published.lock().unwrap();
+        assert!(matches!(
+            published[..],
+            [ViewPublishAnswer::Refused {
+                refusal: ViewRefusal::Rule(RuleBreak::SignedReasoningInvalid { .. })
+            }]
+        ));
+    }
+
+    // The same drop plus the companion drops the rules require.
+    let host = runner.host().clone();
+    let tools = tool_parts(&host);
+    let version = runner.provider().version() + 1;
+    let mut edits = vec![drop_edit(version, &tools[0])];
+    loop {
+        let invalid = invalid_signed_parts(&host.entries(), &edits, &ANTHROPIC_BOUND);
+        if invalid.is_empty() {
+            break;
+        }
+        edits.extend(invalid.iter().map(|target| drop_edit(version, target)));
+    }
+    let answer_fixed = host.publish(ViewPublishRequest {
+        session: host.session(),
+        delivery: ViewDelivery::Inline {
+            view: runner.provider().next_view(edits),
+        },
+    });
+    assert_eq!(answer_fixed, ViewPublishAnswer::Accepted);
+    *runner.provider().on_notice.lock().unwrap() = None;
+    runner.play(&[answer()]).await;
+    // The mock provider checks signatures on its own and accepts it.
+    assert!(
+        runner.report.model_errors.is_empty(),
+        "{:?}",
+        runner.report.model_errors
+    );
+    assert_eq!(runner.report.requests.last().unwrap().view, Some(2));
+}
+
+#[tokio::test]
+async fn the_mock_provider_rejects_a_changed_history_before_signed_reasoning_on_its_own() {
+    // The runner declares no signature rule, so only the mock provider can
+    // catch the broken view.
+    let mut runner = start(config(Kind::Anthropic, FREE, 100_000)).await;
+    *runner.provider().on_notice.lock().unwrap() = Some(once(|host: &Host| {
+        let tools = tool_parts(host);
+        (tools.len() == 3).then(|| vec![drop_edit(1, &tools[0])])
+    }));
+    runner
+        .play(&[
+            user("start"),
+            work(100, 4_000),
+            work(100, 4_000),
+            work(100, 4_000),
+            answer(),
+        ])
+        .await;
+    assert!(
+        matches!(
+            runner.report.model_errors[..],
+            [ModelError::InvalidSignature { .. }]
+        ),
+        "{:?}",
+        runner.report.model_errors
+    );
+}
+
+#[tokio::test]
+async fn over_the_limit_the_runner_rides_and_refuses_rather_than_send() {
+    // Window 20,000 with 1,000 reserved: four 24,000-byte outputs are about
+    // 24,000 tokens, so the fifth request cannot fit without a view.
+    let steps = [
+        user("start"),
+        work(10, 24_000),
+        work(10, 24_000),
+        work(10, 24_000),
+        work(10, 24_000),
+        answer(),
+    ];
+
+    let mut runner = start(config(Kind::OpenAi, FREE, 20_000)).await;
+    runner.play(&steps).await;
+    assert!(
+        runner.report.model_errors.is_empty(),
+        "{:?}",
+        runner.report.model_errors
+    );
+    assert_eq!(runner.report.refusals, ["context_ceiling"]);
+    assert!(runner
+        .report
+        .rides
+        .iter()
+        .any(|ride| ride.cause == RideCause::OverLimit && !ride.got_view));
+    let sent = runner.report.requests.len();
+
+    // With a provider that answers the ride, the same script goes through.
+    let mut runner = start(config(Kind::OpenAi, FREE, 20_000)).await;
+    // The script needs exactly one ride, so this is view 1.
+    *runner.provider().on_ride.lock().unwrap() = Some(once(|host: &Host| {
+        let tools = tool_parts(host);
+        Some(
+            tools[..tools.len() - 1]
+                .iter()
+                .map(|target| drop_edit(1, target))
+                .collect(),
+        )
+    }));
+    runner.play(&steps).await;
+    assert!(
+        runner.report.model_errors.is_empty(),
+        "{:?}",
+        runner.report.model_errors
+    );
+    assert!(runner.report.refusals.is_empty());
+    assert!(runner.report.requests.len() > sent);
+}
+
+#[tokio::test]
+async fn an_idle_gap_past_the_cache_lifetime_rides_before_the_next_request() {
+    let mut runner = start(config(Kind::Anthropic, ANTHROPIC_BOUND, 100_000)).await;
+    runner
+        .play(&[
+            user("start"),
+            answer(),
+            Step::Wait { ms: 300_001 },
+            user("back"),
+            answer(),
+        ])
+        .await;
+    assert_eq!(runner.report.rides.len(), 1);
+    assert_eq!(runner.report.rides[0].cause, RideCause::CacheExpired);
+    let last = runner.report.requests.last().unwrap();
+    assert_eq!(last.usage.cache_read_tokens, 0);
+}
+
+#[tokio::test]
+async fn after_a_revert_the_runner_skips_edits_for_messages_that_are_gone() {
+    let mut runner = start(config(Kind::OpenAi, FREE, 100_000)).await;
+    *runner.provider().on_notice.lock().unwrap() = Some(once(|host: &Host| {
+        let tools = tool_parts(host);
+        (tools.len() == 2).then(|| vec![drop_edit(1, &tools[1])])
+    }));
+    runner
+        .play(&[user("start"), work(10, 1_000), work(10, 1_000), answer()])
+        .await;
+    assert_eq!(runner.host().applied_version(), Some(1));
+    runner
+        .play(&[Step::Revert { ordinal: 2 }, user("again"), answer()])
+        .await;
+    assert!(
+        runner.report.model_errors.is_empty(),
+        "{:?}",
+        runner.report.model_errors
+    );
+    let notices = runner.provider().notices.lock().unwrap();
+    assert!(notices.iter().any(|notice| notice
+        .events
+        .contains(&Event::TranscriptChanged { from_ordinal: 2 })));
+}

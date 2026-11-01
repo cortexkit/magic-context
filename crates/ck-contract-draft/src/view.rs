@@ -168,6 +168,11 @@ pub enum Source {
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum ViewRefusal {
     BadChecksum,
+    /// The view's version is not newer than the runner's latest view.
+    StaleVersion {
+        version: u64,
+        latest: u64,
+    },
     /// An edit's `since` is not consistent with the previous view.
     BadSince,
     UnknownMessage {
@@ -341,6 +346,32 @@ pub fn apply_edits(entries: &[Entry], edits: &[Edit]) -> Result<Vec<RenderedMess
         });
     }
     Ok(rendered)
+}
+
+/// The edits that still name messages in the transcript. After a revert or
+/// a branch switch removes messages, the runner renders with these until the
+/// provider sends a view for the new transcript: an edit for a message that is
+/// gone has nothing left to change, so skipping it changes nothing the model
+/// would have seen of the remaining messages.
+pub fn edits_for_transcript(entries: &[Entry], edits: &[Edit]) -> Vec<Edit> {
+    let present: HashSet<&str> = entries.iter().map(|entry| entry.mid.as_str()).collect();
+    edits
+        .iter()
+        .filter(|edit| match &edit.op {
+            EditOp::Drop { mid, .. } | EditOp::Replace { mid, .. } => {
+                present.contains(mid.as_str())
+            }
+            EditOp::Insert {
+                at: InsertAt::Before(mid),
+                ..
+            } => present.contains(mid.as_str()),
+            EditOp::Insert {
+                at: InsertAt::Start,
+                ..
+            } => true,
+        })
+        .cloned()
+        .collect()
 }
 
 fn find_entry<'a>(by_mid: &HashMap<&str, &'a Entry>, mid: &str) -> Result<&'a Entry, ViewRefusal> {

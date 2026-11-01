@@ -1,0 +1,290 @@
+//! The runner's transcript: entries in full form, with tag numbers assigned
+//! when a part is written, stored with it, and never reused. A revert removes
+//! entries but keeps the counter, so a number the model once saw can never
+//! name a different part later.
+
+use ck_contract_draft::part::{Attachment, Part, PartBody, ToolStatus};
+use ck_contract_draft::read::{
+    entry_digest, Cursor, Detail, Entry, NoticeOrigin, Role, Select, StepUsage,
+};
+use ck_contract_draft::view::AppliedView;
+
+#[derive(Clone, Debug)]
+pub struct Transcript {
+    entries: Vec<Entry>,
+    next_tag: u64,
+    next_mid: u64,
+}
+
+impl Transcript {
+    /// A new transcript whose first tag number is `first_tag`. A session moved
+    /// in from a host that ran Magic Context as its own plugin (OpenCode or Pi
+    /// without a runner) starts above the highest number its model has
+    /// already seen.
+    pub fn new(first_tag: u64) -> Self {
+        Self {
+            entries: Vec::new(),
+            next_tag: first_tag,
+            next_mid: 1,
+        }
+    }
+
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    pub fn cursor(&self) -> Option<Cursor> {
+        self.entries.last().map(|entry| Cursor {
+            ordinal: entry.ordinal,
+            mid: entry.mid.clone(),
+            digest: entry.digest.clone(),
+        })
+    }
+
+    /// Store a message. Text and tool parts get tag numbers; reasoning,
+    /// images and files do not.
+    pub fn append(
+        &mut self,
+        role: Role,
+        notice: Option<NoticeOrigin>,
+        bodies: Vec<PartBody>,
+        usage: Option<StepUsage>,
+        generated_under: Option<AppliedView>,
+        written_at: u64,
+    ) -> &Entry {
+        let mid = format!("msg{:05}", self.next_mid);
+        self.next_mid += 1;
+        let parts: Vec<Part> = bodies
+            .into_iter()
+            .enumerate()
+            .map(|(index, body)| {
+                let tag = match body {
+                    PartBody::Text { .. } | PartBody::Tool(_) => {
+                        let tag = self.next_tag;
+                        self.next_tag += 1;
+                        Some(tag)
+                    }
+                    PartBody::Reasoning { .. } | PartBody::Image(_) | PartBody::File(_) => None,
+                };
+                Part::new(format!("{mid}:p{index}"), tag, body)
+            })
+            .collect();
+        let entry = Entry {
+            ordinal: self.entries.len() as u64,
+            mid,
+            role,
+            digest: entry_digest(role, notice.as_ref(), &parts),
+            notice,
+            written_at,
+            parts,
+            usage,
+            generated_under,
+        };
+        self.entries.push(entry);
+        self.entries.last().expect("just pushed")
+    }
+
+    /// Record a tool's result on the newest message, the only one that may
+    /// still change.
+    pub fn complete_tool(
+        &mut self,
+        call_id: &str,
+        status: ToolStatus,
+        output: String,
+        attachments: Vec<Attachment>,
+    ) -> Result<(), String> {
+        let entry = self.entries.last_mut().ok_or("empty transcript")?;
+        let part = entry
+            .parts
+            .iter_mut()
+            .find(|part| matches!(&part.body, PartBody::Tool(tool) if tool.call_id == call_id))
+            .ok_or_else(|| format!("no tool call {call_id} on the newest message"))?;
+        let PartBody::Tool(mut tool) = part.body.clone() else {
+            unreachable!("matched a tool part");
+        };
+        if tool.status != ToolStatus::Running {
+            return Err(format!("tool call {call_id} already finished"));
+        }
+        tool.status = status;
+        tool.output_bytes = Some(output.len() as u64);
+        tool.output = Some(output);
+        tool.attachments = attachments;
+        *part = Part::new(part.id.clone(), part.tag, PartBody::Tool(tool));
+        entry.digest = entry_digest(entry.role, entry.notice.as_ref(), &entry.parts);
+        Ok(())
+    }
+
+    /// Remove every entry from `ordinal` on. Tag numbers are not reused.
+    pub fn revert_to(&mut self, ordinal: u64) {
+        self.entries.truncate(ordinal as usize);
+    }
+
+    /// Serve a `session.read`: matching entries, and where to continue when
+    /// they did not fit.
+    pub fn read(
+        &self,
+        select: &Select,
+        detail: Detail,
+        max_bytes: Option<u64>,
+    ) -> (Vec<Entry>, Option<u64>) {
+        let candidates: Vec<&Entry> = match select {
+            Select::After { after_ordinal, .. } => self
+                .entries
+                .iter()
+                .filter(|entry| after_ordinal.is_none_or(|after| entry.ordinal > after))
+                .collect(),
+            Select::Mids { mids } => self
+                .entries
+                .iter()
+                .filter(|entry| mids.contains(&entry.mid))
+                .collect(),
+            Select::Tags { tags } => self
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .parts
+                        .iter()
+                        .any(|part| part.tag.is_some_and(|tag| tags.contains(&tag)))
+                })
+                .collect(),
+        };
+        let limit = match select {
+            Select::After { limit, .. } => limit.map(|limit| limit as usize),
+            _ => None,
+        };
+        let mut page = Vec::new();
+        let mut bytes = 0u64;
+        for entry in &candidates {
+            let shaped = match detail {
+                Detail::Full => (*entry).clone(),
+                Detail::Compact => Entry {
+                    parts: entry.parts.iter().map(Part::compact).collect(),
+                    ..(*entry).clone()
+                },
+            };
+            let size = serde_json::to_vec(&shaped)
+                .expect("entries serialize")
+                .len() as u64;
+            let full = limit.is_some_and(|limit| page.len() >= limit)
+                || (!page.is_empty() && max_bytes.is_some_and(|max| bytes + size > max));
+            if full {
+                let next_after = match select {
+                    Select::After { .. } => page.last().map(|last: &Entry| last.ordinal),
+                    _ => None,
+                };
+                return (page, next_after);
+            }
+            bytes += size;
+            page.push(shaped);
+        }
+        (page, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ck_contract_draft::part::{Sealing, ToolPart};
+    use serde_json::json;
+
+    fn text(value: &str) -> PartBody {
+        PartBody::Text { text: value.into() }
+    }
+
+    fn tool(call_id: &str) -> PartBody {
+        PartBody::Tool(ToolPart {
+            call_id: call_id.into(),
+            name: "read".into(),
+            input: json!({"path": "a.rs"}).as_object().unwrap().clone(),
+            status: ToolStatus::Running,
+            output: None,
+            output_bytes: None,
+            attachments: vec![],
+        })
+    }
+
+    #[test]
+    fn numbers_go_to_text_and_tool_parts_and_are_never_reused() {
+        let mut transcript = Transcript::new(100);
+        transcript.append(Role::User, None, vec![text("hi")], None, None, 1);
+        let reasoning = PartBody::Reasoning {
+            text: Some("hmm".into()),
+            text_bytes: Some(3),
+            sealing: Sealing::Signed,
+        };
+        let entry = transcript.append(
+            Role::Assistant,
+            None,
+            vec![reasoning, text("ok"), tool("c1")],
+            None,
+            None,
+            2,
+        );
+        let tags: Vec<_> = entry.parts.iter().map(|part| part.tag).collect();
+        assert_eq!(tags, [None, Some(101), Some(102)]);
+        transcript.revert_to(1);
+        let entry = transcript.append(Role::Assistant, None, vec![text("again")], None, None, 3);
+        assert_eq!(entry.parts[0].tag, Some(103));
+        assert_eq!(entry.ordinal, 1);
+    }
+
+    #[test]
+    fn a_tool_result_updates_the_newest_message_and_its_checksums() {
+        let mut transcript = Transcript::new(1);
+        transcript.append(Role::Assistant, None, vec![tool("c1")], None, None, 1);
+        let before = transcript.entries()[0].clone();
+        transcript
+            .complete_tool("c1", ToolStatus::Completed, "fn main() {}".into(), vec![])
+            .unwrap();
+        let after = &transcript.entries()[0];
+        assert_eq!(after.parts[0].tag, before.parts[0].tag);
+        assert_ne!(after.parts[0].digest, before.parts[0].digest);
+        assert_ne!(after.digest, before.digest);
+        assert!(transcript
+            .complete_tool("c1", ToolStatus::Completed, "again".into(), vec![])
+            .is_err());
+    }
+
+    #[test]
+    fn reads_page_by_size_and_compact_reads_drop_output_text() {
+        let mut transcript = Transcript::new(1);
+        for index in 0..5 {
+            transcript.append(
+                Role::User,
+                None,
+                vec![text(&"x".repeat(100))],
+                None,
+                None,
+                index,
+            );
+        }
+        let (page, next) = transcript.read(
+            &Select::After {
+                after_ordinal: None,
+                limit: None,
+            },
+            Detail::Full,
+            Some(700),
+        );
+        assert!(page.len() < 5 && !page.is_empty());
+        assert_eq!(next, Some(page.last().unwrap().ordinal));
+
+        transcript.append(Role::Assistant, None, vec![tool("c1")], None, None, 9);
+        transcript
+            .complete_tool("c1", ToolStatus::Completed, "big output".into(), vec![])
+            .unwrap();
+        let (page, _) = transcript.read(&Select::Tags { tags: vec![6] }, Detail::Compact, None);
+        let PartBody::Tool(tool) = &page[0].parts[0].body else {
+            panic!()
+        };
+        assert_eq!(
+            (tool.output.as_deref(), tool.output_bytes),
+            (None, Some(10))
+        );
+        assert_eq!(
+            page[0].parts[0].digest,
+            transcript.entries()[5].parts[0].digest
+        );
+    }
+}
