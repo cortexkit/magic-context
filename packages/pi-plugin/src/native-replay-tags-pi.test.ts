@@ -6,8 +6,15 @@ import {
 	updateReplayDocument,
 } from "@magic-context/core/features/magic-context/storage-replay-document";
 import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
-import { signedHistory } from "./__tests__/responses-signed-history";
+import {
+	responsesModel,
+	signedHistory,
+} from "./__tests__/responses-signed-history";
 import { applyNativeResponseTagReplayPi } from "./native-replay-tags-pi";
+import {
+	piPreparedStructure,
+	piPreparedStructureMismatch,
+} from "./pi-dispatch-structure";
 import { createTestDb } from "./test-utils.test";
 
 test("native tag strips first apply only on a rebuild and replay after reopening the database", () => {
@@ -153,6 +160,121 @@ test.each([
 			}),
 		).toBe(0);
 		expect(messages).toEqual(before);
+	} finally {
+		db.close();
+	}
+});
+
+test.each([
+	"id",
+	"phase",
+	"native body",
+	"duplicate native item",
+])("a frozen strip does not authorize a changed %s", (kind) => {
+	const db = createTestDb();
+	const sessionId = `frozen-${kind}`;
+	try {
+		expect(
+			applyNativeResponseTagReplayPi({
+				db,
+				sessionId,
+				messages: [signedHistory()],
+				canApply: true,
+			}),
+		).toBe(1);
+		const ledger = readReplayEnvelope(db, sessionId);
+		for (const canApply of [false, true]) {
+			const message = signedHistory();
+			message.content[0].text = "§2§ Hello";
+			const native = message.providerPayload.items[0];
+			if (kind === "id") native.id = "msg_changed";
+			if (kind === "phase") native.phase = "commentary";
+			if (kind === "native body")
+				native.content[0].text = "§42§ Unrelated body";
+			if (kind === "duplicate native item")
+				message.providerPayload.items.push(structuredClone(native));
+			const messages = [message];
+			const before = structuredClone(messages);
+			expect(
+				applyNativeResponseTagReplayPi({ db, sessionId, messages, canApply }),
+			).toBe(0);
+			expect(messages).toEqual(before);
+			expect(readReplayEnvelope(db, sessionId)).toEqual(ledger);
+		}
+	} finally {
+		db.close();
+	}
+});
+
+test("frozen native replay does not authorize unrelated unsigned typed body changes", () => {
+	const db = createTestDb();
+	const sessionId = "frozen-unrelated-typed-body";
+	try {
+		expect(
+			applyNativeResponseTagReplayPi({
+				db,
+				sessionId,
+				messages: [signedHistory()],
+				canApply: true,
+			}),
+		).toBe(1);
+		const ledger = readReplayEnvelope(db, sessionId);
+		const message = signedHistory();
+		message.content[0].text = "Unrelated body";
+		Reflect.deleteProperty(message.content[0], "textSignature");
+		const messages = [message];
+		expect(
+			applyNativeResponseTagReplayPi({
+				db,
+				sessionId,
+				messages,
+				canApply: false,
+			}),
+		).toBe(0);
+		expect(messages[0].providerPayload.items[0].content[0].text).toBe("Hello");
+		expect(readReplayEnvelope(db, sessionId)).toEqual(ledger);
+		expect(
+			piPreparedStructureMismatch(
+				{ input: messages[0].providerPayload.items },
+				piPreparedStructure(messages, responsesModel, "omp"),
+			),
+		).toContain("comparison=content");
+	} finally {
+		db.close();
+	}
+});
+
+test("a frozen missing-phase strip cannot replay an explicit null phase", () => {
+	const db = createTestDb();
+	const sessionId = "frozen-missing-phase";
+	try {
+		const original = signedHistory();
+		Reflect.deleteProperty(original.providerPayload.items[0], "phase");
+		original.content[0].textSignature = JSON.stringify({ v: 1, id: "msg_old" });
+		expect(
+			applyNativeResponseTagReplayPi({
+				db,
+				sessionId,
+				messages: [original],
+				canApply: true,
+			}),
+		).toBe(1);
+		const ledger = readReplayEnvelope(db, sessionId);
+		const changed = structuredClone(original);
+		Reflect.set(changed.providerPayload.items[0], "phase", null);
+		const messages = [changed];
+		expect(
+			applyNativeResponseTagReplayPi({
+				db,
+				sessionId,
+				messages,
+				canApply: false,
+			}),
+		).toBe(0);
+		expect(messages[0].providerPayload.items[0].content[0].text).toBe(
+			"§42§ Hello",
+		);
+		expect(readReplayEnvelope(db, sessionId)).toEqual(ledger);
 	} finally {
 		db.close();
 	}

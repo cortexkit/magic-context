@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
 	readReplayEnvelope,
@@ -6,6 +5,10 @@ import {
 } from "@magic-context/core/features/magic-context/storage-replay-document";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
+import {
+	nativeResponseTagStripKey,
+	PI_NATIVE_TAG_STRIP_PROVENANCE,
+} from "./native-replay-tag-provenance-pi";
 
 const FIELD = "piResponsesTagStrips";
 const TAG = /^§\d+§ /u;
@@ -86,12 +89,16 @@ export function applyNativeResponseTagReplayPi(args: {
 		const frozen = saved;
 		const content = message.content;
 		const nativeItems = payload.items;
+		const decisions: Record<string, string> = {};
 		let changed = false;
 		const items = nativeItems.map((item) => {
 			if (
 				!isRecord(item) ||
 				item.type !== "message" ||
 				item.role !== "assistant" ||
+				(item.phase !== undefined &&
+					item.phase !== "commentary" &&
+					item.phase !== "final_answer") ||
 				!Array.isArray(item.content) ||
 				item.content.length !== 1
 			)
@@ -104,19 +111,7 @@ export function applyNativeResponseTagReplayPi(args: {
 				!TAG.test(output.text)
 			)
 				return item;
-			const blocks = content.filter((block) => {
-				const identity = signature(block);
-				return (
-					identity && identity.id === item.id && identity.phase === item.phase
-				);
-			});
-			const block = blocks[0];
 			if (
-				blocks.length !== 1 ||
-				!isRecord(block) ||
-				block.type !== "text" ||
-				typeof block.text !== "string" ||
-				block.text.replace(TAG, "") !== output.text.replace(TAG, "") ||
 				nativeItems.filter(
 					(other) =>
 						isRecord(other) &&
@@ -127,13 +122,29 @@ export function applyNativeResponseTagReplayPi(args: {
 				return item;
 			// Bind replay to the native identity and original bytes, not an array
 			// position or Magic Context number that can change after a fork or renumbering.
-			const key = createHash("sha256")
-				.update(JSON.stringify([item.id, item.phase, output.text]))
-				.digest("hex");
+			const key = nativeResponseTagStripKey(item.id, item.phase, output.text);
 			if (!frozen.has(key)) {
 				if (!args.canApply) return item;
+				// Only discovery needs the typed signature. A frozen native edit must
+				// survive host rewrites that remove that signature from typed text.
+				const blocks = content.filter((block) => {
+					const identity = signature(block);
+					return (
+						identity && identity.id === item.id && identity.phase === item.phase
+					);
+				});
+				const block = blocks[0];
+				if (
+					blocks.length !== 1 ||
+					!isRecord(block) ||
+					block.type !== "text" ||
+					typeof block.text !== "string" ||
+					block.text.replace(TAG, "") !== output.text.replace(TAG, "")
+				)
+					return item;
 				added.add(key);
 			}
+			decisions[key] = output.text;
 			changed = true;
 			return {
 				...item,
@@ -143,6 +154,7 @@ export function applyNativeResponseTagReplayPi(args: {
 		if (changed)
 			pending.set(index, {
 				...message,
+				[PI_NATIVE_TAG_STRIP_PROVENANCE]: decisions,
 				providerPayload: { ...payload, items },
 			});
 	}
