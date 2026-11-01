@@ -5,7 +5,6 @@
 //! suite; here each notice is handled before the runner's next step, which
 //! keeps the assertions exact.
 
-use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use ck_contract_draft::notice::{NoticeAnswer, NoticeRequest};
@@ -43,28 +42,16 @@ impl HostClient {
 }
 
 impl RunnerClient for HostClient {
-    fn read(
-        &self,
-        request: ReadRequest,
-    ) -> impl Future<Output = Result<ReadPage, ClientError>> + Send {
-        let host = self.host();
-        async move { Ok(host?.read(&request)) }
+    async fn read(&self, request: ReadRequest) -> Result<ReadPage, ClientError> {
+        Ok(self.host()?.read(&request))
     }
 
-    fn publish(
-        &self,
-        request: ViewPublishRequest,
-    ) -> impl Future<Output = Result<ViewPublishAnswer, ClientError>> + Send {
-        let host = self.host();
-        async move { Ok(host?.publish(request)) }
+    async fn publish(&self, request: ViewPublishRequest) -> Result<ViewPublishAnswer, ClientError> {
+        Ok(self.host()?.publish(request))
     }
 
-    fn current(
-        &self,
-        _: ViewCurrentRequest,
-    ) -> impl Future<Output = Result<ViewCurrentAnswer, ClientError>> + Send {
-        let host = self.host();
-        async move { Ok(host?.current()) }
+    async fn current(&self, _: ViewCurrentRequest) -> Result<ViewCurrentAnswer, ClientError> {
+        Ok(self.host()?.current())
     }
 }
 
@@ -151,6 +138,7 @@ fn config(preset: &str, kind: Kind, rules: ProviderRules) -> SessionConfig {
         system_tokens: 500,
         tag_checkpoint: 0,
         start_ms: 1_000_000,
+        model_latency_ms: 0,
     }
 }
 

@@ -21,6 +21,7 @@
 pub mod model;
 pub mod runner;
 pub mod script;
+pub mod subc;
 pub mod tokens;
 pub mod transcript;
 

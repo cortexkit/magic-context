@@ -5,9 +5,11 @@
 use ck_contract_draft::part::ToolStatus;
 use ck_contract_draft::rules::ProviderRules;
 use ck_contract_draft::setup::ModelRef;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
 pub enum Step {
     /// A person (or the agent that launched the session) sends a message,
     /// which starts a run.
@@ -34,7 +36,8 @@ pub enum Step {
 }
 
 /// The model's reply to one request.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Turn {
     /// Reasoning tokens the reply starts with, if any.
     pub reasoning_tokens: Option<u64>,
@@ -48,7 +51,8 @@ pub struct Turn {
 }
 
 /// The tag prefix a model writes at the start of its reply's text.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SelfTag {
     /// One more than the highest number it can see, as it is told to.
     #[default]
@@ -59,7 +63,7 @@ pub enum SelfTag {
     Number(u64),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCall {
     pub name: String,
     pub input: Value,

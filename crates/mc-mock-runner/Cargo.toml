@@ -10,6 +10,10 @@ ck-contract-draft = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-
-[dev-dependencies]
+subc-client-rs = { workspace = true }
+subc-protocol = { workspace = true }
 tokio = { workspace = true }
+
+[[bin]]
+name = "ck-mock-runner"
+path = "src/main.rs"

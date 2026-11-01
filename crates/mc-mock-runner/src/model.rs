@@ -43,7 +43,8 @@ pub struct Completion {
     pub binding: Binding,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "error", rename_all = "snake_case")]
 pub enum ModelError {
     /// The prompt is larger than the model's window.
     PromptTooLong { prompt_tokens: u64, window: u64 },
@@ -61,7 +62,8 @@ pub struct Binding {
     signed_before: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// Anthropic: signed thinking, prompt cache with a requested lifetime.
     Anthropic,

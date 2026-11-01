@@ -34,7 +34,7 @@ use crate::tokens;
 use crate::transcript::Transcript;
 
 /// How a session starts.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionConfig {
     pub session: SessionRef,
     pub preset: String,
@@ -51,10 +51,16 @@ pub struct SessionConfig {
     pub tag_checkpoint: u64,
     /// The scenario clock at the start, in milliseconds since the Unix epoch.
     pub start_ms: u64,
+    /// Real time each model request takes, in milliseconds. Over the real
+    /// wire a provider works on a notice while the next request is out, as
+    /// with a real model; in process it is 0, and tests wait on the provider
+    /// instead.
+    #[serde(default)]
+    pub model_latency_ms: u64,
 }
 
 /// A call to the provider that did not get an answer.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CallError(pub String);
 
 /// The compaction provider's text edits to a user message before it is
@@ -110,7 +116,7 @@ pub struct SendRequest {
 }
 
 /// What a scenario run observed, for its assertions.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Report {
     pub requests: Vec<RequestRecord>,
     /// Runs the runner refused rather than send over its limit.
@@ -125,7 +131,7 @@ pub struct Report {
     pub call_errors: Vec<CallError>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RequestRecord {
     pub ordinal: u64,
     pub view: Option<u64>,
@@ -133,7 +139,7 @@ pub struct RequestRecord {
     pub now: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RideRecord {
     pub cause: RideCause,
     pub got_view: bool,
@@ -485,6 +491,10 @@ impl<P: Provider> Runner<P> {
     /// One model request and the tool calls of its reply. Returns false when
     /// the run stops.
     async fn model_step(&mut self, turn: &Turn) -> bool {
+        let latency = self.host.lock().config.model_latency_ms;
+        if latency > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(latency)).await;
+        }
         self.deliver_steers().await;
         self.step_boundary().await;
 

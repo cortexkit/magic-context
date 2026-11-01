@@ -33,6 +33,7 @@ pub mod ride;
 pub mod rules;
 pub mod setup;
 pub mod view;
+pub mod wire;
 
 #[cfg(test)]
 mod tests;
