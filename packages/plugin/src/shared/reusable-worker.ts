@@ -150,8 +150,25 @@ function acquireSlot(entry: URL | string, options: WorkerOptions, idleMs: number
             }
             // Only the active job hit the failed thread. Move unstarted jobs to
             // its replacement without retrying any work that may have run.
+            // During process shutdown, release queued leases instead of
+            // spawning threads into a torn-down host.
             for (const lease of owned.queue.splice(0)) {
-                enqueue(acquireSlot(entry, options, idleMs), lease);
+                if (controller.signal.aborted) {
+                    lease.ended = true;
+                    lease.emit("exit", code);
+                } else {
+                    try {
+                        enqueue(acquireSlot(entry, options, idleMs), lease);
+                    } catch (error) {
+                        // Bun can destroy a test file's worker communication
+                        // channel without firing process exit. Report a failed
+                        // replacement through its lease rather than throwing
+                        // from this exit callback between files.
+                        lease.ended = true;
+                        lease.emit("error", error);
+                        lease.emit("exit", 1);
+                    }
+                }
             }
         });
         const controller = new AbortController();
