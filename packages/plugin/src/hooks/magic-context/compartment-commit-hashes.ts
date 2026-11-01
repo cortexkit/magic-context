@@ -13,7 +13,10 @@ export function removeUnsupportedCommitHashes(
     text: string,
     supported: ReadonlySet<string>,
 ): string {
-    return text.replace(/`?\b([0-9a-f]{7,40})\b`?/gi, (token, hash: string) =>
-        Array.from(supported).some((source) => source.startsWith(hash.toLowerCase())) ? token : "",
-    );
+    return text.replace(/`?\b([0-9a-f]{7,40})\b`?/gi, (token, hash: string) => {
+        const normalized = hash.toLowerCase();
+        // Decimal-only tokens are numbers, even when they resemble short hashes.
+        if (!/[a-f]/.test(normalized)) return token;
+        return Array.from(supported).some((source) => source.startsWith(normalized)) ? token : "";
+    });
 }

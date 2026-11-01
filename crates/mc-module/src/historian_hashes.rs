@@ -26,11 +26,27 @@ pub(crate) fn remove_unsupported_hashes(text: &str, supported: &HashSet<&str>) -
     hash_regex()
         .replace_all(text, |capture: &Captures<'_>| {
             let hash = capture[1].to_ascii_lowercase();
-            if supported.iter().any(|source| source.starts_with(&hash)) {
+            // Decimal-only tokens are numbers, even when they resemble short hashes.
+            let has_hex_letter = hash.bytes().any(|byte| matches!(byte, b'a'..=b'f'));
+            if !has_hex_letter || supported.iter().any(|source| source.starts_with(&hash)) {
                 capture[0].to_string()
             } else {
                 String::new()
             }
         })
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_summary_numbers_survive_while_mixed_hashes_are_range_checked() {
+        let summary = "1000000 tokens at 1720000000000; `1234567` bytes; unsupported `a1b2c3d`; supported `D3714D6`.";
+        assert_eq!(
+            remove_unsupported_hashes(summary, &HashSet::from(["d3714d6a9b"])),
+            "1000000 tokens at 1720000000000; `1234567` bytes; unsupported ; supported `D3714D6`."
+        );
+    }
 }
