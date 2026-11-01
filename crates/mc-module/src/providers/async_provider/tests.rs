@@ -2794,6 +2794,43 @@ async fn setup_echoes_the_accepted_serializer_profile_and_refuses_an_unknown_one
     assert!(load(rig.h.store.get().unwrap(), &other).unwrap().is_none());
 }
 
+#[tokio::test]
+async fn setup_pending_view_opt_in_requires_a_positive_hold_without_enabling_pending_views() {
+    for (feature, cap, ready) in [
+        (compact::setup::VIEW_FEATURE_VIEW_PENDING, None, false),
+        (compact::setup::VIEW_FEATURE_VIEW_PENDING, Some(0), false),
+        (compact::setup::VIEW_FEATURE_VIEW_PENDING, Some(1), true),
+        ("future_feature", None, true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let rig = Rig::new(dir.path()).await;
+        rig.bind_provider(8, &rig.module, "opencode", "feature-cap");
+        let mut request = setup_request("feature-cap", "pending-cap");
+        request["view_features"] = json!([feature]);
+        if let Some(cap) = cap {
+            request["view_due_max_ms"] = json!(cap);
+        }
+        let answer = response(
+            rig.h
+                .dispatch_value(8, json!({"method":"compaction.setup","params":request}))
+                .await,
+        );
+        assert_eq!(
+            answer["answer"],
+            if ready { "ready" } else { "refuse" },
+            "{answer}"
+        );
+        assert!(answer.get("view_pending").is_none(), "{answer}");
+        if !ready {
+            assert_eq!(answer["code"], "misconfigured");
+            let reference = runner_session_ref(&rig.module, "opencode", "feature-cap");
+            assert!(load_head(rig.h.store.get().unwrap(), &reference)
+                .unwrap()
+                .is_none());
+        }
+    }
+}
+
 fn setup_request(session: &str, request_id: &str) -> Value {
     json!({
         "session":session,

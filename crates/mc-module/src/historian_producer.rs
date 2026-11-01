@@ -1758,7 +1758,11 @@ impl HistorianProducer {
                     json!({"method":"run.status", "params":{"run_id":run_id}}),
                 )
                 .await?;
-            let status_finish = runner_finish_reason(&answer, self.step_finish_reason.as_deref());
+            let status_finish = runner_finish_reason(
+                &answer,
+                self.step_finish_reason.as_deref(),
+                self.route_follow.finish_reason,
+            );
             let status: RoleRunStatus = serde_json::from_value(answer)?;
             if status.run_state().is_terminal() {
                 let answer = self
@@ -1767,8 +1771,11 @@ impl HistorianProducer {
                         json!({"method":"run.result", "params":{"run_id":run_id}}),
                     )
                     .await?;
-                let result_finish =
-                    runner_finish_reason(&answer, self.step_finish_reason.as_deref());
+                let result_finish = runner_finish_reason(
+                    &answer,
+                    self.step_finish_reason.as_deref(),
+                    self.route_follow.finish_reason,
+                );
                 let finish_reason = if result_finish == RunnerFinishReason::Length
                     || status_finish == RunnerFinishReason::Length
                 {
@@ -2061,11 +2068,29 @@ enum RunnerFinishReason {
     Other,
 }
 
-/// Finish metadata is optional in the current runner role. Unknown and `other`
-/// are not evidence of completeness; envelope and compartment gates always run.
-/// Keep runner-specific finish-reason fields here so changes to their handling
-/// stay in one adapter, not the historian's publication or recovery logic.
-fn runner_finish_reason(answer: &Value, step_finish_reason: Option<&str>) -> RunnerFinishReason {
+/// `declared` means role.describe advertised the `finish_reason` group: use its
+/// normalized `answer.finish`, otherwise retain optional raw/step-event behavior.
+/// Absence, future values and `other` never prove completeness; every reply still
+/// passes validation.
+fn runner_finish_reason(
+    answer: &Value,
+    step_finish_reason: Option<&str>,
+    declared: bool,
+) -> RunnerFinishReason {
+    if declared {
+        use cortexkit_role_llm_runner::finish::Finish;
+        return match answer
+            .get("finish")
+            .and_then(Value::as_str)
+            .map(Finish::parse)
+        {
+            Some(Finish::Length) => RunnerFinishReason::Length,
+            Some(Finish::Stop | Finish::ContentFilter | Finish::ToolCalls | Finish::Error) => {
+                RunnerFinishReason::Other
+            }
+            _ => RunnerFinishReason::Unknown,
+        };
+    }
     let reason = [
         answer.get("final_step_finish_reason"),
         answer.get("finish_reason"),
@@ -2391,6 +2416,117 @@ fn retry_after_secs_from_value(value: &Value) -> Option<u64> {
 #[cfg(test)]
 pub(crate) mod tests {
     #[test]
+    fn normalized_finish_adapter_matches_packaged_runner_vectors() {
+        use cortexkit_role_llm_runner::{finish, vectors};
+        let groups: Vec<Value> =
+            serde_json::from_str(vectors::file("finish-reason.json").unwrap()).unwrap();
+        assert_eq!(groups.len(), 9);
+        for group in groups {
+            let source = group["source"].as_str().unwrap();
+            for case in group["cases"].as_array().unwrap() {
+                let normalized = finish::normalize(
+                    source,
+                    case["raw"].as_str(),
+                    case["emitted_tool_calls"].as_bool().unwrap_or(false),
+                );
+                if case.get("error").is_some() {
+                    assert!(normalized.is_err(), "{source}: {case}");
+                    continue;
+                }
+                let normalized = normalized.unwrap();
+                assert_eq!(
+                    normalized.as_ref().map(finish::Finish::as_str),
+                    case["finish"].as_str(),
+                    "{source}: {case}"
+                );
+                let mut answer = json!({"final_step_finish_reason":"length"});
+                if let Some(finish) = normalized {
+                    answer["finish"] = serde_json::to_value(finish).unwrap();
+                }
+                let expected = match case["finish"].as_str() {
+                    Some("length") => RunnerFinishReason::Length,
+                    None | Some("other") => RunnerFinishReason::Unknown,
+                    Some(_) => RunnerFinishReason::Other,
+                };
+                assert_eq!(
+                    runner_finish_reason(&answer, Some("length"), true),
+                    expected,
+                    "{source}: {case}"
+                );
+            }
+        }
+        assert_eq!(
+            runner_finish_reason(&json!({"finish":"future_normalized_reason"}), None, true),
+            RunnerFinishReason::Unknown
+        );
+        assert_eq!(
+            runner_finish_reason(&json!({"finish":"length"}), None, false),
+            RunnerFinishReason::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn declared_normalized_finish_is_read_from_result_and_ended_status() {
+        for (declared, result_finish, status_finish, raw, capped) in [
+            (true, Some("length"), None, None, true),
+            (true, None, Some("length"), None, true),
+            (true, Some("stop"), Some("stop"), None, false),
+            (true, Some("other"), None, None, false),
+            (true, Some("future_finish"), None, None, false),
+            (true, None, None, Some("length"), false),
+            (false, Some("length"), None, Some("stop"), false),
+            (false, Some("stop"), None, Some("length"), true),
+        ] {
+            let mut caps = vec![json!("no_tools"), json!("max_steps")];
+            if declared {
+                caps.push(json!(
+                    cortexkit_role_llm_runner::capabilities::FINISH_REASON
+                ));
+            }
+            let server = fake_server_with_role_describe(
+                json!({"run_id":"run-1"}),
+                vec![],
+                json!({"capabilities":caps}),
+                false,
+            )
+            .await;
+            {
+                let mut answers = server.answers.lock().await;
+                let mut status = json!({"state":"completed"});
+                if let Some(finish) = status_finish {
+                    status["finish"] = json!(finish);
+                }
+                if let Some(raw) = raw {
+                    status["final_step_finish_reason"] = json!(raw);
+                }
+                answers.statuses = [status].into();
+                let mut result = json!({"run_id":"run-1","state":"completed","final_message":{"ordinal":1,"mid":"answer","text":"reply"}});
+                if let Some(finish) = result_finish {
+                    result["finish"] = json!(finish);
+                }
+                if let Some(raw) = raw {
+                    result["final_step_finish_reason"] = json!(raw);
+                }
+                answers.result = Some(result);
+            }
+            let mut producer = client(&server).await;
+            producer
+                .start("normalized-finish-child", "system", "prompt", "prov/model")
+                .await
+                .unwrap();
+            assert_eq!(
+                producer
+                    .await_output_with_timeout("run-1", Duration::from_secs(3))
+                    .await
+                    .unwrap()
+                    .length_capped,
+                capped
+            );
+            producer.close().await;
+        }
+    }
+
+    #[test]
     fn finish_reason_adapter_distinguishes_length_from_unknown_metadata() {
         for (answer, step, expected) in [
             (json!({}), None, RunnerFinishReason::Unknown),
@@ -2431,7 +2567,7 @@ pub(crate) mod tests {
                 RunnerFinishReason::Unknown,
             ),
         ] {
-            assert_eq!(runner_finish_reason(&answer, step), expected);
+            assert_eq!(runner_finish_reason(&answer, step, false), expected);
         }
     }
 
@@ -2486,7 +2622,7 @@ pub(crate) mod tests {
         assert_eq!(producer.step_finish_reason, None);
         producer.observe_step_finish(&json!({"kind":"control","unit":{"type":"step_finished","run_id":"current","finish_reason":"length"}}));
         assert_eq!(
-            runner_finish_reason(&json!({}), producer.step_finish_reason.as_deref()),
+            runner_finish_reason(&json!({}), producer.step_finish_reason.as_deref(), false),
             RunnerFinishReason::Length
         );
         producer.close().await;
@@ -3215,6 +3351,22 @@ pub(crate) mod tests {
             let mut status = json!({"state":"completed"});
             if let Some(finish) = finish {
                 status["final_step_finish_reason"] = json!(finish);
+            }
+            answers.statuses = [status].into();
+        }
+        (producer, server)
+    }
+
+    pub(crate) async fn publication_follower_with_normalized_finish(
+        output: &str,
+        finish: Option<&str>,
+    ) -> (HistorianProducer, FakeServer) {
+        let (producer, server) = publication_follower_described(output, false, json!({"capabilities":["no_tools", "max_steps", cortexkit_role_llm_runner::capabilities::FINISH_REASON]})).await;
+        {
+            let mut answers = server.answers.lock().await;
+            let mut status = json!({"state":"completed"});
+            if let Some(finish) = finish {
+                status["finish"] = json!(finish);
             }
             answers.statuses = [status].into();
         }

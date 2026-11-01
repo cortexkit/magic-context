@@ -23,6 +23,7 @@ pub(crate) struct FollowCapabilities {
     pub run_status: bool,
     pub streaming: bool,
     pub run_usage: bool,
+    pub finish_reason: bool,
 }
 
 impl FollowCapabilities {
@@ -40,6 +41,7 @@ impl FollowCapabilities {
             run_status: declares(caps::RUN_STATUS),
             streaming: declares(caps::STREAMING),
             run_usage: declares(caps::RUN_USAGE),
+            finish_reason: declares(caps::FINISH_REASON),
         }
     }
 
@@ -68,6 +70,11 @@ mod tests {
         let answer = json!({"capabilities":["run_ops","run_status","streaming","run_usage"]});
         let read = FollowCapabilities::from_describe(&answer);
         assert!(read.run_ops && read.run_status && read.streaming && read.run_usage);
+        assert!(!read.finish_reason);
+        assert!(
+            FollowCapabilities::from_describe(&json!({"capabilities":[caps::FINISH_REASON]}))
+                .finish_reason
+        );
         assert_eq!(read.missing(), None);
         let enveloped = FollowCapabilities::from_describe(&json!({ "result": answer }));
         assert_eq!(

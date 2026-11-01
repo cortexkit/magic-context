@@ -5245,40 +5245,53 @@ mod tests {
 
     #[tokio::test]
     async fn served_runner_length_and_unknown_replies_still_obey_publication_gates() {
-        for (finish, valid_xml, publishes) in [
-            (Some("length"), true, false),
-            (Some("other"), false, false),
-            (None, false, false),
-            (None, true, true),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let main_store = store(dir.path());
-            seed_prior_compartment(&main_store);
-            let chunk = historian_chunk();
-            let prior = prior_ranges();
-            let models = vec!["prov/main".into()];
-            let output = if valid_xml {
-                historian_xml("valid structure")
-            } else {
-                "partial <output>".into()
-            };
-            let (mut producer, _server) =
-                crate::historian_producer::tests::publication_follower_with_finish(&output, finish)
-                    .await;
-            let result = run_historian_firing(
-                &mut producer,
-                fire_request(&main_store, "prompt", &models, &chunk, &prior),
-            )
-            .await;
-            assert_eq!(
-                result.is_ok(),
-                publishes,
-                "finish={finish:?} valid_xml={valid_xml}"
-            );
-            assert_eq!(
-                main_store.load_compartments("ses").unwrap().len(),
-                if publishes { 2 } else { 1 }
-            );
+        for normalized in [false, true] {
+            for (finish, valid_xml, publishes) in [
+                (Some("length"), true, false),
+                (Some("stop"), false, false),
+                (Some("stop"), true, true),
+                (Some("other"), false, false),
+                (Some("future_finish"), false, false),
+                (None, false, false),
+                (None, true, true),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let main_store = store(dir.path());
+                seed_prior_compartment(&main_store);
+                let chunk = historian_chunk();
+                let prior = prior_ranges();
+                let models = vec!["prov/main".into()];
+                let output = if valid_xml {
+                    historian_xml("valid structure")
+                } else {
+                    "partial <output>".into()
+                };
+                let (mut producer, _server) = if normalized {
+                    crate::historian_producer::tests::publication_follower_with_normalized_finish(
+                        &output, finish,
+                    )
+                    .await
+                } else {
+                    crate::historian_producer::tests::publication_follower_with_finish(
+                        &output, finish,
+                    )
+                    .await
+                };
+                let result = run_historian_firing(
+                    &mut producer,
+                    fire_request(&main_store, "prompt", &models, &chunk, &prior),
+                )
+                .await;
+                assert_eq!(
+                    result.is_ok(),
+                    publishes,
+                    "finish={finish:?} valid_xml={valid_xml}"
+                );
+                assert_eq!(
+                    main_store.load_compartments("ses").unwrap().len(),
+                    if publishes { 2 } else { 1 }
+                );
+            }
         }
     }
 

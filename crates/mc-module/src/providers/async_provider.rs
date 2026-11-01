@@ -2913,6 +2913,22 @@ impl McHandler {
         preparation: Option<offline_first_pass::OfflineFirstPass>,
     ) -> Result<Vec<u8>, HandlerOutcome> {
         let request: compact::setup::SetupRequest = decode(params)?;
+        // Pending-view support must bound how long the runner may delay its first
+        // model call, even when the first view is inline. Reject a missing/zero
+        // view_due_max_ms before recording a conversation or returning an answer
+        // the runner is required to refuse.
+        if request
+            .view_features()
+            .iter()
+            .any(|feature| feature == compact::setup::VIEW_FEATURE_VIEW_PENDING)
+            && request.view_due_max_ms().is_none_or(|cap| cap == 0)
+        {
+            return bytes(&moved_session::setup_refusal(
+                &request.request_id,
+                "misconfigured",
+                "view_pending requires a positive view_due_max_ms.",
+            ));
+        }
         let bound_session = binding.session.as_str();
         // The session handle is an opaque caller-chosen string (compaction-provider
         // contract §1 and §4): compare, key and bind it as exact bytes, never trimmed, so
