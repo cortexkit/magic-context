@@ -46,8 +46,9 @@ pub struct SessionConfig {
     /// The prompt-cache lifetime the runner requests, in milliseconds.
     pub cache_ttl_ms: u64,
     pub system_tokens: u64,
-    /// The first tag number; above the old highest for a moved session.
-    pub first_tag: u64,
+    /// The checkpoint numbers count from: 0 for a new session, the old highest
+    /// number for a session moved in from a standalone host.
+    pub tag_checkpoint: u64,
     /// The scenario clock at the start, in milliseconds since the Unix epoch.
     pub start_ms: u64,
 }
@@ -334,7 +335,7 @@ impl<P: Provider> Runner<P> {
     pub async fn start(config: SessionConfig, provider: P) -> Result<Self, CallError> {
         let model = MockModel::new(config.kind, config.cache_ttl_ms);
         let state = State {
-            transcript: Transcript::new(config.first_tag),
+            transcript: Transcript::new(config.tag_checkpoint),
             now: config.start_ms,
             config,
             applied: None,

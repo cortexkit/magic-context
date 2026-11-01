@@ -1,7 +1,10 @@
-//! The runner's transcript: entries in full form, with tag numbers assigned
-//! when a part is written, stored with it, and never reused. A revert removes
-//! entries but keeps the counter, so a number the model once saw can never
-//! name a different part later.
+//! The runner's transcript: entries in full form, with tag numbers counted
+//! from the compaction marker's checkpoint. A part's number is the checkpoint
+//! plus its position among the numbered parts on the transcript (text and tool
+//! parts; never reasoning, images or files). Numbers are contiguous: after a
+//! revert, counting continues from what remains, so the model never sees a
+//! gap it could pattern-match into a jump. Only the runner counts; it hands
+//! each part's number to the compaction provider in reads and notices.
 
 use ck_contract_draft::part::{Attachment, Part, PartBody, ToolStatus};
 use ck_contract_draft::read::{
@@ -12,21 +15,36 @@ use ck_contract_draft::view::AppliedView;
 #[derive(Clone, Debug)]
 pub struct Transcript {
     entries: Vec<Entry>,
-    next_tag: u64,
+    /// The number before the first numbered part: the checkpoint the
+    /// session's compaction marker carries.
+    checkpoint: u64,
+    /// Message ids come from the host and are never reused, revert or not.
     next_mid: u64,
 }
 
 impl Transcript {
-    /// A new transcript whose first tag number is `first_tag`. A session moved
-    /// in from a host that ran Magic Context as its own plugin (OpenCode or Pi
-    /// without a runner) starts above the highest number its model has
-    /// already seen.
-    pub fn new(first_tag: u64) -> Self {
+    /// A new transcript counting from `checkpoint`, so its first number is
+    /// `checkpoint + 1`. A session moved in from a host that ran Magic Context
+    /// as its own plugin (OpenCode or Pi without a runner) gets that plugin's
+    /// highest number as its checkpoint, so new numbers stay above every
+    /// number its model has already seen.
+    pub fn new(checkpoint: u64) -> Self {
         Self {
             entries: Vec::new(),
-            next_tag: first_tag,
+            checkpoint,
             next_mid: 1,
         }
+    }
+
+    /// The number the next numbered part gets.
+    fn next_tag(&self) -> u64 {
+        let numbered = self
+            .entries
+            .iter()
+            .flat_map(|entry| &entry.parts)
+            .filter(|part| part.tag.is_some())
+            .count() as u64;
+        self.checkpoint + numbered + 1
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -54,14 +72,15 @@ impl Transcript {
     ) -> &Entry {
         let mid = format!("msg{:05}", self.next_mid);
         self.next_mid += 1;
+        let mut next_tag = self.next_tag();
         let parts: Vec<Part> = bodies
             .into_iter()
             .enumerate()
             .map(|(index, body)| {
                 let tag = match body {
                     PartBody::Text { .. } | PartBody::Tool(_) => {
-                        let tag = self.next_tag;
-                        self.next_tag += 1;
+                        let tag = next_tag;
+                        next_tag += 1;
                         Some(tag)
                     }
                     PartBody::Reasoning { .. } | PartBody::Image(_) | PartBody::File(_) => None,
@@ -114,7 +133,8 @@ impl Transcript {
         Ok(())
     }
 
-    /// Remove every entry from `ordinal` on. Tag numbers are not reused.
+    /// Remove every entry from `ordinal` on. Their numbers become free, and
+    /// the next numbered part takes the first of them.
     pub fn revert_to(&mut self, ordinal: u64) {
         self.entries.truncate(ordinal as usize);
     }
@@ -205,8 +225,8 @@ mod tests {
     }
 
     #[test]
-    fn numbers_go_to_text_and_tool_parts_and_are_never_reused() {
-        let mut transcript = Transcript::new(100);
+    fn numbers_count_from_the_checkpoint_and_continue_after_a_revert() {
+        let mut transcript = Transcript::new(99);
         transcript.append(Role::User, None, vec![text("hi")], None, None, 1);
         let reasoning = PartBody::Reasoning {
             text: Some("hmm".into()),
@@ -225,13 +245,14 @@ mod tests {
         assert_eq!(tags, [None, Some(101), Some(102)]);
         transcript.revert_to(1);
         let entry = transcript.append(Role::Assistant, None, vec![text("again")], None, None, 3);
-        assert_eq!(entry.parts[0].tag, Some(103));
+        assert_eq!(entry.parts[0].tag, Some(101));
         assert_eq!(entry.ordinal, 1);
+        assert_eq!(entry.mid, "msg00003");
     }
 
     #[test]
     fn a_tool_result_updates_the_newest_message_and_its_checksums() {
-        let mut transcript = Transcript::new(1);
+        let mut transcript = Transcript::new(0);
         transcript.append(Role::Assistant, None, vec![tool("c1")], None, None, 1);
         let before = transcript.entries()[0].clone();
         transcript
@@ -248,7 +269,7 @@ mod tests {
 
     #[test]
     fn reads_page_by_size_and_compact_reads_drop_output_text() {
-        let mut transcript = Transcript::new(1);
+        let mut transcript = Transcript::new(0);
         for index in 0..5 {
             transcript.append(
                 Role::User,

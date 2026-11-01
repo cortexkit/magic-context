@@ -163,7 +163,7 @@ fn config(kind: Kind, rules: ProviderRules, window: u64) -> SessionConfig {
         kind,
         cache_ttl_ms: 300_000,
         system_tokens: 500,
-        first_tag: 1,
+        tag_checkpoint: 0,
         start_ms: 1_000_000,
     }
 }
@@ -505,9 +505,10 @@ async fn self_tagged_replies_keep_a_chained_route_continuing_across_a_revert() {
         .await;
     assert_eq!(continued(&runner.report), [true; 3]);
 
-    // Remove the second user message and the reply to it. The next user
-    // message takes the next number, above the removed ones, so the model's
-    // next self-tag is still the number the runner assigns.
+    // Remove the second user message and the reply to it. Counting continues
+    // from what remains, so the next user message takes the first removed
+    // number and the model's next self-tag is still the number the runner
+    // assigns.
     let removed = runner.host().entries()[4].ordinal;
     runner
         .play(&[
@@ -530,19 +531,14 @@ async fn self_tagged_replies_keep_a_chained_route_continuing_across_a_revert() {
         [true, true, true, false, true, true]
     );
 
-    // Every reply renders exactly as written, and numbers skip the removed
-    // range instead of reusing it.
+    // The numbers the model sees have no gap where the removed messages were.
     let rendered = runner.host().rendered();
     let tags: Vec<u64> = rendered
         .iter()
         .flat_map(|message| &message.parts)
         .filter_map(|part| part.tag)
         .collect();
-    assert!(tags.windows(2).all(|pair| pair[0] < pair[1]), "{tags:?}");
-    assert!(
-        tags.windows(2).any(|pair| pair[1] > pair[0] + 1),
-        "{tags:?}"
-    );
+    assert_eq!(tags, (1..=tags.len() as u64).collect::<Vec<_>>());
 }
 
 #[tokio::test]
