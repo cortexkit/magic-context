@@ -2,19 +2,13 @@ import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { OpenCode } from "../packages/e2e-tests/node_modules/@opencode/client/dist/promise/index.js";
-import { MockProvider } from "../packages/e2e-tests/src/mock-provider/server";
-import {
-    isolation,
-    spawnOpencode2,
-    waitForPluginActive,
-} from "../packages/e2e-tests/src/opencode2-runner/spawn";
+import { OpenCode } from "@opencode/client";
+import { MockProvider } from "../../src/mock-provider/server";
+import { isolation, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 
-// Run explicitly with the exact 2.2.5 CLI and matching schema overrides documented
-// in packages/e2e-tests/src/opencode2-runner/README.md. The streaming assertion
-// intentionally fails until overflow recovery handles terminal provider errors.
-test("issue 827: OpenCode 2.2.5 arms recovery for HTTP and streaming OpenAI overflows", async () => {
-    expect(process.env.MC_E2E_OPENCODE2_VERSION).toBe("2.2.5");
+// The standard lane uses its pinned CLI; exact-version compatibility runs use the
+// CLI/schema overrides documented in src/opencode2-runner/README.md.
+test("arms recovery for HTTP and streaming OpenAI overflows", async () => {
     const fixture = isolation();
     const probe = join(fixture.root, "error-probe");
     const trace = join(fixture.root, "http-response.jsonl");

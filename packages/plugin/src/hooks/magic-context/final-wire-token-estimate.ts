@@ -8,6 +8,7 @@ import {
     providerMass,
     resolveDecisionCalibration,
 } from "./decision-calibration";
+import { incompleteWirePartFields } from "./final-wire-completeness";
 import {
     estimateImageTokensFromDataUrl,
     estimateToolAttachmentImageTokens,
@@ -774,63 +775,7 @@ export function estimateAppendedWireTokens(
 }
 
 function hasCountableParts(message: MessageLike): boolean {
-    return message.parts.every((part) => {
-        if (!part || typeof part !== "object") return false;
-        const p = part as unknown as Record<string, unknown>;
-        if (p.ignored === true) return true;
-        switch (p.type) {
-            case "text":
-            case "reasoning":
-                return typeof p.text === "string";
-            case "thinking":
-                return typeof p.thinking === "string";
-            case "redacted_thinking":
-                return typeof p.data === "string";
-            case "tool": {
-                const state =
-                    p.state !== null && typeof p.state === "object"
-                        ? (p.state as Record<string, unknown>)
-                        : undefined;
-                const hasInput =
-                    state?.input !== undefined || p.input !== undefined || p.args !== undefined;
-                const hasResult =
-                    state?.output !== undefined ||
-                    state?.content !== undefined ||
-                    state?.error !== undefined ||
-                    p.output !== undefined ||
-                    p.result !== undefined ||
-                    p.content !== undefined;
-                return hasInput && hasResult;
-            }
-            case "tool-call":
-                return p.input !== undefined || p.args !== undefined;
-            case "tool-invocation":
-                return (
-                    (p.args !== undefined || p.input !== undefined) &&
-                    (p.result !== undefined ||
-                        p.output !== undefined ||
-                        (p.state !== null && typeof p.state === "object"))
-                );
-            case "tool-result":
-                return p.result !== undefined || p.content !== undefined || p.output !== undefined;
-            case "tool_use":
-                return p.input !== undefined || p.args !== undefined;
-            case "tool_result":
-                return p.content !== undefined || p.result !== undefined || p.output !== undefined;
-            case "step-start":
-            case "step-finish":
-                return true;
-            case "file":
-                // An inline image is counted from its pixel dimensions, and that count
-                // is capped per image, so it is a bounded estimate. Every session with a
-                // memory mural carries one in m[0]; leaving it uncountable made every
-                // fit check on those sessions untrusted, so last-known-good replay was
-                // refused on every engine blip. Other attachments stay uncountable.
-                return typeof p.url === "string" && p.url.startsWith("data:image/");
-            default:
-                return false;
-        }
-    });
+    return message.parts.every((part) => incompleteWirePartFields(part).length === 0);
 }
 
 import { sessionLog } from "../../shared/logger";
