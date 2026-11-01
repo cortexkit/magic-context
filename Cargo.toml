@@ -4,8 +4,10 @@
 # context); the dashboard's Tauri crate is its own standalone build, excluded here.
 [workspace]
 resolver = "2"
-members = ["crates/mc-core", "crates/mc-store", "crates/mc-module", "crates/mc-tokenizer"]
-exclude = ["packages/dashboard/src-tauri"]
+# The mode-3 rewrite starts from an empty crates/ directory. The previous crates
+# live in crates_old/ as a reference only and are not built.
+members = []
+exclude = ["packages/dashboard/src-tauri", "crates_old"]
 
 # Commands the shared ck-motor build runner runs on the default branch to fill its
 # dependency cache. Jobs hit the cache only when their dependency build shape
@@ -36,9 +38,6 @@ subc-client-rs = "=0.33.0"
 subc-os = "=0.1.26"
 subc-core = { git = "https://github.com/cortexkit/subconscious", rev = "90295ece040258c77ea1f1f1d727109c5eaab13f" }
 
-# Internal crates.
-mc-core = { path = "crates/mc-core" }
-mc-store = { path = "crates/mc-store" }
 
 # Third-party. rusqlite pinned to the same version+features cortexkit-store uses so
 # the Connection/Transaction types unify across the with_conn boundary.
