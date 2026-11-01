@@ -1492,18 +1492,24 @@ export function createTransform(deps: TransformDeps) {
         const earlyStateSnapshot = loadTransformPassStateSnapshot(db, sessionId);
         const historianFailureState = earlyStateSnapshot.historianFailure;
 
+        const liveUsageBeforeReset = deps.contextUsageMap.get(sessionId);
         const usagePredatesHistory = usagePredatesHistoryChange(
             db,
             sessionId,
             sessionMeta,
-            deps.contextUsageMap.get(sessionId),
+            liveUsageBeforeReset,
         );
         if ((isFirstTransformPassForSession || usagePredatesHistory) && sessionMeta) {
             const persistedPct = sessionMeta.lastContextPercentage ?? 0;
-            if (persistedPct > 0) {
+            // Another process can reset stored counters while this process retains its provider sample.
+            if (
+                persistedPct > 0 ||
+                (usagePredatesHistory && liveUsageBeforeReset?.hasUsageTokens === true)
+            ) {
+                const resetPct = persistedPct || liveUsageBeforeReset?.usage.percentage || 0;
                 sessionLog(
                     sessionId,
-                    `transform: ${isFirstTransformPassForSession ? "first pass" : "history changed since usage"} reset — percentage=${persistedPct.toFixed(1)}% — clearing stale usage state`,
+                    `transform: ${isFirstTransformPassForSession ? "first pass" : "history changed since usage"} reset — percentage=${resetPct.toFixed(1)}% — clearing stale usage state`,
                 );
                 updateSessionMeta(db, sessionId, {
                     lastContextPercentage: 0,
