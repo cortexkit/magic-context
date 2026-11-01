@@ -1,25 +1,28 @@
-//! The advance notice: after every durable write to a session's transcript,
-//! the runner publishes one on ck-bus. The bus carries identifiers and small
-//! headers, never message content, so the notice only says where the
-//! transcript stands; the provider then reads what is new with
-//! `session.read`. A lost or repeated notice only delays a wake, because the
-//! provider reads from its own position, not from the notice.
+//! `compaction.notice`, served by the provider. After every durable write to
+//! a session's transcript, the runner sends where the transcript stands, plus
+//! the new entries in compact form. The provider acknowledges at once and does
+//! its work afterwards, so the runner never waits on it.
+//!
+//! A notice is a convenience, not the source of truth: the provider keeps its
+//! own position and reads any gap with `session.read`. So a notice that never
+//! arrives (the provider was down, a call failed) only delays its work until
+//! the next notice or Setup.
 
 use serde::{Deserialize, Serialize};
 
-use crate::read::{Cursor, SessionRef};
+use crate::read::{Cursor, Entry, SessionRef};
 use crate::rules::ProviderRules;
 use crate::setup::ModelRef;
 use crate::view::{AppliedView, ViewRefusal};
 
-/// The bus header that carries a notice, as canonical JSON.
-pub const HEADER: &str = "ck-compaction-notice";
-
-/// Largest header value a notice may take on the bus.
-pub const MAX_HEADER_BYTES: usize = 4096;
+/// Above roughly this many bytes of entries, a notice carries none and the
+/// provider reads them instead, keeping every call far below the transport's
+/// frame limit. With compact parts that only happens for a huge tool input,
+/// such as a `write` of a large file.
+pub const ENTRIES_BUDGET_BYTES: usize = 1 << 20;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AdvanceNotice {
+pub struct NoticeRequest {
     pub session: SessionRef,
     /// Increases by one with every notice for the session, so the provider
     /// can tell a repeated or reordered notice apart.
@@ -31,6 +34,12 @@ pub struct AdvanceNotice {
     pub conditions: Conditions,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<Event>,
+    /// Entries written since the previous notice, oldest first, in compact
+    /// form. Only the newest message can change after it was sent (a running
+    /// tool gets its result), and it is then sent again at the same ordinal.
+    /// Empty when they would exceed [`ENTRIES_BUDGET_BYTES`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<Entry>,
 }
 
 /// What the session runs under now. Notices and rides both carry it, so a
@@ -50,36 +59,23 @@ pub struct Conditions {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
-    /// Entries from this ordinal on may differ from what the provider read
+    /// Entries from this ordinal on may differ from what the provider saw
     /// before: a revert, a branch switch, or a host that changed stored
     /// messages. The provider re-reads from there; edits naming messages that
-    /// are gone are dropped from its next view.
+    /// are gone leave its next view.
     TranscriptChanged { from_ordinal: u64 },
-    /// The runner refused this view and keeps applying its previous one.
-    ViewRefused { version: u64, refusal: ViewRefusal },
     /// The runner wrote the host's own compaction marker for this view, so the
     /// host stops loading the messages the view leaves out at the start.
     MarkerWritten { version: u64 },
+    /// A view the runner refused when it was fetched with `view.get` after a
+    /// ride. A view sent with `view.publish` is refused in that call's answer.
+    ViewRefused { version: u64, refusal: ViewRefusal },
 }
 
-impl AdvanceNotice {
-    /// The bus header value: the notice as canonical JSON. Fails when it would
-    /// not fit the bus's header limit.
-    pub fn to_header(&self) -> Result<String, NoticeTooLarge> {
-        let value = serde_json::to_value(self).expect("a notice always serializes");
-        let text = crate::digest::canonical_json(&value);
-        if text.len() > MAX_HEADER_BYTES {
-            return Err(NoticeTooLarge { bytes: text.len() });
-        }
-        Ok(text)
-    }
-
-    pub fn from_header(value: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(value)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NoticeTooLarge {
-    pub bytes: usize,
+/// The provider's answer: it has the notice. It says nothing about the work
+/// the notice causes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "answer", rename_all = "snake_case")]
+pub enum NoticeAnswer {
+    Received,
 }

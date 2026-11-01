@@ -26,13 +26,32 @@ pub struct Part {
 }
 
 impl Part {
-    /// Build a part, computing its checksum from the body.
+    /// Build a part in full form, computing its checksum from the body.
     pub fn new(id: impl Into<String>, tag: Option<u64>, body: PartBody) -> Self {
         let digest = body_digest(&body);
         Self {
             id: id.into(),
             tag,
             digest,
+            body,
+        }
+    }
+
+    /// The compact form of a full part: tool output and reasoning text are
+    /// left out, and only their sizes remain. The checksum stays the one
+    /// computed over the full content, so an edit computed from the compact
+    /// form still names the exact part. Notices carry parts in this form.
+    pub fn compact(&self) -> Part {
+        let mut body = self.body.clone();
+        match &mut body {
+            PartBody::Tool(tool) => tool.output = None,
+            PartBody::Reasoning { text, .. } => *text = None,
+            PartBody::Text { .. } | PartBody::Image(_) | PartBody::File(_) => {}
+        }
+        Part {
+            id: self.id.clone(),
+            tag: self.tag,
+            digest: self.digest.clone(),
             body,
         }
     }
@@ -46,9 +65,13 @@ pub enum PartBody {
         text: String,
     },
     Reasoning {
-        /// The visible reasoning text, when the provider returns any.
+        /// The visible reasoning text, when the provider returns any. Left
+        /// out in the compact form.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+        /// The size of the visible text in bytes, in both forms.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_bytes: Option<u64>,
         sealing: Sealing,
     },
     /// A tool call and its result as one item, at the call's position, even
@@ -81,9 +104,13 @@ pub struct ToolPart {
     pub input: Map<String, Value>,
     pub status: ToolStatus,
     /// The result's text: the output when completed, the error text when it
-    /// failed. Absent while the call is running.
+    /// failed. Absent while the call is running, and in the compact form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+    /// The size of the result's text in bytes, in both forms. Absent while
+    /// the call is running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<u64>,
     /// Images and files the result carries besides its text.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
@@ -139,6 +166,7 @@ mod tests {
                 input: json!({"path": "a.rs"}).as_object().unwrap().clone(),
                 status: ToolStatus::Completed,
                 output: Some("fn main() {}".into()),
+                output_bytes: Some(12),
                 attachments: vec![],
             }),
         );
@@ -148,6 +176,29 @@ mod tests {
         assert_eq!(wire["name"], "read");
         let back: Part = serde_json::from_value(wire).unwrap();
         assert_eq!(back, part);
+    }
+
+    #[test]
+    fn the_compact_form_keeps_sizes_and_the_full_checksum() {
+        let full = Part::new(
+            "p1",
+            None,
+            PartBody::Reasoning {
+                text: Some("long thinking".into()),
+                text_bytes: Some(13),
+                sealing: Sealing::Signed,
+            },
+        );
+        let compact = full.compact();
+        assert_eq!(compact.digest, full.digest);
+        assert_eq!(
+            compact.body,
+            PartBody::Reasoning {
+                text: None,
+                text_bytes: Some(13),
+                sealing: Sealing::Signed,
+            }
+        );
     }
 
     #[test]

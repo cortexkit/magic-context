@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::notice::Conditions;
 use crate::read::SessionRef;
-use crate::view::AppliedView;
+use crate::view::{AppliedView, ViewDelivery};
 
 /// The refusal code a runner gives a run whose next request still does not
 /// fit after an `over_limit` ride. It never sends a request over its limit.
@@ -49,11 +49,11 @@ pub enum RideCause {
     OverLimit,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "answer", rename_all = "snake_case")]
 pub enum RideAnswer {
-    /// Fetch this view with `view.get` and apply it to the coming request.
-    View { version: u64, checksum: String },
+    /// Apply this view to the coming request.
+    View { delivery: ViewDelivery },
     /// Keep the current view.
     Nothing,
 }

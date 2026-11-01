@@ -45,6 +45,7 @@ fn signed(id: &str) -> Part {
         None,
         PartBody::Reasoning {
             text: Some("thinking".into()),
+            text_bytes: Some(8),
             sealing: Sealing::Signed,
         },
     )
@@ -63,6 +64,7 @@ fn tool(id: &str, tag: u64, status: ToolStatus) -> Part {
                 .clone(),
             status,
             output: (status != ToolStatus::Running).then(|| "done".into()),
+            output_bytes: (status != ToolStatus::Running).then_some(4),
             attachments: vec![Attachment {
                 id: "img-1".into(),
                 media: Media {
@@ -498,4 +500,49 @@ fn signed_parts_may_be_left_out_only_as_an_oldest_run() {
     // A gap made before r5 was generated was already part of its history.
     let entries = signed_transcript([0, 0, 1]);
     assert!(invalid(&entries, &[drop_part(1, "a3", "r3")]).is_empty());
+}
+
+/// The same transcript in compact form, as a notice carries it.
+fn compact(entries: &[Entry]) -> Vec<Entry> {
+    entries
+        .iter()
+        .map(|entry| Entry {
+            parts: entry.parts.iter().map(Part::compact).collect(),
+            ..entry.clone()
+        })
+        .collect()
+}
+
+#[test]
+fn edits_computed_from_the_compact_form_apply_to_the_full_one_and_back() {
+    let full = transcript();
+    let short = compact(&full);
+    // Computed by a provider that only holds the compact form.
+    let edits = vec![
+        replace(1, &short, "a1", "k1", "output", json!("[dropped §3§]")),
+        replace(1, &short, "u1", "t1", "text", json!("fix it")),
+        drop_part(1, "a1", "r1"),
+    ];
+    let on_full = apply_edits(&full, &edits).unwrap();
+    let on_short = apply_edits(&short, &edits).unwrap();
+    assert_eq!(on_full.len(), on_short.len());
+    for (left, right) in on_full.iter().zip(&on_short) {
+        let ids = |message: &crate::view::RenderedMessage| {
+            message
+                .parts
+                .iter()
+                .map(|part| (part.id.clone(), part.tag))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(left), ids(right));
+    }
+    let PartBody::Tool(tool) = &on_short[1].parts[1].body else {
+        panic!()
+    };
+    assert_eq!(tool.output.as_deref(), Some("[dropped §3§]"));
+    assert_eq!(tool.output_bytes, Some("[dropped §3§]".len() as u64));
+    assert_eq!(
+        invalid_signed_parts(&full, &edits, &BOUND),
+        invalid_signed_parts(&short, &edits, &BOUND)
+    );
 }

@@ -383,7 +383,8 @@ fn check_field(mid: &str, part: &Part, field: &str, value: &Value) -> Result<(),
     };
     match (&part.body, field) {
         (PartBody::Text { .. }, "text") => value.as_str().map(|_| ()).ok_or_else(bad),
-        (PartBody::Tool(tool), "output") if tool.output.is_some() => {
+        // A finished call has an output size in both part forms.
+        (PartBody::Tool(tool), "output") if tool.output_bytes.is_some() => {
             value.as_str().map(|_| ()).ok_or_else(bad)
         }
         (PartBody::Tool(tool), "attachments") => {
@@ -418,7 +419,11 @@ fn replaced(part: &Part, fields: &[(&str, &Value)]) -> Part {
     for (field, value) in fields {
         match (&mut body, *field) {
             (PartBody::Text { text }, "text") => *text = string_of(value),
-            (PartBody::Tool(tool), "output") => tool.output = Some(string_of(value)),
+            (PartBody::Tool(tool), "output") => {
+                let output = string_of(value);
+                tool.output_bytes = Some(output.len() as u64);
+                tool.output = Some(output);
+            }
             (PartBody::Tool(tool), "attachments") => {
                 let keep: HashSet<&str> = value
                     .as_array()
@@ -485,7 +490,36 @@ pub fn check_carried(previous: Option<&View>, next: &View) -> Result<(), ViewRef
     Ok(())
 }
 
-/// `view.get`, served by the provider.
+/// A view sent inline, or named for a `view.get` fetch when it is too large
+/// for one call.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "form", rename_all = "snake_case")]
+pub enum ViewDelivery {
+    Inline { view: View },
+    Fetch { version: u64, checksum: String },
+}
+
+/// `view.publish`, served by the runner: the provider hands over a new view.
+/// The runner checks it ([`apply`], [`check_carried`],
+/// [`crate::rules::check`]), stores it, and applies it from the next step
+/// boundary, never in the middle of a step.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ViewPublishRequest {
+    pub session: SessionRef,
+    pub delivery: ViewDelivery,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "answer", rename_all = "snake_case")]
+pub enum ViewPublishAnswer {
+    /// Stored; it applies from the next step boundary.
+    Accepted,
+    /// Not stored; the runner keeps its current view.
+    Refused { refusal: ViewRefusal },
+}
+
+/// `view.get`, served by the provider: the fallback fetch for a view too
+/// large to send inline.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ViewGetRequest {
     pub session: SessionRef,

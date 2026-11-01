@@ -20,7 +20,9 @@ pub struct SessionRef {
 }
 
 /// One message of the transcript, as stored. Views never change entries;
-/// they change what the runner renders from them.
+/// they change what the runner renders from them. The parts come in full or
+/// compact form ([`Detail`]); the checksums are always computed over the full
+/// content.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     /// Position in the transcript, counting from 0. A revert or branch switch
@@ -92,10 +94,22 @@ pub struct Cursor {
 pub struct ReadRequest {
     pub session: SessionRef,
     pub select: Select,
+    pub detail: Detail,
     /// Stop adding entries once the page reaches this many bytes. The page
     /// always holds at least one entry when one matches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<u64>,
+}
+
+/// How much of each part a read returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Detail {
+    /// Parts in compact form ([`crate::part::Part::compact`]): enough to keep
+    /// an index and plan edits. Used to catch up after a missed notice.
+    Compact,
+    /// Parts in full, for the summarizer and for showing a message again.
+    Full,
 }
 
 /// Which entries to read.
