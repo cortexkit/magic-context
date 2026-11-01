@@ -1,6 +1,11 @@
 import { EventEmitter } from "node:events";
 import * as timers from "node:timers";
-import { Worker, type WorkerOptions } from "node:worker_threads";
+import {
+    MessageChannel,
+    receiveMessageOnPort,
+    Worker,
+    type WorkerOptions,
+} from "node:worker_threads";
 import { registerExitAbort, unregisterExitAbort } from "./exit-abort-registry";
 import { inRootAsyncContext } from "./sqlite";
 
@@ -8,6 +13,29 @@ const pools = new Map<string, Slot>();
 const liveSlots = new Set<Slot>();
 let nextId = 0;
 const IDLE_MS = 60_000;
+const sharedCloneWorks = (() => {
+    const source = new SharedArrayBuffer(1);
+    const clone = structuredClone(source);
+    new Uint8Array(source)[0] = 1;
+    return new Uint8Array(clone)[0] === 1;
+})();
+let cloneChannel: MessageChannel | undefined;
+
+function cloneJobValue<T>(value: T, transferList?: readonly object[]): T {
+    if (sharedCloneWorks) return structuredClone(value, { transfer: transferList as never });
+    // Bun 1.3's structuredClone snapshots shared buffers, but native message
+    // transport preserves them. One reusable channel keeps cancellation and
+    // writer coordination shared without allocating ports for every job.
+    if (!cloneChannel) {
+        cloneChannel = inRootAsyncContext(() => new MessageChannel());
+        cloneChannel.port1.unref();
+        cloneChannel.port2.unref();
+    }
+    cloneChannel.port1.postMessage(value, transferList as never);
+    const packet = receiveMessageOnPort(cloneChannel.port2);
+    if (!packet) throw new Error("worker input clone did not arrive synchronously");
+    return packet.message as T;
+}
 
 interface Slot {
     worker: Worker;
@@ -33,10 +61,7 @@ class Lease extends EventEmitter {
         if (this.ended) return;
         if (this.slot.active === this)
             this.slot.worker.postMessage({ jobId: this.id, value }, transferList as never);
-        else
-            this.outbox.push(
-                structuredClone({ value, transferList }, { transfer: transferList as never }),
-            );
+        else this.outbox.push(cloneJobValue({ value, transferList }, transferList));
     }
     start() {
         if (this.referenced) this.slot.worker.ref();
@@ -70,7 +95,7 @@ class Lease extends EventEmitter {
 export function reuseWorker(entry: URL | string, options: WorkerOptions, idleMs = IDLE_MS): Worker {
     // Native Worker construction copies its input immediately, even if the job
     // cannot start yet. Do not let a queued job observe later caller mutations.
-    const data = structuredClone(options.workerData);
+    const data = cloneJobValue(options.workerData);
     const slot = acquireSlot(entry, options, idleMs);
     const lease = new Lease(slot, data);
     enqueue(slot, lease);
@@ -94,6 +119,9 @@ export async function resetReusableWorkersForTests(): Promise<void> {
             ),
         );
     }
+    cloneChannel?.port1.close();
+    cloneChannel?.port2.close();
+    cloneChannel = undefined;
 }
 
 function enqueue(slot: Slot, lease: Lease): void {

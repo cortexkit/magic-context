@@ -108,6 +108,21 @@ describe("reusable job workers", () => {
         expect((await result(job)).value).toBe("submitted");
     });
 
+    test("job input keeps shared coordination live in both directions", async () => {
+        const state = new Int32Array(new SharedArrayBuffer(4));
+        Atomics.store(state, 0, 1);
+        const worker = start(`shared-${++key}`, { shared: state.buffer });
+        const first = once(worker, "message");
+        const exit = once(worker, "exit");
+        expect((await first)[0].shared).toBe(1);
+        const changed = once(worker, "message");
+        Atomics.store(state, 0, 7);
+        worker.postMessage({ read: true });
+        expect((await changed)[0].shared).toBe(7);
+        await exit;
+        expect(Atomics.load(state, 0)).toBe(8);
+    });
+
     test("a nonzero job exit fails the lease and replaces the thread", async () => {
         const path = `exit-code-${++key}`;
         const first = await result(start(path));
