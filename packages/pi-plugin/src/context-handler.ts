@@ -359,6 +359,7 @@ import {
 	preparePiToolRemovalMeasurements,
 	withPiToolRemovalBatch,
 } from "./native-replay-state-pi";
+import { applyNativeResponseTagReplayPi } from "./native-replay-tags-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
 import {
 	projectPiReplayDrops,
@@ -11137,6 +11138,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const tTranscriptCommit = performance.now();
 	transcript.commit();
 	logTransformTiming(args.sessionId, "transcriptCommit", tTranscriptCommit);
+	if (
+		applyNativeResponseTagReplayPi({
+			db: args.db,
+			sessionId: args.sessionId,
+			messages: args.messages,
+			canApply: isCacheBustingPass,
+		}) > 0
+	)
+		recordFirstApplicationWireEdit(true);
 
 	// Legacy drop/watermark state does not authorize first native activation.
 	// Use committed canonical inputs, then publish only persisted native decisions.

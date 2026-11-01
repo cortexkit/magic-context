@@ -1,4 +1,5 @@
 import { stripPersistedAssistantText } from "@magic-context/core/hooks/magic-context/tag-content-primitives";
+import { ownsNativeResponseTagStrip } from "./native-replay-tag-provenance-pi";
 import { piOmitsTruncatedAssistant } from "./pi-dispatch-assistant-history";
 import type { PiChatHistoryModel } from "./pi-dispatch-chat-history";
 import type { PiDispatchHost } from "./pi-dispatch-structure";
@@ -87,6 +88,7 @@ export function piResponsesAssistantTexts(
 	model: PiChatHistoryModel | undefined,
 	host?: PiDispatchHost,
 	alternatives?: PiResponsesUnsignedAlternatives,
+	frozenTagStrips?: unknown,
 ): readonly string[] | undefined {
 	const message = object(value);
 	if (!message || !Array.isArray(message.content)) return undefined;
@@ -185,6 +187,7 @@ export function piResponsesAssistantTexts(
 		].includes(model?.api ?? "");
 	let unsigned = false;
 	let rewrittenText = false;
+	let allUnsignedFrozen = true;
 	for (const value of payload.items) {
 		const item = object(value);
 		if (item?.type === "reasoning") continue;
@@ -235,6 +238,17 @@ export function piResponsesAssistantTexts(
 				)
 					return texts;
 				unsigned = true;
+				// Clean unsigned text cannot normally establish native phase ownership.
+				// Persisted strip evidence preserves that ownership only for the exact
+				// native identity and body, without restoring a removed text signature.
+				allUnsignedFrozen &&=
+					part.text === block.text &&
+					ownsNativeResponseTagStrip(
+						frozenTagStrips,
+						item.id,
+						item.phase,
+						part.text,
+					);
 				// Reapplying the echoed ordinal can restore the original bytes, but
 				// the hook still removed the signature. Native replay owns the phase
 				// even when the prepared text now equals the cached output text.
@@ -250,7 +264,11 @@ export function piResponsesAssistantTexts(
 	}
 	// Every prepared text block must own exactly one cached text, in order. With
 	// no replayable output OMP converts the blocks instead, so keep their texts.
-	if (!output || bound !== blocks.length || (unsigned && !rewrittenText))
+	if (
+		!output ||
+		bound !== blocks.length ||
+		(unsigned && !rewrittenText && !allUnsignedFrozen)
+	)
 		return texts;
 	if (unsigned && alternatives) {
 		alternatives.fallback = texts;

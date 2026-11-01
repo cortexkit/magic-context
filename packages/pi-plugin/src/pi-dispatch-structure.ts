@@ -1,3 +1,4 @@
+import { PI_NATIVE_TAG_STRIP_PROVENANCE } from "./native-replay-tag-provenance-pi";
 import {
 	piAgentHistory,
 	piIsDeveloperHistory,
@@ -996,6 +997,7 @@ function buildPiPreparedStructure(
 				model,
 				host,
 				alternatives,
+				object(projectedMessages[index])?.[PI_NATIVE_TAG_STRIP_PROVENANCE],
 			);
 			if (!texts) {
 				responsesMessages = undefined;
