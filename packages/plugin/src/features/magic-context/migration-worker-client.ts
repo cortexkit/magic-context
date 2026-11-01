@@ -1,6 +1,7 @@
 import { Worker } from "node:worker_threads";
 import { log, writeForwardedLogLine } from "../../shared/logger";
 import { beginOffThreadMigration } from "../../shared/off-thread-migration-clock";
+import { reuseWorker } from "../../shared/reusable-worker";
 import type { MigrationWorkerData, MigrationWorkerMessage } from "./migration-worker-protocol";
 
 /**
@@ -45,6 +46,9 @@ export function __setMigrationWorkerEntryForTests(entry: URL | null): void {
  * While the worker runs, boot deadlines do not count the time (see
  * off-thread-migration-clock.ts), except while it waits to retry another
  * process's write lock.
+ * The migration body deliberately has no deadline: a large store can take a
+ * long time to migrate, and aborting it would roll back legitimate progress.
+ * Its dedicated worker pool never serves another kind of background job.
  */
 export function runMigrationsOffThread(
     data: MigrationWorkerData,
@@ -52,8 +56,10 @@ export function runMigrationsOffThread(
     return new Promise<OffThreadMigrationOutcome>((resolve, reject) => {
         let worker: Worker;
         try {
-            worker = inRootAsyncContext(
-                () => new Worker(workerEntryOverride ?? defaultWorkerEntry(), { workerData: data }),
+            worker = inRootAsyncContext(() =>
+                workerEntryOverride
+                    ? new Worker(workerEntryOverride, { workerData: data })
+                    : reuseWorker(defaultWorkerEntry(), { workerData: data }),
             );
         } catch (error) {
             reject(workerStartError(error instanceof Error ? error.message : String(error)));
