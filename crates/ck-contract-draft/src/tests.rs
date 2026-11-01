@@ -1,0 +1,501 @@
+//! Tests for applying views and checking provider rules.
+
+use serde_json::json;
+
+use crate::part::{Attachment, Media, Part, PartBody, Sealing, ToolPart, ToolStatus};
+use crate::read::{entry_digest, Entry, Role};
+use crate::rules::{
+    check, invalid_signed_parts, EditCost, ProviderRules, RuleBreak, SignedReasoning,
+};
+use crate::view::{
+    apply, apply_edits, check_carried, AppliedView, Edit, EditOp, InsertAt, InsertedMessage,
+    Source, View, ViewRefusal,
+};
+
+fn entry(
+    ordinal: u64,
+    mid: &str,
+    role: Role,
+    parts: Vec<Part>,
+    generated_under: Option<u64>,
+) -> Entry {
+    Entry {
+        ordinal,
+        mid: mid.into(),
+        role,
+        notice: None,
+        written_at: ordinal * 1_000,
+        digest: entry_digest(role, None, &parts),
+        parts,
+        usage: None,
+        generated_under: generated_under.map(|version| AppliedView {
+            version,
+            checksum: format!("checksum-{version}"),
+        }),
+    }
+}
+
+fn text(id: &str, tag: u64, value: &str) -> Part {
+    Part::new(id, Some(tag), PartBody::Text { text: value.into() })
+}
+
+fn signed(id: &str) -> Part {
+    Part::new(
+        id,
+        None,
+        PartBody::Reasoning {
+            text: Some("thinking".into()),
+            sealing: Sealing::Signed,
+        },
+    )
+}
+
+fn tool(id: &str, tag: u64, status: ToolStatus) -> Part {
+    Part::new(
+        id,
+        Some(tag),
+        PartBody::Tool(ToolPart {
+            call_id: format!("call-{id}"),
+            name: "edit".into(),
+            input: json!({"path": "a.rs", "old_string": "x".repeat(100), "count": 3})
+                .as_object()
+                .unwrap()
+                .clone(),
+            status,
+            output: (status != ToolStatus::Running).then(|| "done".into()),
+            attachments: vec![Attachment {
+                id: "img-1".into(),
+                media: Media {
+                    mime: "image/png".into(),
+                    name: None,
+                    size: Some(2048),
+                },
+            }],
+        }),
+    )
+}
+
+fn drop_part(since: u64, mid: &str, part: &str) -> Edit {
+    Edit::new(
+        since,
+        EditOp::Drop {
+            mid: mid.into(),
+            part: Some(part.into()),
+        },
+    )
+}
+
+fn drop_message(since: u64, mid: &str) -> Edit {
+    Edit::new(
+        since,
+        EditOp::Drop {
+            mid: mid.into(),
+            part: None,
+        },
+    )
+}
+
+fn replace(
+    since: u64,
+    entries: &[Entry],
+    mid: &str,
+    part: &str,
+    field: &str,
+    value: serde_json::Value,
+) -> Edit {
+    let expect = entries
+        .iter()
+        .find(|entry| entry.mid == mid)
+        .and_then(|entry| entry.parts.iter().find(|candidate| candidate.id == part))
+        .map(|found| found.digest.clone())
+        .unwrap();
+    Edit::new(
+        since,
+        EditOp::Replace {
+            mid: mid.into(),
+            part: part.into(),
+            field: field.into(),
+            value,
+            expect,
+        },
+    )
+}
+
+fn insert(since: u64, at: InsertAt, id: &str) -> Edit {
+    Edit::new(
+        since,
+        EditOp::Insert {
+            at,
+            message: InsertedMessage {
+                id: id.into(),
+                role: Role::User,
+                texts: vec!["<session-history>...</session-history>".into()],
+            },
+        },
+    )
+}
+
+fn transcript() -> Vec<Entry> {
+    vec![
+        entry(0, "u1", Role::User, vec![text("t1", 1, "please fix")], None),
+        entry(
+            1,
+            "a1",
+            Role::Assistant,
+            vec![
+                signed("r1"),
+                text("t2", 2, "looking"),
+                tool("k1", 3, ToolStatus::Completed),
+            ],
+            None,
+        ),
+        entry(2, "u2", Role::User, vec![text("t3", 4, "go on")], None),
+        entry(
+            3,
+            "a2",
+            Role::Assistant,
+            vec![signed("r2"), tool("k2", 5, ToolStatus::Running)],
+            None,
+        ),
+    ]
+}
+
+const BOUND: ProviderRules = ProviderRules {
+    signed_reasoning: SignedReasoning::Bound,
+    history_edit_cost: EditCost::Suffix,
+};
+
+#[test]
+fn an_empty_view_renders_the_transcript_unchanged() {
+    let entries = transcript();
+    let rendered = apply(&entries, &View::seal(1, vec![])).unwrap();
+    assert_eq!(rendered.len(), entries.len());
+    for (message, entry) in rendered.iter().zip(&entries) {
+        assert_eq!(message.parts, entry.parts);
+    }
+}
+
+#[test]
+fn drops_remove_parts_and_a_message_left_empty_disappears() {
+    let entries = transcript();
+    let edits = vec![drop_part(1, "a1", "k1"), drop_part(1, "u2", "t3")];
+    let rendered = apply_edits(&entries, &edits).unwrap();
+    let mids: Vec<_> = rendered
+        .iter()
+        .map(|message| match &message.source {
+            Source::Entry { mid, .. } => mid.as_str(),
+            Source::Inserted { id } => id.as_str(),
+        })
+        .collect();
+    assert_eq!(mids, ["u1", "a1", "a2"]);
+    let a1: Vec<_> = rendered[1]
+        .parts
+        .iter()
+        .map(|part| part.id.as_str())
+        .collect();
+    assert_eq!(a1, ["r1", "t2"]);
+
+    let rendered = apply_edits(&entries, &[drop_message(1, "a1")]).unwrap();
+    assert_eq!(rendered.len(), 3);
+}
+
+#[test]
+fn replaces_change_one_field_and_keep_id_and_tag() {
+    let entries = transcript();
+    let edits = vec![
+        replace(1, &entries, "u1", "t1", "text", json!("[dropped §1§]")),
+        replace(1, &entries, "a1", "k1", "output", json!("[dropped §3§]")),
+        replace(1, &entries, "a1", "k1", "input.old_string", json!("xxx…")),
+        replace(1, &entries, "a1", "k1", "attachments", json!([])),
+    ];
+    let rendered = apply_edits(&entries, &edits).unwrap();
+    let PartBody::Text { text } = &rendered[0].parts[0].body else {
+        panic!()
+    };
+    assert_eq!(text, "[dropped §1§]");
+    let replaced = &rendered[1].parts[2];
+    assert_eq!((replaced.id.as_str(), replaced.tag), ("k1", Some(3)));
+    let PartBody::Tool(tool) = &replaced.body else {
+        panic!()
+    };
+    assert_eq!(tool.output.as_deref(), Some("[dropped §3§]"));
+    assert_eq!(tool.input["old_string"], "xxx…");
+    assert_eq!(tool.input["path"], "a.rs");
+    assert!(tool.attachments.is_empty());
+    assert_ne!(replaced.digest, entries[1].parts[2].digest);
+}
+
+#[test]
+fn bad_edits_are_refused_by_name() {
+    let entries = transcript();
+    let stale = Edit::new(
+        1,
+        EditOp::Replace {
+            mid: "u1".into(),
+            part: "t1".into(),
+            field: "text".into(),
+            value: json!("x"),
+            expect: "old".into(),
+        },
+    );
+    assert!(matches!(
+        apply_edits(&entries, &[stale]),
+        Err(ViewRefusal::StalePart { .. })
+    ));
+    for edit in [
+        replace(1, &entries, "a1", "r1", "text", json!("x")),
+        replace(1, &entries, "a1", "k1", "input.count", json!("x")),
+        replace(1, &entries, "a1", "k1", "input.missing", json!("x")),
+        replace(1, &entries, "a1", "k1", "attachments", json!(["img-2"])),
+        replace(1, &entries, "u1", "t1", "text", json!(7)),
+    ] {
+        assert!(
+            matches!(
+                apply_edits(&entries, std::slice::from_ref(&edit)),
+                Err(ViewRefusal::BadField { .. })
+            ),
+            "{edit:?}"
+        );
+    }
+    assert!(matches!(
+        apply_edits(&entries, &[drop_part(1, "a2", "k2")]),
+        Err(ViewRefusal::RunningTool { .. })
+    ));
+    assert!(matches!(
+        apply_edits(&entries, &[drop_message(1, "a2")]),
+        Err(ViewRefusal::RunningTool { .. })
+    ));
+    assert!(matches!(
+        apply_edits(&entries, &[drop_part(1, "nope", "t1")]),
+        Err(ViewRefusal::UnknownMessage { .. })
+    ));
+    assert!(matches!(
+        apply_edits(&entries, &[drop_part(1, "u1", "nope")]),
+        Err(ViewRefusal::UnknownPart { .. })
+    ));
+    assert!(matches!(
+        apply_edits(
+            &entries,
+            &[
+                drop_part(1, "u1", "t1"),
+                replace(1, &entries, "u1", "t1", "text", json!("x"))
+            ]
+        ),
+        Err(ViewRefusal::Conflict { .. })
+    ));
+    assert!(matches!(
+        apply_edits(
+            &entries,
+            &[
+                replace(1, &entries, "u1", "t1", "text", json!("x")),
+                replace(1, &entries, "u1", "t1", "text", json!("y"))
+            ]
+        ),
+        Err(ViewRefusal::Conflict { .. })
+    ));
+    assert!(matches!(
+        apply_edits(&entries, &[insert(1, InsertAt::Before("nope".into()), "h")]),
+        Err(ViewRefusal::UnknownAnchor { .. })
+    ));
+    assert!(matches!(
+        apply_edits(
+            &entries,
+            &[
+                insert(1, InsertAt::Start, "h"),
+                insert(1, InsertAt::Start, "h")
+            ]
+        ),
+        Err(ViewRefusal::DuplicateInsert { .. })
+    ));
+}
+
+#[test]
+fn inserts_render_where_they_are_anchored_even_before_a_dropped_message() {
+    let entries = transcript();
+    let edits = vec![
+        insert(1, InsertAt::Start, "m0"),
+        drop_message(1, "u1"),
+        drop_message(1, "a1"),
+        insert(1, InsertAt::Before("u2".into()), "m1"),
+    ];
+    let rendered = apply_edits(&entries, &edits).unwrap();
+    let sources: Vec<_> = rendered
+        .iter()
+        .map(|message| message.source.clone())
+        .collect();
+    assert_eq!(
+        sources,
+        [
+            Source::Inserted { id: "m0".into() },
+            Source::Inserted { id: "m1".into() },
+            Source::Entry {
+                ordinal: 2,
+                mid: "u2".into()
+            },
+            Source::Entry {
+                ordinal: 3,
+                mid: "a2".into()
+            },
+        ]
+    );
+    assert_eq!(rendered[0].parts[0].tag, None);
+}
+
+#[test]
+fn a_view_with_a_wrong_checksum_is_refused() {
+    let entries = transcript();
+    let mut view = View::seal(2, vec![drop_part(2, "u1", "t1")]);
+    assert!(apply(&entries, &view).is_ok());
+    view.edits.clear();
+    assert!(matches!(
+        apply(&entries, &view),
+        Err(ViewRefusal::BadChecksum)
+    ));
+}
+
+#[test]
+fn the_wire_shape_puts_since_and_op_side_by_side() {
+    let edit = drop_part(3, "u1", "t1");
+    assert_eq!(
+        serde_json::to_value(&edit).unwrap(),
+        json!({"since": 3, "op": "drop", "mid": "u1", "part": "t1"})
+    );
+    let view = View::seal(
+        3,
+        vec![edit, insert(3, InsertAt::Before("u2".into()), "m1")],
+    );
+    let back: View = serde_json::from_value(serde_json::to_value(&view).unwrap()).unwrap();
+    assert_eq!(back, view);
+    assert!(back.verify());
+}
+
+#[test]
+fn since_values_must_match_the_previous_view() {
+    let carried = drop_part(2, "u1", "t1");
+    let previous = View::seal(2, vec![carried.clone()]);
+    // Carried unchanged, plus new edits from a version the runner skipped and
+    // from the view's own version.
+    let next = View::seal(
+        5,
+        vec![carried, drop_part(4, "a1", "k1"), drop_part(5, "u2", "t3")],
+    );
+    assert!(check_carried(Some(&previous), &next).is_ok());
+    // A new edit that claims to be as old as the previous view.
+    let backdated = View::seal(5, vec![drop_part(2, "a1", "k1")]);
+    assert_eq!(
+        check_carried(Some(&previous), &backdated),
+        Err(ViewRefusal::BadSince)
+    );
+    // An edit from the future.
+    let future = View::seal(5, vec![drop_part(6, "a1", "k1")]);
+    assert_eq!(
+        check_carried(Some(&previous), &future),
+        Err(ViewRefusal::BadSince)
+    );
+    assert_eq!(
+        check_carried(None, &View::seal(1, vec![drop_part(0, "a1", "k1")])),
+        Err(ViewRefusal::BadSince)
+    );
+}
+
+/// u1 | a1: r1 (signed), t2, k1 | u2 | a3: r3 (signed), t5 | u4 | a5: r5 (signed), t7
+fn signed_transcript(generated: [u64; 3]) -> Vec<Entry> {
+    vec![
+        entry(0, "u1", Role::User, vec![text("t1", 1, "start")], None),
+        entry(
+            1,
+            "a1",
+            Role::Assistant,
+            vec![
+                signed("r1"),
+                text("t2", 2, "one"),
+                tool("k1", 3, ToolStatus::Completed),
+            ],
+            Some(generated[0]),
+        ),
+        entry(2, "u2", Role::User, vec![text("t4", 4, "more")], None),
+        entry(
+            3,
+            "a3",
+            Role::Assistant,
+            vec![signed("r3"), text("t5", 5, "two")],
+            Some(generated[1]),
+        ),
+        entry(4, "u4", Role::User, vec![text("t6", 6, "more")], None),
+        entry(
+            5,
+            "a5",
+            Role::Assistant,
+            vec![signed("r5"), text("t7", 7, "three")],
+            Some(generated[2]),
+        ),
+    ]
+}
+
+fn invalid(entries: &[Entry], edits: &[Edit]) -> Vec<String> {
+    invalid_signed_parts(entries, edits, &BOUND)
+        .into_iter()
+        .map(|(_, part)| part)
+        .collect()
+}
+
+#[test]
+fn an_edit_before_a_signed_part_invalidates_it_only_if_it_came_later() {
+    let entries = signed_transcript([0, 0, 0]);
+    let edits = vec![drop_part(1, "a1", "k1")];
+    assert_eq!(invalid(&entries, &edits), ["r3", "r5"]);
+    assert_eq!(
+        check(&entries, &edits, &BOUND),
+        Err(RuleBreak::SignedReasoningInvalid {
+            mid: "a3".into(),
+            part: "r3".into()
+        })
+    );
+
+    // r5 was generated under view 1, which already held that drop.
+    let entries = signed_transcript([0, 0, 1]);
+    assert_eq!(invalid(&entries, &edits), ["r3"]);
+
+    // An edit after every signed part touches none of them.
+    let entries = signed_transcript([0, 0, 0]);
+    assert!(invalid(&entries, &[drop_part(1, "a5", "t7")]).is_empty());
+
+    // The same rules with no signature binding never object.
+    let free = ProviderRules {
+        signed_reasoning: SignedReasoning::None,
+        ..BOUND
+    };
+    assert!(check(&entries, &edits, &free).is_ok());
+}
+
+#[test]
+fn an_insert_right_before_a_message_invalidates_its_own_signed_part() {
+    let entries = signed_transcript([0, 0, 0]);
+    let edits = vec![insert(1, InsertAt::Before("a3".into()), "note")];
+    assert_eq!(invalid(&entries, &edits), ["r3", "r5"]);
+}
+
+#[test]
+fn a_new_history_head_at_the_start_invalidates_every_older_signed_part() {
+    let entries = signed_transcript([1, 1, 2]);
+    let edits = vec![insert(2, InsertAt::Start, "m0")];
+    assert_eq!(invalid(&entries, &edits), ["r1", "r3"]);
+}
+
+#[test]
+fn signed_parts_may_be_left_out_only_as_an_oldest_run() {
+    let entries = signed_transcript([0, 0, 0]);
+    // Leaving out the oldest is fine.
+    assert!(invalid(&entries, &[drop_part(1, "a1", "r1")]).is_empty());
+    // Leaving out the oldest two is fine.
+    assert!(invalid(
+        &entries,
+        &[drop_part(1, "a1", "r1"), drop_part(1, "a3", "r3")]
+    )
+    .is_empty());
+    // Leaving out the middle one invalidates the newer one.
+    assert_eq!(invalid(&entries, &[drop_part(1, "a3", "r3")]), ["r5"]);
+    // A gap made before r5 was generated was already part of its history.
+    let entries = signed_transcript([0, 0, 1]);
+    assert!(invalid(&entries, &[drop_part(1, "a3", "r3")]).is_empty());
+}

@@ -1,0 +1,11 @@
+[package]
+name = "ck-contract-draft"
+version = "0.8.0-draft.1"
+edition = "2021"
+publish = false
+description = "Local draft of the cleaned llm-runner and compaction-provider contracts (0.8.0). SUBC publishes the final version in commons once the mock runner passes."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
