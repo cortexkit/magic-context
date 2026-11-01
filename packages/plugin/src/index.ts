@@ -92,6 +92,7 @@ import { registerExitAbort, unregisterExitAbort } from "./shared/exit-abort-regi
 import { setHarness } from "./shared/harness";
 import { shapeV1HiddenMessage } from "./shared/hidden-zen-read";
 import { setKeepSubagents } from "./shared/keep-subagents";
+import { setSubagentPolicy } from "./plugin/subagent-policy";
 import { flushLogger, log } from "./shared/logger";
 import {
     resolveHistorianAgentOverrides,
@@ -196,6 +197,12 @@ const server: Plugin = async (ctx) => {
     // Debug data-collection toggle: when on, keep subagent child sessions
     // (historian/dreamer/migration) instead of deleting on success.
     setKeepSubagents(pluginConfig.keep_subagents === true);
+    // How much of the primary path a caller's own subagent sessions get.
+    setSubagentPolicy({
+        compress: pluginConfig.subagent.compress === true,
+        memoryWrite: pluginConfig.subagent.memory_write === true,
+        dream: pluginConfig.subagent.dream === true,
+    });
     const autoUpdateAbort = new AbortController();
     // Abort on process exit via the shared single-listener registry. Registering
     // a process.once("exit") here directly would add one listener PER plugin

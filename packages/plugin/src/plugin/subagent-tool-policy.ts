@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { getOrCreateSessionMeta } from "../features/magic-context/storage";
 import type { Database } from "../shared/sqlite";
+import { hidesMemoryTools } from "./subagent-policy";
 
 const PRIMARY_ONLY_TOOLS = new Set(["ctx_memory", "ctx_note"]);
 
@@ -19,7 +20,7 @@ export function subagentToolRefusal(
     if (
         PRIMARY_ONLY_TOOLS.has(toolId) &&
         !isInternalChild(sessionId) &&
-        getOrCreateSessionMeta(db, sessionId).isSubagent
+        hidesMemoryTools(storedSubagentMode(db, sessionId) ?? getOrCreateSessionMeta(db, sessionId).isSubagent)
     ) {
         return `Error: ${toolId} is unavailable in subagent sessions. Use the primary session instead.`;
     }
@@ -58,7 +59,10 @@ export function hideSubagentTools(
     draft: { sessionID: string; tools: Record<string, unknown> },
     db: Database,
 ): void {
-    if (!getOrCreateSessionMeta(db, draft.sessionID).isSubagent) return;
+    const stored =
+        storedSubagentMode(db, draft.sessionID) ??
+        getOrCreateSessionMeta(db, draft.sessionID).isSubagent;
+    if (!hidesMemoryTools(stored)) return;
     removePrimaryOnlyTools(draft.tools);
 }
 

@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { clearLkgRecoveryFence } from "../../hooks/magic-context/lkg-recovery-fence";
+import { effectiveSubagent } from "../../plugin/subagent-policy";
 import {
     cancelAutoSearchWork,
     clearUnpublishedAutoSearchNoHints,
@@ -108,7 +109,14 @@ function findSessionMeta(db: Database, sessionId: string): SessionMeta | undefin
  * lock uses this: inserting would need that same lock, fail, and refuse the turn.
  */
 export function readSessionMeta(db: Database, sessionId: string): SessionMeta {
-    return findSessionMeta(db, sessionId) ?? getDefaultSessionMeta(sessionId);
+    return applySubagentPolicy(findSessionMeta(db, sessionId) ?? getDefaultSessionMeta(sessionId));
+}
+
+/** The stored fact plus the configured policy: `compress` hides it from the reduced-path gates. */
+function applySubagentPolicy(meta: SessionMeta): SessionMeta {
+    const stored = meta.isSubagent;
+    const effective = effectiveSubagent(stored);
+    return effective === stored ? meta : { ...meta, isSubagent: effective };
 }
 
 const parentReadRetries = new WeakMap<
@@ -119,6 +127,10 @@ const PARENT_READ_ATTEMPTS = 5;
 const PARENT_READ_COOLDOWN_MS = 30_000;
 
 export function getOrCreateSessionMeta(db: Database, sessionId: string): SessionMeta {
+    return applySubagentPolicy(getOrCreateStoredSessionMeta(db, sessionId));
+}
+
+function getOrCreateStoredSessionMeta(db: Database, sessionId: string): SessionMeta {
     const existing = findSessionMeta(db, sessionId);
     const harness = getHarness();
     if (existing) {

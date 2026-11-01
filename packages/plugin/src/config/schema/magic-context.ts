@@ -1085,6 +1085,17 @@ export interface MagicContextConfig {
      *  of deleting them on success. For short-term inspection/data collection;
      *  kept sessions accumulate until manually cleared. Default false. */
     keep_subagents: boolean;
+    /** How Magic Context treats the caller's own subagent sessions. The stored
+     *  `is_subagent` flag still records the parent link; these switches decide
+     *  what that flag costs the session. Defaults keep the reduced path. */
+    subagent: {
+        /** Let children use compartments, the historian and full guidance. */
+        compress: boolean;
+        /** Keep `ctx_memory` / `ctx_note` available to children. */
+        memory_write: boolean;
+        /** Let the dreamer retrospective read child sessions. */
+        dream: boolean;
+    };
     /** Enable loopback-only diagnostic RPCs that expose memory usage and heap snapshots. */
     debug_rpc?: boolean;
     /**
@@ -1493,6 +1504,31 @@ export const MagicContextConfigSchema = z
             .default(false)
             .describe(
                 "Debug: keep every settled Magic Context child session instead of deleting it after success: historian, all Dreamer tasks, smart-note evaluation and compilation, user-memory review, and memory migration. Kept Dreamer children can contain memory-pool text and user messages from other sessions of the same operator; their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect. On OpenCode 2, one hidden session holds many runs; it is kept once any of its runs settled, and only a Dreamer session none of whose runs settled is still deleted.",
+            ),
+        subagent: z
+            .object({
+                compress: z
+                    .boolean()
+                    .default(false)
+                    .describe(
+                        "Let child (subagent) sessions take the primary path: compartment injection, the historian, and full guidance. The stored is_subagent flag still records the parent link; this only changes what the session is denied. Default false keeps every child on the reduced path.",
+                    ),
+                memory_write: z
+                    .boolean()
+                    .default(false)
+                    .describe(
+                        "Keep ctx_memory and ctx_note available to child sessions. Independent of subagent.compress: turning compression on does not hand a child the tools that write project memory unless this is also true.",
+                    ),
+                dream: z
+                    .boolean()
+                    .default(false)
+                    .describe(
+                        "Include child sessions in the dreamer retrospective. Default false keeps the existing filter that skips subagent transcripts.",
+                    ),
+            })
+            .default({ compress: false, memory_write: false, dream: false })
+            .describe(
+                "How Magic Context treats the caller's own subagent sessions. Three independent switches because they carry different risks: compression changes context management, memory_write lets a child write the shared memory store, dream feeds child transcripts to the nightly retrospective.",
             ),
         debug_rpc: z
             .boolean()
