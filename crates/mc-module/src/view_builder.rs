@@ -10,10 +10,12 @@
 //! publishes a view the runner would refuse.
 
 use ck_contract_draft::read::Entry;
-use ck_contract_draft::rules::{self, ProviderRules};
+use ck_contract_draft::rules::ProviderRules;
 use std::collections::HashSet;
 
-use ck_contract_draft::view::{self, edits_for_transcript, Edit, EditOp, View, ViewRefusal};
+use ck_contract_draft::view::{Edit, EditOp, View, ViewRefusal};
+use compaction_view::render::{self as view, edits_for_transcript};
+use compaction_view::rules;
 
 /// The next view, or `None` when it would change nothing: no new edit, and
 /// nothing of the previous view left out. Carried edits for which `retire`

@@ -24,7 +24,7 @@ const SECTION: char = '§';
 
 /// A reply's text after cleaning, with the number the model wrote in front of
 /// it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CleanedReply {
     /// The first number among the prefixes the model wrote at the start, when
     /// it wrote one. A runner whose assigned number equals it, and whose reply
@@ -259,7 +259,7 @@ mod tests {
         let written = "§12§ Done.";
         let cleaned = clean_reply(written);
         assert_eq!(
-            format!("{}{}", crate::part::tag_prefix(12), cleaned.text),
+            format!("{}{}", crate::tags::tag_prefix(12), cleaned.text),
             written
         );
     }

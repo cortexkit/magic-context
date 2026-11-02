@@ -10,24 +10,26 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use ck_contract_draft::clean::clean_reply;
 use ck_contract_draft::notice::{
     Conditions, Event, NoticeAnswer, NoticeRequest, ENTRIES_BUDGET_BYTES,
 };
 use ck_contract_draft::part::{
-    tag_prefix, Delivered, OutputFormat, Part, PartBody, Seal, ToolPart, ToolStatus,
+    Delivered, OutputFormat, Part, PartBody, Seal, ToolPart, ToolStatus,
 };
 use ck_contract_draft::read::{
     Entry, Head, NoticeOrigin, ReadPage, ReadRequest, Role, SessionRef, StepUsage,
 };
 use ck_contract_draft::ride::{RideAnswer, RideCause, RideRequest, CONTEXT_CEILING};
-use ck_contract_draft::rules::{self, ProviderRules};
+use ck_contract_draft::rules::ProviderRules;
 use ck_contract_draft::send::{Delivery, RunResult, RunResultRequest, SendAnswer, SendRequest};
 use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{
-    self, edits_for_transcript, AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest,
-    RenderedMessage, View, ViewRefusal,
+    AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest, View, ViewRefusal,
 };
+use compaction_view::clean::clean_reply;
+use compaction_view::render::{self as view, edits_for_transcript, RenderedMessage};
+use compaction_view::rules;
+use compaction_view::tags::tag_prefix;
 use serde_json::Value;
 
 use crate::model::{Completion, Kind, MockModel, ModelError, Request};

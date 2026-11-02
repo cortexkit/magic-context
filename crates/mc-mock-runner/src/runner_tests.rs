@@ -7,11 +7,10 @@ use ck_contract_draft::notice::{Event, NoticeAnswer, NoticeRequest};
 use ck_contract_draft::part::{PartBody, ToolStatus};
 use ck_contract_draft::read::SessionRef;
 use ck_contract_draft::ride::{RideAnswer, RideCause, RideRequest};
-use ck_contract_draft::rules::{
-    invalid_signed_parts, EditCost, ProviderRules, RuleBreak, SignedParts,
-};
+use ck_contract_draft::rules::{EditCost, ProviderRules, RuleBreak, SignedParts};
 use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{ApplyViewAnswer, ApplyViewRequest, Edit, EditOp, View, ViewRefusal};
+use compaction_view::rules::invalid_signed_parts;
 use serde_json::{json, Value};
 
 use crate::model::{Kind, ModelError};

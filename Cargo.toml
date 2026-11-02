@@ -6,7 +6,7 @@
 resolver = "2"
 # The mode-3 rewrite starts from an empty crates/ directory. The previous crates
 # live in crates_old/ as a reference only and are not built.
-members = ["crates/ck-contract-draft", "crates/mc-mock-runner", "crates/mc-module", "crates/mc-tokenizer"]
+members = ["crates/ck-contract-draft", "crates/compaction-view", "crates/compaction-view-wasm", "crates/mc-mock-runner", "crates/mc-module", "crates/mc-tokenizer"]
 exclude = ["packages/dashboard/src-tauri", "crates_old"]
 
 # Commands the shared ck-motor build runner runs on the default branch to fill its
@@ -41,6 +41,7 @@ subc-core = { git = "https://github.com/cortexkit/subconscious", rev = "90295ece
 
 # Internal crates.
 ck-contract-draft = { path = "crates/ck-contract-draft" }
+cortexkit-compaction-view = { path = "crates/compaction-view" }
 mc-tokenizer = { path = "crates/mc-tokenizer" }
 mc-mock-runner = { path = "crates/mc-mock-runner" }
 

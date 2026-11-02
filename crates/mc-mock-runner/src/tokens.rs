@@ -4,7 +4,7 @@
 //! the providers report, which is what these counts become.
 
 use ck_contract_draft::part::{AttachmentItem, Part, PartBody};
-use ck_contract_draft::view::RenderedMessage;
+use compaction_view::render::RenderedMessage;
 
 /// Tokens for an image, whatever its size.
 pub const IMAGE_TOKENS: u64 = 1_000;

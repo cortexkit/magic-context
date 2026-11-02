@@ -8,13 +8,12 @@
 //! pattern-match into a jump. Only the runner counts; it hands each part's
 //! number to the compaction provider in reads and notices.
 
-use ck_contract_draft::part::{
-    is_numbered, Attachment, Delivered, Part, PartBody, Seal, ToolStatus,
-};
+use ck_contract_draft::part::{Attachment, Delivered, Part, PartBody, Seal, ToolStatus};
 use ck_contract_draft::read::{
     entry_digest, Cursor, Detail, Entry, NoticeOrigin, Role, Select, StepUsage,
 };
 use ck_contract_draft::view::AppliedView;
+use compaction_view::tags::is_numbered;
 
 #[derive(Clone, Debug)]
 pub struct Transcript {

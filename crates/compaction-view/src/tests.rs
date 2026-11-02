@@ -1,17 +1,18 @@
 //! Tests for applying views and checking provider rules.
 
-use serde_json::json;
-
-use crate::part::{
+use ck_contract_draft::part::{
     Attachment, AttachmentItem, Delivered, FileMedia, OutputFormat, Part, PartBody, Seal, ToolPart,
     ToolStatus,
 };
-use crate::read::{entry_digest, Entry, Role};
-use crate::rules::{check, invalid_signed_parts, EditCost, ProviderRules, RuleBreak, SignedParts};
-use crate::view::{
-    apply, apply_edits, check_carried, AppliedView, Edit, EditOp, InsertAt, InsertedMessage,
-    Source, View, ViewRefusal,
+use ck_contract_draft::read::{entry_digest, Entry, Role};
+use ck_contract_draft::rules::{EditCost, ProviderRules, RuleBreak, SignedParts};
+use ck_contract_draft::view::{
+    AppliedView, Edit, EditOp, InsertAt, InsertedMessage, View, ViewRefusal,
 };
+use serde_json::json;
+
+use crate::render::{apply, apply_edits, check_carried, Source};
+use crate::rules::{check, invalid_signed_parts};
 
 fn entry(
     ordinal: u64,
@@ -535,7 +536,7 @@ fn edits_computed_from_the_compact_form_apply_to_the_full_one_and_back() {
     let on_short = apply_edits(&short, &edits).unwrap();
     assert_eq!(on_full.len(), on_short.len());
     for (left, right) in on_full.iter().zip(&on_short) {
-        let ids = |message: &crate::view::RenderedMessage| {
+        let ids = |message: &crate::render::RenderedMessage| {
             message
                 .parts
                 .iter()
@@ -673,4 +674,379 @@ fn a_signed_text_part_is_bound_like_signed_reasoning() {
     );
     let invalid = invalid_signed_parts(&entries, &[drop_part(1, "u1", "t1")], &BOUND);
     assert!(invalid.contains(&("u2".to_owned(), "t3".to_owned())));
+}
+
+/// The JSON test vectors under `vectors/cases.json`, for runners that use the
+/// library through WebAssembly or implement the rules themselves. Each case
+/// is generated here and its output computed by [`crate::vectors::call`].
+/// Set `UPDATE_VECTORS=1` to rewrite the file after a deliberate change; the
+/// test otherwise fails when the file and the library disagree.
+mod vector_file {
+    use super::*;
+    use crate::vectors::{call, Vector, FUNCTIONS};
+    use serde_json::{json, Value};
+
+    /// A transcript as a runner presents it: ordinals count from 1.
+    /// u1 | a1: r1 (signed), t2, k1 (edit with an image) | u2 | a2: r2 (signed), t5
+    fn transcript(generated: [u64; 2]) -> Vec<Entry> {
+        vec![
+            entry(1, "u1", Role::User, vec![text("t1", 1, "please fix")], None),
+            entry(
+                2,
+                "a1",
+                Role::Assistant,
+                vec![
+                    signed("r1"),
+                    text("t2", 2, "looking"),
+                    tool("k1", 3, ToolStatus::Completed),
+                ],
+                Some(generated[0]),
+            ),
+            entry(3, "u2", Role::User, vec![text("t4", 4, "go on")], None),
+            entry(
+                4,
+                "a2",
+                Role::Assistant,
+                vec![signed("r2"), text("t5", 5, "done")],
+                Some(generated[1]),
+            ),
+        ]
+    }
+
+    fn running() -> Vec<Entry> {
+        vec![
+            entry(1, "u1", Role::User, vec![text("t1", 1, "run it")], None),
+            entry(
+                2,
+                "a1",
+                Role::Assistant,
+                vec![tool("k1", 2, ToolStatus::Running)],
+                None,
+            ),
+        ]
+    }
+
+    fn only_image() -> Vec<Entry> {
+        let mut body = tool_body("k1", ToolStatus::Completed);
+        body.output = Some(String::new());
+        body.output_bytes = Some(0);
+        vec![
+            entry(1, "u1", Role::User, vec![text("t1", 1, "screenshot")], None),
+            entry(
+                2,
+                "a1",
+                Role::Assistant,
+                vec![Part::new("k1", Some(2), Seal::None, PartBody::Tool(body))],
+                None,
+            ),
+        ]
+    }
+
+    fn head(since: u64) -> Edit {
+        Edit::new(
+            since,
+            EditOp::Insert {
+                at: InsertAt::Start,
+                message: InsertedMessage {
+                    id: "m0".into(),
+                    role: Role::User,
+                    texts: vec!["<session-history>summary</session-history>".into()],
+                },
+            },
+        )
+    }
+
+    fn cut(since: u64, through: &str) -> Edit {
+        Edit::new(
+            since,
+            EditOp::Cut {
+                through: through.into(),
+            },
+        )
+    }
+
+    fn free() -> ProviderRules {
+        ProviderRules {
+            signed_parts: SignedParts::None,
+            ..BOUND
+        }
+    }
+
+    fn cases() -> Vec<(&'static str, &'static str, Value)> {
+        let t = transcript([0, 0]);
+        let plan = |edits: Vec<Edit>| json!({"entries": t, "edits": edits});
+        let placeholder = replace(1, &t, "u2", "t4", "text", json!("[dropped §4§]"));
+        let own_output = replace(1, &t, "a1", "k1", "output", json!("[dropped §3§]"));
+        let marker = replace(
+            1,
+            &t,
+            "a1",
+            "k1",
+            "input.old_string",
+            json!("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…[truncated]"),
+        );
+        let foreign = replace(1, &t, "u2", "t4", "text", json!("see §9§"));
+        let stale = {
+            let mut edit = replace(1, &t, "u2", "t4", "text", json!("[dropped §4§]"));
+            if let EditOp::Replace { expect, .. } = &mut edit.op {
+                *expect = "0".repeat(64);
+            }
+            edit
+        };
+        let tagged_head = Edit::new(
+            1,
+            EditOp::Insert {
+                at: InsertAt::Start,
+                message: InsertedMessage {
+                    id: "m0".into(),
+                    role: Role::User,
+                    texts: vec!["§2§ summary".into()],
+                },
+            },
+        );
+        let view = View::seal(1, vec![drop_part(1, "a1", "k1")]);
+        let mut bad_checksum = view.clone();
+        bad_checksum.checksum = "0".repeat(64);
+        let previous = View::seal(1, vec![drop_part(1, "a1", "k1")]);
+        let carried = View::seal(2, vec![drop_part(1, "a1", "k1"), drop_part(2, "u2", "t4")]);
+        let backdated = View::seal(2, vec![drop_part(1, "a1", "k1"), drop_part(1, "u2", "t4")]);
+        let image = only_image();
+        let mut unnumbered = transcript([0, 0]);
+        for entry in &mut unnumbered {
+            for part in &mut entry.parts {
+                part.tag = None;
+            }
+        }
+        vec![
+            ("an empty view keeps everything", "plan", plan(vec![])),
+            (
+                "a dropped part is left out",
+                "plan",
+                plan(vec![drop_part(1, "a1", "k1")]),
+            ),
+            (
+                "a dropped message is left out",
+                "plan",
+                plan(vec![drop_message(1, "u2")]),
+            ),
+            (
+                "a text placeholder replaces the text and is final",
+                "plan",
+                plan(vec![placeholder]),
+            ),
+            (
+                "a tool result may show its own number",
+                "plan",
+                plan(vec![own_output]),
+            ),
+            (
+                "an edit marker shortens one argument",
+                "plan",
+                plan(vec![marker]),
+            ),
+            (
+                "a history head at the start with a cut",
+                "plan",
+                plan(vec![head(1), cut(1, "a1")]),
+            ),
+            (
+                "an edit naming a message the transcript lacks is refused",
+                "plan",
+                plan(vec![drop_message(1, "gone")]),
+            ),
+            (
+                "a replace computed from another part is refused",
+                "plan",
+                plan(vec![stale]),
+            ),
+            (
+                "an inserted message may not carry a tag prefix",
+                "plan",
+                plan(vec![tagged_head]),
+            ),
+            (
+                "a replace may not show another part's number",
+                "plan",
+                plan(vec![foreign]),
+            ),
+            (
+                "two edits on one part that cannot both hold are refused",
+                "plan",
+                plan(vec![
+                    drop_part(1, "u2", "t4"),
+                    replace(1, &t, "u2", "t4", "text", json!("x")),
+                ]),
+            ),
+            (
+                "a running tool cannot be dropped",
+                "plan",
+                json!({"entries": running(), "edits": [drop_part(1, "a1", "k1")]}),
+            ),
+            (
+                "a result with only an image renders a label",
+                "plan",
+                json!({"entries": image, "edits": []}),
+            ),
+            (
+                "a sealed view applies",
+                "apply",
+                json!({"entries": t, "view": view}),
+            ),
+            (
+                "a view whose checksum does not match is refused",
+                "apply",
+                json!({"entries": t, "view": bad_checksum}),
+            ),
+            (
+                "edits for messages a revert removed are skipped",
+                "edits_for_transcript",
+                json!({"entries": &t[..2], "edits": [drop_part(1, "a1", "k1"), drop_part(1, "u2", "t4")]}),
+            ),
+            (
+                "a new view repeats the previous one's edits",
+                "check_carried",
+                json!({"previous": previous, "next": carried}),
+            ),
+            (
+                "a backdated edit is refused",
+                "check_carried",
+                json!({"previous": previous, "next": backdated}),
+            ),
+            (
+                "an edit before a signed part made after it invalidates it",
+                "check_rules",
+                json!({"entries": t, "edits": [drop_part(1, "a1", "k1")], "rules": BOUND}),
+            ),
+            (
+                "an edit the signed part was generated under is fine",
+                "check_rules",
+                json!({"entries": transcript([0, 1]), "edits": [drop_part(1, "a1", "k1")], "rules": BOUND}),
+            ),
+            (
+                "the oldest signed part may be left out",
+                "check_rules",
+                json!({"entries": t, "edits": [drop_part(1, "a1", "r1")], "rules": BOUND}),
+            ),
+            (
+                "a history head invalidates every older signed part",
+                "check_rules",
+                json!({"entries": t, "edits": [head(1)], "rules": BOUND}),
+            ),
+            (
+                "without bound signatures nothing is invalid",
+                "check_rules",
+                json!({"entries": t, "edits": [drop_part(1, "a1", "k1")], "rules": free()}),
+            ),
+            (
+                "current Claude families are bound",
+                "rules_defaults",
+                json!({"model": "claude-opus-5-5"}),
+            ),
+            (
+                "other models are not",
+                "rules_defaults",
+                json!({"model": "gpt-6.1"}),
+            ),
+            (
+                "numbers count from the checkpoint",
+                "assign_tags",
+                json!({"checkpoint": 41, "entries": unnumbered}),
+            ),
+            (
+                "numbers are found anywhere in a text",
+                "tag_numbers_in",
+                json!({"text": "[dropped §12§] then §3§, but not §§ or §7"}),
+            ),
+            (
+                "a reply's own prefix is split off",
+                "clean_reply",
+                json!({"text": "§12§ Done."}),
+            ),
+            (
+                "numbers inside a reply are removed",
+                "clean_reply",
+                json!({"text": "§12§ §13§ Dropped §4§ and §5\">§6§ as asked."}),
+            ),
+            (
+                "a section reference keeps its number but not its sign",
+                "clean_reply",
+                json!({"text": "See §5.1 of the spec."}),
+            ),
+            (
+                "an entry's checksum",
+                "entry_digest",
+                json!({"role": "user", "parts": [text("t1", 1, "please fix")]}),
+            ),
+            (
+                "a part's checksum covers its seal and body",
+                "body_digest",
+                json!({"seal": "signed", "kind": "reasoning", "text": "thinking", "text_bytes": 8}),
+            ),
+            (
+                "a view's checksum",
+                "seal_view",
+                json!({"version": 3, "edits": [drop_part(2, "a1", "k1")]}),
+            ),
+        ]
+    }
+
+    fn generate() -> Vec<Vector> {
+        cases()
+            .into_iter()
+            .map(|(name, function, input)| Vector {
+                name: name.into(),
+                function: function.into(),
+                output: call(function, input.clone()),
+                input,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_vector_file_matches_the_library() {
+        let vectors = generate();
+        for vector in &vectors {
+            assert!(
+                FUNCTIONS.iter().any(|(name, _)| *name == vector.function),
+                "{}",
+                vector.function
+            );
+            assert!(
+                vector.output.get("error").is_none(),
+                "{}: {}",
+                vector.name,
+                vector.output
+            );
+        }
+        // Every function has at least one case.
+        for (function, _) in FUNCTIONS {
+            assert!(
+                vectors.iter().any(|vector| vector.function == *function),
+                "no vector for {function}"
+            );
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("vectors/cases.json");
+        let written = serde_json::to_string_pretty(&vectors).unwrap() + "\n";
+        if std::env::var_os("UPDATE_VECTORS").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &written).unwrap();
+        }
+        let file = std::fs::read_to_string(&path)
+            .expect("vectors/cases.json is missing; run the tests with UPDATE_VECTORS=1");
+        assert_eq!(
+            file, written,
+            "vectors/cases.json is stale; run with UPDATE_VECTORS=1"
+        );
+        // Read back as a runner reads them: from JSON, each input gives its
+        // output.
+        let read: Vec<Vector> = serde_json::from_str(&file).unwrap();
+        for vector in read {
+            assert_eq!(
+                call(&vector.function, vector.input),
+                vector.output,
+                "{}",
+                vector.name
+            );
+        }
+    }
 }

@@ -1,0 +1,3834 @@
+[
+  {
+    "name": "an empty view keeps everything",
+    "function": "plan",
+    "input": {
+      "edits": [],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "ok": {
+        "items": [
+          {
+            "item": "entry",
+            "mid": "u1",
+            "ordinal": 1,
+            "parts": [
+              {
+                "id": "t1",
+                "prefix": true,
+                "tag": 1
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a1",
+            "ordinal": 2,
+            "parts": [
+              {
+                "id": "r1",
+                "prefix": false
+              },
+              {
+                "id": "t2",
+                "prefix": true,
+                "tag": 2
+              },
+              {
+                "id": "k1",
+                "prefix": true,
+                "tag": 3
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "u2",
+            "ordinal": 3,
+            "parts": [
+              {
+                "id": "t4",
+                "prefix": true,
+                "tag": 4
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a2",
+            "ordinal": 4,
+            "parts": [
+              {
+                "id": "r2",
+                "prefix": false
+              },
+              {
+                "id": "t5",
+                "prefix": true,
+                "tag": 5
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a dropped part is left out",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "mid": "a1",
+          "op": "drop",
+          "part": "k1",
+          "since": 1
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "ok": {
+        "items": [
+          {
+            "item": "entry",
+            "mid": "u1",
+            "ordinal": 1,
+            "parts": [
+              {
+                "id": "t1",
+                "prefix": true,
+                "tag": 1
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a1",
+            "ordinal": 2,
+            "parts": [
+              {
+                "id": "r1",
+                "prefix": false
+              },
+              {
+                "id": "t2",
+                "prefix": true,
+                "tag": 2
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "u2",
+            "ordinal": 3,
+            "parts": [
+              {
+                "id": "t4",
+                "prefix": true,
+                "tag": 4
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a2",
+            "ordinal": 4,
+            "parts": [
+              {
+                "id": "r2",
+                "prefix": false
+              },
+              {
+                "id": "t5",
+                "prefix": true,
+                "tag": 5
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a dropped message is left out",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "mid": "u2",
+          "op": "drop",
+          "since": 1
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "ok": {
+        "items": [
+          {
+            "item": "entry",
+            "mid": "u1",
+            "ordinal": 1,
+            "parts": [
+              {
+                "id": "t1",
+                "prefix": true,
+                "tag": 1
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a1",
+            "ordinal": 2,
+            "parts": [
+              {
+                "id": "r1",
+                "prefix": false
+              },
+              {
+                "id": "t2",
+                "prefix": true,
+                "tag": 2
+              },
+              {
+                "id": "k1",
+                "prefix": true,
+                "tag": 3
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a2",
+            "ordinal": 4,
+            "parts": [
+              {
+                "id": "r2",
+                "prefix": false
+              },
+              {
+                "id": "t5",
+                "prefix": true,
+                "tag": 5
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a text placeholder replaces the text and is final",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "expect": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+          "field": "text",
+          "mid": "u2",
+          "op": "replace",
+          "part": "t4",
+          "since": 1,
+          "value": "[dropped §4§]"
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "ok": {
+        "items": [
+          {
+            "item": "entry",
+            "mid": "u1",
+            "ordinal": 1,
+            "parts": [
+              {
+                "id": "t1",
+                "prefix": true,
+                "tag": 1
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a1",
+            "ordinal": 2,
+            "parts": [
+              {
+                "id": "r1",
+                "prefix": false
+              },
+              {
+                "id": "t2",
+                "prefix": true,
+                "tag": 2
+              },
+              {
+                "id": "k1",
+                "prefix": true,
+                "tag": 3
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "u2",
+            "ordinal": 3,
+            "parts": [
+              {
+                "id": "t4",
+                "prefix": false,
+                "replace": [
+                  {
+                    "field": "text",
+                    "value": "[dropped §4§]"
+                  }
+                ],
+                "tag": 4
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a2",
+            "ordinal": 4,
+            "parts": [
+              {
+                "id": "r2",
+                "prefix": false
+              },
+              {
+                "id": "t5",
+                "prefix": true,
+                "tag": 5
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a tool result may show its own number",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "expect": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+          "field": "output",
+          "mid": "a1",
+          "op": "replace",
+          "part": "k1",
+          "since": 1,
+          "value": "[dropped §3§]"
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "ok": {
+        "items": [
+          {
+            "item": "entry",
+            "mid": "u1",
+            "ordinal": 1,
+            "parts": [
+              {
+                "id": "t1",
+                "prefix": true,
+                "tag": 1
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a1",
+            "ordinal": 2,
+            "parts": [
+              {
+                "id": "r1",
+                "prefix": false
+              },
+              {
+                "id": "t2",
+                "prefix": true,
+                "tag": 2
+              },
+              {
+                "id": "k1",
+                "prefix": false,
+                "replace": [
+                  {
+                    "field": "output",
+                    "value": "[dropped §3§]"
+                  }
+                ],
+                "tag": 3
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "u2",
+            "ordinal": 3,
+            "parts": [
+              {
+                "id": "t4",
+                "prefix": true,
+                "tag": 4
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a2",
+            "ordinal": 4,
+            "parts": [
+              {
+                "id": "r2",
+                "prefix": false
+              },
+              {
+                "id": "t5",
+                "prefix": true,
+                "tag": 5
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "an edit marker shortens one argument",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "expect": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+          "field": "input.old_string",
+          "mid": "a1",
+          "op": "replace",
+          "part": "k1",
+          "since": 1,
+          "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…[truncated]"
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "ok": {
+        "items": [
+          {
+            "item": "entry",
+            "mid": "u1",
+            "ordinal": 1,
+            "parts": [
+              {
+                "id": "t1",
+                "prefix": true,
+                "tag": 1
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a1",
+            "ordinal": 2,
+            "parts": [
+              {
+                "id": "r1",
+                "prefix": false
+              },
+              {
+                "id": "t2",
+                "prefix": true,
+                "tag": 2
+              },
+              {
+                "id": "k1",
+                "prefix": true,
+                "replace": [
+                  {
+                    "field": "input.old_string",
+                    "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…[truncated]"
+                  }
+                ],
+                "tag": 3
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "u2",
+            "ordinal": 3,
+            "parts": [
+              {
+                "id": "t4",
+                "prefix": true,
+                "tag": 4
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a2",
+            "ordinal": 4,
+            "parts": [
+              {
+                "id": "r2",
+                "prefix": false
+              },
+              {
+                "id": "t5",
+                "prefix": true,
+                "tag": 5
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a history head at the start with a cut",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "at": "start",
+          "message": {
+            "id": "m0",
+            "role": "user",
+            "texts": [
+              "<session-history>summary</session-history>"
+            ]
+          },
+          "op": "insert",
+          "since": 1
+        },
+        {
+          "op": "cut",
+          "since": 1,
+          "through": "a1"
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "ok": {
+        "items": [
+          {
+            "id": "m0",
+            "item": "insert",
+            "role": "user",
+            "texts": [
+              "<session-history>summary</session-history>"
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "u2",
+            "ordinal": 3,
+            "parts": [
+              {
+                "id": "t4",
+                "prefix": true,
+                "tag": 4
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a2",
+            "ordinal": 4,
+            "parts": [
+              {
+                "id": "r2",
+                "prefix": false
+              },
+              {
+                "id": "t5",
+                "prefix": true,
+                "tag": 5
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "an edit naming a message the transcript lacks is refused",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "mid": "gone",
+          "op": "drop",
+          "since": 1
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "refused": {
+        "code": "unknown_message",
+        "mid": "gone"
+      }
+    }
+  },
+  {
+    "name": "a replace computed from another part is refused",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "expect": "0000000000000000000000000000000000000000000000000000000000000000",
+          "field": "text",
+          "mid": "u2",
+          "op": "replace",
+          "part": "t4",
+          "since": 1,
+          "value": "[dropped §4§]"
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "refused": {
+        "code": "stale_part",
+        "mid": "u2",
+        "part": "t4"
+      }
+    }
+  },
+  {
+    "name": "an inserted message may not carry a tag prefix",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "at": "start",
+          "message": {
+            "id": "m0",
+            "role": "user",
+            "texts": [
+              "§2§ summary"
+            ]
+          },
+          "op": "insert",
+          "since": 1
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "refused": {
+        "code": "tagged_insert",
+        "id": "m0"
+      }
+    }
+  },
+  {
+    "name": "a replace may not show another part's number",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "expect": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+          "field": "text",
+          "mid": "u2",
+          "op": "replace",
+          "part": "t4",
+          "since": 1,
+          "value": "see §9§"
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "refused": {
+        "code": "foreign_tag",
+        "field": "text",
+        "mid": "u2",
+        "part": "t4",
+        "tag": 9
+      }
+    }
+  },
+  {
+    "name": "two edits on one part that cannot both hold are refused",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "mid": "u2",
+          "op": "drop",
+          "part": "t4",
+          "since": 1
+        },
+        {
+          "expect": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+          "field": "text",
+          "mid": "u2",
+          "op": "replace",
+          "part": "t4",
+          "since": 1,
+          "value": "x"
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "refused": {
+        "code": "conflict",
+        "mid": "u2",
+        "part": "t4"
+      }
+    }
+  },
+  {
+    "name": "a running tool cannot be dropped",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "mid": "a1",
+          "op": "drop",
+          "part": "k1",
+          "since": 1
+        }
+      ],
+      "entries": [
+        {
+          "digest": "92d932ed9d0d5058c493f9129eee762d93bd8b30e5dc9f1493a982cdb9322586",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "178c41e2fee000a0cc47d42dda039bedfe5824c669c38c3ff71ec949f472385e",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "run it"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "73a01ae459499ce70e83dd8edf152800b3c5bc84bd472479b329ffb5301212e4",
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "d64a48b798e880172ba1fd2454ee2ef003eb0c55b58478a1abf6915a7dc9e3fe",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "status": "running",
+              "tag": 2
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        }
+      ]
+    },
+    "output": {
+      "refused": {
+        "code": "running_tool",
+        "mid": "a1",
+        "part": "k1"
+      }
+    }
+  },
+  {
+    "name": "a result with only an image renders a label",
+    "function": "plan",
+    "input": {
+      "edits": [],
+      "entries": [
+        {
+          "digest": "a30376875b617132daa50147baa26e1fab4749b8d23e943678267833a1209d88",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "a561326e4a219806ed1cd45a532be5d3e244c2cef16bcfbcfc97c3ef411c8775",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "screenshot"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "189455a4e427f944a5f654d486cc9cff12f05a57d7a632b8259809aa047c6e79",
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "13cc4a3b9dc0767af999f6c763bc718ea2e525bbec8ce62d6ce9da88b5656131",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "",
+              "output_bytes": 0,
+              "status": "completed",
+              "tag": 2
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        }
+      ]
+    },
+    "output": {
+      "ok": {
+        "items": [
+          {
+            "item": "entry",
+            "mid": "u1",
+            "ordinal": 1,
+            "parts": [
+              {
+                "id": "t1",
+                "prefix": true,
+                "tag": 1
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a1",
+            "ordinal": 2,
+            "parts": [
+              {
+                "empty_result_label": "[image]",
+                "id": "k1",
+                "prefix": true,
+                "tag": 2
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a sealed view applies",
+    "function": "apply",
+    "input": {
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ],
+      "view": {
+        "checksum": "6e13225c2f54b48e1b90a0ae1d6e9f51765ed662275c8c83e0219643c7ed618a",
+        "edits": [
+          {
+            "mid": "a1",
+            "op": "drop",
+            "part": "k1",
+            "since": 1
+          }
+        ],
+        "version": 1
+      }
+    },
+    "output": {
+      "ok": [
+        {
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "source": {
+            "entry": {
+              "mid": "u1",
+              "ordinal": 1
+            }
+          }
+        },
+        {
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            }
+          ],
+          "role": "assistant",
+          "source": {
+            "entry": {
+              "mid": "a1",
+              "ordinal": 2
+            }
+          }
+        },
+        {
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "source": {
+            "entry": {
+              "mid": "u2",
+              "ordinal": 3
+            }
+          }
+        },
+        {
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "source": {
+            "entry": {
+              "mid": "a2",
+              "ordinal": 4
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "a view whose checksum does not match is refused",
+    "function": "apply",
+    "input": {
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ],
+      "view": {
+        "checksum": "0000000000000000000000000000000000000000000000000000000000000000",
+        "edits": [
+          {
+            "mid": "a1",
+            "op": "drop",
+            "part": "k1",
+            "since": 1
+          }
+        ],
+        "version": 1
+      }
+    },
+    "output": {
+      "refused": {
+        "code": "bad_checksum"
+      }
+    }
+  },
+  {
+    "name": "edits for messages a revert removed are skipped",
+    "function": "edits_for_transcript",
+    "input": {
+      "edits": [
+        {
+          "mid": "a1",
+          "op": "drop",
+          "part": "k1",
+          "since": 1
+        },
+        {
+          "mid": "u2",
+          "op": "drop",
+          "part": "t4",
+          "since": 1
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        }
+      ]
+    },
+    "output": {
+      "ok": [
+        {
+          "mid": "a1",
+          "op": "drop",
+          "part": "k1",
+          "since": 1
+        }
+      ]
+    }
+  },
+  {
+    "name": "a new view repeats the previous one's edits",
+    "function": "check_carried",
+    "input": {
+      "next": {
+        "checksum": "3d3e6c922a2e3cb89fb013eb8bd5620e74a837e3ae32a1419d8d97f649f4665e",
+        "edits": [
+          {
+            "mid": "a1",
+            "op": "drop",
+            "part": "k1",
+            "since": 1
+          },
+          {
+            "mid": "u2",
+            "op": "drop",
+            "part": "t4",
+            "since": 2
+          }
+        ],
+        "version": 2
+      },
+      "previous": {
+        "checksum": "6e13225c2f54b48e1b90a0ae1d6e9f51765ed662275c8c83e0219643c7ed618a",
+        "edits": [
+          {
+            "mid": "a1",
+            "op": "drop",
+            "part": "k1",
+            "since": 1
+          }
+        ],
+        "version": 1
+      }
+    },
+    "output": {
+      "ok": null
+    }
+  },
+  {
+    "name": "a backdated edit is refused",
+    "function": "check_carried",
+    "input": {
+      "next": {
+        "checksum": "2752bad1b22710e2436da91716a3b1c7f3e952ccde1c036868b439a576f58d97",
+        "edits": [
+          {
+            "mid": "a1",
+            "op": "drop",
+            "part": "k1",
+            "since": 1
+          },
+          {
+            "mid": "u2",
+            "op": "drop",
+            "part": "t4",
+            "since": 1
+          }
+        ],
+        "version": 2
+      },
+      "previous": {
+        "checksum": "6e13225c2f54b48e1b90a0ae1d6e9f51765ed662275c8c83e0219643c7ed618a",
+        "edits": [
+          {
+            "mid": "a1",
+            "op": "drop",
+            "part": "k1",
+            "since": 1
+          }
+        ],
+        "version": 1
+      }
+    },
+    "output": {
+      "refused": {
+        "code": "bad_since"
+      }
+    }
+  },
+  {
+    "name": "an edit before a signed part made after it invalidates it",
+    "function": "check_rules",
+    "input": {
+      "edits": [
+        {
+          "mid": "a1",
+          "op": "drop",
+          "part": "k1",
+          "since": 1
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ],
+      "rules": {
+        "history_edit_cost": "suffix",
+        "signed_parts": "bound"
+      }
+    },
+    "output": {
+      "refused": {
+        "mid": "a2",
+        "part": "r2",
+        "rule": "signed_part_invalid"
+      }
+    }
+  },
+  {
+    "name": "an edit the signed part was generated under is fine",
+    "function": "check_rules",
+    "input": {
+      "edits": [
+        {
+          "mid": "a1",
+          "op": "drop",
+          "part": "k1",
+          "since": 1
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-1",
+            "version": 1
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ],
+      "rules": {
+        "history_edit_cost": "suffix",
+        "signed_parts": "bound"
+      }
+    },
+    "output": {
+      "ok": null
+    }
+  },
+  {
+    "name": "the oldest signed part may be left out",
+    "function": "check_rules",
+    "input": {
+      "edits": [
+        {
+          "mid": "a1",
+          "op": "drop",
+          "part": "r1",
+          "since": 1
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ],
+      "rules": {
+        "history_edit_cost": "suffix",
+        "signed_parts": "bound"
+      }
+    },
+    "output": {
+      "ok": null
+    }
+  },
+  {
+    "name": "a history head invalidates every older signed part",
+    "function": "check_rules",
+    "input": {
+      "edits": [
+        {
+          "at": "start",
+          "message": {
+            "id": "m0",
+            "role": "user",
+            "texts": [
+              "<session-history>summary</session-history>"
+            ]
+          },
+          "op": "insert",
+          "since": 1
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ],
+      "rules": {
+        "history_edit_cost": "suffix",
+        "signed_parts": "bound"
+      }
+    },
+    "output": {
+      "refused": {
+        "mid": "a1",
+        "part": "r1",
+        "rule": "signed_part_invalid"
+      }
+    }
+  },
+  {
+    "name": "without bound signatures nothing is invalid",
+    "function": "check_rules",
+    "input": {
+      "edits": [
+        {
+          "mid": "a1",
+          "op": "drop",
+          "part": "k1",
+          "since": 1
+        }
+      ],
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ],
+      "rules": {
+        "history_edit_cost": "suffix",
+        "signed_parts": "none"
+      }
+    },
+    "output": {
+      "ok": null
+    }
+  },
+  {
+    "name": "current Claude families are bound",
+    "function": "rules_defaults",
+    "input": {
+      "model": "claude-opus-5-5"
+    },
+    "output": {
+      "ok": {
+        "history_edit_cost": "suffix",
+        "signed_parts": "bound"
+      }
+    }
+  },
+  {
+    "name": "other models are not",
+    "function": "rules_defaults",
+    "input": {
+      "model": "gpt-6.1"
+    },
+    "output": {
+      "ok": {
+        "history_edit_cost": "suffix",
+        "signed_parts": "none"
+      }
+    }
+  },
+  {
+    "name": "numbers count from the checkpoint",
+    "function": "assign_tags",
+    "input": {
+      "checkpoint": 41,
+      "entries": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "ok": [
+        {
+          "digest": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 42,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "bf2f970e21d3cbcf45f72141e5bea2ffe3ea7727b9fe6ccf658611ecb091275e",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 43,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 44
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "cb5c32be3b649c5162c5ddb5c68118d51ffefa24e7f48557597eaab214ddcaab",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 45,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "ec5d79d6f52a4d62cb5d8f5bbb844a981cda923b562219fd35428ec856a714d6",
+          "generated_under": {
+            "checksum": "checksum-0",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 46,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    }
+  },
+  {
+    "name": "numbers are found anywhere in a text",
+    "function": "tag_numbers_in",
+    "input": {
+      "text": "[dropped §12§] then §3§, but not §§ or §7"
+    },
+    "output": {
+      "ok": [
+        12,
+        3
+      ]
+    }
+  },
+  {
+    "name": "a reply's own prefix is split off",
+    "function": "clean_reply",
+    "input": {
+      "text": "§12§ Done."
+    },
+    "output": {
+      "ok": {
+        "model_tag": 12,
+        "text": "Done."
+      }
+    }
+  },
+  {
+    "name": "numbers inside a reply are removed",
+    "function": "clean_reply",
+    "input": {
+      "text": "§12§ §13§ Dropped §4§ and §5\">§6§ as asked."
+    },
+    "output": {
+      "ok": {
+        "model_tag": 12,
+        "text": "Dropped  and  as asked."
+      }
+    }
+  },
+  {
+    "name": "a section reference keeps its number but not its sign",
+    "function": "clean_reply",
+    "input": {
+      "text": "See §5.1 of the spec."
+    },
+    "output": {
+      "ok": {
+        "model_tag": null,
+        "text": "See 5.1 of the spec."
+      }
+    }
+  },
+  {
+    "name": "an entry's checksum",
+    "function": "entry_digest",
+    "input": {
+      "parts": [
+        {
+          "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+          "id": "t1",
+          "kind": "text",
+          "tag": 1,
+          "text": "please fix"
+        }
+      ],
+      "role": "user"
+    },
+    "output": {
+      "ok": "a6aaed849d96c8e56ff1061b7d48f748fd11396e28731ca261813804a9530ef1"
+    }
+  },
+  {
+    "name": "a part's checksum covers its seal and body",
+    "function": "body_digest",
+    "input": {
+      "kind": "reasoning",
+      "seal": "signed",
+      "text": "thinking",
+      "text_bytes": 8
+    },
+    "output": {
+      "ok": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640"
+    }
+  },
+  {
+    "name": "a view's checksum",
+    "function": "seal_view",
+    "input": {
+      "edits": [
+        {
+          "mid": "a1",
+          "op": "drop",
+          "part": "k1",
+          "since": 2
+        }
+      ],
+      "version": 3
+    },
+    "output": {
+      "ok": {
+        "checksum": "b865b21541f62d51a58f3963998c45b0204675f758719c946923e7b400e3a403",
+        "edits": [
+          {
+            "mid": "a1",
+            "op": "drop",
+            "part": "k1",
+            "since": 2
+          }
+        ],
+        "version": 3
+      }
+    }
+  }
+]

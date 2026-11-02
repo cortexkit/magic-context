@@ -891,7 +891,7 @@ async fn a_head_summarizes_older_turns_and_shows_them_in_place_of_the_messages()
     let first_kept = rendered
         .iter()
         .find_map(|message| match &message.source {
-            ck_contract_draft::view::Source::Entry { ordinal, .. } => Some(*ordinal),
+            compaction_view::render::Source::Entry { ordinal, .. } => Some(*ordinal),
             _ => None,
         })
         .unwrap();

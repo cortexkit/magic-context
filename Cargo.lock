@@ -155,6 +155,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cortexkit-compaction-view"
+version = "0.1.0"
+dependencies = [
+ "ck-contract-draft",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cortexkit-compaction-view-wasm"
+version = "0.1.0"
+dependencies = [
+ "cortexkit-compaction-view",
+ "serde_json",
+]
+
+[[package]]
 name = "cortexkit-rich-ui-syntax"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -704,6 +721,7 @@ name = "mc-mock-runner"
 version = "0.1.0"
 dependencies = [
  "ck-contract-draft",
+ "cortexkit-compaction-view",
  "cortexkit-role-step-transform-provider",
  "cortexkit-role-tool-provider",
  "serde",
@@ -719,6 +737,7 @@ name = "mc-module"
 version = "0.1.0"
 dependencies = [
  "ck-contract-draft",
+ "cortexkit-compaction-view",
  "cortexkit-role-step-transform-provider",
  "cortexkit-role-tool-provider",
  "mc-mock-runner",

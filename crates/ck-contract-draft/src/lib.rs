@@ -25,15 +25,14 @@
 //!   checks each one against the rules it declared ([`rules`]), stores it, and
 //!   applies it from the next step until a newer one arrives.
 //!
-//! [`view::plan`], [`view::apply`], [`rules::check`] and [`clean::clean_reply`]
-//! are shared on purpose: the runner renders with them, and the provider uses
-//! the same functions to know exactly what the model sees. They are the view
-//! library MC publishes; the published contract crate keeps only the wire
-//! types and depends on it.
+//! This crate holds only what goes over the wire, plus the checksums that are
+//! part of it ([`digest`]). How a view is rendered and checked lives in the
+//! view library (`cortexkit-compaction-view`), which depends on this crate:
+//! runners render with it, and providers use the same functions to know
+//! exactly what the model sees.
 
 #![forbid(unsafe_code)]
 
-pub mod clean;
 pub mod digest;
 pub mod notice;
 pub mod part;
@@ -44,9 +43,6 @@ pub mod send;
 pub mod setup;
 pub mod view;
 pub mod wire;
-
-#[cfg(test)]
-mod tests;
 
 /// The capability a compaction provider lists in its manifest. The major is
 /// new because every op below changed shape incompatibly.

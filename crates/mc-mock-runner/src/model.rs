@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use ck_contract_draft::part::{PartBody, Seal};
 use ck_contract_draft::read::{Role, StepUsage};
-use ck_contract_draft::view::RenderedMessage;
+use compaction_view::render::RenderedMessage;
 use sha2::{Digest, Sha256};
 
 use crate::tokens::part_tokens;

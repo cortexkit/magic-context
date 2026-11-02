@@ -1,0 +1,16 @@
+[package]
+name = "cortexkit-compaction-view"
+version = "0.1.0"
+edition = "2021"
+# Published once the contract crate it depends on is.
+publish = false
+description = "The view library of the CortexKit compaction contract: how a runner renders a view and checks it, shared by runners and compaction providers so they never compute it differently."
+license = "MIT"
+
+[lib]
+name = "compaction_view"
+
+[dependencies]
+ck-contract-draft = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -30,8 +30,9 @@
 
 use std::collections::BTreeSet;
 
-use ck_contract_draft::part::{tag_prefix, PartBody};
+use ck_contract_draft::part::PartBody;
 use ck_contract_draft::read::{Entry, Role};
+use compaction_view::tags::tag_prefix;
 use serde::{Deserialize, Serialize};
 
 use crate::lanes::{self, Context, PartKey};

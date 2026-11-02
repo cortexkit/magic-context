@@ -68,7 +68,7 @@ pub struct Entry {
     pub usage: Option<StepUsage>,
     /// For an assistant entry: the view applied to the request that produced
     /// it. Signed reasoning is bound to the history as rendered under that
-    /// view, so [`crate::rules::check`] compares against it.
+    /// view, so the view library's rule check compares against it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_under: Option<AppliedView>,
 }
