@@ -8,11 +8,12 @@
 
 use std::time::Duration;
 
-use ck_contract_draft::send::{
-    Generation, RunResultRequest, RunSettings, RunState, SendAnswer, SendRequest, StopWhen,
-};
 use cortexkit_role_compaction::read::SessionRef;
 use cortexkit_role_compaction::setup::ModelRef;
+use cortexkit_role_llm_runner::finish::Finish;
+use cortexkit_role_llm_runner::run::{states, RunResult, RunResultRequest};
+use cortexkit_role_llm_runner::send::SendRequest;
+use serde_json::{json, Map, Value};
 
 use super::{chunk, fit};
 use crate::calibration::DecisionCalibration;
@@ -39,8 +40,11 @@ const MAX_OUTPUT_TOKENS: u64 = 32_000;
 /// How long a run may take before it counts as failed.
 const RUN_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-/// The child session summaries are written in.
-pub const CHILD: &str = "magic-context:summary";
+/// What a child session's id adds to its parent's: each summarizer attempt
+/// runs in a child of its own, `<parent session>:mc-summary:<attempt>`, so
+/// the summarizer sees exactly its system prompt and one user message, and a
+/// child never continues another attempt's conversation.
+pub const CHILD: &str = "mc-summary";
 
 /// What a run reads and writes.
 #[derive(Clone, Debug)]
@@ -268,9 +272,9 @@ async fn attempt<C: RunnerClient>(
     let mut retry = 0;
     loop {
         let child = if retry == 0 {
-            format!("{CHILD}:{label}")
+            format!("{}:{CHILD}:{label}", job.session.session)
         } else {
-            format!("{CHILD}:{label}:retry{retry}")
+            format!("{}:{CHILD}:{label}:retry{retry}", job.session.session)
         };
         match call(client, job, &child, prompt, system, target, usage).await {
             Ok(text) => return Ok(text),
@@ -293,51 +297,111 @@ async fn call<C: RunnerClient>(
     target: &Target,
     usage: &mut Option<StepUsage>,
 ) -> Result<String, String> {
-    let request = SendRequest {
+    let session = SessionRef::new(
+        job.session.runner.clone(),
+        job.session.harness.clone(),
+        child,
+    );
+    let with_temperature = !refuses_temperature(&job.session.runner);
+    let send = |temperature: bool| {
         // A retry after a lost answer finds the run already started.
-        send_id: child.to_owned(),
-        prompt: prompt.to_owned(),
-        template: None,
-        delivery: Vec::new(),
-        run: Some(RunSettings {
-            child: child.to_owned(),
-            system: system.to_owned(),
-            model: target.model.clone(),
-            route_decision_id: Some(target.decision_id.clone()),
-            generation: Generation {
-                max_output_tokens: target.output_tokens,
-                temperature: Some(TEMPERATURE),
-            },
-            stop_when: StopWhen { max_steps: 1 },
-        }),
+        let mut request = SendRequest::new(prompt, child);
+        request.runner_params = run_params(system, target, temperature);
+        request
     };
-    let run_id = match client
-        .send(&job.session, request)
-        .await
-        .map_err(|error| format!("session.send: {error:?}"))?
-    {
-        SendAnswer::Active { run_id } => run_id,
-        SendAnswer::Queued => return Err("the runner queued the run as text".into()),
-    };
-    let result = wait_for(client, &job.session, &run_id).await?;
-    if let Some(reported) = &result.usage {
-        *usage = Some(add_usage(usage.take(), reported));
-    }
-    match result.state {
-        RunState::Finished => {}
-        RunState::Failed => {
-            return Err(format!(
-                "the run failed: {}",
-                result.error.unwrap_or_default()
-            ))
+    let reply = match client.send(&session, send(with_temperature)).await {
+        // No contract declares `generation.temperature`, so a runner may
+        // refuse it by name (llm-runner §9). A refused send starts nothing:
+        // send again without it, and leave it out for that runner from now on.
+        Err(error) if with_temperature && error.0.contains("generation.temperature") => {
+            remember_temperature_refused(&job.session.runner);
+            client.send(&session, send(false)).await
         }
-        RunState::Active => unreachable!("wait_for returns a finished run"),
+        other => other,
+    }
+    .map_err(|error| format!("session.send: {error:?}"))?;
+    let Some(run_id) = reply.run_id.filter(|_| reply.state == states::ACTIVE) else {
+        return Err(format!("the runner did not start a run: {}", reply.state));
+    };
+    let result = wait_for(client, &session, &run_id).await?;
+    if let Some(reported) = &result.usage {
+        *usage = Some(add_usage(usage.take(), &step_usage(reported)));
+    }
+    if result.state != states::COMPLETED {
+        let error = result
+            .error
+            .as_ref()
+            .map_or_else(String::new, |error| error.message.clone());
+        return Err(format!("the run ended {}: {error}", result.state));
     }
     // A reply cut off at its output limit is incomplete even when it parses.
-    if result.finish.as_deref() == Some("length") {
+    if result.finish == Some(Finish::Length) {
         return Err("the reply hit its output limit".into());
     }
-    Ok(result.text.unwrap_or_default())
+    Ok(result
+        .final_message
+        .map(|message| message.text)
+        .unwrap_or_default())
+}
+
+/// A summarizer run's own parameters, which ride beside llm-runner's fields
+/// of `session.send`: the model routing picked and its decision, the system
+/// prompt, one model step and no tools.
+fn run_params(system: &str, target: &Target, temperature: bool) -> Map<String, Value> {
+    let mut model = json!({
+        "provider": target.model.provider,
+        "model": target.model.model,
+    });
+    if let Some(variant) = &target.model.variant {
+        model["variant"] = json!(variant);
+    }
+    let mut generation = json!({"max_output_tokens": target.output_tokens});
+    if temperature {
+        generation["temperature"] = json!(TEMPERATURE);
+    }
+    let Value::Object(params) = json!({
+        "model": model,
+        "system": system,
+        "generation": generation,
+        "stop_when": {"max_steps": 1},
+        "tools": [],
+        "route_decision_id": target.decision_id,
+    }) else {
+        unreachable!("an object literal");
+    };
+    params
+}
+
+/// The runners that refused `generation.temperature`, for this process.
+fn temperature_refusals() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
+    static REFUSED: OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        OnceLock::new();
+    REFUSED.get_or_init(Default::default)
+}
+
+fn refuses_temperature(runner: &str) -> bool {
+    temperature_refusals()
+        .lock()
+        .expect("temperature refusals")
+        .contains(runner)
+}
+
+fn remember_temperature_refused(runner: &str) {
+    temperature_refusals()
+        .lock()
+        .expect("temperature refusals")
+        .insert(runner.to_owned());
+}
+
+/// A run's usage as one step's: the summarizer runs one step.
+fn step_usage(run: &cortexkit_role_llm_runner::usage::RunUsage) -> StepUsage {
+    let mut usage = StepUsage::new();
+    usage.prompt_tokens = run.input_tokens;
+    usage.cache_read_tokens = run.cached_input_tokens;
+    usage.cache_write_tokens = run.cache_write_tokens;
+    usage.output_tokens = run.output_tokens;
+    usage.reasoning_tokens = run.reasoning_tokens;
+    usage
 }
 
 /// The usage of several calls on one decision, added up. A count either
@@ -403,17 +467,14 @@ async fn wait_for<C: RunnerClient>(
     client: &C,
     session: &SessionRef,
     run_id: &str,
-) -> Result<ck_contract_draft::send::RunResult, String> {
+) -> Result<RunResult, String> {
     let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
     loop {
-        let request = RunResultRequest {
-            run_id: run_id.to_owned(),
-        };
         let result = client
-            .run_result(session, request)
+            .run_result(session, RunResultRequest::new(run_id))
             .await
             .map_err(|error| format!("run.result: {error:?}"))?;
-        if result.state != RunState::Active {
+        if result.state != states::ACTIVE {
             return Ok(result);
         }
         if tokio::time::Instant::now() >= deadline {

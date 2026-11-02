@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ck_contract_draft::send::{RunResultRequest, SendRequest};
 use cortexkit_role_compaction::notice::{NoticeAnswer, NoticeRequest};
 use cortexkit_role_compaction::ops;
 use cortexkit_role_compaction::read::{ReadRequest, SessionRef};
@@ -19,6 +18,8 @@ use cortexkit_role_compaction::setup::{SetupAnswer, SetupRequest};
 use cortexkit_role_compaction::view::{AppliedViewRequest, ApplyViewRequest};
 use cortexkit_role_compaction::wire::{self, codes, Refusal};
 use cortexkit_role_compaction::COMPACTION_ROLE;
+use cortexkit_role_llm_runner::run::RunResultRequest;
+use cortexkit_role_llm_runner::send::SendRequest;
 use cortexkit_role_step_transform_provider as step;
 use cortexkit_role_tool_provider::result::{ContentPart, ToolResult};
 use serde::de::DeserializeOwned;
@@ -296,7 +297,15 @@ impl Handler {
 
     /// The session a provider op is about: the one the route is bound to,
     /// and only when the daemon attests the session's provider as the caller.
+    /// A route bound to one of the provider's child sessions reaches the
+    /// session it is a child of: the mock names a child
+    /// `<parent session>:<anything>`, as ck-mc names its summarizer's.
     fn host(&self, channel: u16) -> Result<Host, Refusal> {
+        self.host_and_session(channel).map(|(host, _)| host)
+    }
+
+    /// The host, and the session id the route is bound to.
+    fn host_and_session(&self, channel: u16) -> Result<(Host, String), Refusal> {
         let caller = self
             .callers
             .lock()
@@ -316,12 +325,22 @@ impl Handler {
                 None,
             ));
         }
-        self.hosts
-            .lock()
-            .expect("host map")
+        let hosts = self.hosts.lock().expect("host map");
+        let host = hosts
             .get(&(caller.harness.clone(), caller.session.clone()))
+            .or_else(|| {
+                hosts.iter().find_map(|((harness, session), host)| {
+                    (harness == &caller.harness
+                        && caller
+                            .session
+                            .strip_prefix(session.as_str())
+                            .is_some_and(|rest| rest.starts_with(':')))
+                    .then_some(host)
+                })
+            })
             .cloned()
-            .ok_or_else(Refusal::unknown_session)
+            .ok_or_else(Refusal::unknown_session)?;
+        Ok((host, caller.session))
     }
 
     async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Value, Refusal> {
@@ -339,15 +358,17 @@ impl Handler {
                 let _: AppliedViewRequest = wire::params(params)?;
                 Ok(json_of(&self.host(channel)?.applied_view()))
             }
+            // llm-runner's ops answer `{"result": <answer>}` (llm-runner §1).
             ops::SESSION_SEND => {
                 let request: SendRequest = wire::params(params)?;
-                Ok(json_of(&self.host(channel)?.send(request)))
+                let (host, session) = self.host_and_session(channel)?;
+                Ok(json!({"result": host.send(&session, request)?}))
             }
             ops::RUN_RESULT => {
                 let request: RunResultRequest = wire::params(params)?;
                 self.host(channel)?
                     .run_result(&request)
-                    .map(|result| json_of(&result))
+                    .map(|result| json!({"result": result}))
                     .ok_or_else(|| {
                         Refusal::invalid_params("run_id", format!("unknown run {}", request.run_id))
                     })

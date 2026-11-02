@@ -7,7 +7,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendRequest};
 use cortexkit_role_compaction::notice::{NoticeAnswer, NoticeRequest};
 use cortexkit_role_compaction::part::PartBody;
 use cortexkit_role_compaction::read::{ReadPage, ReadRequest, SessionRef};
@@ -15,6 +14,8 @@ use cortexkit_role_compaction::ride::{RideAnswer, RideCause, RideRequest};
 use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
 use cortexkit_role_compaction::setup::{ModelRef, SetupAnswer, SetupRequest};
 use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
+use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest};
+use cortexkit_role_llm_runner::send::{SendReply, SendRequest};
 use cortexkit_role_routing::report::ReportRequest;
 use cortexkit_role_routing::select::{RouteRef, RunnerRef, SelectAnswer, SelectRequest};
 use mc_mock_runner::model::Kind;
@@ -122,6 +123,21 @@ impl Router for HostClient {
     }
 }
 
+/// A request as the runner decodes it from its JSON.
+fn through_wire<T: serde::Serialize + serde::de::DeserializeOwned>(value: &T) -> T {
+    serde_json::from_value(serde_json::to_value(value).expect("requests serialize"))
+        .expect("the runner decodes what ck-mc sends")
+}
+
+/// An llm-runner answer as ck-mc reads it: wrapped as `{"result": …}`.
+fn read_wrapped<T: serde::Serialize, A: serde::de::DeserializeOwned>(
+    answer: &T,
+) -> Result<A, ClientError> {
+    let body = cortexkit_role_llm_runner::wire::reply_body(answer).expect("answers serialize");
+    cortexkit_role_llm_runner::wire::read_reply(&body)
+        .map_err(|error| ClientError(format!("{error:?}")))
+}
+
 impl RunnerClient for HostClient {
     async fn read(&self, _: &SessionRef, request: ReadRequest) -> Result<ReadPage, ClientError> {
         let page = self
@@ -163,8 +179,21 @@ impl RunnerClient for HostClient {
         Ok(self.host()?.applied_view())
     }
 
-    async fn send(&self, _: &SessionRef, request: SendRequest) -> Result<SendAnswer, ClientError> {
-        Ok(self.host()?.send(request))
+    // Sends and runs go through their wire form, as llm-runner carries
+    // them, so the scenarios check the shapes ck-mc sends and reads: the run
+    // parameters beside llm-runner's fields, and answers wrapped as
+    // `{"result": …}`.
+    async fn send(
+        &self,
+        session: &SessionRef,
+        request: SendRequest,
+    ) -> Result<SendReply, ClientError> {
+        let request: SendRequest = through_wire(&request);
+        let reply = self
+            .host()?
+            .send(&session.session, request)
+            .map_err(|refusal| ClientError(format!("{refusal:?}")))?;
+        read_wrapped(&reply)
     }
 
     async fn run_result(
@@ -172,9 +201,12 @@ impl RunnerClient for HostClient {
         _: &SessionRef,
         request: RunResultRequest,
     ) -> Result<RunResult, ClientError> {
-        self.host()?
+        let request: RunResultRequest = through_wire(&request);
+        let result = self
+            .host()?
             .run_result(&request)
-            .ok_or_else(|| ClientError(format!("unknown run {}", request.run_id)))
+            .ok_or_else(|| ClientError(format!("unknown run {}", request.run_id)))?;
+        read_wrapped(&result)
     }
 }
 
@@ -1121,12 +1153,15 @@ async fn a_worker_that_cannot_free_enough_is_asked_for_ctx_keep_and_keeps_only_w
     let asked = host
         .entries()
         .iter()
+        // A reminder is plain text from magic-context (no plan template).
         .filter(|entry| {
             entry
                 .notice
                 .as_ref()
-                .and_then(|notice| notice.template.as_deref())
-                == Some("mc.ctx_keep")
+                .is_some_and(|notice| notice.sender == "magic-context")
+                && entry.parts.iter().any(|part| {
+                    matches!(&part.body, PartBody::Text { text } if text.contains("Call ctx_keep now"))
+                })
         })
         .count();
     assert_eq!(asked, 1);
@@ -1177,7 +1212,7 @@ async fn a_head_summarizes_older_turns_and_shows_them_in_place_of_the_messages()
     // The summarizer ran in its own child session, never in the transcript.
     let runs = host.child_runs();
     assert!(!runs.is_empty(), "no summarizer run");
-    assert!(runs[0].request.prompt.contains("<new_messages>"));
+    assert!(runs[0].prompt.contains("<new_messages>"));
     assert!(host
         .entries()
         .iter()
@@ -1373,21 +1408,15 @@ async fn an_invalid_summary_gets_one_repair_run_that_sees_the_error() {
     let runs = runner.host().child_runs();
     let repair = runs
         .iter()
-        .find(|run| run.request.run.as_ref().unwrap().child.ends_with(":repair"))
+        .find(|run| run.child.ends_with(":repair"))
         .expect("a repair run");
     assert!(repair
-        .request
         .prompt
         .contains("Your previous XML response was invalid and cannot be persisted."));
-    assert!(repair
-        .request
-        .prompt
-        .contains("<output>not a summary</output>"));
+    assert!(repair.prompt.contains("<output>not a summary</output>"));
     // Each attempt has a child of its own.
-    let children: std::collections::BTreeSet<String> = runs
-        .iter()
-        .map(|run| run.request.run.as_ref().unwrap().child.clone())
-        .collect();
+    let children: std::collections::BTreeSet<String> =
+        runs.iter().map(|run| run.child.clone()).collect();
     assert_eq!(children.len(), runs.len());
     // The repaired summaries are shown.
     let (m0, m1) = head_texts(runner.host());
@@ -1420,7 +1449,7 @@ async fn one_long_turn_at_the_threshold_is_summarized_past_its_prompt_once() {
     // prompt.
     assert!((65.0..85.0).contains(&usage), "first run at {usage:.1}%");
     let runs = runner.host().child_runs();
-    assert!(runs[0].request.prompt.contains("Refactor the whole crate."));
+    assert!(runs[0].prompt.contains("Refactor the whole crate."));
 }
 
 #[tokio::test]
@@ -1470,7 +1499,7 @@ async fn facts_a_summary_finds_become_project_memories_with_it() {
     assert_clean(&runner);
     // The summarizer saw the project's memories, to leave known facts out.
     let runs = runner.host().child_runs();
-    assert!(runs[0].request.prompt.contains("Ask before pushing."));
+    assert!(runs[0].prompt.contains("Ask before pushing."));
     // The new fact became a memory; the known one only counted as seen again.
     let conn = rusqlite::Connection::open(dir.join("context.db")).unwrap();
     let rows: Vec<(String, String, i64)> = conn
@@ -1541,7 +1570,7 @@ async fn routing_picks_the_summarizer_and_a_failed_model_falls_back_to_another()
     let runs = runner.host().child_runs();
     let good = runs
         .iter()
-        .map(|run| run.request.run.as_ref().unwrap())
+        .map(|run| &run.settings)
         .find(|run| run.model.provider == "good")
         .expect("no run on the fallback model");
     assert_eq!(good.route_decision_id.as_deref(), Some("d2"));
@@ -1594,7 +1623,7 @@ async fn a_transient_provider_error_retries_the_summary_after_a_pause() {
             .host()
             .child_runs()
             .iter()
-            .any(|run| run.request.run.as_ref().unwrap().child.ends_with(":retry1"))
+            .any(|run| run.child.ends_with(":retry1"))
         {
             break;
         }
@@ -1604,17 +1633,9 @@ async fn a_transient_provider_error_retries_the_summary_after_a_pause() {
     assert_clean(&runner);
     let runs = runner.host().child_runs();
     assert!(
-        runs.iter().any(|run| run
-            .request
-            .run
-            .as_ref()
-            .unwrap()
-            .child
-            .ends_with(":first:retry1")),
+        runs.iter().any(|run| run.child.ends_with(":first:retry1")),
         "{:?}",
-        runs.iter()
-            .map(|run| run.request.run.as_ref().unwrap().child.clone())
-            .collect::<Vec<_>>()
+        runs.iter().map(|run| run.child.clone()).collect::<Vec<_>>()
     );
     let (m0, m1) = head_texts(runner.host());
     assert!(
@@ -2635,8 +2656,8 @@ impl RunnerClient for StuckClient {
         Self::answer(session, AppliedViewAnswer::new()).await
     }
 
-    async fn send(&self, session: &SessionRef, _: SendRequest) -> Result<SendAnswer, ClientError> {
-        Self::answer(session, SendAnswer::Queued).await
+    async fn send(&self, session: &SessionRef, _: SendRequest) -> Result<SendReply, ClientError> {
+        Self::answer(session, SendReply::new("pending")).await
     }
 
     async fn run_result(

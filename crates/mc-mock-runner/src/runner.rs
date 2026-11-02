@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use ck_contract_draft::send::{Delivery, RunResult, RunResultRequest, SendAnswer, SendRequest};
 use compaction_view::clean::clean_reply;
 use compaction_view::render::{self as view, edits_for_transcript, RenderedMessage};
 use compaction_view::rules;
@@ -31,6 +30,9 @@ use cortexkit_role_compaction::view::{
     AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest, View, ViewRefusal,
 };
 use cortexkit_role_compaction::wire::Refusal;
+use cortexkit_role_llm_runner::delivery_order::Mode;
+use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest};
+use cortexkit_role_llm_runner::send::{SendReply, SendRequest};
 use serde_json::Value;
 
 use crate::model::{Completion, Kind, MockModel, ModelError, Request};
@@ -172,7 +174,7 @@ struct State {
     pending: Option<View>,
     /// Reasoning tokens per reasoning part, as reported when produced.
     reasoning_tokens: HashMap<String, u64>,
-    reminders: Vec<SendRequest>,
+    reminders: Vec<Reminder>,
     /// Runs the provider started in child sessions.
     runs: crate::child::Runs,
     responder: crate::child::Responder,
@@ -284,16 +286,39 @@ impl Host {
         answer
     }
 
-    /// `session.send`: queue a reminder, or start a run in a child session.
-    pub fn send(&self, request: SendRequest) -> SendAnswer {
+    /// `session.send` on a route bound to `bound_session`: a run in a child
+    /// session of the provider's own, or a reminder for this session. A reminder must
+    /// name its delivery modes (`delivery_order`); the mock delivers
+    /// `tool_result` and `steer`. A newer reminder with the same `dedupe_key`
+    /// replaces a queued one.
+    pub fn send(&self, bound_session: &str, request: SendRequest) -> Result<SendReply, Refusal> {
         let mut state = self.lock();
-        if request.run.is_some() {
+        if bound_session != state.config.session.session {
             let responder = state.responder.clone();
-            let run_id = state.runs.start(request, &responder);
-            return SendAnswer::Active { run_id };
+            let run_id = state
+                .runs
+                .start(bound_session, request, &responder)
+                .map_err(|error| Refusal::invalid_params("runner_params", error))?;
+            let mut reply = SendReply::new(cortexkit_role_llm_runner::run::states::ACTIVE);
+            reply.run_id = Some(run_id);
+            return Ok(reply);
         }
-        state.reminders.push(request);
-        SendAnswer::Queued
+        let order = request
+            .delivery_order()
+            .map_err(|field| Refusal::invalid_params(field, "malformed delivery"))?
+            .ok_or_else(|| Refusal::invalid_params("delivery", "a reminder names its modes"))?;
+        let reminder = Reminder {
+            text: request.prompt_text().to_owned(),
+            modes: order.modes.clone(),
+            dedupe_key: order.dedupe_key.clone(),
+        };
+        if let Some(key) = &reminder.dedupe_key {
+            state
+                .reminders
+                .retain(|queued| queued.dedupe_key.as_ref() != Some(key));
+        }
+        state.reminders.push(reminder);
+        Ok(SendReply::new("pending"))
     }
 
     /// `run.result`.
@@ -721,12 +746,10 @@ impl<P: Provider> Runner<P> {
             if let Some(index) = state
                 .reminders
                 .iter()
-                .position(|reminder| reminder.delivery.first() == Some(&Delivery::ToolResult))
+                .position(|reminder| reminder.modes.first() == Some(&Mode::ToolResult))
             {
                 let reminder = state.reminders.remove(index);
-                let mut item = Delivered::new("magic-context", reminder.prompt);
-                item.template = reminder.template.clone();
-                delivered.push(item);
+                delivered.push(Delivered::new("magic-context", reminder.text));
             }
             state
                 .transcript
@@ -749,23 +772,19 @@ impl<P: Provider> Runner<P> {
             let mut state = self.host.lock();
             let (steers, rest): (Vec<_>, Vec<_>) =
                 state.reminders.drain(..).partition(|reminder| {
-                    reminder.delivery.contains(&Delivery::Steer)
-                        && !reminder.delivery.contains(&Delivery::ToolResult)
+                    reminder.modes.contains(&Mode::Steer)
+                        && !reminder.modes.contains(&Mode::ToolResult)
                 });
             state.reminders = rest;
             let now = state.now;
             for reminder in &steers {
                 state.transcript.append(
                     Role::User,
-                    Some({
-                        let mut origin = NoticeOrigin::new("magic-context");
-                        origin.template = reminder.template.clone();
-                        origin
-                    }),
+                    Some(NoticeOrigin::new("magic-context")),
                     vec![(
                         Seal::None,
                         PartBody::Text {
-                            text: reminder.prompt.clone(),
+                            text: reminder.text.clone(),
                         },
                     )],
                     None,
@@ -935,6 +954,14 @@ impl<P: Provider> Runner<P> {
             Err(error) => self.report.call_errors.push(error),
         }
     }
+}
+
+/// A reminder a provider queued, until it is delivered.
+#[derive(Clone, Debug)]
+struct Reminder {
+    text: String,
+    modes: Vec<Mode>,
+    dedupe_key: Option<String>,
 }
 
 /// The ride causes the mock runner detects and declares at Setup. It has no

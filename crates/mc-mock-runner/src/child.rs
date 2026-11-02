@@ -1,5 +1,6 @@
-//! Runs in child sessions: what a provider starts with `session.send` and
-//! reads with `run.result`, such as a summarizer turn.
+//! Runs in child sessions: what a provider starts with llm-runner's
+//! `session.send` on a route bound to a child session of its own, and reads
+//! with `run.result`, such as a summarizer turn.
 //!
 //! A run finishes at once with the reply of a scripted model. The default
 //! answers a summarizer prompt the way a careful model would: one summary per
@@ -10,7 +11,46 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ck_contract_draft::send::{RunResult, RunSettings, RunState, SendRequest};
+use cortexkit_role_llm_runner::finish::Finish;
+use cortexkit_role_llm_runner::run::{states, FinalMessage, RunError, RunResult};
+use cortexkit_role_llm_runner::send::SendRequest;
+use serde::Deserialize;
+
+/// What a run runs with: the runner's own parameters of the `session.send`
+/// that started it (`runner_params`), as the provider sends them, plus the
+/// child session the route named.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct RunSettings {
+    /// The child session's id, from the route's bind identity.
+    #[serde(skip)]
+    pub child: String,
+    pub model: RunModel,
+    pub system: String,
+    pub generation: Generation,
+    pub stop_when: StopWhen,
+    #[serde(default)]
+    pub route_decision_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct RunModel {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub variant: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Generation {
+    pub max_output_tokens: u64,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct StopWhen {
+    pub max_steps: u32,
+}
 
 /// A scripted model's reply to one run.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -27,6 +67,9 @@ pub type Responder = Arc<dyn Fn(&RunSettings, &str) -> Reply + Send + Sync>;
 /// One run a provider started, kept for scenario assertions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChildRun {
+    pub child: String,
+    pub prompt: String,
+    pub settings: RunSettings,
     pub request: SendRequest,
     pub result: RunResult,
 }
@@ -38,33 +81,52 @@ pub struct Runs {
 }
 
 impl Runs {
-    /// Start a run, or return the run an earlier send with the same key
-    /// started.
-    pub fn start(&mut self, request: SendRequest, responder: &Responder) -> String {
-        if let Some(run_id) = self.by_send_id.get(&request.send_id) {
-            return run_id.clone();
+    /// Start a run in `child`, or return the run an earlier send with the
+    /// same key started there. A send whose run parameters don't decode is
+    /// refused naming the field, as a runner refuses it.
+    pub fn start(
+        &mut self,
+        child: &str,
+        request: SendRequest,
+        responder: &Responder,
+    ) -> Result<String, String> {
+        let key = format!("{child}\u{0}{}", request.send_id);
+        if let Some(run_id) = self.by_send_id.get(&key) {
+            return Ok(run_id.clone());
         }
+        let mut settings: RunSettings =
+            serde_json::from_value(serde_json::Value::Object(request.runner_params.clone()))
+                .map_err(|error| error.to_string())?;
+        settings.child = child.to_owned();
+        let prompt = request.prompt_text().to_owned();
         let run_id = format!("run-{}", self.runs.len() + 1);
-        let settings = request.run.clone().expect("a run carries its settings");
-        let reply = responder(&settings, &request.prompt);
-        self.by_send_id
-            .insert(request.send_id.clone(), run_id.clone());
+        let reply = responder(&settings, &prompt);
+        self.by_send_id.insert(key, run_id.clone());
+        let mut result = match &reply.error {
+            Some(message) => {
+                let mut result = RunResult::new(run_id.clone(), states::ERROR);
+                result.error = Some(RunError::new("provider", message.clone(), "mock"));
+                result
+            }
+            None => {
+                let mut result = RunResult::new(run_id.clone(), states::COMPLETED);
+                result.final_message = Some(FinalMessage {
+                    ordinal: 1,
+                    mid: "m1".into(),
+                    text: reply.text.clone(),
+                });
+                result
+            }
+        };
+        result.finish = reply.finish.as_deref().map(Finish::parse);
         self.runs.push(ChildRun {
+            child: child.to_owned(),
+            prompt,
+            settings,
             request,
-            result: RunResult {
-                run_id: run_id.clone(),
-                state: if reply.error.is_some() {
-                    RunState::Failed
-                } else {
-                    RunState::Finished
-                },
-                finish: reply.finish,
-                text: reply.error.is_none().then_some(reply.text),
-                error: reply.error,
-                usage: None,
-            },
+            result,
         });
-        run_id
+        Ok(run_id)
     }
 
     pub fn result(&self, run_id: &str) -> Option<RunResult> {

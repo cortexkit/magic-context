@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendRequest};
 use cortexkit_role_compaction::read::{ReadPage, ReadRequest, SessionRef};
 use cortexkit_role_compaction::view::{
     AppliedViewAnswer, AppliedViewRequest, ApplyViewAnswer, ApplyViewRequest,
@@ -16,6 +15,8 @@ use cortexkit_role_compaction::wire::{self, codes, Refusal};
 use cortexkit_role_compaction::{
     ops, COMPACTION_PROVIDES, COMPACTION_ROLE, COMPACTION_RUNNER_ROLE, LLM_RUNNER_ROLE,
 };
+use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest};
+use cortexkit_role_llm_runner::send::{SendReply, SendRequest};
 use cortexkit_role_step_transform_provider as step;
 use cortexkit_role_tool_provider::result::{ContentPart, ToolResult};
 use serde::de::DeserializeOwned;
@@ -104,7 +105,9 @@ impl SubcRunnerClient {
 
     /// Call the session's runner on the route for `role`, bound to the
     /// session, one route per role (compaction-runner for the view and entry
-    /// ops, llm-runner for sends and runs).
+    /// ops, llm-runner for sends and runs). Compaction answers come bare
+    /// (compaction W1.1); llm-runner wraps every answer as `{"result": …}`
+    /// (llm-runner §1).
     async fn call<P: Serialize, A: DeserializeOwned>(
         &self,
         session: &SessionRef,
@@ -112,6 +115,22 @@ impl SubcRunnerClient {
         method: &str,
         params: &P,
     ) -> Result<A, ClientError> {
+        let reply = self.call_raw(session, role, method, params).await?;
+        if role == LLM_RUNNER_ROLE {
+            return cortexkit_role_llm_runner::wire::read_reply(&reply)
+                .map_err(|error| ClientError(format!("{method} answer: {error:?}")));
+        }
+        serde_json::from_slice(&reply)
+            .map_err(|error| ClientError(format!("{method} answer: {error}")))
+    }
+
+    async fn call_raw<P: Serialize>(
+        &self,
+        session: &SessionRef,
+        role: (&str, &str),
+        method: &str,
+        params: &P,
+    ) -> Result<Vec<u8>, ClientError> {
         let consumer = self
             .consumer
             .get_or_try_init(|| {
@@ -139,8 +158,7 @@ impl SubcRunnerClient {
             )
             .await
             .map_err(|error| ClientError(format!("{method}: {error:?}")))?;
-        serde_json::from_slice(&reply)
-            .map_err(|error| ClientError(format!("{method} answer: {error}")))
+        Ok(reply)
     }
 }
 
@@ -272,7 +290,7 @@ impl RunnerClient for SubcRunnerClient {
         &self,
         session: &SessionRef,
         request: SendRequest,
-    ) -> Result<SendAnswer, ClientError> {
+    ) -> Result<SendReply, ClientError> {
         self.call(session, LLM_RUNNER_ROLE, ops::SESSION_SEND, &request)
             .await
     }

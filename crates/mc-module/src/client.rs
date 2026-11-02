@@ -5,9 +5,10 @@
 
 use std::future::Future;
 
-use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendRequest};
 use cortexkit_role_compaction::read::{ReadPage, ReadRequest, SessionRef};
 use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
+use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest};
+use cortexkit_role_llm_runner::send::{SendReply, SendRequest};
 
 /// A call to the runner that got no answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,13 +34,15 @@ pub trait RunnerClient: Send + Sync + 'static {
         &self,
         session: &SessionRef,
     ) -> impl Future<Output = Result<AppliedViewAnswer, ClientError>> + Send;
-    /// `session.send`.
+    /// `session.send`, llm-runner's. A summarizer run goes to a child session
+    /// of ck-mc's own, named by `session`; a reminder goes to the session it
+    /// is for.
     fn send(
         &self,
         session: &SessionRef,
         request: SendRequest,
-    ) -> impl Future<Output = Result<SendAnswer, ClientError>> + Send;
-    /// `run.result`.
+    ) -> impl Future<Output = Result<SendReply, ClientError>> + Send;
+    /// `run.result`, llm-runner's, on the session the run is in.
     fn run_result(
         &self,
         session: &SessionRef,

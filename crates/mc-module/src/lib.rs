@@ -2,7 +2,8 @@
 //!
 //! A runner holds a session's transcript and renders every request. This
 //! module decides how that history is shortened and says so as views: lists of
-//! edits the runner applies before every request (see `ck-contract-draft`).
+//! edits the runner applies before every request (see the
+//! `cortexkit-role-compaction` contract crate).
 //! Between two views the runner sends exactly what it sent before plus what is
 //! new, so the provider's prompt cache keeps hitting; a new view rewrites the
 //! cache once, so a view is only built on a pass that may pay for that.

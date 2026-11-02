@@ -64,8 +64,10 @@ const HINT_EXCLUDED_TOOLS: [&str; 8] = [
     "work",
 ];
 
-pub const REMINDER_TEMPLATE: &str = "mc.reduce.reminder";
-pub const CEILING_TEMPLATE: &str = "mc.reduce.ceiling";
+/// The kinds of `ctx_reduce` reminder: each send's `dedupe_key`, so a
+/// newer reminder replaces a queued one of its kind, and its `send_id` prefix.
+pub const REMINDER_KIND: &str = "mc.reduce.reminder";
+pub const CEILING_KIND: &str = "mc.reduce.ceiling";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

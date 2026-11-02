@@ -1,4 +1,6 @@
-//! A reference runner for the mode-3 contract draft (`ck-contract-draft`).
+//! A reference runner for the compaction contract (`cortexkit-role-compaction`),
+//! with the subset of llm-runner's `session.send` and `run.result` a
+//! compaction provider uses.
 //!
 //! It does what a real runner does for a compaction provider, and nothing
 //! more: it holds the transcript and its tag numbers ([`transcript`]), renders

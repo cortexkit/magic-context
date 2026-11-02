@@ -7,8 +7,8 @@ default-run = "ck-mc"
 description = "Magic Context as a compaction provider for llm-runners (ck-mc)."
 
 [dependencies]
-ck-contract-draft = { workspace = true }
 cortexkit-role-compaction = { workspace = true }
+cortexkit-role-llm-runner = { workspace = true }
 cortexkit-compaction-view = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

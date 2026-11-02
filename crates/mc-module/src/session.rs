@@ -5,7 +5,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use ck_contract_draft::send::{Delivery, SendRequest};
 use cortexkit_role_compaction::notice::{Conditions, Event, NoticeRequest};
 use cortexkit_role_compaction::part::PartBody;
 use cortexkit_role_compaction::read::{Cursor, Detail, ReadRequest, Select, SessionRef};
@@ -14,6 +13,8 @@ use cortexkit_role_compaction::setup::SetupRequest;
 use cortexkit_role_compaction::view::{
     ApplyViewAnswer, ApplyViewRequest, EditOp, View, MAX_VIEW_BYTES,
 };
+use cortexkit_role_llm_runner::delivery_order::{DeliveryOrder, Mode};
+use cortexkit_role_llm_runner::send::SendRequest;
 use serde_json::Value;
 
 use crate::client::RunnerClient;
@@ -834,26 +835,16 @@ impl Session {
         let sends = [
             (
                 reminders.tool_result,
-                crate::nudges::REMINDER_TEMPLATE,
-                Delivery::ToolResult,
+                crate::nudges::REMINDER_KIND,
+                Mode::ToolResult,
             ),
-            (
-                reminders.ceiling,
-                crate::nudges::CEILING_TEMPLATE,
-                Delivery::Steer,
-            ),
+            (reminders.ceiling, crate::nudges::CEILING_KIND, Mode::Steer),
         ];
-        for (text, template, delivery) in sends {
+        for (text, kind, mode) in sends {
             let Some(text) = text else {
                 continue;
             };
-            let request = SendRequest {
-                send_id: format!("{template}:{}", self.seq),
-                prompt: text,
-                template: Some(template.into()),
-                delivery: vec![delivery],
-                run: None,
-            };
+            let request = reminder(format!("{kind}:{}", self.seq), text, kind, mode);
             if let Err(error) = client.send(&self.key, request).await {
                 eprintln!(
                     "ck-mc: session {}: session.send failed: {error:?}",
@@ -889,15 +880,14 @@ impl Session {
              In `note`, write a few lines on where you are and what comes next. \
              Everything else before that call, except your task, is then removed."
         );
-        let request = SendRequest {
-            // One request per stay over the threshold, so the view version
-            // that crossed it names it.
-            send_id: format!("{KEEP_TEMPLATE}:{}", self.version),
-            prompt: text,
-            template: Some(KEEP_TEMPLATE.into()),
-            delivery: vec![Delivery::Steer],
-            run: None,
-        };
+        // One request per stay over the threshold, so the view version that
+        // crossed it names it.
+        let request = reminder(
+            format!("{KEEP_KIND}:{}", self.version),
+            text,
+            KEEP_KIND,
+            Mode::Steer,
+        );
         match client.send(&self.key, request).await {
             Ok(_) => self.keep_requested = true,
             Err(error) => eprintln!(
@@ -1849,8 +1839,19 @@ fn list(tags: &[u64]) -> String {
         .join(", ")
 }
 
-/// The template name of the request to call `ctx_keep`.
-pub const KEEP_TEMPLATE: &str = "mc.ctx_keep";
+/// The kind of the request to call `ctx_keep`, as for the reminders
+/// ([`crate::nudges::REMINDER_KIND`]).
+pub const KEEP_KIND: &str = "mc.ctx_keep";
+
+/// A reminder as llm-runner carries it: plain text, delivered in `mode` only
+/// (`delivery_order`), so a routine reminder rides the next tool result and
+/// never starts a turn of its own. A queued reminder of the same `kind` is
+/// replaced by a newer one. The text holds per-session numbers, so it is never
+/// a plan template.
+fn reminder(send_id: String, text: String, kind: &str, mode: Mode) -> SendRequest {
+    SendRequest::new(text, send_id)
+        .with_delivery_order(&DeliveryOrder::new(vec![mode]).with_dedupe_key(kind))
+}
 
 /// Roughly what dropping `covered` frees: the parts not already changed by
 /// an earlier view.

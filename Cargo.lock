@@ -145,15 +145,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ck-contract-draft"
-version = "0.8.0-draft.2"
-dependencies = [
- "cortexkit-role-compaction",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "cortexkit-compaction-view"
 version = "0.1.0"
 dependencies = [
@@ -741,9 +732,9 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 name = "mc-mock-runner"
 version = "0.1.0"
 dependencies = [
- "ck-contract-draft",
  "cortexkit-compaction-view",
  "cortexkit-role-compaction",
+ "cortexkit-role-llm-runner",
  "cortexkit-role-step-transform-provider",
  "cortexkit-role-tool-provider",
  "serde",
@@ -758,9 +749,9 @@ dependencies = [
 name = "mc-module"
 version = "0.1.0"
 dependencies = [
- "ck-contract-draft",
  "cortexkit-compaction-view",
  "cortexkit-role-compaction",
+ "cortexkit-role-llm-runner",
  "cortexkit-role-routing",
  "cortexkit-role-step-transform-provider",
  "cortexkit-role-tool-provider",
