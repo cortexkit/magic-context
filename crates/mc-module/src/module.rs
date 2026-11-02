@@ -265,7 +265,11 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                     }
                     Job::Tool { name, input, reply } => {
                         let answer = match &mut session {
-                            Some(session) => session.tool(&inner.settings, &name, &input),
+                            Some(session) => {
+                                session
+                                    .tool(&inner.client, &inner.settings, &name, &input)
+                                    .await
+                            }
                             None => Err("the session has not started".into()),
                         };
                         let _ = reply.send(answer);

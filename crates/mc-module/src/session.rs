@@ -443,8 +443,9 @@ impl Session {
     }
 
     /// A `ctx_*` tool call.
-    pub fn tool(
+    pub async fn tool<C: RunnerClient>(
         &mut self,
+        client: &C,
         settings: &Settings,
         name: &str,
         input: &Value,
@@ -452,6 +453,13 @@ impl Session {
         match name {
             "ctx_reduce" => self.ctx_reduce(input),
             "ctx_keep" if self.features.ctx_keep => self.ctx_keep(settings, input),
+            "ctx_expand" => {
+                let last_summarized = self
+                    .summaries
+                    .last()
+                    .and_then(|summary| u64::try_from(summary.end_message).ok());
+                crate::expand::run(client, &self.key, input, last_summarized).await
+            }
             other => Err(format!("unknown tool {other}")),
         }
     }

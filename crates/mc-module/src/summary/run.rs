@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use ck_contract_draft::read::{Detail, ReadRequest, Select, SessionRef};
+use ck_contract_draft::read::SessionRef;
 use ck_contract_draft::send::{
     Generation, RunResultRequest, RunSettings, RunState, SendAnswer, SendRequest, StopWhen,
 };
@@ -25,7 +25,6 @@ use super::validate::{
 use crate::client::RunnerClient;
 use crate::context_db::StoredCompartment;
 
-const READ_PAGE_BYTES: u64 = 1 << 20;
 /// Flash-class summarizers echo their examples back above this.
 const TEMPERATURE: f64 = 0.1;
 const MAX_OUTPUT_TOKENS: u64 = 32_000;
@@ -145,34 +144,7 @@ async fn read_range<C: RunnerClient>(
     client: &C,
     job: &Request,
 ) -> Result<Vec<ck_contract_draft::read::Entry>, String> {
-    let mut entries = Vec::new();
-    let mut after = job.from.checked_sub(1);
-    loop {
-        let page = client
-            .read(ReadRequest {
-                session: job.session.clone(),
-                select: Select::After {
-                    after_ordinal: after,
-                    limit: None,
-                },
-                detail: Detail::Full,
-                max_bytes: Some(READ_PAGE_BYTES),
-            })
-            .await
-            .map_err(|error| format!("session.read: {error:?}"))?;
-        let mut done = page.next_after.is_none();
-        for entry in page.entries {
-            if entry.ordinal >= job.until {
-                done = true;
-                break;
-            }
-            after = Some(entry.ordinal);
-            entries.push(entry);
-        }
-        if done {
-            return Ok(entries);
-        }
-    }
+    crate::reads::full_range(client, &job.session, job.from, job.until, |_| false).await
 }
 
 async fn wait_for<C: RunnerClient>(

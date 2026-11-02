@@ -1117,3 +1117,81 @@ async fn a_head_shows_its_docs_and_memories_from_the_first_step_and_newer_ones_i
     assert!(!m1.contains("Never force-push."), "{m1}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The answers to every `ctx_expand` call, oldest first.
+fn expand_outputs(host: &Host) -> Vec<String> {
+    host.entries()
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .filter_map(|part| match &part.body {
+            PartBody::Tool(tool) if tool.name == "ctx_expand" => tool.output.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn ctx_expand_shows_summarized_messages_and_parts_again() {
+    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let first_read = runner
+        .host()
+        .entries()
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .find_map(|part| match &part.body {
+            PartBody::Tool(tool) if tool.name == "read" => part.tag,
+            _ => None,
+        })
+        .unwrap();
+    let expand = |input: Value| {
+        Step::Model(Turn {
+            text: Some("Checking.".into()),
+            tools: vec![ToolCall::ok("ctx_expand", input, "")],
+            output_tokens: 5,
+            ..Turn::default()
+        })
+    };
+    runner
+        .play(&[
+            expand(json!({"message": 1})),
+            expand(json!({"start": 1, "end": 3})),
+            expand(json!({"start": 1, "end": 2, "verbose": true})),
+            expand(json!({"tag": format!("§{first_read}§")})),
+            expand(json!({"start": 1000, "end": 1001})),
+            expand(json!({"tag": 999_999})),
+            answer(),
+        ])
+        .await;
+    assert_clean(&runner);
+    let outputs = expand_outputs(runner.host());
+    assert_eq!(outputs.len(), 6, "{outputs:?}");
+    assert!(
+        outputs[0].starts_with("[1] U (user) — full recovery:")
+            && outputs[0].contains("Look at a.rs."),
+        "{}",
+        outputs[0]
+    );
+    assert!(
+        outputs[1].starts_with("Messages 1-") && outputs[1].contains("] U: Look at a.rs."),
+        "{}",
+        outputs[1]
+    );
+    assert!(
+        outputs[2].contains("(verbose)") && outputs[2].contains("• tool read(a.rs)"),
+        "{}",
+        outputs[2]
+    );
+    assert!(
+        outputs[3].starts_with("  [tool: read #") && outputs[3].contains(&"x".repeat(100)),
+        "{}",
+        &outputs[3][..outputs[3].len().min(200)]
+    );
+    assert!(outputs[4].contains("live tail"), "{}", outputs[4]);
+    assert!(outputs[5].starts_with("no tag 999999"), "{}", outputs[5]);
+}
