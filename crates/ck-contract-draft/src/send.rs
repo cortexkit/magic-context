@@ -55,6 +55,11 @@ pub struct RunSettings {
     pub child: String,
     pub system: String,
     pub model: ModelRef,
+    /// The routing `decision_id` the model was picked under (SR4). A runner
+    /// that gets its accounts from routing passes it to `route.account_for`;
+    /// one that runs models through its host's own login ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_decision: Option<String>,
     pub generation: Generation,
     pub stop_when: StopWhen,
 }

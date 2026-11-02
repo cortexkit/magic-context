@@ -194,6 +194,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cortexkit-role-routing"
+version = "0.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f16709cf90027931521cfa83ae5393011af3286c377dd7feb3eb11c9d0ee522"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cortexkit-role-step-transform-provider"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -738,6 +748,7 @@ version = "0.1.0"
 dependencies = [
  "ck-contract-draft",
  "cortexkit-compaction-view",
+ "cortexkit-role-routing",
  "cortexkit-role-step-transform-provider",
  "cortexkit-role-tool-provider",
  "mc-mock-runner",

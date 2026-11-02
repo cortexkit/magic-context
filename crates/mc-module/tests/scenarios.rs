@@ -15,6 +15,8 @@ use ck_contract_draft::rules::{EditCost, ProviderRules, SignedParts};
 use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendRequest};
 use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
+use cortexkit_role_routing::report::ReportRequest;
+use cortexkit_role_routing::select::{RouteRef, RunnerRef, SelectAnswer, SelectRequest};
 use mc_mock_runner::model::Kind;
 use mc_mock_runner::runner::{CallError, Host, Provider, Runner, SessionConfig, UserEdit};
 use mc_mock_runner::script::{Step, ToolCall, Turn};
@@ -24,6 +26,7 @@ use mc_module::lanes::placeholder;
 use mc_module::module::{Module, ModuleError};
 use mc_module::pass::Settings;
 use mc_module::route::{Project as RouteProject, Route};
+use mc_module::routing::{RouteError, Router};
 use mc_module::store::Store;
 use serde_json::{json, Value};
 
@@ -37,6 +40,20 @@ struct HostClient {
     host: Arc<Mutex<Option<Host>>>,
     /// Every catch-up read ck-mc made (compact detail).
     reads: ReadLog,
+    /// The stand-in routing provider's log: every select's request and every
+    /// report.
+    routing: Arc<Mutex<RoutingLog>>,
+}
+
+/// What ck-mc asked the stand-in routing provider, and what it answers.
+#[derive(Default)]
+struct RoutingLog {
+    selects: Vec<cortexkit_role_routing::select::SelectRequest>,
+    reports: Vec<cortexkit_role_routing::report::ReportRequest>,
+    /// Route keys it answers in turn; the session's model when empty.
+    routes: Vec<String>,
+    /// Answer every select with `no_route`.
+    no_route: bool,
 }
 
 impl HostClient {
@@ -46,6 +63,57 @@ impl HostClient {
             .unwrap()
             .clone()
             .ok_or_else(|| ClientError("runner not attached".into()))
+    }
+}
+
+/// A stand-in for the routing provider. It answers the session's own model,
+/// or the next of `routes`, with a 400k-token window: the sessions here have
+/// small windows to reach the thresholds in a few steps, and the summarizer's
+/// prompt needs a real one.
+impl Router for HostClient {
+    async fn select(&self, request: SelectRequest) -> Result<SelectAnswer, RouteError> {
+        let mut log = self.routing.lock().unwrap();
+        log.selects.push(request.clone());
+        if log.no_route {
+            return Err(RouteError {
+                code: "no_route".into(),
+                message: "nothing fits".into(),
+            });
+        }
+        let excluded = request.exclude.clone().unwrap_or_default();
+        let key = if log.routes.is_empty() {
+            "test/test-model".to_owned()
+        } else {
+            match log.routes.iter().find(|key| !excluded.contains(key)) {
+                Some(key) => key.clone(),
+                None => {
+                    return Err(RouteError {
+                        code: "no_route".into(),
+                        message: "every route excluded".into(),
+                    })
+                }
+            }
+        };
+        let (provider, model) = key.split_once('/').unwrap();
+        let route = RouteRef::new(provider, model);
+        let runner = RunnerRef::new(
+            request.runners.unwrap_or_default()[0].clone(),
+            route.clone(),
+        );
+        let decision = format!("d{}", log.selects.len());
+        Ok(SelectAnswer::new(
+            decision,
+            route,
+            runner,
+            400_000,
+            32_000,
+            u64::MAX,
+            "test",
+        ))
+    }
+
+    async fn report(&self, request: ReportRequest) {
+        self.routing.lock().unwrap().reports.push(request);
     }
 }
 
@@ -251,16 +319,10 @@ async fn start_full(
 
 async fn start_runner(
     config: SessionConfig,
-    mut settings: Settings,
+    settings: Settings,
     stores: Option<std::path::PathBuf>,
     pre_user: bool,
 ) -> Runner<InProcess> {
-    // Sessions here have small windows, to reach the thresholds in a few
-    // steps; summaries run on the same model with a real window, as routing
-    // would pick one, so the summarizer's prompt fits.
-    if settings.summarizer.is_none() {
-        settings.summarizer = Some((config.model.clone(), 400_000));
-    }
     let client = HostClient::default();
     let route = Route {
         session: config.session.clone(),
@@ -1266,6 +1328,90 @@ async fn facts_a_summary_finds_become_project_memories_with_it() {
 }
 
 #[tokio::test]
+async fn routing_picks_the_summarizer_and_a_failed_model_falls_back_to_another() {
+    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    runner.provider().client.routing.lock().unwrap().routes =
+        vec!["broken/model".into(), "good/model".into()];
+    let summarizer = mc_mock_runner::child::scripted_summarizer();
+    runner
+        .host()
+        .set_responder(std::sync::Arc::new(move |settings, prompt| {
+            if settings.model.provider == "broken" {
+                mc_mock_runner::child::Reply {
+                    error: Some("400 Bad Request: this model cannot".into()),
+                    ..Default::default()
+                }
+            } else {
+                summarizer(settings, prompt)
+            }
+        }));
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let log = runner.provider().client.routing.lock().unwrap();
+    // Summaries are picked as `mc_summary` on the session's own runner, and
+    // the second select leaves the failed model out.
+    assert!(log.selects.len() >= 2, "{} selects", log.selects.len());
+    assert_eq!(log.selects[0].consumer, "mc_summary");
+    assert_eq!(log.selects[0].runners, Some(vec!["mock-runner".to_owned()]));
+    assert_eq!(
+        log.selects[1].exclude,
+        Some(vec!["broken/model".to_owned()])
+    );
+    // Each decision's outcome went back to routing.
+    let outcomes: Vec<String> = log
+        .reports
+        .iter()
+        .map(|report| {
+            serde_json::to_value(&report.outcome)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(&outcomes[..2], ["failed", "completed"], "{outcomes:?}");
+    drop(log);
+    // The runs carried the decision their model was picked under.
+    let runs = runner.host().child_runs();
+    let good = runs
+        .iter()
+        .map(|run| run.request.run.as_ref().unwrap())
+        .find(|run| run.model.provider == "good")
+        .expect("no run on the fallback model");
+    assert_eq!(good.route_decision.as_deref(), Some("d2"));
+    let (m0, m1) = head_texts(runner.host());
+    assert!(
+        m0.contains("<session-history>\n") || m1.contains("<new-compartments>"),
+        "{m0}\n{m1}"
+    );
+}
+
+#[tokio::test]
+async fn with_no_route_no_summary_runs_and_ck_mc_picks_no_model_itself() {
+    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    runner.provider().client.routing.lock().unwrap().no_route = true;
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    assert!(!runner
+        .provider()
+        .client
+        .routing
+        .lock()
+        .unwrap()
+        .selects
+        .is_empty());
+    assert!(runner.host().child_runs().is_empty());
+}
+
+#[tokio::test]
 async fn a_transient_provider_error_retries_the_summary_after_a_pause() {
     let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
     runner.host().set_responder(summarizer_failing(
@@ -2254,6 +2400,18 @@ impl StuckClient {
         }
         Ok(value)
     }
+}
+
+/// It has no routing provider: its sessions never summarize.
+impl Router for StuckClient {
+    async fn select(&self, _: SelectRequest) -> Result<SelectAnswer, RouteError> {
+        Err(RouteError {
+            code: "routing_unavailable".into(),
+            message: "no routing here".into(),
+        })
+    }
+
+    async fn report(&self, _: ReportRequest) {}
 }
 
 impl RunnerClient for StuckClient {

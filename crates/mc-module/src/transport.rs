@@ -43,6 +43,9 @@ use crate::client::{ClientError, RunnerClient};
 use crate::module::{Module, ModuleError, PRE_USER_BUDGET};
 use crate::pre_user::Addition;
 use crate::route::{Project, Route};
+use crate::routing::RouteError;
+use cortexkit_role_routing::report::ReportRequest;
+use cortexkit_role_routing::select::{SelectAnswer, SelectRequest};
 
 /// How long ck-mc waits on one call to a runner.
 const RUNNER_CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -138,6 +141,91 @@ impl SubcRunnerClient {
             .map_err(|error| ClientError(format!("{method}: {error:?}")))?;
         serde_json::from_slice(&reply)
             .map_err(|error| ClientError(format!("{method} answer: {error}")))
+    }
+}
+
+impl SubcRunnerClient {
+    /// The connection to the daemon, made on first use.
+    async fn consumer(&self) -> Result<&SubcConsumer, String> {
+        self.consumer
+            .get_or_try_init(|| {
+                SubcConsumer::connect(&self.connection_file, ConsumerOptions::default())
+            })
+            .await
+            .map_err(|error| format!("connect: {error:?}"))
+    }
+
+    /// One call to the routing provider the catalog lists. Its answer is
+    /// `{"result": <answer>}`; a refusal is `{code, message, detail}`.
+    async fn route_call<P: Serialize>(
+        &self,
+        method: &str,
+        params: &P,
+    ) -> Result<Value, RouteError> {
+        let unavailable = |message: String| RouteError {
+            code: "routing_unavailable".into(),
+            message,
+        };
+        let consumer = self.consumer().await.map_err(unavailable)?;
+        let providers = consumer
+            .resolve_providers(crate::routing::CAPABILITY)
+            .await
+            .map_err(|error| unavailable(format!("{error:?}")))?;
+        let module_id = match providers.as_slice() {
+            [] => return Err(unavailable("no module provides routing/v1".into())),
+            [one] => one.clone(),
+            many => {
+                return Err(RouteError {
+                    code: "routing_ambiguous".into(),
+                    message: format!(
+                        "routing/v1 has {} providers: {}",
+                        many.len(),
+                        many.join(", ")
+                    ),
+                })
+            }
+        };
+        let reply = consumer
+            .call(
+                RouteTarget::ManagementSurface { module_id },
+                // An unscoped select is attributed to ck-mc itself.
+                BindIdentity::new("magic-context", "routing"),
+                wire::encode(method, params),
+                CallOptions {
+                    timeout: RUNNER_CALL_TIMEOUT,
+                    ..CallOptions::default()
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                // The provider's own refusal, by its code (`no_route`, ...).
+                subc_client_rs::CallError::Module(body) => RouteError {
+                    code: body.code,
+                    message: body.message,
+                },
+                other => unavailable(format!("{method}: {other:?}")),
+            })?;
+        let mut body: Value = serde_json::from_slice(&reply).map_err(|error| RouteError {
+            code: "routing_unavailable".into(),
+            message: format!("{method} answer: {error}"),
+        })?;
+        Ok(body["result"].take())
+    }
+}
+
+impl crate::routing::Router for SubcRunnerClient {
+    async fn select(&self, request: SelectRequest) -> Result<SelectAnswer, RouteError> {
+        let result = self.route_call("route.select", &request).await?;
+        serde_json::from_value(result).map_err(|error| RouteError {
+            code: "routing_unavailable".into(),
+            message: format!("route.select answer: {error}"),
+        })
+    }
+
+    async fn report(&self, request: ReportRequest) {
+        if let Err(error) = self.route_call("route.report", &request).await {
+            eprintln!("ck-mc: route.report failed: {error}");
+        }
     }
 }
 

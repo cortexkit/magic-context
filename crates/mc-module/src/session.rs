@@ -447,24 +447,15 @@ impl Session {
             return None;
         }
         self.summarizing = true;
-        let (summarizer_model, summarizer_window) =
-            settings.summarizer.clone().unwrap_or_else(|| {
-                (
-                    self.conditions.model.clone(),
-                    self.conditions.context_window,
-                )
-            });
         Some(run::Request {
             session: self.key.clone(),
             from,
             until,
             summaries: self.summaries.clone(),
-            model: summarizer_model,
             // A quarter of the session's window: a run reads about as much
             // as the model gives up to summaries.
             chunk_tokens: ((self.conditions.context_window as f64 * 0.25).round() as u64)
                 .clamp(8_000, 50_000),
-            context_window: summarizer_window,
             language: settings.language.clone(),
             memories: self.historian_memories(memory_enabled),
             memory_enabled,

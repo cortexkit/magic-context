@@ -30,6 +30,7 @@ use crate::pass::Settings;
 use crate::pre_user::Addition;
 use crate::preset;
 use crate::route::Route;
+use crate::routing::Router;
 use crate::session::Session;
 use crate::store::Store;
 use crate::summary::run;
@@ -99,7 +100,7 @@ enum Job {
     SummaryFinished(Result<Option<ValidatedChunk>, String>),
 }
 
-impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
+impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     pub fn new(
         client: C,
         config: impl Into<Config>,
@@ -389,7 +390,7 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
 
 /// Run the summarizer beside the session's worker, and hand its result back
 /// as a job.
-fn start_summary<C: RunnerClient + Send + Sync + 'static>(
+fn start_summary<C: RunnerClient + Router + Send + Sync + 'static>(
     inner: &Arc<Inner<C>>,
     worker: mpsc::WeakUnboundedSender<Job>,
     request: run::Request,

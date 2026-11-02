@@ -29,6 +29,9 @@ use super::validate::{
 };
 use crate::client::RunnerClient;
 use crate::context_db::{StoredCompartment, StoredMemory};
+use crate::routing::{self, Router};
+use ck_contract_draft::read::StepUsage;
+use cortexkit_role_routing::report::Outcome;
 
 /// Flash-class summarizers echo their examples back above this.
 const TEMPERATURE: f64 = 0.1;
@@ -49,13 +52,9 @@ pub struct Request {
     pub until: u64,
     /// The session's summaries so far, oldest first.
     pub summaries: Vec<StoredCompartment>,
-    pub model: ModelRef,
     /// How many tokens of messages one run reads at most, before the
     /// prompt is fitted to the summarizer's window.
     pub chunk_tokens: u64,
-    /// The summarizer model's context window: the prompt and its reply must
-    /// fit it.
-    pub context_window: u64,
     /// The user's `language`: the summarizer writes its prose in it.
     pub language: Option<String>,
     /// The project's memories, for the summarizer's `<project-memory>`
@@ -69,31 +68,107 @@ pub struct Request {
 
 /// Transient provider errors retry this many times on the same model.
 const MAX_RETRIES: usize = 2;
+/// After the first model routing picks fails, this many others are tried,
+/// each excluding the ones before it (the plugin's fallback models).
+const MAX_FALLBACKS: usize = 2;
+
+/// The model a summary runs on, as routing picked it.
+struct Target {
+    model: ModelRef,
+    decision_id: String,
+    output_tokens: u64,
+}
 
 /// Run the summarizer. `Ok(None)` when there was nothing to summarize.
 ///
-/// As the plugin's historian (`compartment-runner-historian.ts`): a transient
-/// provider error retries twice, after 2 to 3 s and then 6 to 8 s; an invalid
-/// reply gets one repair run that sees the validation error and its own
-/// reply. Every attempt runs in a child of its own, so the summarizer always
-/// sees exactly its system prompt and one user message.
-pub async fn run<C: RunnerClient>(
+/// Routing picks the model, on the session's own runner (spec 1, SR4). As
+/// the plugin's historian (`compartment-runner-historian.ts`): a transient
+/// provider error retries twice on the same model, after 2 to 3 s and then
+/// 6 to 8 s; an invalid reply gets one repair run that sees the validation
+/// error and its own reply; and when a model still fails, the next one
+/// routing picks without it is tried. Every attempt runs in a child of its
+/// own, so the summarizer always sees exactly its system prompt and one user
+/// message. Each decision's outcome is reported back to routing.
+pub async fn run<C: RunnerClient + Router>(
     client: &C,
     job: &Request,
 ) -> Result<Option<ValidatedChunk>, String> {
+    let entries = read_range(client, job).await?;
+    if entries.is_empty() {
+        return Ok(None);
+    }
     let system = with_content_language_directive(
         HISTORIAN_SYSTEM_PROMPT,
         job.language.as_deref(),
         ContentLanguageDirectiveOptions::default(),
     )
     .into_owned();
-    let window = fit::Window {
-        calibration: DecisionCalibration::for_model(Some(&format!(
-            "{}/{}",
-            job.model.provider, job.model.model
-        ))),
-        context_window: job.context_window,
-    };
+    let mut tried: Vec<String> = Vec::new();
+    let mut failure: Option<String> = None;
+    for _ in 0..=MAX_FALLBACKS {
+        let answer = match client
+            .select(routing::summary_select(&job.session.runner, &tried))
+            .await
+        {
+            Ok(answer) => answer,
+            // No route left after a failure: the failure is what to report.
+            Err(error) => return Err(failure.unwrap_or_else(|| error.to_string())),
+        };
+        tried.push(answer.route.route_key());
+        let window = fit::Window {
+            calibration: DecisionCalibration::for_model(Some(&answer.route.route_key())),
+            context_window: answer.context_window,
+        };
+        let target = Target {
+            model: routing::model_of(&answer),
+            decision_id: answer.decision_id.clone(),
+            output_tokens: window
+                .output_tokens(MAX_OUTPUT_TOKENS)
+                .min(answer.max_output_tokens),
+        };
+        let mut usage = None;
+        let outcome =
+            summarize_on(client, job, &system, &entries, window, &target, &mut usage).await;
+        let reported = match &outcome {
+            Ok(_) => Outcome::Completed,
+            // The prompt never went out: this model's window cannot hold it.
+            Err(Failure::NotSent(_)) => Outcome::Cancelled,
+            Err(Failure::Failed(_)) => Outcome::Failed,
+        };
+        client
+            .report(routing::report(
+                &answer.decision_id,
+                reported,
+                usage.as_ref(),
+            ))
+            .await;
+        match outcome {
+            Ok(result) => return Ok(result),
+            Err(Failure::NotSent(error) | Failure::Failed(error)) => failure = Some(error),
+        }
+    }
+    Err(failure.unwrap_or_default())
+}
+
+/// Why one model did not produce a summary.
+enum Failure {
+    /// Nothing was sent to the model.
+    NotSent(String),
+    /// The model was asked and did not give a valid summary.
+    Failed(String),
+}
+
+/// Summarize on one model: fit the prompt to its window, ask, and repair an
+/// invalid reply once. `usage` adds up what every call reported.
+async fn summarize_on<C: RunnerClient>(
+    client: &C,
+    job: &Request,
+    system: &str,
+    entries: &[ck_contract_draft::read::Entry],
+    window: fit::Window,
+    target: &Target,
+    usage: &mut Option<StepUsage>,
+) -> Result<Option<ValidatedChunk>, Failure> {
     let fitted = fit::fit(&fit::Input {
         session_id: &job.session.session,
         chunk_start: job.from,
@@ -101,14 +176,13 @@ pub async fn run<C: RunnerClient>(
         summaries: &job.summaries,
         memories: &job.memories,
         memory_enabled: job.memory_enabled,
-        system_prompt: &system,
+        system_prompt: system,
         windows: &[window],
-        output_cap: MAX_OUTPUT_TOKENS,
+        output_cap: target.output_tokens,
         requested_chunk_tokens: job.chunk_tokens,
-    })?;
-    let output_tokens = window.output_tokens(MAX_OUTPUT_TOKENS);
-    let entries = read_range(client, job).await?;
-    let Some(chunk) = chunk::build(&entries, fitted.chunk_tokens) else {
+    })
+    .map_err(Failure::NotSent)?;
+    let Some(chunk) = chunk::build(entries, fitted.chunk_tokens) else {
         return Ok(None);
     };
     let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
@@ -120,9 +194,11 @@ pub async fn run<C: RunnerClient>(
         user_observations_requested: false,
         extraction_free: false,
     });
+    // The model is part of the child's name, so a fallback model never
+    // continues another model's conversation.
     let range = format!(
-        "{}-{}",
-        chunk.validation.start_index, chunk.validation.end_index
+        "{}-{}:{}",
+        chunk.validation.start_index, chunk.validation.end_index, target.decision_id
     );
     let prior: Vec<StoredCompartmentRange> = job
         .summaries
@@ -146,10 +222,12 @@ pub async fn run<C: RunnerClient>(
         job,
         &format!("{range}:first"),
         &prompt,
-        &system,
-        output_tokens,
+        system,
+        target,
+        usage,
     )
-    .await?;
+    .await
+    .map_err(Failure::Failed)?;
     let error = match validate_historian_output(&first, &chunk.validation, &prior, options()) {
         Ok(validated) => return Ok(Some(validated)),
         Err(error) => error.message,
@@ -161,13 +239,15 @@ pub async fn run<C: RunnerClient>(
         job,
         &format!("{range}:repair"),
         &repair_prompt,
-        &system,
-        output_tokens,
+        system,
+        target,
+        usage,
     )
-    .await?;
+    .await
+    .map_err(Failure::Failed)?;
     validate_historian_output(&repaired, &chunk.validation, &prior, options())
         .map(Some)
-        .map_err(|error| format!("invalid after repair: {}", error.message))
+        .map_err(|error| Failure::Failed(format!("invalid after repair: {}", error.message)))
 }
 
 /// One summarizer call in the child `label` names, with retries for
@@ -178,7 +258,8 @@ async fn attempt<C: RunnerClient>(
     label: &str,
     prompt: &str,
     system: &str,
-    output_tokens: u64,
+    target: &Target,
+    usage: &mut Option<StepUsage>,
 ) -> Result<String, String> {
     let mut retry = 0;
     loop {
@@ -187,7 +268,7 @@ async fn attempt<C: RunnerClient>(
         } else {
             format!("{CHILD}:{label}:retry{retry}")
         };
-        match call(client, job, &child, prompt, system, output_tokens).await {
+        match call(client, job, &child, prompt, system, target, usage).await {
             Ok(text) => return Ok(text),
             Err(error) if retry < MAX_RETRIES && is_transient(&error) => {
                 tokio::time::sleep(backoff(retry)).await;
@@ -205,7 +286,8 @@ async fn call<C: RunnerClient>(
     child: &str,
     prompt: &str,
     system: &str,
-    output_tokens: u64,
+    target: &Target,
+    usage: &mut Option<StepUsage>,
 ) -> Result<String, String> {
     let request = SendRequest {
         // A retry after a lost answer finds the run already started.
@@ -216,9 +298,10 @@ async fn call<C: RunnerClient>(
         run: Some(RunSettings {
             child: child.to_owned(),
             system: system.to_owned(),
-            model: job.model.clone(),
+            model: target.model.clone(),
+            route_decision: Some(target.decision_id.clone()),
             generation: Generation {
-                max_output_tokens: output_tokens,
+                max_output_tokens: target.output_tokens,
                 temperature: Some(TEMPERATURE),
             },
             stop_when: StopWhen { max_steps: 1 },
@@ -233,6 +316,9 @@ async fn call<C: RunnerClient>(
         SendAnswer::Queued => return Err("the runner queued the run as text".into()),
     };
     let result = wait_for(client, &job.session, &run_id).await?;
+    if let Some(reported) = &result.usage {
+        *usage = Some(add_usage(usage.take(), reported));
+    }
     match result.state {
         RunState::Finished => {}
         RunState::Failed => {
@@ -248,6 +334,25 @@ async fn call<C: RunnerClient>(
         return Err("the reply hit its output limit".into());
     }
     Ok(result.text.unwrap_or_default())
+}
+
+/// The usage of several calls on one decision, added up. A count either
+/// call left out stays as the other reported it.
+fn add_usage(total: Option<StepUsage>, more: &StepUsage) -> StepUsage {
+    let Some(total) = total else {
+        return *more;
+    };
+    let sum = |a: Option<u64>, b: Option<u64>| match (a, b) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+    };
+    StepUsage {
+        prompt_tokens: sum(total.prompt_tokens, more.prompt_tokens),
+        cache_read_tokens: sum(total.cache_read_tokens, more.cache_read_tokens),
+        cache_write_tokens: sum(total.cache_write_tokens, more.cache_write_tokens),
+        output_tokens: sum(total.output_tokens, more.output_tokens),
+        reasoning_tokens: sum(total.reasoning_tokens, more.reasoning_tokens),
+    }
 }
 
 /// Whether a failed call is worth retrying on the same model, as the plugin

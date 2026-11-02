@@ -25,6 +25,8 @@ serde_jcs = "0.2"
 # published contracts, each on a route of its own.
 cortexkit-role-tool-provider = "=0.14.6"
 cortexkit-role-step-transform-provider = "=0.4.2"
+# The routing capability that picks the summarizer's model (spec 3, CH9).
+cortexkit-role-routing = "=0.5.7"
 # Search query embeddings: one HTTPS POST per explicit search, no redirects.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 

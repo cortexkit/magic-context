@@ -51,10 +51,6 @@ pub struct Settings {
     pub git_commits_enabled: bool,
     /// `memory.auto_promote`: facts a summary finds become project memories.
     pub auto_promote: bool,
-    /// The model summaries run on, with its context window. `None` runs them
-    /// on the session's own model. A stand-in until the routing capability
-    /// picks the summarizer's model (spec 3, CH9); the config never sets it.
-    pub summarizer: Option<(ck_contract_draft::setup::ModelRef, u64)>,
     /// The embedding provider `ctx_search` scores by meaning with; `None`
     /// leaves search to its word lanes.
     pub embedding: Option<crate::embedding::Provider>,
@@ -116,7 +112,6 @@ impl Default for Settings {
             memory_enabled: true,
             git_commits_enabled: false,
             auto_promote: true,
-            summarizer: None,
             embedding: None,
             temporal_awareness: true,
             auto_search: AutoSearch::default(),

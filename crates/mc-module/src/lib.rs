@@ -47,6 +47,7 @@ pub mod project_docs;
 pub mod reads;
 pub mod reduce;
 pub mod route;
+pub mod routing;
 pub mod search;
 pub mod session;
 pub mod store;
