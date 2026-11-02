@@ -213,8 +213,8 @@ fn resolve_tiers(
                 }
             }
         }
-        if let Some(share) = number_at(tier, "/history_budget_percentage") {
-            settings.history_budget_percentage = share.clamp(0.05, 0.5);
+        if let Some(share) = in_range(tier, "/history_budget_percentage", 0.05, 0.5) {
+            settings.history_budget_percentage = share;
         }
         if let Some(enabled) = tier.pointer("/memory/enabled").and_then(Value::as_bool) {
             settings.memory_enabled = enabled;
@@ -225,8 +225,8 @@ fn resolve_tiers(
         {
             settings.auto_promote = promote;
         }
-        if let Some(budget) = number_at(tier, "/memory/injection_budget_tokens") {
-            settings.memory_budget_tokens = budget.max(1.0) as u64;
+        if let Some(budget) = in_range(tier, "/memory/injection_budget_tokens", 500.0, 20_000.0) {
+            settings.memory_budget_tokens = budget as u64;
         }
         if let Some(enabled) = tier.get("temporal_awareness").and_then(Value::as_bool) {
             settings.temporal_awareness = enabled;
@@ -238,25 +238,12 @@ fn resolve_tiers(
         {
             auto.enabled = enabled;
         }
-        if let Some(threshold) = number_at(tier, "/memory/auto_search/score_threshold") {
-            auto.score_threshold = threshold.clamp(0.3, 0.95);
+        if let Some(threshold) = in_range(tier, "/memory/auto_search/score_threshold", 0.3, 0.95) {
+            auto.score_threshold = threshold;
         }
-        if let Some(chars) = tier
-            .pointer("/memory/auto_search/min_prompt_chars")
-            .and_then(Value::as_u64)
-            .filter(|chars| *chars > 0)
-        {
-            auto.min_prompt_chars = (chars as usize).clamp(5, 500);
+        if let Some(chars) = in_range(tier, "/memory/auto_search/min_prompt_chars", 5.0, 500.0) {
+            auto.min_prompt_chars = chars as usize;
         }
-    }
-    // The deprecated key still counts when the user never set the new one.
-    if user.pointer("/memory/injection_budget_tokens").is_none() {
-        if let Some(budget) = number_at(user, "/memory/budget_tokens") {
-            settings.memory_budget_tokens = budget.max(1.0) as u64;
-        }
-    }
-    if let Some(budget) = number_at(user, "/memory/user_profile_budget_tokens") {
-        settings.profile_budget_tokens = budget.max(1.0) as u64;
     }
     settings.git_commits_enabled = project
         .pointer("/memory/git_commit_indexing/enabled")
@@ -572,11 +559,14 @@ pub(crate) fn model_key_lookup_order(model_key: &str) -> Vec<String> {
     keys
 }
 
-fn number_at(value: &Value, pointer: &str) -> Option<f64> {
+/// The number at `pointer` when it is within the schema's range. A value
+/// outside it is dropped, as the plugin's loader drops an invalid leaf, so
+/// the tier below or the default applies.
+fn in_range(value: &Value, pointer: &str, min: f64, max: f64) -> Option<f64> {
     value
         .pointer(pointer)
         .and_then(Value::as_f64)
-        .filter(|number| number.is_finite())
+        .filter(|number| (min..=max).contains(number))
 }
 
 /// `{env:NAME}` and `{file:path}` in every string of the user file. A relative
@@ -802,6 +792,43 @@ mod tests {
             1_000,
         );
         assert_eq!(fell_through.execute_threshold_percentage, 75.0);
+    }
+
+    #[test]
+    fn out_of_range_values_are_dropped_not_clamped() {
+        // The plugin's loader drops these leaves and keeps the default
+        // (`project-config-trust-boundary.test.ts`: an injection budget of
+        // 20,001 reads as 4,000).
+        let settings = resolve_for_test(
+            json!({"history_budget_percentage": 0.9, "memory": {"injection_budget_tokens": 20_001,
+                "auto_search": {"score_threshold": 0.99, "min_prompt_chars": 1}}}),
+            json!({}),
+            OPUS,
+            1_000,
+        );
+        let defaults = Settings::default();
+        assert_eq!(
+            settings.history_budget_percentage,
+            defaults.history_budget_percentage
+        );
+        assert_eq!(settings.memory_budget_tokens, 4_000);
+        assert_eq!(
+            settings.auto_search.score_threshold,
+            defaults.auto_search.score_threshold
+        );
+        assert_eq!(
+            settings.auto_search.min_prompt_chars,
+            defaults.auto_search.min_prompt_chars
+        );
+        // In range, they apply.
+        let set = resolve_for_test(
+            json!({"history_budget_percentage": 0.3, "memory": {"injection_budget_tokens": 8_000}}),
+            json!({}),
+            OPUS,
+            1_000,
+        );
+        assert_eq!(set.history_budget_percentage, 0.3);
+        assert_eq!(set.memory_budget_tokens, 8_000);
     }
 
     #[test]
