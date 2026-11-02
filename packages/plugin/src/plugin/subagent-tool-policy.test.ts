@@ -9,6 +9,7 @@ import {
 import { createTestTempDir } from "../shared/test-temp-dir";
 import { registerTools } from "../v2/hooks/tools";
 import type { V2Context } from "../v2/hooks/types";
+import { resetSubagentPolicy, setSubagentPolicy } from "./subagent-policy";
 import {
     guardSubagentTools,
     hideSubagentTools,
@@ -29,6 +30,7 @@ beforeEach(() => {
     updateSessionMeta(db, "primary", { isSubagent: false });
 });
 afterEach(() => {
+    resetSubagentPolicy();
     closeDatabase();
     if (previousStorage === undefined) delete process.env.MAGIC_CONTEXT_STORAGE_DIR;
     else process.env.MAGIC_CONTEXT_STORAGE_DIR = previousStorage;
@@ -161,4 +163,19 @@ test("OC2 execution refuses forged child calls before entering a module backend"
         expect(result.content).toContain(`${id} is unavailable`);
     }
     expect(backendCalls).toBe(0);
+});
+
+test("primary_tools denies the memory tools only while memory_write is off", () => {
+    // OC1's host denies these to task children from its own list, so the list has
+    // to follow subagent.memory_write or the switch cannot work there.
+    expect(primaryOnlyToolIds().sort()).toEqual(["ctx_memory", "ctx_note"]);
+    expect(primaryOnlyToolIds(["selftest_run"]).sort()).toEqual([
+        "ctx_memory",
+        "ctx_note",
+        "selftest_run",
+    ]);
+    setSubagentPolicy({ compress: false, memoryWrite: true });
+    expect(primaryOnlyToolIds()).toEqual([]);
+    // A user-supplied entry is not ours to drop.
+    expect(primaryOnlyToolIds(["selftest_run"])).toEqual(["selftest_run"]);
 });

@@ -1,13 +1,18 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { getOrCreateSessionMeta } from "../features/magic-context/storage";
 import type { Database } from "../shared/sqlite";
-import { hidesMemoryTools } from "./subagent-policy";
+import { hidesMemoryTools, getSubagentPolicy } from "./subagent-policy";
 
 const PRIMARY_ONLY_TOOLS = new Set(["ctx_memory", "ctx_note"]);
 
 /** OC1's task tool turns primary_tools into child-session permission denies. */
 export function primaryOnlyToolIds(existing: readonly string[] = []): string[] {
-    return [...new Set([...existing, ...PRIMARY_ONLY_TOOLS])];
+    // The host's deny list outranks every gate in this package, so it has to follow
+    // the same policy: with `subagent.memory_write` on, a child is allowed the tools
+    // and adding them here would refuse the call before our own check runs. Entries
+    // the user supplied are kept either way.
+    const denied = getSubagentPolicy().memoryWrite ? [] : PRIMARY_ONLY_TOOLS;
+    return [...new Set([...existing, ...denied])];
 }
 
 /** Use the transform's persisted mode, not an agent name that a caller can change. */
