@@ -30,6 +30,11 @@ use crate::pass::Settings;
 /// The highest execute threshold any setting can reach, as the plugin caps
 /// it: above it too little room is left to act before the window fills.
 const MAX_EXECUTE_THRESHOLD_PERCENTAGE: f64 = 90.0;
+/// The lowest execute threshold the schema accepts.
+const MIN_EXECUTE_THRESHOLD_PERCENTAGE: f64 = 20.0;
+/// The range the schema accepts for a token threshold.
+const MIN_THRESHOLD_TOKENS: f64 = 5_000.0;
+const MAX_THRESHOLD_TOKENS: f64 = 2_000_000.0;
 const DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE: f64 = 65.0;
 const DEFAULT_KEEP_REASONING_TOKENS: u64 = 10_000;
 
@@ -468,11 +473,31 @@ fn guidance_override(user: &Value, user_path: &Path) -> Option<String> {
 /// threshold where the user set none: a cloned repository must not make the
 /// session summarize earlier, and so spend more.
 fn execute_threshold(user: &Value, project: &Value, model_key: &str, usable: u64) -> f64 {
+    // A value outside the schema's range is dropped, as the plugin's loader
+    // drops an invalid leaf: the lookup then falls through to the map's
+    // `default` or to the tier below, never to a clamped value.
+    let valid_tokens = |value: &Value| {
+        value
+            .as_f64()
+            .filter(|tokens| (MIN_THRESHOLD_TOKENS..=MAX_THRESHOLD_TOKENS).contains(tokens))
+    };
+    let valid_percentage = |value: &Value| {
+        value.as_f64().filter(|percentage| {
+            (MIN_EXECUTE_THRESHOLD_PERCENTAGE..=MAX_EXECUTE_THRESHOLD_PERCENTAGE)
+                .contains(percentage)
+        })
+    };
+    let lookup = |map: &serde_json::Map<String, Value>, valid: &dyn Fn(&Value) -> Option<f64>| {
+        let kept: serde_json::Map<String, Value> = map
+            .iter()
+            .filter(|(_, value)| valid(value).is_some())
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        model_value(&kept, model_key).and_then(valid)
+    };
     let tokens = |tier: &Value| -> Option<f64> {
         let map = tier.get("execute_threshold_tokens")?.as_object()?;
-        model_value(map, model_key)?
-            .as_f64()
-            .filter(|tokens| tokens.is_finite() && *tokens > 0.0)
+        lookup(map, &valid_tokens)
     };
     if usable > 0 {
         if let Some(user_tokens) = tokens(user) {
@@ -483,16 +508,13 @@ fn execute_threshold(user: &Value, project: &Value, model_key: &str, usable: u64
     }
     let percentage = |tier: &Value, fallback: f64| -> Option<f64> {
         let value = tier.get("execute_threshold_percentage")?;
-        let found = match value {
-            Value::Object(map) => model_value(map, model_key).and_then(Value::as_f64),
-            other => other.as_f64(),
-        }
-        .unwrap_or(fallback);
-        Some(if found.is_finite() && found >= 0.0 {
-            found
-        } else {
-            fallback
-        })
+        Some(
+            match value {
+                Value::Object(map) => lookup(map, &valid_percentage),
+                other => valid_percentage(other),
+            }
+            .unwrap_or(fallback),
+        )
     };
     let user_value = percentage(user, DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE)
         .unwrap_or(DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE);
@@ -761,38 +783,59 @@ mod tests {
             1_000,
         );
         assert_eq!(higher.execute_threshold_percentage, 80.0);
-        let capped = resolve_for_test(
-            json!({"execute_threshold_percentage": 99}),
+        // Out of the schema's 20 to 90 range: dropped, as the plugin's loader
+        // drops an invalid leaf, so the default applies; never clamped.
+        for out_of_range in [99, 10] {
+            let dropped = resolve_for_test(
+                json!({"execute_threshold_percentage": out_of_range}),
+                json!({}),
+                OPUS,
+                1_000,
+            );
+            assert_eq!(dropped.execute_threshold_percentage, 65.0, "{out_of_range}");
+        }
+        // An invalid model entry falls through to the map's `default`.
+        let fell_through = resolve_for_test(
+            json!({"execute_threshold_percentage": {"claude-opus-5": 95, "default": 75}}),
             json!({}),
             OPUS,
             1_000,
         );
-        assert_eq!(capped.execute_threshold_percentage, 90.0);
+        assert_eq!(fell_through.execute_threshold_percentage, 75.0);
     }
 
     #[test]
     fn a_token_threshold_wins_and_a_project_cannot_add_one() {
         let user = resolve_for_test(
-            json!({"execute_threshold_percentage": 80, "execute_threshold_tokens": {"claude-opus-5-5": 700}}),
+            json!({"execute_threshold_percentage": 80, "execute_threshold_tokens": {"claude-opus-5-5": 70_000}}),
             json!({}),
             OPUS,
-            1_000,
+            100_000,
         );
         assert_eq!(user.execute_threshold_percentage, 70.0);
         let added = resolve_for_test(
             json!({}),
-            json!({"execute_threshold_tokens": {"default": 100}}),
+            json!({"execute_threshold_tokens": {"default": 10_000}}),
             OPUS,
-            1_000,
+            100_000,
         );
         assert_eq!(added.execute_threshold_percentage, 65.0);
         let raised = resolve_for_test(
-            json!({"execute_threshold_tokens": {"default": 600}}),
-            json!({"execute_threshold_tokens": {"default": 500}}),
+            json!({"execute_threshold_tokens": {"default": 60_000}}),
+            json!({"execute_threshold_tokens": {"default": 50_000}}),
             OPUS,
-            1_000,
+            100_000,
         );
         assert_eq!(raised.execute_threshold_percentage, 60.0);
+        // Under the schema's 5,000-token floor: dropped, so the percentage
+        // applies.
+        let too_small = resolve_for_test(
+            json!({"execute_threshold_percentage": 80, "execute_threshold_tokens": {"default": 700}}),
+            json!({}),
+            OPUS,
+            100_000,
+        );
+        assert_eq!(too_small.execute_threshold_percentage, 80.0);
     }
 
     #[test]
