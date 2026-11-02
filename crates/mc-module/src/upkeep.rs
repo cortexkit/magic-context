@@ -18,7 +18,8 @@
 //! computed from, so a duplicate run costs one request and changes nothing.
 //!
 //! Not here: vectors for summarized history, which the plugin also computes
-//! only when a search needs them, and the dreamer's tasks.
+//! only when a search needs them, and the memory maintenance the plugin's
+//! scheduled model tasks do (verifying, curating and classifying memories).
 //!
 //! The database lock is never held across a request or a git run: rows are
 //! read, the lock released, the slow work done, and the results written in a
@@ -39,8 +40,8 @@ pub const INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// How long after start the first run waits, so a restart's Setups and their
 /// first reads are not competing with upkeep writes.
 pub const BOOT_QUIET: Duration = Duration::from_secs(30);
-/// A project with no Setup or notice for this long gets no more upkeep, as
-/// the legacy module's dream targets expired.
+/// A project with no Setup or notice for this long gets no more upkeep, so a
+/// project nobody works in stops costing embedding requests and git runs.
 pub const PROJECT_TTL_MS: i64 = 60 * 60_000;
 
 /// Memories embedded per run (`embedUnembeddedMemoriesForProject`).
