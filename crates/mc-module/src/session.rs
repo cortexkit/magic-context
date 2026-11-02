@@ -15,7 +15,7 @@ use ck_contract_draft::view::{ApplyViewAnswer, ApplyViewRequest, EditOp, View, M
 use serde_json::Value;
 
 use crate::client::RunnerClient;
-use crate::context_db::{ContextDb, StoredCompartment};
+use crate::context_db::{ContextDb, StoredCompartment, StoredMemory};
 use crate::index::{Extend, Index};
 use crate::lanes;
 use crate::pass::{self, Settings};
@@ -447,17 +447,26 @@ impl Session {
             return None;
         }
         self.summarizing = true;
+        let (summarizer_model, summarizer_window) =
+            settings.summarizer.clone().unwrap_or_else(|| {
+                (
+                    self.conditions.model.clone(),
+                    self.conditions.context_window,
+                )
+            });
         Some(run::Request {
             session: self.key.clone(),
             from,
             until,
             summaries: self.summaries.clone(),
-            model: self.conditions.model.clone(),
-            // A quarter of the summarizer's window, which is the session's own.
+            model: summarizer_model,
+            // A quarter of the session's window: a run reads about as much
+            // as the model gives up to summaries.
             chunk_tokens: ((self.conditions.context_window as f64 * 0.25).round() as u64)
                 .clamp(8_000, 50_000),
+            context_window: summarizer_window,
             language: settings.language.clone(),
-            project_memory: self.historian_memory_block(memory_enabled),
+            memories: self.historian_memories(memory_enabled),
             memory_enabled,
             auto_promote: settings.auto_promote,
         })
@@ -496,19 +505,16 @@ impl Session {
         self.no_progress = Some((newest, retried));
     }
 
-    /// The project's memories as the summarizer's `<project-memory>` block,
-    /// empty with memory off or none to show.
-    fn historian_memory_block(&self, memory_enabled: bool) -> String {
+    /// The project's memories for the summarizer's `<project-memory>` block;
+    /// none with memory off.
+    fn historian_memories(&self, memory_enabled: bool) -> Vec<StoredMemory> {
         let (Some(db), Some(project), true) = (&self.db, &self.project, memory_enabled) else {
-            return String::new();
+            return Vec::new();
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as i64);
-        let memories = db.project_memories(&project.id, now).unwrap_or_default();
-        crate::summary::prompt::render_historian_memory_block(
-            &crate::summary::prompt::order_historian_memories(&memories),
-        )
+        db.project_memories(&project.id, now).unwrap_or_default()
     }
 
     /// After a revert removed messages from `ordinal` on, forget the summaries

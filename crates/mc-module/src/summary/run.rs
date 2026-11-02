@@ -14,21 +14,21 @@ use ck_contract_draft::send::{
 };
 use ck_contract_draft::setup::ModelRef;
 
-use super::chunk;
+use super::{chunk, fit};
+use crate::calibration::DecisionCalibration;
 use std::sync::OnceLock;
 
 use regex::Regex;
 
 use super::prompt::{
-    build_compartment_agent_prompt, build_historian_repair_prompt,
-    build_reference_blocks_from_stored, with_content_language_directive, CompartmentPromptInputs,
-    ContentLanguageDirectiveOptions, HISTORIAN_SYSTEM_PROMPT,
+    build_compartment_agent_prompt, build_historian_repair_prompt, with_content_language_directive,
+    CompartmentPromptInputs, ContentLanguageDirectiveOptions, HISTORIAN_SYSTEM_PROMPT,
 };
 use super::validate::{
     validate_historian_output, StoredCompartmentRange, ValidateOptions, ValidatedChunk,
 };
 use crate::client::RunnerClient;
-use crate::context_db::StoredCompartment;
+use crate::context_db::{StoredCompartment, StoredMemory};
 
 /// Flash-class summarizers echo their examples back above this.
 const TEMPERATURE: f64 = 0.1;
@@ -50,13 +50,17 @@ pub struct Request {
     /// The session's summaries so far, oldest first.
     pub summaries: Vec<StoredCompartment>,
     pub model: ModelRef,
-    /// How many tokens of messages one run reads at most.
+    /// How many tokens of messages one run reads at most, before the
+    /// prompt is fitted to the summarizer's window.
     pub chunk_tokens: u64,
+    /// The summarizer model's context window: the prompt and its reply must
+    /// fit it.
+    pub context_window: u64,
     /// The user's `language`: the summarizer writes its prose in it.
     pub language: Option<String>,
-    /// The project's memories as the summarizer's `<project-memory>` block,
-    /// so it leaves out facts already known. Empty with memory off.
-    pub project_memory: String,
+    /// The project's memories, for the summarizer's `<project-memory>`
+    /// block, so it leaves out facts already known. Empty with memory off.
+    pub memories: Vec<StoredMemory>,
     /// Memory is on: the summarizer may report facts.
     pub memory_enabled: bool,
     /// `memory.auto_promote`: the facts it reports are kept.
@@ -77,30 +81,45 @@ pub async fn run<C: RunnerClient>(
     client: &C,
     job: &Request,
 ) -> Result<Option<ValidatedChunk>, String> {
-    let entries = read_range(client, job).await?;
-    let Some(chunk) = chunk::build(&entries, job.chunk_tokens) else {
-        return Ok(None);
-    };
-    let references = build_reference_blocks_from_stored(
-        &job.session.session,
-        chunk.validation.start_index as i64,
-        &job.summaries,
-    );
-    let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
-        seed_examples: &references.seed_examples,
-        session_references: &references.session_references,
-        project_memory: &job.project_memory,
-        input_source: &chunk.input,
-        memory_enabled: job.memory_enabled,
-        user_observations_requested: false,
-        extraction_free: false,
-    });
     let system = with_content_language_directive(
         HISTORIAN_SYSTEM_PROMPT,
         job.language.as_deref(),
         ContentLanguageDirectiveOptions::default(),
     )
     .into_owned();
+    let window = fit::Window {
+        calibration: DecisionCalibration::for_model(Some(&format!(
+            "{}/{}",
+            job.model.provider, job.model.model
+        ))),
+        context_window: job.context_window,
+    };
+    let fitted = fit::fit(&fit::Input {
+        session_id: &job.session.session,
+        chunk_start: job.from,
+        last_ordinal: job.until.saturating_sub(1).max(job.from),
+        summaries: &job.summaries,
+        memories: &job.memories,
+        memory_enabled: job.memory_enabled,
+        system_prompt: &system,
+        windows: &[window],
+        output_cap: MAX_OUTPUT_TOKENS,
+        requested_chunk_tokens: job.chunk_tokens,
+    })?;
+    let output_tokens = window.output_tokens(MAX_OUTPUT_TOKENS);
+    let entries = read_range(client, job).await?;
+    let Some(chunk) = chunk::build(&entries, fitted.chunk_tokens) else {
+        return Ok(None);
+    };
+    let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
+        seed_examples: &fitted.seed_examples,
+        session_references: &fitted.session_references,
+        project_memory: &fitted.project_memory,
+        input_source: &chunk.input,
+        memory_enabled: job.memory_enabled,
+        user_observations_requested: false,
+        extraction_free: false,
+    });
     let range = format!(
         "{}-{}",
         chunk.validation.start_index, chunk.validation.end_index
@@ -122,7 +141,15 @@ pub async fn run<C: RunnerClient>(
         auto_promote: job.auto_promote,
         ..ValidateOptions::default()
     };
-    let first = attempt(client, job, &format!("{range}:first"), &prompt, &system).await?;
+    let first = attempt(
+        client,
+        job,
+        &format!("{range}:first"),
+        &prompt,
+        &system,
+        output_tokens,
+    )
+    .await?;
     let error = match validate_historian_output(&first, &chunk.validation, &prior, options()) {
         Ok(validated) => return Ok(Some(validated)),
         Err(error) => error.message,
@@ -135,6 +162,7 @@ pub async fn run<C: RunnerClient>(
         &format!("{range}:repair"),
         &repair_prompt,
         &system,
+        output_tokens,
     )
     .await?;
     validate_historian_output(&repaired, &chunk.validation, &prior, options())
@@ -150,6 +178,7 @@ async fn attempt<C: RunnerClient>(
     label: &str,
     prompt: &str,
     system: &str,
+    output_tokens: u64,
 ) -> Result<String, String> {
     let mut retry = 0;
     loop {
@@ -158,7 +187,7 @@ async fn attempt<C: RunnerClient>(
         } else {
             format!("{CHILD}:{label}:retry{retry}")
         };
-        match call(client, job, &child, prompt, system).await {
+        match call(client, job, &child, prompt, system, output_tokens).await {
             Ok(text) => return Ok(text),
             Err(error) if retry < MAX_RETRIES && is_transient(&error) => {
                 tokio::time::sleep(backoff(retry)).await;
@@ -176,6 +205,7 @@ async fn call<C: RunnerClient>(
     child: &str,
     prompt: &str,
     system: &str,
+    output_tokens: u64,
 ) -> Result<String, String> {
     let request = SendRequest {
         // A retry after a lost answer finds the run already started.
@@ -188,7 +218,7 @@ async fn call<C: RunnerClient>(
             system: system.to_owned(),
             model: job.model.clone(),
             generation: Generation {
-                max_output_tokens: MAX_OUTPUT_TOKENS,
+                max_output_tokens: output_tokens,
                 temperature: Some(TEMPERATURE),
             },
             stop_when: StopWhen { max_steps: 1 },

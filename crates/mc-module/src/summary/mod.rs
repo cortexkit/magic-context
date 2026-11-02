@@ -5,6 +5,7 @@
 //! TypeScript plugin and pinned against its goldens in `testdata/`.
 
 pub mod chunk;
+pub mod fit;
 pub mod head;
 pub mod prompt;
 pub mod render;

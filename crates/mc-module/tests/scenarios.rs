@@ -251,10 +251,16 @@ async fn start_full(
 
 async fn start_runner(
     config: SessionConfig,
-    settings: Settings,
+    mut settings: Settings,
     stores: Option<std::path::PathBuf>,
     pre_user: bool,
 ) -> Runner<InProcess> {
+    // Sessions here have small windows, to reach the thresholds in a few
+    // steps; summaries run on the same model with a real window, as routing
+    // would pick one, so the summarizer's prompt fits.
+    if settings.summarizer.is_none() {
+        settings.summarizer = Some((config.model.clone(), 400_000));
+    }
     let client = HostClient::default();
     let route = Route {
         session: config.session.clone(),
@@ -1184,7 +1190,8 @@ async fn one_long_turn_at_the_threshold_is_summarized_past_its_prompt_once() {
         runner.play(&[read_file(50)]).await;
         if usage_at_first_run.is_none() && !runner.host().child_runs().is_empty() {
             let last = runner.report.requests.last().unwrap();
-            usage_at_first_run = Some(last.usage.prompt_tokens.unwrap_or(0) as f64 / usable * 100.0);
+            usage_at_first_run =
+                Some(last.usage.prompt_tokens.unwrap_or(0) as f64 / usable * 100.0);
         }
     }
     assert_clean(&runner);

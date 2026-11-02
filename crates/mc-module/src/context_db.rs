@@ -76,8 +76,8 @@ const fn declared_number(source: &str, declaration: &str) -> u32 {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StoredCompartment {
     pub sequence: i64,
-    /// The first and last message the summary covers, as message numbers
-    /// (the runner's ordinal plus one).
+    /// The first and last message the summary covers, by the runner's
+    /// ordinal (counted from 1, as the standalone plugin numbers messages).
     pub start_message: i64,
     pub end_message: i64,
     pub start_message_id: String,
