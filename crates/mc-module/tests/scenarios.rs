@@ -1172,6 +1172,31 @@ async fn an_invalid_summary_gets_one_repair_run_that_sees_the_error() {
 }
 
 #[tokio::test]
+async fn one_long_turn_at_the_threshold_is_summarized_past_its_prompt_once() {
+    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    // One prompt, then a long run of tool steps: everything after the prompt
+    // is the current turn, which the summarizer may not read below the force
+    // band, except for one run past the prompt at the execute threshold.
+    runner.play(&[user("Refactor the whole crate.")]).await;
+    let usable = 39_000.0;
+    let mut usage_at_first_run = None;
+    for _ in 0..24 {
+        runner.play(&[read_file(50)]).await;
+        if usage_at_first_run.is_none() && !runner.host().child_runs().is_empty() {
+            let last = runner.report.requests.last().unwrap();
+            usage_at_first_run = Some(last.usage.prompt_tokens.unwrap_or(0) as f64 / usable * 100.0);
+        }
+    }
+    assert_clean(&runner);
+    let usage = usage_at_first_run.expect("no summarizer run");
+    // It ran at the threshold, not only once the force band let it past the
+    // prompt.
+    assert!((65.0..85.0).contains(&usage), "first run at {usage:.1}%");
+    let runs = runner.host().child_runs();
+    assert!(runs[0].request.prompt.contains("Refactor the whole crate."));
+}
+
+#[tokio::test]
 async fn facts_a_summary_finds_become_project_memories_with_it() {
     let dir = scratch("facts");
     ContextDb::create_for_tests(&dir.join("context.db")).unwrap();

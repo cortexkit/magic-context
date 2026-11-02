@@ -96,6 +96,14 @@ pub struct Session {
     /// The session never had a Setup: Magic Context serves its tools only
     /// ([`Session::tools_only`]).
     tools_only: bool,
+    /// After a summarizer run that published nothing: the newest message at
+    /// that moment, and whether the force band's one retry was used. The
+    /// same history is not run again until a newer message arrives
+    /// ([`Session::waits_for_new_history`]).
+    no_progress: Option<(String, bool)>,
+    /// The newest prompt a run has already summarized past once at the
+    /// execute threshold ([`Session::summary_due`]).
+    floor_lifted_for: Option<String>,
     /// The output text of tool results with answered images, read in full
     /// once, so the answered-images lane can keep the text and mark each
     /// removed image ([`lanes::image_results`]).
@@ -136,6 +144,8 @@ impl Session {
             cut: None,
             pruned_turns: 0,
             tools_only: false,
+            no_progress: None,
+            floor_lifted_for: None,
             image_outputs: std::collections::BTreeMap::new(),
         }
     }
@@ -394,21 +404,48 @@ impl Session {
         let tail =
             trigger::protected_tail_tokens(window, settings.execute_threshold_percentage, usage);
         let entries = self.index.entries();
-        let until = trigger::tail_start(entries, entry_tokens, from, tail, force);
-        let readable: Vec<&ck_contract_draft::read::Entry> = entries
-            .iter()
-            .filter(|entry| entry.ordinal >= from && entry.ordinal < until)
-            .collect();
-        let tokens: u64 = readable.iter().map(|entry| entry_tokens(entry)).sum();
         let budget = trigger::trigger_budget(window, settings.execute_threshold_percentage);
-        trigger::should_run(
-            usage,
-            settings.execute_threshold_percentage,
-            force,
-            tokens,
-            readable.len(),
-            budget,
-        )?;
+        let decide = |until: u64| {
+            let readable: Vec<&ck_contract_draft::read::Entry> = entries
+                .iter()
+                .filter(|entry| entry.ordinal >= from && entry.ordinal < until)
+                .collect();
+            let tokens: u64 = readable.iter().map(|entry| entry_tokens(entry)).sum();
+            trigger::should_run(
+                usage,
+                settings.execute_threshold_percentage,
+                force,
+                tokens,
+                readable.len(),
+                budget,
+            )
+        };
+        let mut until = trigger::tail_start(entries, entry_tokens, from, tail, force);
+        if decide(until).is_none() {
+            // At the threshold, a long turn's history after the person's
+            // newest prompt cannot be summarized while that prompt stays raw.
+            // The plugin lets one run summarize past it, once per prompt
+            // (`compartment-trigger.ts`, the live-prompt floor lift).
+            let prompt = entries
+                .iter()
+                .rev()
+                .find(|entry| trigger::is_meaningful_user(entry))
+                .map(|entry| entry.mid.clone());
+            let lifted = trigger::tail_start(entries, entry_tokens, from, tail, true);
+            let at_threshold = usage >= settings.execute_threshold_percentage;
+            if !at_threshold
+                || prompt.is_none()
+                || prompt == self.floor_lifted_for
+                || decide(lifted).is_none()
+            {
+                return None;
+            }
+            until = lifted;
+            self.floor_lifted_for = prompt;
+        }
+        if self.waits_for_new_history(force) {
+            return None;
+        }
         self.summarizing = true;
         Some(run::Request {
             session: self.key.clone(),
@@ -424,6 +461,39 @@ impl Session {
             memory_enabled,
             auto_promote: settings.auto_promote,
         })
+    }
+
+    /// Whether a run would read the same history a run before it failed to
+    /// summarize, as the plugin's `historian-history-wait.ts`: it waits for a
+    /// newer message, so a failing summary does not pay for the same input on
+    /// every pass. In the force band it may try once more.
+    fn waits_for_new_history(&mut self, force: bool) -> bool {
+        let Some((newest, retried)) = &mut self.no_progress else {
+            return false;
+        };
+        let current = self.index.entries().last().map(|entry| entry.mid.as_str());
+        if current != Some(newest.as_str()) {
+            self.no_progress = None;
+            return false;
+        }
+        if force && !*retried {
+            *retried = true;
+            return false;
+        }
+        true
+    }
+
+    /// A run published nothing: wait for newer history before the next.
+    fn record_no_progress(&mut self, settings: &Settings) {
+        let Some(newest) = self.index.entries().last().map(|entry| entry.mid.clone()) else {
+            return;
+        };
+        let force = pass::in_force_band(&self.conditions, settings);
+        let retried = match &self.no_progress {
+            Some((previous, retried)) if *previous == newest => *retried || force,
+            _ => force,
+        };
+        self.no_progress = Some((newest, retried));
     }
 
     /// The project's memories as the summarizer's `<project-memory>` block,
@@ -499,12 +569,16 @@ impl Session {
         self.summarizing = false;
         let validated = match result {
             Ok(Some(validated)) => validated,
-            Ok(None) => return,
+            Ok(None) => {
+                self.record_no_progress(settings);
+                return;
+            }
             Err(error) => {
                 eprintln!(
                     "ck-mc: session {}: summary failed: {error}",
                     self.key.session
                 );
+                self.record_no_progress(settings);
                 return;
             }
         };
@@ -515,8 +589,10 @@ impl Session {
                 present(&summary.end_message_id) && present(&summary.start_message_id)
             })
         {
+            self.record_no_progress(settings);
             return;
         }
+        self.no_progress = None;
         if let Some(db) = &self.db {
             // Facts become memories of the session's project, with memory and
             // auto-promotion on; the validator already left them out otherwise.
