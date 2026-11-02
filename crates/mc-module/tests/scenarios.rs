@@ -3220,3 +3220,162 @@ async fn a_folder_without_a_project_id_still_summarizes_under_that_folder() {
     assert!(runner.provider().module().run_upkeep().await.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A runner with an empty transcript and a stand-in Synapse that scores a
+/// candidate 10 when its document mentions "Zebra" and 0 otherwise. It logs
+/// every Synapse method called.
+#[derive(Clone, Default)]
+struct SynapseClient {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl Router for SynapseClient {
+    async fn select(&self, _: SelectRequest) -> Result<SelectAnswer, RouteError> {
+        Err(RouteError {
+            code: "routing_unavailable".into(),
+            message: "no routing here".into(),
+        })
+    }
+
+    async fn report(&self, _: ReportRequest) {}
+}
+
+impl RunnerClient for SynapseClient {
+    async fn read(&self, _: &SessionRef, _: ReadRequest) -> Result<ReadPage, ClientError> {
+        Ok(ReadPage::new(
+            Vec::new(),
+            cortexkit_role_compaction::read::Head::new(),
+        ))
+    }
+
+    async fn apply_view(
+        &self,
+        _: &SessionRef,
+        _: ApplyViewRequest,
+    ) -> Result<ApplyViewAnswer, ClientError> {
+        Ok(ApplyViewAnswer::Accepted)
+    }
+
+    async fn applied_view(&self, _: &SessionRef) -> Result<AppliedViewAnswer, ClientError> {
+        Ok(AppliedViewAnswer::new())
+    }
+
+    async fn send(&self, _: &SessionRef, _: SendRequest) -> Result<SendReply, ClientError> {
+        Ok(SendReply::new("pending"))
+    }
+
+    async fn send_child(&self, _: &Child, _: SendRequest) -> Result<SendReply, ClientError> {
+        Ok(SendReply::new("pending"))
+    }
+
+    async fn child_result(
+        &self,
+        _: &Child,
+        request: RunResultRequest,
+    ) -> Result<RunResult, ClientError> {
+        Err(ClientError(format!("no run {}", request.run_id)))
+    }
+
+    async fn synapse_call(
+        &self,
+        _: &SessionRef,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        self.calls.lock().unwrap().push(method.to_owned());
+        let fingerprint = "a".repeat(64);
+        match method {
+            "models.list" => Ok(json!({"result": {"table_epoch": 1, "models": [{
+                "model_id": mc_module::search::rerank::MODEL,
+                "certified": true,
+                "fingerprints": [fingerprint],
+            }]}})),
+            "rerank.score" => {
+                let scores: Vec<f64> = params["candidates"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|text| {
+                        if text.as_str().unwrap().contains("Zebra") {
+                            10.0
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                Ok(
+                    json!({"result": {"fingerprint": fingerprint, "table_epoch": 1, "scores": scores}}),
+                )
+            }
+            _ => Err("unknown_method".into()),
+        }
+    }
+}
+
+/// An explicit search whose query reads as prose answers in the reranker's
+/// order; with rerank off the same search keeps the ordinary ranking, and a
+/// search for an identifier never asks Synapse.
+#[tokio::test]
+async fn a_prose_search_answers_in_the_rerankers_order() {
+    let dir = scratch("rerank");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    insert_memory(
+        &dir,
+        1,
+        "The parser handles quoted text in the parser module.",
+    );
+    insert_memory(&dir, 2, "Zebra: quotes stay as written.");
+    let root = dir.to_string_lossy().into_owned();
+    let route = Route {
+        session: SessionRef::new("mock-runner", "mock", "rerank"),
+        project: Some(RouteProject {
+            id: "pj-test".into(),
+            root: root.clone(),
+        }),
+        workdir: Some(root),
+    };
+    let query = json!({"query": "how does the parser treat quoted text"});
+    let position = |text: &str, needle: &str| text.find(needle).unwrap_or(usize::MAX);
+    // Rerank off: the ordinary ranking puts the closer word match first.
+    let plain = Module::new(
+        SynapseClient::default(),
+        Settings {
+            rerank: mc_module::search::rerank::Reranker::Off,
+            ..Settings::default()
+        },
+        Some(ContextDb::open(&dir.join("context.db")).unwrap()),
+        None,
+    );
+    let ordinary = plain
+        .tool(&route, "ctx_search", query.clone())
+        .await
+        .unwrap();
+    assert!(
+        position(&ordinary, "The parser handles") < position(&ordinary, "Zebra"),
+        "{ordinary}"
+    );
+    // Reranked: Synapse's order wins.
+    let client = SynapseClient::default();
+    let module = Module::new(
+        client.clone(),
+        Settings::default(),
+        Some(ContextDb::open(&dir.join("context.db")).unwrap()),
+        None,
+    );
+    let reranked = module.tool(&route, "ctx_search", query).await.unwrap();
+    assert!(
+        position(&reranked, "Zebra") < position(&reranked, "The parser handles"),
+        "{reranked}"
+    );
+    assert_eq!(
+        *client.calls.lock().unwrap(),
+        ["models.list", "rerank.score"]
+    );
+    client.calls.lock().unwrap().clear();
+    module
+        .tool(&route, "ctx_search", json!({"query": "parser_module"}))
+        .await
+        .unwrap();
+    assert!(client.calls.lock().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -4,14 +4,17 @@
 //! tool (`tools/ctx-search` and `features/magic-context/search.ts`), so an
 //! agent reads the same in both.
 //!
-//! A search runs in two steps: [`by_ids`] answers a query of memory ids
-//! without embedding anything; otherwise the caller embeds the query once
-//! (when [`needs_embedding`]) and [`run`] scores every lane with it.
+//! A search runs in steps: [`by_ids`] answers a query of memory ids without
+//! embedding anything; otherwise the caller embeds the query once (when
+//! [`needs_embedding`]), [`prepare`] scores every lane with it and, for a
+//! rerank, also keeps the candidates [`rerank`] scores, and [`finish`]
+//! writes the reply. The caller makes the reranker's call between
+//! [`prepare`] and [`finish`], without holding the store.
 //!
-//! Not here yet: reranking, and memories a workspace shares from other
-//! projects.
+//! Not here yet: memories a workspace shares from other projects.
 
 pub mod messages;
+pub mod rerank;
 pub mod sources;
 pub mod text;
 
@@ -662,6 +665,7 @@ fn collect(
     request: &Request,
     explicit: bool,
     diagnostics: &mut Diagnostics,
+    mut lanes: Option<&mut rerank::Lanes>,
 ) -> Result<Vec<Hit>, String> {
     let (query, dates) = (request.query, request.dates);
     let active = |source: &str| request.active(source);
@@ -683,19 +687,51 @@ fn collect(
     if active("git_commit") && scope.git_repository == Some(false) {
         diagnostics.no_git_repository = true;
     }
+    // A rerank fuses at least the plugin's lane depth from each source.
+    let lane_tier = if lanes.is_some() {
+        tier.max(rerank::LANE_LIMIT)
+    } else {
+        tier
+    };
     let mut hits: Vec<Hit> = Vec::new();
     if active("memory") && scope.memory_enabled {
-        let (found, suppressed) =
-            sources::search_memories(conn, project, query, tier, &visible, dates, scope.semantic);
+        let mut halves = lanes.is_some().then(sources::Halves::default);
+        let (found, suppressed) = sources::search_memories(
+            conn,
+            project,
+            query,
+            tier,
+            &visible,
+            dates,
+            scope.semantic,
+            halves.as_mut(),
+        );
         diagnostics.suppressed_visible = suppressed;
         hits.extend(found.into_iter().map(Hit::Memory));
+        if let (Some(lanes), Some(halves)) = (lanes.as_deref_mut(), halves) {
+            lanes.memory_fts = halves.words.into_iter().map(Hit::Memory).collect();
+            lanes.memory_vector = halves.meaning.into_iter().map(Hit::Memory).collect();
+        }
     }
     if active("primer") && scope.memory_enabled {
+        let mut halves = lanes.is_some().then(sources::Halves::default);
         hits.extend(
-            sources::search_primers(conn, project, query, tier, dates, scope.semantic)
-                .into_iter()
-                .map(Hit::Primer),
+            sources::search_primers(
+                conn,
+                project,
+                query,
+                tier,
+                dates,
+                scope.semantic,
+                halves.as_mut(),
+            )
+            .into_iter()
+            .map(Hit::Primer),
         );
+        if let (Some(lanes), Some(halves)) = (lanes.as_deref_mut(), halves) {
+            lanes.primer_fts = halves.words.into_iter().map(Hit::Primer).collect();
+            lanes.primer_vector = halves.meaning.into_iter().map(Hit::Primer).collect();
+        }
     }
     if active("message") {
         if explicit {
@@ -708,40 +744,156 @@ fn collect(
                 conn,
                 scope.session,
                 project,
-                tier,
+                lane_tier,
                 scope.cutoff,
                 dates,
                 semantic,
             ),
             None => Vec::new(),
         };
+        if let Some(lanes) = lanes.as_deref_mut() {
+            // The message lane is read deeper on its own, as the plugin's
+            // capture limit does, so the baseline's own ranking is unchanged.
+            let deeper = messages::Query {
+                limit: 75,
+                ..wanted
+            };
+            lanes.message_fts =
+                messages::search(conn, scope.session, &deeper, scope.cutoff, explicit)
+                    .into_iter()
+                    .take(rerank::LANE_LIMIT)
+                    .map(Hit::Message)
+                    .collect();
+            lanes.chunk_vector = chunks
+                .iter()
+                .take(rerank::LANE_LIMIT)
+                .cloned()
+                .map(Hit::Chunk)
+                .collect();
+        }
         hits.extend(fuse_history(found, chunks, tier));
     }
     if active("git_commit") && scope.git_commits_enabled {
+        let mut halves = lanes.is_some().then(sources::Halves::default);
         hits.extend(
-            sources::search_commits(conn, project, query, tier, dates, scope.semantic)
-                .into_iter()
-                .map(Hit::Commit),
+            sources::search_commits(
+                conn,
+                project,
+                query,
+                tier,
+                dates,
+                scope.semantic,
+                halves.as_mut(),
+            )
+            .into_iter()
+            .map(Hit::Commit),
         );
+        if let (Some(lanes), Some(halves)) = (lanes.as_deref_mut(), halves) {
+            lanes.git_fts = halves.words.into_iter().map(Hit::Commit).collect();
+            lanes.git_vector = halves.meaning.into_iter().map(Hit::Commit).collect();
+        }
     }
     if active("note") {
-        hits.extend(
-            sources::search_notes(conn, scope.harness, scope.session, project, &wanted)
-                .into_iter()
-                .map(Hit::Note),
-        );
+        let notes_wanted = messages::Query {
+            limit: lane_tier,
+            ..wanted
+        };
+        let found =
+            sources::search_notes(conn, scope.harness, scope.session, project, &notes_wanted);
+        if let Some(lanes) = lanes {
+            lanes.notes = found
+                .iter()
+                .take(rerank::LANE_LIMIT)
+                .cloned()
+                .map(Hit::Note)
+                .collect();
+        }
+        hits.extend(found.into_iter().map(Hit::Note));
     }
     hits.sort_by(compare);
     hits.truncate(limit);
     Ok(hits)
 }
 
-/// Run one `ctx_search` call over every lane; a query of memory ids is
-/// answered by [`by_ids`] first.
-pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String, String> {
+/// A `ctx_search` call scored but not yet answered: its results, and for a
+/// rerank the fused candidates with their documents.
+pub struct Prepared {
+    query: String,
+    hits: Vec<Hit>,
+    pool: Vec<Hit>,
+    texts: Vec<String>,
+    limit: usize,
+    diagnostics: Diagnostics,
+}
+
+impl Prepared {
+    /// The trimmed query.
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// The documents a reranker scores, one per candidate; empty when this
+    /// search is not reranked or found nothing to rerank.
+    pub fn candidates(&self) -> &[String] {
+        &self.texts
+    }
+
+    /// Replace the results with the candidates in `scores`' order, best
+    /// first, cut to the search's limit.
+    pub fn reorder(&mut self, scores: &[f64]) {
+        if scores.len() == self.pool.len() && !self.pool.is_empty() {
+            self.hits = rerank::order(std::mem::take(&mut self.pool), scores, self.limit);
+        }
+    }
+}
+
+/// Score one `ctx_search` call over every lane. With `pool`, a reranker
+/// will score up to that many fused candidates (see [`rerank`]).
+pub fn prepare(
+    conn: &Connection,
+    scope: &Scope,
+    input: &Value,
+    pool: Option<usize>,
+) -> Result<Prepared, String> {
     let request = parse(input)?;
     let mut diagnostics = Diagnostics::default();
-    let hits = collect(conn, scope, &request, true, &mut diagnostics)?;
+    let mut lanes = pool.map(|_| rerank::Lanes::default());
+    let hits = collect(
+        conn,
+        scope,
+        &request,
+        true,
+        &mut diagnostics,
+        lanes.as_mut(),
+    )?;
+    let candidates: Vec<Hit> = match (&lanes, pool) {
+        (Some(lanes), Some(size)) => rerank::fuse(lanes).into_iter().take(size).collect(),
+        _ => Vec::new(),
+    };
+    let texts = match scope.project {
+        Some(project) if !candidates.is_empty() => {
+            rerank::candidate_texts(conn, scope.session, project, &candidates)
+        }
+        _ => Vec::new(),
+    };
+    Ok(Prepared {
+        query: request.query.to_owned(),
+        hits,
+        pool: candidates,
+        texts,
+        limit: request.tool_limit.clamp(1, MAX_LIMIT),
+        diagnostics,
+    })
+}
+
+/// Count the memories the reply returns as retrieved, and write the reply.
+pub fn finish(conn: &mut Connection, scope: &Scope, prepared: Prepared) -> String {
+    let Prepared {
+        query,
+        hits,
+        diagnostics,
+        ..
+    } = prepared;
     let returned: Vec<i64> = hits
         .iter()
         .filter_map(|hit| match hit {
@@ -755,12 +907,14 @@ pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String
             scope.session
         );
     }
-    Ok(format_results(
-        request.query,
-        &hits,
-        scope.session,
-        &diagnostics,
-    ))
+    format_results(&query, &hits, scope.session, &diagnostics)
+}
+
+/// Run one `ctx_search` call over every lane without a rerank; a query of
+/// memory ids is answered by [`by_ids`] first.
+pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String, String> {
+    let prepared = prepare(conn, scope, input, None)?;
+    Ok(finish(conn, scope, prepared))
 }
 
 /// The sources an automatic hint searches: memories, messages and git
@@ -786,7 +940,7 @@ pub fn auto_hits(conn: &Connection, scope: &Scope, prompt: &str) -> Vec<(Hit, f6
         ),
     };
     let mut diagnostics = Diagnostics::default();
-    collect(conn, scope, &request, false, &mut diagnostics)
+    collect(conn, scope, &request, false, &mut diagnostics, None)
         .unwrap_or_default()
         .into_iter()
         .map(|hit| {

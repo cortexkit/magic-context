@@ -30,6 +30,44 @@ pub struct Semantic<'a> {
     pub chunk_model_id: &'a str,
 }
 
+/// How many hits each half keeps for reranking (`RERANK_LANE_LIMIT`).
+pub const HALF_LIMIT: usize = 25;
+
+/// A source's two rankings before they are combined: by words alone and by
+/// meaning alone, best first, at most [`HALF_LIMIT`] each. An explicit
+/// search that reranks fuses these instead of the combined scores, as the
+/// plugin's rerank lanes do.
+#[derive(Debug)]
+pub struct Halves<T> {
+    pub words: Vec<T>,
+    pub meaning: Vec<T>,
+}
+
+impl<T> Default for Halves<T> {
+    fn default() -> Self {
+        Self {
+            words: Vec::new(),
+            meaning: Vec::new(),
+        }
+    }
+}
+
+/// Best score first, ties by `tie`; then cut to [`HALF_LIMIT`].
+fn rank_half<T>(
+    mut hits: Vec<T>,
+    score: impl Fn(&T) -> f64,
+    tie: impl Fn(&T, &T) -> std::cmp::Ordering,
+) -> Vec<T> {
+    hits.sort_by(|left, right| {
+        score(right)
+            .partial_cmp(&score(left))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| tie(left, right))
+    });
+    hits.truncate(HALF_LIMIT);
+    hits
+}
+
 /// One hit's score from its two halves, and which halves matched.
 fn hybrid(semantic: Option<f64>, fts: Option<f64>) -> Option<(f64, &'static str)> {
     let (score, kind) = match (semantic, fts) {
@@ -157,6 +195,7 @@ fn memory_fts_ids(
 ///
 /// Vectors are read as stored: a memory without one for this provider is
 /// found by words only until the embedding drain gives it one.
+#[allow(clippy::too_many_arguments)]
 pub fn search_memories(
     conn: &Connection,
     project: &str,
@@ -165,6 +204,7 @@ pub fn search_memories(
     visible: &BTreeSet<i64>,
     dates: Option<DateRange>,
     semantic: Option<Semantic<'_>>,
+    halves: Option<&mut Halves<MemoryHit>>,
 ) -> (Vec<MemoryHit>, Vec<i64>) {
     let memories: Vec<SearchMemory> = project_memories(conn, project)
         .unwrap_or_default()
@@ -199,6 +239,29 @@ pub fn search_memories(
                 meaning.insert(memory.id, embedding::similarity(semantic.vector, vector));
             }
         }
+    }
+    if let Some(halves) = halves {
+        let half = |scores: &BTreeMap<i64, f64>, factor: f64, match_type: &'static str| {
+            let hits = memories
+                .iter()
+                .filter(|memory| !visible.contains(&memory.id))
+                .filter_map(|memory| {
+                    let score = scores.get(&memory.id)? * factor;
+                    (score > 0.0).then(|| MemoryHit {
+                        id: memory.id,
+                        category: memory.category.clone(),
+                        content: preview(&memory.content),
+                        score,
+                        match_type,
+                    })
+                })
+                .collect();
+            rank_half(hits, |hit| hit.score, |left, right| left.id.cmp(&right.id))
+        };
+        // Words alone carry the single-source penalty; meaning alone does not,
+        // as in the plugin's lanes.
+        halves.words = half(&fts, SINGLE_SOURCE_PENALTY, "fts");
+        halves.meaning = half(&meaning, 1.0, "semantic");
     }
     let mut hits = Vec::new();
     let mut suppressed = Vec::new();
@@ -429,6 +492,7 @@ pub fn search_notes(
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommitHit {
+    pub sha: String,
     pub short_sha: String,
     pub committed_at: i64,
     pub content: String,
@@ -445,6 +509,7 @@ pub fn search_commits(
     limit: usize,
     dates: Option<DateRange>,
     semantic: Option<Semantic<'_>>,
+    halves: Option<&mut Halves<CommitHit>>,
 ) -> Vec<CommitHit> {
     let trimmed = query.trim();
     if trimmed.is_empty() || limit == 0 {
@@ -536,12 +601,38 @@ pub fn search_commits(
             }
         }
     }
+    if let Some(halves) = halves {
+        let half = |scores: &BTreeMap<String, f64>, factor: f64, match_type: &'static str| {
+            let hits = commits
+                .iter()
+                .filter_map(|(sha, (short_sha, message, committed_at))| {
+                    let score = scores.get(sha)? * factor;
+                    (score > 0.0).then(|| CommitHit {
+                        sha: sha.clone(),
+                        short_sha: short_sha.clone(),
+                        committed_at: *committed_at,
+                        content: preview(message),
+                        score,
+                        match_type,
+                    })
+                })
+                .collect();
+            rank_half(
+                hits,
+                |hit| hit.score,
+                |left, right| right.committed_at.cmp(&left.committed_at),
+            )
+        };
+        halves.words = half(&fts_scores, SINGLE_SOURCE_PENALTY, "fts");
+        halves.meaning = half(&meaning, 1.0, "semantic");
+    }
     let mut hits: Vec<CommitHit> = commits
         .into_iter()
         .filter_map(|(sha, (short_sha, message, committed_at))| {
             let (score, match_type) =
                 hybrid(meaning.get(&sha).copied(), fts_scores.get(&sha).copied())?;
             Some(CommitHit {
+                sha,
                 short_sha,
                 committed_at,
                 content: preview(&message),
@@ -580,6 +671,7 @@ pub fn search_primers(
     limit: usize,
     dates: Option<DateRange>,
     semantic: Option<Semantic<'_>>,
+    mut halves: Option<&mut Halves<PrimerHit>>,
 ) -> Vec<PrimerHit> {
     if limit == 0 {
         return Vec::new();
@@ -610,7 +702,15 @@ pub fn search_primers(
     }
     let fts = sanitize_fts_query(query);
     let mut fts_scores: BTreeMap<i64, f64> = BTreeMap::new();
+    // The words half lists more candidates than the combined score uses, as
+    // the plugin's lane does.
+    let mut words_ranked: Vec<i64> = Vec::new();
     if !fts.is_empty() {
+        let fetch = if halves.is_some() {
+            (limit * 3).max(225)
+        } else {
+            limit * 3
+        };
         let read = || -> rusqlite::Result<Vec<i64>> {
             let mut statement = conn.prepare_cached(
                 "SELECT p.id FROM primers_fts
@@ -620,17 +720,44 @@ pub fn search_primers(
                   ORDER BY bm25(primers_fts) ASC LIMIT ?5",
             )?;
             let rows = statement
-                .query_map(params![fts, project, from, to, (limit * 3) as i64], |row| {
+                .query_map(params![fts, project, from, to, fetch as i64], |row| {
                     row.get(0)
                 })?;
             rows.collect()
         };
-        let ids = read().unwrap_or_default();
-        let total = ids.len();
-        for (rank, id) in ids.into_iter().enumerate() {
-            fts_scores.insert(id, linear_decay(rank, total));
+        words_ranked = read().unwrap_or_default();
+        let baseline = &words_ranked[..words_ranked.len().min(limit * 3)];
+        for (rank, id) in baseline.iter().enumerate() {
+            fts_scores.insert(*id, linear_decay(rank, baseline.len()));
         }
     }
+    let text_of = |question: &str, answer: &str| {
+        let answer = answer.trim();
+        if answer.is_empty() {
+            format!("Q: {question}")
+        } else {
+            format!("Q: {question}\nA: {answer}")
+        }
+    };
+    if let Some(halves) = halves.as_deref_mut() {
+        let by_id: BTreeMap<i64, &Row> = primers.iter().map(|row| (row.0, row)).collect();
+        halves.words = words_ranked
+            .iter()
+            .enumerate()
+            .filter_map(|(rank, id)| {
+                let (id, question, answer, support, ..) = by_id.get(id)?;
+                Some(PrimerHit {
+                    id: *id,
+                    support: *support,
+                    content: preview(&text_of(question, answer)),
+                    score: linear_decay(rank, words_ranked.len()),
+                    match_type: "fts",
+                })
+            })
+            .take(HALF_LIMIT)
+            .collect();
+    }
+    let mut meaning_half: Vec<PrimerHit> = Vec::new();
     let mut hits: Vec<PrimerHit> = primers
         .into_iter()
         .filter_map(|(id, question, answer, support, blob, model_id)| {
@@ -643,6 +770,15 @@ pub fn search_primers(
                 _ => 0.0,
             };
             let words = fts_scores.get(&id).copied().unwrap_or(0.0);
+            if halves.is_some() && meaning > 0.0 {
+                meaning_half.push(PrimerHit {
+                    id,
+                    support,
+                    content: preview(&text_of(&question, &answer)),
+                    score: meaning,
+                    match_type: "semantic",
+                });
+            }
             if meaning <= 0.0 && words <= 0.0 {
                 return None;
             }
@@ -653,21 +789,27 @@ pub fn search_primers(
             } else {
                 (words, "fts")
             };
-            let answer = answer.trim();
-            let text = if answer.is_empty() {
-                format!("Q: {question}")
-            } else {
-                format!("Q: {question}\nA: {answer}")
-            };
             Some(PrimerHit {
                 id,
                 support,
-                content: preview(&text),
+                content: preview(&text_of(&question, &answer)),
                 score,
                 match_type,
             })
         })
         .collect();
+    if let Some(halves) = halves {
+        halves.meaning = rank_half(
+            meaning_half,
+            |hit| hit.score,
+            |left, right| {
+                right
+                    .support
+                    .cmp(&left.support)
+                    .then(left.id.cmp(&right.id))
+            },
+        );
+    }
     hits.sort_by(|left, right| {
         right
             .score

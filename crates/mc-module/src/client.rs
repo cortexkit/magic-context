@@ -65,4 +65,18 @@ pub trait RunnerClient: Send + Sync + 'static {
         child: &Child,
         request: RunResultRequest,
     ) -> impl Future<Output = Result<RunResult, ClientError>> + Send;
+    /// One call to the Synapse module's management surface on the session's
+    /// behalf, for `ctx_search`'s rerank (`models.list`, `rerank.score`),
+    /// within [`crate::search::rerank::SYNAPSE_DEADLINE`]. The answer is the
+    /// reply's JSON; an error is a fixed reason for the log, such as the
+    /// module's refusal code. Without Synapse every search keeps its
+    /// ordinary ranking, which is the default here.
+    fn synapse_call(
+        &self,
+        _session: &SessionRef,
+        _method: &str,
+        _params: serde_json::Value,
+    ) -> impl Future<Output = Result<serde_json::Value, String>> + Send {
+        async { Err("missing_synapse".to_owned()) }
+    }
 }

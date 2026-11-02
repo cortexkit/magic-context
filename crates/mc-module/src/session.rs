@@ -1078,7 +1078,8 @@ impl Session {
                         chunk_model_id,
                     }
                 });
-                db.with_connection(|conn| crate::search::run(conn, &scope, input))
+                self.search_reranked(client, settings, db, &scope, input)
+                    .await
             }
             "ctx_note" => {
                 let db = self.db.as_ref().ok_or("ctx_note needs the context store")?;
@@ -1102,6 +1103,84 @@ impl Session {
             }
             other => Err(format!("unknown tool {other}")),
         }
+    }
+
+    /// An explicit `ctx_search`, reranked when its query reads as prose and a
+    /// reranker is configured (see [`crate::search::rerank`]). The store is
+    /// not held while the reranker scores, and any failure keeps the ordinary
+    /// ranking.
+    async fn search_reranked<C: RunnerClient>(
+        &self,
+        client: &C,
+        settings: &Settings,
+        db: &ContextDb,
+        scope: &crate::search::Scope<'_>,
+        input: &Value,
+    ) -> Result<String, String> {
+        use crate::search::rerank::{self, Reranker, Skipped};
+        let query = input
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let prose = settings.rerank != Reranker::Off && rerank::is_prose_query(query);
+        // Synapse's model is pinned before any lane is read, so a missing
+        // Synapse costs no extra retrieval.
+        let mut pinned = None;
+        if prose && settings.rerank == Reranker::Synapse {
+            match client
+                .synapse_call(&self.key, "models.list", serde_json::json!({}))
+                .await
+                .map_err(Skipped)
+                .and_then(rerank::pin)
+            {
+                Ok(pin) => pinned = Some(pin),
+                Err(Skipped(reason)) => rerank::log_fallback(&reason),
+            }
+        }
+        let pool = match (&settings.rerank, &pinned) {
+            (Reranker::Synapse, Some(_)) => Some(rerank::POOL),
+            (Reranker::Remote(remote), _) if prose => Some(remote.top_n),
+            _ => None,
+        };
+        let mut prepared =
+            db.with_connection(|conn| crate::search::prepare(conn, scope, input, pool))?;
+        let mut skipped_note = None;
+        if !prepared.candidates().is_empty() {
+            let texts = prepared.candidates().to_vec();
+            let scored = match (&settings.rerank, &pinned) {
+                (Reranker::Synapse, Some(pin)) => client
+                    .synapse_call(
+                        &self.key,
+                        "rerank.score",
+                        rerank::score_request(pin, prepared.query(), &texts),
+                    )
+                    .await
+                    .map_err(Skipped)
+                    .and_then(|reply| rerank::scores(reply, pin, texts.len())),
+                (Reranker::Remote(remote), _) => {
+                    rerank::remote_scores(remote, prepared.query(), &texts).await
+                }
+                _ => Err(Skipped("validation".into())),
+            };
+            match scored {
+                Ok(scores) => prepared.reorder(&scores),
+                Err(Skipped(reason)) => {
+                    rerank::log_fallback(&reason);
+                    // Only a hosted reranker's skip is shown to the model, as
+                    // the plugin does.
+                    if matches!(settings.rerank, Reranker::Remote(_)) {
+                        skipped_note = Some(rerank::skipped_line(&reason));
+                    }
+                }
+            }
+        }
+        let mut answer = db.with_connection(|conn| crate::search::finish(conn, scope, prepared));
+        if let Some(line) = skipped_note {
+            answer.push('\n');
+            answer.push_str(&line);
+        }
+        Ok(answer)
     }
 
     /// What a search may read for this session: messages up to the last

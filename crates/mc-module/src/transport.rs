@@ -361,6 +361,40 @@ impl RunnerClient for SubcRunnerClient {
     ) -> Result<RunResult, ClientError> {
         self.child_call(child, ops::RUN_RESULT, &request).await
     }
+
+    /// Synapse admits any principal on its management surface and reads no
+    /// project from the bind, so the route is opened unscoped, bound to
+    /// ck-mc and the session the search is for.
+    async fn synapse_call(
+        &self,
+        session: &SessionRef,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        let consumer = self
+            .consumer()
+            .await
+            .map_err(|_| "missing_synapse".to_owned())?;
+        let reply = consumer
+            .call(
+                RouteTarget::ManagementSurface {
+                    module_id: "synapse".to_owned(),
+                },
+                BindIdentity::new("magic-context", session.session.clone()),
+                wire::encode(method, &params),
+                CallOptions {
+                    timeout: crate::search::rerank::SYNAPSE_DEADLINE,
+                    ..CallOptions::default()
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                subc_client_rs::CallError::Module(body) => body.code,
+                subc_client_rs::CallError::OutcomeUnknown(_) => "deadline_exceeded".to_owned(),
+                _ => "missing_synapse".to_owned(),
+            })?;
+        serde_json::from_slice(&reply).map_err(|_| "validation".to_owned())
+    }
 }
 
 /// Serves the provider ops for the daemon.

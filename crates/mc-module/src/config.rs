@@ -269,6 +269,7 @@ fn resolve_tiers(
         }
     }
     settings.embedding = embedding::Provider::from_tiers(user, project, user_path);
+    settings.rerank = crate::search::rerank::Reranker::from_tiers(user, project);
     settings.caveman = caveman(user, project);
     settings.commit_clusters = commit_clusters(user, project);
     // Only the user sets the language; a project file cannot.

@@ -60,6 +60,8 @@ pub struct Settings {
     /// The embedding provider `ctx_search` scores by meaning with; `None`
     /// leaves search to its word lanes.
     pub embedding: Option<crate::embedding::Provider>,
+    /// `rerank.*`: who scores an explicit prose search's best candidates.
+    pub rerank: crate::search::rerank::Reranker,
     /// `temporal_awareness`: a person's message after a gap of five minutes
     /// or more starts with a marker saying how long it was.
     pub temporal_awareness: bool,
@@ -125,6 +127,7 @@ impl Default for Settings {
             git_max_commits: 2000,
             auto_promote: true,
             embedding: None,
+            rerank: crate::search::rerank::Reranker::Synapse,
             temporal_awareness: true,
             auto_search: AutoSearch::default(),
             caveman: None,
