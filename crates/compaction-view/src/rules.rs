@@ -4,10 +4,10 @@
 
 use std::collections::BTreeSet;
 
-use ck_contract_draft::part::Seal;
-use ck_contract_draft::read::Entry;
-use ck_contract_draft::rules::{EditCost, ProviderRules, RuleBreak, SignedParts};
-use ck_contract_draft::view::{Edit, EditOp, InsertAt};
+use cortexkit_role_compaction::part::Seal;
+use cortexkit_role_compaction::read::Entry;
+use cortexkit_role_compaction::rules::{EditCost, ProviderRules, RuleBreak, SignedParts};
+use cortexkit_role_compaction::view::{Edit, EditOp, InsertAt};
 
 /// Claude models whose signed thinking Anthropic binds to the request
 /// prefix, as family, major and minor. The source is Anthropic's
@@ -29,14 +29,12 @@ pub const BOUND_SIGNED_MODELS: &[(&str, u32, u32)] = &[
 /// `full_resend` on a route it knows chains its requests, and may override
 /// `signed_parts` for an account it knows is not bound.
 pub fn defaults(model: &str) -> ProviderRules {
-    ProviderRules {
-        signed_parts: if is_bound_signed_model(model) {
-            SignedParts::Bound
-        } else {
-            SignedParts::None
-        },
-        history_edit_cost: EditCost::Suffix,
-    }
+    let signed_parts = if is_bound_signed_model(model) {
+        SignedParts::Bound
+    } else {
+        SignedParts::None
+    };
+    ProviderRules::new(signed_parts, EditCost::Suffix)
 }
 
 /// Whether a model id names one of [`BOUND_SIGNED_MODELS`] on any route:
@@ -100,6 +98,7 @@ pub fn invalid_signed_parts(
     edits: &[Edit],
     rules: &ProviderRules,
 ) -> Vec<(String, String)> {
+    // An unknown `signed_parts` value is treated as `bound` (W1.5).
     if rules.signed_parts == SignedParts::None {
         return Vec::new();
     }
@@ -146,11 +145,17 @@ pub fn invalid_signed_parts(
                 let position = match at {
                     InsertAt::Start => Some(Position::BEFORE_ALL),
                     InsertAt::Before(mid) => layout.message(mid),
+                    // Refused as `unsupported_edit` anyway; on the safe side
+                    // here, it changes everything after it.
+                    _ => Some(Position::BEFORE_ALL),
                 };
                 if let Some(position) = position {
                     changes.push((position, since));
                 }
             }
+            // An op the runner doesn't know: refused as `unsupported_edit`
+            // anyway, and on the safe side here it changes everything.
+            _ => changes.push((Position::BEFORE_ALL, since)),
         }
     }
     let dropped_messages: BTreeSet<usize> = edits
@@ -254,14 +259,14 @@ impl<'a> Layout<'a> {
     }
 
     fn is_signed(&self, position: Position) -> bool {
-        self.entries[position.entry].parts[position.slot - 1].seal == Seal::Signed
+        is_signed(&self.entries[position.entry].parts[position.slot - 1].seal)
     }
 
     fn signed(&self) -> Vec<Position> {
         let mut out = Vec::new();
         for (entry, message) in self.entries.iter().enumerate() {
             for (part, candidate) in message.parts.iter().enumerate() {
-                if candidate.seal == Seal::Signed {
+                if is_signed(&candidate.seal) {
                     out.push(Position {
                         entry,
                         slot: part + 1,
@@ -280,6 +285,12 @@ impl<'a> Layout<'a> {
             .as_ref()
             .map_or(0, |view| view.version)
     }
+}
+
+/// Whether a seal binds the part to the history before it. Only `signed`
+/// does; an unknown seal is only sealed (W1.5: dropped, never replaced).
+fn is_signed(seal: &Seal) -> bool {
+    *seal == Seal::Signed
 }
 
 #[cfg(test)]

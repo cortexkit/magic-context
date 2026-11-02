@@ -9,10 +9,10 @@
 //! vectors are generated from this library and checked against it by the
 //! crate's own tests, so they never describe anything but what it does.
 
-use ck_contract_draft::part::{body_digest, Part, PartBody, Seal};
-use ck_contract_draft::read::{entry_digest, Entry, NoticeOrigin, Role};
-use ck_contract_draft::rules::ProviderRules;
-use ck_contract_draft::view::{Edit, View};
+use cortexkit_role_compaction::part::{body_digest, Part, PartBody, Seal};
+use cortexkit_role_compaction::read::{entry_digest, Entry, NoticeOrigin, Role};
+use cortexkit_role_compaction::rules::ProviderRules;
+use cortexkit_role_compaction::view::{Edit, View};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

@@ -39,6 +39,9 @@ subc-os = "=0.1.26"
 subc-core = { git = "https://github.com/cortexkit/subconscious", rev = "90295ece040258c77ea1f1f1d727109c5eaab13f" }
 
 
+# The compaction contract (compaction-provider/v2, compaction-runner/v1).
+cortexkit-role-compaction = "=0.1.0"
+
 # Internal crates.
 ck-contract-draft = { path = "crates/ck-contract-draft" }
 cortexkit-compaction-view = { path = "crates/compaction-view" }

@@ -1,14 +1,12 @@
 //! Tests for applying views and checking provider rules.
 
-use ck_contract_draft::part::{
+use cortexkit_role_compaction::part::{
     Attachment, AttachmentItem, Delivered, FileMedia, OutputFormat, Part, PartBody, Seal, ToolPart,
     ToolStatus,
 };
-use ck_contract_draft::read::{entry_digest, Entry, Role};
-use ck_contract_draft::rules::{EditCost, ProviderRules, RuleBreak, SignedParts};
-use ck_contract_draft::view::{
-    AppliedView, Edit, EditOp, InsertAt, InsertedMessage, View, ViewRefusal,
-};
+use cortexkit_role_compaction::read::{Entry, Role};
+use cortexkit_role_compaction::rules::{EditCost, ProviderRules, RuleBreak, SignedParts};
+use cortexkit_role_compaction::view::{Edit, EditOp, InsertAt, InsertedMessage, View, ViewRefusal};
 use serde_json::json;
 
 use crate::render::{apply, apply_edits, check_carried, Source};
@@ -21,24 +19,22 @@ fn entry(
     parts: Vec<Part>,
     generated_under: Option<u64>,
 ) -> Entry {
-    Entry {
-        ordinal,
-        mid: mid.into(),
-        role,
-        notice: None,
-        written_at: ordinal * 1_000,
-        digest: entry_digest(role, None, &parts),
-        parts,
-        usage: None,
-        generated_under: generated_under.map(|version| AppliedView {
-            version,
-            checksum: format!("checksum-{version}"),
-        }),
+    let entry = Entry::new(ordinal, mid, role, ordinal * 1_000, parts);
+    match generated_under {
+        Some(version) => entry.with_generated_under(View::seal(version, Vec::new()).applied()),
+        None => entry,
     }
 }
 
+/// A part with a number and a seal, its checksum computed over both.
+fn mk(id: impl Into<String>, tag: Option<u64>, seal: Seal, body: PartBody) -> Part {
+    let mut part = Part::new(id, body).with_seal(seal);
+    part.tag = tag;
+    part
+}
+
 fn text(id: &str, tag: u64, value: &str) -> Part {
-    Part::new(
+    mk(
         id,
         Some(tag),
         Seal::None,
@@ -47,7 +43,7 @@ fn text(id: &str, tag: u64, value: &str) -> Part {
 }
 
 fn signed(id: &str) -> Part {
-    Part::new(
+    mk(
         id,
         None,
         Seal::Signed,
@@ -59,26 +55,26 @@ fn signed(id: &str) -> Part {
 }
 
 fn tool_body(id: &str, status: ToolStatus) -> ToolPart {
-    ToolPart {
-        call_id: format!("call-{id}"),
-        name: "edit".into(),
-        input: json!({"path": "a.rs", "old_string": "x".repeat(100), "count": 3}),
-        provider_executed: false,
+    let running = status == ToolStatus::Running;
+    let body = ToolPart::new(
+        format!("call-{id}"),
+        "edit",
+        json!({"path": "a.rs", "old_string": "x".repeat(100), "count": 3}),
         status,
-        output: (status != ToolStatus::Running).then(|| "done".into()),
-        output_format: OutputFormat::Text,
-        output_bytes: (status != ToolStatus::Running).then_some(4),
-        attachments: vec![Attachment {
-            id: "img-1".into(),
-            item: AttachmentItem::File(FileMedia::inline("image/png", Some(2048))),
-        }],
-        approval: None,
-        delivered: vec![],
+    )
+    .with_attachments(vec![Attachment::new(
+        "img-1",
+        AttachmentItem::File(FileMedia::inline("image/png", Some(2048))),
+    )]);
+    if running {
+        body
+    } else {
+        body.with_output("done").with_output_bytes(4)
     }
 }
 
 fn tool(id: &str, tag: u64, status: ToolStatus) -> Part {
-    Part::new(
+    mk(
         id,
         Some(tag),
         Seal::None,
@@ -137,11 +133,11 @@ fn insert(since: u64, at: InsertAt, id: &str) -> Edit {
         since,
         EditOp::Insert {
             at,
-            message: InsertedMessage {
-                id: id.into(),
-                role: Role::User,
-                texts: vec!["<session-history>...</session-history>".into()],
-            },
+            message: InsertedMessage::new(
+                id,
+                Role::User,
+                vec!["<session-history>...</session-history>".into()],
+            ),
         },
     )
 }
@@ -171,10 +167,9 @@ fn transcript() -> Vec<Entry> {
     ]
 }
 
-const BOUND: ProviderRules = ProviderRules {
-    signed_parts: SignedParts::Bound,
-    history_edit_cost: EditCost::Suffix,
-};
+fn bound() -> ProviderRules {
+    ProviderRules::new(SignedParts::Bound, EditCost::Suffix)
+}
 
 #[test]
 fn an_empty_view_renders_the_transcript_unchanged() {
@@ -444,7 +439,7 @@ fn signed_transcript(generated: [u64; 3]) -> Vec<Entry> {
 }
 
 fn invalid(entries: &[Entry], edits: &[Edit]) -> Vec<String> {
-    invalid_signed_parts(entries, edits, &BOUND)
+    invalid_signed_parts(entries, edits, &bound())
         .into_iter()
         .map(|(_, part)| part)
         .collect()
@@ -456,7 +451,7 @@ fn an_edit_before_a_signed_part_invalidates_it_only_if_it_came_later() {
     let edits = vec![drop_part(1, "a1", "k1")];
     assert_eq!(invalid(&entries, &edits), ["r3", "r5"]);
     assert_eq!(
-        check(&entries, &edits, &BOUND),
+        check(&entries, &edits, &bound()),
         Err(RuleBreak::SignedPartInvalid {
             mid: "a3".into(),
             part: "r3".into()
@@ -472,10 +467,7 @@ fn an_edit_before_a_signed_part_invalidates_it_only_if_it_came_later() {
     assert!(invalid(&entries, &[drop_part(1, "a5", "t7")]).is_empty());
 
     // The same rules with no signature binding never object.
-    let free = ProviderRules {
-        signed_parts: SignedParts::None,
-        ..BOUND
-    };
+    let free = ProviderRules::new(SignedParts::None, EditCost::Suffix);
     assert!(check(&entries, &edits, &free).is_ok());
 }
 
@@ -515,9 +507,10 @@ fn signed_parts_may_be_left_out_only_as_an_oldest_run() {
 fn compact(entries: &[Entry]) -> Vec<Entry> {
     entries
         .iter()
-        .map(|entry| Entry {
-            parts: entry.parts.iter().map(Part::compact).collect(),
-            ..entry.clone()
+        .map(|entry| {
+            let mut compact = entry.clone();
+            compact.parts = entry.parts.iter().map(Part::compact).collect();
+            compact
         })
         .collect()
 }
@@ -551,8 +544,8 @@ fn edits_computed_from_the_compact_form_apply_to_the_full_one_and_back() {
     assert_eq!(tool.output.as_deref(), Some("[dropped §3§]"));
     assert_eq!(tool.output_bytes, Some("[dropped §3§]".len() as u64));
     assert_eq!(
-        invalid_signed_parts(&full, &edits, &BOUND),
-        invalid_signed_parts(&short, &edits, &BOUND)
+        invalid_signed_parts(&full, &edits, &bound()),
+        invalid_signed_parts(&short, &edits, &bound())
     );
 }
 
@@ -604,10 +597,97 @@ fn a_replace_may_show_its_own_number_and_numbers_the_original_had_but_no_other()
     );
 }
 
+/// Values a later contract version may add are kept and handled on the safe
+/// side (W1.5): an unknown edit, anchor or inserted role refuses the view by
+/// name; an unknown part kind takes no number and may only be dropped; an
+/// unknown tool status counts as running; an output in an unknown format is
+/// never rewritten.
+#[test]
+fn unknown_values_are_handled_on_the_safe_side() {
+    let entries = transcript();
+    let unknown_op = Edit::new(
+        1,
+        EditOp::Unknown {
+            name: "fold".into(),
+            fields: serde_json::Map::new(),
+        },
+    );
+    assert_eq!(
+        apply_edits(&entries, &[drop_part(1, "a1", "k1"), unknown_op]),
+        Err(ViewRefusal::UnsupportedEdit { index: 1 })
+    );
+    let unknown_anchor = Edit::new(
+        1,
+        EditOp::Insert {
+            at: InsertAt::Unknown(json!("end")),
+            message: InsertedMessage::new("h", Role::User, vec!["x".into()]),
+        },
+    );
+    assert_eq!(
+        apply_edits(&entries, &[unknown_anchor]),
+        Err(ViewRefusal::UnsupportedEdit { index: 0 })
+    );
+    let unknown_role = Edit::new(
+        1,
+        EditOp::Insert {
+            at: InsertAt::Start,
+            message: InsertedMessage::new("h", Role::Unknown("developer".into()), vec!["x".into()]),
+        },
+    );
+    assert_eq!(
+        apply_edits(&entries, &[unknown_role]),
+        Err(ViewRefusal::UnsupportedEdit { index: 0 })
+    );
+
+    let mut entries = transcript();
+    entries[1].parts.push(mk(
+        "x1",
+        None,
+        Seal::None,
+        PartBody::Unknown {
+            name: "hologram".into(),
+            fields: serde_json::Map::new(),
+        },
+    ));
+    let mut queued = tool_body("k1", ToolStatus::Unknown("queued".into()));
+    queued.output = Some("done".into());
+    queued.output_bytes = Some(4);
+    entries[1].parts[2] = mk("k1", Some(3), Seal::None, PartBody::Tool(queued));
+    let mut xml = tool_body("k3", ToolStatus::Completed);
+    xml.output_format = OutputFormat::Unknown("xml".into());
+    entries[2]
+        .parts
+        .push(mk("k3", Some(5), Seal::None, PartBody::Tool(xml)));
+
+    let mut numbered = entries.clone();
+    crate::tags::assign_tags(0, &mut numbered);
+    assert_eq!(numbered[1].parts[3].tag, None);
+    assert!(apply_edits(&entries, &[drop_part(1, "a1", "x1")]).is_ok());
+    assert!(matches!(
+        apply_edits(
+            &entries,
+            &[replace(1, &entries, "a1", "x1", "text", json!("y"))]
+        ),
+        Err(ViewRefusal::BadField { .. })
+    ));
+    assert!(matches!(
+        apply_edits(&entries, &[drop_part(1, "a1", "k1")]),
+        Err(ViewRefusal::RunningTool { .. })
+    ));
+    assert!(matches!(
+        apply_edits(
+            &entries,
+            &[replace(1, &entries, "u2", "k3", "output", json!("short"))]
+        ),
+        Err(ViewRefusal::BadField { .. })
+    ));
+    assert!(apply_edits(&entries, &[drop_part(1, "u2", "k3")]).is_ok());
+}
+
 #[test]
 fn sealed_and_provider_run_parts_can_only_be_dropped() {
     let mut entries = transcript();
-    entries[0].parts[0] = Part::new(
+    entries[0].parts[0] = mk(
         "t1",
         Some(1),
         Seal::Signed,
@@ -617,7 +697,7 @@ fn sealed_and_provider_run_parts_can_only_be_dropped() {
     );
     let mut hosted = tool_body("k9", ToolStatus::Completed);
     hosted.provider_executed = true;
-    entries[1].parts[2] = Part::new("k1", None, Seal::None, PartBody::Tool(hosted));
+    entries[1].parts[2] = mk("k1", None, Seal::None, PartBody::Tool(hosted));
 
     for (mid, part, field) in [("u1", "t1", "text"), ("a1", "k1", "output")] {
         let edit = replace(1, &entries, mid, part, field, json!("short"));
@@ -638,10 +718,10 @@ fn a_replace_of_delivered_keeps_only_the_named_sends() {
     let mut entries = transcript();
     let mut body = tool_body("k1", ToolStatus::Completed);
     body.delivered = vec![
-        Delivered::new("magic-context", Some("mc.reduce".into()), "first".into()),
-        Delivered::new("prefrontal", None, "second".into()),
+        Delivered::new("magic-context", "first").with_template("mc.reduce"),
+        Delivered::new("prefrontal", "second"),
     ];
-    entries[1].parts[2] = Part::new("k1", Some(3), Seal::None, PartBody::Tool(body));
+    entries[1].parts[2] = mk("k1", Some(3), Seal::None, PartBody::Tool(body));
     let keep_second = replace(1, &entries, "a1", "k1", "delivered", json!([1]));
     let rendered = apply_edits(&entries, &[keep_second]).unwrap();
     let PartBody::Tool(tool) = &rendered[1].parts[2].body else {
@@ -664,7 +744,7 @@ fn a_signed_text_part_is_bound_like_signed_reasoning() {
     // Gemini signs text and tool calls, not only reasoning. A kept signed
     // text part is invalidated by a later edit before it, like reasoning.
     let mut entries = transcript();
-    entries[2].parts[0] = Part::new(
+    entries[2].parts[0] = mk(
         "t3",
         Some(4),
         Seal::Signed,
@@ -672,7 +752,7 @@ fn a_signed_text_part_is_bound_like_signed_reasoning() {
             text: "go on".into(),
         },
     );
-    let invalid = invalid_signed_parts(&entries, &[drop_part(1, "u1", "t1")], &BOUND);
+    let invalid = invalid_signed_parts(&entries, &[drop_part(1, "u1", "t1")], &bound());
     assert!(invalid.contains(&("u2".to_owned(), "t3".to_owned())));
 }
 
@@ -736,7 +816,7 @@ mod vector_file {
                 2,
                 "a1",
                 Role::Assistant,
-                vec![Part::new("k1", Some(2), Seal::None, PartBody::Tool(body))],
+                vec![mk("k1", Some(2), Seal::None, PartBody::Tool(body))],
                 None,
             ),
         ]
@@ -747,11 +827,11 @@ mod vector_file {
             since,
             EditOp::Insert {
                 at: InsertAt::Start,
-                message: InsertedMessage {
-                    id: "m0".into(),
-                    role: Role::User,
-                    texts: vec!["<session-history>summary</session-history>".into()],
-                },
+                message: InsertedMessage::new(
+                    "m0",
+                    Role::User,
+                    vec!["<session-history>summary</session-history>".into()],
+                ),
             },
         )
     }
@@ -766,10 +846,7 @@ mod vector_file {
     }
 
     fn free() -> ProviderRules {
-        ProviderRules {
-            signed_parts: SignedParts::None,
-            ..BOUND
-        }
+        ProviderRules::new(SignedParts::None, EditCost::Suffix)
     }
 
     fn cases() -> Vec<(&'static str, &'static str, Value)> {
@@ -797,11 +874,7 @@ mod vector_file {
             1,
             EditOp::Insert {
                 at: InsertAt::Start,
-                message: InsertedMessage {
-                    id: "m0".into(),
-                    role: Role::User,
-                    texts: vec!["§2§ summary".into()],
-                },
+                message: InsertedMessage::new("m0", Role::User, vec!["§2§ summary".into()]),
             },
         );
         let view = View::seal(1, vec![drop_part(1, "a1", "k1")]);
@@ -822,7 +895,7 @@ mod vector_file {
                 1,
                 "u1",
                 Role::User,
-                vec![Part::new(
+                vec![mk(
                     "f1",
                     None,
                     Seal::None,
@@ -841,6 +914,31 @@ mod vector_file {
         let stripped_image = replace(1, &pasted, "u1", "f1", "text", json!("[image stripped]"));
         vec![
             ("an empty view keeps everything", "plan", plan(vec![])),
+            (
+                "an edit op the runner doesn't know refuses the view by name",
+                "plan",
+                plan(vec![
+                    drop_part(1, "a1", "k1"),
+                    Edit::new(
+                        1,
+                        EditOp::Unknown {
+                            name: "fold".into(),
+                            fields: serde_json::Map::new(),
+                        },
+                    ),
+                ]),
+            ),
+            (
+                "an insert anchor the runner doesn't know refuses the view by name",
+                "plan",
+                plan(vec![Edit::new(
+                    1,
+                    EditOp::Insert {
+                        at: InsertAt::Unknown(json!("end")),
+                        message: InsertedMessage::new("h", Role::User, vec!["x".into()]),
+                    },
+                )]),
+            ),
             (
                 "text takes an answered image's place",
                 "plan",
@@ -942,22 +1040,22 @@ mod vector_file {
             (
                 "an edit before a signed part made after it invalidates it",
                 "check_rules",
-                json!({"entries": t, "edits": [drop_part(1, "a1", "k1")], "rules": BOUND}),
+                json!({"entries": t, "edits": [drop_part(1, "a1", "k1")], "rules": bound()}),
             ),
             (
                 "an edit the signed part was generated under is fine",
                 "check_rules",
-                json!({"entries": transcript([0, 1]), "edits": [drop_part(1, "a1", "k1")], "rules": BOUND}),
+                json!({"entries": transcript([0, 1]), "edits": [drop_part(1, "a1", "k1")], "rules": bound()}),
             ),
             (
                 "the oldest signed part may be left out",
                 "check_rules",
-                json!({"entries": t, "edits": [drop_part(1, "a1", "r1")], "rules": BOUND}),
+                json!({"entries": t, "edits": [drop_part(1, "a1", "r1")], "rules": bound()}),
             ),
             (
                 "a history head invalidates every older signed part",
                 "check_rules",
-                json!({"entries": t, "edits": [head(1)], "rules": BOUND}),
+                json!({"entries": t, "edits": [head(1)], "rules": bound()}),
             ),
             (
                 "without bound signatures nothing is invalid",
@@ -1080,7 +1178,7 @@ mod vector_file {
 
 #[test]
 fn text_can_take_a_files_place() {
-    let image = Part::new(
+    let image = mk(
         "f1",
         None,
         Seal::None,

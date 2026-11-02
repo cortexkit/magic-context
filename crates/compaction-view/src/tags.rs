@@ -1,8 +1,8 @@
 //! Tag numbers: which parts take one, how runners count them, and how they
 //! are written in front of a part's text.
 
-use ck_contract_draft::part::{AttachmentItem, PartBody, ToolPart};
-use ck_contract_draft::read::{Entry, Role};
+use cortexkit_role_compaction::part::{AttachmentItem, PartBody, ToolPart};
+use cortexkit_role_compaction::read::{Entry, Role};
 
 /// What a runner renders in front of a numbered part's text (a text part's
 /// text, a tool result's output): the number between section signs, then one
@@ -59,12 +59,16 @@ pub fn tag_numbers_in(text: &str) -> Vec<u64> {
 /// text, or attachments only). Reasoning, files, opaque items, the text of
 /// system entries and provider-executed tool parts never take one: a
 /// provider-run result is replayed by the host as it is and cannot carry a
-/// prefix.
-pub fn is_numbered(role: Role, body: &PartBody) -> bool {
+/// prefix. Parts of a kind, or of an entry role, the runner does not know
+/// are handled as opaque parts (W1.5) and take none either.
+pub fn is_numbered(role: &Role, body: &PartBody) -> bool {
+    if matches!(role, Role::Unknown(_)) {
+        return false;
+    }
     match body {
-        PartBody::Text { .. } => role != Role::System,
+        PartBody::Text { .. } => *role != Role::System,
         PartBody::Tool(tool) => !tool.provider_executed,
-        PartBody::Reasoning { .. } | PartBody::File(_) | PartBody::Opaque(_) => false,
+        _ => false,
     }
 }
 
@@ -76,9 +80,9 @@ pub fn is_numbered(role: Role, body: &PartBody) -> bool {
 pub fn assign_tags(checkpoint: u64, entries: &mut [Entry]) {
     let mut next = checkpoint;
     for entry in entries.iter_mut() {
-        let role = entry.role;
+        let role = entry.role.clone();
         for part in &mut entry.parts {
-            part.tag = if is_numbered(role, &part.body) {
+            part.tag = if is_numbered(&role, &part.body) {
                 next += 1;
                 Some(next)
             } else {
@@ -91,23 +95,20 @@ pub fn assign_tags(checkpoint: u64, entries: &mut [Entry]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ck_contract_draft::part::{Attachment, FileMedia, OutputFormat, Part, Seal, ToolStatus};
+    use cortexkit_role_compaction::part::{Attachment, FileMedia, Part, ToolStatus};
     use serde_json::json;
 
     fn tool(output: &str) -> PartBody {
-        PartBody::Tool(ToolPart {
-            call_id: "call_1".into(),
-            name: "read".into(),
-            input: json!({"path": "a.rs"}),
-            provider_executed: false,
-            status: ToolStatus::Completed,
-            output: Some(output.into()),
-            output_format: OutputFormat::Text,
-            output_bytes: Some(output.len() as u64),
-            attachments: Vec::new(),
-            approval: None,
-            delivered: Vec::new(),
-        })
+        PartBody::Tool(
+            ToolPart::new(
+                "call_1",
+                "read",
+                json!({"path": "a.rs"}),
+                ToolStatus::Completed,
+            )
+            .with_output(output)
+            .with_output_bytes(output.len() as u64),
+        )
     }
 
     #[test]
@@ -117,15 +118,15 @@ mod tests {
             unreachable!()
         };
         assert_eq!(empty_result_label(tool), None);
-        tool.attachments.push(Attachment {
-            id: "a1".into(),
-            item: AttachmentItem::File(FileMedia::inline("image/png", None)),
-        });
+        tool.attachments.push(Attachment::new(
+            "a1",
+            AttachmentItem::File(FileMedia::inline("image/png", None)),
+        ));
         assert_eq!(empty_result_label(tool), Some("[image]"));
-        tool.attachments.push(Attachment {
-            id: "a2".into(),
-            item: AttachmentItem::File(FileMedia::inline("application/pdf", None)),
-        });
+        tool.attachments.push(Attachment::new(
+            "a2",
+            AttachmentItem::File(FileMedia::inline("application/pdf", None)),
+        ));
         assert_eq!(empty_result_label(tool), Some("[file]"));
         tool.output_bytes = Some(4);
         assert_eq!(empty_result_label(tool), None);
@@ -146,35 +147,27 @@ mod tests {
     fn provider_executed_tools_files_and_system_text_take_no_number() {
         use Role;
         let text = PartBody::Text { text: "x".into() };
-        assert!(is_numbered(Role::User, &text));
-        assert!(is_numbered(Role::Assistant, &text));
-        assert!(!is_numbered(Role::System, &text));
+        assert!(is_numbered(&Role::User, &text));
+        assert!(is_numbered(&Role::Assistant, &text));
+        assert!(!is_numbered(&Role::System, &text));
         let mut hosted = tool("result");
         if let PartBody::Tool(tool) = &mut hosted {
             tool.provider_executed = true;
         }
-        assert!(is_numbered(Role::Assistant, &tool("result")));
-        assert!(!is_numbered(Role::Assistant, &hosted));
+        assert!(is_numbered(&Role::Assistant, &tool("result")));
+        assert!(!is_numbered(&Role::Assistant, &hosted));
         assert!(!is_numbered(
-            Role::User,
+            &Role::User,
             &PartBody::File(FileMedia::inline("image/png", None))
         ));
     }
 
     #[test]
     fn numbers_count_from_the_checkpoint_over_numbered_parts_only() {
-        let part = |id: &str, body: PartBody| Part::new(id, None, Seal::None, body);
+        let part = |id: &str, body: PartBody| Part::new(id, body);
         let text = || PartBody::Text { text: "x".into() };
-        let entry = |ordinal: u64, role: Role, parts: Vec<Part>| Entry {
-            ordinal,
-            mid: format!("m{ordinal}"),
-            role,
-            notice: None,
-            written_at: 0,
-            digest: String::new(),
-            parts,
-            usage: None,
-            generated_under: None,
+        let entry = |ordinal: u64, role: Role, parts: Vec<Part>| {
+            Entry::new(ordinal, format!("m{ordinal}"), role, 0, parts)
         };
         let mut entries = vec![
             entry(4, Role::User, vec![part("a", text())]),

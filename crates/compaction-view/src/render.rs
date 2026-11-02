@@ -14,9 +14,9 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use ck_contract_draft::part::{Part, PartBody, Seal, ToolStatus};
-use ck_contract_draft::read::{Entry, NoticeOrigin, Role};
-use ck_contract_draft::view::{Edit, EditOp, InsertAt, InsertedMessage, View, ViewRefusal};
+use cortexkit_role_compaction::part::{OutputFormat, Part, PartBody, ToolStatus};
+use cortexkit_role_compaction::read::{Entry, NoticeOrigin, Role};
+use cortexkit_role_compaction::view::{Edit, EditOp, InsertAt, InsertedMessage, View, ViewRefusal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -54,7 +54,9 @@ impl RenderedMessage {
                 }
                 _ => tool.output.as_ref()?,
             },
-            PartBody::Reasoning { .. } | PartBody::File(_) | PartBody::Opaque(_) => return None,
+            // Reasoning, files, opaque parts and kinds the runner doesn't
+            // know have no text the model reads as such.
+            _ => return None,
         };
         match part.tag {
             Some(tag) if !self.final_text.contains(&part.id) => {
@@ -116,7 +118,7 @@ impl PlanItem {
     fn inserted(message: &InsertedMessage) -> Self {
         PlanItem::Insert {
             id: message.id.clone(),
-            role: message.role,
+            role: message.role.clone(),
             texts: message.texts.clone(),
         }
     }
@@ -167,7 +169,10 @@ pub fn plan(entries: &[Entry], edits: &[Edit]) -> Result<RenderPlan, ViewRefusal
     let mut insert_ids: HashSet<&str> = HashSet::new();
     let mut cut: Option<u64> = None;
 
-    for edit in edits {
+    for (index, edit) in edits.iter().enumerate() {
+        let unsupported = || ViewRefusal::UnsupportedEdit {
+            index: index as u64,
+        };
         match &edit.op {
             EditOp::Drop { mid, part } => {
                 let entry = find_entry(&by_mid, mid)?;
@@ -201,6 +206,15 @@ pub fn plan(entries: &[Entry], edits: &[Edit]) -> Result<RenderPlan, ViewRefusal
                         part: part.clone(),
                     });
                 }
+                // Every part of an entry whose role is unknown is handled as
+                // an opaque part: it may be dropped, never replaced (W1.5).
+                if matches!(entry.role, Role::Unknown(_)) {
+                    return Err(ViewRefusal::BadField {
+                        mid: mid.clone(),
+                        part: part.clone(),
+                        field: field.clone(),
+                    });
+                }
                 check_field(mid, found, field, value)?;
                 check_replaced_tags(mid, found, field, value)?;
                 let fields = replaces.entry((mid, part)).or_default();
@@ -226,6 +240,9 @@ pub fn plan(entries: &[Entry], edits: &[Edit]) -> Result<RenderPlan, ViewRefusal
                 cut = Some(last);
             }
             EditOp::Insert { at, message } => {
+                if matches!(message.role, Role::Unknown(_)) || matches!(at, InsertAt::Unknown(_)) {
+                    return Err(unsupported());
+                }
                 if !insert_ids.insert(&message.id) {
                     return Err(ViewRefusal::DuplicateInsert {
                         id: message.id.clone(),
@@ -247,8 +264,10 @@ pub fn plan(entries: &[Entry], edits: &[Edit]) -> Result<RenderPlan, ViewRefusal
                             .map_err(|_| ViewRefusal::UnknownAnchor { mid: mid.clone() })?;
                         inserts_before.entry(mid).or_default().push(message);
                     }
+                    _ => return Err(unsupported()),
                 }
             }
+            _ => return Err(unsupported()),
         }
     }
 
@@ -336,7 +355,7 @@ pub fn apply_edits(entries: &[Entry], edits: &[Edit]) -> Result<Vec<RenderedMess
         .items
         .iter()
         .map(|item| match item {
-            PlanItem::Insert { id, role, texts } => render_inserted(id, *role, texts),
+            PlanItem::Insert { id, role, texts } => render_inserted(id, role.clone(), texts),
             PlanItem::Entry {
                 ordinal,
                 mid,
@@ -366,7 +385,7 @@ pub fn apply_edits(entries: &[Entry], edits: &[Edit]) -> Result<Vec<RenderedMess
                         ordinal: *ordinal,
                         mid: mid.clone(),
                     },
-                    role: entry.role,
+                    role: entry.role.clone(),
                     notice: entry.notice.clone(),
                     parts,
                     final_text,
@@ -393,11 +412,11 @@ pub fn edits_for_transcript(entries: &[Entry], edits: &[Edit]) -> Vec<Edit> {
                 at: InsertAt::Before(mid),
                 ..
             } => present.contains(mid.as_str()),
-            EditOp::Insert {
-                at: InsertAt::Start,
-                ..
-            } => true,
             EditOp::Cut { through } => present.contains(through.as_str()),
+            // Inserts at the start stay. So do unknown anchors and ops, so
+            // the runner refuses the view by name rather than lose an edit
+            // silently.
+            _ => true,
         })
         .cloned()
         .collect()
@@ -423,9 +442,16 @@ fn find_part<'a>(entry: &'a Entry, part_id: &str) -> Result<&'a Part, ViewRefusa
         })
 }
 
+/// A running call, or one whose status is unknown (W1.5), is never dropped,
+/// replaced or cut.
 fn refuse_running(mid: &str, part: &Part) -> Result<(), ViewRefusal> {
     match &part.body {
-        PartBody::Tool(tool) if tool.status == ToolStatus::Running => {
+        PartBody::Tool(tool)
+            if !matches!(
+                tool.status,
+                ToolStatus::Completed | ToolStatus::Error | ToolStatus::Denied
+            ) =>
+        {
             Err(ViewRefusal::RunningTool {
                 mid: mid.to_owned(),
                 part: part.id.clone(),
@@ -443,8 +469,8 @@ fn check_field(mid: &str, part: &Part, field: &str, value: &Value) -> Result<(),
     };
     // A sealed part is checked by the model provider as it is, and a
     // provider-run tool call is replayed by the host as it is: neither can
-    // take new bytes, only be dropped.
-    if part.seal != Seal::None {
+    // take new bytes, only be dropped. An unknown seal counts as sealed.
+    if !part.seal.is_none() {
         return Err(bad());
     }
     match (&part.body, field) {
@@ -453,8 +479,12 @@ fn check_field(mid: &str, part: &Part, field: &str, value: &Value) -> Result<(),
         // that an answered image was removed.
         (PartBody::File(_), "text") => value.as_str().map(|_| ()).ok_or_else(bad),
         (PartBody::Tool(tool), _) if tool.provider_executed => Err(bad()),
-        // A finished call has an output size in both part forms.
-        (PartBody::Tool(tool), "output") if tool.output_bytes.is_some() => {
+        // A finished call has an output size in both part forms. An output
+        // in a format the runner doesn't know is never rewritten (W1.5).
+        (PartBody::Tool(tool), "output")
+            if tool.output_bytes.is_some()
+                && !matches!(tool.output_format, OutputFormat::Unknown(_)) =>
+        {
             value.as_str().map(|_| ()).ok_or_else(bad)
         }
         (PartBody::Tool(tool), "attachments") => {
@@ -580,7 +610,9 @@ fn replaced(part: &Part, fields: &[FieldReplace]) -> Part {
             _ => {}
         }
     }
-    Part::new(part.id.clone(), part.tag, part.seal, body)
+    let mut replaced = Part::new(part.id.clone(), body).with_seal(part.seal.clone());
+    replaced.tag = part.tag;
+    replaced
 }
 
 fn string_of(value: &Value) -> String {
@@ -598,8 +630,6 @@ fn render_inserted(id: &str, role: Role, texts: &[String]) -> RenderedMessage {
             .map(|(index, text)| {
                 Part::new(
                     format!("{id}:{index}"),
-                    None,
-                    Seal::None,
                     PartBody::Text { text: text.clone() },
                 )
             })

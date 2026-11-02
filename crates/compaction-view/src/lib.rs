@@ -19,8 +19,8 @@
 //! - [`clean::clean_reply`]: how a runner removes tag notation from a model's
 //!   reply before storing it.
 //!
-//! The wire types live in the contract crate (`ck-contract-draft` until the
-//! contract is published); this library depends on them. A runner written in
+//! The wire types live in the contract crate, `cortexkit-role-compaction`;
+//! this library depends on it. A runner written in
 //! another language uses the WebAssembly build of this library, or checks
 //! its own implementation against the JSON test vectors under `vectors/`.
 

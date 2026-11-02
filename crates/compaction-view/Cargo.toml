@@ -2,7 +2,7 @@
 name = "cortexkit-compaction-view"
 version = "0.1.0"
 edition = "2021"
-# Published once the contract crate it depends on is.
+# Not yet on crates.io: how it is published is still being settled.
 publish = false
 description = "The view library of the CortexKit compaction contract: how a runner renders a view and checks it, shared by runners and compaction providers so they never compute it differently."
 license = "MIT"
@@ -11,6 +11,6 @@ license = "MIT"
 name = "compaction_view"
 
 [dependencies]
-ck-contract-draft = { workspace = true }
+cortexkit-role-compaction = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
