@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use ck_contract_draft::read::SessionRef;
-use ck_contract_draft::rules::{EditCost, ProviderRules, SignedReasoning};
+use ck_contract_draft::rules::{EditCost, ProviderRules, SignedParts};
 use ck_contract_draft::setup::ModelRef;
 use ck_contract_draft::wire;
 use mc_mock_runner::model::Kind;
@@ -224,7 +224,7 @@ async fn play(stack: &Stack, request: &PlayRequest) -> Report {
 }
 
 const FREE: ProviderRules = ProviderRules {
-    signed_reasoning: SignedReasoning::None,
+    signed_parts: SignedParts::None,
     history_edit_cost: EditCost::Suffix,
 };
 

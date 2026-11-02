@@ -165,7 +165,7 @@ impl Session {
         self.pruned_turns = durable.pruned_turns;
         // The first read after a restart starts at the cut: nothing before
         // it is visible to the model.
-        self.index = Index::starting_at(durable.cut.unwrap_or(0));
+        self.index = Index::starting_at(durable.cut.unwrap_or(1));
     }
 
     /// Load the summaries `context.db` already holds for the session, such as
@@ -255,7 +255,7 @@ impl Session {
                         // view cuts at the last summary left; the index is
                         // read again from there.
                         self.cut = self.summarized_through();
-                        self.index = Index::starting_at(self.cut.unwrap_or(0));
+                        self.index = Index::starting_at(self.cut.unwrap_or(1));
                     }
                     if let Some(db) = &self.db {
                         let (harness, session) = (&self.key.harness, &self.key.session);
@@ -333,7 +333,7 @@ impl Session {
         let window = self.conditions.context_window;
         let usage = pass::usage(&self.conditions).unwrap_or(0.0) * 100.0;
         let force = pass::in_force_band(&self.conditions, settings);
-        let from = self.summarized_through().map_or(0, |ordinal| ordinal + 1);
+        let from = self.summarized_through().map_or(1, |ordinal| ordinal + 1);
         let tail =
             trigger::protected_tail_tokens(window, settings.execute_threshold_percentage, usage);
         let entries = self.index.entries();
@@ -369,11 +369,10 @@ impl Session {
     /// that cover any of them, as standalone does. A head that showed one is
     /// rendered again from what remains.
     fn forget_summaries_from(&mut self, ordinal: u64) {
-        let number = ordinal + 1;
         let Some(first) = self
             .summaries
             .iter()
-            .position(|summary| summary.end_message as u64 >= number)
+            .position(|summary| summary.end_message as u64 >= ordinal)
         else {
             return;
         };
@@ -403,11 +402,12 @@ impl Session {
             .map(|summary| summary.end_message_id.clone())
     }
 
-    /// The last ordinal a summary covers.
+    /// The last ordinal a summary covers. Summaries name messages by
+    /// ordinal, which counts from 1.
     fn summarized_through(&self) -> Option<u64> {
         self.summaries
             .last()
-            .map(|summary| (summary.end_message as u64).saturating_sub(1))
+            .map(|summary| summary.end_message as u64)
     }
 
     /// A summarizer run ended. New summaries are stored, and when usage is at
@@ -599,10 +599,11 @@ impl Session {
     /// anyway, or would not fit. Everything held lands now.
     pub fn ride(&mut self, settings: &Settings, ride: &RideRequest) -> Option<View> {
         self.conditions = ride.conditions.clone();
-        let over_limit =
-            (ride.cause == RideCause::OverLimit).then_some(ride.request_tokens.unwrap_or(0));
+        let over_limit = ride
+            .has(RideCause::OverLimit)
+            .then_some(ride.request_tokens.unwrap_or(0));
         // Any other cause loses the cache, so the head folds for free.
-        if over_limit.is_none() {
+        if ride.cache_lost() {
             self.fold_due = true;
         }
         let view = self.build(settings, over_limit).0?;
@@ -683,11 +684,7 @@ impl Session {
                     session: self.key.session.clone(),
                     project: self.project.as_ref().map(|project| project.id.clone()),
                 };
-                let anchor = self
-                    .index
-                    .entries()
-                    .last()
-                    .map(|entry| crate::summary::chunk::message_number(entry.ordinal));
+                let anchor = self.index.entries().last().map(|entry| entry.ordinal);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |elapsed| elapsed.as_millis() as i64);
@@ -1305,7 +1302,7 @@ impl Session {
     /// Read the index again from the cut, the oldest message the model still
     /// sees.
     fn restart_index(&mut self, rebuilt: &mut bool, after: &mut Option<u64>) {
-        self.index = Index::starting_at(self.cut.unwrap_or(0));
+        self.index = Index::starting_at(self.cut.unwrap_or(1));
         *rebuilt = true;
         *after = self.index.read_after();
     }

@@ -12,8 +12,10 @@ use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendReque
 use ck_contract_draft::view::{
     AppliedViewAnswer, AppliedViewRequest, ApplyViewAnswer, ApplyViewRequest,
 };
-use ck_contract_draft::wire::{self, codes};
-use ck_contract_draft::{ops, COMPACTION_PROVIDES, COMPACTION_ROLE};
+use ck_contract_draft::wire::{self, codes, Refusal};
+use ck_contract_draft::{
+    ops, COMPACTION_PROVIDES, COMPACTION_ROLE, COMPACTION_RUNNER_ROLE, LLM_RUNNER_ROLE,
+};
 use cortexkit_role_step_transform_provider as step;
 use cortexkit_role_tool_provider::result::{ContentPart, ToolResult};
 use serde::de::DeserializeOwned;
@@ -97,9 +99,13 @@ impl SubcRunnerClient {
         }
     }
 
+    /// Call the session's runner on the route for `role`, bound to the
+    /// session, one route per role (compaction-runner for the view and entry
+    /// ops, llm-runner for sends and runs).
     async fn call<P: Serialize, A: DeserializeOwned>(
         &self,
         session: &SessionRef,
+        role: (&str, &str),
         method: &str,
         params: &P,
     ) -> Result<A, ClientError> {
@@ -115,6 +121,10 @@ impl SubcRunnerClient {
         };
         let options = CallOptions {
             timeout: RUNNER_CALL_TIMEOUT,
+            role_versions: Some(std::collections::BTreeMap::from([(
+                role.0.to_owned(),
+                role.1.to_owned(),
+            )])),
             ..CallOptions::default()
         };
         let reply = consumer
@@ -137,7 +147,13 @@ impl RunnerClient for SubcRunnerClient {
         session: &SessionRef,
         request: ReadRequest,
     ) -> Result<ReadPage, ClientError> {
-        self.call(session, ops::SESSION_READ, &request).await
+        self.call(
+            session,
+            COMPACTION_RUNNER_ROLE,
+            ops::SESSION_ENTRIES,
+            &request,
+        )
+        .await
     }
 
     async fn apply_view(
@@ -145,12 +161,23 @@ impl RunnerClient for SubcRunnerClient {
         session: &SessionRef,
         request: ApplyViewRequest,
     ) -> Result<ApplyViewAnswer, ClientError> {
-        self.call(session, ops::SESSION_APPLY_VIEW, &request).await
+        self.call(
+            session,
+            COMPACTION_RUNNER_ROLE,
+            ops::SESSION_APPLY_VIEW,
+            &request,
+        )
+        .await
     }
 
     async fn applied_view(&self, session: &SessionRef) -> Result<AppliedViewAnswer, ClientError> {
-        self.call(session, ops::SESSION_APPLIED_VIEW, &AppliedViewRequest {})
-            .await
+        self.call(
+            session,
+            COMPACTION_RUNNER_ROLE,
+            ops::SESSION_APPLIED_VIEW,
+            &AppliedViewRequest {},
+        )
+        .await
     }
 
     async fn send(
@@ -158,7 +185,8 @@ impl RunnerClient for SubcRunnerClient {
         session: &SessionRef,
         request: SendRequest,
     ) -> Result<SendAnswer, ClientError> {
-        self.call(session, ops::SESSION_SEND, &request).await
+        self.call(session, LLM_RUNNER_ROLE, ops::SESSION_SEND, &request)
+            .await
     }
 
     async fn run_result(
@@ -166,7 +194,8 @@ impl RunnerClient for SubcRunnerClient {
         session: &SessionRef,
         request: RunResultRequest,
     ) -> Result<RunResult, ClientError> {
-        self.call(session, ops::RUN_RESULT, &request).await
+        self.call(session, LLM_RUNNER_ROLE, ops::RUN_RESULT, &request)
+            .await
     }
 }
 
@@ -186,8 +215,32 @@ const HOOK_ROLE: (&str, &str) = ("step-transform-provider", "v1");
 #[derive(Clone)]
 struct Bound {
     route: Route,
-    /// The single role the opener declared, as name and version.
-    role: Option<(String, String)>,
+    role: RouteRole,
+}
+
+/// The roles ck-mc serves, one per route.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RouteRole {
+    Compaction,
+    Tools,
+    Hooks,
+}
+
+impl RouteRole {
+    /// The role a route declares, when it declares exactly one ck-mc serves.
+    fn declared(roles: Option<&std::collections::BTreeMap<String, String>>) -> Option<Self> {
+        let roles = roles?;
+        if roles.len() != 1 {
+            return None;
+        }
+        let (name, version) = roles.iter().next()?;
+        match (name.as_str(), version.as_str()) {
+            COMPACTION_ROLE => Some(Self::Compaction),
+            TOOL_ROLE => Some(Self::Tools),
+            HOOK_ROLE => Some(Self::Hooks),
+            _ => None,
+        }
+    }
 }
 
 impl Handler {
@@ -198,50 +251,36 @@ impl Handler {
         }
     }
 
-    async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Value, (String, String)> {
+    async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Value, Refusal> {
+        // Every route was checked at bind (`on_bind`): one known role, and a
+        // bound session unless it is a module-level hook route.
         let bound = self
             .bound
             .lock()
             .expect("bound routes")
             .get(&channel)
             .cloned()
-            .ok_or_else(|| (codes::REFUSED.to_owned(), "route_unbound".to_owned()))?;
-        let role = bound
-            .role
-            .as_ref()
-            .map(|(name, version)| (name.as_str(), version.as_str()));
-        match role {
-            Some(COMPACTION_ROLE) => self.compaction(&bound.route, body).await,
-            Some(TOOL_ROLE) => self.tool(&bound.route, body).await,
-            Some(HOOK_ROLE) => self.hook(&bound.route, body).await,
-            _ => Err((
-                codes::REFUSED.to_owned(),
-                "unknown_route_role: open the route for compaction-provider/v2, tool-provider/v1 or step-transform-provider/v1"
-                    .to_owned(),
-            )),
+            .ok_or_else(|| Refusal::new(codes::ROUTE_UNBOUND, "no route was bound", None))?;
+        match bound.role {
+            RouteRole::Compaction => self.compaction(&bound.route, body).await,
+            RouteRole::Tools => self.tool(&bound.route, body).await,
+            RouteRole::Hooks => self.hook(&bound.route, body).await,
         }
     }
 
     /// A compaction op, about the session the route is bound to.
-    async fn compaction(&self, route: &Route, body: &[u8]) -> Result<Value, (String, String)> {
-        let bad = |message: String| (codes::BAD_REQUEST.to_owned(), message);
-        let (method, params) = wire::decode(body).map_err(bad)?;
+    async fn compaction(&self, route: &Route, body: &[u8]) -> Result<Value, Refusal> {
+        let (method, params) = wire::decode(body)?;
         let session = &route.session;
         let answer = match method.as_str() {
-            ops::COMPACTION_SETUP => to_value(
-                self.module
-                    .setup(route.clone(), wire::params(params).map_err(bad)?),
-            ),
-            ops::COMPACTION_NOTICE => to_value(
-                self.module
-                    .notice(session, wire::params(params).map_err(bad)?),
-            ),
-            ops::COMPACTION_RIDE => to_value(
-                self.module
-                    .ride(session, wire::params(params).map_err(bad)?)
-                    .await,
-            ),
-            other => return Err(unknown_method(other)),
+            ops::COMPACTION_SETUP => {
+                to_value(self.module.setup(route.clone(), wire::params(params)?))
+            }
+            ops::COMPACTION_NOTICE => to_value(self.module.notice(session, wire::params(params)?)),
+            ops::COMPACTION_RIDE => {
+                to_value(self.module.ride(session, wire::params(params)?).await)
+            }
+            other => return Err(Refusal::unknown_method(other)),
         };
         answer.map_err(refusal)
     }
@@ -249,16 +288,12 @@ impl Handler {
     /// A model tool call (`tool-provider/v1`): the body is the published
     /// `{name, arguments}` call, and the answer its tool result. The call is
     /// about the session the route is bound to.
-    async fn tool(&self, route: &Route, body: &[u8]) -> Result<Value, (String, String)> {
-        let call: ToolCallRequest = serde_json::from_slice(body).map_err(|error| {
-            (
-                codes::BAD_REQUEST.to_owned(),
-                format!("not a tool call: {error}"),
-            )
-        })?;
+    async fn tool(&self, route: &Route, body: &[u8]) -> Result<Value, Refusal> {
+        let call: ToolCallRequest = serde_json::from_slice(body)
+            .map_err(|error| Refusal::invalid_params("", format!("not a tool call: {error}")))?;
         if !call.name.starts_with("ctx_") {
             let error = cortexkit_role_tool_provider::errors::unknown_tool(&call.name);
-            return Err((error.code, error.message));
+            return Err(Refusal::new(&error.code, error.message, None));
         }
         let (text, is_error) = match self
             .module
@@ -281,27 +316,23 @@ impl Handler {
     /// sessions. The body only picks among the sessions of the runner the
     /// daemon attests for the route, so one runner never reaches another's;
     /// on a route bound to one session, the body must name that session.
-    async fn hook(&self, route: &Route, body: &[u8]) -> Result<Value, (String, String)> {
-        let bad = |message: String| (codes::BAD_REQUEST.to_owned(), message);
-        let (method, params) = wire::decode(body).map_err(bad)?;
+    async fn hook(&self, route: &Route, body: &[u8]) -> Result<Value, Refusal> {
+        let (method, params) = wire::decode(body)?;
         match method.as_str() {
             step::ops::TRANSFORM_DECLARE => {
-                let request: DeclareRequest = wire::params(params).map_err(bad)?;
-                let declaration = declare(request.preset.as_deref().unwrap_or("head"))
-                    .ok_or_else(|| bad("unknown preset".into()))?;
+                let request: DeclareRequest = wire::params(params)?;
+                let preset = request.preset.as_deref().unwrap_or("head");
+                let declaration = declare(preset).ok_or_else(|| Refusal::unknown_preset(preset))?;
                 Ok(serde_json::to_value(declaration).expect("answers serialize"))
             }
             step::ops::TRANSFORM_HOOK => {
-                let call: HookCall = wire::params(params).map_err(bad)?;
+                let call: HookCall = wire::params(params)?;
                 let bound_to_session = route.session.harness != MODULE_LEVEL_HARNESS;
                 if bound_to_session
                     && (call.harness != route.session.harness
                         || call.session != route.session.session)
                 {
-                    return Err((
-                        codes::REFUSED.to_owned(),
-                        "session_mismatch: the hook names another session than its route".into(),
-                    ));
+                    return Err(Refusal::session_mismatch(&call.session));
                 }
                 let session = SessionRef {
                     runner: route.session.runner.clone(),
@@ -320,7 +351,7 @@ impl Handler {
                 };
                 Ok(serde_json::to_value(answer).expect("answers serialize"))
             }
-            other => Err(unknown_method(other)),
+            other => Err(Refusal::unknown_method(other)),
         }
     }
 }
@@ -389,24 +420,15 @@ fn now_ms() -> u64 {
         })
 }
 
-fn unknown_method(method: &str) -> (String, String) {
-    (
-        codes::UNKNOWN_METHOD.to_owned(),
-        format!("ck-mc does not serve `{method}` on this route"),
-    )
-}
-
 fn to_value<T: Serialize>(result: Result<T, ModuleError>) -> Result<Value, ModuleError> {
     result.map(|answer| serde_json::to_value(answer).expect("answers serialize"))
 }
 
-fn refusal(error: ModuleError) -> (String, String) {
+fn refusal(error: ModuleError) -> Refusal {
     match error {
-        ModuleError::UnknownSession => (
-            codes::UNKNOWN_SESSION.to_owned(),
-            "no Setup for this session".into(),
-        ),
-        other => (codes::REFUSED.to_owned(), format!("{other:?}")),
+        ModuleError::UnknownSession => Refusal::unknown_session(),
+        ModuleError::UnknownPreset(preset) => Refusal::unknown_preset(&preset),
+        other => Refusal::new("internal", format!("{other:?}"), None),
     }
 }
 
@@ -420,17 +442,24 @@ impl ModuleHandler for Handler {
     async fn on_bind(&self, request: &RouteBindRequest) -> BindDecision {
         let Some(Principal::Reserved { module_id }) = &request.principal else {
             return BindDecision::reject(
-                "unattested_runner",
+                codes::UNATTESTED_RUNNER,
                 "ck-mc serves sessions only to a runner the daemon attests",
             );
         };
-        let role = match request.role_versions.as_ref() {
-            Some(roles) if roles.len() == 1 => roles
-                .iter()
-                .next()
-                .map(|(name, version)| (name.clone(), version.clone())),
-            _ => None,
+        let Some(role) = RouteRole::declared(request.role_versions.as_ref()) else {
+            return BindDecision::reject(
+                codes::UNKNOWN_ROUTE_ROLE,
+                "open the route for exactly one of compaction-provider/v2, tool-provider/v1 or step-transform-provider/v1",
+            );
         };
+        // Only the transitional hook routes may serve all of a runner's
+        // sessions; every other route concerns the session it is bound to.
+        if role != RouteRole::Hooks && request.identity.harness == MODULE_LEVEL_HARNESS {
+            return BindDecision::reject(
+                codes::ROUTE_UNBOUND,
+                "compaction and tool routes must be bound to a session",
+            );
+        }
         let project =
             request
                 .scope
@@ -462,7 +491,16 @@ impl ModuleHandler for Handler {
             Ok(answer) => {
                 HandlerOutcome::Response(serde_json::to_vec(&answer).expect("answers serialize"))
             }
-            Err((code, message)) => HandlerOutcome::Error { code, message },
+            Err(Refusal {
+                code,
+                message,
+                detail: Some(detail),
+            }) => HandlerOutcome::ErrorWithDetail {
+                code,
+                message,
+                detail,
+            },
+            Err(Refusal { code, message, .. }) => HandlerOutcome::Error { code, message },
         }
     }
 }

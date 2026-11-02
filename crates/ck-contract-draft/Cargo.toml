@@ -8,4 +8,7 @@ description = "Local draft of the cleaned llm-runner and compaction-provider con
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
+# Checksums: llm-runner's shared RFC 8785 content digest (W7).
+cortexkit-role-llm-runner = "=0.7.48"
+# Names the field a request failed to decode at (`invalid_params`).
+serde_path_to_error = "0.1"

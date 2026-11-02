@@ -3,7 +3,7 @@
 //! provider has its own estimator and calibrates it against the prompt sizes
 //! the providers report, which is what these counts become.
 
-use ck_contract_draft::part::{Part, PartBody};
+use ck_contract_draft::part::{AttachmentItem, Part, PartBody};
 use ck_contract_draft::view::RenderedMessage;
 
 /// Tokens for an image, whatever its size.
@@ -35,11 +35,21 @@ pub fn part_tokens(
             let attachments: u64 = tool
                 .attachments
                 .iter()
-                .map(|attachment| media_tokens(&attachment.media.mime, attachment.media.size))
+                .map(|attachment| match &attachment.item {
+                    AttachmentItem::File(file) => media_tokens(&file.mime, file.size),
+                    AttachmentItem::Opaque(opaque) => bytes_tokens(opaque.size.unwrap_or(0)),
+                })
                 .sum();
-            text_tokens(&tool.name) + text_tokens(&input) + wire() + attachments
+            // Text delivered with the result renders after it.
+            let delivered: u64 = tool
+                .delivered
+                .iter()
+                .map(|delivered| bytes_tokens(delivered.text_bytes))
+                .sum();
+            text_tokens(&tool.name) + text_tokens(&input) + wire() + attachments + delivered
         }
-        PartBody::Image(media) | PartBody::File(media) => media_tokens(&media.mime, media.size),
+        PartBody::File(file) => media_tokens(&file.mime, file.size),
+        PartBody::Opaque(opaque) => bytes_tokens(opaque.size.unwrap_or(0)),
     }
 }
 

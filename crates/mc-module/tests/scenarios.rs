@@ -11,7 +11,7 @@ use ck_contract_draft::notice::{NoticeAnswer, NoticeRequest};
 use ck_contract_draft::part::PartBody;
 use ck_contract_draft::read::{ReadPage, ReadRequest, SessionRef};
 use ck_contract_draft::ride::{RideAnswer, RideCause, RideRequest};
-use ck_contract_draft::rules::{EditCost, ProviderRules, SignedReasoning};
+use ck_contract_draft::rules::{EditCost, ProviderRules, SignedParts};
 use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendRequest};
 use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
@@ -193,12 +193,12 @@ impl Provider for InProcess {
 }
 
 const FREE: ProviderRules = ProviderRules {
-    signed_reasoning: SignedReasoning::None,
+    signed_parts: SignedParts::None,
     history_edit_cost: EditCost::Suffix,
 };
 
 const BOUND: ProviderRules = ProviderRules {
-    signed_reasoning: SignedReasoning::Bound,
+    signed_parts: SignedParts::Bound,
     history_edit_cost: EditCost::Suffix,
 };
 
@@ -483,7 +483,7 @@ async fn a_cache_loss_lands_queued_drops_below_the_threshold() {
     assert_clean(&runner);
     let rides = &runner.report.rides;
     assert_eq!(rides.len(), 1);
-    assert_eq!(rides[0].cause, RideCause::CacheExpired);
+    assert_eq!(rides[0].causes, [RideCause::CacheExpired]);
     assert!(rides[0].got_view);
     assert_eq!(
         seen(runner.host(), 3).as_deref(),
@@ -609,7 +609,7 @@ async fn heavy_signed_thinking_holds_the_view_until_usage_passes_threshold_plus_
 }
 
 /// The arguments the model sees for the tool part numbered `tag`.
-fn seen_input(host: &Host, tag: u64) -> Option<serde_json::Map<String, Value>> {
+fn seen_input(host: &Host, tag: u64) -> Option<Value> {
     host.rendered().iter().find_map(|message| {
         message
             .parts
@@ -767,7 +767,7 @@ async fn a_request_over_the_limit_gets_a_view_where_the_protections_yield() {
     assert_clean(&runner);
     let rides = &runner.report.rides;
     assert_eq!(rides.len(), 1);
-    assert_eq!(rides[0].cause, RideCause::OverLimit);
+    assert_eq!(rides[0].causes, [RideCause::OverLimit]);
     assert!(rides[0].got_view);
     let host = runner.host();
     for tag in [3, 5, 7] {
@@ -953,7 +953,7 @@ async fn a_lost_cache_folds_the_newer_summaries_into_the_baseline() {
     runner.play(&[answer()]).await;
     assert_clean(&runner);
     let ride = runner.report.rides.last().unwrap();
-    assert_eq!(ride.cause, RideCause::CacheExpired);
+    assert_eq!(ride.causes, [RideCause::CacheExpired]);
     assert!(ride.got_view);
     let (m0, m1) = head_texts(runner.host());
     assert!(
@@ -979,8 +979,8 @@ async fn a_revert_into_summarized_history_forgets_those_summaries() {
     runner.play(&[answer(), answer()]).await;
     let last = runner.report.requests.last().unwrap();
     assert!(
-        last.usage.prompt_tokens < 25_350,
-        "{}",
+        last.usage.prompt_tokens.unwrap() < 25_350,
+        "{:?}",
         last.usage.prompt_tokens
     );
 
@@ -998,7 +998,7 @@ async fn a_revert_into_summarized_history_forgets_those_summaries() {
     // without the summaries of what was undone, at low usage.
     runner
         .play(&[
-            Step::Revert { ordinal: 1 },
+            Step::Revert { ordinal: 2 },
             user("Start over."),
             answer(),
             answer(),
@@ -1811,21 +1811,40 @@ async fn a_reduce_reminder_rides_the_next_tool_result_once_and_a_reduce_quiets_i
     steps.push(answer());
     runner.play(&steps).await;
     assert_clean(&runner);
-    let outputs = tool_outputs(runner.host(), "read");
-    let carrying: Vec<usize> = outputs
+    // A reminder rides a tool result in the tool part's delivered list,
+    // after the result, never inside the tool's own output.
+    let delivered: Vec<Vec<String>> = runner
+        .host()
+        .entries()
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .filter_map(|part| match &part.body {
+            PartBody::Tool(tool) if tool.name == "read" => Some(
+                tool.delivered
+                    .iter()
+                    .map(|delivered| delivered.text.clone().unwrap_or_default())
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect();
+    let carrying: Vec<usize> = delivered
         .iter()
         .enumerate()
-        .filter(|(_, output)| output.contains("<system-reminder>"))
+        .filter(|(_, texts)| !texts.is_empty())
         .map(|(at, _)| at)
         .collect();
     // Decided once the ninth result arrived, carried by the tenth, and not
     // again: neither more reads within the band nor the reads after the
     // reduce grow enough.
     assert_eq!(carrying, vec![9], "{carrying:?}");
-    let reminder = &outputs[9][28_000..];
+    assert!(tool_outputs(runner.host(), "read")
+        .iter()
+        .all(|output| !output.contains("<system-reminder>")));
+    let reminder = &delivered[9][0];
     assert!(
         reminder.starts_with(
-            "\n\n<system-reminder>\n6 spent tool outputs (~42k tokens) are still unstamped. \
+            "<system-reminder>\n6 spent tool outputs (~42k tokens) are still unstamped. \
              Call ctx_reduce now, before your next tool call, on every output you've already used.\n\
              oldest reclaimable: §3§ read · §5§ read · §7§ read · §9§ read.\n</system-reminder>"
         ),
@@ -1901,7 +1920,7 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
         service_tier: None,
     };
     let cursor = ck_contract_draft::read::Cursor {
-        ordinal: 0,
+        ordinal: 1,
         mid: "m0".into(),
         digest: "d".into(),
     };
@@ -1915,6 +1934,7 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
         context_window: 40_000,
         output_reserve: 4_000,
         rules: FREE,
+        detects: Vec::new(),
         applied_view: None,
         newest,
         now: 0,
@@ -1957,7 +1977,7 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
         .unwrap();
     // A ride on the stuck session answers within its deadline, with nothing.
     let ride = RideRequest {
-        cause: RideCause::CacheExpired,
+        causes: vec![RideCause::CacheExpired],
         deadline_ms: 200,
         conditions,
         applied_view: None,
@@ -2102,7 +2122,7 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         output_reserve: session_config.output_reserve,
         rules: FREE,
         newest: ck_contract_draft::read::Cursor {
-            ordinal: 5,
+            ordinal: 6,
             mid: "msg00006".into(),
             digest: "d".into(),
         },

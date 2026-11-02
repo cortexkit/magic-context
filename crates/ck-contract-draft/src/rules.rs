@@ -8,29 +8,29 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::part::{PartBody, Sealing};
+use crate::part::Seal;
 use crate::read::Entry;
 use crate::view::{Edit, EditOp, InsertAt};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderRules {
-    pub signed_reasoning: SignedReasoning,
+    pub signed_parts: SignedParts,
     pub history_edit_cost: EditCost,
 }
 
-/// How signed reasoning constrains edits.
+/// How parts with [`Seal::Signed`] constrain edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SignedReasoning {
+pub enum SignedParts {
     /// No constraint.
     None,
-    /// Anthropic thinking on prefix-bound models (Opus 5.5, Sonnet 5.5,
-    /// Fable 5.1). A signed reasoning part stays valid only while the history
-    /// before it renders exactly as it did when the part was generated, with
-    /// one allowance: earlier signed reasoning parts may be left out as an
-    /// oldest contiguous run. Leaving out a part in the middle, or any other
-    /// edit before it (a drop, a replace, an inserted message), invalidates
-    /// it, so the view must leave it out as well.
+    /// Anthropic thinking on the current families (Opus 5.5, Sonnet 5.5,
+    /// Fable 5.1, Haiku 5.5). A signed part stays valid only while the
+    /// history before it renders exactly as it did when the part was
+    /// generated, with one allowance: earlier signed parts may be left out
+    /// as an oldest contiguous run. Leaving out a part in the middle, or any
+    /// other edit before it (a drop, a replace, an inserted message),
+    /// invalidates it, so the view must leave it out as well.
     Bound,
 }
 
@@ -45,17 +45,85 @@ pub enum EditCost {
     FullResend,
 }
 
+/// Claude models whose signed thinking Anthropic binds to the request
+/// prefix, as family, major and minor. The source is Anthropic's
+/// preserved-thinking page ("Keeping the prefix unchanged"); add a row when
+/// it names a new model. Accounts created on or after 2026-08-31 enforce the
+/// binding on the Claude API, Vertex and Bedrock alike, so the route does not
+/// matter. The standalone plugin keeps the same list
+/// (`PREFIX_BOUND_THINKING_MODELS` in `overflow-detection.ts`).
+pub const BOUND_SIGNED_MODELS: &[(&str, u32, u32)] = &[
+    ("fable", 5, 1),
+    ("opus", 5, 5),
+    ("sonnet", 5, 5),
+    ("haiku", 5, 5),
+];
+
+/// The rules a runner declares for a model unless it knows better: signed
+/// parts are bound for [`BOUND_SIGNED_MODELS`], and an edit costs a re-read
+/// from the changed byte. A runner overrides `history_edit_cost` with
+/// `full_resend` on a route it knows chains its requests, and may override
+/// `signed_parts` for an account it knows is not bound.
+pub fn defaults(model: &str) -> ProviderRules {
+    ProviderRules {
+        signed_parts: if is_bound_signed_model(model) {
+            SignedParts::Bound
+        } else {
+            SignedParts::None
+        },
+        history_edit_cost: EditCost::Suffix,
+    }
+}
+
+/// Whether a model id names one of [`BOUND_SIGNED_MODELS`] on any route:
+/// the family, an optional `-`, `_` or `.`, the major, one of them, the
+/// minor, bounded on both sides so `sonnet-5-50` or `notsonnet-5-5` never
+/// match. The trailing boundary also accepts Vertex `@date` and Bedrock `:0`
+/// suffixes. Case does not matter.
+pub fn is_bound_signed_model(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    let bytes = model.as_bytes();
+    let separator = |b: u8| matches!(b, b'-' | b'_' | b'.');
+    BOUND_SIGNED_MODELS.iter().any(|(family, major, minor)| {
+        let (major, minor) = (major.to_string(), minor.to_string());
+        model.match_indices(family).any(|(start, _)| {
+            if start > 0 && !matches!(bytes[start - 1], b'-' | b'_' | b'.' | b':' | b'/') {
+                return false;
+            }
+            let mut at = start + family.len();
+            if bytes.get(at).copied().is_some_and(separator) {
+                at += 1;
+            }
+            if !model[at..].starts_with(&major) {
+                return false;
+            }
+            at += major.len();
+            if !bytes.get(at).copied().is_some_and(separator) {
+                return false;
+            }
+            at += 1;
+            if !model[at..].starts_with(&minor) {
+                return false;
+            }
+            at += minor.len();
+            bytes
+                .get(at)
+                .is_none_or(|&b| matches!(b, b'-' | b'_' | b'.' | b':' | b'/' | b'@'))
+        })
+    })
+}
+
 /// A rule a view breaks.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "rule", rename_all = "snake_case")]
 pub enum RuleBreak {
-    /// A signed reasoning part the view keeps is no longer valid.
-    SignedReasoningInvalid { mid: String, part: String },
+    /// A signed part the view keeps is no longer valid.
+    SignedPartInvalid { mid: String, part: String },
 }
 
 /// Check a view's edits against the rules.
 ///
-/// An edit already in the view a reasoning part was generated under (its
+/// An edit already in the view a signed part was generated under (its
 /// `since` is not later than that view's version) was part of the history the
 /// part was signed against, so it does not invalidate the part.
 pub fn check(entries: &[Entry], edits: &[Edit], rules: &ProviderRules) -> Result<(), RuleBreak> {
@@ -63,12 +131,12 @@ pub fn check(entries: &[Entry], edits: &[Edit], rules: &ProviderRules) -> Result
         .into_iter()
         .next()
     {
-        Some((mid, part)) => Err(RuleBreak::SignedReasoningInvalid { mid, part }),
+        Some((mid, part)) => Err(RuleBreak::SignedPartInvalid { mid, part }),
         None => Ok(()),
     }
 }
 
-/// The signed reasoning parts a view keeps that its own edits invalidate, in
+/// The signed parts a view keeps that its own edits invalidate, in
 /// transcript order. A provider adds a drop for each of them; since a drop is
 /// itself an edit, it repeats until this returns nothing.
 pub fn invalid_signed_parts(
@@ -76,16 +144,16 @@ pub fn invalid_signed_parts(
     edits: &[Edit],
     rules: &ProviderRules,
 ) -> Vec<(String, String)> {
-    if rules.signed_reasoning == SignedReasoning::None {
+    if rules.signed_parts == SignedParts::None {
         return Vec::new();
     }
     let layout = Layout::new(entries);
 
-    // Positions of edits other than leaving out a reasoning part, with the
+    // Positions of edits other than leaving out a signed part, with the
     // version that introduced each.
     let mut changes: Vec<(Position, u64)> = Vec::new();
-    // Reasoning parts left out, with the version that left each out.
-    let mut reasoning_drops: std::collections::HashMap<(usize, usize), u64> = Default::default();
+    // Signed parts left out, with the version that left each out.
+    let mut signed_drops: std::collections::HashMap<(usize, usize), u64> = Default::default();
     for edit in edits {
         let since = edit.since;
         match &edit.op {
@@ -94,8 +162,8 @@ pub fn invalid_signed_parts(
                 part: Some(part),
             } => {
                 if let Some(position) = layout.part(mid, part) {
-                    if layout.is_reasoning(position) {
-                        reasoning_drops.insert((position.entry, position.slot), since);
+                    if layout.is_signed(position) {
+                        signed_drops.insert((position.entry, position.slot), since);
                     } else {
                         changes.push((position, since));
                     }
@@ -143,12 +211,12 @@ pub fn invalid_signed_parts(
         .flatten()
         .collect();
 
-    // Every signed reasoning part, in transcript order.
-    let signed: Vec<Position> = layout.signed_reasoning();
+    // Every signed part, in transcript order.
+    let signed: Vec<Position> = layout.signed();
     let mut invalid = Vec::new();
     for (index, &position) in signed.iter().enumerate() {
         let kept = !dropped_messages.contains(&position.entry)
-            && !reasoning_drops.contains_key(&(position.entry, position.slot));
+            && !signed_drops.contains_key(&(position.entry, position.slot));
         if !kept {
             continue;
         }
@@ -161,7 +229,7 @@ pub fn invalid_signed_parts(
         let mut seen_kept = false;
         let mut gap = false;
         for earlier in &signed[..index] {
-            match reasoning_drops.get(&(earlier.entry, earlier.slot)) {
+            match signed_drops.get(&(earlier.entry, earlier.slot)) {
                 Some(since) if *since > generated => {
                     if seen_kept {
                         gap = true;
@@ -229,24 +297,15 @@ impl<'a> Layout<'a> {
         })
     }
 
-    fn is_reasoning(&self, position: Position) -> bool {
-        matches!(
-            self.entries[position.entry].parts[position.slot - 1].body,
-            PartBody::Reasoning { .. }
-        )
+    fn is_signed(&self, position: Position) -> bool {
+        self.entries[position.entry].parts[position.slot - 1].seal == Seal::Signed
     }
 
-    fn signed_reasoning(&self) -> Vec<Position> {
+    fn signed(&self) -> Vec<Position> {
         let mut out = Vec::new();
         for (entry, message) in self.entries.iter().enumerate() {
             for (part, candidate) in message.parts.iter().enumerate() {
-                if matches!(
-                    candidate.body,
-                    PartBody::Reasoning {
-                        sealing: Sealing::Signed,
-                        ..
-                    }
-                ) {
+                if candidate.seal == Seal::Signed {
                     out.push(Position {
                         entry,
                         slot: part + 1,
@@ -264,5 +323,37 @@ impl<'a> Layout<'a> {
             .generated_under
             .as_ref()
             .map_or(0, |view| view.version)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_claude_families_are_bound_on_every_route() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-sonnet-5.5",
+            "anthropic/claude-fable-5-1",
+            "claude-haiku-5-5@20261001",
+            "anthropic.claude-opus-5-5-v1:0",
+            "CLAUDE-OPUS-5-5",
+        ] {
+            assert_eq!(defaults(model).signed_parts, SignedParts::Bound, "{model}");
+        }
+        for model in [
+            "claude-sonnet-5-50",
+            "notsonnet-5-5",
+            "claude-opus-4-8",
+            "gpt-6.1-sol",
+            "gemini-3.8-flash",
+        ] {
+            assert_eq!(defaults(model).signed_parts, SignedParts::None, "{model}");
+        }
+        assert_eq!(
+            defaults("claude-opus-5-5").history_edit_cost,
+            EditCost::Suffix
+        );
     }
 }

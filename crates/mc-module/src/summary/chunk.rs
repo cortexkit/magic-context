@@ -1,7 +1,7 @@
 //! The text the summarizer reads: the runner's messages as numbered lines,
 //! in the format the TypeScript plugin's chunk reader produces.
 //!
-//! A message's number is the runner's ordinal plus one. Consecutive messages
+//! A message's number is the runner's ordinal, which counts from 1. Consecutive messages
 //! of the same role merge into one line: `[3-5] A: first / second`. An
 //! assistant message with no text shows its tool calls instead
 //! (`TC: read(src/a.rs)`), and such a line counts as tool-only, a range the
@@ -16,19 +16,13 @@ use std::sync::OnceLock;
 use ck_contract_draft::part::PartBody;
 use ck_contract_draft::read::{Entry, Role};
 use regex::Regex;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use super::validate::{ChunkLine, HistorianChunk, MessageRange};
 
 const MAX_COMMITS_PER_BLOCK: usize = 5;
 const SYSTEM_DIRECTIVE_PREFIX: &str = "[SYSTEM DIRECTIVE: MAGIC-CONTEXT";
 const OMO_INTERNAL_INITIATOR_MARKER: &str = "<!-- OMO_INTERNAL_INITIATOR -->";
-
-/// A message's number: the runner's ordinal plus one, so the first message
-/// is 1, as standalone sessions number them.
-pub fn message_number(ordinal: u64) -> u64 {
-    ordinal + 1
-}
 
 /// What the summarizer is sent, and what its reply is checked against.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,7 +103,9 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
     };
 
     for entry in entries {
-        let number = message_number(entry.ordinal);
+        // Ordinals count from 1, as standalone sessions number messages, so
+        // a summary names messages by their ordinal.
+        let number = entry.ordinal;
         let line = ChunkLine {
             ordinal: number,
             message_id: entry.mid.clone(),
@@ -234,11 +230,14 @@ fn render_entry(entry: &Entry) -> Option<(char, Vec<String>, Vec<String>, bool)>
             let (text, commits) = compact_text_for_summary(&texts.join(" / "));
             Some(('A', vec![text], commits, true))
         }
+        // A turn-scoped system entry carries module text, never the user's or
+        // the model's words, so the summarizer leaves it out.
+        Role::System => None,
     }
 }
 
 /// `TC: <description>` when the call states one, else `TC: name(key arg)`.
-fn tool_summary(name: &str, input: &Map<String, Value>) -> String {
+fn tool_summary(name: &str, input: &Value) -> String {
     if let Some(description) = input
         .get("description")
         .and_then(Value::as_str)
@@ -407,7 +406,7 @@ fn commit_verb_regex() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ck_contract_draft::part::{Part, ToolPart, ToolStatus};
+    use ck_contract_draft::part::{OutputFormat, Part, Seal, ToolPart, ToolStatus};
     use ck_contract_draft::read::{entry_digest, NoticeOrigin};
     use serde_json::json;
 
@@ -415,7 +414,7 @@ mod tests {
         let parts: Vec<Part> = parts
             .into_iter()
             .enumerate()
-            .map(|(index, body)| Part::new(format!("p{ordinal}.{index}"), None, body))
+            .map(|(index, body)| Part::new(format!("p{ordinal}.{index}"), None, Seal::None, body))
             .collect();
         let notice = notice.then(|| NoticeOrigin {
             sender: "prefrontal".into(),
@@ -442,11 +441,15 @@ mod tests {
         PartBody::Tool(ToolPart {
             call_id: "c".into(),
             name: name.into(),
-            input: input.as_object().unwrap().clone(),
+            input,
+            provider_executed: false,
             status: ToolStatus::Completed,
             output: Some("done".into()),
+            output_format: OutputFormat::Text,
             output_bytes: Some(4),
             attachments: Vec::new(),
+            approval: None,
+            delivered: Vec::new(),
         })
     }
 
@@ -454,15 +457,15 @@ mod tests {
     fn lines_merge_by_role_and_tool_only_messages_show_their_calls() {
         let answer = "<system-reminder>\nInbox 12:00 notice from user via user_answer (user_answer)\nThe user answered your parked question ask_1.\nQuestion: Ship it?\nAnswer: Yes\nThis ask is now closed; no dismiss is needed. Continue accordingly.\n</system-reminder>";
         let entries = vec![
-            entry(0, Role::User, false, vec![text("Fix  the\nbug.")]),
+            entry(1, Role::User, false, vec![text("Fix  the\nbug.")]),
             entry(
-                1,
+                2,
                 Role::Assistant,
                 false,
                 vec![tool("read", json!({"filePath": "src/a.rs"}))],
             ),
             entry(
-                2,
+                3,
                 Role::Assistant,
                 false,
                 vec![tool(
@@ -471,7 +474,7 @@ mod tests {
                 )],
             ),
             entry(
-                3,
+                4,
                 Role::User,
                 true,
                 vec![text(
@@ -479,12 +482,12 @@ mod tests {
                 )],
             ),
             entry(
-                4,
+                5,
                 Role::Assistant,
                 false,
                 vec![text("Committed abc1234 with the fix.")],
             ),
-            entry(5, Role::User, true, vec![text(answer)]),
+            entry(6, Role::User, true, vec![text(answer)]),
         ];
         let chunk = build(&entries, 10_000).unwrap();
         assert_eq!(
@@ -511,8 +514,8 @@ mod tests {
     #[test]
     fn a_line_past_the_budget_ends_the_chunk() {
         let entries = vec![
-            entry(0, Role::User, false, vec![text("First.")]),
-            entry(1, Role::Assistant, false, vec![text(&"word ".repeat(400))]),
+            entry(1, Role::User, false, vec![text("First.")]),
+            entry(2, Role::Assistant, false, vec![text(&"word ".repeat(400))]),
         ];
         let chunk = build(&entries, 50).unwrap();
         assert_eq!(chunk.validation.end_index, 1);
@@ -523,7 +526,7 @@ mod tests {
     #[test]
     fn only_noise_builds_no_chunk() {
         let entries = vec![entry(
-            0,
+            1,
             Role::User,
             true,
             vec![text("<system-reminder>x</system-reminder>")],

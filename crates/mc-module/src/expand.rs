@@ -8,10 +8,10 @@
 
 use std::sync::OnceLock;
 
-use ck_contract_draft::part::{PartBody, ToolStatus};
+use ck_contract_draft::part::{AttachmentItem, PartBody, ToolStatus};
 use ck_contract_draft::read::{Entry, Role, SessionRef};
 use regex::Regex;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::client::RunnerClient;
 use crate::reads;
@@ -115,6 +115,7 @@ fn role_label(entry: &Entry) -> &'static str {
     match entry.role {
         Role::Assistant => "A (assistant)",
         Role::User => "U (user)",
+        Role::System => "S (system)",
     }
 }
 
@@ -127,7 +128,7 @@ fn truncate(value: &str, max: usize) -> String {
 }
 
 /// The one argument that best says what a tool call was about.
-fn key_arg(input: &Map<String, Value>) -> String {
+fn key_arg(input: &Value) -> String {
     for key in [
         "filePath",
         "path",
@@ -179,27 +180,24 @@ fn render_part_full(body: &PartBody) -> Option<String> {
             lines.extend(attachments_line(
                 tool.attachments
                     .iter()
-                    .map(|attachment| {
-                        attachment
-                            .media
-                            .name
-                            .clone()
-                            .unwrap_or_else(|| attachment.media.mime.clone())
+                    .map(|attachment| match &attachment.item {
+                        AttachmentItem::File(file) => {
+                            file.name.clone().unwrap_or_else(|| file.mime.clone())
+                        }
+                        AttachmentItem::Opaque(opaque) => opaque.provider_kind.clone(),
                     })
                     .collect(),
             ));
             Some(lines.join("\n"))
         }
-        PartBody::Image(media) | PartBody::File(media) => Some(format!(
+        PartBody::File(file) => Some(format!(
             "  [{}] {} (not kept; ask the user to attach it again if needed)",
-            if matches!(body, PartBody::Image(_)) {
-                "image"
-            } else {
-                "file"
-            },
-            media.name.clone().unwrap_or_else(|| media.mime.clone())
+            if file.is_image() { "image" } else { "file" },
+            file.name.clone().unwrap_or_else(|| file.mime.clone())
         )),
-        PartBody::Reasoning { .. } => None,
+        // Neither is text anyone wrote: reasoning is never shown, and a
+        // provider's own item has no text to show.
+        PartBody::Reasoning { .. } | PartBody::Opaque(_) => None,
     }
 }
 
@@ -226,8 +224,9 @@ fn render_part_preview(body: &PartBody) -> Option<String> {
             })
         }
         PartBody::Reasoning { .. } => Some("    • [reasoning]".into()),
-        PartBody::Image(_) => Some("    • [image]".into()),
+        PartBody::File(file) if file.is_image() => Some("    • [image]".into()),
         PartBody::File(_) => Some("    • [file]".into()),
+        PartBody::Opaque(opaque) => Some(format!("    • [{}]", opaque.provider_kind)),
     }
 }
 
@@ -302,9 +301,9 @@ async fn by_message<C: RunnerClient>(
     session: &SessionRef,
     number: u64,
 ) -> Result<String, String> {
-    let ordinal = number - 1;
-    let entries = reads::full_range(client, session, ordinal, ordinal + 1, |_| true).await?;
-    let Some(entry) = entries.into_iter().find(|entry| entry.ordinal == ordinal) else {
+    // Ordinals count from 1, so a message's number is its ordinal.
+    let entries = reads::full_range(client, session, number, number + 1, |_| true).await?;
+    let Some(entry) = entries.into_iter().find(|entry| entry.ordinal == number) else {
         return Ok(format!(
             "No message at ordinal {number} in this session's stored history — it was deleted (session prune/revert) or the ordinal is wrong, so it can't be recovered. Re-run the tool if you still need the data."
         ));
@@ -338,7 +337,7 @@ async fn range<C: RunnerClient>(
     // The chunk stops at the budget; the read stops once it has read more
     // text than the budget could show.
     let byte_cap = TOKEN_BUDGET * 8;
-    let entries = reads::full_range(client, session, start - 1, end, |read| {
+    let entries = reads::full_range(client, session, start, end + 1, |read| {
         read.iter().map(entry_bytes).sum::<u64>() > byte_cap
     })
     .await?;
@@ -376,7 +375,7 @@ async fn verbose_range<C: RunnerClient>(
     end: u64,
 ) -> Result<String, String> {
     let byte_cap = TOKEN_BUDGET * 8;
-    let entries = reads::full_range(client, session, start - 1, end, |read| {
+    let entries = reads::full_range(client, session, start, end + 1, |read| {
         read.iter().map(entry_bytes).sum::<u64>() > byte_cap
     })
     .await?;
@@ -385,7 +384,7 @@ async fn verbose_range<C: RunnerClient>(
     let mut last = start - 1;
     let mut truncated = false;
     for entry in &entries {
-        let number = chunk::message_number(entry.ordinal);
+        let number = entry.ordinal;
         let header = format!("[{number}] {}", verbose_label(entry));
         let parts: Vec<String> = entry
             .parts

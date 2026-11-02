@@ -1,5 +1,13 @@
-//! `session.read`, served by the runner: transcript entries in the neutral
+//! `session.entries`, served by the runner: transcript entries in the neutral
 //! part model, plus where the transcript and the applied view stand.
+//!
+//! An entry is every record of the host's transcript, on the active path,
+//! that the model sees or that holds part of what it sees, in host order.
+//! Marker records are never entries. A record whose content belongs to
+//! another entry (a Pi `toolResult`, a tool-role message holding a batch's
+//! results) is an entry with no parts: its result sits in the call's tool
+//! part. So is a step that died before any content. Which storage records
+//! that means on each host is the contract's table W4.2.
 
 use serde::{Deserialize, Serialize};
 
@@ -27,21 +35,32 @@ pub struct SessionRef {
 /// they change what the runner renders from them. The parts come in full or
 /// compact form ([`Detail`]); the checksums are always computed over the full
 /// content.
+///
+/// Kinds allowed by role: user entries (notices included) hold text and
+/// files; assistant entries hold text, reasoning, tool, file and opaque
+/// parts; system entries hold text only.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
-    /// Position in the transcript, counting from 0. A revert or branch switch
-    /// can change what sits at an ordinal; the runner's notice says so.
+    /// Position on the session's active path, counting from 1 at its first
+    /// entry. Every entry counts, including the ones a cut leaves out. After a
+    /// revert or a branch switch, a new entry takes the ordinal of the removed
+    /// one; the runner's notice says so.
     pub ordinal: u64,
-    /// The host's message id. Stable for the life of the message.
+    /// The host's message id. Stable for the life of the message. Nothing may
+    /// derive it from the ordinal or the reverse.
     pub mid: String,
     pub role: Role,
     /// Set when a user-role entry was delivered by a module or the runner
     /// (a reminder, a wake, a notice) rather than typed or prompted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<NoticeOrigin>,
-    /// When the runner stored the entry, in milliseconds since the Unix epoch.
+    /// When the host first stored the message, in milliseconds since the Unix
+    /// epoch. It does not change when the entry is updated. For a message the
+    /// runner did not store itself (history from before the runner, a moved
+    /// session), the host's own write time.
     pub written_at: u64,
-    /// Checksum of the entry's role, notice origin and parts.
+    /// Checksum of the entry's role, notice origin and parts, with the parts
+    /// in full form ([`entry_digest`]).
     pub digest: String,
     pub parts: Vec<Part>,
     /// For an assistant entry: what the request that produced it reported.
@@ -59,6 +78,8 @@ pub struct Entry {
 pub enum Role {
     User,
     Assistant,
+    /// A turn-scoped system entry (llm-runner's `turn_system` delivery).
+    System,
 }
 
 /// Who delivered a notice entry.
@@ -71,17 +92,28 @@ pub struct NoticeOrigin {
     pub template: Option<String>,
 }
 
-/// Token counts the provider reported for one request. The runner fills
-/// these per provider so they mean the same everywhere.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Token counts the model provider reported for one request, attached to the
+/// assistant entry it produced. The runner fills these per provider so they
+/// mean the same everywhere.
+///
+/// Every count is optional: absent means the provider did not report it,
+/// never zero. A runner whose host stores 0 for "not reported" leaves the
+/// count out unless it knows the 0 was reported, and always leaves out a
+/// `prompt_tokens` of 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepUsage {
     /// The whole prompt: uncached input plus cache reads plus cache writes.
-    pub prompt_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cache_write_tokens: u64,
-    pub output_tokens: u64,
-    /// Reasoning tokens within `output_tokens`, when the provider reports
-    /// them. Absent means not reported, never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// Reply tokens, reasoning included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// Reasoning tokens within `output_tokens`. The reasoning budget depends
+    /// on it: encrypted reasoning has no other measure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
 }

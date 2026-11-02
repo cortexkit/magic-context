@@ -175,13 +175,14 @@ pub fn should_run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ck_contract_draft::part::Part;
+    use ck_contract_draft::part::{Part, Seal};
     use ck_contract_draft::read::{entry_digest, NoticeOrigin};
 
     fn entry(ordinal: u64, role: Role, notice: bool, text: &str) -> Entry {
         let parts = vec![Part::new(
             format!("p{ordinal}"),
             None,
+            Seal::None,
             PartBody::Text { text: text.into() },
         )];
         let notice = notice.then(|| NoticeOrigin {

@@ -25,12 +25,15 @@
 //!   checks each one against the rules it declared ([`rules`]), stores it, and
 //!   applies it from the next step until a newer one arrives.
 //!
-//! [`view::apply`] and [`rules::check`] are shared on purpose: the runner
-//! renders with them, and the provider uses the same functions to know
-//! exactly what the model sees.
+//! [`view::plan`], [`view::apply`], [`rules::check`] and [`clean::clean_reply`]
+//! are shared on purpose: the runner renders with them, and the provider uses
+//! the same functions to know exactly what the model sees. They are the view
+//! library MC publishes; the published contract crate keeps only the wire
+//! types and depends on it.
 
 #![forbid(unsafe_code)]
 
+pub mod clean;
 pub mod digest;
 pub mod notice;
 pub mod part;
@@ -56,9 +59,20 @@ pub const COMPACTION_PROVIDES: &str = "compaction-provider/v2";
 /// same provider, each bound to the session's identity and scope.
 pub const COMPACTION_ROLE: (&str, &str) = ("compaction-provider", "v2");
 
-/// The capability a runner declares when it serves the runner-side ops below
-/// in these shapes.
-pub const RUNNER_NEUTRAL_READS: &str = "neutral-reads/v1";
+/// The capability a runner declares for its side of this contract:
+/// `session.entries`, `session.apply_view` and `session.applied_view`. It
+/// pairs with [`COMPACTION_PROVIDES`] by name; the name is new, so it starts
+/// at v1.
+pub const COMPACTION_RUNNER_PROVIDES: &str = "compaction-runner/v1";
+
+/// The role a provider declares on the route it opens to the runner for this
+/// contract's runner ops.
+pub const COMPACTION_RUNNER_ROLE: (&str, &str) = ("compaction-runner", "v1");
+
+/// The role a provider declares on the route it opens to the runner for the
+/// llm-runner ops it uses as published (`session.send`, `run.result`). This
+/// contract does not change llm-runner.
+pub const LLM_RUNNER_ROLE: (&str, &str) = ("llm-runner", "v1");
 
 /// Names of the ops, used as the `method` of the request that carries them.
 /// The prefix names the side that serves the op: `compaction.*` the
@@ -70,17 +84,20 @@ pub mod ops {
     pub const COMPACTION_NOTICE: &str = "compaction.notice";
     /// Served by the provider: the runner asks for a view now ([`crate::ride`]).
     pub const COMPACTION_RIDE: &str = "compaction.ride";
-    /// Served by the runner: read transcript entries ([`crate::read`]).
-    pub const SESSION_READ: &str = "session.read";
-    /// Served by the runner: take a new view
+    /// Served by the runner (compaction-runner): read transcript entries in
+    /// the neutral part model ([`crate::read`]). A name of its own, so logs
+    /// never show two shapes of llm-runner's `session.read`.
+    pub const SESSION_ENTRIES: &str = "session.entries";
+    /// Served by the runner (compaction-runner): take a new view
     /// ([`crate::view::ApplyViewRequest`]).
     pub const SESSION_APPLY_VIEW: &str = "session.apply_view";
-    /// Served by the runner: the view it applies now
+    /// Served by the runner (compaction-runner): the view it applies now
     /// ([`crate::view::AppliedViewRequest`]).
     pub const SESSION_APPLIED_VIEW: &str = "session.applied_view";
-    /// Served by the runner: queue text for the model, or start a run in a
-    /// child session ([`crate::send`]).
+    /// Served by the runner (llm-runner): queue text for the model, or start
+    /// a run in a child session ([`crate::send`]).
     pub const SESSION_SEND: &str = "session.send";
-    /// Served by the runner: a run's state and reply ([`crate::send`]).
+    /// Served by the runner (llm-runner): a run's state and reply
+    /// ([`crate::send`]).
     pub const RUN_RESULT: &str = "run.result";
 }

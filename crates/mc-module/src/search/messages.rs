@@ -16,7 +16,6 @@ use super::text::{
     contains_probe_verbatim, indexable_content, matched_snippet, preview, relaxed_fts_query,
     sanitize_fts_query,
 };
-use crate::summary::chunk::message_number;
 
 /// Messages indexed in one transaction, so a long first catch-up never holds
 /// the write lock long.
@@ -40,6 +39,7 @@ fn role_name(role: &Role) -> &'static str {
     match role {
         Role::User => "user",
         Role::Assistant => "assistant",
+        Role::System => "system",
     }
 }
 
@@ -116,7 +116,7 @@ fn insert(
     entry: &Entry,
     content: &str,
 ) -> rusqlite::Result<()> {
-    let number = message_number(entry.ordinal) as i64;
+    let number = entry.ordinal as i64;
     let role = role_name(&entry.role);
     conn.execute(
         "INSERT INTO message_history_source
@@ -155,14 +155,14 @@ pub fn index(
     entries: &[Entry],
 ) -> rusqlite::Result<()> {
     let mark = watermark(conn, session)?;
-    let start = entries.partition_point(|entry| (message_number(entry.ordinal) as i64) < mark);
+    let start = entries.partition_point(|entry| (entry.ordinal as i64) < mark);
     let pending = &entries[start..];
     let mut stopped = false;
     for batch in pending.chunks(INDEX_BATCH) {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut mark = watermark(&tx, session)?;
         for entry in batch {
-            let number = message_number(entry.ordinal) as i64;
+            let number = entry.ordinal as i64;
             if number < mark {
                 continue;
             }
@@ -208,7 +208,7 @@ pub fn forget_from(
     session: &str,
     from_ordinal: u64,
 ) -> rusqlite::Result<()> {
-    let from_number = message_number(from_ordinal) as i64;
+    let from_number = from_ordinal as i64;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if watermark(&tx, session)? >= from_number {
         delete_from(&tx, session, from_number)?;

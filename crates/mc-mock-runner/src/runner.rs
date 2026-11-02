@@ -10,11 +10,12 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use ck_contract_draft::clean::clean_reply;
 use ck_contract_draft::notice::{
     Conditions, Event, NoticeAnswer, NoticeRequest, ENTRIES_BUDGET_BYTES,
 };
 use ck_contract_draft::part::{
-    split_self_tag, tag_prefix, Part, PartBody, Sealing, ToolPart, ToolStatus,
+    tag_prefix, Delivered, OutputFormat, Part, PartBody, Seal, ToolPart, ToolStatus,
 };
 use ck_contract_draft::read::{
     Entry, Head, NoticeOrigin, ReadPage, ReadRequest, Role, SessionRef, StepUsage,
@@ -138,8 +139,14 @@ pub struct RequestRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RideRecord {
-    pub cause: RideCause,
+    pub causes: Vec<RideCause>,
     pub got_view: bool,
+}
+
+impl RideRecord {
+    pub fn has(&self, cause: RideCause) -> bool {
+        self.causes.contains(&cause)
+    }
 }
 
 impl Report {
@@ -148,7 +155,7 @@ impl Report {
     pub fn cache_writes_over(&self, tokens: u64) -> usize {
         self.requests
             .iter()
-            .filter(|record| record.usage.cache_write_tokens > tokens)
+            .filter(|record| record.usage.cache_write_tokens.unwrap_or(0) > tokens)
             .count()
     }
 }
@@ -394,6 +401,7 @@ impl<P: Provider> Runner<P> {
                 context_window: state.config.context_window,
                 output_reserve: state.config.output_reserve,
                 rules: state.config.rules,
+                detects: DETECTS.to_vec(),
                 applied_view: state.applied.as_ref().map(View::applied),
                 newest: state.transcript.cursor(),
                 now: state.now,
@@ -488,7 +496,7 @@ impl<P: Provider> Runner<P> {
             state.transcript.append(
                 Role::User,
                 None,
-                vec![PartBody::Text { text: full }],
+                vec![(Seal::None, PartBody::Text { text: full })],
                 None,
                 None,
                 now,
@@ -507,7 +515,7 @@ impl<P: Provider> Runner<P> {
         self.deliver_steers().await;
         self.step_boundary().await;
 
-        let cause = {
+        let cache_cause = {
             let mut state = self.host.lock();
             let empty = state.transcript.entries().is_empty();
             let expired = state
@@ -519,19 +527,28 @@ impl<P: Provider> Runner<P> {
                 .or(expired.then_some(RideCause::CacheExpired));
             cause.filter(|_| !empty)
         };
-        if let Some(cause) = cause {
-            self.ride(cause, None).await;
-        }
 
+        // One ride with every cause that applies. A view that answers a
+        // cache loss can still leave the request too big (it may add the
+        // history head), so the runner estimates again and rides once more
+        // for the limit before it refuses.
         let limit = {
             let state = self.host.lock();
             state.config.context_window - state.config.output_reserve
         };
-        let mut estimate = self.estimate();
+        let estimate = self.estimate();
+        let mut causes: Vec<RideCause> = cache_cause.into_iter().collect();
         if estimate > limit {
-            self.ride(RideCause::OverLimit, Some(estimate)).await;
-            estimate = self.estimate();
-            if estimate > limit {
+            causes.push(RideCause::OverLimit);
+        }
+        if !causes.is_empty() {
+            let over = causes.contains(&RideCause::OverLimit);
+            self.ride(causes, over.then_some(estimate)).await;
+            let estimate = self.estimate();
+            if estimate > limit && !over {
+                self.ride(vec![RideCause::OverLimit], Some(estimate)).await;
+            }
+            if self.estimate() > limit {
                 self.report.refusals.push(CONTEXT_CEILING.to_owned());
                 return false;
             }
@@ -579,9 +596,9 @@ impl<P: Provider> Runner<P> {
         let mut state = self.host.lock();
         let mut bodies = Vec::new();
         if let Some(tokens) = turn.reasoning_tokens {
-            let sealing = match self.model.kind() {
-                Kind::Anthropic => Sealing::Signed,
-                Kind::OpenAi | Kind::OpenAiChained => Sealing::Encrypted,
+            let seal = match self.model.kind() {
+                Kind::Anthropic => Seal::Signed,
+                Kind::OpenAi | Kind::OpenAiChained => Seal::Encrypted,
             };
             let text = match self.model.kind() {
                 Kind::Anthropic => Some(
@@ -591,39 +608,51 @@ impl<P: Provider> Runner<P> {
                 ),
                 Kind::OpenAi | Kind::OpenAiChained => None,
             };
-            bodies.push(PartBody::Reasoning {
-                text_bytes: text.as_ref().map(|text| text.len() as u64),
-                text,
-                sealing,
-            });
+            bodies.push((
+                seal,
+                PartBody::Reasoning {
+                    text_bytes: text.as_ref().map(|text| text.len() as u64),
+                    text,
+                },
+            ));
         }
         // The text exactly as the model wrote it, tag prefix included. The
-        // transcript keeps it without the prefix; rendering puts the assigned
-        // number back.
+        // transcript keeps it cleaned of tag notation; rendering puts the
+        // assigned number back.
         let written = turn.text.as_ref().map(|text| match turn.self_tag {
             SelfTag::Next => format!("{}{text}", tag_prefix(highest_tag + 1)),
             SelfTag::Missing => text.clone(),
             SelfTag::Number(number) => format!("{}{text}", tag_prefix(number)),
         });
         if let Some(written) = &written {
-            bodies.push(PartBody::Text {
-                text: split_self_tag(written).1.to_owned(),
-            });
+            bodies.push((
+                Seal::None,
+                PartBody::Text {
+                    text: clean_reply(written).text,
+                },
+            ));
         }
         let ordinal = state.transcript.entries().len();
         for (index, call) in turn.tools.iter().enumerate() {
-            bodies.push(PartBody::Tool(ToolPart {
-                call_id: format!("call-{ordinal}-{index}"),
-                name: call.name.clone(),
-                input: call.input.as_object().cloned().unwrap_or_default(),
-                status: ToolStatus::Running,
-                output: None,
-                output_bytes: None,
-                attachments: vec![],
-            }));
+            bodies.push((
+                Seal::None,
+                PartBody::Tool(ToolPart {
+                    call_id: format!("call-{ordinal}-{index}"),
+                    name: call.name.clone(),
+                    input: call.input.clone(),
+                    provider_executed: false,
+                    status: ToolStatus::Running,
+                    output: None,
+                    output_format: OutputFormat::Text,
+                    output_bytes: None,
+                    attachments: vec![],
+                    approval: None,
+                    delivered: vec![],
+                }),
+            ));
         }
         let usage = StepUsage {
-            output_tokens: turn.output_tokens + turn.reasoning_tokens.unwrap_or(0),
+            output_tokens: Some(turn.output_tokens + turn.reasoning_tokens.unwrap_or(0)),
             reasoning_tokens: turn.reasoning_tokens,
             ..completion.usage
         };
@@ -644,17 +673,17 @@ impl<P: Provider> Runner<P> {
             if let (PartBody::Text { .. }, Some(written)) = (&part.body, &written) {
                 self.model.record_output(&part.id, written.clone());
             }
-            if let PartBody::Reasoning { sealing, .. } = part.body {
+            if let PartBody::Reasoning { .. } = part.body {
                 state
                     .reasoning_tokens
                     .insert(part.id.clone(), turn.reasoning_tokens.unwrap_or(0));
-                if sealing == Sealing::Signed {
+                if part.seal == Seal::Signed {
                     self.model.bind(&part.id, completion.binding.clone());
                 }
             }
         }
         state.last_send = Some(now);
-        state.last_prompt_tokens = Some(usage.prompt_tokens);
+        state.last_prompt_tokens = usage.prompt_tokens;
         self.report.requests.push(RequestRecord {
             ordinal: entry.ordinal,
             view: state.applied.as_ref().map(|view| view.version),
@@ -682,7 +711,7 @@ impl<P: Provider> Runner<P> {
                 .collect()
         };
         for (call, call_id) in calls.iter().zip(call_ids) {
-            let (status, mut output) = if call.name.starts_with("ctx_") {
+            let (status, output) = if call.name.starts_with("ctx_") {
                 match self.provider.tool(&call.name, &call.input).await {
                     Ok(output) => (ToolStatus::Completed, output),
                     Err(error) => (ToolStatus::Error, error.0),
@@ -691,18 +720,24 @@ impl<P: Provider> Runner<P> {
                 (call.status, call.output.clone())
             };
             let mut state = self.host.lock();
+            // A reminder that may ride a tool result is delivered with this
+            // one, after its output, in the tool part's delivered list.
+            let mut delivered = Vec::new();
             if let Some(index) = state
                 .reminders
                 .iter()
                 .position(|reminder| reminder.delivery.first() == Some(&Delivery::ToolResult))
             {
                 let reminder = state.reminders.remove(index);
-                output.push_str("\n\n");
-                output.push_str(&reminder.prompt);
+                delivered.push(Delivered::new(
+                    "magic-context",
+                    reminder.template.clone(),
+                    reminder.prompt,
+                ));
             }
             state
                 .transcript
-                .complete_tool(&call_id, status, output, vec![])
+                .complete_tool(&call_id, status, output, vec![], delivered)
                 .expect("the call is running on the newest message");
         }
     }
@@ -727,9 +762,12 @@ impl<P: Provider> Runner<P> {
                         sender: "magic-context".into(),
                         template: reminder.template.clone(),
                     }),
-                    vec![PartBody::Text {
-                        text: reminder.prompt.clone(),
-                    }],
+                    vec![(
+                        Seal::None,
+                        PartBody::Text {
+                            text: reminder.prompt.clone(),
+                        },
+                    )],
                     None,
                     None,
                     now,
@@ -800,11 +838,11 @@ impl<P: Provider> Runner<P> {
             .push(Event::ViewRefused { version, refusal });
     }
 
-    async fn ride(&mut self, cause: RideCause, request_tokens: Option<u64>) {
+    async fn ride(&mut self, causes: Vec<RideCause>, request_tokens: Option<u64>) {
         let request = {
             let state = self.host.lock();
             RideRequest {
-                cause,
+                causes: causes.clone(),
                 deadline_ms: if state.last_send.is_none() {
                     COLD_RIDE_DEADLINE_MS
                 } else {
@@ -830,7 +868,7 @@ impl<P: Provider> Runner<P> {
                 false
             }
         };
-        self.report.rides.push(RideRecord { cause, got_view });
+        self.report.rides.push(RideRecord { causes, got_view });
     }
 
     fn estimate(&self) -> u64 {
@@ -902,16 +940,30 @@ impl<P: Provider> Runner<P> {
     }
 }
 
+/// The ride causes the mock runner detects and declares at Setup. It has no
+/// request chains of its own to reset, and no accounts or tool surfaces that
+/// change.
+const DETECTS: [RideCause; 4] = [
+    RideCause::CacheExpired,
+    RideCause::ModelChange,
+    RideCause::TierChange,
+    RideCause::OverLimit,
+];
+
 /// A part body for tests and scenarios: a finished tool part as a host would
 /// store it.
 pub fn finished_tool(call_id: &str, name: &str, input: Value, output: &str) -> PartBody {
     PartBody::Tool(ToolPart {
         call_id: call_id.into(),
         name: name.into(),
-        input: input.as_object().cloned().unwrap_or_default(),
+        input,
+        provider_executed: false,
         status: ToolStatus::Completed,
         output_bytes: Some(output.len() as u64),
         output: Some(output.into()),
+        output_format: OutputFormat::Text,
         attachments: vec![],
+        approval: None,
+        delivered: vec![],
     })
 }

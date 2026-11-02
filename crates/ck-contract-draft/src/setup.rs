@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::read::Cursor;
+use crate::ride::RideCause;
 use crate::rules::ProviderRules;
 use crate::view::AppliedView;
 
@@ -25,8 +26,13 @@ pub struct SetupRequest {
     /// request larger than `context_window - output_reserve`.
     pub output_reserve: u64,
     pub rules: ProviderRules,
+    /// The ride causes the runner can detect. A cause it cannot detect is
+    /// unknown to the provider, never "did not happen": a runner that cannot
+    /// see an auth plugin's request chains leaves out `chain_reset`.
+    pub detects: Vec<RideCause>,
     /// The view the runner applies now, absent when it applies none. After a
-    /// runner restart this is the view it reloaded from its own store.
+    /// runner restart this is the view it reloaded from its own store; for a
+    /// session moved in, the first view the move installed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_view: Option<AppliedView>,
     /// The newest transcript entry, absent for an empty transcript.
@@ -50,6 +56,8 @@ pub struct ModelRef {
     pub service_tier: Option<String>,
 }
 
+/// Setup either answers `ready` or fails with a refusal naming why
+/// ([`crate::wire::Refusal`], for example `unknown_preset`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "answer", rename_all = "snake_case")]
 pub enum SetupAnswer {

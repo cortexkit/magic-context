@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use ck_contract_draft::notice::Conditions;
 use ck_contract_draft::read::{Entry, Role};
-use ck_contract_draft::rules::SignedReasoning;
+use ck_contract_draft::rules::SignedParts;
 
 use crate::lanes;
 
@@ -151,7 +151,7 @@ pub fn signed_thinking_hold(
     conditions: &Conditions,
     settings: &Settings,
 ) -> bool {
-    if conditions.rules.signed_reasoning != SignedReasoning::Bound {
+    if conditions.rules.signed_parts != SignedParts::Bound {
         return false;
     }
     let Some(usage) = usage(conditions) else {

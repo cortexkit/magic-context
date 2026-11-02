@@ -1,6 +1,6 @@
 //! The mock runner over the subc daemon (the CortexKit module bus that
 //! routes calls between module processes). It serves the runner ops a
-//! compaction provider calls back (`session.read`, `session.apply_view`,
+//! compaction provider calls back (`session.entries`, `session.apply_view`,
 //! `session.applied_view`, `session.send`, `run.result`), plus `mock.play`,
 //! which plays one scenario against the provider over the wire and answers
 //! with the run's report.
@@ -17,7 +17,7 @@ use ck_contract_draft::ride::{RideAnswer, RideRequest};
 use ck_contract_draft::send::{RunResultRequest, SendRequest};
 use ck_contract_draft::setup::{SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{AppliedViewRequest, ApplyViewRequest};
-use ck_contract_draft::wire::{self, codes};
+use ck_contract_draft::wire::{self, codes, Refusal};
 use ck_contract_draft::COMPACTION_ROLE;
 use cortexkit_role_step_transform_provider as step;
 use cortexkit_role_tool_provider::result::{ContentPart, ToolResult};
@@ -223,7 +223,7 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
     ModuleManifest::builder(module_id, env!("CARGO_PKG_VERSION"))
         .provides(vec![ProviderRole::ManagementSurface {
             operations: vec![
-                operation(ops::SESSION_READ, ManagementOperationKind::Query),
+                operation(ops::SESSION_ENTRIES, ManagementOperationKind::Query),
                 operation(ops::SESSION_APPLIED_VIEW, ManagementOperationKind::Query),
                 operation(ops::SESSION_APPLY_VIEW, ManagementOperationKind::Mutate),
                 operation(ops::SESSION_SEND, ManagementOperationKind::Mutate),
@@ -270,21 +270,24 @@ impl Handler {
 
     /// The session a provider op is about: the one the route is bound to,
     /// and only when the daemon attests the session's provider as the caller.
-    fn host(&self, channel: u16) -> Result<Host, (&'static str, String)> {
+    fn host(&self, channel: u16) -> Result<Host, Refusal> {
         let caller = self
             .callers
             .lock()
             .expect("callers")
             .get(&channel)
             .cloned()
-            .ok_or((codes::REFUSED, "route_unbound".to_owned()))?;
+            .ok_or_else(|| Refusal::new(codes::ROUTE_UNBOUND, "the route has no session", None))?;
         if caller.module.as_deref() != Some(self.provider.as_str()) {
-            return Err((
-                codes::REFUSED,
+            // Mock only: one provider is configured per run, and only it may
+            // call back for its sessions.
+            return Err(Refusal::new(
+                "caller_not_provider",
                 format!(
-                    "caller_not_provider: only {} may call the runner for its sessions",
+                    "only {} may call the runner for its sessions",
                     self.provider
                 ),
+                None,
             ));
         }
         self.hosts
@@ -292,53 +295,46 @@ impl Handler {
             .expect("host map")
             .get(&(caller.harness.clone(), caller.session.clone()))
             .cloned()
-            .ok_or_else(|| {
-                (
-                    codes::UNKNOWN_SESSION,
-                    format!("no session {}", caller.session),
-                )
-            })
+            .ok_or_else(Refusal::unknown_session)
     }
 
-    async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Value, (&'static str, String)> {
-        let bad = |message: String| (codes::BAD_REQUEST, message);
-        let (method, params) = wire::decode(body).map_err(bad)?;
+    async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Value, Refusal> {
+        let (method, params) = wire::decode(body)?;
         match method.as_str() {
-            ops::SESSION_READ => {
-                let request: ReadRequest = wire::params(params).map_err(bad)?;
+            ops::SESSION_ENTRIES => {
+                let request: ReadRequest = wire::params(params)?;
                 Ok(json_of(&self.host(channel)?.read(&request)))
             }
             ops::SESSION_APPLY_VIEW => {
-                let request: ApplyViewRequest = wire::params(params).map_err(bad)?;
+                let request: ApplyViewRequest = wire::params(params)?;
                 Ok(json_of(&self.host(channel)?.apply_view(request)))
             }
             ops::SESSION_APPLIED_VIEW => {
-                let _: AppliedViewRequest = wire::params(params).map_err(bad)?;
+                let _: AppliedViewRequest = wire::params(params)?;
                 Ok(json_of(&self.host(channel)?.applied_view()))
             }
             ops::SESSION_SEND => {
-                let request: SendRequest = wire::params(params).map_err(bad)?;
+                let request: SendRequest = wire::params(params)?;
                 Ok(json_of(&self.host(channel)?.send(request)))
             }
             ops::RUN_RESULT => {
-                let request: RunResultRequest = wire::params(params).map_err(bad)?;
+                let request: RunResultRequest = wire::params(params)?;
                 self.host(channel)?
                     .run_result(&request)
                     .map(|result| json_of(&result))
-                    .ok_or_else(|| bad(format!("unknown run {}", request.run_id)))
+                    .ok_or_else(|| {
+                        Refusal::invalid_params("run_id", format!("unknown run {}", request.run_id))
+                    })
             }
             MOCK_PLAY => {
-                let request: PlayRequest = wire::params(params).map_err(bad)?;
+                let request: PlayRequest = wire::params(params)?;
                 let report = self
                     .play(request)
                     .await
-                    .map_err(|error| (codes::REFUSED, error.0))?;
+                    .map_err(|error| Refusal::new("play_failed", error.0, None))?;
                 Ok(json_of(&report))
             }
-            other => Err((
-                codes::UNKNOWN_METHOD,
-                format!("the mock runner does not serve `{other}`"),
-            )),
+            other => Err(Refusal::unknown_method(other)),
         }
     }
 
@@ -398,10 +394,16 @@ impl ModuleHandler for Handler {
             Ok(answer) => {
                 HandlerOutcome::Response(serde_json::to_vec(&answer).expect("answers serialize"))
             }
-            Err((code, message)) => HandlerOutcome::Error {
-                code: code.into(),
+            Err(Refusal {
+                code,
                 message,
+                detail: Some(detail),
+            }) => HandlerOutcome::ErrorWithDetail {
+                code,
+                message,
+                detail,
             },
+            Err(Refusal { code, message, .. }) => HandlerOutcome::Error { code, message },
         }
     }
 }

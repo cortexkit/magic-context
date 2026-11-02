@@ -101,6 +101,9 @@ pub fn move_in(
         context_window: request.context_window,
         output_reserve: request.output_reserve,
         rules: request.rules,
+        // Offline, nothing rides; the runner declares what it detects at its
+        // own Setup.
+        detects: Vec::new(),
         applied_view: None,
         newest: Some(request.newest.clone()),
         now: request.now,

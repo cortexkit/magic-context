@@ -15,7 +15,10 @@ pub const CONTEXT_CEILING: &str = "context_ceiling";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RideRequest {
-    pub cause: RideCause,
+    /// Every cause that applies, at least one, none twice. An expired cache
+    /// and an over-limit request together tell the provider both that the
+    /// rewrite is paid for and that the request must shrink.
+    pub causes: Vec<RideCause>,
     /// How long the runner waits for the answer, in milliseconds. A cold
     /// start gets a longer deadline, since the provider may first have to
     /// read the transcript.
@@ -27,6 +30,21 @@ pub struct RideRequest {
     /// request it is about to send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_tokens: Option<u64>,
+}
+
+impl RideRequest {
+    /// Whether `cause` is among the ride's causes.
+    pub fn has(&self, cause: RideCause) -> bool {
+        self.causes.contains(&cause)
+    }
+
+    /// Whether the model provider's cache is lost for this request: any cause
+    /// but `over_limit`.
+    pub fn cache_lost(&self) -> bool {
+        self.causes
+            .iter()
+            .any(|cause| *cause != RideCause::OverLimit)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

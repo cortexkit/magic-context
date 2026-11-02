@@ -2,11 +2,12 @@
 
 use serde_json::json;
 
-use crate::part::{Attachment, Media, Part, PartBody, Sealing, ToolPart, ToolStatus};
-use crate::read::{entry_digest, Entry, Role};
-use crate::rules::{
-    check, invalid_signed_parts, EditCost, ProviderRules, RuleBreak, SignedReasoning,
+use crate::part::{
+    Attachment, AttachmentItem, Delivered, FileMedia, OutputFormat, Part, PartBody, Seal, ToolPart,
+    ToolStatus,
 };
+use crate::read::{entry_digest, Entry, Role};
+use crate::rules::{check, invalid_signed_parts, EditCost, ProviderRules, RuleBreak, SignedParts};
 use crate::view::{
     apply, apply_edits, check_carried, AppliedView, Edit, EditOp, InsertAt, InsertedMessage,
     Source, View, ViewRefusal,
@@ -36,44 +37,51 @@ fn entry(
 }
 
 fn text(id: &str, tag: u64, value: &str) -> Part {
-    Part::new(id, Some(tag), PartBody::Text { text: value.into() })
+    Part::new(
+        id,
+        Some(tag),
+        Seal::None,
+        PartBody::Text { text: value.into() },
+    )
 }
 
 fn signed(id: &str) -> Part {
     Part::new(
         id,
         None,
+        Seal::Signed,
         PartBody::Reasoning {
             text: Some("thinking".into()),
             text_bytes: Some(8),
-            sealing: Sealing::Signed,
         },
     )
+}
+
+fn tool_body(id: &str, status: ToolStatus) -> ToolPart {
+    ToolPart {
+        call_id: format!("call-{id}"),
+        name: "edit".into(),
+        input: json!({"path": "a.rs", "old_string": "x".repeat(100), "count": 3}),
+        provider_executed: false,
+        status,
+        output: (status != ToolStatus::Running).then(|| "done".into()),
+        output_format: OutputFormat::Text,
+        output_bytes: (status != ToolStatus::Running).then_some(4),
+        attachments: vec![Attachment {
+            id: "img-1".into(),
+            item: AttachmentItem::File(FileMedia::inline("image/png", Some(2048))),
+        }],
+        approval: None,
+        delivered: vec![],
+    }
 }
 
 fn tool(id: &str, tag: u64, status: ToolStatus) -> Part {
     Part::new(
         id,
         Some(tag),
-        PartBody::Tool(ToolPart {
-            call_id: format!("call-{id}"),
-            name: "edit".into(),
-            input: json!({"path": "a.rs", "old_string": "x".repeat(100), "count": 3})
-                .as_object()
-                .unwrap()
-                .clone(),
-            status,
-            output: (status != ToolStatus::Running).then(|| "done".into()),
-            output_bytes: (status != ToolStatus::Running).then_some(4),
-            attachments: vec![Attachment {
-                id: "img-1".into(),
-                media: Media {
-                    mime: "image/png".into(),
-                    name: None,
-                    size: Some(2048),
-                },
-            }],
-        }),
+        Seal::None,
+        PartBody::Tool(tool_body(id, status)),
     )
 }
 
@@ -163,7 +171,7 @@ fn transcript() -> Vec<Entry> {
 }
 
 const BOUND: ProviderRules = ProviderRules {
-    signed_reasoning: SignedReasoning::Bound,
+    signed_parts: SignedParts::Bound,
     history_edit_cost: EditCost::Suffix,
 };
 
@@ -448,7 +456,7 @@ fn an_edit_before_a_signed_part_invalidates_it_only_if_it_came_later() {
     assert_eq!(invalid(&entries, &edits), ["r3", "r5"]);
     assert_eq!(
         check(&entries, &edits, &BOUND),
-        Err(RuleBreak::SignedReasoningInvalid {
+        Err(RuleBreak::SignedPartInvalid {
             mid: "a3".into(),
             part: "r3".into()
         })
@@ -464,7 +472,7 @@ fn an_edit_before_a_signed_part_invalidates_it_only_if_it_came_later() {
 
     // The same rules with no signature binding never object.
     let free = ProviderRules {
-        signed_reasoning: SignedReasoning::None,
+        signed_parts: SignedParts::None,
         ..BOUND
     };
     assert!(check(&entries, &edits, &free).is_ok());
@@ -545,4 +553,124 @@ fn edits_computed_from_the_compact_form_apply_to_the_full_one_and_back() {
         invalid_signed_parts(&full, &edits, &BOUND),
         invalid_signed_parts(&short, &edits, &BOUND)
     );
+}
+
+#[test]
+fn an_inserted_message_carrying_a_tag_prefix_is_refused() {
+    let entries = transcript();
+    let mut tagged = insert(1, InsertAt::Start, "head");
+    if let EditOp::Insert { message, .. } = &mut tagged.op {
+        message.texts = vec!["summary that quotes \u{a7}3\u{a7} by mistake".into()];
+    }
+    assert_eq!(
+        apply_edits(&entries, &[tagged]),
+        Err(ViewRefusal::TaggedInsert { id: "head".into() })
+    );
+    assert!(apply_edits(&entries, &[insert(1, InsertAt::Start, "head")]).is_ok());
+}
+
+#[test]
+fn a_replace_may_show_its_own_number_and_numbers_the_original_had_but_no_other() {
+    let mut entries = transcript();
+    entries[0].parts[0] = text("t1", 1, "please drop \u{a7}7\u{a7} and fix");
+    let own = replace(
+        1,
+        &entries,
+        "u1",
+        "t1",
+        "text",
+        json!("[dropped \u{a7}1\u{a7}]"),
+    );
+    assert!(apply_edits(&entries, &[own]).is_ok());
+    let kept = replace(
+        1,
+        &entries,
+        "u1",
+        "t1",
+        "text",
+        json!("drop \u{a7}7\u{a7}, fix"),
+    );
+    assert!(apply_edits(&entries, &[kept]).is_ok());
+    let foreign = replace(1, &entries, "u1", "t1", "text", json!("see \u{a7}9\u{a7}"));
+    assert_eq!(
+        apply_edits(&entries, &[foreign]),
+        Err(ViewRefusal::ForeignTag {
+            mid: "u1".into(),
+            part: "t1".into(),
+            field: "text".into(),
+            tag: 9,
+        })
+    );
+}
+
+#[test]
+fn sealed_and_provider_run_parts_can_only_be_dropped() {
+    let mut entries = transcript();
+    entries[0].parts[0] = Part::new(
+        "t1",
+        Some(1),
+        Seal::Signed,
+        PartBody::Text {
+            text: "signed text".into(),
+        },
+    );
+    let mut hosted = tool_body("k9", ToolStatus::Completed);
+    hosted.provider_executed = true;
+    entries[1].parts[2] = Part::new("k1", None, Seal::None, PartBody::Tool(hosted));
+
+    for (mid, part, field) in [("u1", "t1", "text"), ("a1", "k1", "output")] {
+        let edit = replace(1, &entries, mid, part, field, json!("short"));
+        assert_eq!(
+            apply_edits(&entries, &[edit]),
+            Err(ViewRefusal::BadField {
+                mid: mid.into(),
+                part: part.into(),
+                field: field.into(),
+            })
+        );
+        assert!(apply_edits(&entries, &[drop_part(1, mid, part)]).is_ok());
+    }
+}
+
+#[test]
+fn a_replace_of_delivered_keeps_only_the_named_sends() {
+    let mut entries = transcript();
+    let mut body = tool_body("k1", ToolStatus::Completed);
+    body.delivered = vec![
+        Delivered::new("magic-context", Some("mc.reduce".into()), "first".into()),
+        Delivered::new("prefrontal", None, "second".into()),
+    ];
+    entries[1].parts[2] = Part::new("k1", Some(3), Seal::None, PartBody::Tool(body));
+    let keep_second = replace(1, &entries, "a1", "k1", "delivered", json!([1]));
+    let rendered = apply_edits(&entries, &[keep_second]).unwrap();
+    let PartBody::Tool(tool) = &rendered[1].parts[2].body else {
+        panic!("the tool part stays a tool part");
+    };
+    assert_eq!(tool.delivered.len(), 1);
+    assert_eq!(tool.delivered[0].text.as_deref(), Some("second"));
+
+    for bad in [json!([2]), json!([0, 0]), json!(["0"])] {
+        let edit = replace(1, &entries, "a1", "k1", "delivered", bad);
+        assert!(matches!(
+            apply_edits(&entries, &[edit]),
+            Err(ViewRefusal::BadField { .. })
+        ));
+    }
+}
+
+#[test]
+fn a_signed_text_part_is_bound_like_signed_reasoning() {
+    // Gemini signs text and tool calls, not only reasoning. A kept signed
+    // text part is invalidated by a later edit before it, like reasoning.
+    let mut entries = transcript();
+    entries[2].parts[0] = Part::new(
+        "t3",
+        Some(4),
+        Seal::Signed,
+        PartBody::Text {
+            text: "go on".into(),
+        },
+    );
+    let invalid = invalid_signed_parts(&entries, &[drop_part(1, "u1", "t1")], &BOUND);
+    assert!(invalid.contains(&("u2".to_owned(), "t3".to_owned())));
 }

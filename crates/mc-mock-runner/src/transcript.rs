@@ -1,12 +1,16 @@
-//! The runner's transcript: entries in full form, with tag numbers counted
-//! from the compaction marker's checkpoint. A part's number is the checkpoint
-//! plus its position among the numbered parts on the transcript (text and tool
-//! parts; never reasoning, images or files). Numbers are contiguous: after a
-//! revert, counting continues from what remains, so the model never sees a
-//! gap it could pattern-match into a jump. Only the runner counts; it hands
-//! each part's number to the compaction provider in reads and notices.
+//! The runner's transcript: entries in full form, ordinals counted from 1,
+//! and tag numbers counted from the compaction marker's checkpoint. A part's
+//! number is the checkpoint plus its position among the numbered parts on the
+//! transcript ([`is_numbered`]: text, and tool results the model provider did
+//! not produce itself; never reasoning, files, opaque items or system text).
+//! Numbers are contiguous: after a revert, counting continues from what
+//! remains, so the model never sees a gap at the newest message it could
+//! pattern-match into a jump. Only the runner counts; it hands each part's
+//! number to the compaction provider in reads and notices.
 
-use ck_contract_draft::part::{Attachment, Part, PartBody, ToolStatus};
+use ck_contract_draft::part::{
+    is_numbered, Attachment, Delivered, Part, PartBody, Seal, ToolStatus,
+};
 use ck_contract_draft::read::{
     entry_digest, Cursor, Detail, Entry, NoticeOrigin, Role, Select, StepUsage,
 };
@@ -59,13 +63,13 @@ impl Transcript {
         })
     }
 
-    /// Store a message. Text and tool parts get tag numbers; reasoning,
-    /// images and files do not.
+    /// Store a message. Numbered parts ([`is_numbered`]) get the next numbers
+    /// in order.
     pub fn append(
         &mut self,
         role: Role,
         notice: Option<NoticeOrigin>,
-        bodies: Vec<PartBody>,
+        bodies: Vec<(Seal, PartBody)>,
         usage: Option<StepUsage>,
         generated_under: Option<AppliedView>,
         written_at: u64,
@@ -76,20 +80,16 @@ impl Transcript {
         let parts: Vec<Part> = bodies
             .into_iter()
             .enumerate()
-            .map(|(index, body)| {
-                let tag = match body {
-                    PartBody::Text { .. } | PartBody::Tool(_) => {
-                        let tag = next_tag;
-                        next_tag += 1;
-                        Some(tag)
-                    }
-                    PartBody::Reasoning { .. } | PartBody::Image(_) | PartBody::File(_) => None,
-                };
-                Part::new(format!("{mid}:p{index}"), tag, body)
+            .map(|(index, (seal, body))| {
+                let tag = is_numbered(role, &body).then(|| {
+                    next_tag += 1;
+                    next_tag - 1
+                });
+                Part::new(format!("{mid}:p{index}"), tag, seal, body)
             })
             .collect();
         let entry = Entry {
-            ordinal: self.entries.len() as u64,
+            ordinal: self.entries.len() as u64 + 1,
             mid,
             role,
             digest: entry_digest(role, notice.as_ref(), &parts),
@@ -111,10 +111,11 @@ impl Transcript {
         let parts = vec![Part::new(
             format!("{mid}:p0"),
             None,
+            Seal::None,
             PartBody::Text { text: text.into() },
         )];
         self.entries.push(Entry {
-            ordinal: self.entries.len() as u64,
+            ordinal: self.entries.len() as u64 + 1,
             mid,
             role,
             digest: entry_digest(role, None, &parts),
@@ -128,13 +129,14 @@ impl Transcript {
     }
 
     /// Record a tool's result on the newest message, the only one that may
-    /// still change.
+    /// still change, with any text delivered after it.
     pub fn complete_tool(
         &mut self,
         call_id: &str,
         status: ToolStatus,
         output: String,
         attachments: Vec<Attachment>,
+        delivered: Vec<Delivered>,
     ) -> Result<(), String> {
         let entry = self.entries.last_mut().ok_or("empty transcript")?;
         let part = entry
@@ -152,7 +154,8 @@ impl Transcript {
         tool.output_bytes = Some(output.len() as u64);
         tool.output = Some(output);
         tool.attachments = attachments;
-        *part = Part::new(part.id.clone(), part.tag, PartBody::Tool(tool));
+        tool.delivered = delivered;
+        *part = Part::new(part.id.clone(), part.tag, part.seal, PartBody::Tool(tool));
         entry.digest = entry_digest(entry.role, entry.notice.as_ref(), &entry.parts);
         Ok(())
     }
@@ -160,11 +163,11 @@ impl Transcript {
     /// Remove every entry from `ordinal` on. Their numbers become free, and
     /// the next numbered part takes the first of them.
     pub fn revert_to(&mut self, ordinal: u64) {
-        self.entries.truncate(ordinal as usize);
+        self.entries.truncate(ordinal.saturating_sub(1) as usize);
     }
 
-    /// Serve a `session.read`: matching entries, and where to continue when
-    /// they did not fit.
+    /// Serve a `session.entries` read: matching entries, and where to
+    /// continue when they did not fit.
     pub fn read(
         &self,
         select: &Select,
@@ -229,34 +232,43 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ck_contract_draft::part::{Sealing, ToolPart};
+    use ck_contract_draft::part::{OutputFormat, ToolPart};
     use serde_json::json;
 
-    fn text(value: &str) -> PartBody {
-        PartBody::Text { text: value.into() }
+    fn text(value: &str) -> (Seal, PartBody) {
+        (Seal::None, PartBody::Text { text: value.into() })
     }
 
-    fn tool(call_id: &str) -> PartBody {
-        PartBody::Tool(ToolPart {
-            call_id: call_id.into(),
-            name: "read".into(),
-            input: json!({"path": "a.rs"}).as_object().unwrap().clone(),
-            status: ToolStatus::Running,
-            output: None,
-            output_bytes: None,
-            attachments: vec![],
-        })
+    fn tool(call_id: &str) -> (Seal, PartBody) {
+        (
+            Seal::None,
+            PartBody::Tool(ToolPart {
+                call_id: call_id.into(),
+                name: "read".into(),
+                input: json!({"path": "a.rs"}),
+                provider_executed: false,
+                status: ToolStatus::Running,
+                output: None,
+                output_format: OutputFormat::Text,
+                output_bytes: None,
+                attachments: vec![],
+                approval: None,
+                delivered: vec![],
+            }),
+        )
     }
 
     #[test]
     fn numbers_count_from_the_checkpoint_and_continue_after_a_revert() {
         let mut transcript = Transcript::new(99);
         transcript.append(Role::User, None, vec![text("hi")], None, None, 1);
-        let reasoning = PartBody::Reasoning {
-            text: Some("hmm".into()),
-            text_bytes: Some(3),
-            sealing: Sealing::Signed,
-        };
+        let reasoning = (
+            Seal::Signed,
+            PartBody::Reasoning {
+                text: Some("hmm".into()),
+                text_bytes: Some(3),
+            },
+        );
         let entry = transcript.append(
             Role::Assistant,
             None,
@@ -267,10 +279,10 @@ mod tests {
         );
         let tags: Vec<_> = entry.parts.iter().map(|part| part.tag).collect();
         assert_eq!(tags, [None, Some(101), Some(102)]);
-        transcript.revert_to(1);
+        transcript.revert_to(2);
         let entry = transcript.append(Role::Assistant, None, vec![text("again")], None, None, 3);
         assert_eq!(entry.parts[0].tag, Some(101));
-        assert_eq!(entry.ordinal, 1);
+        assert_eq!(entry.ordinal, 2);
         assert_eq!(entry.mid, "msg00003");
     }
 
@@ -280,14 +292,20 @@ mod tests {
         transcript.append(Role::Assistant, None, vec![tool("c1")], None, None, 1);
         let before = transcript.entries()[0].clone();
         transcript
-            .complete_tool("c1", ToolStatus::Completed, "fn main() {}".into(), vec![])
+            .complete_tool(
+                "c1",
+                ToolStatus::Completed,
+                "fn main() {}".into(),
+                vec![],
+                vec![],
+            )
             .unwrap();
         let after = &transcript.entries()[0];
         assert_eq!(after.parts[0].tag, before.parts[0].tag);
         assert_ne!(after.parts[0].digest, before.parts[0].digest);
         assert_ne!(after.digest, before.digest);
         assert!(transcript
-            .complete_tool("c1", ToolStatus::Completed, "again".into(), vec![])
+            .complete_tool("c1", ToolStatus::Completed, "again".into(), vec![], vec![])
             .is_err());
     }
 
@@ -317,7 +335,13 @@ mod tests {
 
         transcript.append(Role::Assistant, None, vec![tool("c1")], None, None, 9);
         transcript
-            .complete_tool("c1", ToolStatus::Completed, "big output".into(), vec![])
+            .complete_tool(
+                "c1",
+                ToolStatus::Completed,
+                "big output".into(),
+                vec![],
+                vec![],
+            )
             .unwrap();
         let (page, _) = transcript.read(&Select::Tags { tags: vec![6] }, Detail::Compact, None);
         let PartBody::Tool(tool) = &page[0].parts[0].body else {

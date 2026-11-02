@@ -6,8 +6,10 @@
 //! - a model run in a child session the provider owns, such as a summarizer
 //!   turn, whose reply the provider reads with `run.result`.
 //!
-//! The draft names the session in each request; on the real contract the
-//! route's scope names it.
+//! These types are a stand-in for the mock runner and ck-mc while the draft
+//! is built; the contract uses llm-runner's published types for both ops, and
+//! these go once ck-mc and the mock switch to them. Like every op here, they
+//! name no session: the route is bound to it.
 
 use serde::{Deserialize, Serialize};
 

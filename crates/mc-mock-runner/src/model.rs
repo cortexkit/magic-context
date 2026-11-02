@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use ck_contract_draft::part::{PartBody, Sealing};
+use ck_contract_draft::part::{PartBody, Seal};
 use ck_contract_draft::read::{Role, StepUsage};
 use ck_contract_draft::view::RenderedMessage;
 use sha2::{Digest, Sha256};
@@ -141,13 +141,7 @@ impl MockModel {
             };
             self.previous = Some((blocks, prompt_tokens));
             return Ok(Completion {
-                usage: StepUsage {
-                    prompt_tokens,
-                    cache_read_tokens: read,
-                    cache_write_tokens: prompt_tokens - read,
-                    output_tokens: 0,
-                    reasoning_tokens: None,
-                },
+                usage: usage(prompt_tokens, read),
                 binding: Binding {
                     content: String::new(),
                     signed_before: Vec::new(),
@@ -177,13 +171,7 @@ impl MockModel {
             expires_at: request.now + self.cache_ttl_ms,
         });
         Ok(Completion {
-            usage: StepUsage {
-                prompt_tokens,
-                cache_read_tokens: read,
-                cache_write_tokens: prompt_tokens - read,
-                output_tokens: 0,
-                reasoning_tokens: None,
-            },
+            usage: usage(prompt_tokens, read),
             binding: Binding {
                 content: content_before(request.messages, usize::MAX, request.system_digest),
                 signed_before: signed_ids(request.messages, usize::MAX),
@@ -219,11 +207,7 @@ impl MockModel {
         let mut position = 0;
         for message in request.messages {
             for part in &message.parts {
-                if let PartBody::Reasoning {
-                    sealing: Sealing::Signed,
-                    ..
-                } = part.body
-                {
+                if part.seal == Seal::Signed {
                     let Some(binding) = self.bindings.get(&part.id) else {
                         return Err(ModelError::InvalidSignature {
                             part: part.id.clone(),
@@ -304,23 +288,28 @@ fn signed_ids(messages: &[RenderedMessage], limit: usize) -> Vec<String> {
         .iter()
         .flat_map(|message| &message.parts)
         .take(limit)
-        .filter(|part| {
-            matches!(
-                part.body,
-                PartBody::Reasoning {
-                    sealing: Sealing::Signed,
-                    ..
-                }
-            )
-        })
+        .filter(|part| part.seal == Seal::Signed)
         .map(|part| part.id.clone())
         .collect()
+}
+
+/// What a request reports: its prompt, what it read from the cache, and the
+/// rest written. The mock reports no output: replies are scripted.
+fn usage(prompt_tokens: u64, read: u64) -> StepUsage {
+    StepUsage {
+        prompt_tokens: Some(prompt_tokens),
+        cache_read_tokens: Some(read),
+        cache_write_tokens: Some(prompt_tokens - read),
+        output_tokens: None,
+        reasoning_tokens: None,
+    }
 }
 
 fn role_name(role: Role) -> &'static str {
     match role {
         Role::User => "user",
         Role::Assistant => "assistant",
+        Role::System => "system",
     }
 }
 

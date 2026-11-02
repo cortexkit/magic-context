@@ -8,7 +8,7 @@ use ck_contract_draft::part::{PartBody, ToolStatus};
 use ck_contract_draft::read::SessionRef;
 use ck_contract_draft::ride::{RideAnswer, RideCause, RideRequest};
 use ck_contract_draft::rules::{
-    invalid_signed_parts, EditCost, ProviderRules, RuleBreak, SignedReasoning,
+    invalid_signed_parts, EditCost, ProviderRules, RuleBreak, SignedParts,
 };
 use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{ApplyViewAnswer, ApplyViewRequest, Edit, EditOp, View, ViewRefusal};
@@ -122,12 +122,12 @@ impl Provider for TestProvider {
 }
 
 const ANTHROPIC_BOUND: ProviderRules = ProviderRules {
-    signed_reasoning: SignedReasoning::Bound,
+    signed_parts: SignedParts::Bound,
     history_edit_cost: EditCost::Suffix,
 };
 
 const FREE: ProviderRules = ProviderRules {
-    signed_reasoning: SignedReasoning::None,
+    signed_parts: SignedParts::None,
     history_edit_cost: EditCost::Suffix,
 };
 
@@ -305,7 +305,7 @@ async fn a_view_breaking_signed_reasoning_is_refused_and_its_fixed_form_accepted
         assert!(matches!(
             published[..],
             [ApplyViewAnswer::Refused {
-                refusal: ViewRefusal::Rule(RuleBreak::SignedReasoningInvalid { .. })
+                refusal: ViewRefusal::Rule(RuleBreak::SignedPartInvalid { .. })
             }]
         ));
     }
@@ -390,7 +390,7 @@ async fn over_the_limit_the_runner_rides_and_refuses_rather_than_send() {
         .report
         .rides
         .iter()
-        .any(|ride| ride.cause == RideCause::OverLimit && !ride.got_view));
+        .any(|ride| ride.has(RideCause::OverLimit) && !ride.got_view));
     let sent = runner.report.requests.len();
 
     // With a provider that answers the ride, the same script goes through.
@@ -428,9 +428,9 @@ async fn an_idle_gap_past_the_cache_lifetime_rides_before_the_next_request() {
         ])
         .await;
     assert_eq!(runner.report.rides.len(), 1);
-    assert_eq!(runner.report.rides[0].cause, RideCause::CacheExpired);
+    assert_eq!(runner.report.rides[0].causes, [RideCause::CacheExpired]);
     let last = runner.report.requests.last().unwrap();
-    assert_eq!(last.usage.cache_read_tokens, 0);
+    assert_eq!(last.usage.cache_read_tokens, Some(0));
 }
 
 #[tokio::test]
@@ -445,7 +445,7 @@ async fn after_a_revert_the_runner_skips_edits_for_messages_that_are_gone() {
         .await;
     assert_eq!(runner.host().applied_version(), Some(1));
     runner
-        .play(&[Step::Revert { ordinal: 2 }, user("again"), answer()])
+        .play(&[Step::Revert { ordinal: 3 }, user("again"), answer()])
         .await;
     assert!(
         runner.report.model_errors.is_empty(),
@@ -455,7 +455,7 @@ async fn after_a_revert_the_runner_skips_edits_for_messages_that_are_gone() {
     let notices = runner.provider().notices.lock().unwrap();
     assert!(notices.iter().any(|notice| notice
         .events
-        .contains(&Event::TranscriptChanged { from_ordinal: 2 })));
+        .contains(&Event::TranscriptChanged { from_ordinal: 3 })));
 }
 
 /// A reply that only answers, starting its text the given way.

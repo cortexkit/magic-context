@@ -19,11 +19,19 @@
 use ck_contract_draft::part::{Part, PartBody};
 use ck_contract_draft::read::{Cursor, Entry};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Index {
     /// The ordinal of `entries[0]`, or of the next entry when empty.
+    /// Ordinals count from 1.
     base: u64,
     entries: Vec<Entry>,
+}
+
+/// An empty index that holds the whole transcript, from its first entry.
+impl Default for Index {
+    fn default() -> Self {
+        Self::starting_at(1)
+    }
 }
 
 /// What adding entries did.
@@ -119,10 +127,11 @@ impl Index {
     /// ordinal, so the newest held entry (which may still change) is read
     /// again; `None` reads from the transcript's start.
     pub fn read_after(&self) -> Option<u64> {
-        match self.entries.last() {
-            Some(newest) => newest.ordinal.checked_sub(1),
-            None => self.base.checked_sub(1),
-        }
+        let first = match self.entries.last() {
+            Some(newest) => newest.ordinal,
+            None => self.base,
+        };
+        first.checked_sub(1).filter(|after| *after > 0)
     }
 
     /// The entry and part that carry tag number `tag`.
@@ -159,12 +168,14 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ck_contract_draft::part::Seal;
     use ck_contract_draft::read::{entry_digest, Role};
 
     fn entry(ordinal: u64, mid: &str, text: &str) -> Entry {
         let parts = vec![Part::new(
             format!("{mid}:p0"),
-            Some(ordinal + 1),
+            Some(ordinal),
+            Seal::None,
             PartBody::Text { text: text.into() },
         )];
         Entry {
@@ -184,44 +195,45 @@ mod tests {
     fn entries_extend_repeat_or_update_only_the_newest_message() {
         let mut index = Index::default();
         assert_eq!(
-            index.extend([entry(0, "a", "one"), entry(1, "b", "two")]),
+            index.extend([entry(1, "a", "one"), entry(2, "b", "two")]),
             Extend::Continued
         );
         // A repeat changes nothing.
-        assert_eq!(index.extend([entry(1, "b", "two")]), Extend::Continued);
+        assert_eq!(index.extend([entry(2, "b", "two")]), Extend::Continued);
         // The newest message may change.
         assert_eq!(
-            index.extend([entry(1, "b", "two, done")]),
+            index.extend([entry(2, "b", "two, done")]),
             Extend::Continued
         );
         assert_eq!(index.find_tag(2).unwrap().0.mid, "b");
         // An older one may not, nor may a different message at a known ordinal.
-        assert_eq!(index.extend([entry(0, "a", "changed")]), Extend::Diverged);
-        assert_eq!(index.extend([entry(1, "c", "other")]), Extend::Diverged);
-        assert_eq!(index.extend([entry(3, "d", "later")]), Extend::Gap);
-        index.truncate(1);
+        assert_eq!(index.extend([entry(1, "a", "changed")]), Extend::Diverged);
+        assert_eq!(index.extend([entry(2, "c", "other")]), Extend::Diverged);
+        assert_eq!(index.extend([entry(4, "d", "later")]), Extend::Gap);
+        index.truncate(2);
         assert_eq!(index.cursor().unwrap().mid, "a");
     }
 
     #[test]
     fn a_pruned_index_holds_only_what_follows_its_base() {
         let mut index = Index::default();
-        index.extend((0..5).map(|n| entry(n, &format!("m{n}"), "x")));
-        let gone = index.prune_before(3);
+        index.extend((1..=5).map(|n| entry(n, &format!("m{n}"), "x")));
+        let gone = index.prune_before(4);
         assert_eq!(gone.len(), 3);
-        assert_eq!(index.base(), 3);
+        assert_eq!(index.base(), 4);
         assert_eq!(index.entries().len(), 2);
         // Cut messages coming back in a read are skipped; the rest continue.
         assert_eq!(
-            index.extend((2..7).map(|n| entry(n, &format!("m{n}"), "x"))),
+            index.extend((3..=7).map(|n| entry(n, &format!("m{n}"), "x"))),
             Extend::Continued
         );
         assert_eq!(index.entries().len(), 4);
-        assert_eq!(index.read_after(), Some(5));
-        assert_eq!(index.extend([entry(3, "other", "x")]), Extend::Diverged);
+        assert_eq!(index.read_after(), Some(6));
+        assert_eq!(index.extend([entry(4, "other", "x")]), Extend::Diverged);
         index.truncate(1);
         assert!(index.entries().is_empty());
         assert_eq!(Index::starting_at(4).read_after(), Some(3));
+        assert_eq!(Index::starting_at(2).read_after(), Some(1));
         assert_eq!(Index::default().read_after(), None);
     }
 }

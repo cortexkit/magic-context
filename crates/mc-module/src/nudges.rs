@@ -147,7 +147,7 @@ pub fn measure(
             let (weight, tool) = match &part.body {
                 PartBody::Text { .. } | PartBody::File(_) => (tokens::part(part), None),
                 PartBody::Tool(tool) => (tokens::part(part), Some(tool)),
-                PartBody::Reasoning { .. } | PartBody::Image(_) => continue,
+                PartBody::Reasoning { .. } | PartBody::Opaque(_) => continue,
             };
             measurement.t += weight;
             let key = (entry.mid.clone(), part.id.clone());

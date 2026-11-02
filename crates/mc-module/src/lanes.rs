@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ck_contract_draft::part::{Part, PartBody, Sealing, ToolPart, ToolStatus};
+use ck_contract_draft::part::{Part, PartBody, Seal, ToolPart, ToolStatus};
 use ck_contract_draft::read::{Entry, Role};
 use ck_contract_draft::view::{EditOp, View};
 use serde_json::{json, Value};
@@ -197,9 +197,8 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                 let Some(tag) = part.tag else {
                     continue;
                 };
-                let input = Value::Object(tool.input.clone());
-                let small_recent =
-                    recent.contains(&tag) && input_string_bytes(&input) <= SMALL_INPUT_MAX_BYTES;
+                let small_recent = recent.contains(&tag)
+                    && input_string_bytes(&tool.input) <= SMALL_INPUT_MAX_BYTES;
                 // A call whose result ends the transcript stays a call: the
                 // request would otherwise end on the call's message without
                 // its result.
@@ -218,15 +217,15 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                 if !tool.attachments.is_empty() {
                     ops.push(replace("attachments", json!([])));
                 }
-                if shape == Shape::EditMarker {
-                    for (name, value) in &tool.input {
+                if let (Shape::EditMarker, Some(arguments)) = (shape, tool.input.as_object()) {
+                    for (name, value) in arguments {
                         if let Some(marked) = edit_marker(name, value) {
                             ops.push(replace(&format!("input.{name}"), json!(marked)));
                         }
                     }
                 }
             }
-            PartBody::Image(_) | PartBody::File(_) => continue,
+            PartBody::File(_) | PartBody::Opaque(_) => continue,
         }
         covered.push(key.clone());
     }
@@ -310,8 +309,8 @@ fn starts_user_turn(entry: &Entry) -> bool {
         && entry.notice.is_none()
         && entry.parts.iter().any(|part| match &part.body {
             PartBody::Text { text } => !text.trim().is_empty(),
-            PartBody::Image(_) | PartBody::File(_) => true,
-            PartBody::Reasoning { .. } | PartBody::Tool(_) => false,
+            PartBody::File(_) => true,
+            PartBody::Reasoning { .. } | PartBody::Tool(_) | PartBody::Opaque(_) => false,
         })
 }
 
@@ -413,14 +412,9 @@ fn reasoning_cost(entry: &Entry, reasoning: &[&Part]) -> u64 {
     let mut visible = 0;
     let mut opaque = false;
     for part in reasoning {
-        if let PartBody::Reasoning {
-            text_bytes,
-            sealing,
-            ..
-        } = &part.body
-        {
+        if let PartBody::Reasoning { text_bytes, .. } = &part.body {
             visible += tokens::bytes(text_bytes.unwrap_or(0));
-            opaque |= text_bytes.unwrap_or(0) == 0 && *sealing != Sealing::None;
+            opaque |= text_bytes.unwrap_or(0) == 0 && part.seal != Seal::None;
         }
     }
     if visible > 0 {
@@ -838,14 +832,19 @@ mod tests {
         Part::new(
             format!("p{tag}"),
             Some(tag),
+            Seal::None,
             PartBody::Tool(ToolPart {
                 call_id: format!("c{tag}"),
                 name: "read".into(),
-                input: json!({"path": "b.rs"}).as_object().unwrap().clone(),
+                input: json!({"path": "b.rs"}),
+                provider_executed: false,
                 status: ToolStatus::Completed,
                 output: None,
+                output_format: ck_contract_draft::part::OutputFormat::Text,
                 output_bytes: Some(output_bytes),
                 attachments: Vec::new(),
+                approval: None,
+                delivered: Vec::new(),
             }),
         )
     }
@@ -857,16 +856,17 @@ mod tests {
             Part::new(
                 format!("p{tag}"),
                 Some(tag),
+                Seal::None,
                 PartBody::Text { text: "Go.".into() },
             )
         };
         let mut index = Index::default();
         index.extend([
-            entry(0, Role::User, vec![text(1)]),
-            entry(1, Role::Assistant, vec![read(2, 40), read(3, 40)]),
-            entry(2, Role::Assistant, vec![read(4, 4_000)]),
-            entry(3, Role::Assistant, vec![read(5, 4_000)]),
-            entry(4, Role::Assistant, vec![read(6, 4_000)]),
+            entry(1, Role::User, vec![text(1)]),
+            entry(2, Role::Assistant, vec![read(2, 40), read(3, 40)]),
+            entry(3, Role::Assistant, vec![read(4, 4_000)]),
+            entry(4, Role::Assistant, vec![read(5, 4_000)]),
+            entry(5, Role::Assistant, vec![read(6, 4_000)]),
         ]);
         index
     }
@@ -889,7 +889,7 @@ mod tests {
         assert_eq!(protected_cutoff(&context, 3_001), Some(3));
         assert_eq!(protected_cutoff(&context, 100_000), Some(2));
 
-        let duplicate = vec![(("m1".to_owned(), "p2".to_owned()), Shape::Whole)];
+        let duplicate = vec![(("m2".to_owned(), "p2".to_owned()), Shape::Whole)];
         assert_eq!(duplicate_lookups(&context, Some(4)), duplicate);
         assert_eq!(duplicate_lookups(&context, Some(2)), []);
     }
