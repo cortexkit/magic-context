@@ -72,6 +72,9 @@ pub struct Session {
     /// Where summaries and memories are kept; absent only in tests.
     db: Option<Arc<ContextDb>>,
     project: Option<Project>,
+    /// The baseline a view being published was built on; it replaces
+    /// `baseline` once the runner takes the view.
+    next_baseline: Option<Baseline>,
     /// A revert removed summaries the head shows. The next notice rebuilds
     /// the head whatever the usage: the model must not keep seeing history
     /// that was undone.
@@ -97,6 +100,7 @@ impl Session {
             seq: 0,
             summaries: Vec::new(),
             baseline: None,
+            next_baseline: None,
             summarizing: false,
             fold_due: false,
             head_stale: false,
@@ -618,6 +622,14 @@ impl Session {
             }
             _ => (Vec::new(), Vec::new(), 0, 0),
         };
+        let fragment_cursor = self
+            .db
+            .as_ref()
+            .and_then(|db| {
+                db.last_agent_fragment(&self.key.harness, &self.key.session)
+                    .ok()
+            })
+            .unwrap_or(0);
         let inputs = head::Inputs {
             summaries: &self.summaries,
             docs: &docs,
@@ -625,6 +637,7 @@ impl Session {
             profile_max_id,
             memories: &memories,
             mutation_cursor,
+            fragment_cursor,
             history_budget_tokens: (self.conditions.context_window as f64
                 * settings.execute_threshold_percentage
                 / 100.0
@@ -632,19 +645,37 @@ impl Session {
             memory_budget_tokens: settings.memory_budget_tokens,
             profile_budget_tokens: settings.profile_budget_tokens,
         };
-        if self.baseline.is_none() || self.fold_due {
-            self.baseline = Some(head::fold(&inputs));
-            self.fold_due = false;
-        }
-        let baseline = self.baseline.clone().unwrap_or_default();
-        let mutations = match (&self.db, &self.project) {
-            (Some(db), Some(project)) => db
-                .memory_mutations_after(&project.id, baseline.mutation_cursor)
-                .unwrap_or_default(),
-            _ => Vec::new(),
+        let mut next = match (&self.baseline, self.fold_due) {
+            (Some(baseline), false) => baseline.clone(),
+            _ => head::fold(&inputs),
         };
-        let m1 = head::delta(&baseline, &inputs, &mutations);
-        let mut ops = head::head_ops(&baseline.m0, &m1);
+        let (after_fragment, after_log) = head::processed_through(&next);
+        let mut pending = Vec::new();
+        if let Some(db) = &self.db {
+            pending.extend(
+                db.agent_fragments_after(&self.key.harness, &self.key.session, after_fragment)
+                    .unwrap_or_default(),
+            );
+            if let Some(project) = &self.project {
+                let shown: Vec<i64> = next.shown_memories.iter().map(|(id, _)| *id).collect();
+                pending.extend(
+                    db.dashboard_fragments_after(
+                        &project.id,
+                        after_log,
+                        &shown,
+                        next.max_memory_id,
+                    )
+                    .unwrap_or_default(),
+                );
+            }
+        }
+        let (m1, committed) = head::delta(&next, &inputs, &pending);
+        next.committed = committed;
+        let mut ops = head::head_ops(&next.m0, &m1);
+        // The new baseline and the changes m[1] shows count only once the
+        // runner takes this view.
+        self.next_baseline = Some(next);
+
         let cut = self.summaries.last().and_then(|last| {
             self.index
                 .entries()
@@ -813,19 +844,27 @@ impl Session {
         match client.publish(request).await {
             Ok(ViewPublishAnswer::Accepted) => self.accept(view),
             Ok(ViewPublishAnswer::Refused { refusal }) => {
+                self.next_baseline = None;
                 eprintln!(
                     "ck-mc: session {}: runner refused view {}: {refusal:?}",
                     self.key.session, view.version
                 );
             }
-            Err(error) => eprintln!(
-                "ck-mc: session {}: view.publish failed: {error:?}",
-                self.key.session
-            ),
+            Err(error) => {
+                self.next_baseline = None;
+                eprintln!(
+                    "ck-mc: session {}: view.publish failed: {error:?}",
+                    self.key.session
+                );
+            }
         }
     }
 
     fn accept(&mut self, view: View) {
+        if let Some(next) = self.next_baseline.take() {
+            self.baseline = Some(next);
+            self.fold_due = false;
+        }
         self.version = self.version.max(view.version);
         self.latest = Some(view);
     }

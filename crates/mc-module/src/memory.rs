@@ -5,7 +5,7 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use crate::context_db::{StoredMemory, StoredMutation};
+use crate::context_db::StoredMemory;
 
 /// Render order of the five memory categories.
 const CATEGORY_ORDER: [&str; 5] = [
@@ -174,44 +174,37 @@ pub fn render_profile(profile: &[String], wrapper: &str) -> String {
     lines.join("\n")
 }
 
-/// `<memory-updates>`: what changed in memories the head already shows, so
-/// the model trusts these over the older lines. A replacement shown in the
-/// head is named; otherwise the memory reads as removed.
-pub fn render_updates(mutations: &[StoredMutation], shown: &HashSet<i64>) -> String {
-    if mutations.is_empty() {
-        return String::new();
-    }
-    let mut lines =
-        vec!["These memories changed since the snapshot below — trust these:".to_owned()];
-    for mutation in mutations {
-        let line = match mutation.mutation_type.as_str() {
-            "update" => {
-                let category = mutation
-                    .category
-                    .as_deref()
-                    .filter(|category| !category.is_empty())
-                    .map(|category| format!(" category=\"{}\"", escape_attr(category)))
-                    .unwrap_or_default();
-                format!(
-                    "  <updated id=\"{}\"{category}>{}</updated>",
-                    mutation.target_memory_id,
-                    escape_content(mutation.new_content.as_deref().unwrap_or(""))
-                )
-            }
-            "superseded" => match mutation.superseded_by_id {
-                Some(by) if shown.contains(&by) => {
-                    format!(
-                        "  <superseded id=\"{}\" by=\"{by}\"/>",
-                        mutation.target_memory_id
-                    )
-                }
-                _ => format!("  <removed id=\"{}\"/>", mutation.target_memory_id),
-            },
-            _ => format!("  <removed id=\"{}\"/>", mutation.target_memory_id),
-        };
-        lines.push(line);
-    }
-    format!("<memory-updates>\n{}\n</memory-updates>", lines.join("\n"))
+fn category_attribute(category: Option<&str>) -> String {
+    category
+        .filter(|category| !category.is_empty())
+        .map(|category| format!(" category=\"{}\"", escape_attr(category)))
+        .unwrap_or_default()
+}
+
+/// The `m[1]` line for a memory whose text was replaced.
+pub fn updated_line(id: i64, category: Option<&str>, text: &str) -> String {
+    format!(
+        "  <updated id=\"{id}\"{}>{}</updated>",
+        category_attribute(category),
+        escape_content(text)
+    )
+}
+
+/// The `m[1]` line for a new memory, saved or produced by a merge.
+pub fn added_line(id: i64, category: Option<&str>, text: &str) -> String {
+    format!(
+        "  <added id=\"{id}\"{}>{}</added>",
+        category_attribute(category),
+        escape_content(text)
+    )
+}
+
+pub fn removed_line(id: i64) -> String {
+    format!("  <removed id=\"{id}\"/>")
+}
+
+pub fn superseded_line(id: i64, by: i64) -> String {
+    format!("  <superseded id=\"{id}\" by=\"{by}\"/>")
 }
 
 #[cfg(test)]

@@ -1063,7 +1063,7 @@ fn insert_memory(dir: &std::path::Path, id: i64, content: &str) {
 }
 
 #[tokio::test]
-async fn a_head_shows_its_docs_and_memories_from_the_first_step_and_newer_ones_in_m1() {
+async fn a_head_shows_its_docs_and_memories_first_and_only_its_own_memory_changes_in_m1() {
     let dir = scratch("head-memories");
     ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     insert_memory(&dir, 1, "Ask before pushing.");
@@ -1091,9 +1091,21 @@ async fn a_head_shows_its_docs_and_memories_from_the_first_step_and_newer_ones_i
         "{m1}"
     );
 
-    // A memory written mid-session shows in m[1] on the next pass that
-    // builds a view, and m[0] stays as it was.
+    // A memory another writer adds mid-session waits for the next fold,
+    // while this session's own agent change shows in m[1] on the next pass
+    // that builds a view; m[0] stays as it was.
     insert_memory(&dir, 2, "Never force-push.");
+    rusqlite::Connection::open(dir.join("context.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO memory_agent_fragments (session_id, harness, project_path, operation_key,
+                 memory_ids_json, current_id, lines, visible_texts_json, created_at)
+             VALUES ('s1', 'mock', 'pj-test', 'op-1', '[1]', 1,
+                     '  <updated id=\"1\" category=\"PROJECT_RULES\">Ask before every push.</updated>',
+                     '[{\"id\":1,\"text\":\"Ask before every push.\"}]', 1)",
+            [],
+        )
+        .unwrap();
     let mut steps = Vec::new();
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
@@ -1102,19 +1114,20 @@ async fn a_head_shows_its_docs_and_memories_from_the_first_step_and_newer_ones_i
     assert_clean(&runner);
     let (m0_later, m1) = head_texts(runner.host());
     assert!(
-        m1.contains("<new-memories>") && m1.contains("#2: Never force-push."),
+        m1.contains("<memory-updates>") && m1.contains("Ask before every push."),
         "{m1}"
     );
+    assert!(!m1.contains("Never force-push."), "{m1}");
     assert!(!m0_later.contains("Never force-push."), "{m0_later}");
 
-    // A lost cache folds it into m[0].
+    // A lost cache folds both into m[0].
     runner
         .play(&[Step::Wait { ms: 400_000 }, user("Next."), answer()])
         .await;
     assert_clean(&runner);
     let (m0, m1) = head_texts(runner.host());
     assert!(m0.contains("#2: Never force-push."), "{m0}");
-    assert!(!m1.contains("Never force-push."), "{m1}");
+    assert!(!m1.contains("memory-updates"), "{m1}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

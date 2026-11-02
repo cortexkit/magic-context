@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::summary::head::Fragment;
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 
 use crate::summary::validate::ValidatedCompartment;
@@ -139,17 +140,6 @@ impl From<&ValidatedCompartment> for StoredCompartment {
             created_at: 0,
         }
     }
-}
-
-/// A change to a memory the head may already show, from the mutation log.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StoredMutation {
-    pub id: i64,
-    pub mutation_type: String,
-    pub target_memory_id: i64,
-    pub superseded_by_id: Option<i64>,
-    pub category: Option<String>,
-    pub new_content: Option<String>,
 }
 
 /// Whose notes a call may see and change: the session's own, by harness
@@ -547,35 +537,141 @@ impl ContextDb {
         ))
     }
 
-    /// A project's memory changes after the log entry `after`, oldest first.
-    pub fn memory_mutations_after(
+    /// This session's agent memory fragments after `after`, oldest first.
+    pub fn agent_fragments_after(
         &self,
-        project: &str,
+        harness: &str,
+        session: &str,
         after: i64,
-    ) -> Result<Vec<StoredMutation>, String> {
+    ) -> Result<Vec<Fragment>, String> {
         let connection = self.lock();
         let mut statement = connection
             .prepare_cached(
-                "SELECT id, mutation_type, target_memory_id, superseded_by_id, category, new_content
-                   FROM memory_mutation_log
-                  WHERE project_path = ?1 AND id > ?2
-                  ORDER BY id ASC",
+                "SELECT id, operation_key, memory_ids_json, current_id, lines, visible_texts_json
+                   FROM memory_agent_fragments
+                  WHERE session_id = ?1 AND harness = ?2 AND id > ?3
+                  ORDER BY id",
             )
             .map_err(|error| error.to_string())?;
         let rows = statement
-            .query_map(params![project, after], |row| {
-                Ok(StoredMutation {
+            .query_map(params![session, harness, after], |row| {
+                let ids: String = row.get(2)?;
+                let lines: String = row.get(4)?;
+                let visible: String = row.get(5)?;
+                Ok(Fragment {
                     id: row.get(0)?,
-                    mutation_type: row.get(1)?,
-                    target_memory_id: row.get(2)?,
-                    superseded_by_id: row.get(3)?,
-                    category: row.get(4)?,
-                    new_content: row.get(5)?,
+                    dashboard_log_id: None,
+                    operation_key: row.get(1)?,
+                    memory_ids: serde_json::from_str(&ids).unwrap_or_default(),
+                    current_id: row.get(3)?,
+                    lines: lines.split('\n').map(str::to_owned).collect(),
+                    visible: serde_json::from_str::<Vec<serde_json::Value>>(&visible)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|item| {
+                            Some((
+                                item.get("id")?.as_i64()?,
+                                item.get("text")?.as_str()?.to_owned(),
+                            ))
+                        })
+                        .collect(),
                 })
             })
             .map_err(|error| error.to_string())?;
         rows.collect::<Result<_, _>>()
             .map_err(|error| error.to_string())
+    }
+
+    /// This session's newest agent memory fragment, or 0.
+    pub fn last_agent_fragment(&self, harness: &str, session: &str) -> Result<i64, String> {
+        self.lock()
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM memory_agent_fragments WHERE session_id = ?1 AND harness = ?2",
+                params![session, harness],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    /// Dashboard edits logged after `after` for the project, or for a memory
+    /// the head shows. A multi-row edit stays one change. The log row's own
+    /// text is shown, never the memory's current text.
+    pub fn dashboard_fragments_after(
+        &self,
+        project: &str,
+        after: i64,
+        shown: &[i64],
+        max_memory_id: i64,
+    ) -> Result<Vec<Fragment>, String> {
+        let connection = self.lock();
+        let mut statement = connection
+            .prepare_cached(
+                "SELECT id, project_path, target_memory_id, mutation_type, superseded_by_id, category,
+                        new_content, operation_id
+                   FROM memory_mutation_log
+                  WHERE id > ?1 AND operation_id LIKE 'dashboard:%'
+                    AND (project_path = ?2 OR target_memory_id IN (SELECT value FROM json_each(?3)))
+                  ORDER BY id",
+            )
+            .map_err(|error| error.to_string())?;
+        let shown_json = serde_json::to_string(shown).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![after, project, shown_json], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let mut grouped: Vec<Fragment> = Vec::new();
+        for (log_id, row_project, id, kind, by, category, content, operation) in rows {
+            let removed = row_project != project || kind == "archive" || kind == "delete";
+            let content = content.unwrap_or_default();
+            let line = if removed {
+                crate::memory::removed_line(id)
+            } else if let (true, Some(by)) = (kind == "superseded", by) {
+                crate::memory::superseded_line(id, by)
+            } else if shown.contains(&id) && id <= max_memory_id {
+                crate::memory::updated_line(id, category.as_deref(), &content)
+            } else {
+                crate::memory::added_line(id, category.as_deref(), &content)
+            };
+            let visible = if removed || kind == "superseded" {
+                Vec::new()
+            } else {
+                vec![(id, content)]
+            };
+            match grouped
+                .iter_mut()
+                .find(|fragment| fragment.operation_key == operation)
+            {
+                Some(prior) => {
+                    prior.dashboard_log_id = Some(log_id);
+                    prior.memory_ids.push(id);
+                    prior.lines.push(line);
+                    prior.visible.extend(visible);
+                    prior.current_id = (!removed).then_some(id);
+                }
+                None => grouped.push(Fragment {
+                    id: 0,
+                    dashboard_log_id: Some(log_id),
+                    operation_key: operation,
+                    memory_ids: vec![id],
+                    current_id: (!removed).then_some(id),
+                    lines: vec![line],
+                    visible,
+                }),
+            }
+        }
+        Ok(grouped)
     }
 
     /// The newest memory change logged for a project, or 0.
