@@ -122,3 +122,68 @@ pub fn next_view(
     rules::check(entries, &view.edits, rules).map_err(ViewRefusal::Rule)?;
     Ok(Some(view))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ck_contract_draft::part::{Part, PartBody, Seal};
+    use ck_contract_draft::read::{entry_digest, Role};
+    use ck_contract_draft::rules::{EditCost, SignedParts};
+    use serde_json::json;
+
+    /// ck-mc checks a view with the runner's own functions before it
+    /// publishes, so a lane that asks for an edit the contract forbids gets a
+    /// refusal here, not a view the runner would refuse.
+    #[test]
+    fn a_view_the_runner_would_refuse_is_never_built() {
+        let reasoning = Part::new(
+            "r1",
+            None,
+            Seal::Encrypted,
+            PartBody::Reasoning {
+                text: None,
+                text_bytes: Some(40),
+            },
+        );
+        let entry = Entry {
+            ordinal: 1,
+            mid: "m1".into(),
+            role: Role::Assistant,
+            notice: None,
+            written_at: 0,
+            digest: entry_digest(Role::Assistant, None, std::slice::from_ref(&reasoning)),
+            parts: vec![reasoning.clone()],
+            usage: None,
+            generated_under: None,
+        };
+        let rules = ProviderRules {
+            signed_parts: SignedParts::None,
+            history_edit_cost: EditCost::Suffix,
+        };
+        // A sealed part can be dropped but never replaced.
+        let replace = EditOp::Replace {
+            mid: "m1".into(),
+            part: "r1".into(),
+            field: "text".into(),
+            value: json!("shorter"),
+            expect: reasoning.digest.clone(),
+        };
+        assert!(next_view(
+            None,
+            std::slice::from_ref(&entry),
+            vec![replace],
+            &rules,
+            1,
+            |_| false
+        )
+        .is_err());
+        let drop = EditOp::Drop {
+            mid: "m1".into(),
+            part: Some("r1".into()),
+        };
+        assert!(matches!(
+            next_view(None, &[entry], vec![drop], &rules, 1, |_| false),
+            Ok(Some(_))
+        ));
+    }
+}

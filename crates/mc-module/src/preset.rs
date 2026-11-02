@@ -76,3 +76,54 @@ pub fn features(preset: &str) -> Option<Features> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// Every gate reads a preset's [`super::Features`], never the preset's
+    /// name, so a new preset is a change in this file alone. Only the files
+    /// that map a name to its settings may spell one: this one, the tool
+    /// catalog and its tests (which tools a preset gets) and the transport (the default
+    /// preset of a tools-only route).
+    #[test]
+    fn no_gate_outside_the_preset_tables_names_a_preset() {
+        const ALLOWED: &[&str] = &["preset.rs", "catalog.rs", "transport.rs"];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut folders = vec![root.clone()];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    folders.push(path);
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                let allowed = ALLOWED
+                    .iter()
+                    .any(|file| relative == *file || relative.starts_with("catalog/"));
+                if !relative.ends_with(".rs") || allowed {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for (number, line) in text.lines().enumerate() {
+                    if ["\"head\"", "\"worker\"", "\"reader\""]
+                        .iter()
+                        .any(|preset| line.contains(preset))
+                    {
+                        offenders.push(format!(
+                            "{}:{}: {}",
+                            path.strip_prefix(&root).unwrap().display(),
+                            number + 1,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(offenders.is_empty(), "{offenders:#?}");
+    }
+}

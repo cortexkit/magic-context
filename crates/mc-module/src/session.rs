@@ -81,6 +81,14 @@ pub struct Session {
     /// The caveman state of the view being handed over, which counts once
     /// the runner takes it.
     next_caveman: Option<lanes::CavemanState>,
+    /// The parts the view being handed over drops. Queued drops among them
+    /// are forgotten once the runner takes it; a refused view leaves them
+    /// queued for the next one.
+    next_covered: Vec<lanes::PartKey>,
+    /// Queued drops a refused view already carried once. A second refusal
+    /// carrying one forgets it, so a drop the runner keeps refusing cannot
+    /// make every later pass build a view it refuses.
+    refused_once: BTreeSet<lanes::PartKey>,
     /// A revert removed summaries the head shows. The next notice rebuilds
     /// the head whatever the usage: the model must not keep seeing history
     /// that was undone.
@@ -137,6 +145,8 @@ impl Session {
             next_baseline: None,
             caveman: lanes::CavemanState::default(),
             next_caveman: None,
+            next_covered: Vec::new(),
+            refused_once: BTreeSet::new(),
             summarizing: false,
             fold_due: false,
             head_stale: false,
@@ -1395,16 +1405,21 @@ impl Session {
             version,
             |op| no_history && (head::is_head(op) || matches!(op, EditOp::Cut { .. })),
         );
-        for part in covered {
-            self.queued.remove(part);
-        }
         match built {
             Ok(Some(view)) => {
                 self.version = version;
+                self.next_covered = covered.to_vec();
                 Some(view)
             }
-            Ok(None) => None,
+            // Nothing new to land: what the pass covered was covered already.
+            Ok(None) => {
+                self.forget_queued(covered);
+                None
+            }
+            // A lane's bug. Its work is forgotten, so the same failure does
+            // not repeat on every pass.
             Err(refusal) => {
+                self.forget_queued(covered);
                 eprintln!(
                     "ck-mc: session {}: no valid view: {refusal:?}",
                     self.key.session
@@ -1418,9 +1433,13 @@ impl Session {
         let size = serde_json::to_vec(&view).map_or(usize::MAX, |bytes| bytes.len());
         if size > MAX_VIEW_BYTES {
             // Views name edits, never copies, so one this large is a bug in a
-            // lane. It is not sent; the runner keeps the view it has.
+            // lane. It is not sent; the runner keeps the view it has, and the
+            // queued drops it carried are forgotten, as for any view that
+            // fails ck-mc's own checks.
             self.next_baseline = None;
             self.next_caveman = None;
+            let covered = std::mem::take(&mut self.next_covered);
+            self.forget_queued(&covered);
             eprintln!(
                 "ck-mc: session {}: view {} not sent: view_too_large ({size} bytes, limit {MAX_VIEW_BYTES})",
                 self.key.session, view.version
@@ -1433,6 +1452,7 @@ impl Session {
             Ok(ApplyViewAnswer::Refused { refusal }) => {
                 self.next_baseline = None;
                 self.next_caveman = None;
+                self.keep_refused_drops();
                 eprintln!(
                     "ck-mc: session {}: runner refused view {}: {refusal:?}",
                     self.key.session, view.version
@@ -1441,6 +1461,7 @@ impl Session {
             Err(error) => {
                 self.next_baseline = None;
                 self.next_caveman = None;
+                self.keep_refused_drops();
                 eprintln!(
                     "ck-mc: session {}: session.apply_view failed: {error:?}",
                     self.key.session
@@ -1449,7 +1470,36 @@ impl Session {
         }
     }
 
+    /// Forget queued drops that landed or can never land.
+    fn forget_queued(&mut self, parts: &[lanes::PartKey]) {
+        for part in parts {
+            self.queued.remove(part);
+            self.refused_once.remove(part);
+        }
+    }
+
+    /// The runner did not take a view: its queued drops stay queued for the
+    /// next one, except those a refused view already carried once.
+    fn keep_refused_drops(&mut self) {
+        for part in std::mem::take(&mut self.next_covered) {
+            if !self.queued.contains(&part) {
+                continue;
+            }
+            if self.refused_once.insert(part.clone()) {
+                continue;
+            }
+            eprintln!(
+                "ck-mc: session {}: queued drop of {}/{} forgotten after a second refused view",
+                self.key.session, part.0, part.1
+            );
+            self.queued.remove(&part);
+            self.refused_once.remove(&part);
+        }
+    }
+
     fn accept(&mut self, view: View) {
+        let covered = std::mem::take(&mut self.next_covered);
+        self.forget_queued(&covered);
         if let Some(next) = self.next_baseline.take() {
             self.baseline = Some(next);
             self.fold_due = false;

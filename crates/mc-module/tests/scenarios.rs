@@ -43,6 +43,11 @@ struct HostClient {
     /// The stand-in routing provider's log: every select's request and every
     /// report.
     routing: Arc<Mutex<RoutingLog>>,
+    /// How many of the next views handed over the runner refuses, as a
+    /// runner whose state moved on would.
+    refuse_views: Arc<Mutex<u32>>,
+    /// The version of every view handed over, refused or not.
+    offered: Arc<Mutex<Vec<u64>>>,
 }
 
 /// What ck-mc asked the stand-in routing provider, and what it answers.
@@ -138,6 +143,16 @@ impl RunnerClient for HostClient {
         _: &SessionRef,
         request: ApplyViewRequest,
     ) -> Result<ApplyViewAnswer, ClientError> {
+        self.offered.lock().unwrap().push(request.view.version);
+        {
+            let mut refuse = self.refuse_views.lock().unwrap();
+            if *refuse > 0 {
+                *refuse -= 1;
+                return Ok(ApplyViewAnswer::Refused {
+                    refusal: ck_contract_draft::view::ViewRefusal::BadSince,
+                });
+            }
+        }
         Ok(self.host()?.apply_view(request))
     }
 
@@ -452,6 +467,68 @@ async fn a_worker_lands_its_queued_drops_on_the_first_execute_pass() {
         requests[first + 1].usage.cache_read_tokens,
         requests[first].usage.prompt_tokens
     );
+}
+
+/// Read steps whose sentences (tags 2 and 4) the model then asks to drop.
+fn reads_then_drop_sentences() -> Vec<Step> {
+    vec![
+        user("Review the module."),
+        read_file(50),
+        read_file(50),
+        reduce("2,4"),
+        read_file(50),
+        read_file(50),
+        answer(),
+        answer(),
+        answer(),
+    ]
+}
+
+#[tokio::test]
+async fn a_refused_view_keeps_its_queued_drops_for_the_next_and_its_version_is_not_reused() {
+    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    *runner.provider().client.refuse_views.lock().unwrap() = 1;
+    runner.play(&reads_then_drop_sentences()).await;
+    assert_clean(&runner);
+    let offered = runner.provider().client.offered.lock().unwrap().clone();
+    // The refused view was version 1; the next is 2, never 1 again.
+    assert_eq!(offered[..2], [1, 2], "{offered:?}");
+    let host = runner.host();
+    assert_eq!(host.applied_version(), Some(*offered.last().unwrap()));
+    // The drops the refused view carried landed with the next one.
+    assert_eq!(seen(host, 2).as_deref(), Some(placeholder(2).as_str()));
+    assert_eq!(seen(host, 4).as_deref(), Some(placeholder(4).as_str()));
+}
+
+#[tokio::test]
+async fn a_queued_drop_two_refused_views_carried_is_forgotten() {
+    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    *runner.provider().client.refuse_views.lock().unwrap() = 2;
+    runner.play(&reads_then_drop_sentences()).await;
+    assert_clean(&runner);
+    let host = runner.host();
+    assert_eq!(seen(host, 2).as_deref(), Some("§2§ Reading the next file."));
+    assert_eq!(seen(host, 4).as_deref(), Some("§4§ Reading the next file."));
+}
+
+#[tokio::test]
+async fn an_execute_pass_with_nothing_to_drop_publishes_no_view() {
+    // A worker whose task alone (about 28,000 tokens, which a worker never
+    // drops) puts it over the execute threshold: every pass may rebuild, but
+    // no lane has work, so the cache is never rewritten.
+    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    let task = format!("Review this. {}", "w".repeat(112_000));
+    runner
+        .play(&[user(&task), answer(), answer(), answer(), answer()])
+        .await;
+    assert_clean(&runner);
+    assert_eq!(runner.host().applied_version(), None);
+    assert!(runner.provider().client.offered.lock().unwrap().is_empty());
+    let requests = &runner.report.requests;
+    assert!(requests[1].usage.prompt_tokens.unwrap() > 25_350, "{requests:?}");
+    for pair in requests.windows(2) {
+        assert_eq!(pair[1].usage.cache_read_tokens, pair[0].usage.prompt_tokens);
+    }
 }
 
 #[tokio::test]
@@ -929,6 +1006,43 @@ async fn the_force_band_drops_old_tool_output_down_toward_the_target() {
     assert_eq!(requests.last().unwrap().view, Some(1));
     let host = runner.host();
     assert_eq!(seen(host, 3).as_deref(), Some(placeholder(3).as_str()));
+    assert!(seen(host, 5).unwrap().starts_with("§5§ yyy"));
+}
+
+#[tokio::test]
+async fn the_force_band_takes_one_emergency_batch_per_stay() {
+    // The task (27,500 tokens, never dropped) keeps the session in the force
+    // band (85%, 33,150 here) after the first batch. Shell outputs: 3 and 5
+    // are 2,500 tokens, 7, 9 and 11 are 1,700. No output is ever far behind
+    // (newer content stays under a quarter of the window), so only the
+    // emergency drop takes any.
+    let task = format!("Build it. {}", "w".repeat(110_000));
+    let mut runner = start_with(config("worker", Kind::OpenAi, FREE), high_threshold()).await;
+    runner
+        .play(&[
+            user(&task),
+            shell(2_500),
+            shell(2_500),
+            shell(1_700),
+            shell(1_700),
+            answer(),
+        ])
+        .await;
+    assert_clean(&runner);
+    // Once 9 joins the protected tail (9 and 7 hold its 3,120 tokens, 5
+    // makes three calls), 3 is outside it, and the batch takes it.
+    let host = runner.host();
+    assert_eq!(host.applied_version(), Some(1));
+    assert_eq!(seen(host, 3).as_deref(), Some(placeholder(3).as_str()));
+
+    // Output 11 pushes 5 out of the tail while usage is still in the band.
+    // The batch already landed during this stay, so 5 stays.
+    runner.play(&[shell(1_700), answer(), answer()]).await;
+    assert_clean(&runner);
+    let host = runner.host();
+    let last = runner.report.requests.last().unwrap();
+    assert!(last.usage.prompt_tokens.unwrap() >= 33_150, "{last:?}");
+    assert_eq!(host.applied_version(), Some(1));
     assert!(seen(host, 5).unwrap().starts_with("§5§ yyy"));
 }
 

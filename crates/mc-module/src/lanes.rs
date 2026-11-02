@@ -1298,6 +1298,97 @@ mod tests {
         assert_eq!(duplicate_lookups(&context, Some(2)), []);
     }
 
+    fn context<'a>(
+        index: &'a Index,
+        edited: &'a Edited,
+        protected_tools: &'a BTreeMap<String, u64>,
+    ) -> Context<'a> {
+        Context {
+            index,
+            edited,
+            protected_tools,
+            keep_first_message: false,
+        }
+    }
+
+    fn key(mid: &str, part: &str) -> PartKey {
+        (mid.to_owned(), part.to_owned())
+    }
+
+    #[test]
+    fn the_age_sweep_skips_small_outputs_and_the_newest_results_of_protected_tools() {
+        let index = index();
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        // Tags 2 and 3 are 10 tokens each, under the 250-token floor.
+        let swept: Vec<PartKey> = age_sweep(&context(&index, &edited, &none), 6)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(swept, [key("m3", "p4"), key("m4", "p5"), key("m5", "p6")]);
+
+        // The newest `read` result is protected: no lane drops it, not the
+        // age sweep and not a drop another lane asks for.
+        let one_read = BTreeMap::from([("read".to_owned(), 1)]);
+        let protected = context(&index, &edited, &one_read);
+        let swept: Vec<PartKey> = age_sweep(&protected, 6)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(swept, [key("m3", "p4"), key("m4", "p5")]);
+        let (ops, covered) = drop_ops(&protected, &[(key("m5", "p6"), Shape::Whole)]);
+        assert!(ops.is_empty() && covered.is_empty(), "{ops:?}");
+    }
+
+    #[test]
+    fn a_running_tool_call_is_not_dropped_and_its_drop_waits() {
+        let mut running = read(2, 4_000);
+        if let PartBody::Tool(tool) = &mut running.body {
+            tool.status = ToolStatus::Running;
+            tool.output_bytes = None;
+        }
+        let mut index = Index::default();
+        index.extend([
+            entry(1, Role::User, vec![]),
+            entry(2, Role::Assistant, vec![running]),
+        ]);
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        let (ops, covered) = drop_ops(
+            &context(&index, &edited, &none),
+            &[(key("m2", "p2"), Shape::Default)],
+        );
+        // Not covered, so a queued drop of it stays queued.
+        assert!(ops.is_empty() && covered.is_empty(), "{ops:?}");
+    }
+
+    #[test]
+    fn a_part_two_lanes_want_keeps_the_first_lanes_shape() {
+        // Tag 4 is a recent call with a small input, not at the end: a
+        // default drop keeps the call, a whole drop removes it.
+        let index = index();
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        let context = context(&index, &edited, &none);
+        let part = key("m3", "p4");
+        let (ops, _) = drop_ops(
+            &context,
+            &[(part.clone(), Shape::Default), (part.clone(), Shape::Whole)],
+        );
+        assert!(
+            matches!(ops.as_slice(), [EditOp::Replace { field, .. }] if field == "output"),
+            "{ops:?}"
+        );
+        let (ops, _) = drop_ops(
+            &context,
+            &[(part.clone(), Shape::Whole), (part, Shape::Default)],
+        );
+        assert!(
+            matches!(ops.as_slice(), [EditOp::Drop { part: Some(_), .. }]),
+            "{ops:?}"
+        );
+    }
+
     #[test]
     fn the_protected_tail_default_follows_the_standalone_table() {
         for (usable, expected) in [

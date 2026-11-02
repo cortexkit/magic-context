@@ -2535,7 +2535,7 @@ full narrative
 
     fn validated_fact_texts(options: ValidateOptions) -> Vec<String> {
         let facts = "<facts><PROJECT_RULES>\n* [at_compartment=1 messages=2] Head fact.\n* [at_compartment=2 messages=5] Tail fact.\n* Unanchored fact.\n</PROJECT_RULES></facts>";
-        let text = xml(&[(1, 3, "head"), (4, 6, "tail")], 7, facts);
+        let text = xml(&[(1, 3, "first"), (4, 6, "tail")], 7, facts);
         validate_historian_output(&text, &chunk(1, 6), &[], options)
             .expect("valid reply")
             .facts
