@@ -274,7 +274,7 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
             continue;
         }
         // A part kind, or an entry role, ck-mc doesn't know is carried
-        // unchanged (W1.5).
+        // unchanged (compaction contract W1.5).
         if !is_known(entry, part) {
             continue;
         }
@@ -869,7 +869,7 @@ pub fn caveman(
             };
             let key = (entry.mid.clone(), part.id.clone());
             // A role or part kind ck-mc doesn't know is carried unchanged
-            // (W1.5), as in every other lane.
+            // (compaction contract W1.5), as in every other lane.
             if !is_known(entry, part)
                 || in_tail(part, cutoff)
                 || context.edited.covers(&entry.mid, &part.id)
@@ -1599,7 +1599,7 @@ mod tests {
         }));
     }
 
-    /// Values the contract may add later are carried unchanged (W1.5): a tool
+    /// Values the contract may add later are carried unchanged (compaction contract W1.5): a tool
     /// call whose status ck-mc doesn't know counts as running, and no lane
     /// edits a part of a kind, or in an entry of a role, it doesn't know.
     #[test]

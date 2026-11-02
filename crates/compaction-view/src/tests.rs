@@ -606,7 +606,7 @@ fn a_replace_may_show_its_own_number_and_numbers_the_original_had_but_no_other()
 }
 
 /// Values a later contract version may add are kept and handled on the safe
-/// side (W1.5): an unknown edit, anchor or inserted role refuses the view by
+/// side (compaction contract W1.5): an unknown edit, anchor or inserted role refuses the view by
 /// name; an unknown part kind takes no number and may only be dropped; an
 /// unknown tool status counts as running; an output in an unknown format is
 /// never rewritten.

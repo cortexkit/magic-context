@@ -1,5 +1,6 @@
-//! Cases an audit of the library against the compaction contract found
-//! wrong, each failing before its fix.
+//! Rules of the compaction contract (CONTRACT.md in the
+//! `cortexkit-role-compaction` crate) that this library once broke, one
+//! test each.
 
 use compaction_view::render::{apply_edits, plan, PlanItem};
 use cortexkit_role_compaction::part::{Part, PartBody};
@@ -10,7 +11,7 @@ use serde_json::json;
 /// Keeping only a result's image attachment changes its label in the render
 /// plan from `[file]` to `[image]`, as the neutral rendering shows it, so a
 /// runner rendering from the plan and the provider planning against the
-/// neutral form see the same text (W4.7, W6.3).
+/// neutral form see the same text (compaction contract W4.7, W6.3).
 #[test]
 fn keeping_some_attachments_updates_the_render_plan_label() {
     let entry: Entry = serde_json::from_value(json!({
@@ -48,7 +49,7 @@ fn keeping_some_attachments_updates_the_render_plan_label() {
     assert_eq!(parts[0].empty_result_label.as_deref(), Some("[image]"));
 }
 
-/// Tag notation is syntactic (W6.4): digits too many for a number still
+/// Tag notation is syntactic (compaction contract W6.4): digits too many for a number still
 /// make an inserted text tagged.
 #[test]
 fn an_insert_with_tag_notation_too_long_for_a_number_is_refused() {
@@ -70,7 +71,7 @@ fn an_insert_with_tag_notation_too_long_for_a_number_is_refused() {
 }
 
 /// The JSON numbering function returns entries whose checksums cover the
-/// numbers it gave their parts (W7).
+/// numbers it gave their parts (compaction contract W7).
 #[test]
 fn numbering_returns_entries_with_checksums_over_their_numbers() {
     let parts = vec![Part::new(

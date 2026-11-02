@@ -24,12 +24,12 @@ pub struct Transcript {
     checkpoint: u64,
     /// Message ids come from the host and are never reused, revert or not.
     next_mid: u64,
-    /// The compaction markers written so far (M1), oldest first.
+    /// The compaction markers written so far (compaction contract M1), oldest first.
     markers: Vec<Marker>,
 }
 
 /// A host compaction marker: the last message it covers, and its checkpoint
-/// (T2), the highest number before the first message it keeps.
+/// (compaction contract T2), the highest number before the first message it keeps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Marker {
     pub through_ordinal: u64,
@@ -52,9 +52,9 @@ impl Transcript {
     }
 
     /// Write a compaction marker covering every message through `mid`, as a
-    /// runner does once a view with a cut applies (M1). Numbers stay as they
+    /// runner does once a view with a cut applies (compaction contract M1). Numbers stay as they
     /// were: they are contiguous, so counting from the marker's checkpoint
-    /// over the messages it keeps gives the same numbers (T2). `None` when the
+    /// over the messages it keeps gives the same numbers (compaction contract T2). `None` when the
     /// message is not in the transcript or a marker already covers it.
     pub fn write_marker(&mut self, mid: &str) -> Option<Marker> {
         let through = self.entries.iter().position(|entry| entry.mid == mid)?;
@@ -200,7 +200,7 @@ impl Transcript {
     /// Remove every entry from `ordinal` on. Their numbers become free, and
     /// the next numbered part takes the first of them.
     /// Remove every message from `ordinal` on. A marker covering any of them
-    /// goes too, and the one before it applies again (T3).
+    /// goes too, and the one before it applies again (compaction contract T3).
     pub fn revert_to(&mut self, ordinal: u64) {
         self.entries.truncate(ordinal.saturating_sub(1) as usize);
         self.markers

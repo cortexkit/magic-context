@@ -470,7 +470,7 @@ impl<P: Provider> Runner<P> {
         match runner.setup().await {
             Ok(_) => {}
             // The provider has no such preset: the session runs without
-            // compaction (W1.3).
+            // compaction (compaction contract W1.3).
             Err(error) if error.is(codes::UNKNOWN_PRESET) => {
                 runner.host.lock().compaction = false;
                 runner.report.call_errors.push(error);
@@ -488,7 +488,7 @@ impl<P: Provider> Runner<P> {
         &self.provider
     }
 
-    /// Setup, which restarts the notice count on both sides (S3).
+    /// Setup, which restarts the notice count on both sides (compaction contract S3).
     async fn setup(&self) -> Result<SetupAnswer, CallError> {
         let request = {
             let mut state = self.host.lock();
@@ -914,7 +914,7 @@ impl<P: Provider> Runner<P> {
             match result {
                 Ok(()) => {
                     // A view with a cut has applied: write the host's marker
-                    // at the cut and report it in the next notice (M1).
+                    // at the cut and report it in the next notice (compaction contract M1).
                     let cut = view.edits.iter().find_map(|edit| match &edit.op {
                         EditOp::Cut { through } => Some(through.clone()),
                         _ => None,
@@ -965,7 +965,7 @@ impl<P: Provider> Runner<P> {
             request
         };
         // A late answer counts as none: the request goes out with the view
-        // the runner has (RD2).
+        // the runner has (compaction contract RD2).
         let deadline = std::time::Duration::from_millis(request.deadline_ms);
         let answer = tokio::time::timeout(deadline, self.provider.ride(request))
             .await
@@ -980,7 +980,7 @@ impl<P: Provider> Runner<P> {
                 true
             }
             // The provider no longer knows the session: counted as
-            // `nothing`, and Setup goes before the next notice (S1, F2).
+            // `nothing`, and Setup goes before the next notice (compaction contract S1, F2).
             Err(error) if error.is(codes::UNKNOWN_SESSION) => {
                 self.host.lock().setup_due = true;
                 self.report.call_errors.push(error);
@@ -1060,7 +1060,7 @@ impl<P: Provider> Runner<P> {
             Ok(NoticeAnswer::Received) => {}
             // The provider restarted: Setup again, then send the same notice,
             // with every entry so it can start from the whole transcript. An
-            // answer the runner doesn't know is handled the same way (W1.5).
+            // answer the runner doesn't know is handled the same way (compaction contract W1.5).
             Ok(_) => {
                 if let Err(error) = self.setup().await {
                     self.report.call_errors.push(error);

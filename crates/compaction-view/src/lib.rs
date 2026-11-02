@@ -12,7 +12,7 @@
 //!   neutral part model, which is what the provider plans against;
 //! - [`render::check_carried`]: that each edit of a new view claims an honest
 //!   `since`, so no new edit is hidden from the rule check by backdating it.
-//!   It does not check that the view carries every earlier edit (V2): an
+//!   It does not check that the view carries every earlier edit (compaction contract V2): an
 //!   edit also leaves when a later cut covers its message or a revert removes
 //!   it, and only the provider holds those rules, so carrying edits forward
 //!   is the provider's obligation;
@@ -27,6 +27,10 @@
 //! this library depends on it. A runner written in
 //! another language uses the WebAssembly build of this library, or checks
 //! its own implementation against the JSON test vectors under `vectors/`.
+//!
+//! A reference such as "(compaction contract W1.3)" names a rule of that
+//! contract by its id in CONTRACT.md, which ships in the
+//! `cortexkit-role-compaction` crate.
 
 #![forbid(unsafe_code)]
 

@@ -98,7 +98,7 @@ pub fn invalid_signed_parts(
     edits: &[Edit],
     rules: &ProviderRules,
 ) -> Vec<(String, String)> {
-    // An unknown `signed_parts` value is treated as `bound` (W1.5).
+    // An unknown `signed_parts` value is treated as `bound` (compaction contract W1.5).
     if rules.signed_parts == SignedParts::None {
         return Vec::new();
     }
@@ -186,7 +186,7 @@ pub fn invalid_signed_parts(
             .iter()
             .any(|(change, since)| *since > generated && *change < position);
         // Signed parts may be left out only at the ends, as an oldest run, a
-        // newest run, or both (PR2): a kept part is invalid when a part left
+        // newest run, or both (compaction contract PR2): a kept part is invalid when a part left
         // out after it was generated lies between it and an earlier kept one.
         // Leaving out the newest parts makes no kept part invalid.
         let mut seen_kept = false;

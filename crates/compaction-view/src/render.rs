@@ -208,7 +208,7 @@ pub fn plan(entries: &[Entry], edits: &[Edit]) -> Result<RenderPlan, ViewRefusal
                     });
                 }
                 // Every part of an entry whose role is unknown is handled as
-                // an opaque part: it may be dropped, never replaced (W1.5).
+                // an opaque part: it may be dropped, never replaced (compaction contract W1.5).
                 if matches!(entry.role, Role::Unknown(_)) {
                     return Err(ViewRefusal::BadField {
                         mid: mid.clone(),
@@ -446,7 +446,7 @@ fn find_part<'a>(entry: &'a Entry, part_id: &str) -> Result<&'a Part, ViewRefusa
         })
 }
 
-/// A running call, or one whose status is unknown (W1.5), is never dropped,
+/// A running call, or one whose status is unknown (compaction contract W1.5), is never dropped,
 /// replaced or cut.
 fn refuse_running(mid: &str, part: &Part) -> Result<(), ViewRefusal> {
     match &part.body {
@@ -484,8 +484,8 @@ fn check_field(mid: &str, part: &Part, field: &str, value: &Value) -> Result<(),
         (PartBody::File(_), "text") => value.as_str().map(|_| ()).ok_or_else(bad),
         (PartBody::Tool(tool), _) if tool.provider_executed => Err(bad()),
         // A finished call has an output size whether it came in full or
-        // compact detail (W4.3), and only then a result to rewrite. An output
-        // in a format the runner doesn't know is never rewritten (W1.5).
+        // compact detail (compaction contract W4.3), and only then a result to rewrite. An output
+        // in a format the runner doesn't know is never rewritten (compaction contract W1.5).
         (PartBody::Tool(tool), "output")
             if tool.output_bytes.is_some()
                 && !matches!(tool.output_format, OutputFormat::Unknown(_)) =>

@@ -1,5 +1,6 @@
-//! Runner obligations an audit of the mock runner against the compaction
-//! contract found missing, each failing before its fix.
+//! Runner obligations of the compaction contract (CONTRACT.md in the
+//! `cortexkit-role-compaction` crate) that the mock runner once broke, one
+//! test each, named by the rule it checks.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -92,7 +93,7 @@ fn user(text: &str) -> Step {
     Step::User { text: text.into() }
 }
 
-/// Every Setup restarts the notice count (S3, W5.2).
+/// Every Setup restarts the notice count (compaction contract S3, W5.2).
 #[tokio::test]
 async fn setup_restarts_the_notice_count() {
     let mut runner = Runner::start(config(100_000), Recording::default())
@@ -112,7 +113,7 @@ async fn setup_restarts_the_notice_count() {
     assert_eq!(seqs, [1, 1]);
 }
 
-/// A view arriving after the ride's deadline is not applied (RD2).
+/// A view arriving after the ride's deadline is not applied (compaction contract RD2).
 #[tokio::test]
 async fn a_view_after_the_ride_deadline_is_not_applied() {
     let provider = Recording {
@@ -133,7 +134,7 @@ async fn a_view_after_the_ride_deadline_is_not_applied() {
 }
 
 /// A ride refused with `unknown_session` counts as nothing, and Setup goes
-/// before the next notice (S1, F2).
+/// before the next notice (compaction contract S1, F2).
 #[tokio::test]
 async fn a_lost_session_gets_setup_before_the_next_notice() {
     let provider = Recording {
@@ -163,7 +164,7 @@ async fn a_lost_session_gets_setup_before_the_next_notice() {
 }
 
 /// Once a view with a cut applies, the runner writes its marker and reports
-/// it in the next notice (M1).
+/// it in the next notice (compaction contract M1).
 #[tokio::test]
 async fn an_applied_cut_writes_a_marker_and_the_next_notice_reports_it() {
     let mut runner = Runner::start(config(100_000), Recording::default())
@@ -190,7 +191,7 @@ async fn an_applied_cut_writes_a_marker_and_the_next_notice_reports_it() {
 }
 
 /// A provider without the session's preset leaves the session running
-/// without compaction: no notices, no rides (W1.3).
+/// without compaction: no notices, no rides (compaction contract W1.3).
 #[tokio::test]
 async fn an_unknown_preset_runs_the_session_without_compaction() {
     let provider = Recording {

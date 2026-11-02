@@ -95,7 +95,7 @@ struct Target {
 
 /// Run the summarizer. `Ok(None)` when there was nothing to summarize.
 ///
-/// Routing picks the model, on the session's own runner (spec 1, SR4). As
+/// Routing picks the model, on the session's own runner (compaction contract SR4). As
 /// the plugin's historian (`compartment-runner-historian.ts`): a transient
 /// provider error retries twice on the same model, after 2 to 3 s and then
 /// 6 to 8 s; an invalid reply gets one repair run that sees the validation

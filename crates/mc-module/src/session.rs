@@ -318,7 +318,7 @@ impl Session {
         settings: &Settings,
         notice: NoticeRequest,
     ) -> Option<run::Request> {
-        // Not newer than the last notice handled since Setup (N5). Setup sets
+        // Not newer than the last notice handled since Setup (compaction contract N5). Setup sets
         // the count to 0 and a runner's first notice after it is 1, so this
         // also ignores a notice numbered 0.
         if notice.seq <= self.seq {
@@ -375,7 +375,7 @@ impl Session {
                 Event::MarkerWritten { .. } => {}
                 // An event the contract may add later: its reach is unknown,
                 // so the index is read again from the cut, the oldest message
-                // the model still sees (W1.5).
+                // the model still sees (compaction contract W1.5).
                 other => {
                     eprintln!(
                         "ck-mc: session {}: unknown notice event {other:?}; reading the transcript again",
@@ -388,7 +388,7 @@ impl Session {
         if refused || self.newer_runner_view(&notice) {
             self.adopt_runner_view(client).await;
         }
-        // A notice leaves its entries out when they are too large (W5.2), and
+        // A notice leaves its entries out when they are too large (compaction contract W5.2), and
         // then a change to an older message is not in it either: read from
         // the oldest entry that may have changed.
         let omitted = notice.entries.is_empty();
@@ -965,7 +965,7 @@ impl Session {
             .build(settings, over_limit, cache_lost, kept.as_ref())
             .0?;
         // The size limit holds for a view in a ride's answer as for a pushed
-        // one (V5); an oversized one is answered as nothing.
+        // one (compaction contract V5); an oversized one is answered as nothing.
         if self.refuse_oversized(&view) {
             return None;
         }
@@ -1692,7 +1692,7 @@ impl Session {
         }
     }
 
-    /// Whether `view` is over the size limit (V5). Views name edits, never
+    /// Whether `view` is over the size limit (compaction contract V5). Views name edits, never
     /// copies, so one this large is a bug in the code that built it. It is
     /// not sent, the runner keeps the view it has, and the queued drops it
     /// carried are forgotten, as for any view that fails ck-mc's own checks.
@@ -1729,7 +1729,7 @@ impl Session {
                 );
             }
             // An answer the contract may add later leaves the outcome
-            // unconfirmed (W1.5): the view is not sent again, and ck-mc takes
+            // unconfirmed (compaction contract W1.5): the view is not sent again, and ck-mc takes
             // whatever view the runner applies.
             Ok(other) => {
                 self.next_baseline = None;
@@ -2004,7 +2004,7 @@ fn list(tags: &[u64]) -> String {
 
 pub use crate::nudges::KEEP_KIND;
 
-/// A reminder as a plan template send (compaction SR1), delivered in `mode`
+/// A reminder as a plan template send (compaction contract SR1), delivered in `mode`
 /// only (`delivery_order`), so a routine reminder rides the next tool result
 /// and never starts a turn of its own. A queued reminder of the same `kind` is
 /// replaced by a newer one.

@@ -31,6 +31,10 @@
 //!   `m[1]` holds what changed since: newer summaries and memory changes.
 //! - **Standalone:** the Magic Context plugin running inside a host
 //!   (`packages/plugin`), whose behaviour mode 3 matches.
+//!
+//! A reference such as "(compaction contract W1.3)" names a rule of that
+//! contract by its id in CONTRACT.md, which ships in the
+//! `cortexkit-role-compaction` crate.
 
 #![forbid(unsafe_code)]
 

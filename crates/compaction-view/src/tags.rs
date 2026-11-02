@@ -32,7 +32,7 @@ pub fn empty_result_label(tool: &ToolPart) -> Option<&'static str> {
 
 /// Every tag notation written anywhere in `text` (a section sign, one or more
 /// ASCII digits, a section sign), as its digits without leading zeros. The
-/// notation is syntactic (W6.4): digits too many for a number still count.
+/// notation is syntactic (compaction contract W6.4): digits too many for a number still count.
 /// The runner checks view bytes with it, so a summary or a replaced field
 /// cannot show the model a number that would mislead its count.
 pub fn tag_notation_in(text: &str) -> Vec<String> {
@@ -68,7 +68,7 @@ pub fn tag_numbers_in(text: &str) -> Vec<u64> {
 /// system entries and provider-executed tool parts never take one: a
 /// provider-run result is replayed by the host as it is and cannot carry a
 /// prefix. Parts of a kind, or of an entry role, the runner does not know
-/// are handled as opaque parts (W1.5) and take none either.
+/// are handled as opaque parts (compaction contract W1.5) and take none either.
 pub fn is_numbered(role: &Role, body: &PartBody) -> bool {
     if matches!(role, Role::Unknown(_)) {
         return false;
@@ -86,7 +86,7 @@ pub fn is_numbered(role: &Role, body: &PartBody) -> bool {
 /// after the marker's cut, counting from 1. Parts that take no number get
 /// none. `entries` are the entries after the cut, in transcript order. Each
 /// entry's checksum is computed again, since it covers its parts' numbers
-/// (W7).
+/// (compaction contract W7).
 pub fn assign_tags(checkpoint: u64, entries: &mut [Entry]) {
     let mut next = checkpoint;
     for entry in entries.iter_mut() {

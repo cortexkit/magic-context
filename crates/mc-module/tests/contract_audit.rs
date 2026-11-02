@@ -1,6 +1,7 @@
-//! Cases an audit of ck-mc against the compaction contract found wrong, each
-//! failing before its fix. They drive one session directly, over a runner
-//! that serves a fixed transcript and applied view.
+//! Provider obligations of the compaction contract (CONTRACT.md in the
+//! `cortexkit-role-compaction` crate) that ck-mc once broke, one test each.
+//! They drive one session directly, over a runner that serves a fixed
+//! transcript and applied view.
 
 use cortexkit_role_compaction::notice::{Conditions, NoticeRequest};
 use cortexkit_role_compaction::part::{Part, PartBody};
@@ -111,7 +112,7 @@ fn conditions(request: &SetupRequest) -> Conditions {
     )
 }
 
-/// A notice numbered 0 is not newer than Setup's count (N5), so it changes
+/// A notice numbered 0 is not newer than Setup's count (compaction contract N5), so it changes
 /// nothing, here the session's model.
 #[tokio::test]
 async fn a_notice_numbered_zero_after_setup_is_ignored() {
@@ -139,7 +140,7 @@ async fn a_notice_numbered_zero_after_setup_is_ignored() {
 }
 
 /// A view in a ride's answer is held to the same 3 MiB limit as a pushed one
-/// (V5): one byte under it applied, a queued drop pushes the next view over,
+/// (compaction contract V5): one byte under it applied, a queued drop pushes the next view over,
 /// and the ride answers nothing rather than send it.
 #[tokio::test]
 async fn a_ride_never_answers_with_a_view_over_the_size_limit() {

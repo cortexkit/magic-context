@@ -150,7 +150,7 @@ impl SubcRunnerClient {
     /// Call the session's runner on the route for `role`, bound to the
     /// session, one route per role (compaction-runner for the view and entry
     /// ops, llm-runner for sends and runs). Compaction answers come bare
-    /// (compaction W1.1); llm-runner wraps every answer as `{"result": …}`
+    /// (compaction contract W1.1); llm-runner wraps every answer as `{"result": …}`
     /// (llm-runner §1).
     async fn call<P: Serialize, A: DeserializeOwned>(
         &self,

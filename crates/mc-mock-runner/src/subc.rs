@@ -231,7 +231,7 @@ impl SubcProvider {
             }
         }
         .map_err(|error| match error {
-            // The provider refused by name (W1.3).
+            // The provider refused by name (compaction contract W1.3).
             subc_client_rs::consumer::CallError::Module(body) => {
                 CallError::refused(body.code, format!("{label}: {}", body.message))
             }

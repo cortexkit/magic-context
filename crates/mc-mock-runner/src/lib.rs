@@ -17,6 +17,10 @@
 //! rendered request, without using `cortexkit_role_compaction::rules`. So when a
 //! compaction provider's view passes the contract's checker but would fail at
 //! a real provider, the scenario fails here too.
+//!
+//! A reference such as "(compaction contract W1.3)" names a rule of that
+//! contract by its id in CONTRACT.md, which ships in the
+//! `cortexkit-role-compaction` crate.
 
 #![forbid(unsafe_code)]
 

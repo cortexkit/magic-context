@@ -21,7 +21,7 @@
 //! the ceiling, goes once per cycle as a notice message before the next
 //! request.
 //!
-//! Each reminder is a plan template send (compaction SR1): a runner stores
+//! Each reminder is a plan template send (compaction contract SR1): a runner stores
 //! a send without a template as if the person had typed it. The templates
 //! hold the plugin's wording with integer and `part_tag` slots only, since
 //! a template takes no free text; the oldest reclaimable outputs are named by

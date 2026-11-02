@@ -20,8 +20,10 @@ use cortexkit_role_compaction::part::{Part, PartBody, ToolStatus};
 use cortexkit_role_compaction::read::{Cursor, Entry, Role};
 
 /// Whether `new` is `held` with only tool parts changed: the same parts in
-/// the same order, each the same or a tool part (its status, result, or the
-/// sends delivered with it).
+/// the same order, each the same or a tool part (its status, result, or a
+/// reminder that rode on its result: a message a module asked the runner to
+/// deliver with the next tool result, `session.send` with `tool_result`
+/// delivery).
 fn only_tool_results_changed(held: &Entry, new: &Entry) -> bool {
     held.role == new.role
         && held.parts.len() == new.parts.len()
@@ -58,7 +60,7 @@ pub enum Extend {
     /// The first new entry is beyond the end: something was missed.
     Gap,
     /// An entry differs from what the index holds at its ordinal in a way
-    /// the contract does not allow for a stored message (P5): it is another
+    /// the contract does not allow for a stored message (compaction contract P5): it is another
     /// message, or more than a tool result changed.
     Diverged,
 }
@@ -114,9 +116,9 @@ impl Index {
                 continue;
             }
             // The newest message may still be written; an older one changes
-            // only when one of its tool calls gets its result, or a send is
-            // delivered with one (P5), even when the host stored the result
-            // in a later message.
+            // only when one of its tool calls gets its result, or a reminder
+            // rides on that result (compaction contract P5), even when the
+            // host stored the result in a later message.
             let newest = entry.ordinal + 1 == next;
             if held.mid == entry.mid && (newest || only_tool_results_changed(held, &entry)) {
                 *held = entry;
@@ -155,10 +157,10 @@ impl Index {
         first.checked_sub(1).filter(|after| *after > 0)
     }
 
-    /// The oldest held entry that may still change (P5): one with a tool
-    /// call still running, or the newest assistant message on, whose results
-    /// may yet have a send delivered with them. A read from here sees every
-    /// change a notice could not carry.
+    /// The oldest held entry that may still change (compaction contract P5):
+    /// one with a tool call still running, or the newest assistant message
+    /// on, whose results may yet carry a reminder that rides on them. A read
+    /// from here sees every change a notice could not carry.
     pub fn changeable_from(&self) -> Option<u64> {
         let running = self.entries.iter().find(|entry| {
             entry.parts.iter().any(|part| {
