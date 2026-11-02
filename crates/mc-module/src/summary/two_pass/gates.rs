@@ -527,3 +527,181 @@ pub fn judge(check: &Check, verdicts: &[Value], length_capped: bool) -> Verdict 
     }
     Verdict::Passed
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct Vectors {
+        blocks: Vec<EvidenceBlock>,
+        cases: Vec<Case>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Case {
+        name: String,
+        decision: Value,
+        sources: Vec<Value>,
+        anchor_known: bool,
+        memory_enabled: bool,
+        auto_promote: bool,
+        plan: Value,
+    }
+
+    fn revision(value: &Value) -> Revision {
+        let changes = value["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|change| ChangedClause {
+                memory_id: change["memoryId"].as_i64().unwrap(),
+                ordinal: change["ordinal"].as_i64().unwrap(),
+                block: change["evidence"]["blockStartOrdinal"].as_i64().unwrap(),
+                excerpt: change["evidence"]["excerpt"].as_str().unwrap().to_owned(),
+                replacement: change["replacement"].as_bool().unwrap(),
+            })
+            .collect();
+        let added = value["added"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|clause| AddedClause {
+                text: clause["text"].as_str().unwrap().to_owned(),
+                block: clause["evidence"]["blockStartOrdinal"].as_i64().unwrap(),
+                excerpt: clause["evidence"]["excerpt"].as_str().unwrap().to_owned(),
+            })
+            .collect();
+        Revision {
+            key: value["key"].as_str().unwrap().to_owned(),
+            action: value["action"].as_str().unwrap().to_owned(),
+            project: value["projectPath"].as_str().unwrap().to_owned(),
+            expected: value["expectedSources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|source| {
+                    (
+                        source["id"].as_i64().unwrap(),
+                        source["revision"].as_i64().unwrap(),
+                    )
+                })
+                .collect(),
+            survivor: value["survivorId"].as_i64().unwrap(),
+            final_text: value["finalText"].as_str().unwrap().to_owned(),
+            changes,
+            added,
+        }
+    }
+
+    /// The gates refuse and plan exactly as the plugin's do, check for
+    /// check, operand for operand (gen/gen-revision-gates.ts).
+    #[test]
+    fn gates_match_the_plugin() {
+        let vectors: Vectors =
+            serde_json::from_str(include_str!("../../../testdata/revision-gates.json"))
+                .expect("parse the gate vectors");
+        assert!(vectors.cases.len() >= 15);
+        for case in &vectors.cases {
+            let sources: Vec<Source> = case
+                .sources
+                .iter()
+                .map(|source| Source {
+                    id: source["id"].as_i64().unwrap(),
+                    revision: source["revision"].as_i64().unwrap(),
+                    project: source["projectPath"].as_str().unwrap().to_owned(),
+                    status: source["status"].as_str().unwrap().to_owned(),
+                    content: source["content"].as_str().unwrap().to_owned(),
+                })
+                .collect();
+            let context = Context {
+                memory_enabled: case.memory_enabled,
+                auto_promote: case.auto_promote,
+                anchor_known: case.anchor_known,
+                blocks: &vectors.blocks,
+                sources: &sources,
+            };
+            let got = match plan(&revision(&case.decision), &context) {
+                Err(reason) => json!({"ok": false, "reason": reason}),
+                Ok(plan) => json!({
+                    "ok": true,
+                    "kept": plan.kept.iter().map(|operand| operand.id.clone()).collect::<Vec<_>>(),
+                    "checks": plan.checks.iter().map(|check| json!({
+                        "kind": check.kind.name(),
+                        "operands": check.operands.iter().map(|operand| operand.id.clone()).collect::<Vec<_>>(),
+                        "pairs": check.pairs.iter().map(|pair| pair.id.clone()).collect::<Vec<_>>(),
+                        "input": check.input,
+                    })).collect::<Vec<_>>(),
+                }),
+            };
+            assert_eq!(got, case.plan, "{}", case.name);
+        }
+    }
+
+    fn operand_check(kind: CheckKind, ids: &[&str]) -> Check {
+        Check {
+            kind,
+            operands: ids
+                .iter()
+                .map(|id| Operand {
+                    id: (*id).to_owned(),
+                    text: String::new(),
+                })
+                .collect(),
+            pairs: Vec::new(),
+            input: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_check_passes_only_with_exactly_one_needed_verdict_per_id() {
+        let support = operand_check(CheckKind::Support, &["a", "b"]);
+        let verdicts = |pairs: &[(&str, &str)]| -> Vec<Value> {
+            pairs
+                .iter()
+                .map(|(id, verdict)| json!({"id": id, "verdict": verdict}))
+                .collect()
+        };
+        assert_eq!(
+            judge(&support, &verdicts(&[("a", "yes"), ("b", "yes")]), false),
+            Verdict::Passed
+        );
+        assert_eq!(
+            judge(&support, &verdicts(&[("a", "yes"), ("b", "no")]), false),
+            Verdict::Refused(CheckKind::Support)
+        );
+        assert_eq!(
+            judge(&support, &verdicts(&[("a", "yes"), ("a", "yes")]), false),
+            Verdict::Malformed
+        );
+        assert_eq!(
+            judge(&support, &verdicts(&[("a", "yes"), ("c", "yes")]), false),
+            Verdict::Malformed
+        );
+        assert_eq!(
+            judge(
+                &support,
+                &verdicts(&[("a", "yes"), ("b", "unclear")]),
+                false
+            ),
+            Verdict::Malformed
+        );
+        assert_eq!(
+            judge(&support, &verdicts(&[("a", "yes"), ("b", "yes")]), true),
+            Verdict::Malformed
+        );
+        // A kept clause passes when nothing disproves it.
+        let kept = operand_check(CheckKind::KeptClause, &["k"]);
+        assert_eq!(
+            judge(&kept, &verdicts(&[("k", "no")]), false),
+            Verdict::Passed
+        );
+        assert_eq!(
+            judge(&kept, &verdicts(&[("k", "yes")]), false),
+            Verdict::Refused(CheckKind::KeptClause)
+        );
+        assert!(parse_verdicts("not json").is_empty());
+    }
+}

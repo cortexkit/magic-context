@@ -1,0 +1,1201 @@
+{
+  "blocks": [
+    {
+      "startOrdinal": 10,
+      "endOrdinal": 10,
+      "role": "U",
+      "parts": [
+        "The deploy port is 8443 now, not 8080."
+      ],
+      "joinedText": "The deploy port is 8443 now, not 8080."
+    },
+    {
+      "startOrdinal": 12,
+      "endOrdinal": 12,
+      "role": "U",
+      "parts": [
+        "Use pnpm for every package install."
+      ],
+      "joinedText": "Use pnpm for every package install."
+    },
+    {
+      "startOrdinal": 14,
+      "endOrdinal": 14,
+      "role": "A",
+      "parts": [
+        "Retries are capped at 5 attempts in v2."
+      ],
+      "joinedText": "Retries are capped at 5 attempts in v2."
+    }
+  ],
+  "cases": [
+    {
+      "name": "edit passes",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now, not 8080"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": true,
+        "kept": [
+          "[1,3,2]"
+        ],
+        "checks": [
+          {
+            "kind": "disproof",
+            "operands": [
+              "[1,3,1]"
+            ],
+            "pairs": [],
+            "input": "The deploy port is 8443 now, not 8080."
+          },
+          {
+            "kind": "support",
+            "operands": [
+              "[\"k-edit\",\"proposed\",0,\"14b73904f8e680f1d3d41e66ad0a0d27e25077e2dfdd186179654969b97556bb\"]"
+            ],
+            "pairs": [],
+            "input": "The deploy port is 8443 now, not 8080."
+          },
+          {
+            "kind": "kept-clause",
+            "operands": [
+              "[1,3,2]"
+            ],
+            "pairs": [],
+            "input": "The deploy port is 8443 now, not 8080.\nUse pnpm for every package install.\nRetries are capped at 5 attempts in v2.\n[1,3,2]: Deploys run from main."
+          },
+          {
+            "kind": "compatibility",
+            "operands": [],
+            "pairs": [
+              "[\"[\\\"k-edit\\\",\\\"proposed\\\",0,\\\"14b73904f8e680f1d3d41e66ad0a0d27e25077e2dfdd186179654969b97556bb\\\"]\",\"[1,3,2]\"]"
+            ],
+            "input": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "memory off",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now, not 8080"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": false,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "memory_disabled"
+      }
+    },
+    {
+      "name": "auto promote off",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now, not 8080"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": false,
+      "plan": {
+        "ok": false,
+        "reason": "auto_promote_disabled"
+      }
+    },
+    {
+      "name": "append only",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. Deploys run from main.",
+        "changes": [],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "append_only"
+      }
+    },
+    {
+      "name": "empty final text",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now, not 8080"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "shape"
+      }
+    },
+    {
+      "name": "edit names two sources",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          },
+          {
+            "id": 2,
+            "revision": 1
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now, not 8080"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        },
+        {
+          "id": 2,
+          "revision": 1,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "Lockfiles are committed. Use npm for installs."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "shape"
+      }
+    },
+    {
+      "name": "stale source revision",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now, not 8080"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 4,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "source_revision"
+      }
+    },
+    {
+      "name": "archived source",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now, not 8080"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "archived",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "source_revision"
+      }
+    },
+    {
+      "name": "kept clause rewritten",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. Deploys run from release.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now, not 8080"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "clauses"
+      }
+    },
+    {
+      "name": "same clause changed twice",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          },
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "clauses"
+      }
+    },
+    {
+      "name": "unknown anchor",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now, not 8080"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": false,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "unknown_anchor"
+      }
+    },
+    {
+      "name": "excerpt not in the cited block",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The port moved to 9000"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "evidence_or_window"
+      }
+    },
+    {
+      "name": "removed token kept nowhere",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "Use pnpm for every package install. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 12,
+              "excerpt": "Use pnpm for every package install"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "Use pnpm for every package install. ",
+            "evidence": {
+              "blockStartOrdinal": 12,
+              "excerpt": "Use pnpm for every package install"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "dropped_token"
+      }
+    },
+    {
+      "name": "added token not in evidence",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 9443. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now, not 8080"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 9443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "new_token"
+      }
+    },
+    {
+      "name": "replaces passes",
+      "decision": {
+        "key": "k-replaces",
+        "action": "replaces",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now, not 8080"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": true,
+        "kept": [
+          "[1,3,2]"
+        ],
+        "checks": [
+          {
+            "kind": "disproof",
+            "operands": [
+              "[1,3,1]"
+            ],
+            "pairs": [],
+            "input": "The deploy port is 8443 now, not 8080."
+          },
+          {
+            "kind": "support",
+            "operands": [
+              "[\"k-replaces\",\"proposed\",0,\"14b73904f8e680f1d3d41e66ad0a0d27e25077e2dfdd186179654969b97556bb\"]"
+            ],
+            "pairs": [],
+            "input": "The deploy port is 8443 now, not 8080."
+          },
+          {
+            "kind": "kept-clause",
+            "operands": [
+              "[1,3,2]"
+            ],
+            "pairs": [],
+            "input": "The deploy port is 8443 now, not 8080.\nUse pnpm for every package install.\nRetries are capped at 5 attempts in v2.\n[1,3,2]: Deploys run from main."
+          },
+          {
+            "kind": "compatibility",
+            "operands": [],
+            "pairs": [
+              "[\"[\\\"k-replaces\\\",\\\"proposed\\\",0,\\\"14b73904f8e680f1d3d41e66ad0a0d27e25077e2dfdd186179654969b97556bb\\\"]\",\"[1,3,2]\"]"
+            ],
+            "input": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "merge passes",
+      "decision": {
+        "key": "k-merge",
+        "action": "merge",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 2,
+            "revision": 1
+          },
+          {
+            "id": 3,
+            "revision": 2
+          }
+        ],
+        "survivorId": 2,
+        "finalText": "Lockfiles are committed. CI caches node_modules. Use pnpm for every package install.",
+        "changes": [
+          {
+            "memoryId": 2,
+            "ordinal": 2,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 12,
+              "excerpt": "Use pnpm for every package install"
+            }
+          },
+          {
+            "memoryId": 3,
+            "ordinal": 2,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 12,
+              "excerpt": "Use pnpm for every package install"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "Use pnpm for every package install.",
+            "evidence": {
+              "blockStartOrdinal": 12,
+              "excerpt": "Use pnpm for every package install"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 2,
+          "revision": 1,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "Lockfiles are committed. Use npm for installs."
+        },
+        {
+          "id": 3,
+          "revision": 2,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "CI caches node_modules. Installs use npm."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": true,
+        "kept": [
+          "[2,1,1]",
+          "[3,2,1]"
+        ],
+        "checks": [
+          {
+            "kind": "disproof",
+            "operands": [
+              "[2,1,2]"
+            ],
+            "pairs": [],
+            "input": "Use pnpm for every package install."
+          },
+          {
+            "kind": "disproof",
+            "operands": [
+              "[3,2,2]"
+            ],
+            "pairs": [],
+            "input": "Use pnpm for every package install."
+          },
+          {
+            "kind": "support",
+            "operands": [
+              "[\"k-merge\",\"proposed\",0,\"0df22e9403f2617fb1f75fe2b9d81b50fc1563787c82cc5eca0c6b38a44259ef\"]"
+            ],
+            "pairs": [],
+            "input": "Use pnpm for every package install."
+          },
+          {
+            "kind": "kept-clause",
+            "operands": [
+              "[2,1,1]",
+              "[3,2,1]"
+            ],
+            "pairs": [],
+            "input": "The deploy port is 8443 now, not 8080.\nUse pnpm for every package install.\nRetries are capped at 5 attempts in v2.\n[2,1,1]: Lockfiles are committed. \n[3,2,1]: CI caches node_modules. "
+          },
+          {
+            "kind": "compatibility",
+            "operands": [],
+            "pairs": [
+              "[\"[\\\"k-merge\\\",\\\"proposed\\\",0,\\\"0df22e9403f2617fb1f75fe2b9d81b50fc1563787c82cc5eca0c6b38a44259ef\\\"]\",\"[2,1,1]\"]",
+              "[\"[\\\"k-merge\\\",\\\"proposed\\\",0,\\\"0df22e9403f2617fb1f75fe2b9d81b50fc1563787c82cc5eca0c6b38a44259ef\\\"]\",\"[3,2,1]\"]"
+            ],
+            "input": ""
+          },
+          {
+            "kind": "compatibility",
+            "operands": [],
+            "pairs": [
+              "[\"[2,1,1]\",\"[3,2,1]\"]"
+            ],
+            "input": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "merge that only paraphrases",
+      "decision": {
+        "key": "k-paraphrase",
+        "action": "merge",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 2,
+            "revision": 1
+          },
+          {
+            "id": 3,
+            "revision": 2
+          }
+        ],
+        "survivorId": 2,
+        "finalText": "Lockfiles are committed. CI caches node_modules. Use npm for installs.",
+        "changes": [
+          {
+            "memoryId": 3,
+            "ordinal": 2,
+            "replacement": false,
+            "evidence": {
+              "blockStartOrdinal": 12,
+              "excerpt": "Use pnpm for every package install"
+            }
+          }
+        ],
+        "added": []
+      },
+      "sources": [
+        {
+          "id": 2,
+          "revision": 1,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "Lockfiles are committed. Use npm for installs."
+        },
+        {
+          "id": 3,
+          "revision": 2,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "CI caches node_modules. Installs use npm."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "paraphrase_only"
+      }
+    },
+    {
+      "name": "merge drops a source token",
+      "decision": {
+        "key": "k-drop",
+        "action": "merge",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          },
+          {
+            "id": 3,
+            "revision": 2
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. CI caches node_modules. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          },
+          {
+            "memoryId": 3,
+            "ordinal": 2,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 12,
+              "excerpt": "Use pnpm for every package install"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        },
+        {
+          "id": 3,
+          "revision": 2,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "CI caches node_modules. Installs use npm."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "dropped_token"
+      }
+    },
+    {
+      "name": "added clause holds two clauses",
+      "decision": {
+        "key": "k-edit",
+        "action": "edit",
+        "projectPath": "pj-test",
+        "expectedSources": [
+          {
+            "id": 1,
+            "revision": 3
+          }
+        ],
+        "survivorId": 1,
+        "finalText": "The deploy port is 8443. It changed. Deploys run from main.",
+        "changes": [
+          {
+            "memoryId": 1,
+            "ordinal": 1,
+            "replacement": true,
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now, not 8080"
+            }
+          }
+        ],
+        "added": [
+          {
+            "text": "The deploy port is 8443. It changed. ",
+            "evidence": {
+              "blockStartOrdinal": 10,
+              "excerpt": "The deploy port is 8443 now"
+            }
+          }
+        ]
+      },
+      "sources": [
+        {
+          "id": 1,
+          "revision": 3,
+          "projectPath": "pj-test",
+          "status": "active",
+          "content": "The deploy port is 8080. Deploys run from main."
+        }
+      ],
+      "anchorKnown": true,
+      "memoryEnabled": true,
+      "autoPromote": true,
+      "plan": {
+        "ok": false,
+        "reason": "clauses"
+      }
+    }
+  ]
+}
