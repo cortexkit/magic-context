@@ -238,10 +238,12 @@ function deps(
 }
 
 describe("Pi /ctx-wrapup", () => {
-	it("parses optional positive messages_to_keep", () => {
+	it("parses an optional whole messages_to_keep, 0 included", () => {
 		expect(parseWrapupArgs("")).toEqual({ ok: true, messagesToKeep: 20 });
 		expect(parseWrapupArgs(" 7 ")).toEqual({ ok: true, messagesToKeep: 7 });
-		expect(parseWrapupArgs("0").ok).toBe(false);
+		// 0 summarizes the whole session, which a move to a runner needs.
+		expect(parseWrapupArgs("0")).toEqual({ ok: true, messagesToKeep: 0 });
+		expect(parseWrapupArgs("-1").ok).toBe(false);
 		expect(parseWrapupArgs("two").ok).toBe(false);
 	});
 

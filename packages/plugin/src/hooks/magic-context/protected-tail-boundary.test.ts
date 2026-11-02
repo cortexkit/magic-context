@@ -823,6 +823,34 @@ describe("wrapup protected-tail boundary", () => {
         closeQuietly(db);
     });
 
+    it("keeps nothing raw with a keep of 0, without snapping back to the last user turn", () => {
+        useBoundaryTempDataHome("wrapup-boundary-keep-zero-");
+        const sessionId = "ses-wrapup-keep-zero";
+        createBoundaryOpenCodeDb(sessionId, [
+            { id: "m1", role: "user", parts: [{ type: "text", text: "one" }] },
+            { id: "m2", role: "assistant", parts: [{ type: "text", text: "a" }] },
+            { id: "m3", role: "user", parts: [{ type: "text", text: "two" }] },
+            { id: "m4", role: "assistant", parts: [{ type: "text", text: "b" }] },
+        ]);
+        const db = createContextDb();
+        const plan = resolveWrapupProtectedTailBoundary({
+            db,
+            sessionId,
+            mode: "manual-wrapup",
+            contextLimit: 128_000,
+            executeThresholdPercentage: 65,
+            usage: null,
+            usageSource: "manual-none",
+            messagesToKeep: 0,
+        });
+
+        // The protected tail starts after the newest message: all four are
+        // eligible. A keep of 1 or more snaps back to the user turn at m3.
+        expect(plan.targetProtectedTailStart).toBe(5);
+        expect(plan.snapshot.eligibleEndOrdinal).toBe(5);
+        closeQuietly(db);
+    });
+
     it("snaps outward so a closed tool arc is not split at the keep watermark", () => {
         useBoundaryTempDataHome("wrapup-boundary-arc-");
         const sessionId = "ses-wrapup-arc";

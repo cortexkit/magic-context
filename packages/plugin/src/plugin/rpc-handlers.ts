@@ -1540,7 +1540,7 @@ export function registerRpcHandlers(
         if (!sessionId) return { ok: false, error: "no session" };
         if (!compactionEnabled) return { ok: true, message: compactionOffRefusal("ctx-wrapup") };
         const requested = Number(params.messagesToKeep ?? 20);
-        const messagesToKeep = Number.isSafeInteger(requested) && requested > 0 ? requested : 20;
+        const messagesToKeep = Number.isSafeInteger(requested) && requested >= 0 ? requested : 20;
         const db = readDatabase();
         if (!db) return { ok: false, error: "db unavailable" };
 

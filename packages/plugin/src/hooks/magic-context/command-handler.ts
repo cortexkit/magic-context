@@ -123,12 +123,12 @@ export function parseWrapupArgs(
         return {
             ok: false,
             message:
-                "Usage: `/ctx-wrapup [messages_to_keep]` where messages_to_keep is a positive integer.",
+                "Usage: `/ctx-wrapup [messages_to_keep]` where messages_to_keep is a whole number; 0 summarizes the whole session.",
         };
     }
     const messagesToKeep = Number.parseInt(trimmed, 10);
-    if (!Number.isSafeInteger(messagesToKeep) || messagesToKeep <= 0) {
-        return { ok: false, message: "messages_to_keep must be a positive integer." };
+    if (!Number.isSafeInteger(messagesToKeep) || messagesToKeep < 0) {
+        return { ok: false, message: "messages_to_keep must be a whole number." };
     }
     return { ok: true, messagesToKeep };
 }

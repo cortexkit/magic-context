@@ -1021,7 +1021,9 @@ export function resolveWrapupProtectedTailBoundary(
     // keep; the arc fence and user-boundary snap below still keep the actual
     // cut safe.
     const rawMessagesAboveLastCompartment = Math.max(0, anchorRawMessageCount - offset + 1);
-    const keep = Math.max(1, Math.floor(args.messagesToKeep));
+    // 0 summarizes everything up to the anchor: moving a session to a runner
+    // needs it fully summarized (the move refuses a raw tail).
+    const keep = Math.max(0, Math.floor(args.messagesToKeep));
 
     let targetProtectedTailStart = offset;
     let boundaryReason = "manual-wrapup-empty";
@@ -1040,13 +1042,19 @@ export function resolveWrapupProtectedTailBoundary(
         });
         if (fenced !== targetProtectedTailStart) boundaryReason = "manual-wrapup-tool-arc";
         targetProtectedTailStart = fenced;
-        const snapped = snapWrapupBoundaryToUser({
-            messages,
-            index,
-            candidate: targetProtectedTailStart,
-            offset,
-            triggerBudget: ctx.triggerBudget,
-        });
+        // Snapping back to the last user turn keeps a turn whole when some
+        // messages stay raw. With nothing to keep, the newest message ends a
+        // whole turn already, and snapping would leave that turn raw.
+        const snapped =
+            keep === 0
+                ? targetProtectedTailStart
+                : snapWrapupBoundaryToUser({
+                      messages,
+                      index,
+                      candidate: targetProtectedTailStart,
+                      offset,
+                      triggerBudget: ctx.triggerBudget,
+                  });
         if (snapped !== targetProtectedTailStart) boundaryReason = "manual-wrapup-user-snap";
         targetProtectedTailStart = snapped;
         const refenced = fenceWrapupBoundaryForToolArcs({

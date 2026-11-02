@@ -295,7 +295,7 @@ export async function runManagedWrapup(
     sessionId: string,
     options: WrapupOptions,
 ): Promise<string> {
-    const messagesToKeep = Math.max(1, Math.floor(options.messagesToKeep));
+    const messagesToKeep = Math.max(0, Math.floor(options.messagesToKeep));
     setRecompStarting(ctx.liveSessionState, sessionId, "Estimating wrapup…", "wrapup");
     try {
         if (!(await prepareRawSessionOrdinals(sessionId))) {

@@ -236,14 +236,13 @@ function buildV2Commands(rpc: MagicContextRpcServer, directory: string): V2Comma
                 const argument = commandArgument(input, "ctx-wrapup");
                 if (argument !== "" && !/^\d+$/.test(argument)) {
                     const usage =
-                        "Usage: /ctx-wrapup [messages_to_keep] where messages_to_keep is a positive integer";
+                        "Usage: /ctx-wrapup [messages_to_keep] where messages_to_keep is a whole number; 0 summarizes the whole session";
                     reportUsage(input.sessionID, usage);
                     return;
                 }
                 const messagesToKeep = argument === "" ? 20 : Number.parseInt(argument, 10);
-                if (messagesToKeep <= 0) {
-                    const usage = "messages_to_keep must be a positive integer";
-                    reportUsage(input.sessionID, usage);
+                if (!Number.isSafeInteger(messagesToKeep)) {
+                    reportUsage(input.sessionID, "messages_to_keep must be a whole number");
                     return;
                 }
                 const reply = await rpc.dispatch("wrapup", {
