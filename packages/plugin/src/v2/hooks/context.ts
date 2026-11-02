@@ -109,7 +109,7 @@ import {
     tryMessagesTransformLkgReplay,
 } from "../../plugin/messages-transform";
 import { registerRpcHandlers } from "../../plugin/rpc-handlers";
-import { setSubagentPolicy } from "../../plugin/subagent-policy";
+import { hidesMemoryTools, setSubagentPolicy } from "../../plugin/subagent-policy";
 import {
     hideSubagentTools,
     removePrimaryOnlyTools,
@@ -2365,7 +2365,10 @@ export async function registerContext(context: V2Context) {
                         ? storedSubagentMode(modeDb, draft.sessionID)
                         : undefined;
                     if (subagent === undefined) return undefined;
-                    if (subagent) removePrimaryOnlyTools(draft.tools);
+                    // The same policy the managed pass applies: `memory_write` keeps the
+                    // primary-only tools on this path too. Still a pure read plus an
+                    // in-memory check, so the replay writes nothing.
+                    if (hidesMemoryTools(subagent)) removePrimaryOnlyTools(draft.tools);
                     if (!rustModeModuleClient) {
                         const candidates = syntheticCandidates(
                             context,

@@ -4,6 +4,7 @@
 import { Database as BunDatabase } from "bun:sqlite";
 import { expect, spyOn, test } from "bun:test";
 import { getSlot } from "../../hooks/magic-context/lkg-slot";
+import { resetSubagentPolicy, setSubagentPolicy } from "../../plugin/subagent-policy";
 import * as models from "../../shared/models-dev-cache";
 import { messageTimesQuery, V2StoreReader } from "../store-reader";
 import {
@@ -99,6 +100,61 @@ for (const busy of ["admission", "admission-exhausted"] as const)
             await f.cleanup();
         }
     }, 60000);
+
+// `subagent.memory_write` keeps those tools on the managed pass, so a replay for
+// the same session has to keep them as well: the two paths must serve one tool
+// list, or the turn that exists to preserve the cached prefix changes it.
+test("OC2 replay: memory_write keeps the primary-only tools on the replay", async () => {
+    const failure = installTransientFailure();
+    const admission = installBusyAdmission();
+    const limit = spyOn(models, "getSdkContextLimit").mockReturnValue(1_000_000);
+    const register = withDraftMutation((draft) => {
+        draft.tools = {
+            ...draft.tools,
+            ctx_memory: { description: "Memory", input: { type: "object" } },
+            ctx_note: { description: "Notes", input: { type: "object" } },
+        } as SessionContext["tools"];
+    });
+    const seed = 9203;
+    const f = await oc2ContextFixture(seed, { area: AREA, instructions: false });
+    // After the fixture's boot: registerContext installs the project config, so
+    // setting the switch first would be overwritten by it.
+    setSubagentPolicy({ compress: false, memoryWrite: true });
+    try {
+        const host = new BunDatabase(process.env.OPENCODE_DB!);
+        host.prepare("UPDATE session_v2 SET parent_id = 'ses-parent' WHERE id = ?").run(f.session);
+        host.close();
+        f.compartment(4);
+        await f.pass();
+        f.respond();
+        f.user(`${seed} the saved turn: ${prose}`, 120000);
+        const saved = await f.pass();
+        f.respond();
+        f.user(`${seed} the busy turn: ${prose}`, 120000);
+        expect(getSlot(f.session)).toBeDefined();
+        expect(Object.keys(saved.draft.tools ?? {}).sort()).toEqual([
+            "ctx_memory",
+            "ctx_note",
+            "read",
+        ]);
+        admission.state.busyNext = true;
+        const replay = await f.attempt();
+        expect(lkgEvents(replay.logs)).toBe("lkg_replay_served");
+        expect(replay.draft.system).toEqual(saved.draft.system);
+        expect(Object.keys(replay.draft.tools ?? {}).sort()).toEqual([
+            "ctx_memory",
+            "ctx_note",
+            "read",
+        ]);
+    } finally {
+        register.mockRestore();
+        admission.restore();
+        failure.restore();
+        limit.mockRestore();
+        resetSubagentPolicy();
+        await f.cleanup();
+    }
+}, 60000);
 
 // The stored-times read filters on session_id and id. On the host's schema
 // (built below) SQLite would rather use the (session_id, time_created, id)
