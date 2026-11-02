@@ -1,9 +1,10 @@
 //! ck-mc: serve Magic Context's compaction provider over the subc daemon.
 //!
-//! `ck-mc move-in` instead moves one standalone session to mode 3 (see
-//! `mc_module::move_in`): it reads the request as JSON on standard input and
-//! prints the first view and tag checkpoint for the runner's own move. Run
-//! it with ck-mc and the session's host stopped.
+//! `ck-mc move-in` instead moves one session that ran under the standalone
+//! plugin to a runner, where ck-mc manages it (see `mc_module::move_in`): it
+//! reads the request as JSON on standard input and prints the first view and
+//! tag checkpoint for the runner's own move. Run it with ck-mc and the
+//! session's host stopped.
 
 #![forbid(unsafe_code)]
 
