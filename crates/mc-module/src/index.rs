@@ -7,12 +7,22 @@
 //! message may change after it was written (a tool gets its result), so an
 //! entry at a known ordinal with a different id or content means the
 //! transcript changed under ck-mc, and the index is rebuilt from a read.
+//!
+//! It holds the transcript from a base ordinal on: once a view replaces the
+//! older messages with their summaries, ck-mc forgets everything before the
+//! last message the view cuts (see [`Index::prune_before`]). What the model
+//! no longer sees needs no index, so a session's index, and the work each
+//! notice does over it, stays the size of the model's window however long
+//! the session runs. The few readers of older messages (the summarizer,
+//! `ctx_expand`) read them from the runner.
 
 use ck_contract_draft::part::{Part, PartBody};
 use ck_contract_draft::read::{Cursor, Entry};
 
 #[derive(Clone, Debug, Default)]
 pub struct Index {
+    /// The ordinal of `entries[0]`, or of the next entry when empty.
+    base: u64,
     entries: Vec<Entry>,
 }
 
@@ -29,6 +39,19 @@ pub enum Extend {
 }
 
 impl Index {
+    /// An empty index that holds the transcript from `base` on.
+    pub fn starting_at(base: u64) -> Self {
+        Self {
+            base,
+            entries: Vec::new(),
+        }
+    }
+
+    /// The first ordinal the index holds (or will hold, while empty).
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
@@ -51,19 +74,23 @@ impl Index {
     /// fit and says why; entries before it are kept.
     pub fn extend(&mut self, incoming: impl IntoIterator<Item = Entry>) -> Extend {
         for entry in incoming {
-            let len = self.entries.len() as u64;
-            if entry.ordinal == len {
+            let next = self.base + self.entries.len() as u64;
+            // Before the base: a message the view already cut.
+            if entry.ordinal < self.base {
+                continue;
+            }
+            if entry.ordinal == next {
                 self.entries.push(entry);
                 continue;
             }
-            if entry.ordinal > len {
+            if entry.ordinal > next {
                 return Extend::Gap;
             }
-            let held = &mut self.entries[entry.ordinal as usize];
+            let held = &mut self.entries[(entry.ordinal - self.base) as usize];
             if held.digest == entry.digest && held.mid == entry.mid {
                 continue;
             }
-            let newest = entry.ordinal + 1 == len;
+            let newest = entry.ordinal + 1 == next;
             if newest && held.mid == entry.mid {
                 *held = entry;
                 continue;
@@ -73,9 +100,29 @@ impl Index {
         Extend::Continued
     }
 
-    /// Forget every entry from `ordinal` on.
+    /// Forget every entry from `ordinal` on. An ordinal before the base
+    /// empties the index; the caller decides where it starts again.
     pub fn truncate(&mut self, ordinal: u64) {
-        self.entries.truncate(ordinal as usize);
+        self.entries
+            .truncate(ordinal.saturating_sub(self.base) as usize);
+    }
+
+    /// Forget every entry before `ordinal`, which becomes the base. Returns
+    /// the entries forgotten.
+    pub fn prune_before(&mut self, ordinal: u64) -> Vec<Entry> {
+        let count = (ordinal.saturating_sub(self.base) as usize).min(self.entries.len());
+        self.base += count as u64;
+        self.entries.drain(..count).collect()
+    }
+
+    /// Where a read that brings the index up to date starts: after this
+    /// ordinal, so the newest held entry (which may still change) is read
+    /// again; `None` reads from the transcript's start.
+    pub fn read_after(&self) -> Option<u64> {
+        match self.entries.last() {
+            Some(newest) => newest.ordinal.checked_sub(1),
+            None => self.base.checked_sub(1),
+        }
     }
 
     /// The entry and part that carry tag number `tag`.
@@ -154,5 +201,27 @@ mod tests {
         assert_eq!(index.extend([entry(3, "d", "later")]), Extend::Gap);
         index.truncate(1);
         assert_eq!(index.cursor().unwrap().mid, "a");
+    }
+
+    #[test]
+    fn a_pruned_index_holds_only_what_follows_its_base() {
+        let mut index = Index::default();
+        index.extend((0..5).map(|n| entry(n, &format!("m{n}"), "x")));
+        let gone = index.prune_before(3);
+        assert_eq!(gone.len(), 3);
+        assert_eq!(index.base(), 3);
+        assert_eq!(index.entries().len(), 2);
+        // Cut messages coming back in a read are skipped; the rest continue.
+        assert_eq!(
+            index.extend((2..7).map(|n| entry(n, &format!("m{n}"), "x"))),
+            Extend::Continued
+        );
+        assert_eq!(index.entries().len(), 4);
+        assert_eq!(index.read_after(), Some(5));
+        assert_eq!(index.extend([entry(3, "other", "x")]), Extend::Diverged);
+        index.truncate(1);
+        assert!(index.entries().is_empty());
+        assert_eq!(Index::starting_at(4).read_after(), Some(3));
+        assert_eq!(Index::default().read_after(), None);
     }
 }

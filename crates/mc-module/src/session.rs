@@ -81,6 +81,12 @@ pub struct Session {
     head_stale: bool,
     /// The `ctx_reduce` reminders' cadence.
     nudges: crate::nudges::State,
+    /// The ordinal of the last message the applied view cuts. The index
+    /// starts there: what comes before is replaced by summaries.
+    cut: Option<u64>,
+    /// Messages a person wrote that the index no longer holds, so the
+    /// reminders' turn count keeps counting them.
+    pruned_turns: u64,
 }
 
 impl Session {
@@ -107,6 +113,8 @@ impl Session {
             fold_due: false,
             head_stale: false,
             nudges: crate::nudges::State::default(),
+            cut: None,
+            pruned_turns: 0,
         }
     }
 
@@ -135,6 +143,8 @@ impl Session {
             keep_requested: self.keep_requested,
             baseline: self.baseline.clone(),
             nudges: self.nudges.clone(),
+            cut: self.cut,
+            pruned_turns: self.pruned_turns,
         }
     }
 
@@ -147,6 +157,11 @@ impl Session {
         self.keep_requested = durable.keep_requested;
         self.baseline = durable.baseline;
         self.nudges = durable.nudges;
+        self.cut = durable.cut;
+        self.pruned_turns = durable.pruned_turns;
+        // The first read after a restart starts at the cut: nothing before
+        // it is visible to the model.
+        self.index = Index::starting_at(durable.cut.unwrap_or(0));
     }
 
     /// Load the summaries `context.db` already holds for the session, such as
@@ -229,6 +244,14 @@ impl Session {
                 Event::TranscriptChanged { from_ordinal } => {
                     self.index.truncate(*from_ordinal);
                     self.forget_summaries_from(*from_ordinal);
+                    if self.cut.is_some_and(|cut| *from_ordinal <= cut) {
+                        // The undo reached the cut message or before it, and
+                        // the summaries of what it removed are gone. The next
+                        // view cuts at the last summary left; the index is
+                        // read again from there.
+                        self.cut = self.summarized_through();
+                        self.index = Index::starting_at(self.cut.unwrap_or(0));
+                    }
                     if let Some(db) = &self.db {
                         let (harness, session) = (&self.key.harness, &self.key.session);
                         if let Err(error) = db.with_connection(|conn| {
@@ -433,20 +456,29 @@ impl Session {
     /// The ordinal the latest view's cut reaches: messages up to it are
     /// replaced by the history head.
     fn cut_ordinal(&self) -> Option<u64> {
-        let through = self
-            .latest
-            .as_ref()?
-            .edits
-            .iter()
-            .find_map(|edit| match &edit.op {
-                EditOp::Cut { through } => Some(through),
-                _ => None,
-            })?;
-        self.index
-            .entries()
-            .iter()
-            .find(|entry| &entry.mid == through)
-            .map(|entry| entry.ordinal)
+        self.cut
+    }
+
+    /// Take `view`'s cut as the applied one, and forget the index before it.
+    /// A cut message the index does not hold (a view adopted after a restart)
+    /// leaves the known cut as it is.
+    fn apply_cut(&mut self, view: &View) {
+        let through = view.edits.iter().find_map(|edit| match &edit.op {
+            EditOp::Cut { through } => Some(through),
+            _ => None,
+        });
+        let Some(ordinal) = through.and_then(|through| {
+            self.index
+                .entries()
+                .iter()
+                .find(|entry| &entry.mid == through)
+                .map(|entry| entry.ordinal)
+        }) else {
+            return;
+        };
+        self.cut = Some(ordinal);
+        let gone = self.index.prune_before(ordinal);
+        self.pruned_turns += crate::nudges::person_turns(&gone);
     }
 
     /// Send the `ctx_reduce` reminders this pass calls for (see
@@ -473,7 +505,7 @@ impl Session {
         });
         let protected_from = lanes::protected_cutoff(&context, floor);
         let measurement = crate::nudges::measure(&context, protected_from, &self.queued);
-        let turns = crate::nudges::person_turns(self.index.entries());
+        let turns = self.pruned_turns + crate::nudges::person_turns(self.index.entries());
         let reminders = self.nudges.decide(&measurement, rebuilt, turns, cut_moved);
         let sends = [
             (
@@ -668,7 +700,8 @@ impl Session {
 
     /// What a search may read for this session: messages up to the last
     /// summary (later ones are in the model's view), and memories other than
-    /// those the head shows in full.
+    /// those the history summary at the start of the request (`m[0]` and
+    /// `m[1]`) shows in full.
     fn search_scope<'a>(
         &'a self,
         settings: &Settings,
@@ -1133,6 +1166,7 @@ impl Session {
             self.fold_due = false;
         }
         self.version = self.version.max(view.version);
+        self.apply_cut(&view);
         self.latest = Some(view);
     }
 
@@ -1161,6 +1195,7 @@ impl Session {
             Ok(answer) => {
                 if let Some(view) = &answer.view {
                     self.version = self.version.max(view.version);
+                    self.apply_cut(view);
                 }
                 self.latest = answer.view;
             }
@@ -1176,10 +1211,7 @@ impl Session {
     /// from the index, read it all again.
     async fn sync<C: RunnerClient>(&mut self, client: &C, newest: Option<&Cursor>) {
         let mut rebuilt = false;
-        let mut after = self
-            .index
-            .cursor()
-            .and_then(|cursor| cursor.ordinal.checked_sub(1));
+        let mut after = self.index.read_after();
         loop {
             if self.index.ends_at(newest) {
                 return;
@@ -1228,10 +1260,12 @@ impl Session {
         }
     }
 
+    /// Read the index again from the cut, the oldest message the model still
+    /// sees.
     fn restart_index(&mut self, rebuilt: &mut bool, after: &mut Option<u64>) {
-        self.index = Index::default();
+        self.index = Index::starting_at(self.cut.unwrap_or(0));
         *rebuilt = true;
-        *after = None;
+        *after = self.index.read_after();
     }
 
     /// Drop held work for parts that are no longer in the transcript.

@@ -763,8 +763,9 @@ pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String
     ))
 }
 
-/// The sources an automatic hint searches: never primers or notes, whose
-/// updates must not reach a message the model already saw.
+/// The sources an automatic hint searches: memories, messages and git
+/// commits, as the plugin's auto-search does; primers and notes are left to
+/// an explicit `ctx_search`.
 pub const AUTO_SOURCES: [&str; 3] = ["memory", "message", "git_commit"];
 
 /// The hits an automatic memory hint is built from, for a person's prompt:

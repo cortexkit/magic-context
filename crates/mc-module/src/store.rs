@@ -33,6 +33,13 @@ pub struct Durable {
     /// reminder nor forgets a grace.
     #[serde(default)]
     pub nudges: crate::nudges::State,
+    /// The ordinal of the last message the applied view cuts, where reading
+    /// the transcript starts again after a restart.
+    #[serde(default)]
+    pub cut: Option<u64>,
+    /// Messages a person wrote before the cut, for the reminders' cadence.
+    #[serde(default)]
+    pub pruned_turns: u64,
 }
 
 pub struct Store {

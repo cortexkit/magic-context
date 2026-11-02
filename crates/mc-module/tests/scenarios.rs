@@ -31,12 +31,19 @@ use serde_json::{json, Value};
 
 /// ck-mc's calls back into the mock runner. The runner exists only after its
 /// Setup call, so the host is attached right after it starts.
+/// A catch-up read: the ordinal it read after, and how many entries it got.
+type ReadLog = Arc<Mutex<Vec<(Option<u64>, usize)>>>;
+
 #[derive(Clone, Default)]
-struct HostClient(Arc<Mutex<Option<Host>>>);
+struct HostClient {
+    host: Arc<Mutex<Option<Host>>>,
+    /// Every catch-up read ck-mc made (compact detail).
+    reads: ReadLog,
+}
 
 impl HostClient {
     fn host(&self) -> Result<Host, ClientError> {
-        self.0
+        self.host
             .lock()
             .unwrap()
             .clone()
@@ -46,7 +53,18 @@ impl HostClient {
 
 impl RunnerClient for HostClient {
     async fn read(&self, request: ReadRequest) -> Result<ReadPage, ClientError> {
-        Ok(self.host()?.read(&request))
+        let page = self.host()?.read(&request);
+        if let (
+            ck_contract_draft::read::Detail::Compact,
+            ck_contract_draft::read::Select::After { after_ordinal, .. },
+        ) = (&request.detail, &request.select)
+        {
+            self.reads
+                .lock()
+                .unwrap()
+                .push((*after_ordinal, page.entries.len()));
+        }
+        Ok(page)
     }
 
     async fn publish(&self, request: ViewPublishRequest) -> Result<ViewPublishAnswer, ClientError> {
@@ -249,7 +267,7 @@ async fn start_runner(
         pre_user,
     };
     let runner = Runner::start(config, provider).await.unwrap();
-    *runner.provider().client.0.lock().unwrap() = Some(runner.host().clone());
+    *runner.provider().client.host.lock().unwrap() = Some(runner.host().clone());
     runner
 }
 
@@ -1046,6 +1064,19 @@ async fn a_restarted_ck_mc_keeps_the_history_baseline() {
     assert_clean(&runner);
     let (m0_before, _) = head_texts(runner.host());
     let views_before = runner.host().applied_version();
+    let cut = runner
+        .host()
+        .entries()
+        .iter()
+        .position(|entry| {
+            runner.host().current().view.is_some_and(|view| {
+                view.edits.iter().any(|edit| {
+                    matches!(&edit.op, ck_contract_draft::view::EditOp::Cut { through } if *through == entry.mid)
+                })
+            })
+        })
+        .expect("the head cuts the summarized messages") as u64;
+    runner.provider().client.reads.lock().unwrap().clear();
 
     // After a restart, more turns: m[0] is not rendered again, and each
     // request between views still extends the one before it.
@@ -1071,6 +1102,15 @@ async fn a_restarted_ck_mc_keeps_the_history_baseline() {
             assert_eq!(pair[1].usage.cache_read_tokens, pair[0].usage.prompt_tokens);
         }
     }
+    // The restarted ck-mc read the transcript from a cut message on (the
+    // applied view's, or a newer one the runner already took), never from
+    // the start: what the summaries replace needs no index.
+    let reads = runner.provider().client.reads.lock().unwrap().clone();
+    assert!(!reads.is_empty(), "the restart read nothing");
+    assert!(
+        reads.iter().all(|(after, _)| *after >= cut.checked_sub(1)),
+        "{reads:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
