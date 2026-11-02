@@ -197,6 +197,21 @@ impl Session {
                 Event::TranscriptChanged { from_ordinal } => {
                     self.index.truncate(*from_ordinal);
                     self.forget_summaries_from(*from_ordinal);
+                    if let Some(db) = &self.db {
+                        let (harness, session) = (&self.key.harness, &self.key.session);
+                        if let Err(error) = db.with_connection(|conn| {
+                            crate::search::messages::forget_from(
+                                conn,
+                                harness,
+                                session,
+                                *from_ordinal,
+                            )
+                        }) {
+                            eprintln!(
+                                "ck-mc: session {session}: search index revert failed: {error}"
+                            );
+                        }
+                    }
                 }
                 Event::ViewRefused { .. } => refused = true,
                 Event::MarkerWritten { .. } => {}
@@ -211,6 +226,7 @@ impl Session {
             self.sync(client, Some(&notice.newest)).await;
         }
         self.forget_missing();
+        self.update_search_index();
         if !pass::in_force_band(&self.conditions, settings) {
             self.emergency_latched = false;
         }
@@ -472,6 +488,36 @@ impl Session {
                     project: &project.id,
                 };
                 db.with_connection(|conn| crate::memory_tool::run(conn, &who, input))
+            }
+            "ctx_search" => {
+                let db = self
+                    .db
+                    .as_ref()
+                    .ok_or("ctx_search needs the context store")?;
+                let empty = std::collections::BTreeMap::new();
+                let seen = self
+                    .baseline
+                    .as_ref()
+                    .map_or(&empty, |baseline| &baseline.seen);
+                let cutoff = self
+                    .summaries
+                    .last()
+                    .map_or(0, |summary| summary.end_message);
+                let root = self
+                    .project
+                    .as_ref()
+                    .map(|project| std::path::Path::new(&project.root));
+                let scope = crate::search::Scope {
+                    harness: &self.key.harness,
+                    session: &self.key.session,
+                    project: self.project.as_ref().map(|project| project.id.as_str()),
+                    cutoff,
+                    seen,
+                    memory_enabled: settings.memory_enabled,
+                    git_commits_enabled: settings.git_commits_enabled,
+                    git_repository: root.map(|root| root.join(".git").exists()),
+                };
+                db.with_connection(|conn| crate::search::run(conn, &scope, input))
             }
             "ctx_note" => {
                 let db = self.db.as_ref().ok_or("ctx_note needs the context store")?;
@@ -970,6 +1016,20 @@ impl Session {
     }
 
     /// Drop held work for parts that are no longer in the transcript.
+    /// Add the session's new messages to the shared search index.
+    fn update_search_index(&self) {
+        let Some(db) = &self.db else {
+            return;
+        };
+        let (harness, session) = (&self.key.harness, &self.key.session);
+        let entries = self.index.entries();
+        if let Err(error) = db
+            .with_connection(|conn| crate::search::messages::index(conn, harness, session, entries))
+        {
+            eprintln!("ck-mc: session {session}: search indexing failed: {error}");
+        }
+    }
+
     fn forget_missing(&mut self) {
         let index = &self.index;
         self.queued

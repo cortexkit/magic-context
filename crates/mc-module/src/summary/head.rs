@@ -104,6 +104,11 @@ pub struct Baseline {
     pub m0: String,
     #[serde(default)]
     pub committed: Vec<Committed>,
+    /// The memory text the model reads in full: `m[0]`'s, then each change
+    /// `m[1]` shows in full. A change shown only as a marker or counted in
+    /// the aggregate line leaves the model without that memory's text.
+    #[serde(default)]
+    pub seen: BTreeMap<i64, String>,
 }
 
 impl Baseline {
@@ -164,6 +169,10 @@ pub fn fold(inputs: &Inputs) -> Baseline {
         profile_max_id: inputs.profile_max_id,
         m0: sections.join("\n\n").trim().to_owned(),
         committed: Vec::new(),
+        seen: memories
+            .iter()
+            .map(|memory| (memory.id, memory.content.clone()))
+            .collect(),
     }
 }
 
@@ -383,10 +392,14 @@ pub fn delta(baseline: &Baseline, inputs: &Inputs) -> (String, Baseline) {
         let full_budget = (allowance - marker_reserve).min(headroom);
         for change in pending {
             next.shown.insert(change.id, change.after.clone());
+            next.seen.remove(&change.id);
             if overflow.is_none() {
                 let line = vec![change.line.clone()];
                 let cost = line_tokens(&line);
                 if used_full + cost <= full_budget && full_count < CORRECTION_RECORD_CAP {
+                    if let Shown::Text { text } = &change.after {
+                        next.seen.insert(change.id, text.clone());
+                    }
                     next.committed.push(Committed {
                         form: Form::Full,
                         lines: line,

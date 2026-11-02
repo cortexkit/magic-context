@@ -1368,3 +1368,110 @@ async fn ctx_memory_saves_updates_and_archives_with_history_and_m1_shows_where_e
     assert_eq!(count("SELECT seen_count FROM memories WHERE id = 2"), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn ctx_search_finds_summarized_messages_notes_and_hidden_memories_but_not_what_the_model_sees(
+) {
+    let dir = scratch("search-tool");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    insert_memory(&dir, 1, "Crates use kebab-case naming.");
+    let mut config = config("head", Kind::OpenAi, FREE);
+    config.project = Some(ck_contract_draft::setup::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    });
+    let mut runner = start_full(config, Settings::default(), Some(dir.clone())).await;
+    let call = |name: &str, input: Value| {
+        Step::Model(Turn {
+            text: Some("Looking.".into()),
+            tools: vec![ToolCall::ok(name, input, "")],
+            output_tokens: 5,
+            ..Turn::default()
+        })
+    };
+    let mut steps = Vec::new();
+    for prompt in [
+        "Investigate the zebra parser crash.",
+        "Now b.rs.",
+        "And c.rs.",
+    ] {
+        steps.extend(turn(prompt));
+    }
+    steps.extend([
+        call(
+            "ctx_note",
+            json!({"action": "write", "content": "The zebra fixture lives in testdata.", "note_ids": []}),
+        ),
+        user("Is the zebra parser fixed yet?"),
+        call("ctx_search", json!({"query": "zebra parser"})),
+        call("ctx_search", json!({"query": "kebab naming"})),
+        call("ctx_search", json!({"query": "#1"})),
+        call("ctx_search", json!({"query": "zebra fixture", "sources": ["note"]})),
+        call("ctx_search", json!({"query": "zebra", "from": "2020-02-30"})),
+        answer(),
+    ]);
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let outputs = tool_outputs(runner.host(), "ctx_search");
+    assert_eq!(outputs.len(), 5, "{outputs:?}");
+
+    // The summarized prompt is found, and so is the note; the newest prompt,
+    // which the model still sees, is only counted.
+    assert!(
+        outputs[0].starts_with("Found 2 results for \"zebra parser\""),
+        "{}",
+        outputs[0]
+    );
+    assert!(
+        outputs[0].contains("[note] score=")
+            && outputs[0].contains("Git commits: no git repository"),
+        "{}",
+        outputs[0]
+    );
+    assert!(
+        outputs[0].contains("[message] score=1.00 ordinal=1 range=1-4 role=user")
+            && outputs[0].contains("Investigate the zebra parser crash."),
+        "{}",
+        outputs[0]
+    );
+    assert!(
+        outputs[0].contains(
+            "Message history: 1 raw-message match is newer than the last compartment boundary"
+        ),
+        "{}",
+        outputs[0]
+    );
+
+    // The memory the head shows is found but not repeated, by text or by id.
+    for output in &outputs[1..3] {
+        assert!(output.starts_with("No hidden results found"), "{output}");
+        assert!(
+            output.contains("Memories: 1 match found, all already visible in your project-memory block (ids 1)."),
+            "{output}"
+        );
+    }
+
+    assert!(
+        outputs[3].starts_with("Found 1 result")
+            && outputs[3].contains("[note] score=")
+            && outputs[3].contains("The zebra fixture lives in testdata."),
+        "{}",
+        outputs[3]
+    );
+    assert_eq!(
+        outputs[4],
+        "Error: Invalid 'from' date; use YYYY-MM-DD or a full ISO datetime."
+    );
+
+    // The summarized prompt is in the shared index under its message number.
+    let db = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    let indexed: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM message_history_fts WHERE session_id = 's1' AND message_ordinal = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
