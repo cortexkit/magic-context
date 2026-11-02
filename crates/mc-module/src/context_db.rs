@@ -152,6 +152,54 @@ pub struct StoredMutation {
     pub new_content: Option<String>,
 }
 
+/// Whose notes a call may see and change: the session's own, by harness
+/// and host session id, plus its project's smart notes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NoteScope {
+    pub harness: String,
+    pub session: String,
+    pub project: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredNote {
+    pub id: i64,
+    /// `session` or `smart`.
+    pub kind: String,
+    pub status: String,
+    pub content: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub anchor_ordinal: Option<i64>,
+    pub surface_condition: Option<String>,
+    pub ready_reason: Option<String>,
+    pub check_status: Option<String>,
+}
+
+const NOTE_COLUMNS: &str =
+    "id, type, CASE WHEN status IN ('surfacing', 'surfaced') THEN 'ready' ELSE status END,
+    content, created_at, updated_at, anchor_ordinal, surface_condition, ready_reason, check_status";
+
+fn note_row(row: &rusqlite::Row) -> rusqlite::Result<StoredNote> {
+    Ok(StoredNote {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        status: row.get(2)?,
+        content: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        anchor_ordinal: row.get(6)?,
+        surface_condition: row.get(7)?,
+        ready_reason: row.get(8)?,
+        check_status: row.get(9)?,
+    })
+}
+
+/// `?, ?, …` for `count` binds.
+fn placeholders(count: usize) -> String {
+    vec!["?"; count].join(", ")
+}
+
 pub struct ContextDb {
     connection: Mutex<Connection>,
 }
@@ -296,6 +344,146 @@ impl ContextDb {
             }
         }
         transaction.commit().map_err(|error| error.to_string())
+    }
+
+    /// Store a session note and return its id.
+    pub fn add_session_note(
+        &self,
+        scope: &NoteScope,
+        content: &str,
+        anchor: Option<u64>,
+        now_ms: i64,
+    ) -> Result<i64, String> {
+        let connection = self.lock();
+        connection
+            .execute(
+                "INSERT INTO notes (type, status, content, session_id, harness, project_path,
+                                    created_at, updated_at, anchor_ordinal)
+                 VALUES ('session', 'active', ?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+                params![
+                    content,
+                    scope.session,
+                    scope.harness,
+                    scope.project,
+                    now_ms,
+                    anchor.map(|ordinal| ordinal as i64)
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(connection.last_insert_rowid())
+    }
+
+    /// The session's own notes with one of `statuses`.
+    pub fn session_notes(
+        &self,
+        scope: &NoteScope,
+        statuses: &[&str],
+    ) -> Result<Vec<StoredNote>, String> {
+        let sql = format!(
+            "SELECT {NOTE_COLUMNS} FROM notes
+              WHERE type = 'session' AND session_id = ? AND harness = ? AND status IN ({})",
+            placeholders(statuses.len())
+        );
+        let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&scope.session, &scope.harness];
+        binds.extend(statuses.iter().map(|status| status as &dyn rusqlite::ToSql));
+        self.notes_where(&sql, &binds)
+    }
+
+    /// The project's smart notes with one of `statuses` (standalone sessions
+    /// create them; ck-mc only shows and closes them).
+    pub fn project_smart_notes(
+        &self,
+        scope: &NoteScope,
+        statuses: &[&str],
+    ) -> Result<Vec<StoredNote>, String> {
+        let Some(project) = &scope.project else {
+            return Ok(Vec::new());
+        };
+        let wanted: Vec<&str> = statuses
+            .iter()
+            .flat_map(|status| match *status {
+                "ready" => vec!["ready", "surfacing", "surfaced"],
+                other => vec![other],
+            })
+            .collect();
+        let sql = format!(
+            "SELECT {NOTE_COLUMNS} FROM notes WHERE type = 'smart' AND project_path = ? AND status IN ({})",
+            placeholders(wanted.len())
+        );
+        let mut binds: Vec<&dyn rusqlite::ToSql> = vec![project];
+        binds.extend(wanted.iter().map(|status| status as &dyn rusqlite::ToSql));
+        self.notes_where(&sql, &binds)
+    }
+
+    /// One note, when the scope may see it.
+    pub fn note_in_scope(&self, id: i64, scope: &NoteScope) -> Result<Option<StoredNote>, String> {
+        let sql = format!(
+            "SELECT {NOTE_COLUMNS} FROM notes
+              WHERE id = ? AND ((type = 'session' AND session_id = ? AND harness = ?)
+                                OR (type = 'smart' AND project_path IS ? AND ? IS NOT NULL))"
+        );
+        let binds: Vec<&dyn rusqlite::ToSql> = vec![
+            &id,
+            &scope.session,
+            &scope.harness,
+            &scope.project,
+            &scope.project,
+        ];
+        Ok(self.notes_where(&sql, &binds)?.into_iter().next())
+    }
+
+    /// Dismiss a note the scope may change. False when it is not there or
+    /// already dismissed.
+    pub fn dismiss_note(&self, id: i64, scope: &NoteScope, now_ms: i64) -> Result<bool, String> {
+        if self
+            .note_in_scope(id, scope)?
+            .is_none_or(|note| note.status == "dismissed")
+        {
+            return Ok(false);
+        }
+        self.lock()
+            .execute(
+                "UPDATE notes SET status = 'dismissed', updated_at = ?2 WHERE id = ?1",
+                params![id, now_ms],
+            )
+            .map(|changed| changed == 1)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Replace a note's text. False when the scope may not change it.
+    pub fn update_note_content(
+        &self,
+        id: i64,
+        scope: &NoteScope,
+        content: &str,
+        now_ms: i64,
+    ) -> Result<bool, String> {
+        if self.note_in_scope(id, scope)?.is_none() {
+            return Ok(false);
+        }
+        self.lock()
+            .execute(
+                "UPDATE notes SET content = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, content, now_ms],
+            )
+            .map(|changed| changed == 1)
+            .map_err(|error| error.to_string())
+    }
+
+    fn notes_where(
+        &self,
+        sql: &str,
+        binds: &[&dyn rusqlite::ToSql],
+    ) -> Result<Vec<StoredNote>, String> {
+        let connection = self.lock();
+        let mut statement = connection
+            .prepare_cached(sql)
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(binds, note_row)
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())
     }
 
     /// A project's memories that may be shown: active or permanent, and not

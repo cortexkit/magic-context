@@ -453,6 +453,23 @@ impl Session {
         match name {
             "ctx_reduce" => self.ctx_reduce(input),
             "ctx_keep" if self.features.ctx_keep => self.ctx_keep(settings, input),
+            "ctx_note" => {
+                let db = self.db.as_ref().ok_or("ctx_note needs the context store")?;
+                let scope = crate::context_db::NoteScope {
+                    harness: self.key.harness.clone(),
+                    session: self.key.session.clone(),
+                    project: self.project.as_ref().map(|project| project.id.clone()),
+                };
+                let anchor = self
+                    .index
+                    .entries()
+                    .last()
+                    .map(|entry| crate::summary::chunk::message_number(entry.ordinal));
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_millis() as i64);
+                crate::notes::run(db, &scope, input, anchor, now)
+            }
             "ctx_expand" => {
                 let last_summarized = self
                     .summaries

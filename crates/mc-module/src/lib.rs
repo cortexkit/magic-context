@@ -30,6 +30,7 @@ pub mod js_text;
 pub mod lanes;
 pub mod memory;
 pub mod module;
+pub mod notes;
 pub mod pass;
 pub mod preset;
 pub mod project_docs;

@@ -1195,3 +1195,76 @@ async fn ctx_expand_shows_summarized_messages_and_parts_again() {
     assert!(outputs[4].contains("live tail"), "{}", outputs[4]);
     assert!(outputs[5].starts_with("no tag 999999"), "{}", outputs[5]);
 }
+
+/// The answers to every call of a `ctx_*` tool, oldest first.
+fn tool_outputs(host: &Host, name: &str) -> Vec<String> {
+    host.entries()
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .filter_map(|part| match &part.body {
+            PartBody::Tool(tool) if tool.name == name => tool.output.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn ctx_note_finds_the_notes_a_standalone_session_wrote_and_keeps_new_ones() {
+    let dir = scratch("notes");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    // A note the session wrote before it moved, keyed by harness and host
+    // session id.
+    rusqlite::Connection::open(dir.join("context.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO notes (type, status, content, session_id, harness, created_at, updated_at)
+             VALUES ('session', 'active', 'Check the release\nbefore Friday', 's1', 'mock', 1, 1)",
+            [],
+        )
+        .unwrap();
+    let mut config = config("head", Kind::OpenAi, FREE);
+    config.project = Some(ck_contract_draft::setup::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    });
+    let mut runner = start_full(config, Settings::default(), Some(dir.clone())).await;
+    let note = |input: Value| {
+        Step::Model(Turn {
+            text: Some("Noting.".into()),
+            tools: vec![ToolCall::ok("ctx_note", input, "")],
+            output_tokens: 5,
+            ..Turn::default()
+        })
+    };
+    runner
+        .play(&[
+            user("Hello."),
+            note(json!({"action": "read", "note_ids": []})),
+            note(json!({"action": "write", "content": "Fix the flaky test", "note_ids": []})),
+            note(json!({"action": "dismiss", "note_ids": [1]})),
+            note(json!({"action": "read", "note_ids": [2]})),
+            answer(),
+        ])
+        .await;
+    assert_clean(&runner);
+    let outputs = tool_outputs(runner.host(), "ctx_note");
+    assert_eq!(outputs.len(), 4, "{outputs:?}");
+    assert!(
+        outputs[0].starts_with("## Notes\n\n#1 · ") && outputs[0].contains("Check the release"),
+        "{}",
+        outputs[0]
+    );
+    assert!(
+        outputs[1].starts_with("Saved session note #2. 2 active, oldest "),
+        "{}",
+        outputs[1]
+    );
+    assert_eq!(outputs[2], "Note #1 dismissed.");
+    assert!(
+        outputs[3]
+            .starts_with("## Notes by ID\n\n- **#2** · 0m · active: Fix the flaky test ↳ @msg "),
+        "{}",
+        outputs[3]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
