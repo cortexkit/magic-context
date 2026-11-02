@@ -1,0 +1,5 @@
+## Magic Context
+
+`ctx_search` searches this project's archive — what earlier sessions said and decided, commits and notes; ask it before asking the user anything that may already be recorded, phrased as a question with the exact names in it. {{#memory}}`ctx_memory` pins facts that stay true for the months this work lasts, for you and every agent on the project: what must not have to be found again, especially what cost you turns. They are not shown to you automatically; recall them with `ctx_search`. {{/memory}}{{note_guidance_light}}.{{#language}}
+
+{{$language_directive}}{{/language}}

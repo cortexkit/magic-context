@@ -23,7 +23,7 @@ use ck_contract_draft::wire;
 use mc_mock_runner::model::Kind;
 use mc_mock_runner::runner::{Report, SessionConfig};
 use mc_mock_runner::script::{Step, ToolCall, Turn};
-use mc_mock_runner::subc::{PlayRequest, MOCK_PLAY};
+use mc_mock_runner::subc::{FetchAnswer, FetchRequest, PlayRequest, MOCK_FETCH, MOCK_PLAY};
 use serde_json::{json, Value};
 use subc_client_rs::{CallOptions, ConsumerOptions, SubcConsumer};
 use subc_protocol::{BindIdentity, RouteTarget, SUBC_LAUNCH_NONCE_ENV, SUBC_MODULE_ID_ENV};
@@ -374,4 +374,103 @@ async fn a_worker_reduces_over_the_real_wire() {
             );
         }
     }
+}
+
+/// Ask the mock runner to fetch a `tool-provider/v1` op from ck-mc.
+async fn fetch(stack: &Stack, request: &FetchRequest) -> FetchAnswer {
+    let consumer = SubcConsumer::connect(&stack.connection_file, ConsumerOptions::default())
+        .await
+        .unwrap();
+    let reply = consumer
+        .call(
+            RouteTarget::ManagementSurface {
+                module_id: RUNNER.into(),
+            },
+            BindIdentity::new("mock", "wire-test"),
+            wire::encode(MOCK_FETCH, request),
+            CallOptions {
+                timeout: Duration::from_secs(60),
+                ..CallOptions::default()
+            },
+        )
+        .await
+        .expect("mock.fetch");
+    serde_json::from_slice(&reply).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the daemon and mock runner binaries; run through scripts/wire-gate.sh"]
+async fn a_plan_builder_fetches_the_catalog_with_or_without_declaring_the_role() {
+    let stack = start_stack();
+    // Wait until both modules are up.
+    let _ = play(
+        &stack,
+        &PlayRequest {
+            config: config("worker"),
+            steps: vec![answer()],
+        },
+    )
+    .await;
+    let arguments = json!({
+        "preset": "head",
+        "params": {},
+        "composition": {"compaction": {"provider": PROVIDER}, "providers": [{
+            "provider": PROVIDER,
+            "tools": [{"name": "ctx_expand"}, {"name": "ctx_memory"}, {"name": "ctx_note"},
+                      {"name": "ctx_reduce"}, {"name": "ctx_search"}],
+        }]},
+        "system_text": {"preset": "head", "params": {}},
+    });
+    // The bytes ck-mc serves with no configuration file, which is what the
+    // stack's ck-mc runs with.
+    let expected = {
+        let config = mc_module::config::Config::from(mc_module::pass::Settings::default())
+            .catalog_config(None);
+        String::from_utf8(mc_module::catalog::catalog_answer_bytes(&arguments, &config).unwrap())
+            .unwrap()
+    };
+    for declare_role in [true, false] {
+        let answer = fetch(
+            &stack,
+            &FetchRequest {
+                name: "tool.catalog".into(),
+                arguments: arguments.clone(),
+                declare_role,
+            },
+        )
+        .await;
+        assert_eq!(
+            answer,
+            FetchAnswer::Reply(expected.clone()),
+            "declare_role={declare_role}"
+        );
+    }
+    let FetchAnswer::Reply(describe) = fetch(
+        &stack,
+        &FetchRequest {
+            name: "role.describe".into(),
+            arguments: json!({}),
+            declare_role: false,
+        },
+    )
+    .await
+    else {
+        panic!("role.describe was refused");
+    };
+    let describe: Value = serde_json::from_str(&describe).unwrap();
+    cortexkit_role_tool_provider::describe::check_describe(&describe).unwrap();
+    // A route that declared no role reaches nothing but those two ops.
+    let refused = fetch(
+        &stack,
+        &FetchRequest {
+            name: "ctx_search".into(),
+            arguments: json!({"query": "x"}),
+            declare_role: false,
+        },
+    )
+    .await;
+    assert!(
+        matches!(&refused, FetchAnswer::Refused(error) if error.contains("unknown_route_role")),
+        "{refused:?}"
+    );
 }

@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 
 pub mod calibration;
+pub mod catalog;
 pub mod caveman;
 pub mod client;
 pub mod config;
@@ -52,3 +53,18 @@ pub mod summary;
 pub mod tokens;
 pub mod transport;
 pub mod view_builder;
+
+/// Magic Context's module id, as runners and core name it.
+pub const MODULE_ID: &str = "magic-context";
+
+/// The version line ck-mc reports: its package version, and the commit it
+/// was built from when the build set `MC_BUILD_SHA`.
+pub fn version_line() -> String {
+    match option_env!("MC_BUILD_SHA")
+        .map(str::trim)
+        .filter(|sha| !sha.is_empty())
+    {
+        Some(sha) => format!("ck-mc {} ({sha})", env!("CARGO_PKG_VERSION")),
+        None => format!("ck-mc {}", env!("CARGO_PKG_VERSION")),
+    }
+}

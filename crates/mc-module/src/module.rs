@@ -168,6 +168,19 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
         }
     }
 
+    /// The `tool.catalog` answer for a plan item, as RFC 8785 canonical
+    /// JSON: the tools a preset gets and their guidance text, from the
+    /// project's configuration when the route's scope names a project, else
+    /// the user's alone. It depends on no session, so it never waits on one.
+    pub fn catalog(
+        &self,
+        project_root: Option<&str>,
+        arguments: &Value,
+    ) -> Result<Vec<u8>, crate::catalog::CatalogError> {
+        let config = self.inner.config.catalog_config(project_root);
+        crate::catalog::catalog_answer_bytes(arguments, &config)
+    }
+
     /// A `ctx_*` tool call from a session's model.
     pub async fn tool(
         &self,

@@ -56,6 +56,15 @@ impl Config {
             Self::Files(loader) => loader.resolve(project_root.map(Path::new), model_key, usable),
         }
     }
+
+    /// The settings `tool.catalog` answers with (see [`Loader::catalog_config`]).
+    /// Fixed settings answer with the files' defaults.
+    pub fn catalog_config(&self, project_root: Option<&str>) -> crate::catalog::CatalogConfig {
+        match self {
+            Self::Fixed(_) => catalog_config(None, None, Path::new("")),
+            Self::Files(loader) => loader.catalog_config(project_root.map(Path::new)),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -100,6 +109,18 @@ impl Loader {
             usable,
             &self.user_path,
         )
+    }
+
+    /// The settings `tool.catalog` answers with, for a project folder or, on
+    /// an unscoped preflight, the user's file alone.
+    pub fn catalog_config(&self, project_root: Option<&Path>) -> crate::catalog::CatalogConfig {
+        let user = self
+            .read(&self.user_path)
+            .map(|value| expand_user(value, &self.user_path));
+        let project = project_root
+            .map(|root| detect_config_file(&root.join(".cortexkit")))
+            .and_then(|path| self.read(&path));
+        catalog_config(user.as_ref(), project.as_ref(), &self.user_path)
     }
 
     fn read(&self, path: &Path) -> Option<Value> {
@@ -236,6 +257,153 @@ fn resolve_tiers(
         .unwrap_or(false);
     settings.embedding = embedding::Provider::from_tiers(user, project, user_path);
     settings
+}
+
+/// The catalog's settings from the two tiers, read as the plugin reads them.
+/// Invalid entries are skipped, so a typo falls back to the default wording
+/// rather than refusing every catalog. What the model is told about where
+/// its text goes (tool descriptions, the guidance override) is the user's
+/// choice alone; a project may pick the light or full wording.
+fn catalog_config(
+    user: Option<&Value>,
+    project: Option<&Value>,
+    user_path: &Path,
+) -> crate::catalog::CatalogConfig {
+    use crate::catalog::{CatalogConfig, Surface};
+
+    let tiers = || [user, project].into_iter().flatten();
+    let last_bool = |pointer: &str, default: bool| {
+        tiers()
+            .filter_map(|tier| tier.pointer(pointer).and_then(Value::as_bool))
+            .next_back()
+            .unwrap_or(default)
+    };
+    let surface = |value: &Value| match value.as_str() {
+        Some("full") => Some(Surface::Full),
+        Some("light") => Some(Surface::Light),
+        _ => None,
+    };
+    let mut surface_default = Surface::Full;
+    let mut surface_models = std::collections::BTreeMap::new();
+    for tier in tiers() {
+        if let Some(default) = tier.pointer("/prompt_surface/default").and_then(surface) {
+            surface_default = default;
+        }
+        if let Some(models) = tier
+            .pointer("/prompt_surface/models")
+            .and_then(Value::as_object)
+        {
+            for (key, value) in models {
+                if let (false, Some(surface)) = (key.trim().is_empty(), surface(value)) {
+                    surface_models.insert(key.clone(), surface);
+                }
+            }
+        }
+    }
+    let tool_descriptions = user
+        .and_then(|user| user.pointer("/prompt_surface/tool_descriptions"))
+        .and_then(Value::as_object)
+        .map(|descriptions| {
+            descriptions
+                .iter()
+                .filter(|(tool, _)| crate::catalog::definition().tool(tool).is_some())
+                .filter_map(|(tool, text)| {
+                    let text = text.as_str().filter(|text| !text.trim().is_empty())?;
+                    Some((tool.clone(), text.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    CatalogConfig {
+        // The module-only version does not run smart notes, the dreamer, or
+        // the slash commands yet; see `crate::catalog`.
+        smart_notes_enabled: false,
+        user_commands: false,
+        dreamer_runnable: false,
+        compaction_enabled: user
+            .and_then(|user| user.pointer("/compaction/enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        memory_enabled: last_bool("/memory/enabled", true),
+        temporal_awareness: last_bool("/temporal_awareness", true),
+        caveman_text_compression: last_bool("/caveman_text_compression/enabled", false),
+        language: user
+            .and_then(|user| user.pointer("/language"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|language| !language.is_empty())
+            .map(str::to_ascii_lowercase),
+        surface_default,
+        surface_models,
+        guidance_override: user.and_then(|user| guidance_override(user, user_path)),
+        tool_descriptions,
+        disabled_tools: Vec::new(),
+    }
+}
+
+/// The user's replacement for the primary guidance section: the file at
+/// `prompt_surface.guidance_override_path` (relative to the user's config
+/// file), else `prompt_surface.guidance_override_text`. A file that cannot be
+/// read, is empty, or does not hold exactly one `## Magic Context` heading
+/// is ignored with a warning, and the built-in guidance applies.
+fn guidance_override(user: &Value, user_path: &Path) -> Option<String> {
+    const MARKER: &str = "## Magic Context";
+    let configured = user
+        .pointer("/prompt_surface/guidance_override_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty());
+    let Some(configured) = configured else {
+        return user
+            .pointer("/prompt_surface/guidance_override_text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned);
+    };
+    let path = Path::new(configured);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        user_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path)
+    };
+    let warn = |why: &str| {
+        eprintln!(
+            "ck-mc: prompt_surface.guidance_override_path ({}) {why}; using built-in guidance",
+            path.display()
+        );
+    };
+    let content = match fs::read(&path) {
+        Ok(bytes) if path.is_file() => String::from_utf8_lossy(&bytes).into_owned(),
+        Ok(_) => {
+            warn("is not a file");
+            return None;
+        }
+        Err(error) => {
+            warn(&format!("could not be read ({error})"));
+            return None;
+        }
+    };
+    if content.trim().is_empty() {
+        warn("is empty");
+        return None;
+    }
+    let markers = content
+        .split('\n')
+        .filter(|line| {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            line.strip_prefix(MARKER)
+                .is_some_and(|rest| rest.bytes().all(|byte| matches!(byte, b' ' | b'\t')))
+        })
+        .count();
+    if markers != 1 {
+        warn(&format!(
+            "must contain exactly one {MARKER:?} heading, found {markers}"
+        ));
+        return None;
+    }
+    Some(content)
 }
 
 /// The execute threshold for one model, as a percentage of the usable window.

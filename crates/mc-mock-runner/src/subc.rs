@@ -42,6 +42,31 @@ use crate::script::Step;
 /// Plays a scenario: the mock runner's own test op.
 pub const MOCK_PLAY: &str = "mock.play";
 
+/// Fetches a `tool-provider/v1` op from the provider (`role.describe` or
+/// `tool.catalog`) the way a plan builder does, and answers with the
+/// provider's reply as it came: the mock runner's own test op.
+pub const MOCK_FETCH: &str = "mock.fetch";
+
+/// A [`MOCK_FETCH`] request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FetchRequest {
+    /// `role.describe` or `tool.catalog`.
+    pub name: String,
+    pub arguments: Value,
+    /// Open the route for `tool-provider/v1`, as a runner does; `false`
+    /// declares no role, as a plan builder may.
+    pub declare_role: bool,
+}
+
+/// A [`MOCK_FETCH`] answer: the provider's reply bytes as text, or its
+/// refusal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FetchAnswer {
+    Reply(String),
+    Refused(String),
+}
+
 /// How long the runner waits on one call to the provider. Rides carry their
 /// own, shorter deadline inside the request.
 const PROVIDER_CALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -229,6 +254,7 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
                 operation(ops::SESSION_SEND, ManagementOperationKind::Mutate),
                 operation(ops::RUN_RESULT, ManagementOperationKind::Query),
                 operation(MOCK_PLAY, ManagementOperationKind::Mutate),
+                operation(MOCK_FETCH, ManagementOperationKind::Query),
             ],
             config_schema: json!({}),
             observability: vec![],
@@ -334,8 +360,44 @@ impl Handler {
                     .map_err(|error| Refusal::new("play_failed", error.0, None))?;
                 Ok(json_of(&report))
             }
+            MOCK_FETCH => {
+                let request: FetchRequest = wire::params(params)?;
+                Ok(json_of(&self.fetch(request).await?))
+            }
             other => Err(Refusal::unknown_method(other)),
         }
+    }
+
+    /// Send one `tool-provider/v1` op to the provider and report its reply
+    /// unparsed, so a test sees the exact bytes.
+    async fn fetch(&self, request: FetchRequest) -> Result<FetchAnswer, Refusal> {
+        let consumer = SubcConsumer::connect(&self.connection_file, ConsumerOptions::default())
+            .await
+            .map_err(|error| Refusal::new("fetch_failed", format!("connect: {error:?}"), None))?;
+        let options = CallOptions {
+            timeout: PROVIDER_CALL_TIMEOUT,
+            role_versions: request.declare_role.then(|| Role::Tools.versions()),
+            ..CallOptions::default()
+        };
+        let body = serde_json::to_vec(&json!({
+            "name": request.name,
+            "arguments": request.arguments,
+        }))
+        .expect("requests serialize");
+        let reply = consumer
+            .call(
+                RouteTarget::ToolProvider {
+                    module_id: self.provider.clone(),
+                },
+                BindIdentity::new("mock", "catalog-fetch"),
+                body,
+                options,
+            )
+            .await;
+        Ok(match reply {
+            Ok(bytes) => FetchAnswer::Reply(String::from_utf8_lossy(&bytes).into_owned()),
+            Err(error) => FetchAnswer::Refused(format!("{error:?}")),
+        })
     }
 
     /// Play one scenario on a thread of its own, so the runner (whose

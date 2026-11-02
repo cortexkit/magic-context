@@ -1,0 +1,200 @@
+{
+  "generation": "816fe0b604d53f6a17c3889821d3e3c49d9cdf72cb86dcf77279098488a08dd0",
+  "catalog_digest": "816fe0b604d53f6a17c3889821d3e3c49d9cdf72cb86dcf77279098488a08dd0",
+  "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
+  "tools": [
+    {
+      "name": "ctx_note",
+      "schema_digest": "cf84d0fffd0c46b40b50c6297d8d02f73ef5e0527f66cd14e24718ce1e3ef4f4",
+      "semantics": 1,
+      "result_ops": [
+        "prepend",
+        "append"
+      ],
+      "capabilities": [
+        "magic-context:notes/v1"
+      ],
+      "description": "Session notes are pending intentions: work you intend to return to, with findings attached (\"take a note\" always qualifies). Not active steps, an executing plan, or restart insurance; a record of how things stand (world-state, a design at a point in time) with nothing you intend to do about it — that goes stale silently; a fact worth keeping is memory, the rest is nothing. First line = title (<80 chars). write saves; read lists rows (note_ids for bodies); update changes one; dismiss retires 1–50. Dismiss a note when its work lands or is abandoned; a queue you never dismiss from stops being read. surface_condition parks it until an outside check against repo files, git, GitHub or the web holds.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "write",
+              "read",
+              "dismiss",
+              "update"
+            ],
+            "description": "write | read | update | dismiss."
+          },
+          "content": {
+            "type": "string",
+            "description": "Note text: first line title (<80 chars), then detail."
+          },
+          "surface_condition": {
+            "type": "string",
+            "description": "A condition an outside checker can verify on its own, periodically (repository, releases, web — anything it can look up); never something only this conversation knows."
+          },
+          "filter": {
+            "type": "string",
+            "enum": [
+              "all",
+              "active",
+              "pending",
+              "ready",
+              "dismissed"
+            ],
+            "description": "Read filter: all, active, pending, ready, dismissed. Omitted: active notes plus every current smart note (pending included); active: only active-status notes."
+          },
+          "limit": {
+            "type": "number",
+            "description": "Rows per read (default 25)."
+          },
+          "offset": {
+            "type": "number",
+            "description": "Skip newest rows (default 0)."
+          },
+          "note_ids": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "description": "One id for update, 1–50 for dismiss, or 1–50 to read those notes in full. Write and a plain read take an empty list."
+          }
+        },
+        "required": [
+          "action",
+          "content",
+          "note_ids"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ctx_memory",
+      "schema_digest": "de59b47f087c33bb84d20fe9eec0f5cdd5692089aa43e4bf19b72dcb53292cbc",
+      "semantics": 1,
+      "result_ops": [
+        "prepend",
+        "append"
+      ],
+      "capabilities": [
+        "magic-context:memory.write/v1"
+      ],
+      "description": "Durable facts about this project, shared with every agent on it and kept for the months this work lasts; active ones are already in <project-memory> as `#id: fact`. Write one standalone fact when it must not have to be found again — a rule, an architecture fact, a constraint, a config value, a naming convention — especially what cost you turns. A pending intention with evidence is ctx_note, not memory. write (content + category); update one id (content; category optional); archive one or more ids (reason optional); merge two or more ids (content); get 1–20 ids in any status.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "write",
+              "update",
+              "archive",
+              "merge",
+              "get"
+            ],
+            "description": "write | update | archive | merge | get"
+          },
+          "content": {
+            "type": "string",
+            "description": "One standalone fact (write, update, merge)."
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "PROJECT_RULES",
+              "ARCHITECTURE",
+              "CONSTRAINTS",
+              "CONFIG_VALUES",
+              "NAMING"
+            ],
+            "description": "Kind of fact (required for write; on update/merge pass the current category to keep it)."
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "description": "Ids from <project-memory>: one for update, 1+ for archive, 2+ for merge, 1–20 for get."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why it is archived (optional)."
+          }
+        },
+        "required": [
+          "action",
+          "content",
+          "category",
+          "ids"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ctx_search",
+      "schema_digest": "36ed2de214be00f8a0a281dc7e6bb3da815b9da5c2a233b9c9006f148ee11561",
+      "semantics": 1,
+      "result_ops": [
+        "prepend",
+        "append"
+      ],
+      "capabilities": [
+        "magic-context:archive.search/v1"
+      ],
+      "description": "Search available project memories, stored conversation, commits, primers and notes. Results are not filtered against visible context: this session has no compaction views. Phrase query as a natural-language question with exact terms you expect; a keyword stack finds less. Sources (omit for all): memory, message, git_commit, primer, note. Memory ids alone (`#7234`) resolve directly. from/to restrict every source to an inclusive UTC date range. History recovery requires active compaction and is not available in this tool set.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "A natural-language question carrying the exact terms you expect in the answer."
+          },
+          "limit": {
+            "type": "number",
+            "description": "Maximum results (default 10)."
+          },
+          "from": {
+            "type": "string",
+            "description": "Earliest date, YYYY-MM-DD (inclusive)."
+          },
+          "to": {
+            "type": "string",
+            "description": "Latest date, YYYY-MM-DD (inclusive; default open)."
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "memory",
+                "message",
+                "git_commit",
+                "primer",
+                "note"
+              ]
+            },
+            "description": "Restrict to these sources; omit or [] for all."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  ],
+  "system_text": {
+    "text": "## Magic Context\n\n`ctx_search` searches this project's archive — what earlier sessions said and decided, commits and notes; ask it before asking the user anything that may already be recorded, phrased as a question with the exact names in it. `ctx_memory` pins facts that stay true for the months this work lasts, for you and every agent on the project: what must not have to be found again, especially what cost you turns. They are not shown to you automatically; recall them with `ctx_search`. `ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note; \"take a note\" from the user always goes there.",
+    "item_digest": "7ab356879bd31a5af7b0899ff5c41c2d85ea663f35ec05f032a94db23e934726",
+    "preflight_digest": "c8e6d1dbf760bb325484d0a5c3ace6c8e52f3cb773d6d2f1e012750d3edb9512",
+    "tool_names": [
+      "ctx_memory",
+      "ctx_note",
+      "ctx_search"
+    ],
+    "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e"
+  }
+}

@@ -17,7 +17,7 @@ use mc_module::module::Module;
 use mc_module::store::Store;
 use mc_module::transport::{manifest, Handler, SubcRunnerClient};
 
-const DEFAULT_MODULE_ID: &str = "magic-context";
+const DEFAULT_MODULE_ID: &str = mc_module::MODULE_ID;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {

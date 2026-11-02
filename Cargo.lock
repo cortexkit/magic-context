@@ -747,6 +747,7 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2",
  "subc-client-rs",

@@ -224,12 +224,20 @@ enum RouteRole {
     Compaction,
     Tools,
     Hooks,
+    /// A route that declared no role. `tool-provider/v1` lets a consumer
+    /// reach `role.describe` and `tool.catalog` by name on any route (core
+    /// fetches a plan's catalog that way), so such a route gets those two
+    /// ops and nothing else.
+    Discovery,
 }
 
 impl RouteRole {
-    /// The role a route declares, when it declares exactly one ck-mc serves.
+    /// The role a route declares, when it declares exactly one ck-mc serves,
+    /// or [`RouteRole::Discovery`] when it declares none.
     fn declared(roles: Option<&std::collections::BTreeMap<String, String>>) -> Option<Self> {
-        let roles = roles?;
+        let Some(roles) = roles.filter(|roles| !roles.is_empty()) else {
+            return Some(Self::Discovery);
+        };
         if roles.len() != 1 {
             return None;
         }
@@ -251,7 +259,7 @@ impl Handler {
         }
     }
 
-    async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Value, Refusal> {
+    async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Vec<u8>, Refusal> {
         // Every route was checked at bind (`on_bind`): one known role, and a
         // bound session unless it is a module-level hook route.
         let bound = self
@@ -261,11 +269,15 @@ impl Handler {
             .get(&channel)
             .cloned()
             .ok_or_else(|| Refusal::new(codes::ROUTE_UNBOUND, "no route was bound", None))?;
-        match bound.role {
-            RouteRole::Compaction => self.compaction(&bound.route, body).await,
-            RouteRole::Tools => self.tool(&bound.route, body).await,
-            RouteRole::Hooks => self.hook(&bound.route, body).await,
-        }
+        let answer = match bound.role {
+            RouteRole::Compaction => self.compaction(&bound.route, body).await?,
+            // Catalog answers are served as the exact canonical bytes the
+            // catalog produced, never re-serialized.
+            RouteRole::Tools => return self.tool(&bound.route, body).await,
+            RouteRole::Discovery => return self.discovery(&bound.route, body),
+            RouteRole::Hooks => self.hook(&bound.route, body).await?,
+        };
+        Ok(serde_json::to_vec(&answer).expect("answers serialize"))
     }
 
     /// A compaction op, about the session the route is bound to.
@@ -285,12 +297,42 @@ impl Handler {
         answer.map_err(refusal)
     }
 
-    /// A model tool call (`tool-provider/v1`): the body is the published
-    /// `{name, arguments}` call, and the answer its tool result. The call is
-    /// about the session the route is bound to.
-    async fn tool(&self, route: &Route, body: &[u8]) -> Result<Value, Refusal> {
-        let call: ToolCallRequest = serde_json::from_slice(body)
-            .map_err(|error| Refusal::invalid_params("", format!("not a tool call: {error}")))?;
+    /// `role.describe` or `tool.catalog`, by name in the role's
+    /// `{name, arguments}` envelope; `None` for any other name.
+    fn role_op(&self, route: &Route, call: &ToolCallRequest) -> Option<Result<Vec<u8>, Refusal>> {
+        let answer = match call.name.as_str() {
+            cortexkit_role_tool_provider::ops::ROLE_DESCRIBE => {
+                crate::catalog::role_describe_bytes()
+            }
+            cortexkit_role_tool_provider::ops::TOOL_CATALOG => {
+                let root = route.project.as_ref().map(|project| project.root.as_str());
+                self.module.catalog(root, &call.arguments)
+            }
+            _ => return None,
+        };
+        Some(answer.map_err(crate::catalog::CatalogError::into_refusal))
+    }
+
+    /// An op on a route that declared no role: only the two role ops.
+    fn discovery(&self, route: &Route, body: &[u8]) -> Result<Vec<u8>, Refusal> {
+        let call = tool_call(body)?;
+        self.role_op(route, &call).unwrap_or_else(|| {
+            Err(Refusal::new(
+                codes::UNKNOWN_ROUTE_ROLE,
+                format!("`{}` needs a route opened for tool-provider/v1", call.name),
+                None,
+            ))
+        })
+    }
+
+    /// An op on a `tool-provider/v1` route: a role op by name, or a model's
+    /// call to one of the `ctx_*` tools about the session the route is bound
+    /// to, answered with its tool result.
+    async fn tool(&self, route: &Route, body: &[u8]) -> Result<Vec<u8>, Refusal> {
+        let call = tool_call(body)?;
+        if let Some(answer) = self.role_op(route, &call) {
+            return answer;
+        }
         if !call.name.starts_with("ctx_") {
             let error = cortexkit_role_tool_provider::errors::unknown_tool(&call.name);
             return Err(Refusal::new(&error.code, error.message, None));
@@ -308,7 +350,7 @@ impl Handler {
         if is_error {
             result.is_error = Some(true);
         }
-        Ok(serde_json::to_value(result).expect("answers serialize"))
+        Ok(serde_json::to_vec(&result).expect("answers serialize"))
     }
 
     /// A hook op (`step-transform-provider/v1`). That contract names the
@@ -420,6 +462,12 @@ fn now_ms() -> u64 {
         })
 }
 
+/// The role's `{name, arguments}` envelope.
+fn tool_call(body: &[u8]) -> Result<ToolCallRequest, Refusal> {
+    serde_json::from_slice(body)
+        .map_err(|error| Refusal::invalid_params("", format!("not a tool call: {error}")))
+}
+
 fn to_value<T: Serialize>(result: Result<T, ModuleError>) -> Result<Value, ModuleError> {
     result.map(|answer| serde_json::to_value(answer).expect("answers serialize"))
 }
@@ -453,8 +501,11 @@ impl ModuleHandler for Handler {
             );
         };
         // Only the transitional hook routes may serve all of a runner's
-        // sessions; every other route concerns the session it is bound to.
-        if role != RouteRole::Hooks && request.identity.harness == MODULE_LEVEL_HARNESS {
+        // sessions; every other session route concerns the session it is
+        // bound to. Discovery concerns no session.
+        if matches!(role, RouteRole::Compaction | RouteRole::Tools)
+            && request.identity.harness == MODULE_LEVEL_HARNESS
+        {
             return BindDecision::reject(
                 codes::ROUTE_UNBOUND,
                 "compaction and tool routes must be bound to a session",
@@ -488,9 +539,7 @@ impl ModuleHandler for Handler {
 
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
         match self.dispatch(ctx.route_handle().channel, &body).await {
-            Ok(answer) => {
-                HandlerOutcome::Response(serde_json::to_vec(&answer).expect("answers serialize"))
-            }
+            Ok(answer) => HandlerOutcome::Response(answer),
             Err(Refusal {
                 code,
                 message,

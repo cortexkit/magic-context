@@ -1,0 +1,114 @@
+{
+  "preset": "head",
+  "params": {
+    "exclude": [
+      "ctx_reduce"
+    ]
+  },
+  "composition": {
+    "providers": [
+      {
+        "provider": "aft",
+        "tools": [
+          {
+            "name": "bash",
+            "capabilities": [
+              "shell.exec/v1"
+            ]
+          },
+          {
+            "name": "bash_status",
+            "capabilities": [
+              "shell.exec/v1"
+            ]
+          },
+          {
+            "name": "edit",
+            "capabilities": [
+              "code.edit/v1"
+            ]
+          },
+          {
+            "name": "outline",
+            "capabilities": [
+              "code.outline/v1"
+            ]
+          },
+          {
+            "name": "read",
+            "capabilities": [
+              "code.read/v1"
+            ]
+          },
+          {
+            "name": "search",
+            "capabilities": [
+              "code.search/v1"
+            ]
+          },
+          {
+            "name": "zoom",
+            "capabilities": [
+              "code.outline/v1"
+            ]
+          }
+        ]
+      },
+      {
+        "provider": "magic-context",
+        "tools": [
+          {
+            "name": "ctx_expand",
+            "capabilities": [
+              "magic-context:history.expand/v1"
+            ]
+          },
+          {
+            "name": "ctx_memory",
+            "capabilities": [
+              "magic-context:memory.write/v1"
+            ]
+          },
+          {
+            "name": "ctx_note",
+            "capabilities": [
+              "magic-context:notes/v1"
+            ]
+          },
+          {
+            "name": "ctx_search",
+            "capabilities": [
+              "magic-context:archive.search/v1"
+            ]
+          }
+        ]
+      },
+      {
+        "provider": "prefrontal-core",
+        "tools": [
+          {
+            "name": "browser_use",
+            "capabilities": [
+              "browser.use/v1",
+              "cerebellum:browser.use/v1"
+            ]
+          },
+          {
+            "name": "computer_use",
+            "capabilities": [
+              "cerebellum:computer.use/v1",
+              "computer.use/v1"
+            ]
+          }
+        ]
+      }
+    ],
+    "compaction": {
+      "provider": "magic-context"
+    }
+  },
+  "system_text": {
+    "preset": "head",
+    "params": {}
+  }
+}

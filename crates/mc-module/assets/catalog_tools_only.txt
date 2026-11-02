@@ -1,0 +1,9 @@
+## Magic Context
+
+`ctx_search` searches this project's archive: what earlier sessions said and decided, commits and notes. Ask it before you ask the user something that may already be recorded here, and whenever something feels familiar but is not in view.
+
+{{#memory}}`ctx_memory` pins facts about this project that stay true for the months this work lasts, for you and for every other agent working on this project. Pin one when you learn something that must not have to be found again, and especially when it cost you several turns to find. Pinned facts are not shown to you automatically: `ctx_search` recalls them.
+
+{{/memory}}{{note_guidance}}{{#language}}
+
+{{$language_directive}}{{/language}}

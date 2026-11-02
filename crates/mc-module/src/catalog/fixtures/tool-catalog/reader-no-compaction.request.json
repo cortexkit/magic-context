@@ -1,0 +1,59 @@
+{
+  "preset": "reader",
+  "params": {},
+  "composition": {
+    "providers": [
+      {
+        "provider": "aft",
+        "tools": [
+          {
+            "name": "bash",
+            "capabilities": [
+              "shell.exec/v1"
+            ]
+          },
+          {
+            "name": "bash_status",
+            "capabilities": [
+              "shell.exec/v1"
+            ]
+          },
+          {
+            "name": "edit",
+            "capabilities": [
+              "code.edit/v1"
+            ]
+          },
+          {
+            "name": "outline",
+            "capabilities": [
+              "code.outline/v1"
+            ]
+          },
+          {
+            "name": "read",
+            "capabilities": [
+              "code.read/v1"
+            ]
+          },
+          {
+            "name": "search",
+            "capabilities": [
+              "code.search/v1"
+            ]
+          },
+          {
+            "name": "zoom",
+            "capabilities": [
+              "code.outline/v1"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "system_text": {
+    "preset": "reader",
+    "params": {}
+  }
+}
