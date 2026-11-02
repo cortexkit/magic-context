@@ -27,6 +27,19 @@ pub struct Features {
     pub time_marker: bool,
 }
 
+impl Features {
+    /// A session Magic Context does not compact, whose tools it only serves.
+    /// As in the plugin with compaction off: no summaries, no reminders, no
+    /// time markers or memory hints.
+    pub const NONE: Self = Self {
+        summarizer: false,
+        keep_first_message: false,
+        ctx_keep: false,
+        auto_memory: false,
+        time_marker: false,
+    };
+}
+
 /// The features of a preset, or `None` for a preset Magic Context does not
 /// know.
 pub fn features(preset: &str) -> Option<Features> {

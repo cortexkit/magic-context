@@ -337,11 +337,7 @@ impl Handler {
             let error = cortexkit_role_tool_provider::errors::unknown_tool(&call.name);
             return Err(Refusal::new(&error.code, error.message, None));
         }
-        let (text, is_error) = match self
-            .module
-            .tool(&route.session, &call.name, call.arguments)
-            .await
-        {
+        let (text, is_error) = match self.module.tool(route, &call.name, call.arguments).await {
             Ok(output) => (output, false),
             Err(ModuleError::Tool(output)) => (output, true),
             Err(other) => return Err(refusal(other)),

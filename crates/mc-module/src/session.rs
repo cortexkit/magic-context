@@ -86,6 +86,9 @@ pub struct Session {
     /// Messages a person wrote that the index no longer holds, so the
     /// reminders' turn count keeps counting them.
     pruned_turns: u64,
+    /// The session never had a Setup: Magic Context serves its tools only
+    /// ([`Session::tools_only`]).
+    tools_only: bool,
 }
 
 impl Session {
@@ -119,7 +122,43 @@ impl Session {
             nudges: crate::nudges::State::default(),
             cut: None,
             pruned_turns: 0,
+            tools_only: false,
         }
+    }
+
+    /// A session that only calls tools: a runner offers it `ctx_search`,
+    /// `ctx_memory` and `ctx_note` without having Magic Context compact it, so
+    /// it never had a Setup. Its tools read the project from the route; it has
+    /// no transcript, views or summaries.
+    pub fn tools_only(route: &Route, db: Option<Arc<ContextDb>>) -> Self {
+        let request = SetupRequest {
+            preset: String::new(),
+            model: ck_contract_draft::setup::ModelRef {
+                provider: String::new(),
+                model: String::new(),
+                variant: None,
+                service_tier: None,
+            },
+            context_window: 0,
+            output_reserve: 0,
+            rules: ck_contract_draft::rules::ProviderRules {
+                signed_parts: ck_contract_draft::rules::SignedParts::None,
+                history_edit_cost: ck_contract_draft::rules::EditCost::Suffix,
+            },
+            detects: Vec::new(),
+            applied_view: None,
+            newest: None,
+            now: 0,
+        };
+        let mut session = Self::new(route, &request, Features::NONE, db);
+        session.tools_only = true;
+        session
+    }
+
+    /// Whether Magic Context compacts this session (it had a Setup), rather
+    /// than only serving its tools.
+    pub fn compacting(&self) -> bool {
+        !self.tools_only
     }
 
     pub fn key(&self) -> &SessionRef {
@@ -198,6 +237,7 @@ impl Session {
         features: Features,
     ) {
         self.features = features;
+        self.tools_only = false;
         self.conditions = conditions_of(request);
         self.project = route.project.clone();
         self.seq = 0;
@@ -620,6 +660,11 @@ impl Session {
         input: &Value,
     ) -> Result<String, String> {
         match name {
+            // The tools that act on the transcript need a session Magic Context
+            // compacts; the catalog never offers them to any other.
+            "ctx_reduce" | "ctx_expand" | "ctx_keep" if self.tools_only => Err(format!(
+                "{name} works only in a session Magic Context compacts."
+            )),
             "ctx_reduce" => self.ctx_reduce(input),
             "ctx_keep" if self.features.ctx_keep => self.ctx_keep(settings, input),
             "ctx_memory" => {

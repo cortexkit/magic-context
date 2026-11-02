@@ -175,7 +175,7 @@ impl Provider for InProcess {
 
     async fn tool(&self, name: &str, input: &Value) -> Result<String, CallError> {
         self.module()
-            .tool(&self.route.session, name, input.clone())
+            .tool(&self.route, name, input.clone())
             .await
             .map_err(call_error)
     }
@@ -1991,7 +1991,7 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
     // And the free session still answers tools while the stuck one waits.
     let reply = tokio::time::timeout(
         limit,
-        module.tool(&session("free"), "ctx_reduce", json!({"drop": "1"})),
+        module.tool(&route("free"), "ctx_reduce", json!({"drop": "1"})),
     )
     .await
     .expect("the free session answered its tool call");
@@ -2194,5 +2194,67 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         requests[1].usage.cache_read_tokens,
         requests[0].usage.prompt_tokens
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_session_with_no_setup_gets_its_tools_but_none_that_act_on_a_transcript() {
+    // A runner may offer Magic Context's tools to a head it does not have
+    // Magic Context compact. That session never has a Setup; its tools still
+    // work, on the project the route names.
+    let dir = scratch("tools-only");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    let module = Module::new(
+        StuckClient,
+        Settings::default(),
+        Some(ContextDb::open(&dir.join("context.db")).unwrap()),
+        None,
+    );
+    let route = Route {
+        session: SessionRef {
+            runner: "mock-runner".into(),
+            harness: "mock".into(),
+            session: "plain".into(),
+        },
+        project: Some(RouteProject {
+            id: "pj-test".into(),
+            root: dir.to_string_lossy().into_owned(),
+        }),
+    };
+    let saved = module
+        .tool(
+            &route,
+            "ctx_note",
+            json!({"action": "write", "content": "Ship the fix", "note_ids": []}),
+        )
+        .await
+        .unwrap();
+    assert!(saved.starts_with("Saved session note #1."), "{saved}");
+    let remembered = module
+        .tool(
+            &route,
+            "ctx_memory",
+            json!({"action": "write", "category": "NAMING", "content": "Crates use kebab-case.", "ids": []}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(remembered, "Saved memory [ID: 1] in NAMING.");
+    let found = module
+        .tool(&route, "ctx_search", json!({"query": "kebab-case"}))
+        .await
+        .unwrap();
+    assert!(found.contains("Crates use kebab-case."), "{found}");
+    for tool in ["ctx_reduce", "ctx_expand", "ctx_keep"] {
+        let refused = module
+            .tool(&route, tool, json!({"drop": "1"}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refused,
+            ModuleError::Tool(format!(
+                "{tool} works only in a session Magic Context compacts."
+            ))
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

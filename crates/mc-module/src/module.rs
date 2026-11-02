@@ -85,6 +85,7 @@ enum Job {
     Notice(NoticeRequest),
     Ride(RideRequest, oneshot::Sender<Option<View>>),
     Tool {
+        route: Route,
         name: String,
         input: Value,
         reply: oneshot::Sender<Result<String, String>>,
@@ -181,22 +182,32 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
         crate::catalog::catalog_answer_bytes(arguments, &config)
     }
 
-    /// A `ctx_*` tool call from a session's model.
+    /// A `ctx_*` tool call from a session's model, on the session's tool
+    /// route. A session that never had a Setup is one Magic Context only
+    /// serves tools to ([`Session::tools_only`]); its first call starts its
+    /// worker.
     pub async fn tool(
         &self,
-        session: &SessionRef,
+        route: &Route,
         name: &str,
         input: Value,
     ) -> Result<String, ModuleError> {
         let (reply, answer) = oneshot::channel();
-        self.send(
-            session,
-            Job::Tool {
+        let worker = {
+            let mut workers = self.inner.workers.lock().expect("worker map");
+            workers
+                .entry(route.session.clone())
+                .or_insert_with(|| self.spawn_worker())
+                .clone()
+        };
+        worker
+            .send(Job::Tool {
+                route: route.clone(),
                 name: name.to_owned(),
                 input,
                 reply,
-            },
-        )?;
+            })
+            .map_err(|_| ModuleError::Stopped)?;
         answer
             .await
             .map_err(|_| ModuleError::Stopped)?
@@ -277,17 +288,26 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                         let (root, model_key, usable) = session.config_inputs();
                         inner.config.resolve(root, &model_key, usable)
                     }
+                    // The first tool call of a session that has no Setup: only
+                    // the project's settings matter to its tools.
+                    (Job::Tool { route, .. }, None) => inner.config.resolve(
+                        route.project.as_ref().map(|project| project.root.as_str()),
+                        "",
+                        0,
+                    ),
                     (_, None) => Settings::default(),
                 };
                 let settings = &settings;
                 match job {
                     Job::Setup(route, request, features) => match &mut session {
-                        Some(existing) => {
+                        // A session that so far only called tools starts
+                        // afresh below, like any new one.
+                        Some(existing) if existing.compacting() => {
                             existing
                                 .setup(&inner.client, settings, &route, &request, features)
                                 .await
                         }
-                        None => {
+                        _ => {
                             let mut fresh =
                                 Session::new(&route, &request, features, inner.db.clone());
                             fresh.load_summaries();
@@ -326,13 +346,15 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                             .and_then(|session| session.ride(settings, &ride));
                         let _ = reply.send(view);
                     }
-                    Job::Tool { name, input, reply } => {
-                        let answer = match &mut session {
-                            Some(session) => {
-                                session.tool(&inner.client, settings, &name, &input).await
-                            }
-                            None => Err("the session has not started".into()),
-                        };
+                    Job::Tool {
+                        route,
+                        name,
+                        input,
+                        reply,
+                    } => {
+                        let session = session
+                            .get_or_insert_with(|| Session::tools_only(&route, inner.db.clone()));
+                        let answer = session.tool(&inner.client, settings, &name, &input).await;
                         let _ = reply.send(answer);
                     }
                     Job::PreUser { text, now, reply } => {
@@ -348,7 +370,11 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                         continue;
                     }
                 }
-                if let (Some(store), Some(session)) = (&inner.store, &session) {
+                // A tools-only session has nothing to keep across a restart.
+                if let (Some(store), Some(session)) = (
+                    &inner.store,
+                    session.as_ref().filter(|session| session.compacting()),
+                ) {
                     let durable = session.durable();
                     if saved.as_ref() != Some(&durable) {
                         store.save(session.key(), &durable);
