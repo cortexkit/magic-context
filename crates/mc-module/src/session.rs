@@ -707,8 +707,9 @@ impl Session {
 
     /// What a search may read for this session: messages up to the last
     /// summary (later ones are in the model's view), and memories other than
-    /// those the history summary at the start of the request (`m[0]` and
-    /// `m[1]`) shows in full.
+    /// those the history head shows in full. The head is the two messages a
+    /// view inserts at the start of the request: the baseline of summaries,
+    /// docs and memories, and what changed since that baseline.
     fn search_scope<'a>(
         &'a self,
         settings: &Settings,
