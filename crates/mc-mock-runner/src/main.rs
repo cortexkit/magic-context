@@ -23,12 +23,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let connection_file = subc_arg().ok_or("missing --subc <connection-file>")?;
     let module_id = env_or(subc_protocol::SUBC_MODULE_ID_ENV, DEFAULT_MODULE_ID);
     let provider = env_or(PROVIDER_ENV, DEFAULT_PROVIDER);
-    let (_handle, serve) = subc_client_rs::serve_with_handle(
-        &connection_file,
-        manifest(&module_id),
-        Handler::new(connection_file.clone(), provider),
-    )
-    .await?;
+    let handler = Handler::new(connection_file.clone(), provider);
+    let scopes = std::sync::Arc::clone(&handler.scopes);
+    let (handle, serve) =
+        subc_client_rs::serve_with_handle(&connection_file, manifest(&module_id), handler).await?;
+    // The mock owns its sessions' scopes, published through this connection.
+    scopes.install(&module_id, handle);
     serve.await?;
     Ok(())
 }

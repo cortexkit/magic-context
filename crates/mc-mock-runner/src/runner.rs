@@ -132,6 +132,10 @@ pub struct Report {
     pub view_refusals: Vec<ViewRefusal>,
     /// Calls to the provider that failed.
     pub call_errors: Vec<CallError>,
+    /// The child sessions the provider ran in (its summarizer runs), in
+    /// order.
+    #[serde(default)]
+    pub child_runs: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -324,6 +328,15 @@ impl Host {
     /// `run.result`.
     pub fn run_result(&self, request: &RunResultRequest) -> Option<RunResult> {
         self.lock().runs.result(&request.run_id)
+    }
+
+    /// The folder of the session's project, if it has one.
+    pub fn project_root(&self) -> Option<String> {
+        self.lock()
+            .config
+            .project
+            .as_ref()
+            .map(|project| project.root.clone())
     }
 
     /// Every run started in a child session, for assertions.

@@ -119,6 +119,8 @@ fn spawn(
 
 struct Stack {
     connection_file: PathBuf,
+    /// A project folder a scenario may give its session.
+    project_root: PathBuf,
     _processes: Vec<Process>,
     _root: Root,
 }
@@ -140,6 +142,11 @@ fn start_stack() -> Stack {
     );
     let module = dev_copy(Path::new(env!("CARGO_BIN_EXE_ck-mc")), &root, "mc");
     let connection_file = root.join("runtime/subc-connection.json");
+    // ck-mc's context store, where summaries and memories live. A standalone
+    // plugin creates it in production.
+    let context_db = root.join("data/context.db");
+    mc_module::context_db::ContextDb::create_for_tests(&context_db).unwrap();
+    fs::create_dir_all(root.join("project")).unwrap();
     // The daemon launches both modules itself, as reserved modules. That is
     // what makes it attest each one to the other: a runner's routes reach
     // ck-mc only as an attested module, and ck-mc's reach the runner the
@@ -158,7 +165,7 @@ fn start_stack() -> Stack {
         json!({
             "version": 1,
             "modules": {
-                PROVIDER: entry(&module, json!({})),
+                PROVIDER: entry(&module, json!({"MAGIC_CONTEXT_DB": context_db})),
                 RUNNER: entry(&runner, json!({"MOCK_RUNNER_PROVIDER": PROVIDER})),
             },
         })
@@ -183,6 +190,7 @@ fn start_stack() -> Stack {
     }
     Stack {
         connection_file,
+        project_root: root.join("project"),
         _processes: processes,
         _root: Root(root),
     }
@@ -368,6 +376,66 @@ async fn a_worker_reduces_over_the_real_wire() {
             );
         }
     }
+}
+
+/// A head summarizes over the real wire: the session's routes carry its
+/// project from their scope, ck-mc publishes its own child scope for that
+/// folder, picks a model through routing (the mock stands in for it), and
+/// runs the summarizer in a child session the runner creates under that
+/// scope.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the daemon and mock runner binaries; run through scripts/wire-gate.sh"]
+async fn a_head_summarizes_in_a_child_under_ck_mc_s_scope_over_the_real_wire() {
+    let stack = start_stack();
+    let mut config = config("head");
+    config.context_window = 100_000;
+    config.project = Some(mc_mock_runner::runner::Project {
+        id: "pj-wire".into(),
+        root: stack.project_root.to_string_lossy().into_owned(),
+    });
+    let session = config.session.session.clone();
+    let read = || {
+        Step::Model(Turn {
+            reasoning_tokens: Some(50),
+            text: Some("Reading the next file.".into()),
+            tools: vec![ToolCall::ok(
+                "read",
+                json!({"path": "a.rs"}),
+                "x".repeat(48_000),
+            )],
+            output_tokens: 20,
+            ..Turn::default()
+        })
+    };
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend([
+            Step::User {
+                text: prompt.into(),
+            },
+            read(),
+            read(),
+            answer(),
+        ]);
+    }
+    steps.extend([answer(), answer()]);
+    let report = play(&stack, &PlayRequest { config, steps }).await;
+    assert!(report.model_errors.is_empty(), "{:?}", report.model_errors);
+    assert!(report.refusals.is_empty(), "{:?}", report.refusals);
+    assert!(report.call_errors.is_empty(), "{:?}", report.call_errors);
+    assert!(
+        !report.child_runs.is_empty(),
+        "no summarizer run reached the runner"
+    );
+    let prefix = format!("{session}:mc-summary:");
+    assert!(
+        report
+            .child_runs
+            .iter()
+            .all(|child| child.starts_with(&prefix)),
+        "{:?}",
+        report.child_runs
+    );
 }
 
 /// Ask the mock runner to fetch a `tool-provider/v1` op from ck-mc.

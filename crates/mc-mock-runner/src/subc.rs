@@ -20,6 +20,7 @@ use cortexkit_role_compaction::wire::{self, codes, Refusal};
 use cortexkit_role_compaction::COMPACTION_ROLE;
 use cortexkit_role_llm_runner::run::RunResultRequest;
 use cortexkit_role_llm_runner::send::SendRequest;
+use cortexkit_role_routing::select::{RouteRef, RunnerRef, SelectAnswer, SelectRequest};
 use cortexkit_role_step_transform_provider as step;
 use cortexkit_role_tool_provider::result::{ContentPart, ToolResult};
 use serde::de::DeserializeOwned;
@@ -31,9 +32,10 @@ use subc_client_rs::{
     RequestCtx, RouteBindRequest, SubcConsumer,
 };
 use subc_protocol::manifest::{
-    Concurrency, IdentityScope, ManagementOperation, ManagementOperationKind, ModuleManifest,
-    ProviderRole,
+    CapabilityDeclarations, Concurrency, IdentityScope, ManagementOperation,
+    ManagementOperationKind, ModuleManifest, ProviderRole,
 };
+use subc_protocol::scope::{ScopeKind, ScopeRecord, ScopeSelector};
 use subc_protocol::tool_call::ToolCallRequest;
 use subc_protocol::{BindIdentity, Principal, RouteTarget};
 
@@ -66,6 +68,67 @@ pub struct FetchRequest {
 pub enum FetchAnswer {
     Reply(String),
     Refused(String),
+}
+
+/// The stand-in routing provider's capability and ops. It answers every
+/// select with the first runner the request allows and the model
+/// `test/test-model`, and ignores reports.
+const ROUTING_CAPABILITY: &str = "routing/v1";
+const ROUTE_SELECT: &str = "route.select";
+const ROUTE_REPORT: &str = "route.report";
+
+fn next_decision() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The scopes the mock owns: one per played project, as core owns a
+/// session's scope in production. Each sync carries every project so far.
+#[derive(Default)]
+pub struct Scopes {
+    /// The mock's own module id: a scope selector names its owner.
+    module_id: Mutex<String>,
+    handle: Mutex<Option<subc_client_rs::ModuleHandle>>,
+    state: tokio::sync::Mutex<(u64, BTreeMap<String, ScopeRecord>)>,
+}
+
+impl Scopes {
+    pub fn install(&self, module_id: &str, handle: subc_client_rs::ModuleHandle) {
+        *self.module_id.lock().expect("scope owner") = module_id.to_owned();
+        *self.handle.lock().expect("scope handle") = Some(handle);
+    }
+
+    async fn for_project(
+        &self,
+        project: &crate::runner::Project,
+    ) -> Result<ScopeSelector, CallError> {
+        let handle = self
+            .handle
+            .lock()
+            .expect("scope handle")
+            .clone()
+            .ok_or_else(|| CallError("the mock runner is not serving yet".into()))?;
+        let scope_ref = format!("mock-session-{}", project.id);
+        let mut state = self.state.lock().await;
+        state.1.entry(project.root.clone()).or_insert_with(|| {
+            ScopeRecord::new(scope_ref.clone(), 1, ScopeKind::Ephemeral)
+                .with_workdir(Some(project.root.clone()))
+                .with_project_id(Some(project.id.clone()))
+        });
+        state.0 += 1;
+        let records = state.1.values().cloned().collect();
+        handle
+            .scope_sync(state.0, records)
+            .await
+            .map_err(|error| CallError(format!("scope.sync: {error:?}")))?;
+        Ok(ScopeSelector::new(
+            Principal::Reserved {
+                module_id: self.module_id.lock().expect("scope owner").clone(),
+            },
+            &scope_ref,
+            Some(1),
+        ))
+    }
 }
 
 /// How long the runner waits on one call to the provider. Rides carry their
@@ -105,6 +168,10 @@ pub struct SubcProvider {
     consumer: SubcConsumer,
     provider: String,
     session: SessionRef,
+    /// The session's scope, for a session with a project: its routes to the
+    /// provider are opened under it, so the daemon tells the provider the
+    /// project's folder and id.
+    pub scope: Option<ScopeSelector>,
 }
 
 impl SubcProvider {
@@ -120,6 +187,7 @@ impl SubcProvider {
             consumer,
             provider,
             session,
+            scope: None,
         })
     }
 
@@ -146,18 +214,23 @@ impl SubcProvider {
             role_versions: Some(role.versions()),
             ..CallOptions::default()
         };
-        let reply = self
-            .consumer
-            .call(
-                RouteTarget::ToolProvider {
-                    module_id: self.provider.clone(),
-                },
-                BindIdentity::new(self.session.harness.clone(), self.session.session.clone()),
-                body,
-                options,
-            )
-            .await
-            .map_err(|error| CallError(format!("{label}: {error:?}")))?;
+        let target = RouteTarget::ToolProvider {
+            module_id: self.provider.clone(),
+        };
+        let identity =
+            BindIdentity::new(self.session.harness.clone(), self.session.session.clone());
+        let reply = match &self.scope {
+            None => self.consumer.call(target, identity, body, options).await,
+            Some(scope) => {
+                let route = self
+                    .consumer
+                    .open_route_scoped(target, identity, scope.clone(), options.clone())
+                    .await
+                    .map_err(|error| CallError(format!("{label}: {error:?}")))?;
+                self.consumer.request(&route, body, options).await
+            }
+        }
+        .map_err(|error| CallError(format!("{label}: {error:?}")))?;
         serde_json::from_slice(&reply)
             .map_err(|error| CallError(format!("{label} answer: {error}")))
     }
@@ -256,12 +329,25 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
                 operation(ops::RUN_RESULT, ManagementOperationKind::Query),
                 operation(MOCK_PLAY, ManagementOperationKind::Mutate),
                 operation(MOCK_FETCH, ManagementOperationKind::Query),
+                operation(ROUTE_SELECT, ManagementOperationKind::Query),
+                operation(ROUTE_REPORT, ManagementOperationKind::Mutate),
             ],
             config_schema: json!({}),
             observability: vec![],
             identity_scope: vec![IdentityScope::Session],
             concurrency: Concurrency::ModuleManaged,
         }])
+        // A stand-in routing provider, so a provider's summarizer has a
+        // model to run on over the wire.
+        .capabilities(Some(CapabilityDeclarations {
+            provides: vec![
+                ROUTING_CAPABILITY.to_owned(),
+                // So the daemon stamps a route's scope folder on its bind.
+                subc_protocol::scope::SCOPE_WORKDIR_CAPABILITY.to_owned(),
+            ],
+            requires: Vec::new(),
+            must_never_reach: Vec::new(),
+        }))
         .build()
 }
 
@@ -272,6 +358,9 @@ struct Caller {
     module: Option<String>,
     harness: String,
     session: String,
+    /// The folder of the scope the route was opened under, as the daemon
+    /// stamped it.
+    workdir: Option<String>,
 }
 
 /// Serves the runner ops for every session being played. Each call is about
@@ -282,6 +371,8 @@ pub struct Handler {
     provider: String,
     /// Played sessions by harness and session id.
     hosts: Arc<Mutex<HashMap<(String, String), Host>>>,
+    /// The scopes of played sessions with a project.
+    pub scopes: Arc<Scopes>,
     callers: Mutex<HashMap<u16, Caller>>,
 }
 
@@ -291,6 +382,7 @@ impl Handler {
             connection_file,
             provider,
             hosts: Arc::default(),
+            scopes: Arc::default(),
             callers: Mutex::default(),
         }
     }
@@ -304,7 +396,10 @@ impl Handler {
         self.host_and_session(channel).map(|(host, _)| host)
     }
 
-    /// The host, and the session id the route is bound to.
+    /// The host, and the session id the route is bound to. A route bound to a
+    /// child session must be opened under a scope whose folder is the
+    /// session's project, as a real runner creates the child there and
+    /// refuses a scope without one.
     fn host_and_session(&self, channel: u16) -> Result<(Host, String), Refusal> {
         let caller = self
             .callers
@@ -340,6 +435,14 @@ impl Handler {
             })
             .cloned()
             .ok_or_else(Refusal::unknown_session)?;
+        let is_child = !hosts.contains_key(&(caller.harness.clone(), caller.session.clone()));
+        if is_child && (host.project_root().is_none() || caller.workdir != host.project_root()) {
+            return Err(Refusal::new(
+                codes::INVALID_PARAMS,
+                "a child session needs a scope with the session's project folder",
+                Some(json!({"field": "scope", "problem": "workdir_required"})),
+            ));
+        }
         Ok((host, caller.session))
     }
 
@@ -358,6 +461,25 @@ impl Handler {
                 let _: AppliedViewRequest = wire::params(params)?;
                 Ok(json_of(&self.host(channel)?.applied_view()))
             }
+            ROUTE_SELECT => {
+                let request: SelectRequest = wire::params(params)?;
+                let route = RouteRef::new("test", "test-model");
+                let runner = request
+                    .runners
+                    .and_then(|runners| runners.into_iter().next())
+                    .unwrap_or_else(|| "mock-runner".into());
+                let answer = SelectAnswer::new(
+                    format!("mock-{}", next_decision()),
+                    route.clone(),
+                    RunnerRef::new(runner, route),
+                    400_000,
+                    32_000,
+                    u64::MAX,
+                    "mock",
+                );
+                Ok(json!({"result": answer}))
+            }
+            ROUTE_REPORT => Ok(json!({"result": {}})),
             // llm-runner's ops answer `{"result": <answer>}` (llm-runner §1).
             ops::SESSION_SEND => {
                 let request: SendRequest = wire::params(params)?;
@@ -427,6 +549,7 @@ impl Handler {
         let connection_file = self.connection_file.clone();
         let provider = self.provider.clone();
         let hosts = Arc::clone(&self.hosts);
+        let scopes = Arc::clone(&self.scopes);
         let (reply, report) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -436,7 +559,11 @@ impl Handler {
             let result = runtime.block_on(async move {
                 let session = request.config.session.clone();
                 let key = (session.harness.clone(), session.session.clone());
-                let provider = SubcProvider::connect(&connection_file, provider, session).await?;
+                let mut provider =
+                    SubcProvider::connect(&connection_file, provider, session).await?;
+                if let Some(project) = &request.config.project {
+                    provider.scope = Some(scopes.for_project(project).await?);
+                }
                 let mut runner = Runner::start(request.config, provider).await?;
                 hosts
                     .lock()
@@ -444,7 +571,14 @@ impl Handler {
                     .insert(key.clone(), runner.host().clone());
                 runner.play(&request.steps).await;
                 hosts.lock().expect("host map").remove(&key);
-                Ok(runner.report)
+                let mut report = runner.report.clone();
+                report.child_runs = runner
+                    .host()
+                    .child_runs()
+                    .into_iter()
+                    .map(|run| run.child)
+                    .collect();
+                Ok(report)
             });
             let _ = reply.send(result);
         });
@@ -467,6 +601,10 @@ impl ModuleHandler for Handler {
                 module,
                 harness: request.identity.harness.clone(),
                 session: request.identity.session.clone(),
+                workdir: request
+                    .scope
+                    .as_ref()
+                    .and_then(|scope| scope.workdir.clone()),
             },
         );
         BindDecision::accept()

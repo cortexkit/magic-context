@@ -735,6 +735,7 @@ dependencies = [
  "cortexkit-compaction-view",
  "cortexkit-role-compaction",
  "cortexkit-role-llm-runner",
+ "cortexkit-role-routing",
  "cortexkit-role-step-transform-provider",
  "cortexkit-role-tool-provider",
  "serde",
