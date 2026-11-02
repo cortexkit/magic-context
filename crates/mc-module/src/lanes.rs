@@ -638,6 +638,127 @@ pub fn superseded_edits(
     parts
 }
 
+/// The emergency drop reclaims down to the fixed part of the prompt plus
+/// this share of the room up to the ceiling.
+pub const EMERGENCY_TARGET_FRACTION: f64 = 0.3;
+
+/// The newest share of read-type and edit-type outputs the emergency drop
+/// keeps as continuation context, below the runner's limit.
+pub const EMERGENCY_TIER_RESERVE: f64 = 0.2;
+
+/// The emergency drop does nothing for less than this, unless the pass
+/// rewrites anyway: a rewrite of the whole cached prefix is not worth it.
+pub const EMERGENCY_MIN_TOKENS: u64 = 2_000;
+
+/// How the emergency drop orders tools: tier 3 goes first, tier 1 last.
+pub fn emergency_tier(name: &str) -> u8 {
+    match normalize_tool_name(name).as_str() {
+        "read" | "todowrite" | "task" | "aft_outline" | "aft_zoom" => 1,
+        "edit" | "write" | "apply_patch" | "grep" | "glob" | "aft_search" => 2,
+        _ => 3,
+    }
+}
+
+/// What the emergency drop knows about the pass.
+pub struct Emergency {
+    /// The prompt size it reclaims from: the newest reported prompt, or the
+    /// runner's estimate of the request it is about to send.
+    pub prompt_tokens: u64,
+    /// The usable window times the execute threshold.
+    pub ceiling_tokens: u64,
+    /// The runner said the next request would not fit: the protected tail and
+    /// the tier reserve yield, and dropped calls go whole. Protected tools
+    /// still stay.
+    pub over_limit: bool,
+    /// Another lane already rewrites the prompt on this pass, so even a small
+    /// reclaim is worth taking.
+    pub priced: bool,
+}
+
+/// The tiered emergency drop, from the force band on: tool outputs go,
+/// tier 3 first, oldest first within a tier, until the prompt is down to the
+/// fixed part plus 30% of the room up to the ceiling. The fixed part is what
+/// the prompt holds besides the transcript (system prompt, tools), measured as
+/// the reported prompt minus the transcript's estimate.
+pub fn emergency_drop(
+    context: &Context,
+    cutoff: Option<u64>,
+    emergency: &Emergency,
+) -> Vec<(PartKey, Shape)> {
+    if emergency.prompt_tokens == 0 || emergency.ceiling_tokens == 0 {
+        return Vec::new();
+    }
+    let transcript: u64 = context
+        .index
+        .entries()
+        .iter()
+        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+        .filter(|(entry, part)| !context.edited.covers(&entry.mid, &part.id))
+        .map(|(_, part)| tokens::part(part))
+        .sum();
+    let fixed = emergency.prompt_tokens.saturating_sub(transcript) as f64;
+    let ceiling = emergency.ceiling_tokens as f64;
+    if fixed > ceiling {
+        // Dropping tool output cannot reach the target.
+        return Vec::new();
+    }
+    let target = fixed + EMERGENCY_TARGET_FRACTION * (ceiling - fixed);
+    let reclaim = (emergency.prompt_tokens as f64 - target).round();
+    if reclaim <= EMERGENCY_MIN_TOKENS as f64 {
+        return Vec::new();
+    }
+    let protected = protected_tool_parts(context.index, context.protected_tools);
+    let candidates: Vec<(&Entry, &Part, u8)> = tool_parts(context)
+        .filter(|(entry, part, tool)| {
+            tool.status != ToolStatus::Running
+                && part.tag.is_some()
+                && !context.edited.covers(&entry.mid, &part.id)
+                && !protected.contains(&(entry.mid.clone(), part.id.clone()))
+                && (emergency.over_limit || !in_tail(part, cutoff))
+        })
+        .map(|(entry, part, tool)| (entry, part, emergency_tier(&tool.name)))
+        .collect();
+    let mut reserved = BTreeSet::new();
+    if !emergency.over_limit {
+        for tier in [1, 2] {
+            let newest: Vec<u64> = candidates
+                .iter()
+                .rev()
+                .filter(|(_, _, candidate)| *candidate == tier)
+                .filter_map(|(_, part, _)| part.tag)
+                .collect();
+            let keep = (EMERGENCY_TIER_RESERVE * newest.len() as f64).ceil() as usize;
+            reserved.extend(newest.into_iter().take(keep));
+        }
+    }
+    let shape = if emergency.over_limit {
+        Shape::Whole
+    } else {
+        Shape::Default
+    };
+    let mut selected = Vec::new();
+    let mut reclaimed = 0;
+    'tiers: for tier in [3, 2, 1] {
+        for (entry, part, _) in candidates
+            .iter()
+            .filter(|(_, _, candidate)| *candidate == tier)
+        {
+            if part.tag.is_some_and(|tag| reserved.contains(&tag)) {
+                continue;
+            }
+            selected.push(((entry.mid.clone(), part.id.clone()), shape));
+            reclaimed += tokens::part(part);
+            if reclaimed as f64 >= reclaim {
+                break 'tiers;
+            }
+        }
+    }
+    if !emergency.priced && reclaimed < EMERGENCY_MIN_TOKENS {
+        return Vec::new();
+    }
+    selected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

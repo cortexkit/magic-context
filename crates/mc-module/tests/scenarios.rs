@@ -573,3 +573,82 @@ async fn routine_heuristics_land_with_the_first_views() {
         json!("c".repeat(100))
     );
 }
+
+/// A step that runs a shell command whose output is `tokens` tokens.
+fn shell(tokens: usize) -> Step {
+    step(
+        "Running it.",
+        vec![ToolCall::ok(
+            "bash",
+            json!({"command": "make"}),
+            "y".repeat(tokens * 4),
+        )],
+    )
+}
+
+fn high_threshold() -> Settings {
+    Settings {
+        execute_threshold_percentage: 80.0,
+        ..Settings::default()
+    }
+}
+
+#[tokio::test]
+async fn the_force_band_drops_old_tool_output_down_toward_the_target() {
+    // With the threshold at 80%, the first pass that may rebuild is already
+    // in the force band (85%, about 94% here). Shell outputs at tags 3, 5, 7
+    // and 9 are 9,000 tokens each; 5, 7 and 9 are the newest three calls,
+    // which the protected tail keeps, so the emergency drop takes 3.
+    let mut runner = start_with(config("worker", Kind::OpenAi, FREE), high_threshold()).await;
+    runner
+        .play(&[
+            user("Build it."),
+            shell(9_000),
+            shell(9_000),
+            shell(9_000),
+            shell(9_000),
+            answer(),
+            answer(),
+            answer(),
+        ])
+        .await;
+    assert_clean(&runner);
+    let requests = &runner.report.requests;
+    assert_eq!(
+        requests.iter().position(|record| record.view.is_some()),
+        Some(5)
+    );
+    assert_eq!(requests.last().unwrap().view, Some(1));
+    let host = runner.host();
+    assert_eq!(seen(host, 3).as_deref(), Some(placeholder(3).as_str()));
+    assert!(seen(host, 5).unwrap().starts_with("§5§ yyy"));
+}
+
+#[tokio::test]
+async fn a_request_over_the_limit_gets_a_view_where_the_protections_yield() {
+    // The fifth request would not fit (about 39,600 tokens against 39,000),
+    // so the runner rides with over_limit before sending it. The emergency
+    // drop then takes the protected tail too, oldest first, and dropped calls
+    // go whole, except the newest, whose result ends the transcript.
+    let mut runner = start_with(config("worker", Kind::OpenAi, FREE), high_threshold()).await;
+    runner
+        .play(&[
+            user("Build it."),
+            shell(9_000),
+            shell(9_000),
+            shell(9_000),
+            shell(12_000),
+            answer(),
+        ])
+        .await;
+    assert_clean(&runner);
+    let rides = &runner.report.rides;
+    assert_eq!(rides.len(), 1);
+    assert_eq!(rides[0].cause, RideCause::OverLimit);
+    assert!(rides[0].got_view);
+    let host = runner.host();
+    for tag in [3, 5, 7] {
+        assert_eq!(seen(host, tag), None, "{tag}");
+    }
+    assert_eq!(seen(host, 9).as_deref(), Some(placeholder(9).as_str()));
+}

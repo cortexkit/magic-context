@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use ck_contract_draft::notice::{Conditions, Event, NoticeRequest};
 use ck_contract_draft::read::{Cursor, Detail, ReadRequest, Select, SessionRef};
-use ck_contract_draft::ride::RideRequest;
+use ck_contract_draft::ride::{RideCause, RideRequest};
 use ck_contract_draft::setup::SetupRequest;
 use ck_contract_draft::view::{
     View, ViewCurrentRequest, ViewDelivery, ViewPublishAnswer, ViewPublishRequest,
@@ -40,6 +40,10 @@ pub struct Session {
     /// The age sweep's bookmark from the previous pass with permission to
     /// rebuild: tool outputs at or below it were already far behind then.
     reclaim_bookmark: u64,
+    /// An emergency batch landed during this stay in the force band. Another
+    /// one waits until usage leaves the band, or a pass rewrites anyway, so
+    /// the band never trickles one rewrite per pass.
+    emergency_latched: bool,
     /// The highest notice number handled.
     seq: u64,
 }
@@ -55,6 +59,7 @@ impl Session {
             version: 0,
             queued: BTreeSet::new(),
             reclaim_bookmark: 0,
+            emergency_latched: false,
             seq: 0,
         }
     }
@@ -108,11 +113,15 @@ impl Session {
             self.sync(client, Some(&notice.newest)).await;
         }
         self.forget_missing();
+        if !pass::in_force_band(&self.conditions, settings) {
+            self.emergency_latched = false;
+        }
+        let force = pass::in_force_band(&self.conditions, settings);
         if pass::at_execute(&self.conditions, settings)
-            && !self.summary_on_its_way()
+            && (force || !self.summary_on_its_way())
             && !pass::signed_thinking_hold(self.index.entries(), &self.conditions, settings)
         {
-            if let Some(view) = self.build(settings) {
+            if let Some(view) = self.build(settings, None) {
                 self.publish(client, view).await;
             }
         }
@@ -122,7 +131,9 @@ impl Session {
     /// anyway, or would not fit. Everything held lands now.
     pub fn ride(&mut self, settings: &Settings, ride: &RideRequest) -> Option<View> {
         self.conditions = ride.conditions.clone();
-        let view = self.build(settings)?;
+        let over_limit =
+            (ride.cause == RideCause::OverLimit).then_some(ride.request_tokens.unwrap_or(0));
+        let view = self.build(settings, over_limit)?;
         self.accept(view.clone());
         Some(view)
     }
@@ -192,7 +203,11 @@ impl Session {
     /// A view that fails ck-mc's own checks is a bug in a lane. It is logged
     /// and the work it held is dropped, so the same failure does not repeat
     /// on every pass.
-    fn build(&mut self, settings: &Settings) -> Option<View> {
+    ///
+    /// `over_limit` carries the runner's estimate of a request that would not
+    /// fit, for a ride that says so: the emergency drop then runs whatever
+    /// the usage, with the protections that can yield yielding.
+    fn build(&mut self, settings: &Settings, over_limit: Option<u64>) -> Option<View> {
         let edited = lanes::Edited::of(self.latest.as_ref());
         let context = lanes::Context {
             index: &self.index,
@@ -225,7 +240,26 @@ impl Session {
             &context,
             settings.keep_reasoning_tokens,
         ));
-        let (ops, covered) = lanes::drop_ops(&context, &wanted);
+        let (mut ops, mut covered) = lanes::drop_ops(&context, &wanted);
+        let force = pass::in_force_band(&self.conditions, settings);
+        let priced = !ops.is_empty();
+        if over_limit.is_some() || (force && (priced || !self.emergency_latched)) {
+            let emergency = lanes::Emergency {
+                prompt_tokens: over_limit
+                    .unwrap_or(0)
+                    .max(self.conditions.last_prompt_tokens.unwrap_or(0)),
+                ceiling_tokens: (usable as f64 * settings.execute_threshold_percentage / 100.0)
+                    as u64,
+                over_limit: over_limit.is_some(),
+                priced,
+            };
+            let selected = lanes::emergency_drop(&context, cutoff, &emergency);
+            if !selected.is_empty() {
+                wanted.extend(selected);
+                (ops, covered) = lanes::drop_ops(&context, &wanted);
+                self.emergency_latched = true;
+            }
+        }
         let bookmark = lanes::far_behind_bookmark(&context, usable);
         self.reclaim_bookmark = self.reclaim_bookmark.max(bookmark);
         let version = self.version + 1;

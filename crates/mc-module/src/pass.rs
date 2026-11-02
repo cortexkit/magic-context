@@ -115,3 +115,14 @@ pub fn signed_thinking_hold(
         .take(HEAVY_REASONING_WINDOW_STEPS)
         .any(|entry| lanes::step_reasoning_tokens(entry) > HEAVY_REASONING_TOKENS)
 }
+
+/// The force band: from here a pass stops waiting for a summary and the
+/// emergency drop runs. At least 85%, and above the execute threshold.
+pub fn force_band(settings: &Settings) -> f64 {
+    85.0_f64.max(settings.execute_threshold_percentage + 2.0)
+}
+
+/// Whether usage has reached the force band.
+pub fn in_force_band(conditions: &Conditions, settings: &Settings) -> bool {
+    usage(conditions).is_some_and(|usage| usage * 100.0 >= force_band(settings))
+}
