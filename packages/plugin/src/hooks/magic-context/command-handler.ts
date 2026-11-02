@@ -65,13 +65,13 @@ const RECOMP_CONFIRMATION_WINDOW_MS = 60_000;
 /**
  * Gates anchored to the stored fact, never to `subagent.compress`: wrapup
  * writes the session's own summary, so a compressed child stays ineligible.
+ *
+ * No catch: a metadata or database error has to surface here. Converting it to
+ * `false` would turn an unreadable child into a primary and let `/ctx-wrapup`
+ * write into a subagent session.
  */
 function isSubagentSession(db: Database, sessionId: string): boolean {
-    try {
-        return resolveStoredSubagentMode(db, sessionId);
-    } catch {
-        return false;
-    }
+    return resolveStoredSubagentMode(db, sessionId);
 }
 
 const RECOMP_USAGE = [
