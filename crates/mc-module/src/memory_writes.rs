@@ -418,6 +418,71 @@ fn insert_memory(
     get_memory(tx, id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
+/// Categories a summary's facts may become memories in: the five current
+/// ones and the older ones still in use (`PROMOTABLE_CATEGORIES` in the
+/// plugin's `memory/constants.ts`).
+const PROMOTABLE_CATEGORIES: [&str; 12] = [
+    "PROJECT_RULES",
+    "ARCHITECTURE",
+    "CONSTRAINTS",
+    "CONFIG_VALUES",
+    "NAMING",
+    "ARCHITECTURE_DECISIONS",
+    "CONFIG_DEFAULTS",
+    "USER_PREFERENCES",
+    "USER_DIRECTIVES",
+    "ENVIRONMENT",
+    "WORKFLOW_RULES",
+    "KNOWN_ISSUES",
+];
+
+/// How long a promoted memory of a category lives, where it does not live
+/// on (`CATEGORY_DEFAULT_TTL`).
+fn category_ttl_ms(category: &str) -> Option<i64> {
+    const DAY: i64 = 24 * 60 * 60 * 1000;
+    match category {
+        "WORKFLOW_RULES" => Some(90 * DAY),
+        "KNOWN_ISSUES" => Some(30 * DAY),
+        _ => None,
+    }
+}
+
+/// Promote the facts a summary extracted to project memories, inside the
+/// caller's transaction, as the plugin's `promoteSessionFactsDurable`: a fact
+/// whose text matches a memory of its category bumps that memory's seen
+/// count; any other becomes a memory with source `historian`. Empty facts and
+/// other categories are skipped. Returns how many facts landed.
+pub fn promote_facts(
+    tx: &Transaction,
+    project: &str,
+    session: &str,
+    facts: &[(String, String)],
+) -> rusqlite::Result<usize> {
+    let mut promoted = 0;
+    for (category, content) in facts {
+        if content.trim().is_empty() || !PROMOTABLE_CATEGORIES.contains(&category.as_str()) {
+            continue;
+        }
+        let hash = normalized_hash(content);
+        if let Some(existing) = memory_by_hash(tx, project, category, &hash)? {
+            tx.execute(
+                "UPDATE memories SET seen_count = seen_count + 1, last_seen_at = ?2, updated_at = ?2 WHERE id = ?1",
+                params![existing.id, now_ms()],
+            )?;
+        } else {
+            let memory = insert_memory(tx, project, category, content, session, "historian", None)?;
+            if let Some(ttl) = category_ttl_ms(category) {
+                tx.execute(
+                    "UPDATE memories SET expires_at = ?2 WHERE id = ?1",
+                    params![memory.id, now_ms() + ttl],
+                )?;
+            }
+        }
+        promoted += 1;
+    }
+    Ok(promoted)
+}
+
 /// Who writes: the session and the project its memories belong to.
 pub struct Writer<'a> {
     pub harness: &'a str,

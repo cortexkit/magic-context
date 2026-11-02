@@ -292,6 +292,22 @@ impl ContextDb {
         compartments: &[ValidatedCompartment],
         now_ms: i64,
     ) -> Result<(), String> {
+        self.publish_summaries(harness, session, compartments, None, now_ms)
+            .map(|_| ())
+    }
+
+    /// Store a run's summaries and, with `facts` (the project and its
+    /// category and text pairs), promote the facts to project memories in the
+    /// same transaction, so summaries never land without the memories their
+    /// run found, nor the other way round. Returns how many facts landed.
+    pub fn publish_summaries(
+        &self,
+        harness: &str,
+        session: &str,
+        compartments: &[ValidatedCompartment],
+        facts: Option<(&str, &[(String, String)])>,
+        now_ms: i64,
+    ) -> Result<usize, String> {
         let mut connection = self.lock();
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -332,7 +348,15 @@ impl ContextDb {
                     .map_err(|error| error.to_string())?;
             }
         }
-        transaction.commit().map_err(|error| error.to_string())
+        let promoted = match facts {
+            Some((project, facts)) => {
+                crate::memory_writes::promote_facts(&transaction, project, session, facts)
+                    .map_err(|error| error.to_string())?
+            }
+            None => 0,
+        };
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(promoted)
     }
 
     /// Run `apply` on the connection, for a caller that manages its own

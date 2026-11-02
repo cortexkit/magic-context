@@ -214,6 +214,12 @@ fn resolve_tiers(
         if let Some(enabled) = tier.pointer("/memory/enabled").and_then(Value::as_bool) {
             settings.memory_enabled = enabled;
         }
+        if let Some(promote) = tier
+            .pointer("/memory/auto_promote")
+            .and_then(Value::as_bool)
+        {
+            settings.auto_promote = promote;
+        }
         if let Some(budget) = number_at(tier, "/memory/injection_budget_tokens") {
             settings.memory_budget_tokens = budget.max(1.0) as u64;
         }

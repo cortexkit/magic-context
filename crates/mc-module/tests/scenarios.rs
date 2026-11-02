@@ -1172,6 +1172,68 @@ async fn an_invalid_summary_gets_one_repair_run_that_sees_the_error() {
 }
 
 #[tokio::test]
+async fn facts_a_summary_finds_become_project_memories_with_it() {
+    let dir = scratch("facts");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    insert_memory(&dir, 1, "Ask before pushing.");
+    // Give it the hash a fact with the same text has.
+    let seen_before: i64 = {
+        let conn = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+        conn.execute(
+            "UPDATE memories SET normalized_hash = ?1 WHERE id = 1",
+            [mc_module::memory_writes::normalized_hash(
+                "Ask before pushing.",
+            )],
+        )
+        .unwrap();
+        conn.query_row("SELECT seen_count FROM memories WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    };
+    let mut config = config("head", Kind::OpenAi, FREE);
+    config.project = Some(mc_mock_runner::runner::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    });
+    let mut runner = start_full(config, Settings::default(), Some(dir.clone())).await;
+    let summarizer = mc_mock_runner::child::scripted_summarizer();
+    runner
+        .host()
+        .set_responder(std::sync::Arc::new(move |settings, prompt| {
+            let mut reply = summarizer(settings, prompt);
+            reply.text = reply.text.replace(
+                "</output>",
+                "<facts><PROJECT_RULES>\n* Releases need two reviewers.\n* Ask before pushing.\n</PROJECT_RULES></facts>\n</output>",
+            );
+            reply
+        }));
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    // The summarizer saw the project's memories, to leave known facts out.
+    let runs = runner.host().child_runs();
+    assert!(runs[0].request.prompt.contains("Ask before pushing."));
+    // The new fact became a memory; the known one only counted as seen again.
+    let conn = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    let rows: Vec<(String, String, i64)> = conn
+        .prepare("SELECT content, source_type, seen_count FROM memories WHERE project_path = 'pj-test' ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[1].0, "Releases need two reviewers.");
+    assert_eq!(rows[1].1, "historian");
+    assert_eq!(rows[0].2, seen_before + 1, "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn a_transient_provider_error_retries_the_summary_after_a_pause() {
     let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
     runner.host().set_responder(summarizer_failing(

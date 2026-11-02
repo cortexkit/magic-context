@@ -54,6 +54,13 @@ pub struct Request {
     pub chunk_tokens: u64,
     /// The user's `language`: the summarizer writes its prose in it.
     pub language: Option<String>,
+    /// The project's memories as the summarizer's `<project-memory>` block,
+    /// so it leaves out facts already known. Empty with memory off.
+    pub project_memory: String,
+    /// Memory is on: the summarizer may report facts.
+    pub memory_enabled: bool,
+    /// `memory.auto_promote`: the facts it reports are kept.
+    pub auto_promote: bool,
 }
 
 /// Transient provider errors retry this many times on the same model.
@@ -82,9 +89,9 @@ pub async fn run<C: RunnerClient>(
     let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
         seed_examples: &references.seed_examples,
         session_references: &references.session_references,
-        project_memory: "",
+        project_memory: &job.project_memory,
         input_source: &chunk.input,
-        memory_enabled: false,
+        memory_enabled: job.memory_enabled,
         user_observations_requested: false,
         extraction_free: false,
     });
@@ -111,8 +118,8 @@ pub async fn run<C: RunnerClient>(
             .summaries
             .last()
             .map_or(0, |summary| summary.sequence as u64 + 1),
-        memory_enabled: false,
-        auto_promote: false,
+        memory_enabled: job.memory_enabled,
+        auto_promote: job.auto_promote,
         ..ValidateOptions::default()
     };
     let first = attempt(client, job, &format!("{range}:first"), &prompt, &system).await?;

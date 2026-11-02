@@ -386,6 +386,7 @@ impl Session {
         if !self.features.summarizer || self.summarizing {
             return None;
         }
+        let memory_enabled = settings.memory_enabled && self.project.is_some();
         let window = self.conditions.context_window;
         let usage = pass::usage(&self.conditions).unwrap_or(0.0) * 100.0;
         let force = pass::in_force_band(&self.conditions, settings);
@@ -419,7 +420,25 @@ impl Session {
             chunk_tokens: ((self.conditions.context_window as f64 * 0.25).round() as u64)
                 .clamp(8_000, 50_000),
             language: settings.language.clone(),
+            project_memory: self.historian_memory_block(memory_enabled),
+            memory_enabled,
+            auto_promote: settings.auto_promote,
         })
+    }
+
+    /// The project's memories as the summarizer's `<project-memory>` block,
+    /// empty with memory off or none to show.
+    fn historian_memory_block(&self, memory_enabled: bool) -> String {
+        let (Some(db), Some(project), true) = (&self.db, &self.project, memory_enabled) else {
+            return String::new();
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as i64);
+        let memories = db.project_memories(&project.id, now).unwrap_or_default();
+        crate::summary::prompt::render_historian_memory_block(
+            &crate::summary::prompt::order_historian_memories(&memories),
+        )
     }
 
     /// After a revert removed messages from `ordinal` on, forget the summaries
@@ -499,10 +518,23 @@ impl Session {
             return;
         }
         if let Some(db) = &self.db {
-            if let Err(error) = db.append_compartments(
+            // Facts become memories of the session's project, with memory and
+            // auto-promotion on; the validator already left them out otherwise.
+            let facts: Vec<(String, String)> = validated
+                .facts
+                .iter()
+                .map(|fact| (fact.category.clone(), fact.content.clone()))
+                .collect();
+            let promote = self
+                .project
+                .as_ref()
+                .filter(|_| settings.memory_enabled && settings.auto_promote && !facts.is_empty())
+                .map(|project| (project.id.as_str(), facts.as_slice()));
+            if let Err(error) = db.publish_summaries(
                 &self.key.harness,
                 &self.key.session,
                 &validated.compartments,
+                promote,
                 now_ms,
             ) {
                 eprintln!(

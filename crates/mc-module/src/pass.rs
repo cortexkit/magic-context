@@ -49,6 +49,8 @@ pub struct Settings {
     pub memory_enabled: bool,
     /// `memory.git_commit_indexing.enabled`: commit search. Off by default.
     pub git_commits_enabled: bool,
+    /// `memory.auto_promote`: facts a summary finds become project memories.
+    pub auto_promote: bool,
     /// The embedding provider `ctx_search` scores by meaning with; `None`
     /// leaves search to its word lanes.
     pub embedding: Option<crate::embedding::Provider>,
@@ -109,6 +111,7 @@ impl Default for Settings {
             profile_budget_tokens: 4_000,
             memory_enabled: true,
             git_commits_enabled: false,
+            auto_promote: true,
             embedding: None,
             temporal_awareness: true,
             auto_search: AutoSearch::default(),
