@@ -333,9 +333,10 @@ impl Session {
     /// and the work it held is dropped, so the same failure does not repeat
     /// on every pass.
     ///
-    /// `over_limit` carries the runner's estimate of a request that would not
-    /// fit, for a ride that says so: the emergency drop then runs whatever
-    /// the usage, with the protections that can yield yielding.
+    /// `over_limit` is set when the runner asked for a view because its next
+    /// request would not fit, and carries its estimate of that request. The
+    /// emergency drop then runs whatever the usage, and the protections that
+    /// can yield do.
     ///
     /// Also returns roughly how many tokens the new edits free, plus what the
     /// age sweep has lined up for the next pass.

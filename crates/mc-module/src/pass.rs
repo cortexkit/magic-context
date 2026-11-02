@@ -95,8 +95,10 @@ pub const HOLD_CAP_POINTS: f64 = 10.0;
 /// - usage is below the execute threshold plus 10 points.
 ///
 /// The cap bounds the hold: a session that keeps reasoning heavily still
-/// rebuilds before it gets near the force band. Rides are never held: their
-/// rewrite is paid for anyway.
+/// rebuilds before it reaches the force band, where emergency drops start
+/// ([`force_band`]). A view the runner asks for because it is about to
+/// rewrite its cache anyway (a ride) is never held: that rewrite is paid for
+/// already, so the held work lands in it.
 pub fn signed_thinking_hold(
     entries: &[Entry],
     conditions: &Conditions,
