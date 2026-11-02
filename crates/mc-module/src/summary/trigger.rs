@@ -64,20 +64,18 @@ pub fn protected_tail_tokens(
     ceiling.min(floor.min(ceiling).max(raw))
 }
 
-/// Whether a user message carries the user's own words, not only a notice.
+/// Whether a user message carries the user's own words: not a notice, and
+/// with text left once injected regions (reminders, directives) are stripped.
 pub fn is_meaningful_user(entry: &Entry) -> bool {
     entry.role == Role::User
         && entry.notice.is_none()
         && entry.parts.iter().any(|part| match &part.body {
-            PartBody::Text { text } => !text.trim().is_empty(),
+            PartBody::Text { text } => !crate::injection::strip(text)
+                .unwrap_or_else(|| text.clone())
+                .trim()
+                .is_empty(),
             _ => false,
         })
-}
-
-fn has_running_tool(entry: &Entry) -> bool {
-    entry.parts.iter().any(
-        |part| matches!(&part.body, PartBody::Tool(tool) if !crate::neutral::is_finished(&tool.status)),
-    )
 }
 
 /// The first ordinal the summarizer must not read, given that everything
@@ -85,9 +83,12 @@ fn has_running_tool(entry: &Entry) -> bool {
 /// read yet.
 ///
 /// The tail is the newest `tail_tokens` of history, rounded out to whole
-/// messages. A message still running a tool is always in it. Below the force
-/// band, so is the newest message the user wrote: summarizing the prompt the
-/// model is answering would replace it with a narration mid-turn.
+/// messages. A tool call and its result are one part, so the tail never
+/// splits them; a call still running in a message older than the tail was
+/// interrupted, and is summarized as it stands (the plugin treats such an
+/// open call as stale). Below the force band, the newest message the user
+/// wrote is in the tail: summarizing the prompt the model is answering would
+/// replace it with a narration mid-turn.
 pub fn tail_start(
     entries: &[Entry],
     weight: impl Fn(&Entry) -> u64,
@@ -114,9 +115,6 @@ pub fn tail_start(
             }
             break;
         }
-    }
-    if let Some(running) = entries.iter().find(|entry| has_running_tool(entry)) {
-        boundary = boundary.min(running.ordinal);
     }
     if !force {
         if let Some(prompt) = entries.iter().rev().find(|entry| is_meaningful_user(entry)) {
@@ -275,6 +273,47 @@ mod tests {
         } else {
             entry
         }
+    }
+
+    /// A user message holding only an injected reminder is not the person's
+    /// prompt, so it does not hold the tail back.
+    #[test]
+    fn a_reminder_only_user_message_is_not_a_prompt() {
+        assert!(is_meaningful_user(&entry(1, Role::User, false, "Do it.")));
+        assert!(!is_meaningful_user(&entry(
+            1,
+            Role::User,
+            false,
+            "<system-reminder>Keep going.</system-reminder>"
+        )));
+        let wrapped = "<system-reminder>\nThe user sent the following message:\nDo not deploy.\n\nPlease address this message and continue with your tasks.\n</system-reminder>";
+        assert!(is_meaningful_user(&entry(1, Role::User, false, wrapped)));
+    }
+
+    /// A call left running in an old message was interrupted: it does not
+    /// pull the tail back to it, or nothing after it could be summarized.
+    #[test]
+    fn an_old_running_call_does_not_hold_the_tail_back() {
+        let mut entries: Vec<Entry> = (1..=10)
+            .map(|ordinal| entry(ordinal, Role::Assistant, false, "x"))
+            .collect();
+        entries[1] = Entry::new(
+            2,
+            "m2".to_owned(),
+            Role::Assistant,
+            0,
+            vec![Part::new(
+                "p2",
+                PartBody::Tool(cortexkit_role_compaction::part::ToolPart::new(
+                    "c2",
+                    "bash",
+                    serde_json::json!({}),
+                    cortexkit_role_compaction::part::ToolStatus::Running,
+                )),
+            )],
+        );
+        let weight = |_: &Entry| 1_000;
+        assert_eq!(tail_start(&entries, weight, 1, 2_000, false), 9);
     }
 
     #[test]

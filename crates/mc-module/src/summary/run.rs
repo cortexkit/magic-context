@@ -68,6 +68,10 @@ pub struct Request {
     pub memory_enabled: bool,
     /// `memory.auto_promote`: the facts it reports are kept.
     pub auto_promote: bool,
+    /// The run started in the force band. Its reply keeps every summary,
+    /// the last one included, as the plugin's emergency recovery does: the
+    /// session needs the relief now.
+    pub emergency: bool,
 }
 
 /// Transient provider errors retry this many times on the same model.
@@ -115,7 +119,10 @@ pub async fn run<C: RunnerClient + Router>(
     .into_owned();
     let mut tried: Vec<String> = Vec::new();
     let mut failure: Option<String> = None;
-    for _ in 0..=MAX_FALLBACKS {
+    // One deadline for the whole run, retries, repair and fallbacks
+    // included.
+    let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
+    for fallback in 0..=MAX_FALLBACKS {
         let answer = match client
             .select(routing::summary_select(&job.session.runner, &tried))
             .await
@@ -137,8 +144,15 @@ pub async fn run<C: RunnerClient + Router>(
                 .min(answer.max_output_tokens),
         };
         let mut usage = None;
-        let outcome =
-            summarize_on(client, job, &system, &entries, window, &target, &mut usage).await;
+        // Only the first model gets a repair run, as in the plugin; a
+        // fallback's invalid reply moves on to the next model.
+        let call = Call {
+            target: &target,
+            window,
+            repair: fallback == 0,
+            deadline,
+        };
+        let outcome = summarize_on(client, job, &system, &entries, &call, &mut usage).await;
         let reported = match &outcome {
             Ok(_) => Outcome::Completed,
             // The prompt never went out: this model's window cannot hold it.
@@ -168,17 +182,74 @@ enum Failure {
     Failed(String),
 }
 
+/// How one model is asked.
+struct Call<'a> {
+    target: &'a Target,
+    window: fit::Window,
+    /// An invalid reply gets one repair run.
+    repair: bool,
+    deadline: tokio::time::Instant,
+}
+
+/// The marker an oversized chunk ends with, as in the plugin.
+const TRUNCATION_MARKER: &str =
+    "\n[… tokens truncated by Magic Context to fit the historian window …]";
+
+/// `text` cut to fit `budget` tokens with [`TRUNCATION_MARKER`] after it, as
+/// the plugin's `truncateHistorianInputIfNeeded`: a single message larger
+/// than the whole budget is summarized from its start.
+fn truncate_to(text: &str, budget: u64) -> String {
+    let tokens = |text: &str| mc_tokenizer::estimate_tokens(text) as u64;
+    if tokens(text) <= budget {
+        return text.to_owned();
+    }
+    let boundaries: Vec<usize> = text
+        .char_indices()
+        .map(|(at, _)| at)
+        .chain([text.len()])
+        .collect();
+    let (mut lo, mut hi, mut best) = (0usize, boundaries.len() - 1, 0usize);
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        if tokens(&format!("{}{TRUNCATION_MARKER}", &text[..boundaries[mid]])) <= budget {
+            best = mid;
+            lo = mid + 1;
+        } else if mid == 0 {
+            break;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    format!("{}{TRUNCATION_MARKER}", &text[..boundaries[best]])
+}
+
 /// Summarize on one model: fit the prompt to its window, ask, and repair an
-/// invalid reply once. `usage` adds up what every call reported.
+/// invalid reply once when `call.repair` allows. Every prompt is checked
+/// against the model's window right before it is sent. `usage` adds up what
+/// every call reported.
 async fn summarize_on<C: RunnerClient>(
     client: &C,
     job: &Request,
     system: &str,
     entries: &[cortexkit_role_compaction::read::Entry],
-    window: fit::Window,
-    target: &Target,
+    call: &Call<'_>,
     usage: &mut Option<StepUsage>,
 ) -> Result<Option<ValidatedChunk>, Failure> {
+    let (target, window) = (call.target, call.window);
+    // A quarter of the model's window, in the model's tokens, converted to
+    // the local estimator's with the larger of its prose and tool ratios
+    // (the plugin's `producerSourceLocalBudget`).
+    let requested = ((window.context_window as f64 * CHUNK_SHARE).round() as u64)
+        .clamp(CHUNK_MIN_TOKENS, CHUNK_MAX_TOKENS);
+    let ratio = window
+        .calibration
+        .prose_ratio
+        .max(window.calibration.tools_ratio);
+    let requested = if ratio == 1.0 {
+        requested
+    } else {
+        crate::calibration::local_budget(requested as f64, ratio) as u64
+    };
     let fitted = fit::fit(&fit::Input {
         session_id: &job.session.session,
         chunk_start: job.from,
@@ -189,13 +260,14 @@ async fn summarize_on<C: RunnerClient>(
         system_prompt: system,
         windows: &[window],
         output_cap: target.output_tokens,
-        requested_chunk_tokens: ((window.context_window as f64 * CHUNK_SHARE).round() as u64)
-            .clamp(CHUNK_MIN_TOKENS, CHUNK_MAX_TOKENS),
+        requested_chunk_tokens: requested,
     })
     .map_err(Failure::NotSent)?;
-    let Some(chunk) = chunk::build(entries, fitted.chunk_tokens) else {
+    let Some(mut chunk) = chunk::build(entries, fitted.chunk_tokens) else {
         return Ok(None);
     };
+    // The first message is always taken, even past the budget.
+    chunk.input = truncate_to(&chunk.input, fitted.chunk_tokens);
     let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
         seed_examples: &fitted.seed_examples,
         session_references: &fitted.session_references,
@@ -226,37 +298,62 @@ async fn summarize_on<C: RunnerClient>(
             .map_or(0, |summary| summary.sequence as u64 + 1),
         memory_enabled: job.memory_enabled,
         auto_promote: job.auto_promote,
+        in_emergency: job.emergency,
         ..ValidateOptions::default()
     };
+    if !window.admits(target.output_tokens, system, &prompt) {
+        return Err(Failure::NotSent(
+            "prompt_over_window: the summarizer prompt does not fit the model".into(),
+        ));
+    }
     let first = attempt(
         client,
         job,
         &format!("{range}:first"),
         &prompt,
         system,
-        target,
+        call,
         usage,
     )
     .await
     .map_err(Failure::Failed)?;
-    let error = match validate_historian_output(&first, &chunk.validation, &prior, options()) {
+    let hashes = super::hashes::by_ordinal(entries);
+    let checked = |reply: &str| {
+        validate_historian_output(reply, &chunk.validation, &prior, options()).map(
+            |mut validated| {
+                super::hashes::sanitize(&mut validated.compartments, &hashes);
+                validated
+            },
+        )
+    };
+    let error = match checked(&first) {
         Ok(validated) => return Ok(Some(validated)),
         Err(error) => error.message,
     };
+    if !call.repair {
+        return Err(Failure::Failed(format!("invalid reply: {error}")));
+    }
     let repair_prompt =
         build_historian_repair_prompt(&prompt, &first, &error, job.language.as_deref());
+    // The repair prompt carries the invalid reply, so it can outgrow the
+    // window the first prompt fit.
+    if !window.admits(target.output_tokens, system, &repair_prompt) {
+        return Err(Failure::Failed(format!(
+            "invalid reply, and its repair prompt does not fit the model: {error}"
+        )));
+    }
     let repaired = attempt(
         client,
         job,
         &format!("{range}:repair"),
         &repair_prompt,
         system,
-        target,
+        call,
         usage,
     )
     .await
     .map_err(Failure::Failed)?;
-    validate_historian_output(&repaired, &chunk.validation, &prior, options())
+    checked(&repaired)
         .map(Some)
         .map_err(|error| Failure::Failed(format!("invalid after repair: {}", error.message)))
 }
@@ -269,7 +366,7 @@ async fn attempt<C: RunnerClient>(
     label: &str,
     prompt: &str,
     system: &str,
-    target: &Target,
+    call_on: &Call<'_>,
     usage: &mut Option<StepUsage>,
 ) -> Result<String, String> {
     let mut retry = 0;
@@ -279,7 +376,7 @@ async fn attempt<C: RunnerClient>(
         } else {
             format!("{}:{CHILD}:{label}:retry{retry}", job.session.session)
         };
-        match call(client, job, &child, prompt, system, target, usage).await {
+        match call(client, job, &child, prompt, system, call_on, usage).await {
             Ok(text) => return Ok(text),
             Err(error) if retry < MAX_RETRIES && is_transient(&error) => {
                 tokio::time::sleep(backoff(retry)).await;
@@ -297,9 +394,10 @@ async fn call<C: RunnerClient>(
     child: &str,
     prompt: &str,
     system: &str,
-    target: &Target,
+    call_on: &Call<'_>,
     usage: &mut Option<StepUsage>,
 ) -> Result<String, String> {
+    let target = call_on.target;
     let child = Child {
         session: SessionRef::new(
             job.session.runner.clone(),
@@ -329,7 +427,7 @@ async fn call<C: RunnerClient>(
     let Some(run_id) = reply.run_id.filter(|_| reply.state == states::ACTIVE) else {
         return Err(format!("the runner did not start a run: {}", reply.state));
     };
-    let result = wait_for(client, &child, &run_id).await?;
+    let result = wait_for(client, &child, &run_id, call_on.deadline).await?;
     if let Some(reported) = &result.usage {
         *usage = Some(add_usage(usage.take(), &step_usage(reported)));
     }
@@ -469,17 +567,22 @@ async fn read_range<C: RunnerClient>(
     crate::reads::full_range(client, &job.session, job.from, job.until, |_| false).await
 }
 
+/// Wait for a run's result until `deadline`, the run's overall limit. The
+/// wait for each answer is bounded by it too.
 async fn wait_for<C: RunnerClient>(
     client: &C,
     child: &Child,
     run_id: &str,
+    deadline: tokio::time::Instant,
 ) -> Result<RunResult, String> {
-    let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
     loop {
-        let result = client
-            .child_result(child, RunResultRequest::new(run_id))
-            .await
-            .map_err(|error| format!("run.result: {error:?}"))?;
+        let result = tokio::time::timeout_at(
+            deadline,
+            client.child_result(child, RunResultRequest::new(run_id)),
+        )
+        .await
+        .map_err(|_| "the run did not finish in time".to_owned())?
+        .map_err(|error| format!("run.result: {error:?}"))?;
         if result.state != states::ACTIVE {
             return Ok(result);
         }
@@ -492,7 +595,19 @@ async fn wait_for<C: RunnerClient>(
 
 #[cfg(test)]
 mod tests {
-    use super::is_transient;
+    use super::{is_transient, truncate_to, TRUNCATION_MARKER};
+
+    /// A chunk over its budget is cut to fit it, ending in the plugin's
+    /// marker; one within it is untouched.
+    #[test]
+    fn an_oversized_chunk_is_cut_to_its_budget() {
+        let text = "word ".repeat(10_000);
+        let cut = truncate_to(&text, 500);
+        assert!(cut.ends_with(TRUNCATION_MARKER));
+        assert!(mc_tokenizer::estimate_tokens(&cut) as u64 <= 500);
+        assert!(cut.len() > 1_000, "cut far too short: {}", cut.len());
+        assert_eq!(truncate_to("short", 500), "short");
+    }
 
     // The cases the plugin's classifier is written for.
     #[test]

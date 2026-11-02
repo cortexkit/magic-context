@@ -237,6 +237,8 @@ impl Session {
             pruned_turns: self.pruned_turns,
             caveman: self.caveman.clone(),
             drain: self.drain.clone(),
+            no_progress: self.no_progress.clone(),
+            floor_lifted_for: self.floor_lifted_for.clone(),
         }
     }
 
@@ -253,6 +255,8 @@ impl Session {
         self.pruned_turns = durable.pruned_turns;
         self.caveman = durable.caveman;
         self.drain = durable.drain;
+        self.no_progress = durable.no_progress;
+        self.floor_lifted_for = durable.floor_lifted_for;
         // The first read after a restart starts at the cut: nothing before
         // it is visible to the model.
         self.index = Index::starting_at(durable.cut.unwrap_or(1));
@@ -516,6 +520,8 @@ impl Session {
         };
         let mut until = bounded(tail, force);
         let mut decision = decide(until);
+        // The prompt this run summarizes past, once it is admitted.
+        let mut lifting = None;
         if decision.is_none() && force {
             // Nothing to read in the force band: the protected tail shrinks
             // to a half, or a quarter from 95% (the plugin's emergency tail
@@ -541,7 +547,7 @@ impl Session {
             decision = decide(lifted);
             decision?;
             until = lifted;
-            self.floor_lifted_for = prompt;
+            lifting = prompt;
         }
         if self.waits_for_new_history(force) {
             return None;
@@ -562,6 +568,10 @@ impl Session {
         };
         self.reservation = Some(reservation);
         self.summarizing = true;
+        // The lift is spent only by a run that actually starts.
+        if lifting.is_some() {
+            self.floor_lifted_for = lifting;
+        }
         Some(run::Request {
             session: self.key.clone(),
             from,
@@ -572,6 +582,7 @@ impl Session {
             memories: self.historian_memories(memory_enabled),
             memory_enabled,
             auto_promote: settings.auto_promote,
+            emergency: force,
         })
     }
 
@@ -750,7 +761,10 @@ impl Session {
                 return;
             }
             // The summarizer failed: the reservation stays spent, so a broken
-            // summarizer does not run again on every pass.
+            // summarizer does not run again on every pass. The wait for new
+            // history is only for a run that published nothing (the plugin's
+            // `historian-history-wait.ts`): a provider that recovers may run
+            // again on the same history while the quota lasts.
             Err(error) => {
                 eprintln!(
                     "ck-mc: session {}: summary failed: {error}",
@@ -758,7 +772,6 @@ impl Session {
                 );
                 let now = self.clock();
                 self.drain.record_failure(now);
-                self.record_no_progress(settings);
                 return;
             }
         };
@@ -775,7 +788,6 @@ impl Session {
             self.record_no_progress(settings);
             return;
         }
-        self.no_progress = None;
         if let Some(db) = &self.db {
             // Facts become memories of the session's project, with memory and
             // auto-promotion on; the validator already left them out otherwise.
@@ -800,9 +812,11 @@ impl Session {
                     "ck-mc: session {}: storing summaries failed: {error}",
                     self.key.session
                 );
+                self.record_no_progress(settings);
                 return;
             }
         }
+        self.no_progress = None;
         self.summaries
             .extend(validated.compartments.iter().map(StoredCompartment::from));
         // The signed-thinking hold applies here as on a notice: the summary

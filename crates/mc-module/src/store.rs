@@ -46,6 +46,14 @@ pub struct Durable {
     /// The summarizer's drain quota.
     #[serde(default)]
     pub drain: crate::summary::drain::Drain,
+    /// The newest message a summary run made no progress on, so a restart
+    /// does not pay for the same run again.
+    #[serde(default)]
+    pub no_progress: Option<(String, bool)>,
+    /// The prompt a run already summarized past, so a restart does not lift
+    /// it twice.
+    #[serde(default)]
+    pub floor_lifted_for: Option<String>,
 }
 
 pub struct Store {

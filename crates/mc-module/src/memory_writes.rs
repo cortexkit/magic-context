@@ -448,10 +448,13 @@ fn category_ttl_ms(category: &str) -> Option<i64> {
 }
 
 /// Promote the facts a summary extracted to project memories, inside the
-/// caller's transaction, as the plugin's `promoteSessionFactsDurable`: a fact
-/// whose text matches a memory of its category bumps that memory's seen
-/// count; any other becomes a memory with source `historian`. Empty facts and
-/// other categories are skipped. Returns how many facts landed.
+/// caller's transaction, as the plugin's `promoteSessionFactsDurable` through
+/// its admission rules (`lifecycle-applier.ts`): a fact whose text matches a
+/// live memory of its category bumps that memory's seen count; one matching
+/// an archived memory of its category, or (with no match in its category) a
+/// live memory of another category word for word, is left out; any other
+/// becomes a memory with source `historian`. Empty facts and other
+/// categories are skipped. Returns how many facts landed.
 pub fn promote_facts(
     tx: &Transaction,
     project: &str,
@@ -464,7 +467,26 @@ pub fn promote_facts(
             continue;
         }
         let hash = normalized_hash(content);
-        if let Some(existing) = memory_by_hash(tx, project, category, &hash)? {
+        let existing = memory_by_hash(tx, project, category, &hash)?;
+        if existing
+            .as_ref()
+            .is_some_and(|row| row.status == "archived")
+        {
+            continue;
+        }
+        if existing.is_none() {
+            let cross: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM memories WHERE project_path = ?1 AND category != ?2 AND normalized_hash = ?3 AND content = ?4 AND status != 'archived' ORDER BY id LIMIT 1",
+                    params![project, category, hash, content],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if cross.is_some() {
+                continue;
+            }
+        }
+        if let Some(existing) = existing {
             tx.execute(
                 "UPDATE memories SET seen_count = seen_count + 1, last_seen_at = ?2, updated_at = ?2 WHERE id = ?1",
                 params![existing.id, now_ms()],
@@ -938,5 +960,96 @@ pub enum MutationError {
 impl From<rusqlite::Error> for MutationError {
     fn from(error: rusqlite::Error) -> Self {
         MutationError::Store(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> (std::path::PathBuf, Connection) {
+        let dir =
+            std::env::temp_dir().join(format!("mc-promote-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("context.db");
+        drop(crate::context_db::ContextDb::create_for_tests(&path).unwrap());
+        let connection = Connection::open(&path).unwrap();
+        (dir, connection)
+    }
+
+    fn rows(conn: &Connection) -> Vec<(String, String, String, i64)> {
+        let mut statement = conn
+            .prepare("SELECT category, content, status, seen_count FROM memories ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// As the plugin's admission rules: a fact matching an archived memory
+    /// of its category, or a live memory of another category word for word,
+    /// is left out; one matching a live memory of its category bumps it.
+    #[test]
+    fn promotion_skips_archived_and_cross_category_matches() {
+        let (dir, mut conn) = store();
+        let tx = conn.transaction().unwrap();
+        let archived = insert_memory(
+            &tx,
+            "pj",
+            "PROJECT_RULES",
+            "Ask before pushing.",
+            "s",
+            "agent",
+            None,
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE memories SET status = 'archived' WHERE id = ?1",
+            params![archived.id],
+        )
+        .unwrap();
+        insert_memory(
+            &tx,
+            "pj",
+            "NAMING",
+            "Crates use kebab-case.",
+            "s",
+            "agent",
+            None,
+        )
+        .unwrap();
+        insert_memory(
+            &tx,
+            "pj",
+            "CONSTRAINTS",
+            "Never force-push.",
+            "s",
+            "agent",
+            None,
+        )
+        .unwrap();
+        let facts = [
+            ("PROJECT_RULES".to_owned(), "Ask before pushing.".to_owned()),
+            (
+                "PROJECT_RULES".to_owned(),
+                "Crates use kebab-case.".to_owned(),
+            ),
+            ("CONSTRAINTS".to_owned(), "Never force-push.".to_owned()),
+            ("ARCHITECTURE".to_owned(), "Views name edits.".to_owned()),
+        ];
+        assert_eq!(promote_facts(&tx, "pj", "s", &facts).unwrap(), 2);
+        tx.commit().unwrap();
+        let rows = rows(&conn);
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        assert_eq!(rows[0].2, "archived");
+        assert_eq!(rows[0].3, 1, "the archived memory is not bumped");
+        assert_eq!(rows[2].3, 2, "the live match is bumped");
+        assert_eq!(rows[3].1, "Views name edits.");
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

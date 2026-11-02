@@ -7,6 +7,7 @@
 pub mod chunk;
 pub mod drain;
 pub mod fit;
+pub mod hashes;
 pub mod head;
 pub mod prompt;
 pub mod render;

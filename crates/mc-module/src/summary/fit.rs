@@ -49,6 +49,24 @@ impl Window {
         cap.min((self.context_window as f64 * OUTPUT_SHARE_CAP) as u64)
     }
 
+    /// Whether a prompt of `system` and `prompt` fits this model next to
+    /// `output` tokens of reply, measured as [`fit`] measures it. The check
+    /// every prompt passes right before it is sent.
+    pub fn admits(self, output: u64, system: &str, prompt: &str) -> bool {
+        let Some(limit) = self.input_limit(output) else {
+            return true;
+        };
+        let tokens = self.calibration.provider_mass(
+            LocalMass {
+                system: mc_tokenizer::estimate_tokens(system) as f64,
+                prose: mc_tokenizer::estimate_tokens(prompt) as f64,
+                tools: 0.0,
+            },
+            true,
+        );
+        tokens.is_finite() && tokens <= limit as f64
+    }
+
     /// The prompt tokens the model takes next to `output` tokens of reply.
     fn input_limit(self, output: u64) -> Option<u64> {
         let shared = self

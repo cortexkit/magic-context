@@ -22,10 +22,6 @@ use super::validate::{ChunkLine, HistorianChunk, MessageRange};
 
 const MAX_COMMITS_PER_BLOCK: usize = 5;
 const SYSTEM_DIRECTIVE_PREFIX: &str = "[SYSTEM DIRECTIVE: MAGIC-CONTEXT";
-/// The comment oh-my-opencode puts in the user messages it starts itself.
-/// It is not the person's text, so the summarizer never sees it (as the
-/// plugin's `read-session-chunk.ts` strips it).
-const OMO_INTERNAL_INITIATOR_MARKER: &str = "<!-- OMO_INTERNAL_INITIATOR -->";
 
 /// What the summarizer is sent, and what its reply is checked against.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,12 +305,13 @@ fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Strip reminder blocks and oh-my-opencode's initiator marker from a
-/// user's text.
+/// Strip injected regions (reminder blocks, directives, oh-my-opencode's
+/// initiator marker) from a user's text. A message the user sent while the
+/// agent ran, which older OpenCode wrapped in a reminder, is the user's own
+/// words and stays ([`crate::injection::strip`]).
 fn clean_user_text(text: &str) -> String {
-    system_reminder_regex()
-        .replace_all(text, "")
-        .replace(OMO_INTERNAL_INITIATOR_MARKER, "")
+    crate::injection::strip(text)
+        .unwrap_or_else(|| text.trim().to_owned())
         .trim()
         .to_owned()
 }
@@ -399,11 +396,6 @@ fn compact_text_for_summary(text: &str) -> (String, Vec<String>) {
     (text, hashes)
 }
 
-fn system_reminder_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?is)<system-reminder>[\s\S]*?</system-reminder>").unwrap())
-}
-
 fn envelope_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)<system-reminder>([\s\S]*?)</system-reminder>").unwrap())
@@ -464,6 +456,34 @@ mod tests {
 
     fn text(text: &str) -> PartBody {
         PartBody::Text { text: text.into() }
+    }
+
+    /// A message the user sent while the agent ran, which older OpenCode
+    /// wrapped in a reminder, reaches the summarizer; a plain reminder does
+    /// not.
+    #[test]
+    fn the_users_wrapped_message_reaches_the_summarizer() {
+        let wrapped = "<system-reminder>\nThe user sent the following message:\nDo not deploy to production.\n\nPlease address this message and continue with your tasks.\n</system-reminder>";
+        let entries = [
+            entry(1, Role::User, false, vec![text("Start the release.")]),
+            entry(2, Role::User, false, vec![text(wrapped)]),
+            entry(
+                3,
+                Role::User,
+                false,
+                vec![text(
+                    "<system-reminder>Spent output.</system-reminder> Go on.",
+                )],
+            ),
+        ];
+        let chunk = build(&entries, 10_000).expect("a chunk");
+        assert!(
+            chunk.input.contains("Do not deploy to production."),
+            "{}",
+            chunk.input
+        );
+        assert!(!chunk.input.contains("Spent output."), "{}", chunk.input);
+        assert!(chunk.input.contains("Go on."), "{}", chunk.input);
     }
 
     fn tool(name: &str, input: Value) -> PartBody {
