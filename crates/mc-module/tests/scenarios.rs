@@ -505,8 +505,13 @@ async fn a_queued_drop_two_refused_views_carried_is_forgotten() {
     let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
     *runner.provider().client.refuse_views.lock().unwrap() = 2;
     runner.play(&reads_then_drop_sentences()).await;
+    runner.play(&[read_file(50), answer(), answer()]).await;
     assert_clean(&runner);
     let host = runner.host();
+    // A view after the two refused ones landed, without the drops.
+    let offered = runner.provider().client.offered.lock().unwrap().clone();
+    assert!(offered.len() >= 3, "{offered:?}");
+    assert_eq!(host.applied_version(), offered.last().copied());
     assert_eq!(seen(host, 2).as_deref(), Some("§2§ Reading the next file."));
     assert_eq!(seen(host, 4).as_deref(), Some("§4§ Reading the next file."));
 }
@@ -525,7 +530,10 @@ async fn an_execute_pass_with_nothing_to_drop_publishes_no_view() {
     assert_eq!(runner.host().applied_version(), None);
     assert!(runner.provider().client.offered.lock().unwrap().is_empty());
     let requests = &runner.report.requests;
-    assert!(requests[1].usage.prompt_tokens.unwrap() > 25_350, "{requests:?}");
+    assert!(
+        requests[1].usage.prompt_tokens.unwrap() > 25_350,
+        "{requests:?}"
+    );
     for pair in requests.windows(2) {
         assert_eq!(pair[1].usage.cache_read_tokens, pair[0].usage.prompt_tokens);
     }
