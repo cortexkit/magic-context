@@ -79,6 +79,8 @@ pub struct Session {
     /// the head whatever the usage: the model must not keep seeing history
     /// that was undone.
     head_stale: bool,
+    /// The `ctx_reduce` reminders' cadence.
+    nudges: crate::nudges::State,
 }
 
 impl Session {
@@ -104,6 +106,7 @@ impl Session {
             summarizing: false,
             fold_due: false,
             head_stale: false,
+            nudges: crate::nudges::State::default(),
         }
     }
 
@@ -131,6 +134,7 @@ impl Session {
             emergency_latched: self.emergency_latched,
             keep_requested: self.keep_requested,
             baseline: self.baseline.clone(),
+            nudges: self.nudges.clone(),
         }
     }
 
@@ -142,6 +146,7 @@ impl Session {
         self.emergency_latched = durable.emergency_latched;
         self.keep_requested = durable.keep_requested;
         self.baseline = durable.baseline;
+        self.nudges = durable.nudges;
     }
 
     /// Load the summaries `context.db` already holds for the session, such as
@@ -190,7 +195,8 @@ impl Session {
     }
 
     /// Handle a notice. Returns a summarizer run for the worker to start, when
-    /// one is due.
+    /// one is due. After the pass, the `ctx_reduce` reminders read what the
+    /// model now sees.
     pub async fn notice<C: RunnerClient>(
         &mut self,
         client: &C,
@@ -200,6 +206,21 @@ impl Session {
         if notice.seq <= self.seq && self.seq != 0 {
             return None;
         }
+        let version = self.latest.as_ref().map(|view| view.version);
+        let cut = self.cut_ordinal();
+        let summary = self.handle_notice(client, settings, notice).await;
+        let rebuilt = self.latest.as_ref().map(|view| view.version) != version;
+        let cut_moved = self.cut_ordinal() > cut;
+        self.remind(client, settings, rebuilt, cut_moved).await;
+        summary
+    }
+
+    async fn handle_notice<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        settings: &Settings,
+        notice: NoticeRequest,
+    ) -> Option<run::Request> {
         self.seq = notice.seq;
         self.conditions = notice.conditions.clone();
         let mut refused = false;
@@ -405,6 +426,84 @@ impl Session {
             let (view, _) = self.build(settings, None);
             if let Some(view) = view {
                 self.publish(client, view).await;
+            }
+        }
+    }
+
+    /// The ordinal the latest view's cut reaches: messages up to it are
+    /// replaced by the history head.
+    fn cut_ordinal(&self) -> Option<u64> {
+        let through = self
+            .latest
+            .as_ref()?
+            .edits
+            .iter()
+            .find_map(|edit| match &edit.op {
+                EditOp::Cut { through } => Some(through),
+                _ => None,
+            })?;
+        self.index
+            .entries()
+            .iter()
+            .find(|entry| &entry.mid == through)
+            .map(|entry| entry.ordinal)
+    }
+
+    /// Send the `ctx_reduce` reminders this pass calls for (see
+    /// [`crate::nudges`]), measured on what the model sees now.
+    async fn remind<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        settings: &Settings,
+        rebuilt: bool,
+        cut_moved: bool,
+    ) {
+        if self.index.entries().is_empty() {
+            return;
+        }
+        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, None);
+        let context = lanes::Context {
+            index: &self.index,
+            edited: &edited,
+            protected_tools: &settings.protected_tools,
+            keep_first_message: self.features.keep_first_message,
+        };
+        let floor = settings.protected_tokens.unwrap_or_else(|| {
+            lanes::default_protected_tokens(pass::usable_window(&self.conditions))
+        });
+        let protected_from = lanes::protected_cutoff(&context, floor);
+        let measurement = crate::nudges::measure(&context, protected_from, &self.queued);
+        let turns = crate::nudges::person_turns(self.index.entries());
+        let reminders = self.nudges.decide(&measurement, rebuilt, turns, cut_moved);
+        let sends = [
+            (
+                reminders.tool_result,
+                crate::nudges::REMINDER_TEMPLATE,
+                Delivery::ToolResult,
+            ),
+            (
+                reminders.ceiling,
+                crate::nudges::CEILING_TEMPLATE,
+                Delivery::Steer,
+            ),
+        ];
+        for (text, template, delivery) in sends {
+            let Some(text) = text else {
+                continue;
+            };
+            let request = SendRequest {
+                session: self.key.clone(),
+                send_id: format!("{template}:{}", self.seq),
+                prompt: text,
+                template: Some(template.into()),
+                delivery: vec![delivery],
+                run: None,
+            };
+            if let Err(error) = client.send(request).await {
+                eprintln!(
+                    "ck-mc: session {}: session.send failed: {error:?}",
+                    self.key.session
+                );
             }
         }
     }
@@ -749,6 +848,9 @@ impl Session {
                 }
                 None => missing.push(tag),
             }
+        }
+        if !queued.is_empty() {
+            self.nudges.reduced();
         }
         if queued.is_empty() && !missing.is_empty() {
             return Err(format!(

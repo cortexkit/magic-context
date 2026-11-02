@@ -1740,3 +1740,46 @@ async fn a_persons_message_gets_the_time_since_the_last_one_and_a_hint_of_relate
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn a_reduce_reminder_rides_the_next_tool_result_once_and_a_reduce_quiets_it() {
+    // A large window, so piling up results never reaches the execute
+    // threshold: only the reminders act. Each read adds about 7,000 tokens;
+    // the newest three are protected. After nine, 6 of 9 results are spent:
+    // U/T is about 0.67, the urgent band.
+    let mut config = config("worker", Kind::OpenAi, FREE);
+    config.context_window = 400_000;
+    let mut runner = start(config).await;
+    let mut steps = vec![user("Survey the repository.")];
+    steps.extend((0..10).map(|_| read_file(50)));
+    steps.push(Step::Model(Turn {
+        text: Some("Dropping what I read.".into()),
+        tools: vec![ToolCall::ok("ctx_reduce", json!({"drop": "3-13"}), "")],
+        output_tokens: 5,
+        ..Turn::default()
+    }));
+    steps.extend((0..3).map(|_| read_file(50)));
+    steps.push(answer());
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let outputs = tool_outputs(runner.host(), "read");
+    let carrying: Vec<usize> = outputs
+        .iter()
+        .enumerate()
+        .filter(|(_, output)| output.contains("<system-reminder>"))
+        .map(|(at, _)| at)
+        .collect();
+    // Decided once the ninth result arrived, carried by the tenth, and not
+    // again: neither more reads within the band nor the reads after the
+    // reduce grow enough.
+    assert_eq!(carrying, vec![9], "{carrying:?}");
+    let reminder = &outputs[9][28_000..];
+    assert!(
+        reminder.starts_with(
+            "\n\n<system-reminder>\n6 spent tool outputs (~42k tokens) are still unstamped. \
+             Call ctx_reduce now, before your next tool call, on every output you've already used.\n\
+             oldest reclaimable: §3§ read · §5§ read · §7§ read · §9§ read.\n</system-reminder>"
+        ),
+        "{reminder}"
+    );
+}

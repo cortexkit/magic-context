@@ -29,6 +29,10 @@ pub struct Durable {
     pub keep_requested: bool,
     /// What the head's `m[0]` holds, so a restart does not re-render it.
     pub baseline: Option<Baseline>,
+    /// The `ctx_reduce` reminders' cadence, so a restart neither repeats a
+    /// reminder nor forgets a grace.
+    #[serde(default)]
+    pub nudges: crate::nudges::State,
 }
 
 pub struct Store {
