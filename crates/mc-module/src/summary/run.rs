@@ -52,9 +52,6 @@ pub struct Request {
     pub until: u64,
     /// The session's summaries so far, oldest first.
     pub summaries: Vec<StoredCompartment>,
-    /// How many tokens of messages one run reads at most, before the
-    /// prompt is fitted to the summarizer's window.
-    pub chunk_tokens: u64,
     /// The user's `language`: the summarizer writes its prose in it.
     pub language: Option<String>,
     /// The project's memories, for the summarizer's `<project-memory>`
@@ -68,6 +65,12 @@ pub struct Request {
 
 /// Transient provider errors retry this many times on the same model.
 const MAX_RETRIES: usize = 2;
+/// A run reads at most this share of the summarizer's window of messages,
+/// within these bounds (`HISTORIAN_CHUNK_PERCENTAGE` in the plugin's
+/// `derive-budgets.ts`), before the prompt is fitted to the window.
+const CHUNK_SHARE: f64 = 0.25;
+const CHUNK_MIN_TOKENS: u64 = 8_000;
+const CHUNK_MAX_TOKENS: u64 = 50_000;
 /// After the first model routing picks fails, this many others are tried,
 /// each excluding the ones before it (the plugin's fallback models).
 const MAX_FALLBACKS: usize = 2;
@@ -179,7 +182,8 @@ async fn summarize_on<C: RunnerClient>(
         system_prompt: system,
         windows: &[window],
         output_cap: target.output_tokens,
-        requested_chunk_tokens: job.chunk_tokens,
+        requested_chunk_tokens: ((window.context_window as f64 * CHUNK_SHARE).round() as u64)
+            .clamp(CHUNK_MIN_TOKENS, CHUNK_MAX_TOKENS),
     })
     .map_err(Failure::NotSent)?;
     let Some(chunk) = chunk::build(entries, fitted.chunk_tokens) else {

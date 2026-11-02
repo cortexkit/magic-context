@@ -452,10 +452,6 @@ impl Session {
             from,
             until,
             summaries: self.summaries.clone(),
-            // A quarter of the session's window: a run reads about as much
-            // as the model gives up to summaries.
-            chunk_tokens: ((self.conditions.context_window as f64 * 0.25).round() as u64)
-                .clamp(8_000, 50_000),
             language: settings.language.clone(),
             memories: self.historian_memories(memory_enabled),
             memory_enabled,
