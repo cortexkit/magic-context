@@ -2020,4 +2020,109 @@ describe("createCtxMemoryTool", () => {
 			}
 		});
 	});
+
+	// pi validates with @earendil-works/pi-schema, which coerces these raw
+	// shapes before validation: null content becomes the string "null" and a
+	// null ids array becomes [0]. prepareArguments runs first, so the tool
+	// rejects them before a memory is written with either.
+	describe("prepareArguments rejects arguments that schema coercion would mangle", () => {
+		it("throws when content is null", () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				expect(() =>
+					tool.prepareArguments?.({
+						action: "write",
+						category: "PROJECT_RULES",
+						content: null,
+						ids: [],
+					}),
+				).toThrow("Error: 'content' must be a string, not null.");
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it('passes the literal string "null" through unchanged', () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				const args = {
+					action: "write",
+					category: "PROJECT_RULES",
+					content: "null",
+					ids: [],
+				};
+				expect(tool.prepareArguments?.(args)).toBe(args);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("throws when ids is null", () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				expect(() =>
+					tool.prepareArguments?.({
+						action: "get",
+						category: "PROJECT_RULES",
+						content: "",
+						ids: null,
+					}),
+				).toThrow("Error: 'ids' must be an array of positive memory IDs.");
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("throws when ids is a bare string", () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				expect(() =>
+					tool.prepareArguments?.({
+						action: "get",
+						category: "PROJECT_RULES",
+						content: "",
+						ids: "1",
+					}),
+				).toThrow("Error: 'ids' must be an array of positive memory IDs.");
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("passes a well-formed ids list through unchanged", () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				const args = {
+					action: "get",
+					category: "PROJECT_RULES",
+					content: "",
+					ids: [1],
+				};
+				expect(tool.prepareArguments?.(args)).toBe(args);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("rejects memory id 0 at the provider-schema level", () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({ db });
+				const base = {
+					action: "get",
+					category: "PROJECT_RULES",
+					content: "",
+				};
+				expect(Value.Check(tool.parameters, { ...base, ids: [0] })).toBe(false);
+				expect(Value.Check(tool.parameters, { ...base, ids: [1] })).toBe(true);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+	});
 });
