@@ -11,6 +11,9 @@
 use std::error::Error;
 use std::path::PathBuf;
 
+use std::sync::Arc;
+
+use mc_module::child_scopes::ChildScopes;
 use mc_module::config::{Config, Loader};
 use mc_module::context_db::ContextDb;
 use mc_module::module::Module;
@@ -40,18 +43,21 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(path) => Some(Store::open(&path)?),
         None => None,
     };
+    let child_scopes = Arc::new(ChildScopes::new(module_id.clone()));
     let module = Module::new(
-        SubcRunnerClient::new(connection_file.clone()),
+        SubcRunnerClient::new(connection_file.clone(), Arc::clone(&child_scopes)),
         Config::Files(Loader::from_environment()),
         db,
         store,
     );
-    let (_handle, serve) = subc_client_rs::serve_with_handle(
+    let (handle, serve) = subc_client_rs::serve_with_handle(
         &connection_file,
         manifest(&module_id),
         Handler::new(module),
     )
     .await?;
+    // ck-mc's child scopes are published through its serving connection.
+    child_scopes.install(handle);
     serve.await?;
     Ok(())
 }

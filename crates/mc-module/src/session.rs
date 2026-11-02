@@ -544,6 +544,7 @@ impl Session {
             session: self.key.clone(),
             from,
             until,
+            project_root: self.project.as_ref().map(|project| project.root.clone()),
             summaries: self.summaries.clone(),
             language: settings.language.clone(),
             memories: self.historian_memories(memory_enabled),

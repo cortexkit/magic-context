@@ -21,7 +21,7 @@ use cortexkit_role_routing::select::{RouteRef, RunnerRef, SelectAnswer, SelectRe
 use mc_mock_runner::model::Kind;
 use mc_mock_runner::runner::{CallError, Host, Provider, Runner, SessionConfig, UserEdit};
 use mc_mock_runner::script::{Step, ToolCall, Turn};
-use mc_module::client::{ClientError, RunnerClient};
+use mc_module::client::{Child, ClientError, RunnerClient};
 use mc_module::context_db::ContextDb;
 use mc_module::lanes::placeholder;
 use mc_module::module::{Module, ModuleError};
@@ -49,6 +49,8 @@ struct HostClient {
     refuse_views: Arc<Mutex<u32>>,
     /// The version of every view handed over, refused or not.
     offered: Arc<Mutex<Vec<u64>>>,
+    /// The project folder of every summarizer child send, for its scope.
+    child_scopes: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 /// What ck-mc asked the stand-in routing provider, and what it answers.
@@ -196,9 +198,21 @@ impl RunnerClient for HostClient {
         read_wrapped(&reply)
     }
 
-    async fn run_result(
+    async fn send_child(
         &self,
-        _: &SessionRef,
+        child: &Child,
+        request: SendRequest,
+    ) -> Result<SendReply, ClientError> {
+        self.child_scopes
+            .lock()
+            .unwrap()
+            .push(child.project_root.clone());
+        self.send(&child.session, request).await
+    }
+
+    async fn child_result(
+        &self,
+        _: &Child,
         request: RunResultRequest,
     ) -> Result<RunResult, ClientError> {
         let request: RunResultRequest = through_wire(&request);
@@ -1497,6 +1511,23 @@ async fn facts_a_summary_finds_become_project_memories_with_it() {
     steps.push(answer());
     runner.play(&steps).await;
     assert_clean(&runner);
+    // Every summarizer child was sent under the project's folder, where a
+    // real runner creates it.
+    let folders = runner
+        .provider()
+        .client
+        .child_scopes
+        .lock()
+        .unwrap()
+        .clone();
+    assert!(!folders.is_empty());
+    let root = dir.to_string_lossy().into_owned();
+    assert!(
+        folders
+            .iter()
+            .all(|folder| folder.as_deref() == Some(root.as_str())),
+        "{folders:?}"
+    );
     // The summarizer saw the project's memories, to leave known facts out.
     let runs = runner.host().child_runs();
     assert!(runs[0].prompt.contains("Ask before pushing."));
@@ -2660,9 +2691,13 @@ impl RunnerClient for StuckClient {
         Self::answer(session, SendReply::new("pending")).await
     }
 
-    async fn run_result(
+    async fn send_child(&self, child: &Child, _: SendRequest) -> Result<SendReply, ClientError> {
+        Self::answer(&child.session, SendReply::new("pending")).await
+    }
+
+    async fn child_result(
         &self,
-        _: &SessionRef,
+        _: &Child,
         request: RunResultRequest,
     ) -> Result<RunResult, ClientError> {
         std::future::pending::<()>().await;

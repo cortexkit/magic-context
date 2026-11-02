@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cortexkit_role_compaction::read::{ReadPage, ReadRequest, SessionRef};
@@ -35,12 +35,14 @@ use subc_protocol::manifest::{
     CapabilityDeclarations, Concurrency, ExecutionMode, IdentityScope, ModuleManifest,
     ProviderRole, Tool,
 };
+use subc_protocol::scope::ScopeSelector;
 use subc_protocol::tool_call::ToolCallRequest;
 use subc_protocol::Principal;
 use subc_protocol::{BindIdentity, RouteTarget};
 use tokio::sync::OnceCell;
 
-use crate::client::{ClientError, RunnerClient};
+use crate::child_scopes::ChildScopes;
+use crate::client::{Child, ClientError, RunnerClient};
 use crate::module::{Module, ModuleError, PRE_USER_BUDGET};
 use crate::pre_user::Addition;
 use crate::route::{Project, Route};
@@ -93,13 +95,55 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
 pub struct SubcRunnerClient {
     connection_file: PathBuf,
     consumer: OnceCell<SubcConsumer>,
+    /// The scopes ck-mc's summarizer children run under.
+    child_scopes: Arc<ChildScopes>,
 }
 
 impl SubcRunnerClient {
-    pub fn new(connection_file: PathBuf) -> Self {
+    pub fn new(connection_file: PathBuf, child_scopes: Arc<ChildScopes>) -> Self {
         Self {
             connection_file,
             consumer: OnceCell::new(),
+            child_scopes,
+        }
+    }
+
+    /// An llm-runner call on a child's route, opened under ck-mc's child
+    /// scope for the parent's project folder. A daemon that restarted since
+    /// the last sync answers `scope_not_synced`; the scope is synced again
+    /// and the call made once more.
+    async fn child_call<P: Serialize, A: DeserializeOwned>(
+        &self,
+        child: &Child,
+        method: &str,
+        params: &P,
+    ) -> Result<A, ClientError> {
+        let root = child.project_root.as_deref().ok_or_else(|| {
+            ClientError(format!(
+                "{method}: the session has no project folder, so its summarizer has no child scope"
+            ))
+        })?;
+        let mut synced_again = false;
+        loop {
+            let scope = self
+                .child_scopes
+                .for_project(root)
+                .await
+                .map_err(|error| ClientError(format!("{method}: child scope: {error}")))?;
+            match self
+                .call_raw(&child.session, LLM_RUNNER_ROLE, method, params, Some(scope))
+                .await
+            {
+                Err(error) if !synced_again && error.0.contains("scope_not_synced") => {
+                    self.child_scopes.forget_sync().await;
+                    synced_again = true;
+                }
+                Err(error) => return Err(error),
+                Ok(reply) => {
+                    return cortexkit_role_llm_runner::wire::read_reply(&reply)
+                        .map_err(|error| ClientError(format!("{method} answer: {error:?}")))
+                }
+            }
         }
     }
 
@@ -115,7 +159,7 @@ impl SubcRunnerClient {
         method: &str,
         params: &P,
     ) -> Result<A, ClientError> {
-        let reply = self.call_raw(session, role, method, params).await?;
+        let reply = self.call_raw(session, role, method, params, None).await?;
         if role == LLM_RUNNER_ROLE {
             return cortexkit_role_llm_runner::wire::read_reply(&reply)
                 .map_err(|error| ClientError(format!("{method} answer: {error:?}")));
@@ -124,12 +168,15 @@ impl SubcRunnerClient {
             .map_err(|error| ClientError(format!("{method} answer: {error}")))
     }
 
+    /// One call on the route to `session` for `role`: an unscoped route for
+    /// the session's own calls, or one opened under `scope`.
     async fn call_raw<P: Serialize>(
         &self,
         session: &SessionRef,
         role: (&str, &str),
         method: &str,
         params: &P,
+        scope: Option<ScopeSelector>,
     ) -> Result<Vec<u8>, ClientError> {
         let consumer = self
             .consumer
@@ -149,15 +196,19 @@ impl SubcRunnerClient {
             )])),
             ..CallOptions::default()
         };
-        let reply = consumer
-            .call(
-                target,
-                BindIdentity::new(session.harness.clone(), session.session.clone()),
-                wire::encode(method, params),
-                options,
-            )
-            .await
-            .map_err(|error| ClientError(format!("{method}: {error:?}")))?;
+        let identity = BindIdentity::new(session.harness.clone(), session.session.clone());
+        let body = wire::encode(method, params);
+        let reply = match scope {
+            None => consumer.call(target, identity, body, options).await,
+            Some(scope) => {
+                let route = consumer
+                    .open_route_scoped(target, identity, scope, options.clone())
+                    .await
+                    .map_err(|error| ClientError(format!("{method}: {error:?}")))?;
+                consumer.request(&route, body, options).await
+            }
+        }
+        .map_err(|error| ClientError(format!("{method}: {error:?}")))?;
         Ok(reply)
     }
 }
@@ -295,13 +346,20 @@ impl RunnerClient for SubcRunnerClient {
             .await
     }
 
-    async fn run_result(
+    async fn send_child(
         &self,
-        session: &SessionRef,
+        child: &Child,
+        request: SendRequest,
+    ) -> Result<SendReply, ClientError> {
+        self.child_call(child, ops::SESSION_SEND, &request).await
+    }
+
+    async fn child_result(
+        &self,
+        child: &Child,
         request: RunResultRequest,
     ) -> Result<RunResult, ClientError> {
-        self.call(session, LLM_RUNNER_ROLE, ops::RUN_RESULT, &request)
-            .await
+        self.child_call(child, ops::RUN_RESULT, &request).await
     }
 }
 

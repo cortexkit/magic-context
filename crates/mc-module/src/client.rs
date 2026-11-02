@@ -10,6 +10,19 @@ use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyV
 use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest};
 use cortexkit_role_llm_runner::send::{SendReply, SendRequest};
 
+/// A child session of ck-mc's own on a session's runner, where a summarizer
+/// run happens. The route to it is opened under ck-mc's child scope for the
+/// session's project folder ([`crate::child_scopes`]); the runner creates the
+/// child in that folder on its first send.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Child {
+    /// The child's runner and harness are its parent's.
+    pub session: SessionRef,
+    /// The parent session's project folder. A real runner refuses a child
+    /// without one.
+    pub project_root: Option<String>,
+}
+
 /// A call to the runner that got no answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientError(pub String);
@@ -34,18 +47,22 @@ pub trait RunnerClient: Send + Sync + 'static {
         &self,
         session: &SessionRef,
     ) -> impl Future<Output = Result<AppliedViewAnswer, ClientError>> + Send;
-    /// `session.send`, llm-runner's. A summarizer run goes to a child session
-    /// of ck-mc's own, named by `session`; a reminder goes to the session it
-    /// is for.
+    /// `session.send`, llm-runner's, on the session's own route: a reminder.
     fn send(
         &self,
         session: &SessionRef,
         request: SendRequest,
     ) -> impl Future<Output = Result<SendReply, ClientError>> + Send;
-    /// `run.result`, llm-runner's, on the session the run is in.
-    fn run_result(
+    /// `session.send` on a child's route: it starts a summarizer run.
+    fn send_child(
         &self,
-        session: &SessionRef,
+        child: &Child,
+        request: SendRequest,
+    ) -> impl Future<Output = Result<SendReply, ClientError>> + Send;
+    /// `run.result` on the child's route the run started on.
+    fn child_result(
+        &self,
+        child: &Child,
         request: RunResultRequest,
     ) -> impl Future<Output = Result<RunResult, ClientError>> + Send;
 }

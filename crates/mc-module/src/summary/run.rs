@@ -28,7 +28,7 @@ use super::prompt::{
 use super::validate::{
     validate_historian_output, StoredCompartmentRange, ValidateOptions, ValidatedChunk,
 };
-use crate::client::RunnerClient;
+use crate::client::{Child, RunnerClient};
 use crate::context_db::{StoredCompartment, StoredMemory};
 use crate::routing::{self, Router};
 use cortexkit_role_compaction::read::StepUsage;
@@ -56,6 +56,9 @@ pub struct Request {
     pub until: u64,
     /// The session's summaries so far, oldest first.
     pub summaries: Vec<StoredCompartment>,
+    /// The session's project folder, where the runner creates the
+    /// summarizer's child sessions.
+    pub project_root: Option<String>,
     /// The user's `language`: the summarizer writes its prose in it.
     pub language: Option<String>,
     /// The project's memories, for the summarizer's `<project-memory>`
@@ -297,25 +300,28 @@ async fn call<C: RunnerClient>(
     target: &Target,
     usage: &mut Option<StepUsage>,
 ) -> Result<String, String> {
-    let session = SessionRef::new(
-        job.session.runner.clone(),
-        job.session.harness.clone(),
-        child,
-    );
+    let child = Child {
+        session: SessionRef::new(
+            job.session.runner.clone(),
+            job.session.harness.clone(),
+            child,
+        ),
+        project_root: job.project_root.clone(),
+    };
     let with_temperature = !refuses_temperature(&job.session.runner);
     let send = |temperature: bool| {
         // A retry after a lost answer finds the run already started.
-        let mut request = SendRequest::new(prompt, child);
+        let mut request = SendRequest::new(prompt, child.session.session.clone());
         request.runner_params = run_params(system, target, temperature);
         request
     };
-    let reply = match client.send(&session, send(with_temperature)).await {
+    let reply = match client.send_child(&child, send(with_temperature)).await {
         // No contract declares `generation.temperature`, so a runner may
         // refuse it by name (llm-runner §9). A refused send starts nothing:
         // send again without it, and leave it out for that runner from now on.
         Err(error) if with_temperature && error.0.contains("generation.temperature") => {
             remember_temperature_refused(&job.session.runner);
-            client.send(&session, send(false)).await
+            client.send_child(&child, send(false)).await
         }
         other => other,
     }
@@ -323,7 +329,7 @@ async fn call<C: RunnerClient>(
     let Some(run_id) = reply.run_id.filter(|_| reply.state == states::ACTIVE) else {
         return Err(format!("the runner did not start a run: {}", reply.state));
     };
-    let result = wait_for(client, &session, &run_id).await?;
+    let result = wait_for(client, &child, &run_id).await?;
     if let Some(reported) = &result.usage {
         *usage = Some(add_usage(usage.take(), &step_usage(reported)));
     }
@@ -465,13 +471,13 @@ async fn read_range<C: RunnerClient>(
 
 async fn wait_for<C: RunnerClient>(
     client: &C,
-    session: &SessionRef,
+    child: &Child,
     run_id: &str,
 ) -> Result<RunResult, String> {
     let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
     loop {
         let result = client
-            .run_result(session, RunResultRequest::new(run_id))
+            .child_result(child, RunResultRequest::new(run_id))
             .await
             .map_err(|error| format!("run.result: {error:?}"))?;
         if result.state != states::ACTIVE {
