@@ -72,6 +72,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ),
     ("body_digest", "{seal?, body}: a part's checksum"),
     ("seal_view", "{version, edits}: the view with its checksum"),
+    (
+        "plan_version",
+        "{}: the version of what this library renders (`PLAN_VERSION`)",
+    ),
 ];
 
 /// Call one library function by name with JSON input. Answers
@@ -145,6 +149,7 @@ fn dispatch(function: &str, input: Value) -> Result<Outcome, String> {
             let input: Sealing = parse(input)?;
             ok(View::seal(input.version, input.edits))
         }
+        "plan_version" => ok(crate::PLAN_VERSION),
         other => return Err(format!("unknown function {other}")),
     })
 }

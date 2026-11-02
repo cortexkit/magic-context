@@ -26,6 +26,16 @@
 
 #![forbid(unsafe_code)]
 
+/// The version of what a runner renders from a transcript and a view: tag
+/// numbers, reply cleaning, the tag prefix, the label of a result with only
+/// attachments, and what each edit does to the rendered messages. It changes
+/// whenever some input could render different bytes. A runner that must
+/// resume a run with exactly the bytes it sent before records it when the
+/// run starts, and refuses to resume under another. A test pins each version
+/// to a checksum of what the rendering vectors produce, so rendered bytes
+/// cannot change without a new version.
+pub const PLAN_VERSION: u32 = 1;
+
 pub mod clean;
 pub mod render;
 pub mod rules;

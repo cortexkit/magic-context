@@ -1,5 +1,13 @@
 [
   {
+    "name": "the version of what this library renders",
+    "function": "plan_version",
+    "input": {},
+    "output": {
+      "ok": 1
+    }
+  },
+  {
     "name": "an empty view keeps everything",
     "function": "plan",
     "input": {
@@ -754,6 +762,190 @@
         {
           "mid": "u2",
           "op": "drop",
+          "since": 1
+        }
+      ],
+      "entries": [
+        {
+          "digest": "3e2634cf83c881d5d6a5b09552d2cd17967336ce26266a24f30802f75f8933d7",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "e21128c42b49f1313d904efdc4301471b0501de75d5cd62ce2ff9746ea613ed0",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "please fix"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "aa1c90f693e8495dde1da264bc9c4ed41b039d7759b0cdd12c5dfe0bc73e72d1",
+          "generated_under": {
+            "checksum": "b14a557c42f11d5828a24cc7aa91b1c8df02fb927beab941aec8e9bb5d493d03",
+            "version": 0
+          },
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r1",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "9148af84c085d204d03a26f4a5d48fac648fabd8b1024931c326af6d1c8018d5",
+              "id": "t2",
+              "kind": "text",
+              "tag": 2,
+              "text": "looking"
+            },
+            {
+              "attachments": [
+                {
+                  "id": "img-1",
+                  "kind": "file",
+                  "mime": "image/png",
+                  "size": 2048,
+                  "transport": "inline"
+                }
+              ],
+              "call_id": "call-k1",
+              "digest": "197f24250ac8f43412ce21043a13491bcaa0c8a7d68789571301bb7ea44f3728",
+              "id": "k1",
+              "input": {
+                "count": 3,
+                "old_string": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "path": "a.rs"
+              },
+              "kind": "tool",
+              "name": "edit",
+              "output": "done",
+              "output_bytes": 4,
+              "status": "completed",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        },
+        {
+          "digest": "9a5492798a948d993056728878bb01cc376f2d982c6d3c0512c70f195a522140",
+          "mid": "u2",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "c8ba08272cdbb2b7279ca34bf8d2af3fde3211edcc367b349d9ffd3a7d548017",
+              "id": "t4",
+              "kind": "text",
+              "tag": 4,
+              "text": "go on"
+            }
+          ],
+          "role": "user",
+          "written_at": 3000
+        },
+        {
+          "digest": "127e2cd514e1720f27455540a56b3db80db6dda84a52546359b650c6c6ac103f",
+          "generated_under": {
+            "checksum": "b14a557c42f11d5828a24cc7aa91b1c8df02fb927beab941aec8e9bb5d493d03",
+            "version": 0
+          },
+          "mid": "a2",
+          "ordinal": 4,
+          "parts": [
+            {
+              "digest": "bb23c45f3a64e0095202165101ab4a427142dcf64c96e76ab7aae48d0563f640",
+              "id": "r2",
+              "kind": "reasoning",
+              "seal": "signed",
+              "text": "thinking",
+              "text_bytes": 8
+            },
+            {
+              "digest": "1fc03dd92b44bf9a8dd2849645744885c75d570b341cbe9fdca9252809d0896a",
+              "id": "t5",
+              "kind": "text",
+              "tag": 5,
+              "text": "done"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 4000
+        }
+      ]
+    },
+    "output": {
+      "ok": {
+        "items": [
+          {
+            "item": "entry",
+            "mid": "u1",
+            "ordinal": 1,
+            "parts": [
+              {
+                "id": "t1",
+                "prefix": true,
+                "tag": 1
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a1",
+            "ordinal": 2,
+            "parts": [
+              {
+                "id": "r1",
+                "prefix": false
+              },
+              {
+                "id": "t2",
+                "prefix": true,
+                "tag": 2
+              },
+              {
+                "id": "k1",
+                "prefix": true,
+                "tag": 3
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a2",
+            "ordinal": 4,
+            "parts": [
+              {
+                "id": "r2",
+                "prefix": false
+              },
+              {
+                "id": "t5",
+                "prefix": true,
+                "tag": 5
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a message whose every part is dropped is left out",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "mid": "u2",
+          "op": "drop",
+          "part": "t4",
           "since": 1
         }
       ],
@@ -4134,6 +4326,19 @@
       "ok": {
         "model_tag": null,
         "text": "See 5.1 of the spec."
+      }
+    }
+  },
+  {
+    "name": "a cleaned reply is trimmed",
+    "function": "clean_reply",
+    "input": {
+      "text": "  §12§ Done.\n\n"
+    },
+    "output": {
+      "ok": {
+        "model_tag": null,
+        "text": "Done."
       }
     }
   },

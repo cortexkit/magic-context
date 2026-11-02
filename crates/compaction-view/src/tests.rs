@@ -913,6 +913,11 @@ mod vector_file {
         ];
         let stripped_image = replace(1, &pasted, "u1", "f1", "text", json!("[image stripped]"));
         vec![
+            (
+                "the version of what this library renders",
+                "plan_version",
+                json!({}),
+            ),
             ("an empty view keeps everything", "plan", plan(vec![])),
             (
                 "an edit op the runner doesn't know refuses the view by name",
@@ -953,6 +958,11 @@ mod vector_file {
                 "a dropped message is left out",
                 "plan",
                 plan(vec![drop_message(1, "u2")]),
+            ),
+            (
+                "a message whose every part is dropped is left out",
+                "plan",
+                plan(vec![drop_part(1, "u2", "t4")]),
             ),
             (
                 "a text placeholder replaces the text and is final",
@@ -1098,6 +1108,11 @@ mod vector_file {
                 json!({"text": "See §5.1 of the spec."}),
             ),
             (
+                "a cleaned reply is trimmed",
+                "clean_reply",
+                json!({"text": "  §12§ Done.\n\n"}),
+            ),
+            (
                 "an entry's checksum",
                 "entry_digest",
                 json!({"role": "user", "parts": [text("t1", 1, "please fix")]}),
@@ -1113,6 +1128,53 @@ mod vector_file {
                 json!({"version": 3, "edits": [drop_part(2, "a1", "k1")]}),
             ),
         ]
+    }
+
+    /// Each `PLAN_VERSION`, with the checksum of what the rendering vectors
+    /// produce under it, oldest first. When a change makes the library render
+    /// different bytes, the test below fails until `PLAN_VERSION` is bumped
+    /// and a row for it is added here; an existing row never changes.
+    const PLAN_OUTPUTS: &[(u32, &str)] = &[(
+        1,
+        "3d84ce2befe70fa75d47f618ce91b36f887716f3e86bfd25bf67aae1cc7d9a74",
+    )];
+
+    /// The functions whose output a runner renders, or renders from.
+    const RENDERING: &[&str] = &[
+        "plan",
+        "apply",
+        "edits_for_transcript",
+        "assign_tags",
+        "clean_reply",
+    ];
+
+    fn rendered_checksum() -> String {
+        let vectors = generate();
+        let mut outputs: Vec<&Value> = Vec::new();
+        outputs.extend(
+            vectors
+                .iter()
+                .filter(|vector| RENDERING.contains(&vector.function.as_str()))
+                .map(|vector| &vector.output),
+        );
+        let prefix = json!(crate::tags::tag_prefix(12));
+        outputs.push(&prefix);
+        cortexkit_role_compaction::digest::checksum(&outputs)
+    }
+
+    #[test]
+    fn rendered_bytes_change_only_with_a_new_plan_version() {
+        for pair in PLAN_OUTPUTS.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "versions rise: {pair:?}");
+            assert_ne!(pair[0].1, pair[1].1, "a new version renders differently");
+        }
+        let (version, checksum) = PLAN_OUTPUTS.last().expect("a pinned version");
+        assert_eq!(*version, crate::PLAN_VERSION);
+        assert_eq!(
+            *checksum,
+            rendered_checksum(),
+            "the rendered bytes changed: bump PLAN_VERSION and add its row to PLAN_OUTPUTS"
+        );
     }
 
     fn generate() -> Vec<Vector> {
