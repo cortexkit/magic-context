@@ -1490,6 +1490,15 @@ async fn one_long_turn_at_the_threshold_is_summarized_past_its_prompt_once() {
     assert!(runs[0].prompt.contains("Refactor the whole crate."));
 }
 
+/// The one-pass summarizer: `historian.turn_two` off, so facts become
+/// memories when the summary is stored.
+fn one_pass() -> Settings {
+    Settings {
+        turn_two: false,
+        ..Settings::default()
+    }
+}
+
 #[tokio::test]
 async fn facts_a_summary_finds_become_project_memories_with_it() {
     let dir = scratch("facts");
@@ -1515,7 +1524,7 @@ async fn facts_a_summary_finds_become_project_memories_with_it() {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
     });
-    let mut runner = start_full(config, Settings::default(), Some(dir.clone())).await;
+    let mut runner = start_full(config, one_pass(), Some(dir.clone())).await;
     let summarizer = mc_mock_runner::child::scripted_summarizer();
     runner
         .host()
@@ -1568,6 +1577,147 @@ async fn facts_a_summary_finds_become_project_memories_with_it() {
     assert_eq!(rows[1].0, "Releases need two reviewers.");
     assert_eq!(rows[1].1, "historian");
     assert_eq!(rows[0].2, seen_before + 1, "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The two-pass historian, which runs by default: the first turn sees no
+/// memory block and anchors its facts to the lines that state them; the
+/// facts become candidates, not memories; a second turn in the same child
+/// conversation then decides each against the project's memories. A `new`
+/// fact becomes a memory with undo history, and a `covered` one only keeps
+/// its mapping to the memory that already states it.
+#[tokio::test]
+async fn the_two_pass_historian_reconciles_its_facts_with_memory_in_a_second_turn() {
+    let dir = scratch("two-pass");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    insert_memory(&dir, 1, "Ask before pushing.");
+    let seen_before: i64 = rusqlite::Connection::open(dir.join("context.db"))
+        .unwrap()
+        .query_row("SELECT seen_count FROM memories WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let mut config = config("head", Kind::OpenAi, free());
+    config.project = Some(mc_mock_runner::runner::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    });
+    let mut runner = start_full(config, Settings::default(), Some(dir.clone())).await;
+    let summarizer = mc_mock_runner::child::scripted_summarizer();
+    runner
+        .host()
+        .set_responder(std::sync::Arc::new(move |settings, prompt| {
+            use mc_mock_runner::child as mock;
+            let mut reply = summarizer(settings, prompt);
+            if prompt.contains(mock::TURN_TWO_FACT) {
+                let decisions: Vec<String> = mock::facts_of(prompt)
+                    .into_iter()
+                    .map(|(id, text)| {
+                        if text == "Ask before pushing." {
+                            let revision: String = prompt
+                                .split_once("memory:1@")
+                                .map(|(_, rest)| rest.chars().take_while(char::is_ascii_digit).collect())
+                                .unwrap_or_default();
+                            format!(r#"{{"fact_id":{id},"action":"covered","target_id":1,"revision":{revision},"clauses":[1],"check":"memory 1 states it"}}"#)
+                        } else {
+                            format!(r#"{{"fact_id":{id},"action":"new","check":"no memory states it"}}"#)
+                        }
+                    })
+                    .collect();
+                reply.text = mock::turn_two_reply(&decisions);
+            } else if prompt.contains(mock::TURN_ONE_FORMAT) {
+                let xml = mock::summarize(prompt).replace(
+                    "</output>",
+                    "<facts><PROJECT_RULES>\n* [at_compartment=1 messages=1] Releases need two reviewers.\n* [at_compartment=1 messages=1] Ask before pushing.\n</PROJECT_RULES></facts>\n</output>",
+                );
+                reply.text = mock::turn_one_reply(&xml);
+            }
+            reply
+        }));
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    steps.push(answer());
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let runs = runner.host().child_runs();
+    let first = runs
+        .iter()
+        .find(|run| run.prompt.contains("<new_messages>"))
+        .expect("a first turn");
+    // The first turn compares nothing with memory: it gets no memory block
+    // and asks for anchored facts in a JSON envelope.
+    assert!(
+        !first.prompt.contains("Ask before pushing."),
+        "{}",
+        first.prompt
+    );
+    assert!(first.prompt.contains("at_compartment"));
+    assert!(first
+        .prompt
+        .contains(mc_mock_runner::child::TURN_ONE_FORMAT));
+    // The second turn continues the first turn's child conversation.
+    let second = runs
+        .iter()
+        .find(|run| run.prompt.contains(mc_mock_runner::child::TURN_TWO_FACT))
+        .expect("a second turn");
+    assert_eq!(second.child, first.child);
+    assert_eq!(second.settings.system, first.settings.system);
+    let conn = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    let facts: Vec<(String, String, Option<String>)> = conn
+        .prepare("SELECT content, state || ':' || COALESCE(reason, ''), mapping_json FROM memory_pending_facts ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(facts.len(), 2, "{facts:?}");
+    assert_eq!(facts[0].0, "Releases need two reviewers.");
+    assert_eq!(facts[0].1, "applied:inserted", "{facts:?}");
+    assert_eq!(facts[1].1, "covered:covered", "{facts:?}");
+    assert!(
+        facts[1]
+            .2
+            .as_deref()
+            .is_some_and(|mapping| mapping.contains("\"memoryId\":1")),
+        "{facts:?}"
+    );
+    let memories: Vec<(String, String, i64)> = conn
+        .prepare("SELECT content, COALESCE(source_type, ''), seen_count FROM memories WHERE project_path = 'pj-test' ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(memories.len(), 2, "{memories:?}");
+    assert_eq!(memories[1].0, "Releases need two reviewers.");
+    assert_eq!(memories[1].1, "historian");
+    // `covered` changes no memory.
+    assert_eq!(memories[0].2, seen_before, "{memories:?}");
+    let history: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memory_history WHERE after_text = 'Releases need two reviewers.'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(history, 1);
+    let stages: Vec<(String, String)> = conn
+        .prepare("SELECT stage, state FROM memory_stage_attempts ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(
+        stages.contains(&("turn_one".into(), "published".into())),
+        "{stages:?}"
+    );
+    assert!(
+        stages.contains(&("turn_two".into(), "resolved".into())),
+        "{stages:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

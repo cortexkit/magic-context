@@ -120,7 +120,7 @@ pub fn get_memory(conn: &Connection, id: i64) -> rusqlite::Result<Option<MemoryR
     .optional()
 }
 
-fn memory_by_hash(
+pub(crate) fn memory_by_hash(
     conn: &Connection,
     project: &str,
     category: &str,
@@ -138,7 +138,7 @@ fn memory_by_hash(
 
 /// The memory row as undo history stores it: the shared field set, or
 /// nothing when the row holds a value history cannot restore.
-fn history_snapshot(conn: &Connection, id: i64) -> rusqlite::Result<Option<Value>> {
+pub(crate) fn history_snapshot(conn: &Connection, id: i64) -> rusqlite::Result<Option<Value>> {
     const TEXT: [&str; 10] = [
         "projectPath",
         "category",
@@ -246,7 +246,7 @@ fn history_snapshot(conn: &Connection, id: i64) -> rusqlite::Result<Option<Value
 }
 
 /// Recursively key-sorted JSON, the bytes both writers persist.
-fn history_json(value: &Value) -> String {
+pub(crate) fn history_json(value: &Value) -> String {
     // serde_json's map keeps keys sorted, so plain serialization sorts them.
     serde_json::to_string(value).unwrap_or_default()
 }
@@ -261,7 +261,7 @@ pub struct Receipt {
     pub superseded_ids: Vec<i64>,
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as i64)
@@ -324,7 +324,7 @@ fn queue_mutation(
     Ok(())
 }
 
-fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+pub(crate) fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
         params![name],
@@ -352,7 +352,12 @@ fn clear_derived(tx: &Transaction, id: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn update_content(tx: &Transaction, id: i64, content: &str, hash: &str) -> rusqlite::Result<()> {
+pub(crate) fn update_content(
+    tx: &Transaction,
+    id: i64,
+    content: &str,
+    hash: &str,
+) -> rusqlite::Result<()> {
     tx.execute(
         "UPDATE memories SET content = ?2, normalized_hash = ?3, updated_at = ?4, shareable = 0,
                 classified_at = NULL, mural_cue = NULL, mural_cue_hash = NULL, mural_cue_at = NULL,
@@ -373,7 +378,11 @@ fn update_content(tx: &Transaction, id: i64, content: &str, hash: &str) -> rusql
     Ok(())
 }
 
-fn archive(tx: &Transaction, memory: &MemoryRow, reason: Option<&str>) -> rusqlite::Result<()> {
+pub(crate) fn archive(
+    tx: &Transaction,
+    memory: &MemoryRow,
+    reason: Option<&str>,
+) -> rusqlite::Result<()> {
     match reason.map(str::trim).filter(|reason| !reason.is_empty()) {
         None => tx.execute(
             "UPDATE memories SET status = 'archived', updated_at = ?2 WHERE id = ?1",
@@ -396,7 +405,7 @@ fn archive(tx: &Transaction, memory: &MemoryRow, reason: Option<&str>) -> rusqli
 }
 
 #[allow(clippy::too_many_arguments)]
-fn insert_memory(
+pub(crate) fn insert_memory(
     tx: &Transaction,
     project: &str,
     category: &str,
@@ -438,7 +447,7 @@ const PROMOTABLE_CATEGORIES: [&str; 12] = [
 
 /// How long a promoted memory of a category lives, where it does not live
 /// on (`CATEGORY_DEFAULT_TTL`).
-fn category_ttl_ms(category: &str) -> Option<i64> {
+pub(crate) fn category_ttl_ms(category: &str) -> Option<i64> {
     const DAY: i64 = 24 * 60 * 60 * 1000;
     match category {
         "WORKFLOW_RULES" => Some(90 * DAY),
@@ -874,59 +883,22 @@ pub fn mutate(
     let reason_text = reason
         .map(str::to_owned)
         .unwrap_or_else(|| writer_op.clone());
-    let multiple = after.len() > 1;
-    let rows: Vec<Value> = after
-        .iter()
-        .enumerate()
-        .map(|(index, after)| {
-            let id = after.as_ref().and_then(|after| after["id"].as_i64()).unwrap_or(0);
-            let before = before.get(index).cloned().flatten();
-            json!({
-                "memoryId": id,
-                "role": if Some(id) == survivor_id { "survivor" } else if multiple { "source" } else { "target" },
-                "beforeRevision": before.as_ref().and_then(|before| before["revision"].as_i64()),
-                "afterRevision": after.as_ref().and_then(|after| after["revision"].as_i64()),
-                "before": before,
-                "after": after,
-                "completeness": "complete",
-            })
-        })
-        .collect();
-    let decision = json!({
-        "version": 1,
-        "decisionKey": key,
-        "projectPath": first.project_path,
-        "writer": "ctx_memory",
-        "operation": operation.name(),
-        "reason": reason_text,
-        "appliedAt": now,
-        "evidence": [],
-        "sourceIds": sources.iter().map(|source| source.id).collect::<Vec<_>>(),
-        "survivorId": survivor_id,
-        "rows": rows,
-        "restorable": true,
-        "refusalReason": null,
-    });
-    for row in decision["rows"].as_array().expect("rows") {
-        tx.execute(
-            "INSERT INTO memory_history(memory_id, revision, previous_text, after_text, before_json, after_json,
-                                        applied_at, reason, evidence_json, source_ids_json, decision_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                row["memoryId"].as_i64(),
-                row["beforeRevision"].as_i64().unwrap_or(0),
-                row["before"]["content"].as_str().unwrap_or(""),
-                row["after"]["content"].as_str().unwrap_or(""),
-                history_json(&json!({"version": 1, "snapshot": row["before"]})),
-                history_json(&json!({"version": 1, "snapshot": row["after"]})),
-                now,
-                decision["reason"].as_str(),
-                history_json(&decision["evidence"]),
-                history_json(&decision["sourceIds"]),
-                key
-            ],
-        )?;
-    }
+    let decision = record_history(
+        &tx,
+        &History {
+            key: &key,
+            project: &first.project_path,
+            writer: "ctx_memory",
+            operation: operation.name(),
+            reason: &reason_text,
+            now,
+            before: &before,
+            after: &after,
+            source_ids: &sources.iter().map(|source| source.id).collect::<Vec<_>>(),
+            survivor_id,
+            evidence: json!([]),
+        },
+    )?;
     let memory_id = canonical.as_ref().map_or(first.id, |memory| memory.id);
     record_receipt(
         &tx,
@@ -949,6 +921,85 @@ pub fn mutate(
         inserted: false,
         superseded_ids,
     })
+}
+
+/// One decision for the memories' undo history: the rows before and after
+/// it, index for index (`before` may hold `None` for a row it created).
+pub(crate) struct History<'a> {
+    pub key: &'a str,
+    pub project: &'a str,
+    /// Who decided: `ctx_memory`, `historian`, ...
+    pub writer: &'a str,
+    pub operation: &'a str,
+    pub reason: &'a str,
+    pub now: i64,
+    pub before: &'a [Option<Value>],
+    pub after: &'a [Option<Value>],
+    pub source_ids: &'a [i64],
+    pub survivor_id: Option<i64>,
+    pub evidence: Value,
+}
+
+/// Write one decision to `memory_history`, a row per memory it changed, in
+/// the shape the plugin's history applier writes and restores
+/// (`makeMemoryHistoryDecision`, `recordMemoryHistoryDecision`), and return
+/// the decision for the journal.
+pub(crate) fn record_history(tx: &Transaction, history: &History<'_>) -> rusqlite::Result<Value> {
+    let multiple = history.after.len() > 1;
+    let rows: Vec<Value> = history
+        .after
+        .iter()
+        .enumerate()
+        .map(|(index, after)| {
+            let id = after.as_ref().and_then(|after| after["id"].as_i64()).unwrap_or(0);
+            let before = history.before.get(index).cloned().flatten();
+            json!({
+                "memoryId": id,
+                "role": if Some(id) == history.survivor_id { "survivor" } else if multiple { "source" } else { "target" },
+                "beforeRevision": before.as_ref().and_then(|before| before["revision"].as_i64()),
+                "afterRevision": after.as_ref().and_then(|after| after["revision"].as_i64()),
+                "before": before,
+                "after": after,
+                "completeness": "complete",
+            })
+        })
+        .collect();
+    let decision = json!({
+        "version": 1,
+        "decisionKey": history.key,
+        "projectPath": history.project,
+        "writer": history.writer,
+        "operation": history.operation,
+        "reason": history.reason,
+        "appliedAt": history.now,
+        "evidence": history.evidence,
+        "sourceIds": history.source_ids,
+        "survivorId": history.survivor_id,
+        "rows": rows,
+        "restorable": true,
+        "refusalReason": null,
+    });
+    for row in decision["rows"].as_array().expect("rows") {
+        tx.execute(
+            "INSERT INTO memory_history(memory_id, revision, previous_text, after_text, before_json, after_json,
+                                        applied_at, reason, evidence_json, source_ids_json, decision_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                row["memoryId"].as_i64(),
+                row["beforeRevision"].as_i64().unwrap_or(0),
+                row["before"]["content"].as_str().unwrap_or(""),
+                row["after"]["content"].as_str().unwrap_or(""),
+                history_json(&json!({"version": 1, "snapshot": row["before"]})),
+                history_json(&json!({"version": 1, "snapshot": row["after"]})),
+                history.now,
+                history.reason,
+                history_json(&decision["evidence"]),
+                history_json(&decision["sourceIds"]),
+                history.key
+            ],
+        )?;
+    }
+    Ok(decision)
 }
 
 #[derive(Debug)]

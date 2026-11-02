@@ -15,6 +15,7 @@ use cortexkit_role_llm_runner::run::{states, RunResult, RunResultRequest};
 use cortexkit_role_llm_runner::send::SendRequest;
 use serde_json::{json, Map, Value};
 
+use super::two_pass::turn_one::{self, Lane};
 use super::{chunk, fit};
 use crate::calibration::DecisionCalibration;
 use std::sync::OnceLock;
@@ -29,7 +30,7 @@ use super::validate::{
     validate_historian_output, StoredCompartmentRange, ValidateOptions, ValidatedChunk,
 };
 use crate::client::{Child, RunnerClient};
-use crate::context_db::{StoredCompartment, StoredMemory};
+use crate::context_db::{ContextDb, StoredCompartment, StoredMemory};
 use crate::routing::{self, Router};
 use cortexkit_role_compaction::read::StepUsage;
 use cortexkit_role_routing::report::Outcome;
@@ -43,7 +44,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// What a child session's id adds to its parent's: each summarizer attempt
 /// runs in a child of its own, `<parent session>:mc-summary:<attempt>`, so
 /// the summarizer sees exactly its system prompt and one user message, and a
-/// child never continues another attempt's conversation.
+/// child never continues another attempt's conversation. The two-pass
+/// historian's second turn is the one exception: it continues the child its
+/// first turn answered in.
 pub const CHILD: &str = "mc-summary";
 
 /// What a run reads and writes.
@@ -59,6 +62,9 @@ pub struct Request {
     /// The session's project folder, where the runner creates the
     /// summarizer's child sessions.
     pub project_root: Option<String>,
+    /// The session's project id. With it, the run keeps the plugin's send
+    /// and publication records, and the two-pass historian can run.
+    pub project: Option<String>,
     /// The user's `language`: the summarizer writes its prose in it.
     pub language: Option<String>,
     /// The project's memories, for the summarizer's `<project-memory>`
@@ -72,6 +78,45 @@ pub struct Request {
     /// the last one included, as the plugin's emergency recovery does: the
     /// session needs the relief now.
     pub emergency: bool,
+    /// `historian.turn_two` is on and the editor pass is off: the two-pass
+    /// historian runs unless its failure budget for this chunk is spent.
+    pub two_pass: bool,
+}
+
+/// What a run produced.
+#[derive(Clone, Debug)]
+pub struct Summarized {
+    pub validated: ValidatedChunk,
+    /// The first turn's send and publication record, stored with the
+    /// summaries. `None` without a project or store.
+    pub publication: Option<turn_one::Publication>,
+    /// On the two-pass lane: the conversation the second turn continues.
+    pub continuation: Option<Continuation>,
+}
+
+/// The child conversation a first turn answered in, and the model it ran on,
+/// which the second turn and its checks reuse.
+#[derive(Clone, Debug)]
+pub struct Continuation {
+    pub child: Child,
+    pub model: ModelRef,
+    pub decision_id: String,
+    pub output_tokens: u64,
+    /// The user's `language`, which the system prompt both turns run under
+    /// carries.
+    pub language: Option<String>,
+    /// The publication whose candidates the second turn sends first.
+    pub publication_id: String,
+}
+
+/// The two-pass historian's system prompt with `language`'s directive.
+pub(crate) fn two_pass_system(language: Option<&str>) -> String {
+    with_content_language_directive(
+        turn_one::SYSTEM,
+        language,
+        ContentLanguageDirectiveOptions::default(),
+    )
+    .into_owned()
 }
 
 /// Transient provider errors retry this many times on the same model.
@@ -93,6 +138,17 @@ struct Target {
     output_tokens: u64,
 }
 
+impl Target {
+    fn model_json(&self) -> Value {
+        json!({
+            "provider": self.model.provider,
+            "model": self.model.model,
+            "variant": self.model.variant,
+            "decision": self.decision_id,
+        })
+    }
+}
+
 /// Run the summarizer. `Ok(None)` when there was nothing to summarize.
 ///
 /// Routing picks the model, on the session's own runner (compaction contract SR4). As
@@ -103,20 +159,33 @@ struct Target {
 /// routing picks without it is tried. Every attempt runs in a child of its
 /// own, so the summarizer always sees exactly its system prompt and one user
 /// message. Each decision's outcome is reported back to routing.
+///
+/// With [`Request::two_pass`], a project and a store, each model first runs
+/// the two-pass historian's first turn ([`turn_one`]) unless that chunk's
+/// failure budget for the model is spent: its facts carry source anchors and
+/// become candidates, and its reply is a JSON envelope. An invalid first
+/// turn gets no repair and no fallback: it counts against the budget, and
+/// the run ends.
 pub async fn run<C: RunnerClient + Router>(
     client: &C,
+    db: Option<&ContextDb>,
     job: &Request,
-) -> Result<Option<ValidatedChunk>, String> {
+) -> Result<Option<Summarized>, String> {
     let entries = read_range(client, job).await?;
     if entries.is_empty() {
         return Ok(None);
     }
-    let system = with_content_language_directive(
-        HISTORIAN_SYSTEM_PROMPT,
-        job.language.as_deref(),
-        ContentLanguageDirectiveOptions::default(),
-    )
-    .into_owned();
+    let language = |prompt: &str| {
+        with_content_language_directive(
+            prompt,
+            job.language.as_deref(),
+            ContentLanguageDirectiveOptions::default(),
+        )
+        .into_owned()
+    };
+    let one_pass = language(HISTORIAN_SYSTEM_PROMPT);
+    let two_pass = two_pass_system(job.language.as_deref());
+    let carrier = format!("ck-mc:{}", job.session.runner);
     let mut tried: Vec<String> = Vec::new();
     let mut failure: Option<String> = None;
     // One deadline for the whole run, retries, repair and fallbacks
@@ -143,21 +212,47 @@ pub async fn run<C: RunnerClient + Router>(
                 .output_tokens(MAX_OUTPUT_TOKENS)
                 .min(answer.max_output_tokens),
         };
+        let records = match (db, job.project.as_deref()) {
+            (Some(db), Some(project)) => Some(Records {
+                db,
+                project,
+                carrier: &carrier,
+                counter: turn_one::CounterKey::new(
+                    &job.session.session,
+                    &entries[0].mid,
+                    &carrier,
+                    &target.model_json(),
+                    &two_pass,
+                ),
+            }),
+            _ => None,
+        };
+        let lane = match &records {
+            Some(records) if job.two_pass && records.budget_left() => Lane::Enabled,
+            _ => Lane::Dormant,
+        };
         let mut usage = None;
         // Only the first model gets a repair run, as in the plugin; a
         // fallback's invalid reply moves on to the next model.
         let call = Call {
             target: &target,
             window,
-            repair: fallback == 0,
+            repair: fallback == 0 && lane == Lane::Dormant,
             deadline,
+            lane,
+            system: if lane == Lane::Enabled {
+                &two_pass
+            } else {
+                &one_pass
+            },
         };
-        let outcome = summarize_on(client, job, &system, &entries, &call, &mut usage).await;
+        let outcome =
+            summarize_on(client, job, &entries, &call, records.as_ref(), &mut usage).await;
         let reported = match &outcome {
             Ok(_) => Outcome::Completed,
             // The prompt never went out: this model's window cannot hold it.
             Err(Failure::NotSent(_)) => Outcome::Cancelled,
-            Err(Failure::Failed(_)) => Outcome::Failed,
+            Err(Failure::Failed(_) | Failure::Final(_)) => Outcome::Failed,
         };
         client
             .report(routing::report(
@@ -168,6 +263,7 @@ pub async fn run<C: RunnerClient + Router>(
             .await;
         match outcome {
             Ok(result) => return Ok(result),
+            Err(Failure::Final(error)) => return Err(error),
             Err(Failure::NotSent(error) | Failure::Failed(error)) => failure = Some(error),
         }
     }
@@ -180,6 +276,9 @@ enum Failure {
     NotSent(String),
     /// The model was asked and did not give a valid summary.
     Failed(String),
+    /// The two-pass historian's first turn gave no valid reply: the run ends
+    /// without trying another model.
+    Final(String),
 }
 
 /// How one model is asked.
@@ -189,6 +288,28 @@ struct Call<'a> {
     /// An invalid reply gets one repair run.
     repair: bool,
     deadline: tokio::time::Instant,
+    lane: Lane,
+    /// The system prompt, language directive included.
+    system: &'a str,
+}
+
+/// Where a run keeps the plugin's send and publication records.
+struct Records<'a> {
+    db: &'a ContextDb,
+    project: &'a str,
+    carrier: &'a str,
+    /// The two-pass lane's failure budget key for this model and chunk.
+    counter: turn_one::CounterKey,
+}
+
+impl Records<'_> {
+    /// The two-pass lane's failure budget for this chunk and model is not
+    /// spent. A store that can't be read leaves the lane off.
+    fn budget_left(&self) -> bool {
+        self.db
+            .with_connection(|conn| turn_one::failure_count(conn, self.project, &self.counter))
+            .is_ok_and(|failures| failures < turn_one::FAILURE_BUDGET)
+    }
 }
 
 /// The marker an oversized chunk ends with, as in the plugin.
@@ -226,16 +347,21 @@ fn truncate_to(text: &str, budget: u64) -> String {
 /// Summarize on one model: fit the prompt to its window, ask, and repair an
 /// invalid reply once when `call.repair` allows. Every prompt is checked
 /// against the model's window right before it is sent. `usage` adds up what
-/// every call reported.
+/// every call reported. With `records`, the send is recorded before it goes
+/// out and the result carries its publication.
 async fn summarize_on<C: RunnerClient>(
     client: &C,
     job: &Request,
-    system: &str,
     entries: &[cortexkit_role_compaction::read::Entry],
     call: &Call<'_>,
+    records: Option<&Records<'_>>,
     usage: &mut Option<StepUsage>,
-) -> Result<Option<ValidatedChunk>, Failure> {
-    let (target, window) = (call.target, call.window);
+) -> Result<Option<Summarized>, Failure> {
+    let (target, window, system) = (call.target, call.window, call.system);
+    let enabled = call.lane == Lane::Enabled;
+    // Facts carry anchors only when memory is on: with memory off the
+    // prompt asks for none.
+    let anchored = enabled && job.memory_enabled;
     // A quarter of the model's window, in the model's tokens, converted to
     // the local estimator's with the larger of its prose and tool ratios
     // (the plugin's `producerSourceLocalBudget`).
@@ -257,26 +383,38 @@ async fn summarize_on<C: RunnerClient>(
         summaries: &job.summaries,
         memories: &job.memories,
         memory_enabled: job.memory_enabled,
+        anchored_facts: anchored,
         system_prompt: system,
         windows: &[window],
         output_cap: target.output_tokens,
         requested_chunk_tokens: requested,
     })
     .map_err(Failure::NotSent)?;
-    let Some(mut chunk) = chunk::build(entries, fitted.chunk_tokens) else {
+    // The two-pass lane prints each message on a line of its own, so a
+    // fact's anchor can cite exactly the lines that state it.
+    let lines = if enabled {
+        chunk::Lines::PerMessage
+    } else {
+        chunk::Lines::Merged
+    };
+    let Some(chunk) = chunk::build_with(entries, fitted.chunk_tokens, lines) else {
         return Ok(None);
     };
     // The first message is always taken, even past the budget.
-    chunk.input = truncate_to(&chunk.input, fitted.chunk_tokens);
-    let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
+    let input = truncate_to(&chunk.input, fitted.chunk_tokens);
+    let mut prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
         seed_examples: &fitted.seed_examples,
         session_references: &fitted.session_references,
         project_memory: &fitted.project_memory,
-        input_source: &chunk.input,
+        input_source: &input,
         memory_enabled: job.memory_enabled,
         user_observations_requested: false,
         extraction_free: false,
+        anchored_facts: anchored,
     });
+    if enabled {
+        prompt = format!("{prompt}\n\n{}", turn_one::FORMAT_INSTRUCTION);
+    }
     // The model is part of the child's name, so a fallback model never
     // continues another model's conversation.
     let range = format!(
@@ -306,17 +444,34 @@ async fn summarize_on<C: RunnerClient>(
             "prompt_over_window: the summarizer prompt does not fit the model".into(),
         ));
     }
-    let first = attempt(
-        client,
-        job,
-        &format!("{range}:first"),
-        &prompt,
-        system,
-        call,
-        usage,
-    )
-    .await
-    .map_err(Failure::Failed)?;
+    let label = format!("{range}:{}", if enabled { "turn-one" } else { "first" });
+    let send = match records {
+        Some(records) => Some(
+            records
+                .db
+                .with_connection(|conn| {
+                    turn_one::allocate(
+                        conn,
+                        &turn_one::SendInput {
+                            project: records.project,
+                            session: &job.session.session,
+                            harness: &job.session.harness,
+                            carrier: records.carrier,
+                            lane: call.lane,
+                            chunk: (chunk.validation.start_index, chunk.validation.end_index),
+                            model: target.model_json(),
+                            child: &child_name(job, &label, 0),
+                        },
+                        now_ms(),
+                    )
+                })
+                .map_err(|error| Failure::NotSent(format!("recording the send: {error}")))?,
+        ),
+        None => None,
+    };
+    let (first, answered_in) = attempt(client, job, &label, &prompt, call, usage)
+        .await
+        .map_err(Failure::Failed)?;
     let hashes = super::hashes::by_ordinal(entries);
     let checked = |reply: &str| {
         validate_historian_output(reply, &chunk.validation, &prior, options()).map(
@@ -326,8 +481,75 @@ async fn summarize_on<C: RunnerClient>(
             },
         )
     };
+    let publish = |validated: ValidatedChunk, child: Option<Child>| {
+        let publication = send
+            .clone()
+            .zip(records)
+            .map(|(send, records)| turn_one::Publication {
+                send,
+                project: records.project.to_owned(),
+                session: job.session.session.clone(),
+                harness: job.session.harness.clone(),
+                carrier: records.carrier.to_owned(),
+                counter: enabled.then(|| records.counter.clone()),
+                blocks: chunk::blocks_sent(&chunk, &input)
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+                candidates: if anchored {
+                    validated.facts.clone()
+                } else {
+                    Vec::new()
+                },
+            });
+        let continuation = child
+            .filter(|_| anchored)
+            .zip(send.as_ref())
+            .map(|(child, send)| Continuation {
+                child,
+                model: target.model.clone(),
+                decision_id: target.decision_id.clone(),
+                output_tokens: target.output_tokens,
+                language: job.language.clone(),
+                publication_id: send.publication_id.clone(),
+            });
+        Summarized {
+            validated,
+            publication,
+            continuation,
+        }
+    };
+    if enabled {
+        // No repair and no other model: an invalid first turn counts
+        // against the chunk's failure budget, and the run ends.
+        let reply = turn_one::parse_reply(&first)
+            .ok_or_else(|| "the reply is not a turn-one JSON envelope".to_owned())
+            .and_then(|xml| checked(&xml).map_err(|error| error.message));
+        return match reply {
+            Ok(validated) => Ok(Some(publish(validated, Some(answered_in)))),
+            Err(error) => {
+                if let Some(records) = records {
+                    let counted = records.db.with_connection(|conn| {
+                        turn_one::record_counter(
+                            conn,
+                            records.project,
+                            &records.counter,
+                            &job.session.harness,
+                            records.carrier,
+                            true,
+                            now_ms(),
+                        )
+                    });
+                    if let Err(failure) = counted {
+                        eprintln!("ck-mc: recording a turn-one failure failed: {failure}");
+                    }
+                }
+                Err(Failure::Final(format!("invalid turn-one reply: {error}")))
+            }
+        };
+    }
     let error = match checked(&first) {
-        Ok(validated) => return Ok(Some(validated)),
+        Ok(validated) => return Ok(Some(publish(validated, None))),
         Err(error) => error.message,
     };
     if !call.repair {
@@ -342,42 +564,62 @@ async fn summarize_on<C: RunnerClient>(
             "invalid reply, and its repair prompt does not fit the model: {error}"
         )));
     }
-    let repaired = attempt(
+    let (repaired, _) = attempt(
         client,
         job,
         &format!("{range}:repair"),
         &repair_prompt,
-        system,
         call,
         usage,
     )
     .await
     .map_err(Failure::Failed)?;
     checked(&repaired)
-        .map(Some)
+        .map(|validated| Some(publish(validated, None)))
         .map_err(|error| Failure::Failed(format!("invalid after repair: {}", error.message)))
 }
 
+/// The child session of attempt `retry` of the call `label` names.
+fn child_name(job: &Request, label: &str, retry: usize) -> String {
+    if retry == 0 {
+        format!("{}:{CHILD}:{label}", job.session.session)
+    } else {
+        format!("{}:{CHILD}:{label}:retry{retry}", job.session.session)
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64)
+}
+
 /// One summarizer call in the child `label` names, with retries for
-/// transient provider errors. Returns the reply's text.
+/// transient provider errors. Returns the reply's text and the child that
+/// answered.
 async fn attempt<C: RunnerClient>(
     client: &C,
     job: &Request,
     label: &str,
     prompt: &str,
-    system: &str,
     call_on: &Call<'_>,
     usage: &mut Option<StepUsage>,
-) -> Result<String, String> {
+) -> Result<(String, Child), String> {
     let mut retry = 0;
     loop {
-        let child = if retry == 0 {
-            format!("{}:{CHILD}:{label}", job.session.session)
-        } else {
-            format!("{}:{CHILD}:{label}:retry{retry}", job.session.session)
+        let child = Child {
+            session: SessionRef::new(
+                job.session.runner.clone(),
+                job.session.harness.clone(),
+                child_name(job, label, retry),
+            ),
+            project_root: job.project_root.clone(),
         };
-        match call(client, job, &child, prompt, system, call_on, usage).await {
-            Ok(text) => return Ok(text),
+        // The first send to a child is identified by the child itself, so a
+        // retry after a lost answer finds the run already started.
+        let send_id = child.session.session.clone();
+        match call(client, &child, &send_id, prompt, call_on, usage).await {
+            Ok(text) => return Ok((text, child)),
             Err(error) if retry < MAX_RETRIES && is_transient(&error) => {
                 tokio::time::sleep(backoff(retry)).await;
                 retry += 1;
@@ -387,39 +629,72 @@ async fn attempt<C: RunnerClient>(
     }
 }
 
-/// Send one run and wait for its reply.
+/// Send one summarizer call in `child` and wait for its reply. A reply cut
+/// off at its output limit is incomplete even when it parses.
 async fn call<C: RunnerClient>(
     client: &C,
-    job: &Request,
-    child: &str,
+    child: &Child,
+    send_id: &str,
     prompt: &str,
-    system: &str,
     call_on: &Call<'_>,
     usage: &mut Option<StepUsage>,
 ) -> Result<String, String> {
     let target = call_on.target;
-    let child = Child {
-        session: SessionRef::new(
-            job.session.runner.clone(),
-            job.session.harness.clone(),
-            child,
-        ),
-        project_root: job.project_root.clone(),
+    let how = Model {
+        model: &target.model,
+        decision_id: &target.decision_id,
+        output_tokens: target.output_tokens,
+        system: call_on.system,
+        deadline: call_on.deadline,
     };
-    let with_temperature = !refuses_temperature(&job.session.runner);
+    let reply = send_and_wait(client, child, send_id, prompt, &how, usage).await?;
+    if reply.length_capped {
+        return Err("the reply hit its output limit".into());
+    }
+    Ok(reply.text)
+}
+
+/// How a call in a summarizer child is made: the model routing picked and
+/// its decision, the output cap, the system prompt and the run's deadline.
+pub(crate) struct Model<'a> {
+    pub model: &'a ModelRef,
+    pub decision_id: &'a str,
+    pub output_tokens: u64,
+    pub system: &'a str,
+    pub deadline: tokio::time::Instant,
+}
+
+/// A completed call's reply.
+pub(crate) struct Reply {
+    pub text: String,
+    /// The reply stopped at its output limit.
+    pub length_capped: bool,
+}
+
+/// Send `prompt` in `child` under `send_id` and wait for the run to end. A
+/// run that ends other than `completed` is an error naming its state.
+pub(crate) async fn send_and_wait<C: RunnerClient>(
+    client: &C,
+    child: &Child,
+    send_id: &str,
+    prompt: &str,
+    how: &Model<'_>,
+    usage: &mut Option<StepUsage>,
+) -> Result<Reply, String> {
+    let runner = &child.session.runner;
+    let with_temperature = !refuses_temperature(runner);
     let send = |temperature: bool| {
-        // A retry after a lost answer finds the run already started.
-        let mut request = SendRequest::new(prompt, child.session.session.clone());
-        request.runner_params = run_params(system, target, temperature);
+        let mut request = SendRequest::new(prompt, send_id.to_owned());
+        request.runner_params = run_params(how, temperature);
         request
     };
-    let reply = match client.send_child(&child, send(with_temperature)).await {
+    let reply = match client.send_child(child, send(with_temperature)).await {
         // No contract declares `generation.temperature`, so a runner may
         // refuse it by name (llm-runner §9). A refused send starts nothing:
         // send again without it, and leave it out for that runner from now on.
         Err(error) if with_temperature && error.0.contains("generation.temperature") => {
-            remember_temperature_refused(&job.session.runner);
-            client.send_child(&child, send(false)).await
+            remember_temperature_refused(runner);
+            client.send_child(child, send(false)).await
         }
         other => other,
     }
@@ -427,7 +702,7 @@ async fn call<C: RunnerClient>(
     let Some(run_id) = reply.run_id.filter(|_| reply.state == states::ACTIVE) else {
         return Err(format!("the runner did not start a run: {}", reply.state));
     };
-    let result = wait_for(client, &child, &run_id, call_on.deadline).await?;
+    let result = wait_for(client, child, &run_id, how.deadline).await?;
     if let Some(reported) = &result.usage {
         *usage = Some(add_usage(usage.take(), &step_usage(reported)));
     }
@@ -438,38 +713,37 @@ async fn call<C: RunnerClient>(
             .map_or_else(String::new, |error| error.message.clone());
         return Err(format!("the run ended {}: {error}", result.state));
     }
-    // A reply cut off at its output limit is incomplete even when it parses.
-    if result.finish == Some(Finish::Length) {
-        return Err("the reply hit its output limit".into());
-    }
-    Ok(result
-        .final_message
-        .map(|message| message.text)
-        .unwrap_or_default())
+    Ok(Reply {
+        length_capped: result.finish == Some(Finish::Length),
+        text: result
+            .final_message
+            .map(|message| message.text)
+            .unwrap_or_default(),
+    })
 }
 
 /// A summarizer run's own parameters, which ride beside llm-runner's fields
 /// of `session.send`: the model routing picked and its decision, the system
 /// prompt, one model step and no tools.
-fn run_params(system: &str, target: &Target, temperature: bool) -> Map<String, Value> {
+fn run_params(how: &Model<'_>, temperature: bool) -> Map<String, Value> {
     let mut model = json!({
-        "provider": target.model.provider,
-        "model": target.model.model,
+        "provider": how.model.provider,
+        "model": how.model.model,
     });
-    if let Some(variant) = &target.model.variant {
+    if let Some(variant) = &how.model.variant {
         model["variant"] = json!(variant);
     }
-    let mut generation = json!({"max_output_tokens": target.output_tokens});
+    let mut generation = json!({"max_output_tokens": how.output_tokens});
     if temperature {
         generation["temperature"] = json!(TEMPERATURE);
     }
     let Value::Object(params) = json!({
         "model": model,
-        "system": system,
+        "system": how.system,
         "generation": generation,
         "stop_when": {"max_steps": 1},
         "tools": [],
-        "route_decision_id": target.decision_id,
+        "route_decision_id": how.decision_id,
     }) else {
         unreachable!("an object literal");
     };

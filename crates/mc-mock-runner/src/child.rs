@@ -141,23 +141,73 @@ impl Runs {
     }
 }
 
+/// What the two-pass historian's first turn asks for: its reply as a JSON
+/// envelope around the summary XML.
+pub const TURN_ONE_FORMAT: &str = r#"{"result":{"step":"turn_one""#;
+/// What every candidate fact of a second-turn prompt starts with.
+pub const TURN_TWO_FACT: &str = "## Fact ";
+
 /// The default responder: a summarizer that covers each chunk line with one
-/// summary. A prompt without a `<new_messages>` chunk gets an empty reply.
+/// summary. A first turn of the two-pass historian gets that summary in its
+/// JSON envelope, and a second turn abstains on every fact. Any other prompt
+/// without a `<new_messages>` chunk gets an empty reply.
 pub fn scripted_summarizer() -> Responder {
     Arc::new(|_: &RunSettings, prompt: &str| {
-        if !prompt.contains("<new_messages>") {
-            return Reply {
-                text: String::new(),
-                finish: Some("stop".into()),
-                error: None,
-            };
-        }
+        let text = if prompt.contains(TURN_TWO_FACT) {
+            let decisions: Vec<String> = fact_ids(prompt)
+                .into_iter()
+                .map(|id| {
+                    format!(r#"{{"fact_id":{id},"action":"abstain","check":"no memory matches"}}"#)
+                })
+                .collect();
+            turn_two_reply(&decisions)
+        } else if !prompt.contains("<new_messages>") {
+            String::new()
+        } else if prompt.contains(TURN_ONE_FORMAT) {
+            turn_one_reply(&summarize(prompt))
+        } else {
+            summarize(prompt)
+        };
         Reply {
-            text: summarize(prompt),
+            text,
             finish: Some("stop".into()),
             error: None,
         }
     })
+}
+
+/// A first-turn reply carrying `xml`.
+pub fn turn_one_reply(xml: &str) -> String {
+    serde_json::json!({"result": {"step": "turn_one", "xml": xml}}).to_string()
+}
+
+/// A second-turn reply with these decision objects and no scores.
+pub fn turn_two_reply(decisions: &[String]) -> String {
+    format!(
+        r#"{{"result":{{"step":"turn_two","decisions":[{}],"scores":[]}}}}"#,
+        decisions.join(",")
+    )
+}
+
+/// The candidate facts of a second-turn prompt: each id with the fact's
+/// text, in prompt order.
+pub fn facts_of(prompt: &str) -> Vec<(i64, String)> {
+    let mut facts = Vec::new();
+    let mut lines = prompt.lines();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.strip_prefix(TURN_TWO_FACT) else {
+            continue;
+        };
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(id) = digits.parse() {
+            facts.push((id, lines.next().unwrap_or("").to_owned()));
+        }
+    }
+    facts
+}
+
+fn fact_ids(prompt: &str) -> Vec<i64> {
+    facts_of(prompt).into_iter().map(|(id, _)| id).collect()
 }
 
 /// Summaries for every `[A]` or `[A-B]` line between `<new_messages>` and

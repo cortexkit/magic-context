@@ -142,6 +142,7 @@ pub struct ParsedCompartment {
 
 /// A fact extracted from the `<facts>` block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "FactCandidateWire")]
 pub struct FactCandidate {
     pub category: String,
     pub content: String,
@@ -151,13 +152,41 @@ pub struct FactCandidate {
     /// cannot be proven.
     #[serde(default)]
     pub origin_compartment_index: Option<u64>,
-    /// The printed `[A]`/`[A-B]` range of `<new_messages>` lines the fact cites,
-    /// written as `messages=A-B` in its anchor prefix. Present only when the
-    /// historian wrote that range; the TypeScript runners ask for it only on a turn
-    /// one that requests anchored facts, and every production run is still
-    /// unanchored. See [`resolve_fact_anchor`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_range: Option<FactSourceRange>,
+    /// The printed `[A]`/`[A-B]` ranges of `<new_messages>` lines the fact cites,
+    /// written as `messages=A-B,C` in its anchor prefix: one to three, in the
+    /// order written. Empty when the historian wrote none; only the two-pass
+    /// historian's first turn asks for them. See [`resolve_fact_anchor`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_ranges: Vec<FactSourceRange>,
+}
+
+/// A [`FactCandidate`] as stored or written by an older parser, which kept
+/// a single cited range under `source_range`.
+#[derive(Deserialize)]
+struct FactCandidateWire {
+    category: String,
+    content: String,
+    #[serde(default)]
+    origin_compartment_index: Option<u64>,
+    #[serde(default)]
+    source_ranges: Vec<FactSourceRange>,
+    #[serde(default)]
+    source_range: Option<FactSourceRange>,
+}
+
+impl From<FactCandidateWire> for FactCandidate {
+    fn from(wire: FactCandidateWire) -> Self {
+        let mut source_ranges = wire.source_ranges;
+        if source_ranges.is_empty() {
+            source_ranges.extend(wire.source_range);
+        }
+        Self {
+            category: wire.category,
+            content: wire.content,
+            origin_compartment_index: wire.origin_compartment_index,
+            source_ranges,
+        }
+    }
 }
 
 /// An inclusive raw-ordinal range a fact anchor cites.
@@ -180,37 +209,56 @@ pub struct ResolvedFactAnchor {
 
 /// Resolve a fact's source anchor. Anything that does not resolve exactly is an
 /// unknown anchor; nothing is guessed:
-/// - the index must name a published compartment (a discarded tail does not count);
-/// - the cited range must lie inside that compartment;
-/// - the range must start at a printed line's start and end at a printed line's
-///   end, so the printed lines inside it tile it exactly.
+/// - one to three ranges, and the index must name a published compartment (a
+///   discarded tail does not count);
+/// - no range may be the whole `chunk`, which cannot tell this fact's evidence
+///   from unrelated lines;
+/// - each range must lie inside that compartment, and start at a printed line's
+///   start and end at a printed line's end, so the printed lines inside it tile
+///   it exactly;
+/// - no printed line may serve two ranges.
 ///
-/// `compartments` and `printed_blocks` are inclusive `(start, end)` ordinal ranges
-/// in order. The TypeScript publisher (`resolveTurnOneFactAnchor` in
-/// packages/plugin/src/features/magic-context/memory/turn-one-publication.ts)
+/// `compartments`, `printed_blocks` and `chunk` are inclusive `(start, end)`
+/// ordinal ranges, in order. The TypeScript publisher (`resolveTurnOneFactAnchor`
+/// in packages/plugin/src/features/magic-context/memory/turn-one-publication.ts)
 /// applies the same rules; both are pinned by
-/// tests/fixtures/turn-one-anchor-goldens.json.
+/// tests/fixtures/turn-one-anchor-goldens.json and testdata/turn-one-anchor-ranges.json.
 pub fn resolve_fact_anchor(
     fact: &FactCandidate,
     compartments: &[(u64, u64)],
     printed_blocks: &[(u64, u64)],
+    chunk: (u64, u64),
 ) -> Option<ResolvedFactAnchor> {
     let index = fact.origin_compartment_index?;
-    let range = fact.source_range?;
-    let slot = usize::try_from(index).ok()?.checked_sub(1)?;
-    let &(compartment_start, compartment_end) = compartments.get(slot)?;
-    if range.start > range.end || range.start < compartment_start || range.end > compartment_end {
+    if fact.source_ranges.is_empty() || fact.source_ranges.len() > 3 {
         return None;
     }
-    let block_indexes: Vec<usize> = printed_blocks
-        .iter()
-        .enumerate()
-        .filter(|(_, &(start, end))| start >= range.start && end <= range.end)
-        .map(|(position, _)| position)
-        .collect();
-    let first = printed_blocks.get(*block_indexes.first()?)?;
-    let last = printed_blocks.get(*block_indexes.last()?)?;
-    if first.0 != range.start || last.1 != range.end {
+    let slot = usize::try_from(index).ok()?.checked_sub(1)?;
+    let &(compartment_start, compartment_end) = compartments.get(slot)?;
+    let mut block_indexes = Vec::new();
+    for range in &fact.source_ranges {
+        if (range.start, range.end) == chunk {
+            return None;
+        }
+        if range.start > range.end || range.start < compartment_start || range.end > compartment_end
+        {
+            return None;
+        }
+        let tiling: Vec<usize> = printed_blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, &(start, end))| start >= range.start && end <= range.end)
+            .map(|(position, _)| position)
+            .collect();
+        let first = printed_blocks.get(*tiling.first()?)?;
+        let last = printed_blocks.get(*tiling.last()?)?;
+        if first.0 != range.start || last.1 != range.end {
+            return None;
+        }
+        block_indexes.extend(tiling);
+    }
+    let distinct: std::collections::BTreeSet<usize> = block_indexes.iter().copied().collect();
+    if distinct.len() != block_indexes.len() {
         return None;
     }
     Some(ResolvedFactAnchor {
@@ -458,13 +506,14 @@ pub fn parse_compartment_output(
             continue;
         }
         for item in fact_items(block) {
-            let (origin_compartment_index, source_range, content) = split_fact_anchor_prefix(&item);
+            let (origin_compartment_index, source_ranges, content) =
+                split_fact_anchor_prefix(&item);
             if !content.is_empty() {
                 facts.push(FactCandidate {
                     category: category.to_string(),
                     content,
                     origin_compartment_index,
-                    source_range,
+                    source_ranges,
                 });
             }
         }
@@ -1472,33 +1521,43 @@ fn split_anchor_prefix(text: &str) -> (Option<u64>, String) {
 }
 
 /// Split a side-channel bullet's optional anchor prefix from its text:
-/// `[at_compartment=N messages=A-B] text`, `[at_compartment=N] text`, or
-/// `[at_compartment=unknown] text`. An unknown index, or an index or range past
-/// 2^53, yields no anchor and no range. Mirrors `splitFactAnchorPrefix` in
+/// `[at_compartment=N messages=A-B,C] text` (at most three ranges),
+/// `[at_compartment=N] text`, or `[at_compartment=unknown] text`. An unknown
+/// index, more than three ranges, or an index or range past 2^53 yields no
+/// anchor and no range. Mirrors `splitFactAnchorPrefix` in
 /// packages/plugin/src/hooks/magic-context/compartment-parser.ts.
-pub fn split_fact_anchor_prefix(text: &str) -> (Option<u64>, Option<FactSourceRange>, String) {
+pub fn split_fact_anchor_prefix(text: &str) -> (Option<u64>, Vec<FactSourceRange>, String) {
     let Some(caps) = side_channel_anchor_regex().captures(text) else {
-        return (None, None, trim_fact_text(text).to_string());
+        return (None, Vec::new(), trim_fact_text(text).to_string());
     };
     let content = caps
-        .get(4)
+        .get(3)
         .map(|m| trim_fact_text(m.as_str()).to_string())
         .unwrap_or_default();
     let Some(anchor) = caps.get(1).and_then(|m| parse_anchor_ordinal(m.as_str())) else {
-        return (None, None, content);
+        return (None, Vec::new(), content);
     };
-    let Some(start) = caps.get(2) else {
-        return (Some(anchor), None, content);
+    let Some(list) = caps.get(2) else {
+        return (Some(anchor), Vec::new(), content);
     };
-    let start = parse_anchor_ordinal(start.as_str());
-    let end = match caps.get(3) {
-        Some(m) => parse_anchor_ordinal(m.as_str()),
-        None => start,
-    };
-    match (start, end) {
-        (Some(start), Some(end)) => (Some(anchor), Some(FactSourceRange { start, end }), content),
-        _ => (None, None, content),
+    let pieces: Vec<&str> = list.as_str().split(',').collect();
+    if pieces.len() > 3 {
+        return (None, Vec::new(), content);
     }
+    let mut ranges = Vec::new();
+    for piece in pieces {
+        let mut ends = piece.split('-').map(|end| end.trim_matches([' ', '\t']));
+        let start = ends.next().and_then(parse_anchor_ordinal);
+        let end = match ends.next() {
+            Some(end) => parse_anchor_ordinal(end),
+            None => start,
+        };
+        match (start, end) {
+            (Some(start), Some(end)) => ranges.push(FactSourceRange { start, end }),
+            _ => return (None, Vec::new(), content),
+        }
+    }
+    (Some(anchor), ranges, content)
 }
 
 /// Decode the five predefined XML entities in a single left-to-right pass, so
@@ -1735,7 +1794,7 @@ fn side_channel_anchor_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r#"^[ \t]*[\[(][ \t]*(?:at_compartment|origin_compartment)[ \t]*=[ \t]*"?([0-9]+|unknown)"?(?:[ \t]+messages[ \t]*=[ \t]*"?([0-9]+)(?:[ \t]*-[ \t]*([0-9]+))?"?)?[ \t]*[\])][ \t]*(?s:(.+))$"#,
+            r#"^[ \t]*[\[(][ \t]*(?:at_compartment|origin_compartment)[ \t]*=[ \t]*"?([0-9]+|unknown)"?(?:[ \t]+messages[ \t]*=[ \t]*"?([0-9]+(?:[ \t]*-[ \t]*[0-9]+)?(?:[ \t]*,[ \t]*[0-9]+(?:[ \t]*-[ \t]*[0-9]+)?)*)"?)?[ \t]*[\])][ \t]*(?s:(.+))$"#,
         )
         .unwrap()
     })
@@ -2578,6 +2637,15 @@ full narrative
         );
     }
 
+    /// The chunk the TypeScript publisher assumes when it is given none: from
+    /// the first compartment's start to the last one's end.
+    fn outer(compartments: &[(u64, u64)]) -> (u64, u64) {
+        (
+            compartments.first().map_or(0, |first| first.0),
+            compartments.last().map_or(0, |last| last.1),
+        )
+    }
+
     #[derive(Debug, Deserialize)]
     struct AnchorGoldenCase {
         name: String,
@@ -2613,30 +2681,34 @@ full narrative
         assert!(!golden.cases.is_empty());
         let mut mismatches = Vec::new();
         for case in &golden.cases {
-            let (origin_compartment_index, source_range, content) =
+            let (origin_compartment_index, source_ranges, content) =
                 split_fact_anchor_prefix(&case.line);
+            let range = source_ranges.first().map(|range| (range.start, range.end));
             let fact = FactCandidate {
                 category: "PROJECT_RULES".into(),
                 content: content.clone(),
                 origin_compartment_index,
-                source_range,
+                source_ranges,
             };
             let blocks = case.blocks.as_ref().unwrap_or(&golden.blocks);
-            let resolved =
-                resolve_fact_anchor(&fact, &golden.compartments, blocks).map(|resolved| {
-                    AnchorGoldenResolved {
-                        compartment: resolved.compartment_index,
-                        blocks: resolved
-                            .block_indexes
-                            .iter()
-                            .map(|&index| blocks[index])
-                            .collect(),
-                    }
-                });
+            let resolved = resolve_fact_anchor(
+                &fact,
+                &golden.compartments,
+                blocks,
+                outer(&golden.compartments),
+            )
+            .map(|resolved| AnchorGoldenResolved {
+                compartment: resolved.compartment_index,
+                blocks: resolved
+                    .block_indexes
+                    .iter()
+                    .map(|&index| blocks[index])
+                    .collect(),
+            });
             let got = AnchorGoldenExpect {
                 content,
                 compartment: origin_compartment_index,
-                range: source_range.map(|range| (range.start, range.end)),
+                range,
                 resolved,
             };
             if got != case.expect {
@@ -2654,6 +2726,63 @@ full narrative
         );
     }
 
+    #[derive(Debug, Deserialize)]
+    struct RangeGoldens {
+        compartments: Vec<(u64, u64)>,
+        blocks: Vec<(u64, u64)>,
+        chunk: (u64, u64),
+        cases: Vec<RangeGolden>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RangeGolden {
+        line: String,
+        content: String,
+        compartment: Option<u64>,
+        ranges: Vec<(u64, u64)>,
+        resolved: Option<RangeGoldenResolved>,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct RangeGoldenResolved {
+        compartment: u64,
+        blocks: Vec<usize>,
+    }
+
+    /// Anchors that cite up to three ranges parse and resolve as the plugin's
+    /// do (gen/gen-turn-one-anchor-ranges.ts).
+    #[test]
+    fn multi_range_anchors_match_the_typescript_publisher() {
+        let golden: RangeGoldens =
+            serde_json::from_str(include_str!("../../testdata/turn-one-anchor-ranges.json"))
+                .expect("parse turn-one anchor range goldens");
+        assert!(golden.cases.len() >= 10);
+        for case in &golden.cases {
+            let (compartment, ranges, content) = split_fact_anchor_prefix(&case.line);
+            assert_eq!(content, case.content, "{}", case.line);
+            assert_eq!(compartment, case.compartment, "{}", case.line);
+            let pairs: Vec<(u64, u64)> = ranges
+                .iter()
+                .map(|range| (range.start, range.end))
+                .collect();
+            assert_eq!(pairs, case.ranges, "{}", case.line);
+            let fact = FactCandidate {
+                category: "PROJECT_RULES".into(),
+                content,
+                origin_compartment_index: compartment,
+                source_ranges: ranges,
+            };
+            let resolved =
+                resolve_fact_anchor(&fact, &golden.compartments, &golden.blocks, golden.chunk).map(
+                    |resolved| RangeGoldenResolved {
+                        compartment: resolved.compartment_index,
+                        blocks: resolved.block_indexes,
+                    },
+                );
+            assert_eq!(resolved, case.resolved, "{}", case.line);
+        }
+    }
+
     #[test]
     fn fact_anchor_ranges_ride_the_out_of_order_remap() {
         let text = "<output><compartments>\
@@ -2665,16 +2794,17 @@ full narrative
         assert_eq!(parsed.facts[0].content, "Fact from later.");
         assert_eq!(parsed.facts[0].origin_compartment_index, Some(2));
         assert_eq!(
-            parsed.facts[0].source_range,
-            Some(FactSourceRange { start: 5, end: 6 })
+            parsed.facts[0].source_ranges,
+            vec![FactSourceRange { start: 5, end: 6 }]
         );
         let compartments: Vec<(u64, u64)> = parsed
             .compartments
             .iter()
             .map(|compartment| (compartment.start_message, compartment.end_message))
             .collect();
-        let resolved = resolve_fact_anchor(&parsed.facts[0], &compartments, &[(1, 2), (5, 6)])
-            .expect("anchor resolves to the later compartment");
+        let resolved =
+            resolve_fact_anchor(&parsed.facts[0], &compartments, &[(1, 2), (5, 6)], (1, 6))
+                .expect("anchor resolves to the later compartment");
         assert_eq!(resolved.compartment_index, 2);
         assert_eq!(resolved.block_indexes, vec![1]);
     }
@@ -2752,26 +2882,29 @@ full narrative
                 continue;
             }
             compared += 1;
-            let (origin_compartment_index, source_range, content) =
+            let (origin_compartment_index, source_ranges, content) =
                 split_fact_anchor_prefix(&case.line);
+            let range = source_ranges.first().map(|range| (range.start, range.end));
             let fact = FactCandidate {
                 category: "PROJECT_RULES".into(),
                 content: content.clone(),
                 origin_compartment_index,
-                source_range,
+                source_ranges,
             };
-            let resolved =
-                resolve_fact_anchor(&fact, &case.compartments, &case.blocks).map(|resolved| {
-                    AnchorGoldenResolved {
-                        compartment: resolved.compartment_index,
-                        blocks: resolved
-                            .block_indexes
-                            .iter()
-                            .map(|&index| case.blocks[index])
-                            .collect(),
-                    }
-                });
-            let range = source_range.map(|range| (range.start, range.end));
+            let resolved = resolve_fact_anchor(
+                &fact,
+                &case.compartments,
+                &case.blocks,
+                outer(&case.compartments),
+            )
+            .map(|resolved| AnchorGoldenResolved {
+                compartment: resolved.compartment_index,
+                blocks: resolved
+                    .block_indexes
+                    .iter()
+                    .map(|&index| case.blocks[index])
+                    .collect(),
+            });
             if content != case.ts.content
                 || origin_compartment_index != case.ts.compartment
                 || range != case.ts.range
@@ -2802,7 +2935,10 @@ full narrative
                         category: fact.category,
                         content: fact.content,
                         compartment: fact.origin_compartment_index,
-                        range: fact.source_range.map(|range| (range.start, range.end)),
+                        range: fact
+                            .source_ranges
+                            .first()
+                            .map(|range| (range.start, range.end)),
                     })
                     .collect(),
                 Err(error) => {

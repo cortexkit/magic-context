@@ -38,6 +38,35 @@ pub struct Chunk {
     pub commit_clusters: u64,
     /// Messages the chunk's lines cover, noise included.
     pub messages: usize,
+    /// Each printed line, in order: what a fact's anchor may cite.
+    pub printed_blocks: Vec<PrintedBlock>,
+}
+
+/// One `[N]`/`[N-M]` line of the chunk as the summarizer reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrintedBlock {
+    /// `U` or `A`.
+    pub role: String,
+    pub start: u64,
+    pub end: u64,
+    /// The line's message texts, in order.
+    pub parts: Vec<String>,
+    /// The byte offset in [`Chunk::input`] where the line ends, so a cut of the
+    /// input shows which lines the summarizer saw whole.
+    pub text_end: usize,
+}
+
+/// How messages become lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lines {
+    /// Consecutive messages of one role share a line, and assistant text is
+    /// compacted: the ordinary summarizer's chunk.
+    Merged,
+    /// Every message is a line of its own, and its text is kept as written,
+    /// commit hashes in place: the two-pass historian's first turn, whose
+    /// facts cite lines as evidence (`singleMessageLines` in the plugin's
+    /// `read-session-chunk.ts`).
+    PerMessage,
 }
 
 struct Block {
@@ -71,7 +100,14 @@ impl Block {
 /// line is always taken, so a chunk is never empty while messages remain.
 /// Returns `None` when the entries hold nothing to summarize.
 pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
+    build_with(entries, token_budget, Lines::Merged)
+}
+
+/// [`build`], with lines formed as `mode` says.
+pub fn build_with(entries: &[Entry], token_budget: u64, mode: Lines) -> Option<Chunk> {
+    let per_message = mode == Lines::PerMessage;
     let mut lines: Vec<String> = Vec::new();
+    let mut printed: Vec<(char, u64, u64, Vec<String>)> = Vec::new();
     let mut covered: Vec<ChunkLine> = Vec::new();
     let mut present = Vec::new();
     let mut tool_only: Vec<MessageRange> = Vec::new();
@@ -85,6 +121,7 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
     // Appends the current block to the chunk; false when it does not fit.
     let flush = |block: Block,
                  lines: &mut Vec<String>,
+                 printed: &mut Vec<(char, u64, u64, Vec<String>)>,
                  covered: &mut Vec<ChunkLine>,
                  tool_only: &mut Vec<MessageRange>,
                  total: &mut u64,
@@ -102,6 +139,7 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
         }
         *last_role = Some(block.role);
         lines.push(text);
+        printed.push((block.role, block.start, block.end, block.parts.clone()));
         covered.extend(block.lines);
         if block.tool_only {
             match tool_only.last_mut() {
@@ -124,13 +162,29 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
             message_id: entry.mid.clone(),
             anchorable: true,
         };
-        let Some((role, parts, commits, narrative)) = render_entry(entry) else {
-            pending_noise.push(line);
+        let Some((role, mut parts, commits, narrative)) = render_entry(entry, per_message) else {
             present.push(number);
+            match current.as_mut().filter(|_| per_message) {
+                // A line of its own keeps the hidden messages after it in
+                // its range, as the plugin's reader does.
+                Some(block) => {
+                    block.end = number;
+                    block.lines.push(line);
+                }
+                None => pending_noise.push(line),
+            }
             continue;
         };
         present.push(number);
-        if let Some(block) = current.as_mut().filter(|block| block.role == role) {
+        if per_message {
+            // A message's text is one part, so evidence may quote across its
+            // text parts as it reads on the line.
+            parts = vec![parts.join(" / ")];
+        }
+        if let Some(block) = current
+            .as_mut()
+            .filter(|block| !per_message && block.role == role)
+        {
             block.end = number;
             block.parts.extend(parts);
             block.lines.append(&mut pending_noise);
@@ -149,6 +203,7 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
             if !flush(
                 block,
                 &mut lines,
+                &mut printed,
                 &mut covered,
                 &mut tool_only,
                 &mut total,
@@ -176,6 +231,7 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
         if !flush(
             block,
             &mut lines,
+            &mut printed,
             &mut covered,
             &mut tool_only,
             &mut total,
@@ -197,8 +253,25 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
     let (start, end) = (first.ordinal, last.ordinal);
     present.retain(|number| *number <= end);
     let text = lines.join("\n");
+    let header = format!("Messages {start}-{end}:\n\n");
+    let mut offset = header.len();
+    let printed_blocks = printed
+        .into_iter()
+        .zip(&lines)
+        .enumerate()
+        .map(|(index, ((role, start, end, parts), line))| {
+            offset += line.len() + usize::from(index > 0);
+            PrintedBlock {
+                role: role.to_string(),
+                start,
+                end,
+                parts,
+                text_end: offset,
+            }
+        })
+        .collect();
     Some(Chunk {
-        input: format!("Messages {start}-{end}:\n\n{text}"),
+        input: format!("{header}{text}"),
         validation: HistorianChunk {
             start_index: start,
             end_index: end,
@@ -211,12 +284,31 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
         has_more: stopped,
         commit_clusters: clusters,
         messages,
+        printed_blocks,
     })
+}
+
+/// The printed blocks of `chunk` whose whole line reached the summarizer in
+/// `sent`, which may be [`Chunk::input`] cut to fit the model's window: a line
+/// past the cut was not seen, so an anchor naming it can't be evidence
+/// (`blocksSentToHistorian` in the plugin's `turn-one-publication.ts`).
+pub fn blocks_sent<'a>(chunk: &'a Chunk, sent: &str) -> Vec<&'a PrintedBlock> {
+    let common = chunk
+        .input
+        .bytes()
+        .zip(sent.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    chunk
+        .printed_blocks
+        .iter()
+        .filter(|block| block.text_end <= common)
+        .collect()
 }
 
 /// One message's role letter, line parts, commit hashes and whether it
 /// carries narrative (text rather than only tool calls). `None` for noise.
-fn render_entry(entry: &Entry) -> Option<(char, Vec<String>, Vec<String>, bool)> {
+fn render_entry(entry: &Entry, verbatim: bool) -> Option<(char, Vec<String>, Vec<String>, bool)> {
     let raw_texts: Vec<&str> = entry
         .parts
         .iter()
@@ -259,7 +351,11 @@ fn render_entry(entry: &Entry) -> Option<(char, Vec<String>, Vec<String>, bool)>
                 return (!calls.is_empty())
                     .then(|| ('A', vec![calls.join(" / ")], Vec::new(), false));
             }
-            let (text, commits) = compact_text_for_summary(&texts.join(" / "));
+            let joined = texts.join(" / ");
+            let (compacted, commits) = compact_text_for_summary(&joined);
+            // Evidence keeps the hashes in place; the line's prefix still
+            // lists them.
+            let text = if verbatim { joined } else { compacted };
             Some(('A', vec![text], commits, true))
         }
         // A turn-scoped system entry carries module text, never the user's or
@@ -492,6 +588,61 @@ mod tests {
                 .with_output("done")
                 .with_output_bytes(4),
         )
+    }
+
+    /// Per-message lines: no merging, hidden messages stay in the range of the
+    /// line before them, assistant text keeps its commit hashes in place, and
+    /// each printed block knows where its line ends in the input.
+    #[test]
+    fn per_message_lines_print_each_message_and_record_where_it_ends() {
+        let entries = [
+            entry(1, Role::User, false, vec![text("Ship it."), text("Today.")]),
+            entry(2, Role::User, false, vec![text("And tag it.")]),
+            entry(3, Role::User, true, vec![text("a notice")]),
+            entry(
+                4,
+                Role::Assistant,
+                false,
+                vec![text("Committed abc1234def as the fix.")],
+            ),
+        ];
+        let chunk = build_with(&entries, 10_000, Lines::PerMessage).expect("a chunk");
+        let lines: Vec<&str> = chunk.input.lines().skip(2).collect();
+        assert_eq!(
+            lines,
+            [
+                "[1] U: Ship it. / Today.",
+                "[2-3] U: And tag it.",
+                "[4] A: commits: abc1234def Committed abc1234def as the fix.",
+            ]
+        );
+        let blocks: Vec<(u64, u64, &[String])> = chunk
+            .printed_blocks
+            .iter()
+            .map(|block| (block.start, block.end, block.parts.as_slice()))
+            .collect();
+        assert_eq!(blocks[0], (1, 1, &["Ship it. / Today.".to_string()][..]));
+        assert_eq!(blocks[1].0..=blocks[1].1, 2..=3);
+        for (block, line) in chunk.printed_blocks.iter().zip(&lines) {
+            assert!(chunk.input[..block.text_end].ends_with(line), "{line}");
+        }
+        // A cut inside the last line leaves the first two as evidence.
+        let cut = &chunk.input[..chunk.printed_blocks[2].text_end - 3];
+        let sent: Vec<u64> = blocks_sent(&chunk, cut)
+            .iter()
+            .map(|block| block.start)
+            .collect();
+        assert_eq!(sent, [1, 2]);
+        // Merged lines are unchanged: a hidden message opens the next line,
+        // and assistant text loses its hash.
+        let merged = build(&entries, 10_000).expect("a chunk");
+        assert!(
+            merged.input.ends_with(
+                "[1-2] U: Ship it. / Today. / And tag it.\n[3-4] A: commits: abc1234def Committed as the fix."
+            ),
+            "{}",
+            merged.input
+        );
     }
 
     #[test]

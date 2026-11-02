@@ -77,6 +77,13 @@ pub struct Settings {
     /// history it could read holds this many separate stretches of work that
     /// ended in commits. `None` when turned off.
     pub commit_clusters: Option<u64>,
+    /// `historian.turn_two`: the summarizer's facts become candidates that a
+    /// second turn in the same conversation reconciles with the project's
+    /// memories (the two-pass historian). User-level only; on by default.
+    pub turn_two: bool,
+    /// `historian.two_pass`: the older editor pass that polishes a draft.
+    /// Asking for it leaves the two-pass historian off.
+    pub editor_pass: bool,
 }
 
 /// How the caveman lane compresses.
@@ -133,6 +140,8 @@ impl Default for Settings {
             caveman: None,
             language: None,
             commit_clusters: Some(3),
+            turn_two: true,
+            editor_pass: false,
         }
     }
 }

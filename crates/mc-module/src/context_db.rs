@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 
+use crate::summary::two_pass::turn_one;
 use crate::summary::validate::ValidatedCompartment;
 
 const STORAGE_SOURCE: &str =
@@ -297,6 +298,7 @@ impl ContextDb {
             session,
             compartments,
             None,
+            None,
             &Recall::default(),
             now_ms,
         )
@@ -307,14 +309,18 @@ impl ContextDb {
     /// category and text pairs), promote the facts to project memories in the
     /// same transaction, so summaries never land without the memories their
     /// run found, nor the other way round. The run's events and its primer
-    /// candidate land in the same transaction too ([`Recall`]). Returns how
-    /// many facts landed.
+    /// candidate land in the same transaction too ([`Recall`]), and so does
+    /// the summarizer's `publication` record: the activity ledger, and on the
+    /// two-pass lane the facts kept as candidates for its second turn
+    /// ([`turn_one::commit`]). Returns how many facts landed.
+    #[allow(clippy::too_many_arguments)]
     pub fn publish_summaries(
         &self,
         harness: &str,
         session: &str,
         compartments: &[ValidatedCompartment],
         facts: Option<(&str, &[(String, String)])>,
+        publication: Option<&turn_one::Publication>,
         recall: &Recall,
         now_ms: i64,
     ) -> Result<usize, String> {
@@ -376,6 +382,18 @@ impl ContextDb {
                     .map_err(|error| error.to_string())?
             }
             None => 0,
+        };
+        let promoted = match publication {
+            Some(publication) => {
+                let ranges: Vec<(u64, u64)> = compartments
+                    .iter()
+                    .map(|compartment| (compartment.start_message, compartment.end_message))
+                    .collect();
+                let committed = turn_one::commit(&transaction, publication, &ids, &ranges, now_ms)
+                    .map_err(|error| error.to_string())?;
+                promoted + committed.candidates
+            }
+            None => promoted,
         };
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(promoted)
@@ -694,6 +712,7 @@ mod tests {
             "opencode",
             "s1",
             &[summary(0, 1, 4), summary(1, 5, 9)],
+            None,
             None,
             &recall,
             7,

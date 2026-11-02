@@ -89,6 +89,9 @@ pub struct Input<'a> {
     pub summaries: &'a [StoredCompartment],
     pub memories: &'a [StoredMemory],
     pub memory_enabled: bool,
+    /// The two-pass historian's first turn: no memory block, and the anchor
+    /// instruction instead.
+    pub anchored_facts: bool,
     /// The system prompt the run sends, language directive included.
     pub system_prompt: &'a str,
     /// The models the same prompt may be sent to, the first one first.
@@ -127,7 +130,9 @@ pub fn fit(input: &Input<'_>) -> Result<Fit, String> {
         input.session_id,
         input.chunk_start as i64,
     );
-    let memories = if input.memory_enabled {
+    // Anchored facts are compared with memory by the second turn, so the
+    // first turn carries no memory block.
+    let memories = if input.memory_enabled && !input.anchored_facts {
         order_historian_memories(input.memories)
     } else {
         Vec::new()
@@ -165,6 +170,7 @@ pub fn fit(input: &Input<'_>) -> Result<Fit, String> {
             memory_enabled: input.memory_enabled,
             user_observations_requested: false,
             extraction_free: false,
+            anchored_facts: input.anchored_facts,
         });
         mc_tokenizer::estimate_tokens(&prompt) as u64
     };
@@ -305,6 +311,7 @@ mod tests {
             summaries,
             memories,
             memory_enabled: true,
+            anchored_facts: false,
             system_prompt: "system",
             windows,
             output_cap: 32_000,

@@ -28,7 +28,7 @@ use crate::route::{Project, Route};
 use crate::summary::head::{self, Baseline};
 use crate::summary::run;
 use crate::summary::trigger;
-use crate::summary::validate::ValidatedChunk;
+use crate::summary::two_pass::turn_one;
 use crate::tokens;
 use crate::view_builder;
 
@@ -583,6 +583,8 @@ impl Session {
             from,
             until,
             project_root: self.workdir.clone(),
+            project: self.project.as_ref().map(|project| project.id.clone()),
+            two_pass: settings.turn_two && !settings.editor_pass,
             summaries: self.summaries.clone(),
             language: settings.language.clone(),
             memories: self.historian_memories(memory_enabled),
@@ -748,23 +750,30 @@ impl Session {
     /// A summarizer run ended. New summaries are stored, and when usage is at
     /// the execute threshold the view that shows them is built now: the pass
     /// that held its work for this summary is waiting on it.
+    ///
+    /// Returns the conversation the two-pass historian's second turn
+    /// continues, once its first turn's summaries and candidates are stored.
     pub async fn summary_finished<C: RunnerClient>(
         &mut self,
         client: &C,
         settings: &Settings,
-        result: Result<Option<ValidatedChunk>, String>,
+        result: Result<Option<run::Summarized>, String>,
         now_ms: i64,
-    ) {
+    ) -> Option<run::Continuation> {
         self.summarizing = false;
         let reservation = self.reservation.take();
-        let validated = match result {
-            Ok(Some(validated)) => validated,
+        let (validated, publication, continuation) = match result {
+            Ok(Some(summarized)) => (
+                summarized.validated,
+                summarized.publication,
+                summarized.continuation,
+            ),
             Ok(None) => {
                 if let Some(reservation) = reservation {
                     self.drain.release(reservation);
                 }
                 self.record_no_progress(settings);
-                return;
+                return None;
             }
             // The summarizer failed: the reservation stays spent, so a broken
             // summarizer does not run again on every pass. The wait for new
@@ -778,7 +787,7 @@ impl Session {
                 );
                 let now = self.clock();
                 self.drain.record_failure(now);
-                return;
+                return None;
             }
         };
         // A revert during the run may have removed what it summarized.
@@ -792,8 +801,13 @@ impl Session {
                 self.drain.release(reservation);
             }
             self.record_no_progress(settings);
-            return;
+            return None;
         }
+        // On the two-pass lane the facts are candidates for the second
+        // turn, stored with the publication; they never become memories here.
+        let two_pass = publication
+            .as_ref()
+            .is_some_and(|publication| publication.send.lane == turn_one::Lane::Enabled);
         if let Some(db) = &self.db {
             // Facts become memories of the session's project, with memory and
             // auto-promotion on; the validator already left them out otherwise.
@@ -805,7 +819,12 @@ impl Session {
             let promote = self
                 .project
                 .as_ref()
-                .filter(|_| settings.memory_enabled && settings.auto_promote && !facts.is_empty())
+                .filter(|_| {
+                    !two_pass
+                        && settings.memory_enabled
+                        && settings.auto_promote
+                        && !facts.is_empty()
+                })
                 .map(|project| (project.id.as_str(), facts.as_slice()));
             // The plugin stores one primer candidate per run, the first.
             let primer = match (&self.project, validated.primer_candidates.first()) {
@@ -841,6 +860,7 @@ impl Session {
                 &self.key.session,
                 &validated.compartments,
                 promote,
+                publication.as_ref(),
                 &recall,
                 now_ms,
             ) {
@@ -849,7 +869,7 @@ impl Session {
                     self.key.session
                 );
                 self.record_no_progress(settings);
-                return;
+                return None;
             }
         }
         self.no_progress = None;
@@ -865,6 +885,24 @@ impl Session {
                 self.publish(client, view).await;
             }
         }
+        continuation.filter(|_| two_pass && self.db.is_some())
+    }
+
+    /// The second turn a two-pass summary's first turn calls for.
+    pub fn turn_two_job(
+        &self,
+        settings: &Settings,
+        continuation: run::Continuation,
+    ) -> Option<crate::summary::two_pass::turn_two::Job> {
+        Some(crate::summary::two_pass::turn_two::Job {
+            owner: self.key.clone(),
+            project: self.project.as_ref()?.id.clone(),
+            project_root: self.workdir.clone(),
+            continuation,
+            memory_enabled: settings.memory_enabled,
+            auto_promote: settings.auto_promote,
+            embedding: settings.embedding.clone(),
+        })
     }
 
     /// The ordinal the latest view's cut reaches: messages up to it are

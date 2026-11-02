@@ -199,7 +199,15 @@ pub struct CompartmentPromptInputs<'a> {
     /// historian to skip `<user_observations>`. True leaves the prompt unchanged.
     pub user_observations_requested: bool,
     pub extraction_free: bool,
+    /// The two-pass historian's first turn: each fact carries its source
+    /// anchor, and the caller passes no `project_memory`, since the second turn
+    /// compares facts with memory instead.
+    pub anchored_facts: bool,
 }
+
+/// The two-pass historian's turn-one instruction, asking for anchored facts
+/// (`TWO_PASS_TURN_ONE` in the plugin's `two-pass-prompts/turn-one.md`).
+pub const FACT_ANCHOR_INSTRUCTION: &str = include_str!("../../testdata/two-pass/turn-one.md");
 
 pub fn reference_seeds() -> &'static [ReferenceSeed] {
     REFERENCE_SEEDS
@@ -595,6 +603,8 @@ pub fn build_compartment_agent_prompt(inputs: &CompartmentPromptInputs<'_>) -> S
     }
     if !inputs.memory_enabled {
         parts.push(FACT_EXTRACTION_DISABLED_TOGGLE.to_string());
+    } else if inputs.anchored_facts && !inputs.extraction_free {
+        parts.push(FACT_ANCHOR_INSTRUCTION.to_string());
     }
     // The extraction-free toggle already forbids <user_observations>.
     if !inputs.user_observations_requested && !inputs.extraction_free {
@@ -1077,6 +1087,7 @@ mod tests {
                 memory_enabled: case.memory_enabled,
                 user_observations_requested: case.user_observations_requested,
                 extraction_free: case.extraction_free,
+                anchored_facts: false,
             });
             assert_eq!(prompt, case.prompt, "prompt mismatch in '{}'", case.label);
 

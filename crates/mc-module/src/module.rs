@@ -39,7 +39,6 @@ use crate::routing::Router;
 use crate::session::Session;
 use crate::store::Store;
 use crate::summary::run;
-use crate::summary::validate::ValidatedChunk;
 
 /// How long a runner waits for the `pre_user` hook before storing the
 /// message as it is: the budget ck-mc declares for it.
@@ -107,7 +106,8 @@ enum Job {
         reply: oneshot::Sender<Addition>,
     },
     Idle(oneshot::Sender<()>),
-    SummaryFinished(Result<Option<ValidatedChunk>, String>),
+    /// Boxed: a summary result is much larger than any other job.
+    SummaryFinished(Box<Result<Option<run::Summarized>, String>>),
 }
 
 impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
@@ -425,9 +425,14 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                     }
                     Job::SummaryFinished(result) => {
                         if let Some(session) = &mut session {
-                            session
-                                .summary_finished(&inner.client, settings, result, now_ms())
+                            let continuation = session
+                                .summary_finished(&inner.client, settings, *result, now_ms())
                                 .await;
+                            if let Some(job) = continuation.and_then(|continuation| {
+                                session.turn_two_job(settings, continuation)
+                            }) {
+                                start_turn_two(&inner, job);
+                            }
                         }
                     }
                     Job::Ride(ride, reply) => {
@@ -487,10 +492,33 @@ fn start_summary<C: RunnerClient + Router + Send + Sync + 'static>(
     *inner.summaries_running.lock().expect("summary count") += 1;
     let inner = Arc::clone(inner);
     tokio::spawn(async move {
-        let result = run::run(&inner.client, &request).await;
+        let result = run::run(&inner.client, inner.db.as_deref(), &request).await;
         if let Some(worker) = worker.upgrade() {
-            let _ = worker.send(Job::SummaryFinished(result));
+            let _ = worker.send(Job::SummaryFinished(Box::new(result)));
         }
+        *inner.summaries_running.lock().expect("summary count") -= 1;
+    });
+}
+
+/// Run the two-pass historian's second turn beside the session's worker.
+/// It writes only memories and candidate rows, never the session's state,
+/// so nothing comes back to the worker; [`Module::idle`] waits for it as for
+/// a summary.
+fn start_turn_two<C: RunnerClient + Router + Send + Sync + 'static>(
+    inner: &Arc<Inner<C>>,
+    job: crate::summary::two_pass::turn_two::Job,
+) {
+    let Some(db) = inner.db.clone() else {
+        return;
+    };
+    *inner.summaries_running.lock().expect("summary count") += 1;
+    let inner = Arc::clone(inner);
+    tokio::spawn(async move {
+        let outcome = crate::summary::two_pass::turn_two::run(&inner.client, &db, &job).await;
+        eprintln!(
+            "ck-mc: session {}: turn two: {outcome:?}",
+            job.owner.session
+        );
         *inner.summaries_running.lock().expect("summary count") -= 1;
     });
 }

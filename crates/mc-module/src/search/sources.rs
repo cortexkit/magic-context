@@ -155,11 +155,57 @@ pub fn project_memories(conn: &Connection, project: &str) -> rusqlite::Result<Ve
     rows.collect()
 }
 
+/// Up to `limit` of the project's current memories matching `query` by
+/// words, best first, with the relaxed query when the strict one finds
+/// nothing (`searchMemoriesFTS`).
+pub(crate) fn memory_words(
+    conn: &Connection,
+    project: &str,
+    query: &str,
+    limit: usize,
+) -> Vec<i64> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let mut ids = memory_fts_ids_limited(conn, project, &sanitize_fts_query(trimmed), None, limit);
+    if ids.is_empty() {
+        ids = memory_fts_ids_limited(conn, project, &relaxed_fts_query(trimmed), None, limit);
+    }
+    ids
+}
+
+/// Every vector the project's memories have under `model_id`.
+pub(crate) fn memory_vectors(
+    conn: &Connection,
+    project: &str,
+    model_id: &str,
+) -> BTreeMap<i64, Vec<f32>> {
+    vectors(
+        conn,
+        "SELECT e.memory_id, e.embedding FROM memory_embeddings e
+           JOIN memories m ON m.id = e.memory_id
+          WHERE m.project_path = ?1 AND e.model_id = ?2",
+        project,
+        model_id,
+    )
+}
+
 fn memory_fts_ids(
     conn: &Connection,
     project: &str,
     fts: &str,
     dates: Option<DateRange>,
+) -> Vec<i64> {
+    memory_fts_ids_limited(conn, project, fts, dates, MEMORY_FTS_CANDIDATES)
+}
+
+fn memory_fts_ids_limited(
+    conn: &Connection,
+    project: &str,
+    fts: &str,
+    dates: Option<DateRange>,
+    limit: usize,
 ) -> Vec<i64> {
     if fts.is_empty() {
         return Vec::new();
@@ -174,14 +220,7 @@ fn memory_fts_ids(
               ORDER BY bm25(memories_fts), memories.updated_at DESC, memories.id ASC LIMIT ?6",
         )?;
         let rows = statement.query_map(
-            params![
-                project,
-                now_ms(),
-                from,
-                to,
-                fts,
-                MEMORY_FTS_CANDIDATES as i64
-            ],
+            params![project, now_ms(), from, to, fts, limit as i64],
             |row| row.get(0),
         )?;
         rows.collect()
