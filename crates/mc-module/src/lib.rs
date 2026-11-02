@@ -75,6 +75,7 @@ pub mod store;
 pub mod summary;
 pub mod tokens;
 pub mod transport;
+pub mod upkeep;
 pub mod view_builder;
 
 /// Magic Context's module id, as runners and core name it.

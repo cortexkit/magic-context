@@ -10,8 +10,13 @@
 //! A summarizer run is the one piece of a session's work that runs beside
 //! its worker: it can take minutes, and the session keeps answering rides
 //! meanwhile. Its result comes back as a job of its own.
+//!
+//! Project upkeep (memory and commit vectors, commit indexing; see
+//! [`crate::upkeep`]) runs on a timer of its own, for every project a
+//! session used in the last hour, one project at a time.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -79,6 +84,11 @@ struct Inner<C> {
     workers: Mutex<HashMap<SessionRef, mpsc::UnboundedSender<Job>>>,
     /// Summarizer runs in progress, so [`Module::idle`] can wait for them.
     summaries_running: Mutex<usize>,
+    /// Each session's project, from its Setup route's scope.
+    session_projects: Mutex<HashMap<SessionRef, crate::route::Project>>,
+    /// Projects with recent activity: folder and the last Setup or notice
+    /// time, keyed by project id. Upkeep runs for these.
+    active_projects: Mutex<HashMap<String, (String, i64)>>,
 }
 
 enum Job {
@@ -115,6 +125,8 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 store,
                 workers: Mutex::new(HashMap::new()),
                 summaries_running: Mutex::new(0),
+                session_projects: Mutex::new(HashMap::new()),
+                active_projects: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -124,6 +136,14 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
     pub fn setup(&self, route: Route, request: SetupRequest) -> Result<SetupAnswer, ModuleError> {
         let features = preset::features(&request.preset)
             .ok_or_else(|| ModuleError::UnknownPreset(request.preset.clone()))?;
+        if let Some(project) = &route.project {
+            self.inner
+                .session_projects
+                .lock()
+                .expect("session projects")
+                .insert(route.session.clone(), project.clone());
+            self.touch(&route.session);
+        }
         let worker = {
             let mut workers = self.inner.workers.lock().expect("worker map");
             workers
@@ -146,7 +166,10 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         request: NoticeRequest,
     ) -> Result<NoticeAnswer, ModuleError> {
         match self.send(session, Job::Notice(request)) {
-            Ok(()) => Ok(NoticeAnswer::Received),
+            Ok(()) => {
+                self.touch(session);
+                Ok(NoticeAnswer::Received)
+            }
             Err(ModuleError::UnknownSession) => Ok(NoticeAnswer::SetupRequired),
             Err(error) => Err(error),
         }
@@ -252,6 +275,72 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
                 return answer.await.map_err(|_| ModuleError::Stopped);
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// One upkeep round: every project with a Setup or notice in the last
+    /// hour, one after another. Returns each project's report.
+    pub async fn run_upkeep(&self) -> Vec<(String, crate::upkeep::Report)> {
+        let Some(db) = self.inner.db.clone() else {
+            return Vec::new();
+        };
+        let now = now_ms();
+        let projects: Vec<(String, String)> = {
+            let mut active = self.inner.active_projects.lock().expect("active projects");
+            active.retain(|_, (_, seen)| now - *seen <= crate::upkeep::PROJECT_TTL_MS);
+            let mut projects: Vec<_> = active
+                .iter()
+                .map(|(id, (root, _))| (id.clone(), root.clone()))
+                .collect();
+            projects.sort();
+            projects
+        };
+        let mut reports = Vec::new();
+        for (id, root) in projects {
+            // Upkeep reads no per-model setting, so no model is named.
+            let settings = self.inner.config.resolve(Some(&root), "", 0);
+            let plan = crate::upkeep::Plan::from_settings(&settings);
+            let report =
+                crate::upkeep::run_project(&db, &id, Path::new(&root), &plan, &now_ms).await;
+            if report != crate::upkeep::Report::default() {
+                eprintln!("ck-mc: upkeep for {id}: {report:?}");
+            }
+            reports.push((id, report));
+        }
+        reports
+    }
+
+    /// Run upkeep every [`crate::upkeep::INTERVAL`], the first time after a
+    /// short quiet period. Without `context.db` there is nothing to keep up.
+    pub fn spawn_upkeep(&self) {
+        if self.inner.db.is_none() {
+            return;
+        }
+        let module = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(crate::upkeep::BOOT_QUIET).await;
+            loop {
+                module.run_upkeep().await;
+                tokio::time::sleep(crate::upkeep::INTERVAL).await;
+            }
+        });
+    }
+
+    /// Mark the session's project active now.
+    fn touch(&self, session: &SessionRef) {
+        let project = self
+            .inner
+            .session_projects
+            .lock()
+            .expect("session projects")
+            .get(session)
+            .cloned();
+        if let Some(project) = project {
+            self.inner
+                .active_projects
+                .lock()
+                .expect("active projects")
+                .insert(project.id, (project.root, now_ms()));
         }
     }
 

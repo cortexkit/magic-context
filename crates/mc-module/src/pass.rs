@@ -49,6 +49,12 @@ pub struct Settings {
     pub memory_enabled: bool,
     /// `memory.git_commit_indexing.enabled`: commit search. Off by default.
     pub git_commits_enabled: bool,
+    /// `memory.git_commit_indexing.since_days`: how far back a project's
+    /// commits are indexed (7 to 3650, default 365).
+    pub git_since_days: u64,
+    /// `memory.git_commit_indexing.max_commits`: commits kept per project,
+    /// oldest evicted first (100 to 20000, default 2000).
+    pub git_max_commits: u64,
     /// `memory.auto_promote`: facts a summary finds become project memories.
     pub auto_promote: bool,
     /// The embedding provider `ctx_search` scores by meaning with; `None`
@@ -115,6 +121,8 @@ impl Default for Settings {
             profile_budget_tokens: 4_000,
             memory_enabled: true,
             git_commits_enabled: false,
+            git_since_days: 365,
+            git_max_commits: 2000,
             auto_promote: true,
             embedding: None,
             temporal_awareness: true,

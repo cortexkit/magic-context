@@ -220,15 +220,52 @@ impl Provider {
             * QUERY_WINDOW_SAFETY_RATIO)
             .floor() as u64)
             .max(1);
-        if crate::tokens::bytes(input.len() as u64) > budget {
-            let mut end = (budget * 4) as usize;
-            while end > 0 && !input.is_char_boundary(end) {
-                end -= 1;
-            }
-            input.truncate(end);
-        }
-        let mut body = json!({"model": self.model, "input": [input]});
-        if let Some(input_type) = self.query_input_type.as_ref().or(self.input_type.as_ref()) {
+        cap_input(&mut input, budget);
+        let input_type = self.query_input_type.as_ref().or(self.input_type.as_ref());
+        let mut vectors = self
+            .request(vec![input], input_type.map(String::as_str), "search query")
+            .await?;
+        vectors.swap_remove(0)
+    }
+
+    /// Embed stored texts (memories, commit messages), one slot per text in
+    /// order. `None` when the whole request failed; a `None` slot when only
+    /// that text came back unusable. As the plugin's passage batches: each
+    /// text gets the document prefix and is cut at the model's full input
+    /// limit, and a blank text is sent as one space, which every provider
+    /// accepts. A failed or rate-limited batch is simply tried again on the
+    /// next upkeep run.
+    pub async fn embed_documents(&self, texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
+        let prefix = self.document_prefix();
+        let budget = self
+            .max_input_tokens
+            .unwrap_or(DEFAULT_CHUNK_MAX_INPUT_TOKENS)
+            .max(1);
+        let inputs = texts
+            .iter()
+            .map(|text| {
+                let mut input = format!(
+                    "{prefix}{}",
+                    if text.trim().is_empty() { " " } else { text }
+                );
+                cap_input(&mut input, budget);
+                input
+            })
+            .collect();
+        self.request(inputs, self.input_type.as_deref(), "document")
+            .await
+    }
+
+    /// One `/embeddings` request, without redirects or proxies.
+    async fn request(
+        &self,
+        inputs: Vec<String>,
+        input_type: Option<&str>,
+        what: &str,
+    ) -> Option<Vec<Option<Vec<f32>>>> {
+        let count = inputs.len();
+        let mut body = json!({"model": self.model, "input": inputs});
+        if let Some(input_type) = input_type {
             body["input_type"] = json!(input_type);
         }
         if let Some(truncate) = &self.truncate {
@@ -249,23 +286,37 @@ impl Provider {
         let response = match request.body(body.to_string()).send().await {
             Ok(response) => response,
             Err(_) => {
-                eprintln!("ck-mc: search query embedding failed: the endpoint did not answer");
+                eprintln!("ck-mc: {what} embedding failed: the endpoint did not answer");
                 return None;
             }
         };
         let status = response.status().as_u16();
         let raw = response.bytes().await.ok()?;
         if status != 200 {
-            eprintln!("ck-mc: search query embedding failed: HTTP {status}");
+            eprintln!("ck-mc: {what} embedding failed: HTTP {status}");
             return None;
         }
-        parse_response(&raw, &self.model)
+        parse_response(&raw, &self.model, count)
     }
 }
 
-/// The single vector in an embeddings response, or `None` when the envelope
-/// is malformed or names a different model than the one requested.
-fn parse_response(raw: &[u8], requested: &str) -> Option<Vec<f32>> {
+/// Cut `input` to about `budget` tokens at a character boundary, keeping its
+/// start, where a search task or a document's subject usually is.
+fn cap_input(input: &mut String, budget: u64) {
+    if crate::tokens::bytes(input.len() as u64) > budget {
+        let mut end = (budget * 4) as usize;
+        while end > 0 && !input.is_char_boundary(end) {
+            end -= 1;
+        }
+        input.truncate(end);
+    }
+}
+
+/// The vectors in an embeddings response, one slot per input in order (an
+/// item without `index` takes its position). `None` when the envelope is
+/// malformed or names a different model than the one requested; a `None`
+/// slot when that input's vector is missing, empty or not finite.
+fn parse_response(raw: &[u8], requested: &str, count: usize) -> Option<Vec<Option<Vec<f32>>>> {
     let body: Value = serde_json::from_slice(raw).ok()?;
     if let Some(served) = body["model"].as_str().filter(|served| !served.is_empty()) {
         if !models_match(served, requested) {
@@ -273,16 +324,24 @@ fn parse_response(raw: &[u8], requested: &str) -> Option<Vec<f32>> {
             return None;
         }
     }
-    let item = body["data"]
-        .as_array()?
-        .iter()
-        .find(|item| item.get("index").is_none() || item["index"].as_u64() == Some(0))?;
-    let vector: Vec<f32> = item["embedding"]
-        .as_array()?
-        .iter()
-        .map(|value| value.as_f64().map(|value| value as f32))
-        .collect::<Option<_>>()?;
-    (!vector.is_empty() && vector.iter().all(|value| value.is_finite())).then_some(vector)
+    let mut slots = vec![None; count];
+    for (position, item) in body["data"].as_array()?.iter().enumerate() {
+        let index = item["index"]
+            .as_u64()
+            .map_or(position, |index| index as usize);
+        let Some(slot) = slots.get_mut(index) else {
+            continue;
+        };
+        let vector: Option<Vec<f32>> = item["embedding"].as_array().and_then(|values| {
+            values
+                .iter()
+                .map(|value| value.as_f64().map(|value| value as f32))
+                .collect()
+        });
+        *slot = vector
+            .filter(|vector| !vector.is_empty() && vector.iter().all(|value| value.is_finite()));
+    }
+    Some(slots)
 }
 
 /// The plugin's substitution guard: equal names, or one name extending the
@@ -390,6 +449,14 @@ fn validate_endpoint(endpoint: &str) -> Result<(), ()> {
         }
     }
     Ok(())
+}
+
+/// A vector as stored: little-endian `f32`s, as the plugin writes them.
+pub fn encode(vector: &[f32]) -> Vec<u8> {
+    vector
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
 }
 
 /// A stored vector: little-endian `f32`s, as the plugin writes them.
@@ -507,9 +574,12 @@ mod tests {
     #[test]
     fn responses_for_another_model_are_refused() {
         let body = br#"{"model":"voyage-4","data":[{"index":0,"embedding":[0.5,0.25]}]}"#;
-        assert_eq!(parse_response(body, "voyage-4"), Some(vec![0.5, 0.25]));
+        assert_eq!(
+            parse_response(body, "voyage-4", 1),
+            Some(vec![Some(vec![0.5, 0.25])])
+        );
         let other = br#"{"model":"text-embedding-3-small","data":[{"embedding":[1.0]}]}"#;
-        assert_eq!(parse_response(other, "voyage-4"), None);
+        assert_eq!(parse_response(other, "voyage-4", 1), None);
         assert!(models_match("nomic-embed-text:latest", "nomic-embed-text"));
         assert!(models_match("org/qwen3-embedding-8b", "qwen3-embedding-8b"));
         assert!(!models_match("model:a", "model:b"));

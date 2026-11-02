@@ -253,6 +253,21 @@ fn resolve_tiers(
                 .and_then(Value::as_bool)
         })
         .unwrap_or(false);
+    // The plugin drops an out-of-range value, so the other tier or the
+    // default applies.
+    for tier in [user, project] {
+        if let Some(days) = in_range(tier, "/memory/git_commit_indexing/since_days", 7.0, 3650.0) {
+            settings.git_since_days = days as u64;
+        }
+        if let Some(commits) = in_range(
+            tier,
+            "/memory/git_commit_indexing/max_commits",
+            100.0,
+            20000.0,
+        ) {
+            settings.git_max_commits = commits as u64;
+        }
+    }
     settings.embedding = embedding::Provider::from_tiers(user, project, user_path);
     settings.caveman = caveman(user, project);
     settings.commit_clusters = commit_clusters(user, project);

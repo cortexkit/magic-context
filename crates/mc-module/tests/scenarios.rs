@@ -3091,3 +3091,61 @@ async fn a_session_with_no_setup_gets_its_tools_but_none_that_act_on_a_transcrip
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A session's project gets upkeep: once its Setup and notices name the
+/// project, an upkeep round indexes the project's commits into the store the
+/// plugin shares; a project no session used gets none.
+#[tokio::test]
+async fn a_sessions_project_gets_its_commits_indexed() {
+    let dir = scratch("upkeep");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "-q", "--allow-empty", "-m", "Add the parser"],
+        vec!["commit", "-q", "--allow-empty", "-m", "Fix the parser"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(&args)
+            .current_dir(&repo)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let settings = Settings {
+        git_commits_enabled: true,
+        ..Settings::default()
+    };
+    let mut config = config("head", Kind::OpenAi, free());
+    config.project = Some(mc_mock_runner::runner::Project {
+        id: "pj-upkeep".into(),
+        root: repo.to_string_lossy().into_owned(),
+    });
+    let mut runner = start_full(config, settings, Some(dir.clone())).await;
+    runner.play(&turn("Look at the parser.")).await;
+    assert_clean(&runner);
+    let reports = runner.provider().module().run_upkeep().await;
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0].0, "pj-upkeep");
+    assert!(
+        matches!(
+            reports[0].1.sweep,
+            Some(mc_module::upkeep::Sweep::Indexed { inserted: 2, .. })
+        ),
+        "{reports:?}"
+    );
+    let conn = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    let indexed: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM git_commits WHERE project_path = 'pj-upkeep'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed, 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
