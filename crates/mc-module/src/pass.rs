@@ -60,6 +60,9 @@ pub struct Settings {
     /// `caveman_text_compression`: older long text compressed by age, for
     /// sessions with a summarizer. `None` when off, the default.
     pub caveman: Option<Caveman>,
+    /// The user-level `language`, lower-cased: the summarizer writes its
+    /// prose in it. `None` writes English.
+    pub language: Option<String>,
 }
 
 /// How the caveman lane compresses.
@@ -110,6 +113,7 @@ impl Default for Settings {
             temporal_awareness: true,
             auto_search: AutoSearch::default(),
             caveman: None,
+            language: None,
         }
     }
 }

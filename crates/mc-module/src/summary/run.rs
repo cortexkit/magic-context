@@ -15,9 +15,14 @@ use ck_contract_draft::send::{
 use ck_contract_draft::setup::ModelRef;
 
 use super::chunk;
+use std::sync::OnceLock;
+
+use regex::Regex;
+
 use super::prompt::{
-    build_compartment_agent_prompt, build_reference_blocks_from_stored, CompartmentPromptInputs,
-    HISTORIAN_SYSTEM_PROMPT,
+    build_compartment_agent_prompt, build_historian_repair_prompt,
+    build_reference_blocks_from_stored, with_content_language_directive, CompartmentPromptInputs,
+    ContentLanguageDirectiveOptions, HISTORIAN_SYSTEM_PROMPT,
 };
 use super::validate::{
     validate_historian_output, StoredCompartmentRange, ValidateOptions, ValidatedChunk,
@@ -47,9 +52,20 @@ pub struct Request {
     pub model: ModelRef,
     /// How many tokens of messages one run reads at most.
     pub chunk_tokens: u64,
+    /// The user's `language`: the summarizer writes its prose in it.
+    pub language: Option<String>,
 }
 
+/// Transient provider errors retry this many times on the same model.
+const MAX_RETRIES: usize = 2;
+
 /// Run the summarizer. `Ok(None)` when there was nothing to summarize.
+///
+/// As the plugin's historian (`compartment-runner-historian.ts`): a transient
+/// provider error retries twice, after 2 to 3 s and then 6 to 8 s; an invalid
+/// reply gets one repair run that sees the validation error and its own
+/// reply. Every attempt runs in a child of its own, so the summarizer always
+/// sees exactly its system prompt and one user message.
 pub async fn run<C: RunnerClient>(
     client: &C,
     job: &Request,
@@ -72,18 +88,97 @@ pub async fn run<C: RunnerClient>(
         user_observations_requested: false,
         extraction_free: false,
     });
+    let system = with_content_language_directive(
+        HISTORIAN_SYSTEM_PROMPT,
+        job.language.as_deref(),
+        ContentLanguageDirectiveOptions::default(),
+    )
+    .into_owned();
+    let range = format!(
+        "{}-{}",
+        chunk.validation.start_index, chunk.validation.end_index
+    );
+    let prior: Vec<StoredCompartmentRange> = job
+        .summaries
+        .iter()
+        .map(|summary| StoredCompartmentRange {
+            start_message: summary.start_message as u64,
+            end_message: summary.end_message as u64,
+        })
+        .collect();
+    let options = || ValidateOptions {
+        sequence_offset: job
+            .summaries
+            .last()
+            .map_or(0, |summary| summary.sequence as u64 + 1),
+        memory_enabled: false,
+        auto_promote: false,
+        ..ValidateOptions::default()
+    };
+    let first = attempt(client, job, &format!("{range}:first"), &prompt, &system).await?;
+    let error = match validate_historian_output(&first, &chunk.validation, &prior, options()) {
+        Ok(validated) => return Ok(Some(validated)),
+        Err(error) => error.message,
+    };
+    let repair_prompt =
+        build_historian_repair_prompt(&prompt, &first, &error, job.language.as_deref());
+    let repaired = attempt(
+        client,
+        job,
+        &format!("{range}:repair"),
+        &repair_prompt,
+        &system,
+    )
+    .await?;
+    validate_historian_output(&repaired, &chunk.validation, &prior, options())
+        .map(Some)
+        .map_err(|error| format!("invalid after repair: {}", error.message))
+}
+
+/// One summarizer call in the child `label` names, with retries for
+/// transient provider errors. Returns the reply's text.
+async fn attempt<C: RunnerClient>(
+    client: &C,
+    job: &Request,
+    label: &str,
+    prompt: &str,
+    system: &str,
+) -> Result<String, String> {
+    let mut retry = 0;
+    loop {
+        let child = if retry == 0 {
+            format!("{CHILD}:{label}")
+        } else {
+            format!("{CHILD}:{label}:retry{retry}")
+        };
+        match call(client, job, &child, prompt, system).await {
+            Ok(text) => return Ok(text),
+            Err(error) if retry < MAX_RETRIES && is_transient(&error) => {
+                tokio::time::sleep(backoff(retry)).await;
+                retry += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Send one run and wait for its reply.
+async fn call<C: RunnerClient>(
+    client: &C,
+    job: &Request,
+    child: &str,
+    prompt: &str,
+    system: &str,
+) -> Result<String, String> {
     let request = SendRequest {
         // A retry after a lost answer finds the run already started.
-        send_id: format!(
-            "{CHILD}:{}-{}",
-            chunk.validation.start_index, chunk.validation.end_index
-        ),
-        prompt,
+        send_id: child.to_owned(),
+        prompt: prompt.to_owned(),
         template: None,
         delivery: Vec::new(),
         run: Some(RunSettings {
-            child: CHILD.into(),
-            system: HISTORIAN_SYSTEM_PROMPT.into(),
+            child: child.to_owned(),
+            system: system.to_owned(),
             model: job.model.clone(),
             generation: Generation {
                 max_output_tokens: MAX_OUTPUT_TOKENS,
@@ -115,27 +210,39 @@ pub async fn run<C: RunnerClient>(
     if result.finish.as_deref() == Some("length") {
         return Err("the reply hit its output limit".into());
     }
-    let text = result.text.unwrap_or_default();
-    let prior: Vec<StoredCompartmentRange> = job
-        .summaries
-        .iter()
-        .map(|summary| StoredCompartmentRange {
-            start_message: summary.start_message as u64,
-            end_message: summary.end_message as u64,
-        })
-        .collect();
-    let options = ValidateOptions {
-        sequence_offset: job
-            .summaries
-            .last()
-            .map_or(0, |summary| summary.sequence as u64 + 1),
-        memory_enabled: false,
-        auto_promote: false,
-        ..ValidateOptions::default()
+    Ok(result.text.unwrap_or_default())
+}
+
+/// Whether a failed call is worth retrying on the same model, as the plugin
+/// decides (`historian-transient-error.ts`): provider errors arrive as free
+/// text, so each keyword must stand alone ("auth" must not match "author",
+/// 500 must not match "250000"), and request or authorization errors never
+/// retry.
+pub fn is_transient(error: &str) -> bool {
+    static NON_TRANSIENT: OnceLock<Regex> = OnceLock::new();
+    static TRANSIENT: OnceLock<Regex> = OnceLock::new();
+    let lower = error.to_lowercase();
+    let non_transient = NON_TRANSIENT.get_or_init(|| {
+        Regex::new(r"(?:^|[^a-z])(?:invalid[ _]request|bad[ _]request|unauthori[sz]ed|forbidden|authentication|authenticate|authorization|o?auth)(?:[^a-z]|$)|(?:^| )400(?:[^0-9]|$)").unwrap()
+    });
+    let transient = TRANSIENT.get_or_init(|| {
+        Regex::new(r"(?:^|[^0-9])(?:429|500|502|503)(?:[^0-9]|$)|rate[ _]limit|timeout|econnreset|etimedout|overloaded").unwrap()
+    });
+    !non_transient.is_match(&lower) && transient.is_match(&lower)
+}
+
+/// The wait before retry `retry` (0 or 1): 2 to 3 s, then 6 to 8 s, with
+/// jitter so parallel sessions do not retry together.
+fn backoff(retry: usize) -> Duration {
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| u64::from(elapsed.subsec_nanos()));
+    let (base, spread) = if retry == 0 {
+        (2_000, 1_001)
+    } else {
+        (6_000, 2_001)
     };
-    validate_historian_output(&text, &chunk.validation, &prior, options)
-        .map(Some)
-        .map_err(|error| error.message)
+    Duration::from_millis(base + jitter % spread)
 }
 
 /// The messages from `job.from` up to `job.until`, in full.
@@ -167,5 +274,33 @@ async fn wait_for<C: RunnerClient>(
             return Err("the run did not finish in time".into());
         }
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_transient;
+
+    // The cases the plugin's classifier is written for.
+    #[test]
+    fn transient_errors_retry_and_request_errors_never_do() {
+        for error in [
+            "429 Too Many Requests",
+            "HTTP 503: overloaded",
+            "rate_limit_error",
+            "request timeout",
+            "ECONNRESET",
+        ] {
+            assert!(is_transient(error), "{error}");
+        }
+        for error in [
+            "400 Bad Request",
+            "invalid_request: prompt is too long: 250000 tokens",
+            "401 Unauthorized",
+            "OAuth token expired, rate limit",
+            "the model could not parse the author list",
+        ] {
+            assert!(!is_transient(error), "{error}");
+        }
     }
 }

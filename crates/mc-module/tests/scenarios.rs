@@ -1111,6 +1111,116 @@ async fn caveman_compresses_older_long_text_by_age_when_turned_on() {
     assert_ne!(shown(1), format!("§1§ {}", long(1)));
 }
 
+/// A responder that answers like the scripted summarizer, except for runs
+/// whose child name ends with `failing`: those get `reply`.
+fn summarizer_failing(
+    failing: &'static str,
+    reply: mc_mock_runner::child::Reply,
+) -> mc_mock_runner::child::Responder {
+    let summarizer = mc_mock_runner::child::scripted_summarizer();
+    std::sync::Arc::new(move |settings, prompt| {
+        if settings.child.ends_with(failing) {
+            reply.clone()
+        } else {
+            summarizer(settings, prompt)
+        }
+    })
+}
+
+#[tokio::test]
+async fn an_invalid_summary_gets_one_repair_run_that_sees_the_error() {
+    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    runner.host().set_responder(summarizer_failing(
+        ":first",
+        mc_mock_runner::child::Reply {
+            text: "<output>not a summary</output>".into(),
+            finish: Some("stop".into()),
+            error: None,
+        },
+    ));
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let runs = runner.host().child_runs();
+    let repair = runs
+        .iter()
+        .find(|run| run.request.run.as_ref().unwrap().child.ends_with(":repair"))
+        .expect("a repair run");
+    assert!(repair
+        .request
+        .prompt
+        .contains("Your previous XML response was invalid and cannot be persisted."));
+    assert!(repair
+        .request
+        .prompt
+        .contains("<output>not a summary</output>"));
+    // Each attempt has a child of its own.
+    let children: std::collections::BTreeSet<String> = runs
+        .iter()
+        .map(|run| run.request.run.as_ref().unwrap().child.clone())
+        .collect();
+    assert_eq!(children.len(), runs.len());
+    // The repaired summaries are shown.
+    let (m0, m1) = head_texts(runner.host());
+    assert!(
+        m0.contains("<session-history>\n") || m1.contains("<new-compartments>"),
+        "{m0}\n{m1}"
+    );
+}
+
+#[tokio::test]
+async fn a_transient_provider_error_retries_the_summary_after_a_pause() {
+    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    runner.host().set_responder(summarizer_failing(
+        ":first",
+        mc_mock_runner::child::Reply {
+            error: Some("503 Service Unavailable: overloaded".into()),
+            ..Default::default()
+        },
+    ));
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    // The retry waits two to three seconds before it runs.
+    for _ in 0..40 {
+        if runner
+            .host()
+            .child_runs()
+            .iter()
+            .any(|run| run.request.run.as_ref().unwrap().child.ends_with(":retry1"))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    runner.play(&[user("Go on."), answer()]).await;
+    assert_clean(&runner);
+    let runs = runner.host().child_runs();
+    assert!(
+        runs.iter().any(|run| run
+            .request
+            .run
+            .as_ref()
+            .unwrap()
+            .child
+            .ends_with(":first:retry1")),
+        "{:?}",
+        runs.iter()
+            .map(|run| run.request.run.as_ref().unwrap().child.clone())
+            .collect::<Vec<_>>()
+    );
+    let (m0, m1) = head_texts(runner.host());
+    assert!(
+        m0.contains("<session-history>\n") || m1.contains("<new-compartments>"),
+        "{m0}\n{m1}"
+    );
+}
+
 #[tokio::test]
 async fn a_lost_cache_folds_the_newer_summaries_into_the_baseline() {
     let mut runner = start(config("head", Kind::OpenAi, FREE)).await;

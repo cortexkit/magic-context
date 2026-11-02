@@ -418,6 +418,7 @@ impl Session {
             // A quarter of the summarizer's window, which is the session's own.
             chunk_tokens: ((self.conditions.context_window as f64 * 0.25).round() as u64)
                 .clamp(8_000, 50_000),
+            language: settings.language.clone(),
         })
     }
 

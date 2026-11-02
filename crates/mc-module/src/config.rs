@@ -257,6 +257,12 @@ fn resolve_tiers(
         .unwrap_or(false);
     settings.embedding = embedding::Provider::from_tiers(user, project, user_path);
     settings.caveman = caveman(user, project);
+    // Only the user sets the language; a project file cannot.
+    settings.language = user
+        .pointer("/language")
+        .and_then(Value::as_str)
+        .map(|language| language.trim().to_ascii_lowercase())
+        .filter(|language| !language.is_empty());
     settings
 }
 

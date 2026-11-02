@@ -13,11 +13,13 @@ use std::sync::Arc;
 use ck_contract_draft::send::{RunResult, RunSettings, RunState, SendRequest};
 
 /// A scripted model's reply to one run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Reply {
     pub text: String,
     /// `stop`, `length` and so on, as the runner normalizes it.
     pub finish: Option<String>,
+    /// The run fails with this provider error instead of replying.
+    pub error: Option<String>,
 }
 
 pub type Responder = Arc<dyn Fn(&RunSettings, &str) -> Reply + Send + Sync>;
@@ -51,10 +53,14 @@ impl Runs {
             request,
             result: RunResult {
                 run_id: run_id.clone(),
-                state: RunState::Finished,
+                state: if reply.error.is_some() {
+                    RunState::Failed
+                } else {
+                    RunState::Finished
+                },
                 finish: reply.finish,
-                text: Some(reply.text),
-                error: None,
+                text: reply.error.is_none().then_some(reply.text),
+                error: reply.error,
                 usage: None,
             },
         });
@@ -81,11 +87,13 @@ pub fn scripted_summarizer() -> Responder {
             return Reply {
                 text: String::new(),
                 finish: Some("stop".into()),
+                error: None,
             };
         }
         Reply {
             text: summarize(prompt),
             finish: Some("stop".into()),
+            error: None,
         }
     })
 }
