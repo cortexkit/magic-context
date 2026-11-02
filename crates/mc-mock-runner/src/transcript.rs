@@ -103,6 +103,30 @@ impl Transcript {
         self.entries.last().expect("just pushed")
     }
 
+    /// Store a text message without a tag number: a message from before a
+    /// move, which the move's first view already cuts.
+    pub fn append_unnumbered(&mut self, role: Role, text: &str, written_at: u64) -> &Entry {
+        let mid = format!("msg{:05}", self.next_mid);
+        self.next_mid += 1;
+        let parts = vec![Part::new(
+            format!("{mid}:p0"),
+            None,
+            PartBody::Text { text: text.into() },
+        )];
+        self.entries.push(Entry {
+            ordinal: self.entries.len() as u64,
+            mid,
+            role,
+            digest: entry_digest(role, None, &parts),
+            notice: None,
+            written_at,
+            parts,
+            usage: None,
+            generated_under: None,
+        });
+        self.entries.last().expect("just pushed")
+    }
+
     /// Record a tool's result on the newest message, the only one that may
     /// still change.
     pub fn complete_tool(

@@ -225,6 +225,7 @@ fn config(preset: &str, kind: Kind, rules: ProviderRules) -> SessionConfig {
         cache_ttl_ms: 300_000,
         system_tokens: 500,
         tag_checkpoint: 0,
+        moved_in: None,
         start_ms: 1_000_000,
         project: None,
         model_latency_ms: 0,
@@ -1987,5 +1988,164 @@ async fn a_long_head_session_keeps_ck_mcs_index_window_sized() {
         .map(|(_, entries)| entries)
         .sum();
     assert!(read > 0 && read <= 24, "read {read} of {total} entries");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A summary the standalone plugin stored for session `session`, covering
+/// the host's messages `start..=end` (1-based numbers) whose ids are given.
+fn insert_summary(
+    dir: &std::path::Path,
+    session: &str,
+    sequence: i64,
+    (start, start_id): (i64, &str),
+    (end, end_id): (i64, &str),
+    title: &str,
+) {
+    let connection = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO compartments (session_id, sequence, start_message, end_message,
+                                       start_message_id, end_message_id, title, content, p1,
+                                       created_at, harness)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 1, 'mock')",
+            rusqlite::params![
+                session,
+                sequence,
+                start,
+                end,
+                start_id,
+                end_id,
+                title,
+                format!("{title}: what happened.")
+            ],
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_numbers() {
+    use mc_module::move_in::{move_in, MoveRequest};
+    let dir = scratch("move-in");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    insert_memory(&dir, 1, "Ask before pushing.");
+    // The standalone plugin summarized all six messages, and its highest
+    // tag number was 42.
+    insert_summary(
+        &dir,
+        "s1",
+        0,
+        (1, "msg00001"),
+        (4, "msg00004"),
+        "Set up the parser",
+    );
+    insert_summary(
+        &dir,
+        "s1",
+        1,
+        (5, "msg00005"),
+        (6, "msg00006"),
+        "Fixed the crash",
+    );
+    {
+        let db = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+        db.execute(
+            "INSERT INTO tags (session_id, message_id, type, tag_number, harness)
+             VALUES ('s1', 'msg00006', 'message', 42, 'mock')",
+            [],
+        )
+        .unwrap();
+    }
+    // Another session whose summaries stop two messages short.
+    insert_summary(&dir, "s2", 0, (1, "msg00001"), (4, "msg00004"), "Started");
+    let project = ck_contract_draft::setup::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    };
+    let mut session_config = config("head", Kind::OpenAi, FREE);
+    session_config.project = Some(project.clone());
+    let request = |session: &str| MoveRequest {
+        session: SessionRef {
+            session: session.into(),
+            ..session_config.session.clone()
+        },
+        preset: "head".into(),
+        project: Some(project.clone()),
+        model: session_config.model.clone(),
+        context_window: session_config.context_window,
+        output_reserve: session_config.output_reserve,
+        rules: FREE,
+        newest: ck_contract_draft::read::Cursor {
+            ordinal: 5,
+            mid: "msg00006".into(),
+            digest: "d".into(),
+        },
+        now: 1,
+    };
+    let config_source = mc_module::config::Config::from(Settings::default());
+    let open = || {
+        (
+            ContextDb::open(&dir.join("context.db")).unwrap(),
+            Store::open(&dir.join("mode3.db")).unwrap(),
+        )
+    };
+    let (db, store) = open();
+    let refused = move_in(db, &store, &config_source, &request("s2")).unwrap_err();
+    assert!(refused.starts_with("session_not_summarized:"), "{refused}");
+    let (db, store) = open();
+    let moved = move_in(db, &store, &config_source, &request("s1")).unwrap();
+    assert_eq!(moved.tag_checkpoint, 42);
+    drop(store);
+    let (db, store) = open();
+    let again = move_in(db, &store, &config_source, &request("s1")).unwrap_err();
+    assert!(again.starts_with("session_already_moved:"), "{again}");
+    drop(store);
+
+    // The runner's move left the old messages and installed the view; the
+    // session goes on from there.
+    session_config.tag_checkpoint = moved.tag_checkpoint;
+    session_config.moved_in = Some(mc_mock_runner::runner::MovedIn {
+        messages: (1..=6)
+            .map(|n| {
+                let role = if n % 2 == 1 {
+                    ck_contract_draft::read::Role::User
+                } else {
+                    ck_contract_draft::read::Role::Assistant
+                };
+                (role, format!("Old message {n}."))
+            })
+            .collect(),
+        view: moved.view.clone(),
+    });
+    let mut runner = start_full(session_config, Settings::default(), Some(dir.clone())).await;
+    runner
+        .play(&[user("Where were we?"), answer(), user("Go on."), answer()])
+        .await;
+    assert_clean(&runner);
+    let host = runner.host();
+    // The model sees the summaries and the memory, none of the old
+    // messages, and numbers continuing above 42.
+    let (m0, _) = head_texts(host);
+    assert!(
+        m0.contains("Set up the parser") && m0.contains("Fixed the crash"),
+        "{m0}"
+    );
+    assert!(m0.contains("Ask before pushing."), "{m0}");
+    let rendered: String = host
+        .rendered()
+        .iter()
+        .flat_map(|message| &message.parts)
+        .map(|part| format!("{part:?}"))
+        .collect();
+    assert!(!rendered.contains("Old message"), "{rendered}");
+    let first = seen(host, 43).unwrap_or_default();
+    assert!(first.contains("Where were we?"), "{first}");
+    // No rebuild: the first request writes the cache once with the moved
+    // view, and the next one reads all of it.
+    assert_eq!(host.applied_version(), Some(moved.view.version));
+    let requests = &runner.report.requests;
+    assert_eq!(
+        requests[1].usage.cache_read_tokens,
+        requests[0].usage.prompt_tokens
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

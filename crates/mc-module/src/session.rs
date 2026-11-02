@@ -391,6 +391,13 @@ impl Session {
             .is_some_and(|view| view.edits.iter().any(|edit| head::is_head(&edit.op)));
     }
 
+    /// The id of the last message a summary covers.
+    pub fn last_summary_end(&self) -> Option<String> {
+        self.summaries
+            .last()
+            .map(|summary| summary.end_message_id.clone())
+    }
+
     /// The last ordinal a summary covers.
     fn summarized_through(&self) -> Option<u64> {
         self.summaries
@@ -909,6 +916,26 @@ impl Session {
         if !self.features.summarizer {
             return (Vec::new(), None);
         }
+        let mut ops = self.render_head(settings);
+        let cut = self.summaries.last().and_then(|last| {
+            self.index
+                .entries()
+                .iter()
+                .find(|entry| entry.mid == last.end_message_id)
+                .map(|entry| (entry.ordinal, last.end_message_id.clone()))
+        });
+        if let Some((_, through)) = &cut {
+            ops.push(EditOp::Cut {
+                through: through.clone(),
+            });
+        }
+        (ops, cut.map(|(ordinal, _)| ordinal))
+    }
+
+    /// The history head's edits: `m[0]` (kept unless a fold is due) and
+    /// `m[1]` with what changed since. The baseline they set counts once the
+    /// runner takes the view.
+    fn render_head(&mut self, settings: &Settings) -> Vec<EditOp> {
         let docs = self
             .project
             .as_ref()
@@ -971,24 +998,37 @@ impl Session {
             ..fold_inputs
         };
         let (m1, next) = head::delta(&base, &inputs);
-        let mut ops = head::head_ops(&next.m0, &m1);
-        // The new baseline and the changes m[1] shows count only once the
-        // runner takes this view.
+        let ops = head::head_ops(&next.m0, &m1);
         self.next_baseline = Some(next);
+        ops
+    }
 
-        let cut = self.summaries.last().and_then(|last| {
-            self.index
-                .entries()
-                .iter()
-                .find(|entry| entry.mid == last.end_message_id)
-                .map(|entry| (entry.ordinal, last.end_message_id.clone()))
+    /// The first view of a session moved in from a standalone host whose
+    /// summaries cover its whole transcript: the history head, and a cut
+    /// through `newest`, the transcript's last message. The session then
+    /// holds it as accepted, ready to be saved.
+    pub fn first_view_after_move(&mut self, settings: &Settings, newest: &Cursor) -> View {
+        self.fold_due = true;
+        let mut ops = self.render_head(settings);
+        ops.push(EditOp::Cut {
+            through: newest.mid.clone(),
         });
-        if let Some((_, through)) = &cut {
-            ops.push(EditOp::Cut {
-                through: through.clone(),
-            });
+        let version = self.version + 1;
+        let view = View::seal(
+            version,
+            ops.into_iter()
+                .map(|op| ck_contract_draft::view::Edit::new(version, op))
+                .collect(),
+        );
+        if let Some(next) = self.next_baseline.take() {
+            self.baseline = Some(next);
+            self.fold_due = false;
         }
-        (ops, cut.map(|(ordinal, _)| ordinal))
+        self.version = version;
+        self.cut = Some(newest.ordinal);
+        self.index = Index::starting_at(newest.ordinal);
+        self.latest = Some(view.clone());
+        view
     }
 
     /// A pass with permission to rebuild: every lane adds the parts it wants

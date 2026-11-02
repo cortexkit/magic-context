@@ -61,6 +61,19 @@ pub struct SessionConfig {
     /// instead.
     #[serde(default)]
     pub model_latency_ms: u64,
+    /// A session moved in from a standalone host, as the move left it.
+    #[serde(default)]
+    pub moved_in: Option<MovedIn>,
+}
+
+/// What a move from a standalone host leaves in the runner: the old
+/// messages, already summarized, and the first view, installed as the
+/// session's current view. The old messages carry no tag numbers; numbering
+/// continues from [`SessionConfig::tag_checkpoint`].
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct MovedIn {
+    pub messages: Vec<(Role, String)>,
+    pub view: View,
 }
 
 /// A call to the provider that did not get an answer.
@@ -352,11 +365,19 @@ impl<P: Provider> Runner<P> {
     /// Start a session: Setup, nothing else.
     pub async fn start(config: SessionConfig, provider: P) -> Result<Self, CallError> {
         let model = MockModel::new(config.kind, config.cache_ttl_ms);
+        let mut transcript = Transcript::new(config.tag_checkpoint);
+        let mut applied = None;
+        if let Some(moved) = &config.moved_in {
+            for (role, text) in &moved.messages {
+                transcript.append_unnumbered(*role, text, config.start_ms);
+            }
+            applied = Some(moved.view.clone());
+        }
         let state = State {
-            transcript: Transcript::new(config.tag_checkpoint),
+            transcript,
             now: config.start_ms,
             config,
-            applied: None,
+            applied,
             pending: None,
             reasoning_tokens: HashMap::new(),
             reminders: Vec::new(),

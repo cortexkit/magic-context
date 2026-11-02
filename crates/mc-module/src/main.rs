@@ -1,4 +1,9 @@
 //! ck-mc: serve Magic Context's compaction provider over the subc daemon.
+//!
+//! `ck-mc move-in` instead moves one standalone session to mode 3 (see
+//! `mc_module::move_in`): it reads the request as JSON on standard input and
+//! prints the first view and tag checkpoint for the runner's own move. Run
+//! it with ck-mc and the session's host stopped.
 
 #![forbid(unsafe_code)]
 
@@ -15,6 +20,9 @@ const DEFAULT_MODULE_ID: &str = "magic-context";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    if std::env::args().nth(1).as_deref() == Some("move-in") {
+        return move_in();
+    }
     // Before anything could start a child that would inherit the launch
     // nonce's descriptor.
     let _ = subc_client_rs::launch_nonce();
@@ -44,6 +52,20 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     )
     .await?;
     serve.await?;
+    Ok(())
+}
+
+fn move_in() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let request: mc_module::move_in::MoveRequest = serde_json::from_reader(std::io::stdin())?;
+    let db = ContextDb::open(&context_db_path().ok_or("move-in needs MAGIC_CONTEXT_DB")?)?;
+    let store = Store::open(&store_path().ok_or("move-in needs MAGIC_CONTEXT_MODE3_STORE")?)?;
+    let moved = mc_module::move_in::move_in(
+        db,
+        &store,
+        &Config::Files(Loader::from_environment()),
+        &request,
+    )?;
+    println!("{}", serde_json::to_string(&moved)?);
     Ok(())
 }
 
