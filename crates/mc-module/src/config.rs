@@ -256,7 +256,50 @@ fn resolve_tiers(
         })
         .unwrap_or(false);
     settings.embedding = embedding::Provider::from_tiers(user, project, user_path);
+    settings.caveman = caveman(user, project);
     settings
+}
+
+/// `caveman_text_compression`: on when the last tier that sets `enabled`
+/// turns it on, with `min_chars` (100 to 10,000, default 500) from the last
+/// tier that sets a valid one; an out-of-range value is ignored, as the
+/// plugin's loader falls back to the default for an invalid leaf. The word rules follow the user-level `language`: English
+/// when it is unset, `en`, `en-*` or not a known code (the values that give no
+/// reply-language directive), as `cavemanWordRulesForLanguage` decides.
+fn caveman(user: &Value, project: &Value) -> Option<crate::pass::Caveman> {
+    let mut enabled = false;
+    let mut min_chars = 500;
+    for tier in [user, project] {
+        if let Some(on) = tier
+            .pointer("/caveman_text_compression/enabled")
+            .and_then(Value::as_bool)
+        {
+            enabled = on;
+        }
+        if let Some(chars) = tier
+            .pointer("/caveman_text_compression/min_chars")
+            .and_then(Value::as_u64)
+            .filter(|chars| (100..=10_000).contains(chars))
+        {
+            min_chars = chars;
+        }
+    }
+    if !enabled {
+        return None;
+    }
+    let code = user
+        .pointer("/language")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let english_word_rules = code == "en"
+        || code.starts_with("en-")
+        || crate::catalog::primary_language_directive(Some(&code)).is_empty();
+    Some(crate::pass::Caveman {
+        min_chars,
+        english_word_rules,
+    })
 }
 
 /// The catalog's settings from the two tiers, read as the plugin reads them.
@@ -792,5 +835,54 @@ mod tests {
         assert_eq!(provider.endpoint(), "https://e.invalid/v1");
         assert_eq!(provider.api_key_for_test(), Some("{file:key}"));
         fs::remove_dir_all(folder).ok();
+    }
+
+    #[test]
+    fn caveman_is_off_by_default_and_its_word_rules_follow_the_language() {
+        use crate::pass::Caveman;
+        let resolve =
+            |user: Value, project: Value| resolve_for_test(user, project, OPUS, 1_000).caveman;
+        assert_eq!(resolve(json!({}), json!({})), None);
+        let on = json!({"caveman_text_compression": {"enabled": true}});
+        assert_eq!(
+            resolve(on.clone(), json!({})),
+            Some(Caveman {
+                min_chars: 500,
+                english_word_rules: true
+            })
+        );
+        // Another language keeps only the language-neutral passes; English
+        // and an unknown code keep the English word lists.
+        let with_language = |language: &str| json!({"caveman_text_compression": {"enabled": true, "min_chars": 50}, "language": language});
+        assert_eq!(
+            resolve(with_language("tr"), json!({})).map(|c| c.english_word_rules),
+            Some(false)
+        );
+        assert_eq!(
+            resolve(with_language("en-GB"), json!({})).map(|c| c.english_word_rules),
+            Some(true)
+        );
+        assert_eq!(
+            resolve(with_language("zz"), json!({})).map(|c| c.english_word_rules),
+            Some(true)
+        );
+        // An out-of-range min_chars is ignored; a project may set its own,
+        // and may turn the lane off.
+        assert_eq!(
+            resolve(with_language("en"), json!({})).map(|c| c.min_chars),
+            Some(500)
+        );
+        assert_eq!(
+            resolve(
+                on.clone(),
+                json!({"caveman_text_compression": {"min_chars": 800}})
+            )
+            .map(|c| c.min_chars),
+            Some(800)
+        );
+        assert_eq!(
+            resolve(on, json!({"caveman_text_compression": {"enabled": false}})),
+            None
+        );
     }
 }

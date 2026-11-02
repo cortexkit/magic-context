@@ -1041,6 +1041,77 @@ fn head_texts(host: &Host) -> (String, String) {
 }
 
 #[tokio::test]
+async fn caveman_compresses_older_long_text_by_age_when_turned_on() {
+    let settings = Settings {
+        caveman: Some(mc_module::pass::Caveman {
+            min_chars: 100,
+            english_word_rules: true,
+        }),
+        ..Settings::default()
+    };
+    let long = |n: usize| {
+        format!(
+            "Message {n}: I really just think that the very simple approach is actually quite good, and we should basically go with it because it is the clearest option."
+        )
+    };
+    let mut runner = start_with(config("head", Kind::OpenAi, FREE), settings).await;
+    let mut steps = Vec::new();
+    // Ten person messages and ten replies: twenty eligible text parts, tags
+    // 1 to 20, oldest first.
+    for n in 0..10 {
+        steps.push(user(&long(2 * n + 1)));
+        steps.push(Step::Model(Turn {
+            text: Some(long(2 * n + 2)),
+            output_tokens: 40,
+            ..Turn::default()
+        }));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    // Below the threshold nothing is compressed.
+    let first: String = format!("\u{a7}1\u{a7} {}", long(1))
+        .chars()
+        .take(60)
+        .collect();
+    assert_eq!(seen(runner.host(), 1), Some(first));
+    // A lost cache rewrites the prefix anyway; the lanes ride it.
+    runner
+        .play(&[Step::Wait { ms: 400_000 }, user("Next."), answer()])
+        .await;
+    assert_clean(&runner);
+    let shown = |tag: u64| {
+        runner
+            .host()
+            .rendered()
+            .iter()
+            .flat_map(|message| message.parts.clone())
+            .find(|part| part.tag == Some(tag))
+            .and_then(|part| match part.body {
+                PartBody::Text { text } => Some(text),
+                _ => None,
+            })
+            .unwrap()
+    };
+    use mc_module::caveman::{compress, CavemanLevel};
+    // The oldest fifth goes to ultra, the next to full, the next to lite.
+    assert_eq!(
+        shown(1),
+        format!("§1§ {}", compress(&long(1), CavemanLevel::Ultra))
+    );
+    assert_eq!(
+        shown(5),
+        format!("§5§ {}", compress(&long(5), CavemanLevel::Full))
+    );
+    assert_eq!(
+        shown(9),
+        format!("§9§ {}", compress(&long(9), CavemanLevel::Lite))
+    );
+    // The newest 40% stays as written.
+    assert_eq!(shown(13), long(13));
+    assert_ne!(shown(1), format!("§1§ {}", long(1)));
+}
+
+#[tokio::test]
 async fn a_lost_cache_folds_the_newer_summaries_into_the_baseline() {
     let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
     let mut steps = Vec::new();

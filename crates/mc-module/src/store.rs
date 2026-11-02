@@ -40,6 +40,9 @@ pub struct Durable {
     /// Messages a person wrote before the cut, for the reminders' cadence.
     #[serde(default)]
     pub pruned_turns: u64,
+    /// How far each compressed text part is compressed.
+    #[serde(default)]
+    pub caveman: crate::lanes::CavemanState,
 }
 
 pub struct Store {

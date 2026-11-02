@@ -57,6 +57,19 @@ pub struct Settings {
     pub temporal_awareness: bool,
     /// `memory.auto_search`: memory hints on a person's message.
     pub auto_search: AutoSearch,
+    /// `caveman_text_compression`: older long text compressed by age, for
+    /// sessions with a summarizer. `None` when off, the default.
+    pub caveman: Option<Caveman>,
+}
+
+/// How the caveman lane compresses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Caveman {
+    /// Text shorter than this, in bytes of its own text, stays as it is.
+    pub min_chars: u64,
+    /// The English word lists apply; for another `language`, only the
+    /// language-neutral passes run.
+    pub english_word_rules: bool,
 }
 
 /// When a person's message gets a memory hint.
@@ -96,6 +109,7 @@ impl Default for Settings {
             embedding: None,
             temporal_awareness: true,
             auto_search: AutoSearch::default(),
+            caveman: None,
         }
     }
 }

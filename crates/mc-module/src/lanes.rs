@@ -695,6 +695,134 @@ pub fn injected_text(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Sh
         .collect()
 }
 
+/// How far each compressed text part is compressed, and with which word
+/// rules, so a part only ever deepens and a change of `language` rewrites
+/// every compressed part once.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CavemanState {
+    /// Message id, part id and depth: 1 lite, 2 full, 3 ultra.
+    pub depths: Vec<(String, String, u8)>,
+    /// The word rules the compressed parts were written with.
+    pub english_word_rules: Option<bool>,
+}
+
+impl CavemanState {
+    fn depth(&self, key: &PartKey) -> u8 {
+        self.depths
+            .iter()
+            .find(|(mid, part, _)| *mid == key.0 && *part == key.1)
+            .map_or(0, |(_, _, depth)| *depth)
+    }
+
+    /// Forget parts the index no longer holds.
+    pub fn retain_present(&mut self, index: &Index) {
+        self.depths
+            .retain(|(mid, part, _)| index.find(mid, part).is_some());
+    }
+}
+
+/// The depth a text part should have by its place among the eligible parts,
+/// oldest first: the oldest 20% ultra, the next 20% full, the next 20% lite,
+/// the newest 40% untouched (`computeTargetDepth` in `caveman-cleanup.ts`).
+pub fn caveman_target_depth(position: usize, total: usize) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+    let fraction = position as f64 / total as f64;
+    if fraction < 0.2 {
+        3
+    } else if fraction < 0.4 {
+        2
+    } else if fraction < 0.6 {
+        1
+    } else {
+        0
+    }
+}
+
+/// The caveman lane, as the plugin's `applyCavemanCleanup`: numbered text
+/// parts outside the protected tail, not dropped, whose text is at least
+/// `min_chars` bytes, are compressed by age ([`caveman_target_depth`]), only
+/// ever deeper, always from their original text (after stripping injected
+/// regions, as the plugin's stored source is). A compressed part keeps its
+/// prefix and can still be dropped. When the word rules changed, every
+/// compressed part is rewritten at its depth.
+///
+/// Returns each part's new text and the state to keep once the view is
+/// taken. A part whose compressed text equals what it already shows gets its
+/// depth and no text.
+pub fn caveman(
+    context: &Context,
+    settings: &crate::pass::Caveman,
+    state: &CavemanState,
+    cutoff: Option<u64>,
+    skip: &[PartKey],
+) -> (Vec<(PartKey, String)>, CavemanState) {
+    let rewrite_all = state
+        .english_word_rules
+        .is_some_and(|english| english != settings.english_word_rules);
+    let mut eligible: Vec<(u64, PartKey, &str, String)> = context
+        .index
+        .entries()
+        .iter()
+        .filter(|entry| entry.role != Role::System)
+        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+        .filter_map(|(entry, part)| {
+            let (PartBody::Text { text }, Some(tag)) = (&part.body, part.tag) else {
+                return None;
+            };
+            let key = (entry.mid.clone(), part.id.clone());
+            if in_tail(part, cutoff)
+                || context.edited.covers(&entry.mid, &part.id)
+                || skip.contains(&key)
+            {
+                return None;
+            }
+            let source = injection::stripped_source(tag, text).unwrap_or_else(|| text.clone());
+            (source.len() as u64 >= settings.min_chars).then_some((tag, key, text.as_str(), source))
+        })
+        .collect();
+    eligible.sort_by_key(|(tag, ..)| *tag);
+    let total = eligible.len();
+    let mut next = CavemanState {
+        depths: Vec::new(),
+        english_word_rules: Some(settings.english_word_rules),
+    };
+    let mut texts = Vec::new();
+    for (position, (tag, key, text, source)) in eligible.into_iter().enumerate() {
+        let current = state.depth(&key);
+        let target = caveman_target_depth(position, total);
+        let depth = if target > current {
+            target
+        } else if current > 0 && rewrite_all {
+            current
+        } else {
+            if current > 0 {
+                next.depths.push((key.0, key.1, current));
+            }
+            continue;
+        };
+        let level = match depth {
+            1 => crate::caveman::CavemanLevel::Lite,
+            2 => crate::caveman::CavemanLevel::Full,
+            _ => crate::caveman::CavemanLevel::Ultra,
+        };
+        let compressed = crate::caveman::compress_with(&source, level, settings.english_word_rules);
+        if compressed.is_empty() {
+            if current > 0 {
+                next.depths.push((key.0, key.1, current));
+            }
+            continue;
+        }
+        let shown = format!("§{tag}§ {compressed}");
+        if shown != format!("§{tag}§ {text}") {
+            texts.push((key.clone(), shown));
+        }
+        next.depths.push((key.0, key.1, depth));
+    }
+    (texts, next)
+}
+
 /// The text an answered image becomes.
 pub const IMAGE_STRIPPED: &str = "[image stripped]";
 

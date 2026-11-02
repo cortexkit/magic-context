@@ -153,6 +153,22 @@ pub fn strip_part(tag: u64, text: &str) -> Option<Stripped> {
     })
 }
 
+/// A text part's text without its injected regions and without its prefix,
+/// as the plugin stores it after stripping (`replaceSourceContent` with
+/// `stripTagPrefix`): what later compression starts from. `None` when the part
+/// holds no injected text.
+pub fn stripped_source(tag: u64, text: &str) -> Option<String> {
+    let prefix = format!("§{tag}§");
+    let stripped = strip(&format!("{prefix} {text}"))?;
+    Some(
+        stripped
+            .strip_prefix(&prefix)
+            .unwrap_or(&stripped)
+            .trim_start()
+            .to_owned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

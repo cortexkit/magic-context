@@ -25,6 +25,10 @@ pub struct Features {
     /// A person's message gets a marker of the time since the previous
     /// message after a long gap. A reader runs one short task and gets none.
     pub time_marker: bool,
+    /// Older long text is compressed by age when the user turns
+    /// `caveman_text_compression` on. Never for a session another agent
+    /// started, as in the plugin.
+    pub caveman: bool,
 }
 
 impl Features {
@@ -37,6 +41,7 @@ impl Features {
         ctx_keep: false,
         auto_memory: false,
         time_marker: false,
+        caveman: false,
     };
 }
 
@@ -50,6 +55,7 @@ pub fn features(preset: &str) -> Option<Features> {
             ctx_keep: false,
             auto_memory: true,
             time_marker: true,
+            caveman: true,
         }),
         "worker" => Some(Features {
             summarizer: false,
@@ -57,6 +63,7 @@ pub fn features(preset: &str) -> Option<Features> {
             ctx_keep: true,
             auto_memory: false,
             time_marker: true,
+            caveman: false,
         }),
         "reader" => Some(Features {
             summarizer: false,
@@ -64,6 +71,7 @@ pub fn features(preset: &str) -> Option<Features> {
             ctx_keep: true,
             auto_memory: false,
             time_marker: false,
+            caveman: false,
         }),
         _ => None,
     }

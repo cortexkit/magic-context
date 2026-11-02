@@ -75,6 +75,12 @@ pub struct Session {
     /// The baseline a view being published was built on; it replaces
     /// `baseline` once the runner takes the view.
     next_baseline: Option<Baseline>,
+    /// How far each compressed text part is compressed, as the applied view
+    /// shows it.
+    caveman: lanes::CavemanState,
+    /// The caveman state of the view being handed over, which counts once
+    /// the runner takes it.
+    next_caveman: Option<lanes::CavemanState>,
     /// A revert removed summaries the head shows. The next notice rebuilds
     /// the head whatever the usage: the model must not keep seeing history
     /// that was undone.
@@ -121,6 +127,8 @@ impl Session {
             summaries: Vec::new(),
             baseline: None,
             next_baseline: None,
+            caveman: lanes::CavemanState::default(),
+            next_caveman: None,
             summarizing: false,
             fold_due: false,
             head_stale: false,
@@ -194,6 +202,7 @@ impl Session {
             nudges: self.nudges.clone(),
             cut: self.cut,
             pruned_turns: self.pruned_turns,
+            caveman: self.caveman.clone(),
         }
     }
 
@@ -208,6 +217,7 @@ impl Session {
         self.nudges = durable.nudges;
         self.cut = durable.cut;
         self.pruned_turns = durable.pruned_turns;
+        self.caveman = durable.caveman;
         // The first read after a restart starts at the cut: nothing before
         // it is visible to the model.
         self.index = Index::starting_at(durable.cut.unwrap_or(1));
@@ -1171,6 +1181,29 @@ impl Session {
         let (image_ops, image_parts) = lanes::answered_images(&context, &images);
         ops.extend(image_ops);
         covered.extend(image_parts);
+        // Caveman text replaces any other text edit of the same part this
+        // pass made (a stripped injection): it starts from the stripped text.
+        self.next_caveman = None;
+        if let (true, Some(caveman)) = (self.features.caveman, settings.caveman.as_ref()) {
+            let (texts, next) = lanes::caveman(&context, caveman, &self.caveman, cutoff, &covered);
+            for ((mid, part_id), text) in texts {
+                let Some((_, part)) = self.index.find(&mid, &part_id) else {
+                    continue;
+                };
+                ops.retain(|op| {
+                    !matches!(op, EditOp::Replace { mid: m, part: p, field, .. }
+                        if *m == mid && *p == part_id && field == "text")
+                });
+                ops.push(EditOp::Replace {
+                    mid,
+                    part: part_id,
+                    field: "text".into(),
+                    value: serde_json::json!(text),
+                    expect: part.digest.clone(),
+                });
+            }
+            self.next_caveman = Some(next);
+        }
         let bookmark = lanes::far_behind_bookmark(&context, usable);
         // The age sweep only drops on the pass after the one that sees an
         // output far behind, so the first pass over the threshold frees
@@ -1254,6 +1287,7 @@ impl Session {
             // Views name edits, never copies, so one this large is a bug in a
             // lane. It is not sent; the runner keeps the view it has.
             self.next_baseline = None;
+            self.next_caveman = None;
             eprintln!(
                 "ck-mc: session {}: view {} not sent: view_too_large ({size} bytes, limit {MAX_VIEW_BYTES})",
                 self.key.session, view.version
@@ -1265,6 +1299,7 @@ impl Session {
             Ok(ApplyViewAnswer::Accepted) => self.accept(view),
             Ok(ApplyViewAnswer::Refused { refusal }) => {
                 self.next_baseline = None;
+                self.next_caveman = None;
                 eprintln!(
                     "ck-mc: session {}: runner refused view {}: {refusal:?}",
                     self.key.session, view.version
@@ -1272,6 +1307,7 @@ impl Session {
             }
             Err(error) => {
                 self.next_baseline = None;
+                self.next_caveman = None;
                 eprintln!(
                     "ck-mc: session {}: session.apply_view failed: {error:?}",
                     self.key.session
@@ -1284,6 +1320,9 @@ impl Session {
         if let Some(next) = self.next_baseline.take() {
             self.baseline = Some(next);
             self.fold_due = false;
+        }
+        if let Some(next) = self.next_caveman.take() {
+            self.caveman = next;
         }
         self.version = self.version.max(view.version);
         self.apply_cut(&view);
@@ -1403,6 +1442,7 @@ impl Session {
             .retain(|(mid, part)| index.find(mid, part).is_some());
         self.image_outputs
             .retain(|(mid, part), _| index.find(mid, part).is_some());
+        self.caveman.retain_present(index);
     }
 
     /// Read in full the tool results with images whose output the
