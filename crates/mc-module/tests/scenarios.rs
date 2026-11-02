@@ -1823,3 +1823,169 @@ async fn a_reduce_reminder_rides_the_next_tool_result_once_and_a_reduce_quiets_i
         "{reminder}"
     );
 }
+
+/// A runner that never answers any call about the session named `stuck`,
+/// and answers the others with an empty transcript.
+#[derive(Clone)]
+struct StuckClient;
+
+impl StuckClient {
+    async fn answer<T>(session: &SessionRef, value: T) -> Result<T, ClientError> {
+        if session.session == "stuck" {
+            std::future::pending::<()>().await;
+        }
+        Ok(value)
+    }
+}
+
+impl RunnerClient for StuckClient {
+    async fn read(&self, request: ReadRequest) -> Result<ReadPage, ClientError> {
+        let page = ReadPage {
+            entries: Vec::new(),
+            next_after: None,
+            head: ck_contract_draft::read::Head {
+                newest: None,
+                applied_view: None,
+            },
+        };
+        Self::answer(&request.session, page).await
+    }
+
+    async fn publish(&self, request: ViewPublishRequest) -> Result<ViewPublishAnswer, ClientError> {
+        Self::answer(&request.session, ViewPublishAnswer::Accepted).await
+    }
+
+    async fn current(&self, request: ViewCurrentRequest) -> Result<ViewCurrentAnswer, ClientError> {
+        Self::answer(&request.session, ViewCurrentAnswer { view: None }).await
+    }
+
+    async fn send(&self, request: SendRequest) -> Result<SendAnswer, ClientError> {
+        Self::answer(&request.session, SendAnswer::Queued).await
+    }
+
+    async fn run_result(&self, request: RunResultRequest) -> Result<RunResult, ClientError> {
+        std::future::pending::<()>().await;
+        Err(ClientError(format!("no run {}", request.run_id)))
+    }
+}
+
+#[tokio::test]
+async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
+    let module = Module::new(StuckClient, Settings::default(), None, None);
+    let session = |name: &str| SessionRef {
+        runner: "mock-runner".into(),
+        harness: "mock".into(),
+        session: name.into(),
+    };
+    let model = ModelRef {
+        provider: "test".into(),
+        model: "test-model".into(),
+        variant: None,
+        service_tier: None,
+    };
+    let cursor = ck_contract_draft::read::Cursor {
+        ordinal: 0,
+        mid: "m0".into(),
+        digest: "d".into(),
+    };
+    let setup = |name: &str, newest: Option<ck_contract_draft::read::Cursor>| SetupRequest {
+        session: session(name),
+        preset: "worker".into(),
+        model: model.clone(),
+        context_window: 40_000,
+        output_reserve: 4_000,
+        rules: FREE,
+        applied_view: None,
+        newest,
+        now: 0,
+        project: None,
+    };
+    // The stuck session's Setup has a transcript to read, and that read
+    // never returns: its worker waits for good.
+    module.setup(setup("stuck", Some(cursor.clone()))).unwrap();
+    module.setup(setup("free", None)).unwrap();
+    let conditions = ck_contract_draft::notice::Conditions {
+        model: model.clone(),
+        context_window: 40_000,
+        output_reserve: 4_000,
+        rules: FREE,
+        last_prompt_tokens: Some(1_000),
+    };
+    let notice = |name: &str| NoticeRequest {
+        session: session(name),
+        seq: 1,
+        newest: cursor.clone(),
+        applied_view: None,
+        conditions: conditions.clone(),
+        events: Vec::new(),
+        entries: Vec::new(),
+    };
+    // A notice is acknowledged at once even for the stuck session; its
+    // work waits behind the read.
+    assert_eq!(module.notice(notice("stuck")), Ok(NoticeAnswer::Received));
+    assert_eq!(module.notice(notice("free")), Ok(NoticeAnswer::Received));
+    let limit = std::time::Duration::from_secs(5);
+    tokio::time::timeout(limit, module.idle(&session("free")))
+        .await
+        .expect("the free session finished its notice")
+        .unwrap();
+    // A ride on the stuck session answers within its deadline, with nothing.
+    let ride = RideRequest {
+        session: session("stuck"),
+        cause: RideCause::CacheExpired,
+        deadline_ms: 200,
+        conditions,
+        applied_view: None,
+        request_tokens: None,
+    };
+    let answer = tokio::time::timeout(limit, module.ride(ride))
+        .await
+        .expect("the ride kept its deadline")
+        .unwrap();
+    assert_eq!(answer, RideAnswer::Nothing);
+    // And the free session still answers tools while the stuck one waits.
+    let reply = tokio::time::timeout(
+        limit,
+        module.tool(&session("free"), "ctx_reduce", json!({"drop": "1"})),
+    )
+    .await
+    .expect("the free session answered its tool call");
+    assert!(reply.is_err(), "{reply:?}");
+}
+
+#[tokio::test]
+async fn a_long_head_session_keeps_ck_mcs_index_window_sized() {
+    // Forty turns of four messages each: summaries keep cutting the older
+    // ones. After a restart, ck-mc reads only what the model still sees,
+    // however long the session has run.
+    let dir = scratch("long-head");
+    let mut runner = start_full(
+        config("head", Kind::OpenAi, FREE),
+        Settings::default(),
+        Some(dir.clone()),
+    )
+    .await;
+    let mut steps = Vec::new();
+    for turn_number in 0..40 {
+        steps.extend(turn(&format!("Look at file {turn_number}.")));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let total = runner.host().entries().len();
+    assert!(total >= 160, "{total}");
+    runner.provider().client.reads.lock().unwrap().clear();
+    runner.provider().restart();
+    runner.play(&turn("One more.")).await;
+    assert_clean(&runner);
+    let read: usize = runner
+        .provider()
+        .client
+        .reads
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, entries)| entries)
+        .sum();
+    assert!(read > 0 && read <= 24, "read {read} of {total} entries");
+    let _ = std::fs::remove_dir_all(&dir);
+}
