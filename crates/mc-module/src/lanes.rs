@@ -67,8 +67,30 @@ pub struct Edited {
 }
 
 impl Edited {
-    pub fn of(view: Option<&View>) -> Self {
+    /// What `view` changes, plus every message at or before `cut`, the
+    /// ordinal a summary is about to cover.
+    pub fn of(view: Option<&View>, index: &Index, cut: Option<u64>) -> Self {
         let mut edited = Self::default();
+        let mut cut = cut;
+        for edit in view.map(|view| view.edits.as_slice()).unwrap_or_default() {
+            if let EditOp::Cut { through } = &edit.op {
+                let ordinal = index
+                    .entries()
+                    .iter()
+                    .find(|entry| &entry.mid == through)
+                    .map(|entry| entry.ordinal);
+                cut = cut.max(ordinal);
+            }
+        }
+        if let Some(cut) = cut {
+            edited.messages.extend(
+                index
+                    .entries()
+                    .iter()
+                    .take_while(|entry| entry.ordinal <= cut)
+                    .map(|entry| entry.mid.clone()),
+            );
+        }
         for edit in view.map(|view| view.edits.as_slice()).unwrap_or_default() {
             match &edit.op {
                 EditOp::Drop {
@@ -81,7 +103,7 @@ impl Edited {
                 EditOp::Drop { mid, part: None } => {
                     edited.messages.insert(mid.clone());
                 }
-                EditOp::Insert { .. } => {}
+                EditOp::Insert { .. } | EditOp::Cut { .. } => {}
             }
         }
         edited

@@ -6,6 +6,10 @@
 //! Notices are acknowledged before their work runs, so a runner never waits
 //! on ck-mc to send its next request. Rides and tool calls wait for their
 //! answer, within the deadline the runner gave.
+//!
+//! A summarizer run is the one piece of a session's work that runs beside
+//! its worker: it can take minutes, and the session keeps answering rides
+//! meanwhile. Its result comes back as a job of its own.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -20,9 +24,12 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::client::RunnerClient;
+use crate::context_db::ContextDb;
 use crate::pass::Settings;
 use crate::preset;
 use crate::session::Session;
+use crate::summary::run;
+use crate::summary::validate::ValidatedChunk;
 
 /// A call ck-mc refuses.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,7 +61,12 @@ impl<C> Clone for Module<C> {
 struct Inner<C> {
     client: C,
     settings: Settings,
+    /// Where summaries are stored. Without it they live only in memory, which
+    /// only tests want.
+    db: Option<ContextDb>,
     workers: Mutex<HashMap<SessionRef, mpsc::UnboundedSender<Job>>>,
+    /// Summarizer runs in progress, so [`Module::idle`] can wait for them.
+    summaries_running: Mutex<usize>,
 }
 
 enum Job {
@@ -68,15 +80,18 @@ enum Job {
     },
     ViewGet(u64, oneshot::Sender<Option<View>>),
     Idle(oneshot::Sender<()>),
+    SummaryFinished(Result<Option<ValidatedChunk>, String>),
 }
 
-impl<C: RunnerClient> Module<C> {
-    pub fn new(client: C, settings: Settings) -> Self {
+impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
+    pub fn new(client: C, settings: Settings, db: Option<ContextDb>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 client,
                 settings,
+                db,
                 workers: Mutex::new(HashMap::new()),
+                summaries_running: Mutex::new(0),
             }),
         }
     }
@@ -153,13 +168,24 @@ impl<C: RunnerClient> Module<C> {
             .map_err(ModuleError::Tool)
     }
 
-    /// Wait until the session's worker has handled every job sent before.
-    /// Tests use it to make a run deterministic, the way a real runner's
-    /// model time gives ck-mc time to finish.
+    /// Wait until the session's worker has handled every job sent before,
+    /// and every summarizer run has ended and been handled. Tests use it to
+    /// make a run deterministic, the way a real runner's model time gives
+    /// ck-mc time to finish.
     pub async fn idle(&self, session: &SessionRef) -> Result<(), ModuleError> {
-        let (reply, answer) = oneshot::channel();
-        self.send(session, Job::Idle(reply))?;
-        answer.await.map_err(|_| ModuleError::Stopped)
+        loop {
+            let (reply, answer) = oneshot::channel();
+            self.send(session, Job::Idle(reply))?;
+            answer.await.map_err(|_| ModuleError::Stopped)?;
+            if *self.inner.summaries_running.lock().expect("summary count") == 0 {
+                // A run that just ended queued its result before the count
+                // dropped; one more round handles it.
+                let (reply, answer) = oneshot::channel();
+                self.send(session, Job::Idle(reply))?;
+                return answer.await.map_err(|_| ModuleError::Stopped);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     fn send(&self, session: &SessionRef, job: Job) -> Result<(), ModuleError> {
@@ -177,6 +203,8 @@ impl<C: RunnerClient> Module<C> {
     fn spawn_worker(&self) -> mpsc::UnboundedSender<Job> {
         let (jobs, mut receiver) = mpsc::unbounded_channel::<Job>();
         let inner = Arc::clone(&self.inner);
+        // Weak, so the worker's own handle never keeps it alive.
+        let own = jobs.downgrade();
         tokio::spawn(async move {
             let mut session: Option<Session> = None;
             while let Some(job) = receiver.recv().await {
@@ -185,13 +213,33 @@ impl<C: RunnerClient> Module<C> {
                         Some(existing) => existing.setup(&inner.client, &request, features).await,
                         None => {
                             let mut fresh = Session::new(&request, features);
+                            if let Some(db) = &inner.db {
+                                fresh.load_summaries(db);
+                            }
                             fresh.setup(&inner.client, &request, features).await;
                             session = Some(fresh);
                         }
                     },
                     Job::Notice(notice) => {
                         if let Some(session) = &mut session {
-                            session.notice(&inner.client, &inner.settings, notice).await;
+                            if let Some(request) =
+                                session.notice(&inner.client, &inner.settings, notice).await
+                            {
+                                start_summary(&inner, own.clone(), request);
+                            }
+                        }
+                    }
+                    Job::SummaryFinished(result) => {
+                        if let Some(session) = &mut session {
+                            session
+                                .summary_finished(
+                                    &inner.client,
+                                    &inner.settings,
+                                    inner.db.as_ref(),
+                                    result,
+                                    now_ms(),
+                                )
+                                .await;
                         }
                     }
                     Job::Ride(ride, reply) => {
@@ -219,4 +267,28 @@ impl<C: RunnerClient> Module<C> {
         });
         jobs
     }
+}
+
+/// Run the summarizer beside the session's worker, and hand its result back
+/// as a job.
+fn start_summary<C: RunnerClient + Send + Sync + 'static>(
+    inner: &Arc<Inner<C>>,
+    worker: mpsc::WeakUnboundedSender<Job>,
+    request: run::Request,
+) {
+    *inner.summaries_running.lock().expect("summary count") += 1;
+    let inner = Arc::clone(inner);
+    tokio::spawn(async move {
+        let result = run::run(&inner.client, &request).await;
+        if let Some(worker) = worker.upgrade() {
+            let _ = worker.send(Job::SummaryFinished(result));
+        }
+        *inner.summaries_running.lock().expect("summary count") -= 1;
+    });
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64)
 }

@@ -38,6 +38,9 @@ pub struct Settings {
     /// What `ctx_keep` may keep, as a share of the usable window. Tags past
     /// it, in the order the model listed them, are not kept.
     pub keep_max_percentage: f64,
+    /// The history head's budget, as a share of the window up to the execute
+    /// threshold.
+    pub history_budget_percentage: f64,
 }
 
 impl Default for Settings {
@@ -49,6 +52,7 @@ impl Default for Settings {
             protected_tokens: None,
             keep_min_recovery_percentage: 30.0,
             keep_max_percentage: 30.0,
+            history_budget_percentage: 0.15,
         }
     }
 }

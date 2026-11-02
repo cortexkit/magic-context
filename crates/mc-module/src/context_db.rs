@@ -117,6 +117,30 @@ pub struct StoredMemory {
     pub verified_at: Option<i64>,
 }
 
+impl From<&ValidatedCompartment> for StoredCompartment {
+    fn from(compartment: &ValidatedCompartment) -> Self {
+        Self {
+            sequence: compartment.sequence as i64,
+            start_message: compartment.start_message as i64,
+            end_message: compartment.end_message as i64,
+            start_message_id: compartment.start_message_id.clone(),
+            end_message_id: compartment.end_message_id.clone(),
+            start_date: None,
+            end_date: None,
+            title: compartment.title.clone(),
+            content: compartment.content.clone(),
+            p1: compartment.p1.clone(),
+            p2: compartment.p2.clone(),
+            p3: compartment.p3.clone(),
+            p4: compartment.p4.clone(),
+            importance: compartment.importance.unwrap_or(50) as i32,
+            episode_type: compartment.episode_type.clone(),
+            legacy: i32::from(compartment.p1.as_deref().is_none_or(str::is_empty)),
+            created_at: 0,
+        }
+    }
+}
+
 pub struct ContextDb {
     connection: Mutex<Connection>,
 }

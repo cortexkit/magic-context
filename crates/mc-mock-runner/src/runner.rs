@@ -21,7 +21,7 @@ use ck_contract_draft::read::{
 };
 use ck_contract_draft::ride::{RideAnswer, RideCause, RideRequest, CONTEXT_CEILING};
 use ck_contract_draft::rules::{self, ProviderRules};
-use ck_contract_draft::send::{Delivery, SendAnswer, SendRequest};
+use ck_contract_draft::send::{Delivery, RunResult, RunResultRequest, SendAnswer, SendRequest};
 use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{
     self, edits_for_transcript, RenderedMessage, View, ViewCurrentAnswer, ViewDelivery,
@@ -152,6 +152,9 @@ struct State {
     /// Reasoning tokens per reasoning part, as reported when produced.
     reasoning_tokens: HashMap<String, u64>,
     reminders: Vec<SendRequest>,
+    /// Runs the provider started in child sessions.
+    runs: crate::child::Runs,
+    responder: crate::child::Responder,
     seq: u64,
     /// The newest entry the provider was sent, and its checksum then.
     notified: Option<(u64, String)>,
@@ -280,10 +283,31 @@ impl Host {
         }
     }
 
-    /// `session.send`: queue a reminder.
+    /// `session.send`: queue a reminder, or start a run in a child session.
     pub fn send(&self, request: SendRequest) -> SendAnswer {
-        self.lock().reminders.push(request);
+        let mut state = self.lock();
+        if request.run.is_some() {
+            let responder = state.responder.clone();
+            let run_id = state.runs.start(request, &responder);
+            return SendAnswer::Active { run_id };
+        }
+        state.reminders.push(request);
         SendAnswer::Queued
+    }
+
+    /// `run.result`.
+    pub fn run_result(&self, request: &RunResultRequest) -> Option<RunResult> {
+        self.lock().runs.result(&request.run_id)
+    }
+
+    /// Every run started in a child session, for assertions.
+    pub fn child_runs(&self) -> Vec<crate::child::ChildRun> {
+        self.lock().runs.all().to_vec()
+    }
+
+    /// Answer child runs with `responder` from now on.
+    pub fn set_responder(&self, responder: crate::child::Responder) {
+        self.lock().responder = responder;
     }
 
     pub fn session(&self) -> SessionRef {
@@ -332,6 +356,8 @@ impl<P: Provider> Runner<P> {
             pending: None,
             reasoning_tokens: HashMap::new(),
             reminders: Vec::new(),
+            runs: crate::child::Runs::default(),
+            responder: crate::child::scripted_summarizer(),
             seq: 0,
             notified: None,
             last_send: None,
@@ -674,7 +700,7 @@ impl<P: Provider> Runner<P> {
             {
                 let reminder = state.reminders.remove(index);
                 output.push_str("\n\n");
-                output.push_str(&reminder.text);
+                output.push_str(&reminder.prompt);
             }
             state
                 .transcript
@@ -704,7 +730,7 @@ impl<P: Provider> Runner<P> {
                         template: reminder.template.clone(),
                     }),
                     vec![PartBody::Text {
-                        text: reminder.text.clone(),
+                        text: reminder.prompt.clone(),
                     }],
                     None,
                     None,

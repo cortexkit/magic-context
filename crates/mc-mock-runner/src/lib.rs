@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod child;
 pub mod model;
 pub mod runner;
 pub mod script;

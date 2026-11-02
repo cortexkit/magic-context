@@ -6,7 +6,7 @@
 use std::future::Future;
 
 use ck_contract_draft::read::{ReadPage, ReadRequest};
-use ck_contract_draft::send::{SendAnswer, SendRequest};
+use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendRequest};
 use ck_contract_draft::view::{
     ViewCurrentAnswer, ViewCurrentRequest, ViewPublishAnswer, ViewPublishRequest,
 };
@@ -36,4 +36,9 @@ pub trait RunnerClient: Send + Sync + 'static {
         &self,
         request: SendRequest,
     ) -> impl Future<Output = Result<SendAnswer, ClientError>> + Send;
+    /// `run.result`.
+    fn run_result(
+        &self,
+        request: RunResultRequest,
+    ) -> impl Future<Output = Result<RunResult, ClientError>> + Send;
 }

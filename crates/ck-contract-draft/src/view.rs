@@ -121,6 +121,11 @@ pub enum EditOp {
         at: InsertAt,
         message: InsertedMessage,
     },
+    /// Leave out every message up to and including `through`: the messages a
+    /// summary at the start replaces. One per view. Once a view with a cut
+    /// applies, the runner may write its host's own compaction marker there,
+    /// so the host stops loading those messages.
+    Cut { through: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +240,8 @@ pub enum ViewRefusal {
     DuplicateInsert {
         id: String,
     },
+    /// More than one cut.
+    DuplicateCut,
     /// The view breaks a provider rule the runner declared.
     Rule(crate::rules::RuleBreak),
 }
@@ -265,6 +272,7 @@ pub fn apply_edits(entries: &[Entry], edits: &[Edit]) -> Result<Vec<RenderedMess
     let mut inserts_at_start: Vec<&InsertedMessage> = Vec::new();
     let mut inserts_before: HashMap<&str, Vec<&InsertedMessage>> = HashMap::new();
     let mut insert_ids: HashSet<&str> = HashSet::new();
+    let mut cut: Option<u64> = None;
 
     for edit in edits {
         match &edit.op {
@@ -309,6 +317,19 @@ pub fn apply_edits(entries: &[Entry], edits: &[Edit]) -> Result<Vec<RenderedMess
                     });
                 }
                 fields.push((field, value));
+            }
+            EditOp::Cut { through } => {
+                if cut.is_some() {
+                    return Err(ViewRefusal::DuplicateCut);
+                }
+                let last = find_entry(&by_mid, through)?.ordinal;
+                for entry in entries.iter().take_while(|entry| entry.ordinal <= last) {
+                    for part in &entry.parts {
+                        refuse_running(&entry.mid, part)?;
+                    }
+                    dropped_messages.insert(&entry.mid);
+                }
+                cut = Some(last);
             }
             EditOp::Insert { at, message } => {
                 if !insert_ids.insert(&message.id) {
@@ -404,6 +425,7 @@ pub fn edits_for_transcript(entries: &[Entry], edits: &[Edit]) -> Vec<Edit> {
                 at: InsertAt::Start,
                 ..
             } => true,
+            EditOp::Cut { through } => present.contains(through.as_str()),
         })
         .cloned()
         .collect()

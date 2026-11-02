@@ -15,11 +15,16 @@ use ck_contract_draft::view::{
 use serde_json::Value;
 
 use crate::client::RunnerClient;
+use crate::context_db::{ContextDb, StoredCompartment};
 use crate::index::{Extend, Index};
 use crate::lanes;
 use crate::pass::{self, Settings};
 use crate::preset::Features;
 use crate::reduce;
+use crate::summary::head::{self, Baseline};
+use crate::summary::run;
+use crate::summary::trigger;
+use crate::summary::validate::ValidatedChunk;
 use crate::tokens;
 use crate::view_builder;
 
@@ -54,6 +59,15 @@ pub struct Session {
     pending_keep: Option<BTreeSet<lanes::PartKey>>,
     /// The highest notice number handled.
     seq: u64,
+    /// The session's summaries, oldest first.
+    summaries: Vec<StoredCompartment>,
+    /// What `m[0]` holds; `None` until the first summary reaches a view.
+    baseline: Option<Baseline>,
+    /// A summarizer run is in progress.
+    summarizing: bool,
+    /// The next view re-renders `m[0]`, because the provider cache is lost
+    /// anyway.
+    fold_due: bool,
 }
 
 impl Session {
@@ -71,6 +85,22 @@ impl Session {
             keep_requested: false,
             pending_keep: None,
             seq: 0,
+            summaries: Vec::new(),
+            baseline: None,
+            summarizing: false,
+            fold_due: false,
+        }
+    }
+
+    /// Load the summaries `context.db` already holds for the session, such as
+    /// those of a session moved in from a standalone host.
+    pub fn load_summaries(&mut self, db: &ContextDb) {
+        match db.compartments(&self.key.harness, &self.key.session) {
+            Ok(summaries) => self.summaries = summaries,
+            Err(error) => eprintln!(
+                "ck-mc: session {}: loading summaries failed: {error}",
+                self.key.session
+            ),
         }
     }
 
@@ -93,14 +123,16 @@ impl Session {
         self.sync(client, request.newest.as_ref()).await;
     }
 
+    /// Handle a notice. Returns a summarizer run for the worker to start, when
+    /// one is due.
     pub async fn notice<C: RunnerClient>(
         &mut self,
         client: &C,
         settings: &Settings,
         notice: NoticeRequest,
-    ) {
+    ) -> Option<run::Request> {
         if notice.seq <= self.seq && self.seq != 0 {
-            return;
+            return None;
         }
         self.seq = notice.seq;
         self.conditions = notice.conditions.clone();
@@ -135,8 +167,9 @@ impl Session {
                 self.publish(client, view).await;
             }
             self.keep_requested = false;
-            return;
+            return None;
         }
+        let summary = self.summary_due(settings);
         let force = pass::in_force_band(&self.conditions, settings);
         if execute
             && (force || !self.summary_on_its_way())
@@ -147,6 +180,106 @@ impl Session {
                 self.publish(client, view).await;
             }
             self.ask_for_keep_if_short(client, settings, freed).await;
+        }
+        summary
+    }
+
+    /// A summarizer run to start now, if one is due: the session has a
+    /// summarizer, none is running, and the history it may read is worth a
+    /// run at this usage.
+    fn summary_due(&mut self, settings: &Settings) -> Option<run::Request> {
+        if !self.features.summarizer || self.summarizing {
+            return None;
+        }
+        let window = self.conditions.context_window;
+        let usage = pass::usage(&self.conditions).unwrap_or(0.0) * 100.0;
+        let force = pass::in_force_band(&self.conditions, settings);
+        let from = self.summarized_through().map_or(0, |ordinal| ordinal + 1);
+        let tail =
+            trigger::protected_tail_tokens(window, settings.execute_threshold_percentage, usage);
+        let entries = self.index.entries();
+        let until = trigger::tail_start(entries, entry_tokens, from, tail, force);
+        let readable: Vec<&ck_contract_draft::read::Entry> = entries
+            .iter()
+            .filter(|entry| entry.ordinal >= from && entry.ordinal < until)
+            .collect();
+        let tokens: u64 = readable.iter().map(|entry| entry_tokens(entry)).sum();
+        let budget = trigger::trigger_budget(window, settings.execute_threshold_percentage);
+        trigger::should_run(
+            usage,
+            settings.execute_threshold_percentage,
+            force,
+            tokens,
+            readable.len(),
+            budget,
+        )?;
+        self.summarizing = true;
+        Some(run::Request {
+            session: self.key.clone(),
+            from,
+            until,
+            summaries: self.summaries.clone(),
+            model: self.conditions.model.clone(),
+            // A quarter of the summarizer's window, which is the session's own.
+            chunk_tokens: ((self.conditions.context_window as f64 * 0.25).round() as u64)
+                .clamp(8_000, 50_000),
+        })
+    }
+
+    /// The last ordinal a summary covers.
+    fn summarized_through(&self) -> Option<u64> {
+        self.summaries
+            .last()
+            .map(|summary| (summary.end_message as u64).saturating_sub(1))
+    }
+
+    /// A summarizer run ended. New summaries are stored, and when usage is at
+    /// the execute threshold the view that shows them is built now: the pass
+    /// that held its work for this summary is waiting on it.
+    pub async fn summary_finished<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        settings: &Settings,
+        db: Option<&ContextDb>,
+        result: Result<Option<ValidatedChunk>, String>,
+        now_ms: i64,
+    ) {
+        self.summarizing = false;
+        let validated = match result {
+            Ok(Some(validated)) => validated,
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!(
+                    "ck-mc: session {}: summary failed: {error}",
+                    self.key.session
+                );
+                return;
+            }
+        };
+        if validated.compartments.is_empty() {
+            return;
+        }
+        if let Some(db) = db {
+            if let Err(error) = db.append_compartments(
+                &self.key.harness,
+                &self.key.session,
+                &validated.compartments,
+                now_ms,
+            ) {
+                eprintln!(
+                    "ck-mc: session {}: storing summaries failed: {error}",
+                    self.key.session
+                );
+                return;
+            }
+        }
+        self.summaries
+            .extend(validated.compartments.iter().map(StoredCompartment::from));
+        if pass::at_execute(&self.conditions, settings) {
+            let (view, _) = self.build(settings, None);
+            if let Some(view) = view {
+                self.publish(client, view).await;
+            }
         }
     }
 
@@ -178,9 +311,13 @@ impl Session {
         );
         let request = SendRequest {
             session: self.key.clone(),
-            text,
+            // One request per stay over the threshold, so the view version
+            // that crossed it names it.
+            send_id: format!("{KEEP_TEMPLATE}:{}", self.version),
+            prompt: text,
             template: Some(KEEP_TEMPLATE.into()),
             delivery: vec![Delivery::Steer],
+            run: None,
         };
         match client.send(request).await {
             Ok(_) => self.keep_requested = true,
@@ -197,6 +334,10 @@ impl Session {
         self.conditions = ride.conditions.clone();
         let over_limit =
             (ride.cause == RideCause::OverLimit).then_some(ride.request_tokens.unwrap_or(0));
+        // Any other cause loses the cache, so the head folds for free.
+        if over_limit.is_none() {
+            self.fold_due = true;
+        }
         let view = self.build(settings, over_limit).0?;
         self.accept(view.clone());
         Some(view)
@@ -320,10 +461,41 @@ impl Session {
     }
 
     fn summary_on_its_way(&self) -> bool {
-        // Summaries are not built yet in this module, so none is ever on its
-        // way, and a session with a summarizer rebuilds on execute like one
-        // without.
-        false
+        self.summarizing
+    }
+
+    /// The history head and the cut, when the session has summaries whose
+    /// covered messages are still in the transcript. A due fold re-renders
+    /// `m[0]` with every summary.
+    fn history_ops(&mut self, settings: &Settings) -> (Vec<EditOp>, Option<u64>) {
+        let Some(last) = self.summaries.last() else {
+            return (Vec::new(), None);
+        };
+        let Some(through) = self
+            .index
+            .entries()
+            .iter()
+            .find(|entry| entry.mid == last.end_message_id)
+        else {
+            return (Vec::new(), None);
+        };
+        let cut = through.ordinal;
+        let budget = (self.conditions.context_window as f64 * settings.execute_threshold_percentage
+            / 100.0
+            * settings.history_budget_percentage) as u64;
+        if self.baseline.is_none() || self.fold_due {
+            self.baseline = Some(Baseline {
+                through_sequence: last.sequence,
+                budget_tokens: budget,
+            });
+            self.fold_due = false;
+        }
+        let baseline = self.baseline.clone().unwrap_or_default();
+        let mut ops = head::head_ops(&self.summaries, &baseline);
+        ops.push(EditOp::Cut {
+            through: last.end_message_id.clone(),
+        });
+        (ops, Some(cut))
     }
 
     /// A pass with permission to rebuild: every lane adds the parts it wants
@@ -341,7 +513,8 @@ impl Session {
     /// Also returns roughly how many tokens the new edits free, plus what the
     /// age sweep has lined up for the next pass.
     fn build(&mut self, settings: &Settings, over_limit: Option<u64>) -> (Option<View>, u64) {
-        let edited = lanes::Edited::of(self.latest.as_ref());
+        let (history, cut) = self.history_ops(settings);
+        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, cut);
         let context = lanes::Context {
             index: &self.index,
             edited: &edited,
@@ -407,6 +580,7 @@ impl Session {
                 .collect();
         let freed = freed_tokens(&context, &covered) + freed_tokens(&context, &lined_up);
         self.reclaim_bookmark = self.reclaim_bookmark.max(bookmark);
+        ops.extend(history);
         (self.seal(ops, &covered), freed)
     }
 
@@ -414,7 +588,7 @@ impl Session {
     /// [`lanes::keep_drops`]), plus every other lane's work, which rides the
     /// same rewrite.
     fn build_keep(&mut self, settings: &Settings, kept: &BTreeSet<lanes::PartKey>) -> Option<View> {
-        let edited = lanes::Edited::of(self.latest.as_ref());
+        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, None);
         let context = lanes::Context {
             index: &self.index,
             edited: &edited,
@@ -626,4 +800,9 @@ fn freed_tokens(context: &lanes::Context, covered: &[lanes::PartKey]) -> u64 {
         .filter_map(|(mid, part)| context.index.find(mid, part))
         .map(|(_, part)| tokens::part(part))
         .sum()
+}
+
+/// A message's estimated size for the summarizer's boundary.
+fn entry_tokens(entry: &ck_contract_draft::read::Entry) -> u64 {
+    entry.parts.iter().map(tokens::part).sum()
 }

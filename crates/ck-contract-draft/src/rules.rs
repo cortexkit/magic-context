@@ -111,6 +111,13 @@ pub fn invalid_signed_parts(
                     changes.push((position, since));
                 }
             }
+            // A cut removes the earliest messages, so it changes what every
+            // later part was signed after.
+            EditOp::Cut { through } => {
+                if layout.message(through).is_some() {
+                    changes.push((Position::BEFORE_ALL, since));
+                }
+            }
             EditOp::Insert { at, .. } => {
                 let position = match at {
                     InsertAt::Start => Some(Position::BEFORE_ALL),
@@ -125,9 +132,15 @@ pub fn invalid_signed_parts(
     let dropped_messages: BTreeSet<usize> = edits
         .iter()
         .filter_map(|edit| match &edit.op {
-            EditOp::Drop { mid, part: None } => layout.message(mid).map(|position| position.entry),
+            EditOp::Drop { mid, part: None } => {
+                layout.message(mid).map(|position| vec![position.entry])
+            }
+            EditOp::Cut { through } => layout
+                .message(through)
+                .map(|last| (0..=last.entry).collect()),
             _ => None,
         })
+        .flatten()
         .collect();
 
     // Every signed reasoning part, in transcript order.

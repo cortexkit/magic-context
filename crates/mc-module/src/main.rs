@@ -5,6 +5,7 @@
 use std::error::Error;
 use std::path::PathBuf;
 
+use mc_module::context_db::ContextDb;
 use mc_module::module::Module;
 use mc_module::pass::Settings;
 use mc_module::transport::{manifest, Handler, SubcRunnerClient};
@@ -21,9 +22,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_MODULE_ID.to_owned());
+    let db = match context_db_path() {
+        Some(path) => Some(ContextDb::open(&path)?),
+        None => None,
+    };
     let module = Module::new(
         SubcRunnerClient::new(connection_file.clone()),
         Settings::default(),
+        db,
     );
     let (_handle, serve) = subc_client_rs::serve_with_handle(
         &connection_file,
@@ -33,6 +39,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     .await?;
     serve.await?;
     Ok(())
+}
+
+/// `context.db`, named by `MAGIC_CONTEXT_DB`. Without it summaries are kept in
+/// memory only, which only throwaway test runs want.
+fn context_db_path() -> Option<PathBuf> {
+    std::env::var_os("MAGIC_CONTEXT_DB")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn subc_arg() -> Option<PathBuf> {

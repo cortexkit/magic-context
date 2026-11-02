@@ -12,7 +12,7 @@ use ck_contract_draft::part::PartBody;
 use ck_contract_draft::read::{ReadPage, ReadRequest, SessionRef};
 use ck_contract_draft::ride::{RideAnswer, RideCause, RideRequest};
 use ck_contract_draft::rules::{EditCost, ProviderRules, SignedReasoning};
-use ck_contract_draft::send::{SendAnswer, SendRequest};
+use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendRequest};
 use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{
     View, ViewCurrentAnswer, ViewCurrentRequest, ViewGetRequest, ViewPublishAnswer,
@@ -57,6 +57,12 @@ impl RunnerClient for HostClient {
 
     async fn send(&self, request: SendRequest) -> Result<SendAnswer, ClientError> {
         Ok(self.host()?.send(request))
+    }
+
+    async fn run_result(&self, request: RunResultRequest) -> Result<RunResult, ClientError> {
+        self.host()?
+            .run_result(&request)
+            .ok_or_else(|| ClientError(format!("unknown run {}", request.run_id)))
     }
 }
 
@@ -154,7 +160,7 @@ async fn start(config: SessionConfig) -> Runner<InProcess> {
 async fn start_with(config: SessionConfig, settings: Settings) -> Runner<InProcess> {
     let client = HostClient::default();
     let provider = InProcess {
-        module: Module::new(client.clone(), settings),
+        module: Module::new(client.clone(), settings, None),
         client,
     };
     let runner = Runner::start(config, provider).await.unwrap();
@@ -720,4 +726,64 @@ async fn a_worker_that_cannot_free_enough_is_asked_for_ctx_keep_and_keeps_only_w
     }
     assert!(seen(host, 3).unwrap().starts_with("§3§ zzz"));
     assert!(seen(host, 9).unwrap().contains("Keeping §3§"));
+}
+
+/// The user's prompt and two file reads: one turn of a head session.
+fn turn(prompt: &str) -> Vec<Step> {
+    vec![user(prompt), read_file(50), read_file(50), answer()]
+}
+
+#[tokio::test]
+async fn a_head_summarizes_older_turns_and_shows_them_in_place_of_the_messages() {
+    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let host = runner.host();
+
+    // The summarizer ran in its own child session, never in the transcript.
+    let runs = host.child_runs();
+    assert!(!runs.is_empty(), "no summarizer run");
+    assert!(runs[0].request.prompt.contains("<new_messages>"));
+    assert!(host
+        .entries()
+        .iter()
+        .all(|entry| entry.parts.iter().all(|part| match &part.body {
+            PartBody::Text { text } => !text.contains("<compartment"),
+            _ => true,
+        })));
+
+    // Over the threshold, one view shows the summaries at the start in place
+    // of the messages they cover, and the newest prompt stays as it is.
+    let rendered = host.rendered();
+    let texts: Vec<String> = rendered
+        .iter()
+        .take(2)
+        .map(|message| message.parts.iter().filter_map(|part| message.wire_text(part)).collect())
+        .collect();
+    assert!(texts[0].starts_with("<session-history>"), "{:?}", texts[0]);
+    assert!(texts[1].starts_with("<session-history-since>"), "{:?}", texts[1]);
+    let first_kept = rendered
+        .iter()
+        .find_map(|message| match &message.source {
+            ck_contract_draft::view::Source::Entry { ordinal, .. } => Some(*ordinal),
+            _ => None,
+        })
+        .unwrap();
+    assert!(first_kept > 0, "nothing was cut");
+    assert!(rendered.iter().any(|message| message
+        .parts
+        .iter()
+        .any(|part| message.wire_text(part).is_some_and(|text| text.contains("And c.rs.")))));
+
+    // Every request between views extends the one before it.
+    let requests = &runner.report.requests;
+    for pair in requests.windows(2) {
+        if pair[0].view == pair[1].view {
+            assert_eq!(pair[1].usage.cache_read_tokens, pair[0].usage.prompt_tokens);
+        }
+    }
 }

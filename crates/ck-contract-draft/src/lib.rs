@@ -64,6 +64,9 @@ pub mod ops {
     /// Served by the runner: the view it currently applies, for a provider
     /// whose own copy is missing or older (for example after a store restore).
     pub const VIEW_CURRENT: &str = "view.current";
-    /// Served by the runner: queue text for the model ([`crate::send`]).
+    /// Served by the runner: queue text for the model, or start a run in a
+    /// child session ([`crate::send`]).
     pub const SESSION_SEND: &str = "session.send";
+    /// Served by the runner: a run's state and reply ([`crate::send`]).
+    pub const RUN_RESULT: &str = "run.result";
 }

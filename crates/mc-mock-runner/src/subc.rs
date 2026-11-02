@@ -13,7 +13,7 @@ use ck_contract_draft::notice::{NoticeAnswer, NoticeRequest};
 use ck_contract_draft::ops;
 use ck_contract_draft::read::{ReadRequest, SessionRef};
 use ck_contract_draft::ride::{RideAnswer, RideRequest};
-use ck_contract_draft::send::SendRequest;
+use ck_contract_draft::send::{RunResultRequest, SendRequest};
 use ck_contract_draft::setup::{SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{View, ViewCurrentRequest, ViewGetRequest, ViewPublishRequest};
 use ck_contract_draft::wire::{
@@ -160,6 +160,7 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
                 operation(ops::VIEW_CURRENT, ManagementOperationKind::Query),
                 operation(ops::VIEW_PUBLISH, ManagementOperationKind::Mutate),
                 operation(ops::SESSION_SEND, ManagementOperationKind::Mutate),
+                operation(ops::RUN_RESULT, ManagementOperationKind::Query),
                 operation(MOCK_PLAY, ManagementOperationKind::Mutate),
             ],
             config_schema: json!({}),
@@ -221,6 +222,13 @@ impl Handler {
                 let request: SendRequest = wire::params(params).map_err(bad)?;
                 let host = self.host(&request.session)?;
                 Ok(json_of(&host.send(request)))
+            }
+            ops::RUN_RESULT => {
+                let request: RunResultRequest = wire::params(params).map_err(bad)?;
+                let host = self.host(&request.session)?;
+                host.run_result(&request)
+                    .map(|result| json_of(&result))
+                    .ok_or_else(|| bad(format!("unknown run {}", request.run_id)))
             }
             MOCK_PLAY => {
                 let request: PlayRequest = wire::params(params).map_err(bad)?;
