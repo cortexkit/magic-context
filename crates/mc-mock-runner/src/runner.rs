@@ -27,9 +27,9 @@ use cortexkit_role_compaction::ride::{RideAnswer, RideCause, RideRequest, CONTEX
 use cortexkit_role_compaction::rules::ProviderRules;
 use cortexkit_role_compaction::setup::{ModelRef, SetupAnswer, SetupRequest};
 use cortexkit_role_compaction::view::{
-    AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest, View, ViewRefusal,
+    AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest, EditOp, View, ViewRefusal,
 };
-use cortexkit_role_compaction::wire::Refusal;
+use cortexkit_role_compaction::wire::{codes, Refusal};
 use cortexkit_role_llm_runner::delivery_order::{Mode, Template, TemplateUse};
 use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest};
 use cortexkit_role_llm_runner::send::{SendReply, SendRequest};
@@ -86,9 +86,35 @@ pub struct MovedIn {
     pub view: View,
 }
 
-/// A call to the provider that did not get an answer.
+/// A call to the provider that did not get an answer: refused by name
+/// (`code`, from the provider's error frame), or failed in transport.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CallError(pub String);
+pub struct CallError {
+    pub code: Option<String>,
+    pub message: String,
+}
+
+impl CallError {
+    /// A failure with no refusal code.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            code: None,
+            message: message.into(),
+        }
+    }
+
+    /// A refusal the provider named.
+    pub fn refused(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: Some(code.into()),
+            message: message.into(),
+        }
+    }
+
+    fn is(&self, code: &str) -> bool {
+        self.code.as_deref() == Some(code)
+    }
+}
 
 /// The compaction provider's text edits to a user message before it is
 /// stored (the `pre_user` hook).
@@ -195,6 +221,11 @@ struct State {
     /// A cache loss already known before the next request.
     forced_cause: Option<RideCause>,
     events: Vec<Event>,
+    /// Whether the provider manages the session; false after it refused
+    /// Setup with `unknown_preset`.
+    compaction: bool,
+    /// The provider lost the session; Setup goes before the next notice.
+    setup_due: bool,
 }
 
 impl State {
@@ -425,8 +456,10 @@ impl<P: Provider> Runner<P> {
             last_prompt_tokens: None,
             forced_cause: None,
             events: Vec::new(),
+            compaction: true,
+            setup_due: false,
         };
-        let runner = Self {
+        let mut runner = Self {
             host: Host {
                 state: Arc::new(Mutex::new(state)),
             },
@@ -434,7 +467,16 @@ impl<P: Provider> Runner<P> {
             provider,
             report: Report::default(),
         };
-        runner.setup().await?;
+        match runner.setup().await {
+            Ok(_) => {}
+            // The provider has no such preset: the session runs without
+            // compaction (W1.3).
+            Err(error) if error.is(codes::UNKNOWN_PRESET) => {
+                runner.host.lock().compaction = false;
+                runner.report.call_errors.push(error);
+            }
+            Err(error) => return Err(error),
+        }
         Ok(runner)
     }
 
@@ -446,9 +488,12 @@ impl<P: Provider> Runner<P> {
         &self.provider
     }
 
+    /// Setup, which restarts the notice count on both sides (S3).
     async fn setup(&self) -> Result<SetupAnswer, CallError> {
         let request = {
-            let state = self.host.lock();
+            let mut state = self.host.lock();
+            state.seq = 0;
+            state.setup_due = false;
             let mut request = SetupRequest::new(
                 state.config.preset.clone(),
                 state.config.model.clone(),
@@ -761,7 +806,7 @@ impl<P: Provider> Runner<P> {
             let (status, output) = if call.name.starts_with("ctx_") {
                 match self.provider.tool(&call.name, &call.input).await {
                     Ok(output) => (ToolStatus::Completed, output),
-                    Err(error) => (ToolStatus::Error, error.0),
+                    Err(error) => (ToolStatus::Error, error.message),
                 }
             } else {
                 (call.status.clone(), call.output.clone())
@@ -868,6 +913,19 @@ impl<P: Provider> Runner<P> {
             };
             match result {
                 Ok(()) => {
+                    // A view with a cut has applied: write the host's marker
+                    // at the cut and report it in the next notice (M1).
+                    let cut = view.edits.iter().find_map(|edit| match &edit.op {
+                        EditOp::Cut { through } => Some(through.clone()),
+                        _ => None,
+                    });
+                    if let Some(through) = cut {
+                        if state.transcript.write_marker(&through).is_some() {
+                            state.events.push(Event::MarkerWritten {
+                                version: view.version,
+                            });
+                        }
+                    }
                     state.applied = Some(view.clone());
                     Ok(())
                 }
@@ -893,6 +951,9 @@ impl<P: Provider> Runner<P> {
     async fn ride(&mut self, causes: Vec<RideCause>, request_tokens: Option<u64>) {
         let request = {
             let state = self.host.lock();
+            if !state.compaction {
+                return;
+            }
             let deadline_ms = if state.last_send.is_none() {
                 COLD_RIDE_DEADLINE_MS
             } else {
@@ -903,7 +964,12 @@ impl<P: Provider> Runner<P> {
             request.request_tokens = request_tokens;
             request
         };
-        let answer = self.provider.ride(request).await;
+        // A late answer counts as none: the request goes out with the view
+        // the runner has (RD2).
+        let deadline = std::time::Duration::from_millis(request.deadline_ms);
+        let answer = tokio::time::timeout(deadline, self.provider.ride(request))
+            .await
+            .unwrap_or_else(|_| Err(CallError::new("no ride answer before its deadline")));
         let got_view = match answer {
             Ok(RideAnswer::Nothing) => false,
             Ok(RideAnswer::View { view }) => {
@@ -912,6 +978,13 @@ impl<P: Provider> Runner<P> {
                 self.host.lock().pending = None;
                 self.adopt(view);
                 true
+            }
+            // The provider no longer knows the session: counted as
+            // `nothing`, and Setup goes before the next notice (S1, F2).
+            Err(error) if error.is(codes::UNKNOWN_SESSION) => {
+                self.host.lock().setup_due = true;
+                self.report.call_errors.push(error);
+                false
             }
             Err(error) => {
                 self.report.call_errors.push(error);
@@ -935,6 +1008,19 @@ impl<P: Provider> Runner<P> {
 
     /// Tell the provider what was written since the last notice.
     async fn notice(&mut self) {
+        let (compaction, setup_due) = {
+            let state = self.host.lock();
+            (state.compaction, state.setup_due)
+        };
+        if !compaction {
+            return;
+        }
+        if setup_due {
+            if let Err(error) = self.setup().await {
+                self.report.call_errors.push(error);
+                return;
+            }
+        }
         let request = {
             let mut state = self.host.lock();
             let Some(newest) = state.transcript.cursor() else {
@@ -980,6 +1066,13 @@ impl<P: Provider> Runner<P> {
                     self.report.call_errors.push(error);
                     return;
                 }
+                // Setup restarted the count, so this is notice 1 again.
+                let mut request = request;
+                request.seq = {
+                    let mut state = self.host.lock();
+                    state.seq += 1;
+                    state.seq
+                };
                 if let Err(error) = self.provider.notice(request).await {
                     self.report.call_errors.push(error);
                 }

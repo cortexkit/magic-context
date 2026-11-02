@@ -107,7 +107,7 @@ impl Scopes {
             .lock()
             .expect("scope handle")
             .clone()
-            .ok_or_else(|| CallError("the mock runner is not serving yet".into()))?;
+            .ok_or_else(|| CallError::new("the mock runner is not serving yet"))?;
         let scope_ref = format!("mock-session-{}", project.id);
         let mut state = self.state.lock().await;
         state.1.entry(project.root.clone()).or_insert_with(|| {
@@ -120,7 +120,7 @@ impl Scopes {
         handle
             .scope_sync(state.0, records)
             .await
-            .map_err(|error| CallError(format!("scope.sync: {error:?}")))?;
+            .map_err(|error| CallError::new(format!("scope.sync: {error:?}")))?;
         Ok(ScopeSelector::new(
             Principal::Reserved {
                 module_id: self.module_id.lock().expect("scope owner").clone(),
@@ -182,7 +182,7 @@ impl SubcProvider {
     ) -> Result<Self, CallError> {
         let consumer = SubcConsumer::connect(connection_file, ConsumerOptions::default())
             .await
-            .map_err(|error| CallError(format!("connect: {error:?}")))?;
+            .map_err(|error| CallError::new(format!("connect: {error:?}")))?;
         Ok(Self {
             consumer,
             provider,
@@ -226,13 +226,19 @@ impl SubcProvider {
                     .consumer
                     .open_route_scoped(target, identity, scope.clone(), options.clone())
                     .await
-                    .map_err(|error| CallError(format!("{label}: {error:?}")))?;
+                    .map_err(|error| CallError::new(format!("{label}: {error:?}")))?;
                 self.consumer.request(&route, body, options).await
             }
         }
-        .map_err(|error| CallError(format!("{label}: {error:?}")))?;
+        .map_err(|error| match error {
+            // The provider refused by name (W1.3).
+            subc_client_rs::consumer::CallError::Module(body) => {
+                CallError::refused(body.code, format!("{label}: {}", body.message))
+            }
+            other => CallError::new(format!("{label}: {other:?}")),
+        })?;
         serde_json::from_slice(&reply)
-            .map_err(|error| CallError(format!("{label} answer: {error}")))
+            .map_err(|error| CallError::new(format!("{label} answer: {error}")))
     }
 }
 
@@ -268,7 +274,7 @@ impl Provider for SubcProvider {
             .collect::<Vec<_>>()
             .join("\n");
         if result.is_error == Some(true) {
-            Err(CallError(text))
+            Err(CallError::new(text))
         } else {
             Ok(text)
         }
@@ -500,7 +506,7 @@ impl Handler {
                 let report = self
                     .play(request)
                     .await
-                    .map_err(|error| Refusal::new("play_failed", error.0, None))?;
+                    .map_err(|error| Refusal::new("play_failed", error.message, None))?;
                 Ok(json_of(&report))
             }
             MOCK_FETCH => {
@@ -584,7 +590,7 @@ impl Handler {
         });
         report
             .await
-            .map_err(|_| CallError("the scenario thread stopped".into()))?
+            .map_err(|_| CallError::new("the scenario thread stopped"))?
     }
 }
 

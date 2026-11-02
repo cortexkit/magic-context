@@ -24,6 +24,16 @@ pub struct Transcript {
     checkpoint: u64,
     /// Message ids come from the host and are never reused, revert or not.
     next_mid: u64,
+    /// The compaction markers written so far (M1), oldest first.
+    markers: Vec<Marker>,
+}
+
+/// A host compaction marker: the last message it covers, and its checkpoint
+/// (T2), the highest number before the first message it keeps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Marker {
+    pub through_ordinal: u64,
+    pub checkpoint: u64,
 }
 
 impl Transcript {
@@ -37,7 +47,42 @@ impl Transcript {
             entries: Vec::new(),
             checkpoint,
             next_mid: 1,
+            markers: Vec::new(),
         }
+    }
+
+    /// Write a compaction marker covering every message through `mid`, as a
+    /// runner does once a view with a cut applies (M1). Numbers stay as they
+    /// were: they are contiguous, so counting from the marker's checkpoint
+    /// over the messages it keeps gives the same numbers (T2). `None` when the
+    /// message is not in the transcript or a marker already covers it.
+    pub fn write_marker(&mut self, mid: &str) -> Option<Marker> {
+        let through = self.entries.iter().position(|entry| entry.mid == mid)?;
+        let through_ordinal = self.entries[through].ordinal;
+        if self
+            .markers
+            .last()
+            .is_some_and(|marker| marker.through_ordinal >= through_ordinal)
+        {
+            return None;
+        }
+        let checkpoint = self.entries[..=through]
+            .iter()
+            .flat_map(|entry| &entry.parts)
+            .filter_map(|part| part.tag)
+            .max()
+            .unwrap_or(self.checkpoint);
+        let marker = Marker {
+            through_ordinal,
+            checkpoint,
+        };
+        self.markers.push(marker.clone());
+        Some(marker)
+    }
+
+    /// The markers written, oldest first.
+    pub fn markers(&self) -> &[Marker] {
+        &self.markers
     }
 
     /// The number the next numbered part gets.
@@ -154,8 +199,12 @@ impl Transcript {
 
     /// Remove every entry from `ordinal` on. Their numbers become free, and
     /// the next numbered part takes the first of them.
+    /// Remove every message from `ordinal` on. A marker covering any of them
+    /// goes too, and the one before it applies again (T3).
     pub fn revert_to(&mut self, ordinal: u64) {
         self.entries.truncate(ordinal.saturating_sub(1) as usize);
+        self.markers
+            .retain(|marker| marker.through_ordinal < ordinal);
     }
 
     /// Serve a `session.entries` read: matching entries, and where to

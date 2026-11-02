@@ -277,9 +277,12 @@ impl InProcess {
 }
 
 fn call_error(error: ModuleError) -> CallError {
+    use cortexkit_role_compaction::wire::codes;
     match error {
-        ModuleError::Tool(text) => CallError(text),
-        other => CallError(format!("{other:?}")),
+        ModuleError::Tool(text) => CallError::new(text),
+        ModuleError::UnknownPreset(preset) => CallError::refused(codes::UNKNOWN_PRESET, preset),
+        ModuleError::UnknownSession => CallError::refused(codes::UNKNOWN_SESSION, "no Setup"),
+        other => CallError::new(format!("{other:?}")),
     }
 }
 
