@@ -8,7 +8,7 @@ use std::time::Duration;
 use ck_contract_draft::read::{ReadPage, ReadRequest, SessionRef};
 use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendRequest};
 use ck_contract_draft::view::{
-    ViewCurrentAnswer, ViewCurrentRequest, ViewPublishAnswer, ViewPublishRequest,
+    AppliedViewAnswer, AppliedViewRequest, ApplyViewAnswer, ApplyViewRequest,
 };
 use ck_contract_draft::wire::{self, codes, PreUserRequest, ToolCallAnswer, ToolCallRequest};
 use ck_contract_draft::{ops, COMPACTION_PROVIDES};
@@ -111,14 +111,21 @@ impl RunnerClient for SubcRunnerClient {
             .await
     }
 
-    async fn publish(&self, request: ViewPublishRequest) -> Result<ViewPublishAnswer, ClientError> {
-        self.call(&request.session.clone(), ops::VIEW_PUBLISH, &request)
+    async fn apply_view(&self, request: ApplyViewRequest) -> Result<ApplyViewAnswer, ClientError> {
+        self.call(&request.session.clone(), ops::SESSION_APPLY_VIEW, &request)
             .await
     }
 
-    async fn current(&self, request: ViewCurrentRequest) -> Result<ViewCurrentAnswer, ClientError> {
-        self.call(&request.session.clone(), ops::VIEW_CURRENT, &request)
-            .await
+    async fn applied_view(
+        &self,
+        request: AppliedViewRequest,
+    ) -> Result<AppliedViewAnswer, ClientError> {
+        self.call(
+            &request.session.clone(),
+            ops::SESSION_APPLIED_VIEW,
+            &request,
+        )
+        .await
     }
 
     async fn send(&self, request: SendRequest) -> Result<SendAnswer, ClientError> {
@@ -155,11 +162,6 @@ impl Handler {
             ops::COMPACTION_RIDE => {
                 to_value(self.module.ride(wire::params(params).map_err(bad)?).await)
             }
-            ops::VIEW_GET => to_value(
-                self.module
-                    .view_get(wire::params(params).map_err(bad)?)
-                    .await,
-            ),
             wire::ops::TOOL_CALL => {
                 let request: ToolCallRequest = wire::params(params).map_err(bad)?;
                 let answer = match self

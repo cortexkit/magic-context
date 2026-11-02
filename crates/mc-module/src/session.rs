@@ -11,7 +11,7 @@ use ck_contract_draft::ride::{RideCause, RideRequest};
 use ck_contract_draft::send::{Delivery, SendRequest};
 use ck_contract_draft::setup::{Project, SetupRequest};
 use ck_contract_draft::view::{
-    EditOp, View, ViewCurrentRequest, ViewDelivery, ViewPublishAnswer, ViewPublishRequest,
+    AppliedViewRequest, ApplyViewAnswer, ApplyViewRequest, EditOp, View, MAX_VIEW_BYTES,
 };
 use serde_json::Value;
 
@@ -607,10 +607,6 @@ impl Session {
         Some(view)
     }
 
-    pub fn view(&self, version: u64) -> Option<View> {
-        self.latest.clone().filter(|view| view.version == version)
-    }
-
     /// A `ctx_*` tool call.
     pub async fn tool<C: RunnerClient>(
         &mut self,
@@ -1178,13 +1174,24 @@ impl Session {
     }
 
     async fn publish<C: RunnerClient>(&mut self, client: &C, view: View) {
-        let request = ViewPublishRequest {
+        let size = serde_json::to_vec(&view).map_or(usize::MAX, |bytes| bytes.len());
+        if size > MAX_VIEW_BYTES {
+            // Views name edits, never copies, so one this large is a bug in a
+            // lane. It is not sent; the runner keeps the view it has.
+            self.next_baseline = None;
+            eprintln!(
+                "ck-mc: session {}: view {} not sent: view_too_large ({size} bytes, limit {MAX_VIEW_BYTES})",
+                self.key.session, view.version
+            );
+            return;
+        }
+        let request = ApplyViewRequest {
             session: self.key.clone(),
-            delivery: ViewDelivery::Inline { view: view.clone() },
+            view: view.clone(),
         };
-        match client.publish(request).await {
-            Ok(ViewPublishAnswer::Accepted) => self.accept(view),
-            Ok(ViewPublishAnswer::Refused { refusal }) => {
+        match client.apply_view(request).await {
+            Ok(ApplyViewAnswer::Accepted) => self.accept(view),
+            Ok(ApplyViewAnswer::Refused { refusal }) => {
                 self.next_baseline = None;
                 eprintln!(
                     "ck-mc: session {}: runner refused view {}: {refusal:?}",
@@ -1194,7 +1201,7 @@ impl Session {
             Err(error) => {
                 self.next_baseline = None;
                 eprintln!(
-                    "ck-mc: session {}: view.publish failed: {error:?}",
+                    "ck-mc: session {}: session.apply_view failed: {error:?}",
                     self.key.session
                 );
             }
@@ -1228,7 +1235,7 @@ impl Session {
     /// when ck-mc's copy is missing or older (for example after a restore).
     async fn adopt_runner_view<C: RunnerClient>(&mut self, client: &C) {
         match client
-            .current(ViewCurrentRequest {
+            .applied_view(AppliedViewRequest {
                 session: self.key.clone(),
             })
             .await
@@ -1241,7 +1248,7 @@ impl Session {
                 self.latest = answer.view;
             }
             Err(error) => eprintln!(
-                "ck-mc: session {}: view.current failed: {error:?}",
+                "ck-mc: session {}: session.applied_view failed: {error:?}",
                 self.key.session
             ),
         }

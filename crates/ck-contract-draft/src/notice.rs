@@ -69,8 +69,10 @@ pub enum Event {
     /// The runner wrote the host's own compaction marker for this view, so the
     /// host stops loading the messages the view leaves out at the start.
     MarkerWritten { version: u64 },
-    /// A view the runner refused when it was fetched with `view.get` after a
-    /// ride. A view sent with `view.publish` is refused in that call's answer.
+    /// A view the runner refused when it came to apply it: a ride's answer,
+    /// or an accepted view that no longer fits the transcript at the next step
+    /// boundary. Otherwise a view handed over with `session.apply_view` is
+    /// refused in that call's answer.
     ViewRefused { version: u64, refusal: ViewRefusal },
 }
 

@@ -11,10 +11,7 @@ use ck_contract_draft::rules::{
     invalid_signed_parts, EditCost, ProviderRules, RuleBreak, SignedReasoning,
 };
 use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
-use ck_contract_draft::view::{
-    Edit, EditOp, View, ViewDelivery, ViewGetRequest, ViewPublishAnswer, ViewPublishRequest,
-    ViewRefusal,
-};
+use ck_contract_draft::view::{ApplyViewAnswer, ApplyViewRequest, Edit, EditOp, View, ViewRefusal};
 use serde_json::{json, Value};
 
 use crate::model::{Kind, ModelError};
@@ -44,7 +41,7 @@ struct TestProvider {
     on_notice: Mutex<Option<Decide>>,
     on_ride: Mutex<Option<Decide>>,
     version: Mutex<u64>,
-    published: Mutex<Vec<ViewPublishAnswer>>,
+    published: Mutex<Vec<ApplyViewAnswer>>,
     notices: Mutex<Vec<NoticeRequest>>,
 }
 
@@ -92,9 +89,9 @@ impl Provider for TestProvider {
                 .and_then(|decide| decide(&host));
             if let Some(edits) = edits {
                 let view = self.next_view(edits);
-                let answer = host.publish(ViewPublishRequest {
+                let answer = host.apply_view(ApplyViewRequest {
                     session: host.session(),
-                    delivery: ViewDelivery::Inline { view },
+                    view,
                 });
                 self.published.lock().unwrap().push(answer);
             }
@@ -112,16 +109,10 @@ impl Provider for TestProvider {
             .and_then(|decide| decide(&host));
         Ok(match edits {
             Some(edits) => RideAnswer::View {
-                delivery: ViewDelivery::Inline {
-                    view: self.next_view(edits),
-                },
+                view: self.next_view(edits),
             },
             None => RideAnswer::Nothing,
         })
-    }
-
-    async fn view_get(&self, _: ViewGetRequest) -> Result<View, CallError> {
-        Err(CallError("not used".into()))
     }
 
     async fn tool(&self, _: &SessionRef, name: &str, _: &Value) -> Result<String, CallError> {
@@ -275,7 +266,7 @@ async fn a_view_costs_one_cache_write_and_reading_resumes_after_it() {
     assert!(report.model_errors.is_empty(), "{:?}", report.model_errors);
     assert_eq!(
         runner.provider().published.lock().unwrap()[..],
-        [ViewPublishAnswer::Accepted]
+        [ApplyViewAnswer::Accepted]
     );
     let after: Vec<_> = report
         .requests
@@ -316,7 +307,7 @@ async fn a_view_breaking_signed_reasoning_is_refused_and_its_fixed_form_accepted
         let published = runner.provider().published.lock().unwrap();
         assert!(matches!(
             published[..],
-            [ViewPublishAnswer::Refused {
+            [ApplyViewAnswer::Refused {
                 refusal: ViewRefusal::Rule(RuleBreak::SignedReasoningInvalid { .. })
             }]
         ));
@@ -334,13 +325,11 @@ async fn a_view_breaking_signed_reasoning_is_refused_and_its_fixed_form_accepted
         }
         edits.extend(invalid.iter().map(|target| drop_edit(version, target)));
     }
-    let answer_fixed = host.publish(ViewPublishRequest {
+    let answer_fixed = host.apply_view(ApplyViewRequest {
         session: host.session(),
-        delivery: ViewDelivery::Inline {
-            view: runner.provider().next_view(edits),
-        },
+        view: runner.provider().next_view(edits),
     });
-    assert_eq!(answer_fixed, ViewPublishAnswer::Accepted);
+    assert_eq!(answer_fixed, ApplyViewAnswer::Accepted);
     *runner.provider().on_notice.lock().unwrap() = None;
     runner.play(&[answer()]).await;
     // The mock provider checks signatures on its own and accepts it.

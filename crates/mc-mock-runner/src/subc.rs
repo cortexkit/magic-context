@@ -1,8 +1,9 @@
 //! The mock runner over the subc daemon (the CortexKit module bus that
 //! routes calls between module processes). It serves the runner ops a
-//! compaction provider calls back (`session.read`, `view.publish`,
-//! `view.current`), plus `mock.play`, which plays one scenario against the
-//! provider over the wire and answers with the run's report.
+//! compaction provider calls back (`session.read`, `session.apply_view`,
+//! `session.applied_view`, `session.send`, `run.result`), plus `mock.play`,
+//! which plays one scenario against the provider over the wire and answers
+//! with the run's report.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,7 +16,7 @@ use ck_contract_draft::read::{ReadRequest, SessionRef};
 use ck_contract_draft::ride::{RideAnswer, RideRequest};
 use ck_contract_draft::send::{RunResultRequest, SendRequest};
 use ck_contract_draft::setup::{SetupAnswer, SetupRequest};
-use ck_contract_draft::view::{View, ViewCurrentRequest, ViewGetRequest, ViewPublishRequest};
+use ck_contract_draft::view::{AppliedViewRequest, ApplyViewRequest};
 use ck_contract_draft::wire::{
     self, codes, PreUserAnswer, PreUserRequest, ToolCallAnswer, ToolCallRequest,
 };
@@ -108,11 +109,6 @@ impl Provider for SubcProvider {
             .await
     }
 
-    async fn view_get(&self, request: ViewGetRequest) -> Result<View, CallError> {
-        self.call(&request.session.clone(), ops::VIEW_GET, &request)
-            .await
-    }
-
     async fn tool(
         &self,
         session: &SessionRef,
@@ -163,8 +159,8 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
         .provides(vec![ProviderRole::ManagementSurface {
             operations: vec![
                 operation(ops::SESSION_READ, ManagementOperationKind::Query),
-                operation(ops::VIEW_CURRENT, ManagementOperationKind::Query),
-                operation(ops::VIEW_PUBLISH, ManagementOperationKind::Mutate),
+                operation(ops::SESSION_APPLIED_VIEW, ManagementOperationKind::Query),
+                operation(ops::SESSION_APPLY_VIEW, ManagementOperationKind::Mutate),
                 operation(ops::SESSION_SEND, ManagementOperationKind::Mutate),
                 operation(ops::RUN_RESULT, ManagementOperationKind::Query),
                 operation(MOCK_PLAY, ManagementOperationKind::Mutate),
@@ -215,14 +211,14 @@ impl Handler {
                 let request: ReadRequest = wire::params(params).map_err(bad)?;
                 Ok(json_of(&self.host(&request.session)?.read(&request)))
             }
-            ops::VIEW_PUBLISH => {
-                let request: ViewPublishRequest = wire::params(params).map_err(bad)?;
+            ops::SESSION_APPLY_VIEW => {
+                let request: ApplyViewRequest = wire::params(params).map_err(bad)?;
                 let host = self.host(&request.session)?;
-                Ok(json_of(&host.publish(request)))
+                Ok(json_of(&host.apply_view(request)))
             }
-            ops::VIEW_CURRENT => {
-                let request: ViewCurrentRequest = wire::params(params).map_err(bad)?;
-                Ok(json_of(&self.host(&request.session)?.current()))
+            ops::SESSION_APPLIED_VIEW => {
+                let request: AppliedViewRequest = wire::params(params).map_err(bad)?;
+                Ok(json_of(&self.host(&request.session)?.applied_view()))
             }
             ops::SESSION_SEND => {
                 let request: SendRequest = wire::params(params).map_err(bad)?;

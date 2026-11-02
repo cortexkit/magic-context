@@ -24,8 +24,8 @@ use ck_contract_draft::rules::{self, ProviderRules};
 use ck_contract_draft::send::{Delivery, RunResult, RunResultRequest, SendAnswer, SendRequest};
 use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{
-    self, edits_for_transcript, RenderedMessage, View, ViewCurrentAnswer, ViewDelivery,
-    ViewGetRequest, ViewPublishAnswer, ViewPublishRequest, ViewRefusal,
+    self, edits_for_transcript, AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest,
+    RenderedMessage, View, ViewRefusal,
 };
 use serde_json::Value;
 
@@ -99,7 +99,6 @@ pub trait Provider {
         request: NoticeRequest,
     ) -> impl Future<Output = Result<NoticeAnswer, CallError>>;
     fn ride(&self, request: RideRequest) -> impl Future<Output = Result<RideAnswer, CallError>>;
-    fn view_get(&self, request: ViewGetRequest) -> impl Future<Output = Result<View, CallError>>;
     /// A `ctx_*` tool call the model made; the answer is the tool's output.
     fn tool(
         &self,
@@ -156,16 +155,13 @@ impl Report {
     }
 }
 
-enum Pending {
-    View(View),
-    Fetch { version: u64, checksum: String },
-}
-
 struct State {
     config: SessionConfig,
     transcript: Transcript,
     applied: Option<View>,
-    pending: Option<Pending>,
+    /// A view accepted since the last request; it applies at the next step
+    /// boundary.
+    pending: Option<View>,
     /// Reasoning tokens per reasoning part, as reported when produced.
     reasoning_tokens: HashMap<String, u64>,
     reminders: Vec<SendRequest>,
@@ -195,18 +191,11 @@ impl State {
     }
 
     fn latest_version(&self) -> u64 {
-        match &self.pending {
-            Some(Pending::View(view)) => view.version,
-            Some(Pending::Fetch { version, .. }) => *version,
-            None => self.applied.as_ref().map_or(0, |view| view.version),
-        }
+        self.latest_view().map_or(0, |view| view.version)
     }
 
     fn latest_view(&self) -> Option<&View> {
-        match &self.pending {
-            Some(Pending::View(view)) => Some(view),
-            _ => self.applied.as_ref(),
-        }
+        self.pending.as_ref().or(self.applied.as_ref())
     }
 
     /// Check a view a provider sent: what a runner must verify before it
@@ -269,33 +258,21 @@ impl Host {
         }
     }
 
-    /// `view.publish`: check the view and store it for the next step.
-    pub fn publish(&self, request: ViewPublishRequest) -> ViewPublishAnswer {
+    /// `session.apply_view`: check the view and store it for the next step.
+    pub fn apply_view(&self, request: ApplyViewRequest) -> ApplyViewAnswer {
         let mut state = self.lock();
-        match request.delivery {
-            ViewDelivery::Inline { view } => match state.check(&view) {
-                Ok(()) => {
-                    state.pending = Some(Pending::View(view));
-                    ViewPublishAnswer::Accepted
-                }
-                Err(refusal) => ViewPublishAnswer::Refused { refusal },
-            },
-            ViewDelivery::Fetch { version, checksum } => {
-                let latest = state.latest_version();
-                if version <= latest {
-                    return ViewPublishAnswer::Refused {
-                        refusal: ViewRefusal::StaleVersion { version, latest },
-                    };
-                }
-                state.pending = Some(Pending::Fetch { version, checksum });
-                ViewPublishAnswer::Accepted
+        match state.check(&request.view) {
+            Ok(()) => {
+                state.pending = Some(request.view);
+                ApplyViewAnswer::Accepted
             }
+            Err(refusal) => ApplyViewAnswer::Refused { refusal },
         }
     }
 
-    /// `view.current`.
-    pub fn current(&self) -> ViewCurrentAnswer {
-        ViewCurrentAnswer {
+    /// `session.applied_view`.
+    pub fn applied_view(&self) -> AppliedViewAnswer {
+        AppliedViewAnswer {
             view: self.lock().applied.clone(),
         }
     }
@@ -771,31 +748,10 @@ impl<P: Provider> Runner<P> {
         }
     }
 
-    /// Apply the view that arrived since the last request, fetching it first
-    /// when it was too large to send inline.
+    /// Apply the view that arrived since the last request.
     async fn step_boundary(&mut self) {
-        let pending = self.host.lock().pending.take();
-        let view = match pending {
-            None => return,
-            Some(Pending::View(view)) => view,
-            Some(Pending::Fetch { version, checksum }) => {
-                let session = self.host.session();
-                match self
-                    .provider
-                    .view_get(ViewGetRequest { session, version })
-                    .await
-                {
-                    Ok(view) if view.checksum == checksum => view,
-                    Ok(_) => {
-                        self.refuse_at_boundary(version, ViewRefusal::BadChecksum);
-                        return;
-                    }
-                    Err(error) => {
-                        self.report.call_errors.push(error);
-                        return;
-                    }
-                }
-            }
+        let Some(view) = self.host.lock().pending.take() else {
+            return;
         };
         self.adopt(view);
     }
@@ -869,37 +825,12 @@ impl<P: Provider> Runner<P> {
         let answer = self.provider.ride(request).await;
         let got_view = match answer {
             Ok(RideAnswer::Nothing) => false,
-            Ok(RideAnswer::View { delivery }) => {
-                let view = match delivery {
-                    ViewDelivery::Inline { view } => Some(view),
-                    ViewDelivery::Fetch { version, checksum } => {
-                        let session = self.host.session();
-                        match self
-                            .provider
-                            .view_get(ViewGetRequest { session, version })
-                            .await
-                        {
-                            Ok(view) if view.checksum == checksum => Some(view),
-                            Ok(_) => {
-                                self.refuse_at_boundary(version, ViewRefusal::BadChecksum);
-                                None
-                            }
-                            Err(error) => {
-                                self.report.call_errors.push(error);
-                                None
-                            }
-                        }
-                    }
-                };
-                if let Some(view) = view {
-                    // A view published earlier but not yet applied is
-                    // superseded by the ride's answer.
-                    self.host.lock().pending = None;
-                    self.adopt(view);
-                    true
-                } else {
-                    false
-                }
+            Ok(RideAnswer::View { view }) => {
+                // A view handed over earlier but not yet applied is
+                // superseded by the ride's answer.
+                self.host.lock().pending = None;
+                self.adopt(view);
+                true
             }
             Err(error) => {
                 self.report.call_errors.push(error);

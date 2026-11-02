@@ -1,7 +1,7 @@
 //! ck-mc's own store: per session, the decisions that are not in the
 //! runner's transcript or view and must survive a restart. Views themselves
 //! are not kept here: after a restart ck-mc takes the runner's current view
-//! with `view.current`, so this store is small and close to a cache.
+//! with `session.applied_view`, so this store is small and close to a cache.
 //!
 //! It is a new file, separate from the store earlier ck-mc builds used, so a
 //! rollback to one of them finds its own file untouched.

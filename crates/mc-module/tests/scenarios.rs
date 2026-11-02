@@ -15,8 +15,7 @@ use ck_contract_draft::rules::{EditCost, ProviderRules, SignedReasoning};
 use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendRequest};
 use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{
-    View, ViewCurrentAnswer, ViewCurrentRequest, ViewGetRequest, ViewPublishAnswer,
-    ViewPublishRequest,
+    AppliedViewAnswer, AppliedViewRequest, ApplyViewAnswer, ApplyViewRequest,
 };
 use mc_mock_runner::model::Kind;
 use mc_mock_runner::runner::{CallError, Host, Provider, Runner, SessionConfig, UserEdit};
@@ -67,12 +66,12 @@ impl RunnerClient for HostClient {
         Ok(page)
     }
 
-    async fn publish(&self, request: ViewPublishRequest) -> Result<ViewPublishAnswer, ClientError> {
-        Ok(self.host()?.publish(request))
+    async fn apply_view(&self, request: ApplyViewRequest) -> Result<ApplyViewAnswer, ClientError> {
+        Ok(self.host()?.apply_view(request))
     }
 
-    async fn current(&self, _: ViewCurrentRequest) -> Result<ViewCurrentAnswer, ClientError> {
-        Ok(self.host()?.current())
+    async fn applied_view(&self, _: AppliedViewRequest) -> Result<AppliedViewAnswer, ClientError> {
+        Ok(self.host()?.applied_view())
     }
 
     async fn send(&self, request: SendRequest) -> Result<SendAnswer, ClientError> {
@@ -157,10 +156,6 @@ impl Provider for InProcess {
 
     async fn ride(&self, request: RideRequest) -> Result<RideAnswer, CallError> {
         self.module().ride(request).await.map_err(call_error)
-    }
-
-    async fn view_get(&self, request: ViewGetRequest) -> Result<View, CallError> {
-        self.module().view_get(request).await.map_err(call_error)
     }
 
     async fn tool(
@@ -1070,7 +1065,7 @@ async fn a_restarted_ck_mc_keeps_the_history_baseline() {
         .entries()
         .iter()
         .position(|entry| {
-            runner.host().current().view.is_some_and(|view| {
+            runner.host().applied_view().view.is_some_and(|view| {
                 view.edits.iter().any(|edit| {
                     matches!(&edit.op, ck_contract_draft::view::EditOp::Cut { through } if *through == entry.mid)
                 })
@@ -1852,12 +1847,15 @@ impl RunnerClient for StuckClient {
         Self::answer(&request.session, page).await
     }
 
-    async fn publish(&self, request: ViewPublishRequest) -> Result<ViewPublishAnswer, ClientError> {
-        Self::answer(&request.session, ViewPublishAnswer::Accepted).await
+    async fn apply_view(&self, request: ApplyViewRequest) -> Result<ApplyViewAnswer, ClientError> {
+        Self::answer(&request.session, ApplyViewAnswer::Accepted).await
     }
 
-    async fn current(&self, request: ViewCurrentRequest) -> Result<ViewCurrentAnswer, ClientError> {
-        Self::answer(&request.session, ViewCurrentAnswer { view: None }).await
+    async fn applied_view(
+        &self,
+        request: AppliedViewRequest,
+    ) -> Result<AppliedViewAnswer, ClientError> {
+        Self::answer(&request.session, AppliedViewAnswer { view: None }).await
     }
 
     async fn send(&self, request: SendRequest) -> Result<SendAnswer, ClientError> {

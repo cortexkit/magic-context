@@ -15,7 +15,8 @@
 //!   ([`notice`]); and before a request that rewrites the model provider's
 //!   prompt cache anyway, or that would not fit, it asks for a view and waits
 //!   for the answer ([`ride`]);
-//! - the provider sends new views with `view.publish` ([`view`]); the runner
+//! - the provider hands over new views with `session.apply_view` ([`view`]),
+//!   or in a ride's answer; the runner
 //!   checks each one against the rules it declared ([`rules`]), stores it, and
 //!   applies it from the next step until a newer one arrives.
 //!
@@ -48,6 +49,8 @@ pub const COMPACTION_PROVIDES: &str = "compaction-provider/v2";
 pub const RUNNER_NEUTRAL_READS: &str = "neutral-reads/v1";
 
 /// Names of the ops, used as the `method` of the request that carries them.
+/// The prefix names the side that serves the op: `compaction.*` the
+/// compaction provider, `session.*` and `run.*` the runner.
 pub mod ops {
     /// Served by the provider: start managing a session ([`crate::setup`]).
     pub const COMPACTION_SETUP: &str = "compaction.setup";
@@ -55,15 +58,14 @@ pub mod ops {
     pub const COMPACTION_NOTICE: &str = "compaction.notice";
     /// Served by the provider: the runner asks for a view now ([`crate::ride`]).
     pub const COMPACTION_RIDE: &str = "compaction.ride";
-    /// Served by the provider: fetch a view too large to send inline.
-    pub const VIEW_GET: &str = "view.get";
     /// Served by the runner: read transcript entries ([`crate::read`]).
     pub const SESSION_READ: &str = "session.read";
-    /// Served by the runner: take a new view ([`crate::view::ViewPublishRequest`]).
-    pub const VIEW_PUBLISH: &str = "view.publish";
-    /// Served by the runner: the view it currently applies, for a provider
-    /// whose own copy is missing or older (for example after a store restore).
-    pub const VIEW_CURRENT: &str = "view.current";
+    /// Served by the runner: take a new view
+    /// ([`crate::view::ApplyViewRequest`]).
+    pub const SESSION_APPLY_VIEW: &str = "session.apply_view";
+    /// Served by the runner: the view it applies now
+    /// ([`crate::view::AppliedViewRequest`]).
+    pub const SESSION_APPLIED_VIEW: &str = "session.applied_view";
     /// Served by the runner: queue text for the model, or start a run in a
     /// child session ([`crate::send`]).
     pub const SESSION_SEND: &str = "session.send";

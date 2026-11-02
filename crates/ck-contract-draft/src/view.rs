@@ -579,51 +579,43 @@ pub fn check_carried(previous: Option<&View>, next: &View) -> Result<(), ViewRef
     Ok(())
 }
 
-/// A view sent inline, or named for a `view.get` fetch when it is too large
-/// for one call.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "form", rename_all = "snake_case")]
-pub enum ViewDelivery {
-    Inline { view: View },
-    Fetch { version: u64, checksum: String },
-}
+/// The largest view, as serialized JSON, a provider may hand over. Views name
+/// edits, never copies of held content, so a real one stays far below this
+/// (the largest seen, a 9,000-message session's first view, was about 400 KB).
+/// It leaves room under a module call's 4 MiB frame for the request around it.
+/// A provider refuses by name to send a larger view: one would be a bug in
+/// the provider, not something to page.
+pub const MAX_VIEW_BYTES: usize = 3 << 20;
 
-/// `view.publish`, served by the runner: the provider hands over a new view.
-/// The runner checks it ([`apply`], [`check_carried`],
+/// `session.apply_view`, served by the runner: the provider hands over a new
+/// view. The runner checks it ([`apply`], [`check_carried`],
 /// [`crate::rules::check`]), stores it, and applies it from the next step
 /// boundary, never in the middle of a step.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ViewPublishRequest {
+pub struct ApplyViewRequest {
     pub session: SessionRef,
-    pub delivery: ViewDelivery,
+    pub view: View,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "answer", rename_all = "snake_case")]
-pub enum ViewPublishAnswer {
+pub enum ApplyViewAnswer {
     /// Stored; it applies from the next step boundary.
     Accepted,
     /// Not stored; the runner keeps its current view.
     Refused { refusal: ViewRefusal },
 }
 
-/// `view.get`, served by the provider: the fallback fetch for a view too
-/// large to send inline.
+/// `session.applied_view`, served by the runner: the view it applies now, for
+/// a provider whose own copy is missing or older (for example after its store
+/// was restored from a backup).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ViewGetRequest {
-    pub session: SessionRef,
-    pub version: u64,
-}
-
-/// `view.current`, served by the runner. The answer is the view it applies
-/// now, or none.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ViewCurrentRequest {
+pub struct AppliedViewRequest {
     pub session: SessionRef,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ViewCurrentAnswer {
+pub struct AppliedViewAnswer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<View>,
 }

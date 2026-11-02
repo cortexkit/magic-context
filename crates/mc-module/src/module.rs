@@ -19,7 +19,7 @@ use ck_contract_draft::notice::{NoticeAnswer, NoticeRequest};
 use ck_contract_draft::read::SessionRef;
 use ck_contract_draft::ride::{RideAnswer, RideRequest};
 use ck_contract_draft::setup::{SetupAnswer, SetupRequest};
-use ck_contract_draft::view::{View, ViewDelivery, ViewGetRequest};
+use ck_contract_draft::view::View;
 use ck_contract_draft::wire::PreUserAnswer;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
@@ -45,8 +45,6 @@ pub enum ModuleError {
     UnknownPreset(String),
     /// A call for a session that never had a Setup.
     UnknownSession,
-    /// The view asked for is not ck-mc's current one.
-    UnknownView,
     /// The session's worker stopped.
     Stopped,
     /// A tool call failed; the text is for the model.
@@ -95,7 +93,6 @@ enum Job {
         now: u64,
         reply: oneshot::Sender<PreUserAnswer>,
     },
-    ViewGet(u64, oneshot::Sender<Option<View>>),
     Idle(oneshot::Sender<()>),
     SummaryFinished(Result<Option<ValidatedChunk>, String>),
 }
@@ -156,22 +153,10 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
         let (reply, answer) = oneshot::channel();
         self.send(&request.session.clone(), Job::Ride(request, reply))?;
         match tokio::time::timeout(deadline, answer).await {
-            Ok(Ok(Some(view))) => Ok(RideAnswer::View {
-                delivery: ViewDelivery::Inline { view },
-            }),
+            Ok(Ok(Some(view))) => Ok(RideAnswer::View { view }),
             Ok(Ok(None)) | Err(_) => Ok(RideAnswer::Nothing),
             Ok(Err(_)) => Err(ModuleError::Stopped),
         }
-    }
-
-    /// `view.get`.
-    pub async fn view_get(&self, request: ViewGetRequest) -> Result<View, ModuleError> {
-        let (reply, answer) = oneshot::channel();
-        self.send(&request.session, Job::ViewGet(request.version, reply))?;
-        answer
-            .await
-            .map_err(|_| ModuleError::Stopped)?
-            .ok_or(ModuleError::UnknownView)
     }
 
     /// A `ctx_*` tool call from a session's model.
@@ -258,7 +243,7 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
             let mut saved: Option<crate::store::Durable> = None;
             while let Some(job) = receiver.recv().await {
                 let settings: Settings = match (&job, &session) {
-                    (Job::ViewGet(..) | Job::Idle(_), _) => Settings::default(),
+                    (Job::Idle(_), _) => Settings::default(),
                     (Job::Setup(request, _), _) => inner.config.resolve(
                         request
                             .project
@@ -336,11 +321,6 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                             None => PreUserAnswer::default(),
                         };
                         let _ = reply.send(answer);
-                        continue;
-                    }
-                    Job::ViewGet(version, reply) => {
-                        let _ =
-                            reply.send(session.as_ref().and_then(|session| session.view(version)));
                         continue;
                     }
                     Job::Idle(reply) => {
