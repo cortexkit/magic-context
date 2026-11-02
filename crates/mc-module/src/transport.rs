@@ -363,8 +363,8 @@ impl RunnerClient for SubcRunnerClient {
     }
 
     /// Synapse admits any principal on its management surface and reads no
-    /// project from the bind, so the route is opened unscoped, bound to
-    /// ck-mc and the session the search is for.
+    /// project from the bind, so the route is opened unscoped, bound to the
+    /// `magic-context` harness and the session the search is for.
     async fn synapse_call(
         &self,
         session: &SessionRef,
