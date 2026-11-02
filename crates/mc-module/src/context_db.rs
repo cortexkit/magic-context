@@ -292,26 +292,37 @@ impl ContextDb {
         compartments: &[ValidatedCompartment],
         now_ms: i64,
     ) -> Result<(), String> {
-        self.publish_summaries(harness, session, compartments, None, now_ms)
-            .map(|_| ())
+        self.publish_summaries(
+            harness,
+            session,
+            compartments,
+            None,
+            &Recall::default(),
+            now_ms,
+        )
+        .map(|_| ())
     }
 
     /// Store a run's summaries and, with `facts` (the project and its
     /// category and text pairs), promote the facts to project memories in the
     /// same transaction, so summaries never land without the memories their
-    /// run found, nor the other way round. Returns how many facts landed.
+    /// run found, nor the other way round. The run's events and its primer
+    /// candidate land in the same transaction too ([`Recall`]). Returns how
+    /// many facts landed.
     pub fn publish_summaries(
         &self,
         harness: &str,
         session: &str,
         compartments: &[ValidatedCompartment],
         facts: Option<(&str, &[(String, String)])>,
+        recall: &Recall,
         now_ms: i64,
     ) -> Result<usize, String> {
         let mut connection = self.lock();
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
+        let mut ids = Vec::with_capacity(compartments.len());
         {
             let mut insert = transaction
                 .prepare_cached(
@@ -322,7 +333,7 @@ impl ContextDb {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 )
                 .map_err(|error| error.to_string())?;
-            for compartment in compartments {
+            for compartment in compartments.iter() {
                 // A summary with tiers is current; one without is the old flat form.
                 let legacy = i32::from(compartment.p1.as_deref().is_none_or(str::is_empty));
                 insert
@@ -346,8 +357,19 @@ impl ContextDb {
                         harness,
                     ])
                     .map_err(|error| error.to_string())?;
+                ids.push(transaction.last_insert_rowid());
             }
         }
+        store_recall(
+            &transaction,
+            harness,
+            session,
+            compartments,
+            &ids,
+            recall,
+            now_ms,
+        )
+        .map_err(|error| error.to_string())?;
         let promoted = match facts {
             Some((project, facts)) => {
                 crate::memory_writes::promote_facts(&transaction, project, session, facts)
@@ -632,6 +654,73 @@ impl ContextDb {
 mod tests {
     use super::*;
 
+    /// A run's events and its first primer candidate land with its
+    /// summaries; an event names the summary it belongs to by stored id.
+    #[test]
+    fn a_runs_events_and_primer_candidate_land_with_its_summaries() {
+        let dir = std::env::temp_dir().join(format!("ck-mc-recall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+        let summary = |sequence: u64, start: u64, end: u64| ValidatedCompartment {
+            sequence,
+            start_message: start,
+            end_message: end,
+            start_message_id: format!("m{start}"),
+            end_message_id: format!("m{end}"),
+            title: "Work".into(),
+            content: "Did work.".into(),
+            p1: Some("Did work.".into()),
+            p2: None,
+            p3: None,
+            p4: None,
+            importance: Some(50),
+            episode_type: None,
+        };
+        let recall = Recall {
+            events: vec![crate::summary::validate::ParsedEvent {
+                kind: "decision".into(),
+                at_compartment: Some(2),
+                fields: std::collections::BTreeMap::from([("what".into(), "ship".into())]),
+            }],
+            primer: Some(PrimerSource {
+                project: "pj".into(),
+                question: "  How do we ship?  ".into(),
+                origin: Some(2),
+                source_time: 42,
+            }),
+        };
+        db.publish_summaries(
+            "opencode",
+            "s1",
+            &[summary(0, 1, 4), summary(1, 5, 9)],
+            None,
+            &recall,
+            7,
+        )
+        .unwrap();
+        db.with_connection(|conn| {
+            let second: i64 = conn
+                .query_row("SELECT id FROM compartments WHERE sequence = 1", [], |row| row.get(0))
+                .unwrap();
+            let (event_compartment, kind): (i64, String) = conn
+                .query_row("SELECT compartment_id, kind FROM compartment_events", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap();
+            assert_eq!((event_compartment, kind.as_str()), (second, "decision"));
+            let primer: (String, String, String, i64) = conn
+                .query_row(
+                    "SELECT normalized_question, source_start_message_id, source_end_message_id, source_message_time FROM primer_candidates",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(primer, ("how do we ship".into(), "m5".into(), "m9".into(), 42));
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_fresh_store_opens_and_round_trips_summaries() {
         let dir = std::env::temp_dir().join(format!("ck-mc-context-db-{}", std::process::id()));
@@ -666,4 +755,107 @@ mod tests {
             .is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// What a summary run records for recall besides its summaries, as the
+/// plugin's publisher does (`compartment-runner-incremental.ts`): its events
+/// (`compartment_events`), and with a project its first primer candidate
+/// (`primer_candidates`, read by the dashboard and `ctx_search`, never shown
+/// in the prompt).
+#[derive(Default)]
+pub struct Recall {
+    pub events: Vec<crate::summary::validate::ParsedEvent>,
+    pub primer: Option<PrimerSource>,
+}
+
+/// A primer candidate and where it came from.
+pub struct PrimerSource {
+    pub project: String,
+    pub question: String,
+    /// 1-based index into the run's summaries; outside them, the whole run.
+    pub origin: Option<u64>,
+    /// When the first message of its source was written.
+    pub source_time: i64,
+}
+
+/// A primer question normalized as the plugin's `normalizePrimerQuestion`.
+fn normalize_primer_question(question: &str) -> String {
+    let lowered = question
+        .trim()
+        .to_lowercase()
+        .replace(['\u{201c}', '\u{201d}'], "\"")
+        .replace('\u{2019}', "'");
+    let collapsed = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed
+        .trim_end_matches(['?', '.', '!'])
+        .trim()
+        .to_owned()
+}
+
+fn store_recall(
+    tx: &rusqlite::Transaction,
+    harness: &str,
+    session: &str,
+    compartments: &[ValidatedCompartment],
+    ids: &[i64],
+    recall: &Recall,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    for event in &recall.events {
+        // `at_compartment` is 1-based into the run's summaries.
+        let id = event
+            .at_compartment
+            .and_then(|at| at.checked_sub(1))
+            .and_then(|index| ids.get(index as usize).copied());
+        tx.execute(
+            "INSERT INTO compartment_events (session_id, compartment_id, kind, at_compartment, fields_json, created_at, harness) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                session,
+                id,
+                event.kind,
+                event.at_compartment.map(|at| at as i64),
+                serde_json::to_string(&event.fields).unwrap_or_else(|_| "{}".into()),
+                now_ms,
+                harness,
+            ],
+        )?;
+    }
+    let (Some(primer), Some(first), Some(last)) =
+        (&recall.primer, compartments.first(), compartments.last())
+    else {
+        return Ok(());
+    };
+    let question = primer.question.trim();
+    if question.is_empty() {
+        return Ok(());
+    }
+    let origin = primer
+        .origin
+        .and_then(|at| at.checked_sub(1))
+        .and_then(|index| compartments.get(index as usize));
+    let (start, end) = origin.map_or((first, last), |origin| (origin, origin));
+    tx.execute(
+        "INSERT INTO primer_candidates (project_path, harness, session_id, question, normalized_question, source_compartment_start, source_compartment_end, source_start_message_id, source_end_message_id, source_message_time, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(project_path, harness, session_id, source_start_message_id, source_end_message_id)
+         DO UPDATE SET question = excluded.question, normalized_question = excluded.normalized_question,
+            source_compartment_start = excluded.source_compartment_start,
+            source_compartment_end = excluded.source_compartment_end,
+            source_message_time = excluded.source_message_time,
+            created_at = MIN(primer_candidates.created_at, excluded.created_at)",
+        params![
+            primer.project,
+            harness,
+            session,
+            question,
+            normalize_primer_question(question),
+            start.start_message as i64,
+            end.end_message as i64,
+            start.start_message_id,
+            end.end_message_id,
+            primer.source_time,
+            now_ms,
+        ],
+    )?;
+    Ok(())
 }

@@ -801,11 +801,41 @@ impl Session {
                 .as_ref()
                 .filter(|_| settings.memory_enabled && settings.auto_promote && !facts.is_empty())
                 .map(|project| (project.id.as_str(), facts.as_slice()));
+            // The plugin stores one primer candidate per run, the first.
+            let primer = match (&self.project, validated.primer_candidates.first()) {
+                (Some(project), Some(candidate)) => {
+                    let origin = candidate.origin_compartment_index;
+                    let source = origin
+                        .and_then(|at| at.checked_sub(1))
+                        .and_then(|index| validated.compartments.get(index as usize))
+                        .or(validated.compartments.first());
+                    let source_time = source
+                        .and_then(|summary| {
+                            self.index
+                                .entries()
+                                .iter()
+                                .find(|entry| entry.mid == summary.start_message_id)
+                        })
+                        .map_or(now_ms, |entry| entry.written_at as i64);
+                    Some(crate::context_db::PrimerSource {
+                        project: project.id.clone(),
+                        question: candidate.question.clone(),
+                        origin,
+                        source_time,
+                    })
+                }
+                _ => None,
+            };
+            let recall = crate::context_db::Recall {
+                events: validated.events.clone(),
+                primer,
+            };
             if let Err(error) = db.publish_summaries(
                 &self.key.harness,
                 &self.key.session,
                 &validated.compartments,
                 promote,
+                &recall,
                 now_ms,
             ) {
                 eprintln!(

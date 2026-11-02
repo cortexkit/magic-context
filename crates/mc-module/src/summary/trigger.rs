@@ -110,12 +110,15 @@ pub fn tail_start(
         if total >= tail_tokens {
             // One huge message alone over the tail stays summarizable,
             // or nothing before it could ever be read.
-            if weight(entry) > (2 * tail_tokens).max(64_000) && entry.ordinal < newest.ordinal {
+            if weight(entry) > (2 * tail_tokens).max(HUGE_MESSAGE_MIN_TOKENS)
+                && entry.ordinal < newest.ordinal
+            {
                 boundary += 1;
             }
             break;
         }
     }
+    boundary = semantic_snap(entries, &weight, from, boundary, tail_tokens);
     if !force {
         if let Some(prompt) = entries.iter().rev().find(|entry| is_meaningful_user(entry)) {
             if prompt.ordinal >= from {
@@ -133,6 +136,56 @@ pub fn tail_start(
     }
     boundary.max(from)
 }
+
+/// The tail starts preferably at a message that opens a stretch of work: a
+/// prompt the person wrote, or a message with a tool call. So the boundary
+/// moves back to the newest such message at or before it, as the plugin's
+/// `semanticSnapBoundary` does, unless that keeps more than
+/// `min(1.5 × tail, 48,000)` extra tokens raw, or the message is a prompt
+/// too large to keep (over `max(2 × tail, 64,000)`).
+fn semantic_snap(
+    entries: &[Entry],
+    weight: &impl Fn(&Entry) -> u64,
+    from: u64,
+    boundary: u64,
+    tail_tokens: u64,
+) -> u64 {
+    let opens_work = |entry: &Entry| {
+        is_meaningful_user(entry)
+            || entry
+                .parts
+                .iter()
+                .any(|part| matches!(part.body, PartBody::Tool(_)))
+    };
+    let Some(snapped) = entries
+        .iter()
+        .filter(|entry| entry.ordinal >= from && entry.ordinal <= boundary)
+        .rfind(|entry| opens_work(entry))
+    else {
+        return boundary;
+    };
+    if snapped.ordinal == boundary {
+        return boundary;
+    }
+    let extra: u64 = entries
+        .iter()
+        .filter(|entry| entry.ordinal >= snapped.ordinal && entry.ordinal < boundary)
+        .map(weight)
+        .sum();
+    let allowed = ((1.5 * tail_tokens as f64).round() as u64).min(SNAP_MAX_EXTRA_TOKENS);
+    let huge_prompt = snapped.role == Role::User
+        && weight(snapped) > (2 * tail_tokens).max(HUGE_MESSAGE_MIN_TOKENS);
+    if extra > allowed || huge_prompt {
+        boundary
+    } else {
+        snapped.ordinal
+    }
+}
+
+/// The most a semantic snap keeps raw beyond the size walk.
+const SNAP_MAX_EXTRA_TOKENS: u64 = 48_000;
+/// A message larger than `max(2 × tail, this)` is too large to keep raw.
+const HUGE_MESSAGE_MIN_TOKENS: u64 = 64_000;
 
 /// What decided a run, for the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -288,6 +341,28 @@ mod tests {
         )));
         let wrapped = "<system-reminder>\nThe user sent the following message:\nDo not deploy.\n\nPlease address this message and continue with your tasks.\n</system-reminder>";
         assert!(is_meaningful_user(&entry(1, Role::User, false, wrapped)));
+    }
+
+    /// The tail moves back to the newest prompt or tool call at or before
+    /// the size walk's boundary, when that keeps little extra raw.
+    #[test]
+    fn the_tail_snaps_back_to_the_prompt_that_opens_the_work() {
+        let entries: Vec<Entry> = (1..=10)
+            .map(|ordinal| {
+                let role = if ordinal == 7 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                };
+                entry(ordinal, role, false, "x")
+            })
+            .collect();
+        let weight = |_: &Entry| 1_000;
+        // The size walk keeps 9 and 10; the prompt at 7 opens that work and
+        // costs 2,000 extra, within 1.5 × 2,000.
+        assert_eq!(tail_start(&entries, weight, 1, 2_000, true), 7);
+        // With a tail of 1,000 the extra 3,000 is too much.
+        assert_eq!(tail_start(&entries, weight, 1, 1_000, true), 10);
     }
 
     /// A call left running in an old message was interrupted: it does not
