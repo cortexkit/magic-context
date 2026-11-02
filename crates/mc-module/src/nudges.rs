@@ -21,6 +21,13 @@
 //! the ceiling, goes once per cycle as a notice message before the next
 //! request.
 //!
+//! Each reminder is a plan template send (compaction SR1): a runner stores
+//! a send without a template as if the person had typed it. The templates
+//! hold the plugin's wording with integer and `part_tag` slots only, since
+//! a template takes no free text; the oldest reclaimable outputs are named by
+//! their part, and the runner renders the number it shows for each, so the
+//! plugin's tool names after those numbers are left out.
+//!
 //! Two rules keep a reminder from being caused by ck-mc itself:
 //! - a pass that published a view fires nothing. Removing content lowers `T`
 //!   and can raise `U/T`; that pass records the band it left, so only growth
@@ -30,10 +37,15 @@
 
 use std::collections::BTreeSet;
 
-use compaction_view::tags::tag_prefix;
+use std::collections::BTreeMap;
+
 use cortexkit_role_compaction::part::PartBody;
 use cortexkit_role_compaction::read::{Entry, Role};
+use cortexkit_role_llm_runner::delivery_order::{
+    template_digest, PartRef, PlanSender, Slot, Template, TemplateUse,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
 
 use crate::lanes::{self, Context, PartKey};
 use crate::tokens;
@@ -68,6 +80,115 @@ const HINT_EXCLUDED_TOOLS: [&str; 8] = [
 /// newer reminder replaces a queued one of its kind, and its `send_id` prefix.
 pub const REMINDER_KIND: &str = "mc.reduce.reminder";
 pub const CEILING_KIND: &str = "mc.reduce.ceiling";
+/// The kind and template of the request to call `ctx_keep`.
+pub const KEEP_KIND: &str = "mc.ctx_keep";
+pub const KEEP_TEMPLATE: &str = "mc.ctx_keep.v1";
+
+/// The largest value an integer slot takes. Larger counts are clamped, so a
+/// send never carries a value its slot refuses.
+const SLOT_MAX: i64 = 100_000_000;
+
+/// The reminder bodies, with `{summary}` for the outputs and tokens.
+const BODIES: [(&str, &str); 5] = [
+    (
+        "gentle",
+        "Housekeeping: {summary} are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.",
+    ),
+    (
+        "firm",
+        "{summary} are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.",
+    ),
+    (
+        "urgent",
+        "{summary} are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.",
+    ),
+    (
+        "again",
+        "Still unstamped: {summary}. Stamp the ones you've used with ctx_reduce now.",
+    ),
+    (
+        "ceiling",
+        "Your next step: call ctx_reduce on the outputs you've already used ({summary}). Then continue your task.",
+    ),
+];
+
+/// Every template ck-mc sends, for the plan's `senders` entry.
+pub fn templates() -> Vec<Template> {
+    let integer = |min| Slot::Integer { min, max: SLOT_MAX };
+    let mut templates = Vec::new();
+    for (kind, body) in BODIES {
+        for count in ["zero", "one", "many"] {
+            for hints in 0..=HINT_COUNT {
+                let mut slots = BTreeMap::from([("tokens_k".to_owned(), integer(0))]);
+                let outputs = match count {
+                    "zero" => "spent tool outputs",
+                    "one" => "1 spent tool output",
+                    _ => {
+                        slots.insert("count".into(), integer(2));
+                        "{count} spent tool outputs"
+                    }
+                };
+                let summary = format!("{outputs} (~{{tokens_k}}k tokens)");
+                let mut text =
+                    format!("<system-reminder>\n{}", body.replace("{summary}", &summary));
+                if hints > 0 {
+                    let names: Vec<String> = (0..hints).map(|i| format!("{{tag{i}}}")).collect();
+                    text.push_str(&format!("\noldest reclaimable: {}.", names.join(" · ")));
+                    for i in 0..hints {
+                        slots.insert(format!("tag{i}"), Slot::PartTag);
+                    }
+                }
+                text.push_str("\n</system-reminder>");
+                templates.push(Template::new(
+                    format!("mc.ctx_reduce.{kind}.{count}.h{hints}.v1"),
+                    text,
+                    slots,
+                ));
+            }
+        }
+    }
+    templates.push(Template::new(
+        KEEP_TEMPLATE,
+        "Your context is {usage}% full, and dropping old tool output freed only {freed} tokens. \
+         Call ctx_keep now. In `tags`, list the tags you still need, most important first. \
+         In `note`, write a few lines on where you are and what comes next. \
+         Everything else before that call, except your task, is then removed.",
+        BTreeMap::from([
+            ("usage".to_owned(), Slot::Percentage),
+            ("freed".to_owned(), integer(0)),
+        ]),
+    ));
+    templates
+}
+
+/// The plan `senders` entry that admits ck-mc's sends and its templates.
+pub fn plan_sender() -> PlanSender {
+    PlanSender::new("magic-context").with_templates(templates())
+}
+
+/// A use of the template `id` with `slots`.
+fn template_use(id: &str, slots: Map<String, Value>) -> TemplateUse {
+    let digest = templates()
+        .iter()
+        .find(|template| template.id == id)
+        .map(template_digest)
+        .unwrap_or_else(|| panic!("unknown template {id}"));
+    TemplateUse::new(id, digest, slots)
+}
+
+/// The request to call `ctx_keep`: `usage` percent full, `freed` tokens.
+pub fn keep_request(usage: f64, freed: u64) -> TemplateUse {
+    template_use(
+        KEEP_TEMPLATE,
+        Map::from_iter([
+            (
+                "usage".to_owned(),
+                json!(usage.round().clamp(0.0, 100.0) as i64),
+            ),
+            ("freed".to_owned(), json!(freed.min(SLOT_MAX as u64))),
+        ]),
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -78,13 +199,13 @@ pub enum Level {
 }
 
 /// `T`, `U`, how many tool results make up `U`, and the oldest of them worth
-/// suggesting, as `(tag, tool name)`.
+/// suggesting.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Measurement {
     pub t: u64,
     pub u: u64,
     pub outputs: usize,
-    pub hints: Vec<(u64, String)>,
+    pub hints: Vec<PartRef>,
 }
 
 impl Measurement {
@@ -136,7 +257,7 @@ pub fn measure(
         })
         .flatten();
     let mut measurement = Measurement::default();
-    let mut candidates: Vec<(u8, u64, String)> = Vec::new();
+    let mut candidates: Vec<(u8, u64, PartRef)> = Vec::new();
     for entry in context.index.entries() {
         // Reminders and other notices are the runner's or a module's, not
         // content the model could act on.
@@ -172,7 +293,11 @@ pub fn measure(
                     && !name.starts_with("ctx_")
                     && !HINT_EXCLUDED_TOOLS.contains(&name.as_str())
                 {
-                    candidates.push((lanes::emergency_tier(&tool.name), tag, tool.name.clone()));
+                    candidates.push((
+                        lanes::emergency_tier(&tool.name),
+                        tag,
+                        PartRef::new(entry.mid.clone(), part.id.clone()),
+                    ));
                 }
             }
         }
@@ -183,7 +308,7 @@ pub fn measure(
     measurement.hints = candidates
         .into_iter()
         .take(HINT_COUNT)
-        .map(|(_, tag, name)| (tag, name))
+        .map(|(_, _, part)| part)
         .collect();
     measurement
 }
@@ -211,10 +336,10 @@ pub struct State {
 /// What a pass sends.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Reminders {
-    /// Text to ride the next tool result.
-    pub tool_result: Option<String>,
-    /// Text to store as a notice message before the next request.
-    pub ceiling: Option<String>,
+    /// A reminder to ride the next tool result.
+    pub tool_result: Option<TemplateUse>,
+    /// A reminder to store as a notice message before the next request.
+    pub ceiling: Option<TemplateUse>,
 }
 
 fn rank(level: Option<Level>) -> u8 {
@@ -267,7 +392,7 @@ impl State {
         }
         if !self.ceiling_sent && measurement.at_ceiling() {
             self.ceiling_sent = true;
-            reminders.ceiling = Some(ceiling_text(measurement));
+            reminders.ceiling = Some(reminder("ceiling", measurement));
         }
         let threshold = refire_tokens(measurement.t);
         if let Some(grace_u) = self.grace_u {
@@ -301,7 +426,13 @@ impl State {
         // When the ceiling reminder goes on the same pass it says it all; a
         // second reminder in the same step would only repeat it.
         if reminders.ceiling.is_none() {
-            reminders.tool_result = Some(reminder_text(level, measurement, !crossed));
+            let kind = match (crossed, level) {
+                (false, _) => "again",
+                (true, Level::Gentle) => "gentle",
+                (true, Level::Firm) => "firm",
+                (true, Level::Urgent) => "urgent",
+            };
+            reminders.tool_result = Some(reminder(kind, measurement));
         }
         self.last_level = Some(level);
         self.last_u = measurement.u;
@@ -318,61 +449,29 @@ pub fn person_turns(entries: &[Entry]) -> u64 {
         .count() as u64
 }
 
-fn summary(measurement: &Measurement) -> String {
-    let outputs = match measurement.outputs {
-        0 => "spent tool outputs".to_owned(),
-        1 => "1 spent tool output".to_owned(),
-        count => format!("{count} spent tool outputs"),
-    };
-    format!(
-        "{outputs} (~{}k tokens)",
-        (measurement.u as f64 / 1_000.0).round() as u64
-    )
-}
-
-fn hint_text(measurement: &Measurement) -> String {
-    if measurement.hints.is_empty() {
-        return String::new();
-    }
-    let rendered: Vec<String> = measurement
-        .hints
-        .iter()
-        .map(|(tag, name)| format!("{}{name}", tag_prefix(*tag)))
-        .collect();
-    format!("\noldest reclaimable: {}.", rendered.join(" · "))
-}
-
-/// The Channel 1 text, as the plugin words it. `again` is a same-band
-/// reminder, which uses the calm one-line wording.
-pub fn reminder_text(level: Level, measurement: &Measurement, again: bool) -> String {
-    let summary = summary(measurement);
-    let body = if again {
-        format!("Still unstamped: {summary}. Stamp the ones you've used with ctx_reduce now.")
-    } else {
-        match level {
-            Level::Gentle => format!(
-                "Housekeeping: {summary} are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish."
-            ),
-            Level::Firm => format!(
-                "{summary} are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue."
-            ),
-            Level::Urgent => format!(
-                "{summary} are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used."
-            ),
+/// The reminder of `kind` (one of [`BODIES`]) for this measurement, as the
+/// plugin words it.
+fn reminder(kind: &str, measurement: &Measurement) -> TemplateUse {
+    let mut slots = Map::from_iter([(
+        "tokens_k".to_owned(),
+        json!(((measurement.u as f64 / 1_000.0).round() as i64).min(SLOT_MAX)),
+    )]);
+    let count = match measurement.outputs {
+        0 => "zero",
+        1 => "one",
+        outputs => {
+            slots.insert("count".into(), json!((outputs as i64).min(SLOT_MAX)));
+            "many"
         }
     };
-    format!(
-        "<system-reminder>\n{body}{}\n</system-reminder>",
-        hint_text(measurement)
-    )
-}
-
-pub fn ceiling_text(measurement: &Measurement) -> String {
-    format!(
-        "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used ({}). Then continue your task.{}\n</system-reminder>",
-        summary(measurement),
-        hint_text(measurement)
-    )
+    let hints = measurement.hints.len().min(HINT_COUNT);
+    for (i, part) in measurement.hints.iter().take(hints).enumerate() {
+        slots.insert(
+            format!("tag{i}"),
+            serde_json::to_value(part).expect("part references serialize"),
+        );
+    }
+    template_use(&format!("mc.ctx_reduce.{kind}.{count}.h{hints}.v1"), slots)
 }
 
 #[cfg(test)]
@@ -384,8 +483,41 @@ mod tests {
             t,
             u,
             outputs: 3,
-            hints: vec![(12, "bash".into())],
+            hints: vec![PartRef::new("m4", "p1")],
         }
+    }
+
+    /// A reminder as the runner renders it, with the hint numbered 12.
+    fn text(reminder: Option<TemplateUse>) -> String {
+        let reminder = reminder.expect("a reminder");
+        cortexkit_role_llm_runner::delivery_order::render(&templates(), &reminder, |_| Some(12))
+            .expect("every reminder renders from its plan template")
+    }
+
+    #[test]
+    fn every_template_is_a_valid_plan_template() {
+        let sender = plan_sender();
+        let Value::Object(plan) = json!({"senders": [sender]}) else {
+            unreachable!("an object literal");
+        };
+        cortexkit_role_llm_runner::delivery_order::check_plan(
+            &plan,
+            &[cortexkit_role_llm_runner::capabilities::DELIVERY_ORDER],
+        )
+        .expect("the plan accepts ck-mc's sender entry");
+        let ids: BTreeSet<_> = sender
+            .templates
+            .iter()
+            .map(|template| &template.id)
+            .collect();
+        assert_eq!(ids.len(), sender.templates.len(), "template ids are unique");
+        let keep = cortexkit_role_llm_runner::delivery_order::render(
+            &templates(),
+            &keep_request(81.4, 1_200),
+            |_| None,
+        )
+        .unwrap();
+        assert!(keep.starts_with("Your context is 81% full, and dropping old tool output freed only 1200 tokens. Call ctx_keep now."), "{keep}");
     }
 
     #[test]
@@ -403,10 +535,9 @@ mod tests {
     fn a_rising_band_fires_once_and_regrowth_needs_turns() {
         let mut state = State::default();
         let first = state.decide(&at(30_000, 100_000), false, 1, false);
-        assert!(first
-            .tool_result
-            .unwrap()
-            .contains("Housekeeping: 3 spent tool outputs (~30k tokens)"));
+        assert!(
+            text(first.tool_result).contains("Housekeeping: 3 spent tool outputs (~30k tokens)")
+        );
         assert_eq!(
             state.decide(&at(31_000, 100_000), false, 1, false),
             Reminders::default()
@@ -417,7 +548,7 @@ mod tests {
             Reminders::default()
         );
         let again = state.decide(&at(56_000, 200_000), false, 6, false);
-        assert!(again.tool_result.unwrap().contains("Still unstamped"));
+        assert!(text(again.tool_result).contains("Still unstamped"));
     }
 
     #[test]
@@ -450,16 +581,17 @@ mod tests {
             Reminders::default()
         );
         let after = state.decide(&at(75_000, 125_000), false, 9, false);
-        assert!(after.tool_result.unwrap().contains("Call ctx_reduce now"));
+        assert!(text(after.tool_result).contains("Call ctx_reduce now"));
     }
 
     #[test]
     fn the_ceiling_goes_once_per_cycle() {
         let mut state = State::default();
         let first = state.decide(&at(80_000, 100_000), false, 1, false);
-        assert!(first.ceiling.unwrap().starts_with(
-            "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (3 spent tool outputs (~80k tokens)). Then continue your task.\noldest reclaimable: §12§ bash."
-        ));
+        assert_eq!(
+            text(first.ceiling),
+            "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (3 spent tool outputs (~80k tokens)). Then continue your task.\noldest reclaimable: §12§.\n</system-reminder>"
+        );
         assert_eq!(first.tool_result, None);
         assert_eq!(
             state.decide(&at(90_000, 110_000), false, 9, false).ceiling,

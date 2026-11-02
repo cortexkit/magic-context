@@ -355,6 +355,8 @@ fn config(preset: &str, kind: Kind, rules: ProviderRules) -> SessionConfig {
         start_ms: 1_000_000,
         project: None,
         model_latency_ms: 0,
+        // The plan admits ck-mc's reminder templates, as core composes it.
+        templates: mc_module::nudges::templates(),
     }
 }
 
@@ -1167,15 +1169,15 @@ async fn a_worker_that_cannot_free_enough_is_asked_for_ctx_keep_and_keeps_only_w
     let asked = host
         .entries()
         .iter()
-        // A reminder is plain text from magic-context (no plan template).
+        // A template send from magic-context, so a notice and never the
+        // person's own message.
         .filter(|entry| {
-            entry
-                .notice
-                .as_ref()
-                .is_some_and(|notice| notice.sender == "magic-context")
-                && entry.parts.iter().any(|part| {
-                    matches!(&part.body, PartBody::Text { text } if text.contains("Call ctx_keep now"))
-                })
+            entry.notice.as_ref().is_some_and(|notice| {
+                notice.sender == "magic-context"
+                    && notice.template.as_deref() == Some("mc.ctx_keep.v1")
+            }) && entry.parts.iter().any(|part| {
+                matches!(&part.body, PartBody::Text { text } if text.contains("Call ctx_keep now"))
+            })
         })
         .count();
     assert_eq!(asked, 1);
@@ -2637,9 +2639,25 @@ async fn a_reduce_reminder_rides_the_next_tool_result_once_and_a_reduce_quiets_i
         reminder.starts_with(
             "<system-reminder>\n6 spent tool outputs (~42k tokens) are still unstamped. \
              Call ctx_reduce now, before your next tool call, on every output you've already used.\n\
-             oldest reclaimable: §3§ read · §5§ read · §7§ read · §9§ read.\n</system-reminder>"
+             oldest reclaimable: §3§ · §5§ · §7§ · §9§.\n</system-reminder>"
         ),
         "{reminder}"
+    );
+    // It was a plan template send, so the runner knows it for a notice and
+    // never as something the person typed.
+    let templates: Vec<Option<String>> = runner
+        .host()
+        .entries()
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .filter_map(|part| match &part.body {
+            PartBody::Tool(tool) => tool.delivered.first().map(|item| item.template.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        templates,
+        [Some("mc.ctx_reduce.urgent.many.h4.v1".to_owned())]
     );
 }
 

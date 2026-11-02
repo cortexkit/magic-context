@@ -30,7 +30,7 @@ use cortexkit_role_compaction::view::{
     AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest, View, ViewRefusal,
 };
 use cortexkit_role_compaction::wire::Refusal;
-use cortexkit_role_llm_runner::delivery_order::Mode;
+use cortexkit_role_llm_runner::delivery_order::{Mode, Template, TemplateUse};
 use cortexkit_role_llm_runner::run::{RunResult, RunResultRequest};
 use cortexkit_role_llm_runner::send::{SendReply, SendRequest};
 use serde_json::Value;
@@ -70,6 +70,10 @@ pub struct SessionConfig {
     /// A session moved in from a standalone host, as the move left it.
     #[serde(default)]
     pub moved_in: Option<MovedIn>,
+    /// The templates the session's plan admits from the compaction provider
+    /// (its `senders` entry). A reminder send names one of them.
+    #[serde(default)]
+    pub templates: Vec<Template>,
 }
 
 /// What a move from a standalone host leaves in the runner: the old
@@ -291,10 +295,14 @@ impl Host {
     }
 
     /// `session.send` on a route bound to `bound_session`: a run in a child
-    /// session of the provider's own, or a reminder for this session. A reminder must
-    /// name its delivery modes (`delivery_order`); the mock delivers
-    /// `tool_result` and `steer`. A newer reminder with the same `dedupe_key`
-    /// replaces a queued one.
+    /// session of the provider's own, or a reminder for this session. A
+    /// reminder must name its delivery modes (`delivery_order`); the mock
+    /// delivers `tool_result` and `steer`. A newer reminder with the same
+    /// `dedupe_key` replaces a queued one.
+    ///
+    /// As llm-runner classifies sends: a send naming a plan template is a
+    /// notice from its sender, rendered when it is delivered; any other send
+    /// is stored as a person's message, whoever sent it.
     pub fn send(&self, bound_session: &str, request: SendRequest) -> Result<SendReply, Refusal> {
         let mut state = self.lock();
         if bound_session != state.config.session.session {
@@ -311,8 +319,14 @@ impl Host {
             .delivery_order()
             .map_err(|field| Refusal::invalid_params(field, "malformed delivery"))?
             .ok_or_else(|| Refusal::invalid_params("delivery", "a reminder names its modes"))?;
+        if let Some(template) = &order.template {
+            // Refused at admission when it cannot render, as a runner does.
+            render(&state.config.templates, template, &state.transcript)
+                .map_err(|problem| Refusal::invalid_params("template", format!("{problem:?}")))?;
+        }
         let reminder = Reminder {
-            text: request.prompt_text().to_owned(),
+            prompt: request.prompt.clone(),
+            template: order.template.clone(),
             modes: order.modes.clone(),
             dedupe_key: order.dedupe_key.clone(),
         };
@@ -762,7 +776,10 @@ impl<P: Provider> Runner<P> {
                 .position(|reminder| reminder.modes.first() == Some(&Mode::ToolResult))
             {
                 let reminder = state.reminders.remove(index);
-                delivered.push(Delivered::new("magic-context", reminder.text));
+                let (text, template) = reminder.text(&state.config.templates, &state.transcript);
+                let mut item = Delivered::new("magic-context", text);
+                item.template = template;
+                delivered.push(item);
             }
             state
                 .transcript
@@ -791,15 +808,18 @@ impl<P: Provider> Runner<P> {
             state.reminders = rest;
             let now = state.now;
             for reminder in &steers {
+                let (text, template) = reminder.text(&state.config.templates, &state.transcript);
+                // Only a template send is a notice; a plain one reads as the
+                // person's own message.
+                let notice = template.clone().map(|template| {
+                    let mut origin = NoticeOrigin::new("magic-context");
+                    origin.template = Some(template);
+                    origin
+                });
                 state.transcript.append(
                     Role::User,
-                    Some(NoticeOrigin::new("magic-context")),
-                    vec![(
-                        Seal::None,
-                        PartBody::Text {
-                            text: reminder.text.clone(),
-                        },
-                    )],
+                    notice,
+                    vec![(Seal::None, PartBody::Text { text })],
                     None,
                     None,
                     now,
@@ -972,9 +992,47 @@ impl<P: Provider> Runner<P> {
 /// A reminder a provider queued, until it is delivered.
 #[derive(Clone, Debug)]
 struct Reminder {
-    text: String,
+    prompt: Option<String>,
+    template: Option<TemplateUse>,
     modes: Vec<Mode>,
     dedupe_key: Option<String>,
+}
+
+impl Reminder {
+    /// The text as delivered now, and the template it came from. A template
+    /// renders each `part_tag` slot as the number the transcript gives that
+    /// part.
+    fn text(&self, templates: &[Template], transcript: &Transcript) -> (String, Option<String>) {
+        match &self.template {
+            Some(template) => (
+                render(templates, template, transcript).unwrap_or_default(),
+                Some(template.id.clone()),
+            ),
+            None => (self.prompt.clone().unwrap_or_default(), None),
+        }
+    }
+}
+
+/// `template` rendered from the plan's `templates`, with each part named by
+/// a `part_tag` slot shown as its number.
+fn render(
+    templates: &[Template],
+    template: &TemplateUse,
+    transcript: &Transcript,
+) -> Result<String, cortexkit_role_llm_runner::delivery_order::TemplateProblem> {
+    cortexkit_role_llm_runner::delivery_order::render(templates, template, |part| {
+        transcript
+            .entries()
+            .iter()
+            .find(|entry| entry.mid == part.mid)
+            .and_then(|entry| {
+                entry
+                    .parts
+                    .iter()
+                    .find(|candidate| candidate.id == part.part)
+            })
+            .and_then(|found| found.tag)
+    })
 }
 
 /// The ride causes the mock runner detects and declares at Setup. Its model

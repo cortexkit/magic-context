@@ -13,7 +13,7 @@ use cortexkit_role_compaction::setup::SetupRequest;
 use cortexkit_role_compaction::view::{
     ApplyViewAnswer, ApplyViewRequest, EditOp, View, MAX_VIEW_BYTES,
 };
-use cortexkit_role_llm_runner::delivery_order::{DeliveryOrder, Mode};
+use cortexkit_role_llm_runner::delivery_order::{DeliveryOrder, Mode, TemplateUse};
 use cortexkit_role_llm_runner::send::SendRequest;
 use serde_json::Value;
 
@@ -845,11 +845,11 @@ impl Session {
             ),
             (reminders.ceiling, crate::nudges::CEILING_KIND, Mode::Steer),
         ];
-        for (text, kind, mode) in sends {
-            let Some(text) = text else {
+        for (template, kind, mode) in sends {
+            let Some(template) = template else {
                 continue;
             };
-            let request = reminder(format!("{kind}:{}", self.seq), text, kind, mode);
+            let request = reminder(format!("{kind}:{}", self.seq), template, kind, mode);
             if let Err(error) = client.send(&self.key, request).await {
                 eprintln!(
                     "ck-mc: session {}: session.send failed: {error:?}",
@@ -879,17 +879,11 @@ impl Session {
             return;
         }
         let usage = pass::usage(&self.conditions).unwrap_or(0.0) * 100.0;
-        let text = format!(
-            "Your context is {usage:.0}% full, and dropping old tool output freed only {freed} tokens. \
-             Call ctx_keep now. In `tags`, list the tags you still need, most important first. \
-             In `note`, write a few lines on where you are and what comes next. \
-             Everything else before that call, except your task, is then removed."
-        );
         // One request per stay over the threshold, so the view version that
         // crossed it names it.
         let request = reminder(
             format!("{KEEP_KIND}:{}", self.version),
-            text,
+            crate::nudges::keep_request(usage, freed),
             KEEP_KIND,
             Mode::Steer,
         );
@@ -1846,18 +1840,19 @@ fn list(tags: &[u64]) -> String {
         .join(", ")
 }
 
-/// The kind of the request to call `ctx_keep`, as for the reminders
-/// ([`crate::nudges::REMINDER_KIND`]).
-pub const KEEP_KIND: &str = "mc.ctx_keep";
+pub use crate::nudges::KEEP_KIND;
 
-/// A reminder as llm-runner carries it: plain text, delivered in `mode` only
-/// (`delivery_order`), so a routine reminder rides the next tool result and
-/// never starts a turn of its own. A queued reminder of the same `kind` is
-/// replaced by a newer one. The text holds per-session numbers, so it is never
-/// a plan template.
-fn reminder(send_id: String, text: String, kind: &str, mode: Mode) -> SendRequest {
-    SendRequest::new(text, send_id)
-        .with_delivery_order(&DeliveryOrder::new(vec![mode]).with_dedupe_key(kind))
+/// A reminder as a plan template send (compaction SR1), delivered in `mode`
+/// only (`delivery_order`), so a routine reminder rides the next tool result
+/// and never starts a turn of its own. A queued reminder of the same `kind` is
+/// replaced by a newer one.
+fn reminder(send_id: String, template: TemplateUse, kind: &str, mode: Mode) -> SendRequest {
+    SendRequest::template(
+        send_id,
+        &DeliveryOrder::new(vec![mode])
+            .with_dedupe_key(kind)
+            .with_template(template),
+    )
 }
 
 /// Roughly what dropping `covered` frees: the parts not already changed by

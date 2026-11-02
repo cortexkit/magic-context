@@ -401,6 +401,9 @@ pub fn role_describe_bytes() -> Result<Vec<u8>, CatalogError> {
         }],
         "implementation_version": crate::version_line(),
         "capabilities": capabilities,
+        // Core copies `sender` into a session plan's `senders`, which admits
+        // ck-mc's reminder sends and the templates they render from.
+        "reminder_templates": {"sender": crate::nudges::plan_sender()},
     }))
 }
 
