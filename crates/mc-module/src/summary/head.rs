@@ -47,9 +47,27 @@ pub struct Inputs<'a> {
     /// The current rows of memories the head shows that are no longer in
     /// `memories` (archived, merged away or expired).
     pub gone: &'a [StoredMemory],
+    /// The history budget in the model provider's tokens, which `m[1]`'s
+    /// size limits are measured against.
     pub history_budget_tokens: u64,
+    /// The same budget in the local estimator's tokens, which the summaries
+    /// in `m[0]` are rendered against (`history_local_budget`): the plugin
+    /// converts it, so a model whose tokens are larger gets less detail.
+    pub history_local_budget_tokens: u64,
     pub memory_budget_tokens: u64,
     pub profile_budget_tokens: u64,
+}
+
+/// A checksum of the user profile's text, so any change to it, by any
+/// writer, shows in `m[1]` (an id high-water mark misses edits and archives).
+fn profile_digest(profile: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for line in profile {
+        hasher.update(line.as_bytes());
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 /// What the head shows for one memory.
@@ -101,6 +119,10 @@ pub struct Baseline {
     /// `m[1]` showed since.
     pub shown: BTreeMap<i64, Shown>,
     pub profile_max_id: i64,
+    /// [`profile_digest`] of the profile `m[0]` was rendered from. A baseline
+    /// from before it was recorded compares `profile_max_id` instead.
+    #[serde(default)]
+    pub profile_digest: Option<String>,
     pub m0: String,
     #[serde(default)]
     pub committed: Vec<Committed>,
@@ -138,7 +160,7 @@ impl Baseline {
 pub fn fold(inputs: &Inputs) -> Baseline {
     let history = render_stored_compartments(
         inputs.summaries,
-        inputs.history_budget_tokens as f64,
+        inputs.history_local_budget_tokens as f64,
         mc_tokenizer::estimate_tokens,
     );
     let memories = memory::trim_to_budget(inputs.memories.to_vec(), inputs.memory_budget_tokens);
@@ -183,6 +205,7 @@ pub fn fold(inputs: &Inputs) -> Baseline {
             })
             .collect(),
         profile_max_id: inputs.profile_max_id,
+        profile_digest: Some(profile_digest(inputs.profile)),
         m0: sections.join("\n\n").trim().to_owned(),
         committed: Vec::new(),
         seen: memories
@@ -342,7 +365,9 @@ fn overflow_line(ids: &[i64], count: u64) -> String {
 /// here. Each change shows in full while it fits a share of the memory
 /// budget, then as a one-line marker, then in one aggregate line; what an
 /// earlier `m[1]` showed stays byte for byte.
-pub fn delta(baseline: &Baseline, inputs: &Inputs) -> (String, Baseline) {
+/// Also returns `m[1]`'s size without its memory changes, which is what the
+/// refold backstop measures ([`needs_refold`]).
+pub fn delta(baseline: &Baseline, inputs: &Inputs) -> (String, Baseline, u64) {
     let mut next = baseline.clone();
     let mut blocks = Vec::new();
     let newer_summaries: Vec<String> = inputs
@@ -359,7 +384,11 @@ pub fn delta(baseline: &Baseline, inputs: &Inputs) -> (String, Baseline) {
             newer_summaries.join("\n\n")
         ));
     }
-    if inputs.profile_max_id != baseline.profile_max_id {
+    let profile_changed = match &baseline.profile_digest {
+        Some(digest) => *digest != profile_digest(inputs.profile),
+        None => inputs.profile_max_id != baseline.profile_max_id,
+    };
+    if profile_changed {
         let profile = memory::trim_profile(
             inputs.profile.to_vec(),
             ((inputs.profile_budget_tokens as f64 * DELTA_SHARE) as u64).max(1),
@@ -471,45 +500,26 @@ pub fn delta(baseline: &Baseline, inputs: &Inputs) -> (String, Baseline) {
             blocks.join("\n")
         )
     };
-    (text, next)
+    (text, next, independent)
 }
 
-/// The memory changes `m[1]` shows past which a rebuild folds instead, as
-/// the plugin does (`memoryUpdateCount > 40` in `inject-compartments.ts`).
-const REFOLD_MEMORY_CHANGES: u64 = 40;
-
 /// Whether a rebuild that would keep `m[0]` should fold instead, because
-/// `m[1]` grew too large (the plugin's pressure backstop). A session whose
-/// cache never expires would otherwise never fold, and its `m[1]` would keep
-/// growing: newer summaries stay at full detail there, and memory changes
-/// pile up. Any one of three folds:
-/// - more than [`REFOLD_MEMORY_CHANGES`] memory changes shown since the fold;
+/// `m[1]` grew too large (the plugin's pressure backstop,
+/// `inject-compartments.ts`). A session whose cache never expires would
+/// otherwise never fold, and newer summaries would pile up in `m[1]` at full
+/// detail. Either folds:
 /// - `m[1]` over a fifth of the history budget;
 /// - `m[1]` over 15% of `m[0]`, once `m[0]` holds at least 500 tokens (a
 ///   smaller `m[0]` would make that share trivially exceeded).
 ///
-/// `m1` and `next` are what [`delta`] produced from `baseline`.
-pub fn needs_refold(
-    baseline: &Baseline,
-    m1: &str,
-    next: &Baseline,
-    history_budget_tokens: u64,
-) -> bool {
-    let changes: u64 = next
-        .committed
-        .iter()
-        .map(|entry| match entry.form {
-            Form::Overflow => entry.overflow_count,
-            _ => 1,
-        })
-        .sum();
-    if changes > REFOLD_MEMORY_CHANGES {
-        return true;
-    }
-    if m1 == M1_EMPTY {
+/// `pressure_tokens` is `m[1]`'s size without its memory changes, as
+/// [`delta`] returns it. Memory changes have their own allowance and are
+/// never a reason to fold, as in the plugin.
+pub fn needs_refold(baseline: &Baseline, pressure_tokens: u64, history_budget_tokens: u64) -> bool {
+    if pressure_tokens == 0 {
         return false;
     }
-    let m1_tokens = tokens(m1) as f64;
+    let m1_tokens = pressure_tokens as f64;
     let m0_tokens = tokens(&baseline.m0);
     m1_tokens > history_budget_tokens as f64 * M1_ABSOLUTE_CAP_RATIO
         || (m0_tokens >= M0_DRIFT_RATIO_FLOOR_TOKENS
@@ -573,6 +583,7 @@ mod tests {
             memories,
             gone: &[],
             history_budget_tokens: 60_000,
+            history_local_budget_tokens: 60_000,
             memory_budget_tokens: 4_000,
             profile_budget_tokens: 4_000,
         }
@@ -600,7 +611,7 @@ mod tests {
         let gone = [merged];
         let mut current = inputs(&summaries, &now);
         current.gone = &gone;
-        let (m1, next) = delta(&baseline, &current);
+        let (m1, next, _) = delta(&baseline, &current);
         assert!(m1.contains("Part 1"), "{m1}");
         assert!(
             m1.contains(
@@ -638,12 +649,12 @@ mod tests {
         let first = vec![memory(1, &text(1))];
         let mut small = inputs(&[], &first);
         small.memory_budget_tokens = 1_000;
-        let (m1, next) = delta(&baseline, &small);
+        let (m1, next, _) = delta(&baseline, &small);
         assert!(m1.contains(&text(1)), "{m1}");
         let many: Vec<StoredMemory> = (1..40).map(|id| memory(id, &text(id))).collect();
         let mut later = inputs(&[], &many);
         later.memory_budget_tokens = 1_000;
-        let (m1_later, after) = delta(&next, &later);
+        let (m1_later, after, _) = delta(&next, &later);
         let shown_before = &m1[..m1.find("\n</memory-updates>").unwrap()];
         assert!(m1_later.starts_with(shown_before), "{m1_later}");
         assert!(!m1_later.contains(&text(2)), "{m1_later}");
@@ -658,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn a_large_m1_or_many_memory_changes_fold_instead_of_refreshing_m1() {
+    fn a_large_m1_folds_instead_of_refreshing_m1() {
         let words = |n: usize| "word ".repeat(n);
         let small_m0 = Baseline {
             m0: words(10),
@@ -668,33 +679,46 @@ mod tests {
             m0: words(4_000),
             ..Baseline::default()
         };
-        let m1 = |n: usize| {
-            format!(
-                "<session-history-since>\n{}\n</session-history-since>",
-                words(n)
-            )
-        };
-        let none = Baseline::default();
         // Nothing new: never.
-        assert!(!needs_refold(&big_m0, M1_EMPTY, &none, 10_000));
+        assert!(!needs_refold(&big_m0, 0, 10_000));
         // Over 15% of a large m[0].
         let big_m0_tokens = tokens(&big_m0.m0);
-        let over = m1((big_m0_tokens as f64 * 0.2) as usize);
-        assert!(needs_refold(&big_m0, &over, &none, 1_000_000));
+        assert!(needs_refold(&big_m0, big_m0_tokens / 5, 1_000_000));
         // A small m[0] does not count the share; a fifth of the history
         // budget does.
-        assert!(!needs_refold(&small_m0, &m1(300), &none, 10_000));
-        assert!(needs_refold(&small_m0, &m1(3_000), &none, 10_000));
-        // More than 40 memory changes, whatever the sizes.
-        let changes = Baseline {
-            committed: vec![Committed {
-                form: Form::Overflow,
-                lines: Vec::new(),
-                overflow_ids: Vec::new(),
-                overflow_count: 41,
-            }],
-            ..Baseline::default()
-        };
-        assert!(needs_refold(&small_m0, &m1(1), &changes, 1_000_000));
+        assert!(!needs_refold(&small_m0, 300, 10_000));
+        assert!(needs_refold(&small_m0, 3_000, 10_000));
+    }
+
+    /// Editing a profile line in place, with no new row, still shows the
+    /// profile again in `m[1]`.
+    #[test]
+    fn an_edited_profile_line_shows_in_m1() {
+        let mut at_fold = inputs(&[], &[]);
+        let before = ["prefers tea".to_owned(), "works late".to_owned()];
+        at_fold.profile = &before;
+        at_fold.profile_max_id = 2;
+        let baseline = fold(&at_fold);
+        assert_eq!(delta(&baseline, &at_fold).0, M1_EMPTY);
+        let after = ["prefers coffee".to_owned(), "works late".to_owned()];
+        let mut now = at_fold;
+        now.profile = &after;
+        let (m1, _, _) = delta(&baseline, &now);
+        assert!(m1.contains("prefers coffee"), "{m1}");
+    }
+
+    /// Memory changes alone never fold, however many there are: they have
+    /// their own allowance, and `delta` leaves them out of the size it
+    /// returns.
+    #[test]
+    fn memory_changes_alone_never_fold() {
+        let baseline = fold(&inputs(&[], &[]));
+        let edits: Vec<StoredMemory> = (1..=60)
+            .map(|id| memory(id, &format!("fact number {id} with some detail")))
+            .collect();
+        let (m1, _, pressure) = delta(&baseline, &inputs(&[], &edits));
+        assert!(m1.contains("<memory-updates>"));
+        assert_eq!(pressure, 0);
+        assert!(!needs_refold(&baseline, pressure, 1_000));
     }
 }

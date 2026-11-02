@@ -49,6 +49,25 @@ pub fn next_view(
             _ => None,
         })
         .collect();
+    // A changed inserted message keeps its place among the inserts, so the
+    // history head's two messages stay in order (`m[0]` before `m[1]`) when
+    // only one of them changes. Appending it instead would move it behind
+    // the other and rewrite the whole request.
+    let mut replaced_in_place = false;
+    for op in &new_ops {
+        let EditOp::Insert { message, .. } = op else {
+            continue;
+        };
+        let carried = edits.iter_mut().find(
+            |edit| matches!(&edit.op, EditOp::Insert { message: old, .. } if old.id == message.id),
+        );
+        if let Some(edit) = carried {
+            if edit.op != *op {
+                *edit = Edit::new(version, op.clone());
+                replaced_in_place = true;
+            }
+        }
+    }
     // A part that new edits change loses its earlier edits: a drop of a
     // part an earlier view only trimmed replaces the trimming.
     let newly_edited: HashSet<(&str, &str)> = new_ops
@@ -100,7 +119,7 @@ pub fn next_view(
         edits.push(Edit::new(version, op));
         added = true;
     }
-    if !added && !dropped_some {
+    if !added && !dropped_some && !replaced_in_place {
         return Ok(None);
     }
     loop {
@@ -132,6 +151,60 @@ mod tests {
     use cortexkit_role_compaction::read::Role;
     use cortexkit_role_compaction::rules::{EditCost, SignedParts};
     use serde_json::json;
+
+    fn insert(id: &str, text: &str) -> EditOp {
+        EditOp::Insert {
+            at: cortexkit_role_compaction::view::InsertAt::Start,
+            message: cortexkit_role_compaction::view::InsertedMessage::new(
+                id,
+                Role::User,
+                vec![text.into()],
+            ),
+        }
+    }
+
+    fn insert_ids(view: &View) -> Vec<String> {
+        view.edits
+            .iter()
+            .filter_map(|edit| match &edit.op {
+                EditOp::Insert { message, .. } => Some(message.id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// When only the first of two inserted messages changes, it keeps its
+    /// place: the history head stays `m[0]` then `m[1]`.
+    #[test]
+    fn a_changed_insert_keeps_its_place_among_the_inserts() {
+        let rules = ProviderRules::new(SignedParts::None, EditCost::Suffix);
+        let first = next_view(
+            None,
+            &[],
+            vec![insert("m0", "baseline"), insert("m1", "nothing new")],
+            &rules,
+            1,
+            |_| false,
+        )
+        .unwrap()
+        .unwrap();
+        let second = next_view(
+            Some(&first),
+            &[],
+            vec![
+                insert("m0", "baseline, folded"),
+                insert("m1", "nothing new"),
+            ],
+            &rules,
+            2,
+            |_| false,
+        )
+        .unwrap()
+        .expect("a changed m[0] is a new view");
+        assert_eq!(insert_ids(&second), ["m0", "m1"]);
+        assert_eq!(second.edits[0].since, 2);
+        assert_eq!(second.edits[1].since, 1);
+    }
 
     /// ck-mc checks a view with the runner's own functions before it
     /// publishes, so a lane that asks for an edit the contract forbids gets a

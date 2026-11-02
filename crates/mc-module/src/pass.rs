@@ -167,11 +167,13 @@ pub const HOLD_CAP_POINTS: f64 = 10.0;
 ///   reasoning tokens, and
 /// - usage is below the execute threshold plus 10 points.
 ///
-/// The cap bounds the hold: a session that keeps reasoning heavily still
-/// rebuilds before it reaches the force band, where emergency drops start
-/// ([`force_band`]). A view the runner asks for because it is about to
-/// rewrite its cache anyway (a ride) is never held: that rewrite is paid for
-/// already, so the held work lands in it.
+/// The cap bounds the hold, and the hold never applies in the force band
+/// ([`force_band`]): a threshold above 75 would otherwise put the cap inside
+/// the band and hold back the emergency drop (the plugin's bounded hold
+/// yields to fit, `mayRebuildForFit`). A turn with no message a person wrote
+/// is empty, so nothing is held. A view the runner asks for because it is
+/// about to rewrite its cache anyway (a ride) is never held: that rewrite is
+/// paid for already, so the held work lands in it.
 pub fn signed_thinking_hold(
     entries: &[Entry],
     conditions: &Conditions,
@@ -183,21 +185,30 @@ pub fn signed_thinking_hold(
     let Some(usage) = usage(conditions) else {
         return false;
     };
-    if usage * 100.0 >= settings.execute_threshold_percentage + HOLD_CAP_POINTS {
+    if usage * 100.0 >= settings.execute_threshold_percentage + HOLD_CAP_POINTS
+        || usage * 100.0 >= force_band(settings)
+    {
         return false;
     }
-    // The current turn starts after the last message the user wrote; notices
-    // a module or the runner delivered do not end it.
-    let turn_start = entries
-        .iter()
-        .rposition(|entry| entry.role == Role::User && entry.notice.is_none())
-        .map_or(0, |user| user + 1);
+    let Some(turn_start) = current_turn_start(entries) else {
+        return false;
+    };
     entries[turn_start..]
         .iter()
         .rev()
         .filter(|entry| entry.role == Role::Assistant && !entry.parts.is_empty())
         .take(HEAVY_REASONING_WINDOW_STEPS)
         .any(|entry| lanes::step_reasoning_tokens(entry) > HEAVY_REASONING_TOKENS)
+}
+
+/// Where the current turn starts: after the last message a person wrote.
+/// Notices a module or the runner delivered do not end it. `None` when no
+/// message a person wrote is held.
+pub fn current_turn_start(entries: &[Entry]) -> Option<usize> {
+    entries
+        .iter()
+        .rposition(|entry| entry.role == Role::User && entry.notice.is_none())
+        .map(|user| user + 1)
 }
 
 /// The force band: from here a pass stops waiting for a summary and the

@@ -55,6 +55,13 @@ pub struct Session {
     /// one waits until usage leaves the band, or a pass rewrites anyway, so
     /// the band never trickles one rewrite per pass.
     emergency_latched: bool,
+    /// Set when the pass being built selected an emergency batch; it latches
+    /// only once the runner takes the view.
+    next_latch: bool,
+    /// Parts whose edits once made a view fail ck-mc's own checks. Automatic
+    /// lanes leave them alone, so the same failing view is not rebuilt on
+    /// every pass.
+    failed_parts: BTreeSet<lanes::PartKey>,
     /// The model was asked to call `ctx_keep` during this stay over the
     /// execute threshold; it is not asked again until usage falls below it.
     keep_requested: bool,
@@ -146,6 +153,8 @@ impl Session {
             queued: BTreeSet::new(),
             reclaim_bookmark: 0,
             emergency_latched: false,
+            next_latch: false,
+            failed_parts: BTreeSet::new(),
             keep_requested: false,
             pending_keep: None,
             seq: 0,
@@ -396,7 +405,8 @@ impl Session {
             self.keep_requested = false;
         }
         if let Some(kept) = self.pending_keep.take() {
-            if let Some(view) = self.build_keep(settings, &kept) {
+            let (view, _) = self.build(settings, None, false, Some(&kept));
+            if let Some(view) = view {
                 self.publish(client, view).await;
             }
             self.keep_requested = false;
@@ -597,11 +607,13 @@ impl Session {
         let mut wanted: Vec<(lanes::PartKey, lanes::Shape)> = self
             .queued
             .iter()
-            .map(|key| (key.clone(), lanes::Shape::Default))
+            .map(|key| (key.clone(), lanes::Shape::Requested))
             .collect();
+        let model = &self.conditions.model;
         wanted.extend(lanes::reasoning_over_budget(
             &context,
             settings.keep_reasoning_tokens,
+            model.provider.contains("anthropic") || model.model.contains("claude"),
         ));
         let (_, covered) = lanes::drop_ops(&context, &wanted);
         let freed = freed_tokens(&context, &covered);
@@ -685,7 +697,16 @@ impl Session {
             }
         }
         self.summaries.truncate(first);
-        self.baseline = None;
+        // `m[0]` is rendered again only when it shows a forgotten summary;
+        // one shown only in `m[1]` leaves with an `m[1]` refresh, and `m[0]`
+        // stays cached.
+        if self
+            .baseline
+            .as_ref()
+            .is_none_or(|baseline| sequence <= baseline.through_sequence)
+        {
+            self.baseline = None;
+        }
         self.head_stale = self
             .latest
             .as_ref()
@@ -784,7 +805,11 @@ impl Session {
         }
         self.summaries
             .extend(validated.compartments.iter().map(StoredCompartment::from));
-        if pass::at_execute(&self.conditions, settings) {
+        // The signed-thinking hold applies here as on a notice: the summary
+        // lands on the next pass the hold lets through.
+        if pass::at_execute(&self.conditions, settings)
+            && !pass::signed_thinking_hold(self.index.entries(), &self.conditions, settings)
+        {
             let (view, _) = self.build_now(client, settings).await;
             if let Some(view) = view {
                 self.publish(client, view).await;
@@ -880,8 +905,10 @@ impl Session {
         freed: u64,
     ) {
         let usable = pass::usable_window(&self.conditions);
+        // A setting of 100 asks on every such pass.
+        let every_pass = settings.keep_min_recovery_percentage >= 100.0;
         if !self.features.ctx_keep
-            || self.keep_requested
+            || (self.keep_requested && !every_pass)
             || usable == 0
             || freed as f64 >= usable as f64 * settings.keep_min_recovery_percentage / 100.0
         {
@@ -912,11 +939,17 @@ impl Session {
         let over_limit = ride
             .has(RideCause::OverLimit)
             .then_some(ride.request_tokens.unwrap_or(0));
-        // Any other cause loses the cache, so the head folds for free.
-        if ride.cache_lost() {
+        // Any other cause loses the cache, so the head folds for free. So
+        // does a settings change `m[0]` depends on, as on a notice. A
+        // `ctx_keep` waiting for the next notice lands in this rewrite.
+        let cache_lost = ride.cache_lost();
+        if cache_lost || self.head_shape_changed(settings) {
             self.fold_due = true;
         }
-        let view = self.build(settings, over_limit).0?;
+        let kept = self.pending_keep.take();
+        let view = self
+            .build(settings, over_limit, cache_lost, kept.as_ref())
+            .0?;
         // The size limit holds for a view in a ride's answer as for a pushed
         // one (V5); an oversized one is answered as nothing.
         if self.refuse_oversized(&view) {
@@ -1252,6 +1285,10 @@ impl Session {
     /// The history head's edits: `m[0]` (kept unless a fold is due) and
     /// `m[1]` with what changed since. The baseline they set counts once the
     /// runner takes the view.
+    ///
+    /// When memories cannot be read, the head stays as the latest view shows
+    /// it: an empty read would otherwise state every shown memory as removed,
+    /// and the next good read as updated again.
     fn render_head(&mut self, settings: &Settings) -> Vec<EditOp> {
         let docs = self
             .project
@@ -1265,23 +1302,26 @@ impl Session {
             .map_or(0, |elapsed| elapsed.as_millis() as i64);
         let shape = self.head_shape(settings);
         // With memory off, the history head shows no memories and no user
-        // profile, as the standalone plugin's does.
-        let (memories, profile, profile_max_id) = match (&self.db, &self.project) {
-            (Some(db), Some(project)) if shape.memory_enabled => {
-                let memories = db
-                    .project_memories(&project.id, now)
-                    .unwrap_or_else(|error| {
-                        eprintln!(
-                            "ck-mc: session {}: reading memories failed: {error}",
-                            self.key.session
-                        );
-                        Vec::new()
-                    });
-                let (profile, profile_max_id) = db.user_profile().unwrap_or_default();
-                (memories, profile, profile_max_id)
+        // profile, as the standalone plugin's does. The user profile is the
+        // person's, read whatever the session's project.
+        let mut memories = Vec::new();
+        let (mut profile, mut profile_max_id) = (Vec::new(), 0);
+        if let (Some(db), true) = (&self.db, shape.memory_enabled) {
+            if let Some(project) = &self.project {
+                match db.project_memories(&project.id, now) {
+                    Ok(read) => memories = read,
+                    Err(error) => return self.head_as_shown(&format!("reading memories: {error}")),
+                }
             }
-            _ => (Vec::new(), Vec::new(), 0),
-        };
+            match db.user_profile() {
+                Ok(read) => (profile, profile_max_id) = read,
+                Err(error) => return self.head_as_shown(&format!("reading the profile: {error}")),
+            }
+        }
+        let model_key = format!(
+            "{}/{}",
+            self.conditions.model.provider, self.conditions.model.model
+        );
         let history_budget_tokens = shape.history_budget_tokens;
         let fold_inputs = head::Inputs {
             summaries: &self.summaries,
@@ -1291,48 +1331,79 @@ impl Session {
             memories: &memories,
             gone: &[],
             history_budget_tokens,
+            history_local_budget_tokens: crate::summary::render::history_local_budget(
+                history_budget_tokens as f64,
+                Some(&model_key),
+            ) as u64,
             memory_budget_tokens: settings.memory_budget_tokens,
             profile_budget_tokens: settings.profile_budget_tokens,
         };
         let active: std::collections::HashSet<i64> =
             memories.iter().map(|memory| memory.id).collect();
-        // `m[1]` from a baseline: shown memories that left the active set get
-        // their rows, which say whether they were archived or merged.
-        let delta_from = |base: &Baseline| {
+        // Shown memories that left the active set get their rows, which say
+        // whether they were archived or merged.
+        let gone_from = |base: &Baseline| -> Result<Vec<StoredMemory>, String> {
             let missing: Vec<i64> = base
                 .shown_ids()
                 .into_iter()
                 .filter(|id| !active.contains(id))
                 .collect();
-            let gone = match &self.db {
-                Some(db) => db.memories_by_ids(&missing).unwrap_or_default(),
-                None => Vec::new(),
-            };
-            head::delta(
-                base,
-                &head::Inputs {
-                    gone: &gone,
-                    ..fold_inputs
-                },
-            )
+            match &self.db {
+                Some(db) => db.memories_by_ids(&missing),
+                None => Ok(Vec::new()),
+            }
         };
         let folded = |inputs: &head::Inputs| {
             let mut base = head::fold(inputs);
             base.shape = Some(shape.clone());
             base
         };
-        let (mut m1, mut next) = match (&self.baseline, self.fold_due) {
-            (Some(baseline), false) => delta_from(baseline),
-            _ => delta_from(&folded(&fold_inputs)),
+        let mut base = match (&self.baseline, self.fold_due) {
+            (Some(baseline), false) => baseline.clone(),
+            _ => folded(&fold_inputs),
         };
-        if let (Some(baseline), false) = (&self.baseline, self.fold_due) {
-            if head::needs_refold(baseline, &m1, &next, history_budget_tokens) {
-                (m1, next) = delta_from(&folded(&fold_inputs));
-            }
+        let gone = match gone_from(&base) {
+            Ok(gone) => gone,
+            Err(error) => return self.head_as_shown(&format!("reading memory rows: {error}")),
+        };
+        let (mut m1, mut next, pressure) = head::delta(
+            &base,
+            &head::Inputs {
+                gone: &gone,
+                ..fold_inputs
+            },
+        );
+        if self.baseline.is_some()
+            && !self.fold_due
+            && head::needs_refold(&base, pressure, history_budget_tokens)
+        {
+            base = folded(&fold_inputs);
+            // A fresh fold shows every current memory, so none is gone.
+            (m1, next, _) = head::delta(&base, &fold_inputs);
         }
         let ops = head::head_ops(&next.m0, &m1);
         self.next_baseline = Some(next);
         ops
+    }
+
+    /// The history head as the latest view shows it, after a read the head
+    /// needs failed: nothing about it changes on this pass.
+    fn head_as_shown(&mut self, why: &str) -> Vec<EditOp> {
+        eprintln!(
+            "ck-mc: session {}: history head kept as shown, {why}",
+            self.key.session
+        );
+        self.next_baseline = None;
+        self.latest
+            .as_ref()
+            .map(|view| {
+                view.edits
+                    .iter()
+                    .filter(|edit| head::is_head(&edit.op))
+                    .map(|edit| edit.op.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The settings the history head's baseline (`m[0]`) is rendered under,
@@ -1399,7 +1470,13 @@ impl Session {
     ///
     /// Also returns roughly how many tokens the new edits free, plus what the
     /// age sweep has lined up for the next pass.
-    fn build(&mut self, settings: &Settings, over_limit: Option<u64>) -> (Option<View>, u64) {
+    fn build(
+        &mut self,
+        settings: &Settings,
+        over_limit: Option<u64>,
+        cache_lost: bool,
+        keep: Option<&BTreeSet<lanes::PartKey>>,
+    ) -> (Option<View>, u64) {
         let (history, cut) = self.history_ops(settings);
         let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, cut);
         let context = lanes::Context {
@@ -1415,13 +1492,27 @@ impl Session {
         let cutoff = lanes::protected_cutoff(&context, floor);
         // A part two lanes want keeps the first lane's shape, so the order
         // here decides it: the model's own request first, then the lanes
-        // that keep a call, then the rest.
+        // that keep a call, then the rest. A requested part in the protected
+        // tail waits until it leaves the tail, as in the plugin
+        // (`pendingDropVeto`).
         let mut wanted: Vec<(lanes::PartKey, lanes::Shape)> = self
             .queued
             .iter()
-            .map(|key| (key.clone(), lanes::Shape::Default))
+            .filter(|key| !lanes::in_protected_tail(&context, key, cutoff))
+            .map(|key| (key.clone(), lanes::Shape::Requested))
             .collect();
-        wanted.extend(lanes::injected_text(&context, cutoff));
+        if let Some(kept) = keep {
+            wanted.extend(lanes::keep_drops(&context, kept, cutoff));
+        }
+        let injected = lanes::injected_text(&context, cutoff);
+        // Parts whose only edit is a stripped injection: caveman may compress
+        // them on this pass, starting from the stripped text.
+        let stripped_only: Vec<lanes::PartKey> = injected
+            .iter()
+            .map(|(key, _)| key.clone())
+            .filter(|key| !wanted.iter().any(|(earlier, _)| earlier == key))
+            .collect();
+        wanted.extend(injected);
         wanted.extend(lanes::superseded_edits(
             &context,
             cutoff,
@@ -1430,13 +1521,26 @@ impl Session {
         wanted.extend(lanes::spent_control_plane(&context, cutoff));
         wanted.extend(lanes::duplicate_lookups(&context, cutoff));
         wanted.extend(lanes::age_sweep(&context, self.reclaim_bookmark));
+        let model = &self.conditions.model;
+        let anthropic = model.provider.contains("anthropic") || model.model.contains("claude");
         wanted.extend(lanes::reasoning_over_budget(
             &context,
             settings.keep_reasoning_tokens,
+            anthropic,
         ));
+        wanted.retain(|(key, _)| !self.failed_parts.contains(key));
         let (mut ops, mut covered) = lanes::drop_ops(&context, &wanted);
         let force = pass::in_force_band(&self.conditions, settings);
-        let priced = !ops.is_empty();
+        // Another rewrite on this pass: a lane edit, a history head or cut
+        // that changes, or a ride whose cache is lost anyway.
+        let head_changes = history.iter().any(|op| {
+            !self
+                .latest
+                .as_ref()
+                .is_some_and(|view| view.edits.iter().any(|edit| edit.op == *op))
+        });
+        let priced = !ops.is_empty() || head_changes || cache_lost;
+        self.next_latch = false;
         if over_limit.is_some() || (force && (priced || !self.emergency_latched)) {
             let emergency = lanes::Emergency {
                 prompt_tokens: over_limit
@@ -1449,9 +1553,17 @@ impl Session {
             };
             let selected = lanes::emergency_drop(&context, cutoff, &emergency);
             if !selected.is_empty() {
+                // An over-limit request drops calls whole, whatever shape an
+                // earlier lane asked for.
+                if over_limit.is_some() {
+                    let whole: BTreeSet<&lanes::PartKey> =
+                        selected.iter().map(|(key, _)| key).collect();
+                    wanted.retain(|(key, _)| !whole.contains(key));
+                }
                 wanted.extend(selected);
                 (ops, covered) = lanes::drop_ops(&context, &wanted);
-                self.emergency_latched = true;
+                // The batch counts once the runner takes the view.
+                self.next_latch = true;
             }
         }
         // Answered images go once content at least as new has been dropped,
@@ -1466,13 +1578,19 @@ impl Session {
             skip: &covered,
         };
         let (image_ops, image_parts) = lanes::answered_images(&context, &images);
+        let caveman_skip: Vec<lanes::PartKey> = covered
+            .iter()
+            .filter(|key| !stripped_only.contains(key))
+            .cloned()
+            .collect();
         ops.extend(image_ops);
         covered.extend(image_parts);
         // Caveman text replaces any other text edit of the same part this
         // pass made (a stripped injection): it starts from the stripped text.
         self.next_caveman = None;
         if let (true, Some(caveman)) = (self.features.caveman, settings.caveman.as_ref()) {
-            let (texts, next) = lanes::caveman(&context, caveman, &self.caveman, cutoff, &covered);
+            let (texts, next) =
+                lanes::caveman(&context, caveman, &self.caveman, cutoff, &caveman_skip);
             for ((mid, part_id), text) in texts {
                 let Some((_, part)) = self.index.find(&mid, &part_id) else {
                     continue;
@@ -1509,32 +1627,6 @@ impl Session {
         (self.seal(ops, &covered), freed)
     }
 
-    /// The view that keeps only what a `ctx_keep` call asked for (see
-    /// [`lanes::keep_drops`]), plus every other lane's work, which rides the
-    /// same rewrite.
-    fn build_keep(&mut self, settings: &Settings, kept: &BTreeSet<lanes::PartKey>) -> Option<View> {
-        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, None);
-        let context = lanes::Context {
-            index: &self.index,
-            edited: &edited,
-            protected_tools: &settings.protected_tools,
-            keep_first_message: self.features.keep_first_message,
-        };
-        let usable = pass::usable_window(&self.conditions);
-        let floor = settings
-            .protected_tokens
-            .unwrap_or_else(|| lanes::default_protected_tokens(usable));
-        let cutoff = lanes::protected_cutoff(&context, floor);
-        let mut wanted: Vec<(lanes::PartKey, lanes::Shape)> = self
-            .queued
-            .iter()
-            .map(|key| (key.clone(), lanes::Shape::Default))
-            .collect();
-        wanted.extend(lanes::keep_drops(&context, kept, cutoff));
-        let (ops, covered) = lanes::drop_ops(&context, &wanted);
-        self.seal(ops, &covered)
-    }
-
     /// Turn a pass's edits into the next view, and forget the queued drops
     /// it covers.
     fn seal(&mut self, ops: Vec<EditOp>, covered: &[lanes::PartKey]) -> Option<View> {
@@ -1556,14 +1648,27 @@ impl Session {
                 Some(view)
             }
             // Nothing new to land: what the pass covered was covered already.
+            // The head it rendered is the one shown, so a due fold is done:
+            // left pending, it would rewrite `m[0]` on a later pass whose
+            // cache is still warm.
             Ok(None) => {
                 self.forget_queued(covered);
+                if let Some(next) = self.next_baseline.take() {
+                    self.baseline = Some(next);
+                    self.fold_due = false;
+                }
+                if let Some(next) = self.next_caveman.take() {
+                    self.caveman = next;
+                }
                 None
             }
-            // A lane's bug. Its work is forgotten, so the same failure does
-            // not repeat on every pass.
+            // A lane's bug. Its work is forgotten, queued drops and the parts
+            // automatic lanes chose alike, so the same failure does not repeat
+            // on every pass.
             Err(refusal) => {
                 self.forget_queued(covered);
+                self.failed_parts.extend(covered.iter().cloned());
+                self.next_latch = false;
                 eprintln!(
                     "ck-mc: session {}: no valid view: {refusal:?}",
                     self.key.session
@@ -1664,6 +1769,9 @@ impl Session {
     fn accept(&mut self, view: View) {
         let covered = std::mem::take(&mut self.next_covered);
         self.forget_queued(&covered);
+        if std::mem::take(&mut self.next_latch) {
+            self.emergency_latched = true;
+        }
         if let Some(next) = self.next_baseline.take() {
             self.baseline = Some(next);
             self.fold_due = false;
@@ -1860,7 +1968,7 @@ impl Session {
                 ),
             }
         }
-        self.build(settings, None)
+        self.build(settings, None, false, None)
     }
 }
 

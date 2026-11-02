@@ -671,11 +671,16 @@ async fn drops_before_signed_reasoning_take_the_later_reasoning_with_them() {
 #[tokio::test]
 async fn a_cache_loss_lands_queued_drops_below_the_threshold() {
     let mut runner = start(config("worker", Kind::OpenAi, free())).await;
+    // Three newer reads take the dropped output out of the protected tail;
+    // a requested drop inside it would wait (`pendingDropVeto`).
     runner
         .play(&[
             user("Review the module."),
             read_file(50),
             reduce("3"),
+            read_file(50),
+            read_file(50),
+            read_file(50),
             Step::Wait { ms: 300_001 },
             answer(),
             answer(),

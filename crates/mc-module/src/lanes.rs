@@ -225,6 +225,10 @@ pub enum Shape {
     /// result is replaced; any other call goes with its result. Text becomes
     /// the placeholder, reasoning goes.
     Default,
+    /// [`Shape::Default`] for a part the model named with `ctx_reduce`. The
+    /// model's own request is not held back by `protected_tools`, which only
+    /// protects against automatic lanes (the plugin's `pendingDropVeto`).
+    Requested,
     /// The call goes with its result, however recent. Used where the call
     /// itself is redundant (a duplicate of a newer identical call).
     Whole,
@@ -297,7 +301,9 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
             },
             PartBody::Reasoning { .. } => ops.push(drop()),
             PartBody::Tool(tool) => {
-                if !is_finished(&tool.status) || protected.contains(key) {
+                if !is_finished(&tool.status)
+                    || (shape != Shape::Requested && protected.contains(key))
+                {
                     continue;
                 }
                 let Some(tag) = part.tag else {
@@ -305,13 +311,11 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                 };
                 let small_recent = recent.contains(&tag)
                     && input_string_bytes(&tool.input) <= SMALL_INPUT_MAX_BYTES;
-                // A call whose result ends the transcript stays a call: the
-                // request would otherwise end on the call's message without
-                // its result.
-                let ends_transcript = Some(entry.mid.as_str()) == newest_mid;
                 let keep_call = match shape {
-                    Shape::Default | Shape::StripInjection => ends_transcript || small_recent,
-                    Shape::Whole => ends_transcript,
+                    Shape::Default | Shape::Requested | Shape::StripInjection => {
+                        ends_transcript(entry, part, newest_mid) || small_recent
+                    }
+                    Shape::Whole => ends_transcript(entry, part, newest_mid),
                     Shape::EditMarker => true,
                 };
                 if !keep_call {
@@ -331,13 +335,64 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                     }
                 }
             }
-            // Files, opaque parts and kinds ck-mc doesn't know: no lane here
-            // edits them.
+            // A file goes only when a lane wants it gone whole (`ctx_keep`).
+            PartBody::File(_) if shape == Shape::Whole => ops.push(drop()),
+            // Other files, opaque parts and kinds ck-mc doesn't know: no lane
+            // here edits them.
             _ => continue,
         }
         covered.push(key.clone());
     }
     (ops, covered)
+}
+
+/// Whether a tool part's result ends the transcript: the last tool part of
+/// the newest entry. Removing that call whole would end the request on its
+/// message without the result, so it stays a call; earlier calls of the same
+/// message may go whole.
+fn ends_transcript(entry: &Entry, part: &Part, newest_mid: Option<&str>) -> bool {
+    Some(entry.mid.as_str()) == newest_mid
+        && entry
+            .parts
+            .iter()
+            .rev()
+            .find(|candidate| matches!(candidate.body, PartBody::Tool(_)))
+            .is_some_and(|last| last.id == part.id)
+}
+
+/// What dropping a tool part with [`Shape::Default`] wins back: its output
+/// and attachments when the call stays (a recent small-input call, or one
+/// that ends the transcript), the whole part when it goes. The plugin weighs
+/// age-sweep and emergency candidates the same way (`reclaimableTokens`).
+pub fn reclaimable_tokens(context: &Context, entry: &Entry, part: &Part) -> u64 {
+    let PartBody::Tool(tool) = &part.body else {
+        return tokens::part(part);
+    };
+    let newest_mid = context
+        .index
+        .entries()
+        .last()
+        .map(|entry| entry.mid.as_str());
+    let small_recent = part.tag.is_some_and(|tag| {
+        context
+            .index
+            .newest_tool_tags(RECENT_TOOL_WINDOW)
+            .contains(&tag)
+            && input_string_bytes(&tool.input) <= SMALL_INPUT_MAX_BYTES
+    });
+    if small_recent || ends_transcript(entry, part, newest_mid) {
+        tokens::tool_result(tool)
+    } else {
+        tokens::part(part)
+    }
+}
+
+/// Whether a part sits in the protected tail.
+pub fn in_protected_tail(context: &Context, key: &PartKey, cutoff: Option<u64>) -> bool {
+    context
+        .index
+        .find(&key.0, &key.1)
+        .is_some_and(|(_, part)| in_tail(part, cutoff))
 }
 
 /// Diff arguments of an edit call longer than this keep only their start.
@@ -481,7 +536,7 @@ pub fn age_sweep(context: &Context, bookmark: u64) -> Vec<(PartKey, Shape)> {
             if tag > bookmark
                 || context.edited.covers(&entry.mid, &part.id)
                 || protected.contains(&key)
-                || tokens::part(part) < AGE_SWEEP_MIN_TOKENS
+                || reclaimable_tokens(context, entry, part) < AGE_SWEEP_MIN_TOKENS
             {
                 continue;
             }
@@ -535,11 +590,17 @@ fn reasoning_cost(entry: &Entry, reasoning: &[&Part]) -> u64 {
 }
 
 /// Reasoning clearing: keep the newest assistant entries whose reasoning fits
-/// `budget`, and drop the reasoning of every older one. The newest assistant
-/// entry always keeps its reasoning and is charged first. What goes is always
+/// `budget`, and drop the reasoning of every older one. As in the plugin
+/// (`reasoning-budget.ts`), some entries are charged first and never
+/// cleared: the newest assistant, the newest one with reasoning, and, on an
+/// Anthropic model, every assistant of the current turn. What goes is always
 /// an oldest contiguous run, which every provider accepts, signed reasoning
 /// included.
-pub fn reasoning_over_budget(context: &Context, budget: u64) -> Vec<(PartKey, Shape)> {
+pub fn reasoning_over_budget(
+    context: &Context,
+    budget: u64,
+    anthropic: bool,
+) -> Vec<(PartKey, Shape)> {
     let assistants: Vec<(&Entry, Vec<&Part>)> = context
         .index
         .entries()
@@ -555,10 +616,36 @@ pub fn reasoning_over_budget(context: &Context, budget: u64) -> Vec<(PartKey, Sh
             (entry, reasoning)
         })
         .collect();
-    let Some(((newest, newest_reasoning), older)) = assistants.split_last() else {
+    if assistants.is_empty() {
         return Vec::new();
-    };
-    let mut kept = reasoning_cost(newest, newest_reasoning);
+    }
+    let entries = context.index.entries();
+    let position_of = |entry: &Entry| entries.iter().position(|e| e.mid == entry.mid);
+    // The first assistant that is exempt; every later one is too.
+    let mut exempt_from = assistants.len() - 1;
+    if let Some(latest) = assistants.iter().rposition(|(entry, _)| {
+        entry
+            .parts
+            .iter()
+            .any(|part| matches!(part.body, PartBody::Reasoning { .. }))
+    }) {
+        exempt_from = exempt_from.min(latest);
+    }
+    if anthropic {
+        if let Some(turn) = crate::pass::current_turn_start(entries) {
+            if let Some(first) = assistants
+                .iter()
+                .position(|(entry, _)| position_of(entry).is_some_and(|at| at >= turn))
+            {
+                exempt_from = exempt_from.min(first);
+            }
+        }
+    }
+    let (older, exempt) = assistants.split_at(exempt_from);
+    let mut kept: u64 = exempt
+        .iter()
+        .map(|(entry, reasoning)| reasoning_cost(entry, reasoning))
+        .sum();
     let mut cut = None;
     for (position, (entry, reasoning)) in older.iter().enumerate().rev() {
         if reasoning.is_empty() {
@@ -781,7 +868,10 @@ pub fn caveman(
                 return None;
             };
             let key = (entry.mid.clone(), part.id.clone());
-            if in_tail(part, cutoff)
+            // A role or part kind ck-mc doesn't know is carried unchanged
+            // (W1.5), as in every other lane.
+            if !is_known(entry, part)
+                || in_tail(part, cutoff)
                 || context.edited.covers(&entry.mid, &part.id)
                 || skip.contains(&key)
             {
@@ -1046,7 +1136,9 @@ pub fn superseded_edits(
         .filter(|(_, _, tool)| tool.name == "edit" || tool.name == "write")
         .collect();
     for (entry, part, tool) in edits.into_iter().rev() {
-        if in_tail(part, cutoff) {
+        // An edit an earlier view dropped is gone from the model's view, so
+        // it does not make an older edit of the same file superseded.
+        if in_tail(part, cutoff) || context.edited.covers(&entry.mid, &part.id) {
             continue;
         }
         let Some(path) = ["filePath", "file_path", "path"].iter().find_map(|key| {
@@ -1137,20 +1229,20 @@ pub fn emergency_drop(
         return Vec::new();
     }
     let protected = protected_tool_parts(context.index, context.protected_tools);
-    let candidates: Vec<(&Entry, &Part, u8)> = tool_parts(context)
+    // Every output that could go, tail included: the tier reserve is taken
+    // over these, as the plugin does, so it mostly overlaps the tail.
+    let droppable: Vec<(&Entry, &Part, u8)> = tool_parts(context)
         .filter(|(entry, part, tool)| {
             is_finished(&tool.status)
                 && part.tag.is_some()
                 && !context.edited.covers(&entry.mid, &part.id)
-                && !protected.contains(&(entry.mid.clone(), part.id.clone()))
-                && (emergency.over_limit || !in_tail(part, cutoff))
         })
         .map(|(entry, part, tool)| (entry, part, emergency_tier(&tool.name)))
         .collect();
     let mut reserved = BTreeSet::new();
     if !emergency.over_limit {
         for tier in [1, 2] {
-            let newest: Vec<u64> = candidates
+            let newest: Vec<u64> = droppable
                 .iter()
                 .rev()
                 .filter(|(_, _, candidate)| *candidate == tier)
@@ -1160,6 +1252,13 @@ pub fn emergency_drop(
             reserved.extend(newest.into_iter().take(keep));
         }
     }
+    let candidates: Vec<&(&Entry, &Part, u8)> = droppable
+        .iter()
+        .filter(|(entry, part, _)| {
+            !protected.contains(&(entry.mid.clone(), part.id.clone()))
+                && (emergency.over_limit || !in_tail(part, cutoff))
+        })
+        .collect();
     let shape = if emergency.over_limit {
         Shape::Whole
     } else {
@@ -1176,7 +1275,11 @@ pub fn emergency_drop(
                 continue;
             }
             selected.push(((entry.mid.clone(), part.id.clone()), shape));
-            reclaimed += tokens::part(part);
+            reclaimed += if emergency.over_limit {
+                tokens::part(part)
+            } else {
+                reclaimable_tokens(context, entry, part)
+            };
             if reclaimed as f64 >= reclaim {
                 break 'tiers;
             }
@@ -1334,6 +1437,166 @@ mod tests {
         assert_eq!(swept, [key("m3", "p4"), key("m4", "p5")]);
         let (ops, covered) = drop_ops(&protected, &[(key("m5", "p6"), Shape::Whole)]);
         assert!(ops.is_empty() && covered.is_empty(), "{ops:?}");
+        // The model's own `ctx_reduce` of it still lands: protected tools
+        // only hold back automatic lanes.
+        let (ops, covered) = drop_ops(&protected, &[(key("m5", "p6"), Shape::Requested)]);
+        assert_eq!(covered, [key("m5", "p6")], "{ops:?}");
+    }
+
+    fn reasoning(id: &str, text_bytes: u64) -> Part {
+        part(
+            id.to_owned(),
+            None,
+            Seal::None,
+            PartBody::Reasoning {
+                text: None,
+                text_bytes: Some(text_bytes),
+            },
+        )
+    }
+
+    /// On an Anthropic model, every assistant of the current turn keeps its
+    /// reasoning, as in the plugin; elsewhere only the newest one is exempt.
+    #[test]
+    fn reasoning_of_the_current_anthropic_turn_is_never_cleared() {
+        let say = |tag: u64| {
+            part(
+                format!("p{tag}"),
+                Some(tag),
+                Seal::None,
+                PartBody::Text { text: "Go.".into() },
+            )
+        };
+        let mut index = Index::default();
+        // One person turn, then three steps of 6,000 reasoning tokens each.
+        index.extend([
+            entry(1, Role::User, vec![say(1)]),
+            entry(2, Role::Assistant, vec![reasoning("r2", 24_000)]),
+            entry(3, Role::Assistant, vec![reasoning("r3", 24_000)]),
+            entry(4, Role::Assistant, vec![reasoning("r4", 24_000)]),
+        ]);
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        let context = context(&index, &edited, &none);
+        assert!(reasoning_over_budget(&context, 10_000, true).is_empty());
+        let cleared: Vec<PartKey> = reasoning_over_budget(&context, 10_000, false)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(cleared, [key("m2", "r2"), key("m3", "r3")]);
+    }
+
+    /// When the newest assistant has no reasoning, the newest one that has
+    /// keeps it.
+    #[test]
+    fn the_newest_reasoning_is_kept_when_the_newest_step_has_none() {
+        let mut index = Index::default();
+        index.extend([
+            entry(1, Role::Assistant, vec![reasoning("r1", 4_000)]),
+            entry(2, Role::Assistant, vec![reasoning("r2", 48_000)]),
+            entry(3, Role::Assistant, vec![read(3, 40)]),
+        ]);
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        let cleared: Vec<PartKey> =
+            reasoning_over_budget(&context(&index, &edited, &none), 10_000, false)
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect();
+        assert_eq!(cleared, [key("m1", "r1")]);
+    }
+
+    /// The age sweep weighs what a drop wins back: for a recent call with a
+    /// small input, only its output.
+    #[test]
+    fn the_age_sweep_weighs_only_the_output_of_a_call_that_stays() {
+        let mut big_input = read(2, 400);
+        if let PartBody::Tool(tool) = &mut big_input.body {
+            tool.input = json!({"path": "b.rs", "pattern": "x".repeat(900)});
+        }
+        let mut index = Index::default();
+        index.extend([
+            entry(1, Role::Assistant, vec![big_input]),
+            entry(2, Role::Assistant, vec![read(3, 40)]),
+        ]);
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        // 100 output tokens, under the floor, though the whole part is over.
+        assert!(age_sweep(&context(&index, &edited, &none), 3).is_empty());
+    }
+
+    /// An edit an earlier view dropped does not make the edit before it of
+    /// the same file superseded.
+    #[test]
+    fn a_dropped_edit_does_not_supersede_an_older_one() {
+        let edit = |tag: u64| {
+            part(
+                format!("p{tag}"),
+                Some(tag),
+                Seal::None,
+                PartBody::Tool(
+                    ToolPart::new(
+                        format!("c{tag}"),
+                        "edit",
+                        json!({"filePath": "c.rs", "oldString": "a", "newString": "b"}),
+                        ToolStatus::Completed,
+                    )
+                    .with_output_bytes(40),
+                ),
+            )
+        };
+        let mut index = Index::default();
+        index.extend([
+            entry(1, Role::Assistant, vec![edit(1)]),
+            entry(2, Role::Assistant, vec![edit(2)]),
+            entry(3, Role::Assistant, vec![edit(3)]),
+        ]);
+        // Newer messages take the edits out of the newest 20.
+        index.extend((4..=24).map(|n| entry(n, Role::Assistant, vec![read(n, 40)])));
+        let none = BTreeMap::new();
+        let nothing = Edited::default();
+        let marked: Vec<PartKey> = superseded_edits(&context(&index, &nothing, &none), None, 3)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(marked, [key("m2", "p2"), key("m1", "p1")]);
+        let mut dropped = Edited::default();
+        dropped.parts.insert(key("m3", "p3"));
+        let marked: Vec<PartKey> = superseded_edits(&context(&index, &dropped, &none), None, 3)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(marked, [key("m1", "p1")]);
+    }
+
+    /// Of two calls in the newest message, only the last one ends the
+    /// transcript and stays a call; the earlier one goes whole.
+    #[test]
+    fn only_the_last_call_of_the_newest_message_stays_a_call() {
+        let mut a = read(2, 40);
+        if let PartBody::Tool(tool) = &mut a.body {
+            tool.input = json!({"path": "b.rs", "pattern": "x".repeat(2_000)});
+        }
+        let mut index = Index::default();
+        index.extend([entry(1, Role::Assistant, vec![a, read(3, 40)])]);
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        let context = context(&index, &edited, &none);
+        let (ops, _) = drop_ops(
+            &context,
+            &[
+                (key("m1", "p2"), Shape::Default),
+                (key("m1", "p3"), Shape::Default),
+            ],
+        );
+        assert!(ops.contains(&EditOp::Drop {
+            mid: "m1".into(),
+            part: Some("p2".into())
+        }));
+        assert!(!ops.contains(&EditOp::Drop {
+            mid: "m1".into(),
+            part: Some("p3".into())
+        }));
     }
 
     /// Values the contract may add later are carried unchanged (W1.5): a tool
