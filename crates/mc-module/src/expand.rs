@@ -3,8 +3,9 @@
 //! tool's (`packages/plugin/src/tools/ctx-expand`), so an agent reads the
 //! same in both.
 //!
-//! A message number is the runner's ordinal plus one, the numbering summary
-//! headings and `ctx_search` hits use. A tag number names one part.
+//! A message number is the runner's ordinal, which counts from 1 like the
+//! numbering summary headings and `ctx_search` hits use. A tag number names
+//! one part.
 
 use std::sync::OnceLock;
 
