@@ -13,7 +13,7 @@
 //! The blocks, wrappers and budgets are the TypeScript plugin's, so a head
 //! reads the same in both.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use ck_contract_draft::read::Role;
 use ck_contract_draft::view::{EditOp, InsertAt, InsertedMessage};
@@ -44,20 +44,30 @@ pub struct Inputs<'a> {
     pub profile_max_id: i64,
     /// Every project memory that may be shown.
     pub memories: &'a [StoredMemory],
-    /// The newest memory-mutation-log entry, which a fold covers.
-    pub mutation_cursor: i64,
-    /// The session's newest memory fragment, which a fold covers.
-    pub fragment_cursor: i64,
+    /// The current rows of memories the head shows that are no longer in
+    /// `memories` (archived, merged away or expired).
+    pub gone: &'a [StoredMemory],
     pub history_budget_tokens: u64,
     pub memory_budget_tokens: u64,
     pub profile_budget_tokens: u64,
+}
+
+/// What the head shows for one memory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Shown {
+    /// The text the head shows, or, for a change shown only as a marker or
+    /// counted in the aggregate line, the text that change was about.
+    Text { text: String },
+    /// The head says the memory was removed or merged away.
+    Removed,
 }
 
 /// How a memory change is shown in `m[1]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Form {
-    /// Its lines in full.
+    /// Its line in full.
     Full,
     /// One line saying the shown text is out of date.
     Marker,
@@ -65,40 +75,31 @@ pub enum Form {
     Overflow,
 }
 
-/// A memory change an earlier `m[1]` already shows. Shown changes never move
+/// Memory changes an earlier `m[1]` already shows. Shown changes never move
 /// or shrink; only the aggregate line grows.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Committed {
-    /// The fragment id; for a dashboard change, 0.
-    pub id: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dashboard_log_id: Option<i64>,
     pub form: Form,
     pub lines: Vec<String>,
-    /// Memory text this session now sees in full, by memory id.
-    #[serde(default)]
-    pub visible: Vec<(i64, String)>,
     #[serde(default)]
     pub overflow_ids: Vec<i64>,
     #[serde(default)]
     pub overflow_count: u64,
 }
 
-/// `m[0]` as rendered at the last fold, what it covered, and the memory
-/// changes shown in `m[1]` since.
+/// `m[0]` as rendered at the last fold, what the head shows of each memory,
+/// and the memory changes shown in `m[1]` since.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Baseline {
     /// The highest summary sequence in `m[0]`.
     pub through_sequence: i64,
-    /// The highest memory id that existed at the fold.
+    /// The highest memory id that existed at the fold. A newer memory is
+    /// one `m[0]` could not show; an older one left out of `m[0]` was left
+    /// out by the memory budget and waits for the next fold.
     pub max_memory_id: i64,
-    /// The memories `m[0]` shows, with the text it shows.
-    pub shown_memories: Vec<(i64, String)>,
-    /// The memory-mutation-log entry `m[0]` already reflects. Only dashboard
-    /// edits after it are shown in `m[1]`.
-    pub mutation_cursor: i64,
-    /// The session's memory fragment `m[0]` already reflects.
-    pub fragment_cursor: i64,
+    /// What the head shows of each memory: `m[0]`'s text, then each change
+    /// `m[1]` showed since.
+    pub shown: BTreeMap<i64, Shown>,
     pub profile_max_id: i64,
     pub m0: String,
     #[serde(default)]
@@ -106,35 +107,10 @@ pub struct Baseline {
 }
 
 impl Baseline {
-    /// Whether the head shows memory `id` with exactly `text`.
-    pub fn shows(&self, id: i64, text: &str) -> bool {
-        let mut shown = self
-            .shown_memories
-            .iter()
-            .find(|(shown, _)| *shown == id)
-            .map(|(_, text)| text.as_str());
-        for committed in &self.committed {
-            if let Some((_, newer)) = committed.visible.iter().find(|(shown, _)| *shown == id) {
-                shown = Some(newer);
-            }
-        }
-        shown == Some(text)
+    /// The memory ids the head says anything about.
+    pub fn shown_ids(&self) -> Vec<i64> {
+        self.shown.keys().copied().collect()
     }
-}
-
-/// A memory change made by this session's agent, or on the dashboard, that
-/// `m[1]` may show.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Fragment {
-    pub id: i64,
-    pub dashboard_log_id: Option<i64>,
-    /// Dashboard rows of one operation share it, so they show together.
-    pub operation_key: String,
-    pub memory_ids: Vec<i64>,
-    /// The memory that now holds the current text, when there is one.
-    pub current_id: Option<i64>,
-    pub lines: Vec<String>,
-    pub visible: Vec<(i64, String)>,
 }
 
 /// Render a new baseline from everything current: a fold.
@@ -174,12 +150,17 @@ pub fn fold(inputs: &Inputs) -> Baseline {
             .map(|memory| memory.id)
             .max()
             .unwrap_or(0),
-        shown_memories: memories
+        shown: memories
             .iter()
-            .map(|memory| (memory.id, memory.content.clone()))
+            .map(|memory| {
+                (
+                    memory.id,
+                    Shown::Text {
+                        text: memory.content.clone(),
+                    },
+                )
+            })
             .collect(),
-        mutation_cursor: inputs.mutation_cursor,
-        fragment_cursor: inputs.fragment_cursor,
         profile_max_id: inputs.profile_max_id,
         m0: sections.join("\n\n").trim().to_owned(),
         committed: Vec::new(),
@@ -219,17 +200,87 @@ fn updates_block(lines: &[String]) -> String {
     )
 }
 
-/// One short line for a change whose full lines do not fit: the shown text
-/// of these memories is out of date, and `ctx_search` has the current text.
-fn stale_marker(fragment: &Fragment) -> String {
-    let ids: Vec<String> = fragment.memory_ids.iter().map(i64::to_string).collect();
-    let current = fragment
-        .current_id
+/// One change to what the head shows of a memory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Change {
+    id: i64,
+    line: String,
+    /// What the head shows of the memory once this change is shown.
+    after: Shown,
+    /// The memory that now holds the current text, when there is one.
+    current: Option<i64>,
+}
+
+/// Every difference between what the head shows and the current rows:
+/// shown memories whose text changed, that were archived or merged away,
+/// then memories newer than the fold that the head does not show yet. In
+/// memory-id order, so the same rows always give the same changes.
+fn changes(baseline: &Baseline, inputs: &Inputs) -> Vec<Change> {
+    let current: BTreeMap<i64, &StoredMemory> = inputs
+        .memories
+        .iter()
+        .map(|memory| (memory.id, memory))
+        .collect();
+    let gone: BTreeMap<i64, &StoredMemory> = inputs
+        .gone
+        .iter()
+        .map(|memory| (memory.id, memory))
+        .collect();
+    let mut out = Vec::new();
+    for (id, shown) in &baseline.shown {
+        match (current.get(id), shown) {
+            (Some(memory), Shown::Text { text }) if memory.content == *text => {}
+            (Some(memory), _) => out.push(Change {
+                id: *id,
+                line: memory::updated_line(*id, Some(&memory.category), &memory.content),
+                after: Shown::Text {
+                    text: memory.content.clone(),
+                },
+                current: Some(*id),
+            }),
+            (None, Shown::Removed) => {}
+            (None, Shown::Text { .. }) => {
+                let by = gone
+                    .get(id)
+                    .and_then(|memory| memory.superseded_by_memory_id);
+                out.push(Change {
+                    id: *id,
+                    line: match by {
+                        Some(by) => memory::superseded_line(*id, by),
+                        None => memory::removed_line(*id),
+                    },
+                    after: Shown::Removed,
+                    current: by,
+                });
+            }
+        }
+    }
+    for memory in inputs.memories {
+        if memory.id > baseline.max_memory_id && !baseline.shown.contains_key(&memory.id) {
+            out.push(Change {
+                id: memory.id,
+                line: memory::added_line(memory.id, Some(&memory.category), &memory.content),
+                after: Shown::Text {
+                    text: memory.content.clone(),
+                },
+                current: Some(memory.id),
+            });
+        }
+    }
+    out
+}
+
+/// One short line for a change whose full line does not fit: the shown
+/// text of this memory is out of date, and `ctx_search` has the current
+/// text.
+fn stale_marker(change: &Change) -> String {
+    let current = change
+        .current
         .map(|id| format!(" current=\"{id}\""))
         .unwrap_or_default();
     format!(
         "  <stale-memory ids=\"{}\"{current} read-with=\"ctx_search\"/>",
-        ids.join(",")
+        change.id
     )
 }
 
@@ -255,19 +306,18 @@ fn overflow_line(ids: &[i64], count: u64) -> String {
     )
 }
 
-/// `m[1]`, and the memory changes it shows, for a pass that builds a view.
+/// `m[1]`, and the baseline that records what it shows, for a pass that
+/// builds a view.
 ///
 /// Between folds `m[1]` shows newer summaries, a changed user profile, and
-/// memory changes that come from this session's own agent or the dashboard
-/// (`pending`, oldest first). Memories other writers add or change wait for
-/// the next fold. Each change shows in full while it fits a share of the
-/// memory budget, then as a one-line marker, then in one aggregate line; what
-/// an earlier `m[1]` showed stays byte for byte.
-pub fn delta(
-    baseline: &Baseline,
-    inputs: &Inputs,
-    pending: &[Fragment],
-) -> (String, Vec<Committed>) {
+/// every memory change since the fold, whoever made it: an agent in this or
+/// another session, the historian, the dreamer or the dashboard. `m[0]`
+/// cannot change between folds, so a change to a memory it shows is stated
+/// here. Each change shows in full while it fits a share of the memory
+/// budget, then as a one-line marker, then in one aggregate line; what an
+/// earlier `m[1]` showed stays byte for byte.
+pub fn delta(baseline: &Baseline, inputs: &Inputs) -> (String, Baseline) {
+    let mut next = baseline.clone();
     let mut blocks = Vec::new();
     let newer_summaries: Vec<String> = inputs
         .summaries
@@ -302,19 +352,15 @@ pub fn delta(
         ))
     };
 
-    let mut committed: Vec<Committed> = baseline
-        .committed
-        .iter()
-        .filter(|entry| entry.form != Form::Overflow)
-        .cloned()
-        .collect();
+    next.committed.retain(|entry| entry.form != Form::Overflow);
     let mut overflow = baseline
         .committed
         .iter()
         .find(|entry| entry.form == Form::Overflow)
         .cloned();
+    let pending = changes(baseline, inputs);
     if !pending.is_empty() {
-        let full_lines_of = |form: Form, entries: &[Committed]| -> Vec<String> {
+        let lines_of = |form: Form, entries: &[Committed]| -> Vec<String> {
             entries
                 .iter()
                 .filter(|entry| entry.form == form)
@@ -323,9 +369,9 @@ pub fn delta(
         };
         let mut used_full = tokens(&format!(
             "<memory-updates>\n{MEMORY_UPDATES_HEADER}\n</memory-updates>\n"
-        )) + line_tokens(&full_lines_of(Form::Full, &committed));
-        let mut used_markers = line_tokens(&full_lines_of(Form::Marker, &committed));
-        let mut full_count = full_lines_of(Form::Full, &committed).len();
+        )) + line_tokens(&lines_of(Form::Full, &next.committed));
+        let mut used_markers = line_tokens(&lines_of(Form::Marker, &next.committed));
+        let mut full_count = lines_of(Form::Full, &next.committed).len();
         let allowance = (inputs.memory_budget_tokens as f64 * CORRECTION_ALLOWANCE_RATIO) as u64;
         let marker_reserve = MARKER_RESERVE_TOKENS.min(allowance / 2);
         let mut cap = inputs.history_budget_tokens as f64 * M1_ABSOLUTE_CAP_RATIO;
@@ -335,34 +381,28 @@ pub fn delta(
         }
         let headroom = (cap - independent as f64).max(0.0) as u64;
         let full_budget = (allowance - marker_reserve).min(headroom);
-        for fragment in pending {
+        for change in pending {
+            next.shown.insert(change.id, change.after.clone());
             if overflow.is_none() {
-                let cost = line_tokens(&fragment.lines);
-                if used_full + cost <= full_budget
-                    && full_count + fragment.lines.len() <= CORRECTION_RECORD_CAP
-                {
-                    committed.push(Committed {
-                        id: fragment.id,
-                        dashboard_log_id: fragment.dashboard_log_id,
+                let line = vec![change.line.clone()];
+                let cost = line_tokens(&line);
+                if used_full + cost <= full_budget && full_count < CORRECTION_RECORD_CAP {
+                    next.committed.push(Committed {
                         form: Form::Full,
-                        lines: fragment.lines.clone(),
-                        visible: fragment.visible.clone(),
+                        lines: line,
                         overflow_ids: Vec::new(),
                         overflow_count: 0,
                     });
                     used_full += cost;
-                    full_count += fragment.lines.len();
+                    full_count += 1;
                     continue;
                 }
-                let marker = stale_marker(fragment);
-                let marker_cost = line_tokens(std::slice::from_ref(&marker));
+                let marker = vec![stale_marker(&change)];
+                let marker_cost = line_tokens(&marker);
                 if used_markers + marker_cost <= marker_reserve {
-                    committed.push(Committed {
-                        id: fragment.id,
-                        dashboard_log_id: fragment.dashboard_log_id,
+                    next.committed.push(Committed {
                         form: Form::Marker,
-                        lines: vec![marker],
-                        visible: Vec::new(),
+                        lines: marker,
                         overflow_ids: Vec::new(),
                         overflow_count: 0,
                     });
@@ -371,27 +411,21 @@ pub fn delta(
                 }
             }
             let entry = overflow.get_or_insert_with(|| Committed {
-                id: fragment.id,
-                dashboard_log_id: None,
                 form: Form::Overflow,
                 lines: Vec::new(),
-                visible: Vec::new(),
                 overflow_ids: Vec::new(),
                 overflow_count: 0,
             });
-            entry.id = entry.id.max(fragment.id);
-            if fragment.dashboard_log_id.is_some() {
-                entry.dashboard_log_id = fragment.dashboard_log_id;
-            }
-            entry.overflow_ids.extend(&fragment.memory_ids);
+            entry.overflow_ids.push(change.id);
             entry.overflow_count += 1;
         }
     }
     if let Some(mut entry) = overflow {
         entry.lines = vec![overflow_line(&entry.overflow_ids, entry.overflow_count)];
-        committed.push(entry);
+        next.committed.push(entry);
     }
-    let lines: Vec<String> = committed
+    let lines: Vec<String> = next
+        .committed
         .iter()
         .flat_map(|entry| entry.lines.clone())
         .collect();
@@ -407,23 +441,7 @@ pub fn delta(
             blocks.join("\n")
         )
     };
-    (text, committed)
-}
-
-/// Where a pass's pending changes start: after the fold's cursors and every
-/// change an earlier `m[1]` showed.
-pub fn processed_through(baseline: &Baseline) -> (i64, i64) {
-    let fragments = baseline
-        .committed
-        .iter()
-        .map(|entry| entry.id)
-        .fold(baseline.fragment_cursor, i64::max);
-    let dashboard = baseline
-        .committed
-        .iter()
-        .filter_map(|entry| entry.dashboard_log_id)
-        .fold(baseline.mutation_cursor, i64::max);
-    (fragments, dashboard)
+    (text, next)
 }
 
 /// `m[0]` and `m[1]` as view edits, in that order.
@@ -485,77 +503,89 @@ mod tests {
             profile: &[],
             profile_max_id: 0,
             memories,
-            mutation_cursor: 0,
-            fragment_cursor: 0,
+            gone: &[],
             history_budget_tokens: 60_000,
             memory_budget_tokens: 4_000,
             profile_budget_tokens: 4_000,
         }
     }
 
-    fn fragment(id: i64, line: &str) -> Fragment {
-        Fragment {
-            id,
-            dashboard_log_id: None,
-            operation_key: format!("op-{id}"),
-            memory_ids: vec![id],
-            current_id: Some(id),
-            lines: vec![line.to_owned()],
-            visible: vec![(id, line.to_owned())],
-        }
-    }
-
     #[test]
-    fn newer_summaries_go_to_m1_and_other_writers_memories_wait_for_a_fold() {
+    fn m1_shows_every_change_since_the_fold_and_a_fold_takes_them_in() {
         let summaries = vec![summary(0, 1, 4), summary(1, 5, 9)];
-        let memories = vec![memory(1, "ask first"), memory(2, "never push")];
-        let baseline = fold(&inputs(&summaries[..1], &memories[..1]));
+        let at_fold = vec![memory(1, "ask first"), memory(2, "old naming rule")];
+        let baseline = fold(&inputs(&summaries[..1], &at_fold));
         assert!(baseline.m0.contains("Part 0") && baseline.m0.contains("#1: ask first"));
-        let (m1, _) = delta(&baseline, &inputs(&summaries, &memories), &[]);
-        assert!(
-            m1.contains("<new-compartments>") && m1.contains("Part 1"),
-            "{m1}"
-        );
-        assert!(!m1.contains("never push"), "{m1}");
-        let refolded = fold(&inputs(&summaries, &memories));
-        assert!(refolded.m0.contains("Part 1") && refolded.m0.contains("#2: never push"));
         assert_eq!(
-            delta(&refolded, &inputs(&summaries, &memories), &[]).0,
+            delta(&baseline, &inputs(&summaries[..1], &at_fold)).0,
             M1_EMPTY
         );
+
+        // Another writer adds memory 3, changes 1 and merges 2 into 3.
+        let now = vec![
+            memory(1, "ask before every push"),
+            memory(3, "new naming rule"),
+        ];
+        let mut merged = memory(2, "old naming rule");
+        merged.status = "archived".into();
+        merged.superseded_by_memory_id = Some(3);
+        let gone = [merged];
+        let mut current = inputs(&summaries, &now);
+        current.gone = &gone;
+        let (m1, next) = delta(&baseline, &current);
+        assert!(m1.contains("Part 1"), "{m1}");
+        assert!(
+            m1.contains(
+                r#"<updated id="1" category="PROJECT_RULES">ask before every push</updated>"#
+            ),
+            "{m1}"
+        );
+        assert!(m1.contains(r#"<superseded id="2" by="3"/>"#), "{m1}");
+        assert!(
+            m1.contains(r#"<added id="3" category="PROJECT_RULES">new naming rule</added>"#),
+            "{m1}"
+        );
+
+        // Nothing new: the same m[1], byte for byte.
+        assert_eq!(delta(&next, &current).0, m1);
+
+        let refolded = fold(&inputs(&summaries, &now));
+        assert!(
+            refolded.m0.contains("#1: ask before every push")
+                && refolded.m0.contains("#3: new naming rule")
+        );
+        assert_eq!(delta(&refolded, &inputs(&summaries, &now)).0, M1_EMPTY);
     }
 
     #[test]
     fn changes_show_in_full_then_as_markers_then_in_one_line_and_never_move() {
         let baseline = fold(&inputs(&[], &[]));
-        let mut small = inputs(&[], &[]);
+        // Varied words, so a line costs real tokens: one fits the full budget, two do not.
+        let text = |id: i64| {
+            (0..15)
+                .map(|word| format!("fact{id}w{word}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let first = vec![memory(1, &text(1))];
+        let mut small = inputs(&[], &first);
         small.memory_budget_tokens = 1_000;
-        // Varied words, so the line costs real tokens: one fits the full budget, two do not.
-        let line = |id: i64| {
-            let words: Vec<String> = (0..15).map(|word| format!("fact{id}w{word}")).collect();
-            format!("  <added id=\"{id}\">{}</added>", words.join(" "))
-        };
-        let (m1, committed) = delta(&baseline, &small, &[fragment(1, &line(1))]);
-        assert!(m1.contains(&line(1)), "{m1}");
-        let next = Baseline {
-            committed: committed.clone(),
-            ..baseline.clone()
-        };
-        let pending: Vec<Fragment> = (2..40).map(|id| fragment(id, &line(id))).collect();
-        let (m1_later, committed_later) = delta(&next, &small, &pending);
+        let (m1, next) = delta(&baseline, &small);
+        assert!(m1.contains(&text(1)), "{m1}");
+        let many: Vec<StoredMemory> = (1..40).map(|id| memory(id, &text(id))).collect();
+        let mut later = inputs(&[], &many);
+        later.memory_budget_tokens = 1_000;
+        let (m1_later, after) = delta(&next, &later);
         let shown_before = &m1[..m1.find("\n</memory-updates>").unwrap()];
         assert!(m1_later.starts_with(shown_before), "{m1_later}");
-        assert!(!m1_later.contains(&line(2)), "{m1_later}");
-        assert!(m1_later.contains("<stale-memory ids=\"2\""), "{m1_later}");
+        assert!(!m1_later.contains(&text(2)), "{m1_later}");
+        assert!(m1_later.contains(r#"<stale-memory ids="2""#), "{m1_later}");
         assert!(
-            m1_later.contains("<more-memory-edits count=\""),
+            m1_later.contains(r#"<more-memory-edits count=""#),
             "{m1_later}"
         );
-        assert_eq!(committed_later.last().unwrap().form, Form::Overflow);
-        assert!(Baseline {
-            committed: committed_later,
-            ..baseline
-        }
-        .shows(1, &line(1)));
+        assert_eq!(after.committed.last().unwrap().form, Form::Overflow);
+        // A change shown as a marker or counted is not shown again.
+        assert_eq!(delta(&after, &later).0, m1_later);
     }
 }

@@ -471,10 +471,7 @@ impl Session {
                     session: &self.key.session,
                     project: &project.id,
                 };
-                let baseline = self.baseline.as_ref();
-                let shows =
-                    |id: i64, text: &str| baseline.is_some_and(|baseline| baseline.shows(id, text));
-                db.with_connection(|conn| crate::memory_tool::run(conn, &who, input, &shows))
+                db.with_connection(|conn| crate::memory_tool::run(conn, &who, input))
             }
             "ctx_note" => {
                 let db = self.db.as_ref().ok_or("ctx_note needs the context store")?;
@@ -624,7 +621,7 @@ impl Session {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as i64);
-        let (memories, profile, profile_max_id, mutation_cursor) = match (&self.db, &self.project) {
+        let (memories, profile, profile_max_id) = match (&self.db, &self.project) {
             (Some(db), Some(project)) => {
                 let memories = db
                     .project_memories(&project.id, now)
@@ -636,60 +633,46 @@ impl Session {
                         Vec::new()
                     });
                 let (profile, profile_max_id) = db.user_profile().unwrap_or_default();
-                let cursor = db.last_memory_mutation(&project.id).unwrap_or(0);
-                (memories, profile, profile_max_id, cursor)
+                (memories, profile, profile_max_id)
             }
-            _ => (Vec::new(), Vec::new(), 0, 0),
+            _ => (Vec::new(), Vec::new(), 0),
         };
-        let fragment_cursor = self
-            .db
-            .as_ref()
-            .and_then(|db| {
-                db.last_agent_fragment(&self.key.harness, &self.key.session)
-                    .ok()
-            })
-            .unwrap_or(0);
-        let inputs = head::Inputs {
+        let history_budget_tokens =
+            (self.conditions.context_window as f64 * settings.execute_threshold_percentage / 100.0
+                * settings.history_budget_percentage) as u64;
+        let fold_inputs = head::Inputs {
             summaries: &self.summaries,
             docs: &docs,
             profile: &profile,
             profile_max_id,
             memories: &memories,
-            mutation_cursor,
-            fragment_cursor,
-            history_budget_tokens: (self.conditions.context_window as f64
-                * settings.execute_threshold_percentage
-                / 100.0
-                * settings.history_budget_percentage) as u64,
+            gone: &[],
+            history_budget_tokens,
             memory_budget_tokens: settings.memory_budget_tokens,
             profile_budget_tokens: settings.profile_budget_tokens,
         };
-        let mut next = match (&self.baseline, self.fold_due) {
+        let base = match (&self.baseline, self.fold_due) {
             (Some(baseline), false) => baseline.clone(),
-            _ => head::fold(&inputs),
+            _ => head::fold(&fold_inputs),
         };
-        let (after_fragment, after_log) = head::processed_through(&next);
-        let mut pending = Vec::new();
-        if let Some(db) = &self.db {
-            pending.extend(
-                db.agent_fragments_after(&self.key.harness, &self.key.session, after_fragment)
-                    .unwrap_or_default(),
-            );
-            if let Some(project) = &self.project {
-                let shown: Vec<i64> = next.shown_memories.iter().map(|(id, _)| *id).collect();
-                pending.extend(
-                    db.dashboard_fragments_after(
-                        &project.id,
-                        after_log,
-                        &shown,
-                        next.max_memory_id,
-                    )
-                    .unwrap_or_default(),
-                );
-            }
-        }
-        let (m1, committed) = head::delta(&next, &inputs, &pending);
-        next.committed = committed;
+        // Shown memories that left the active set: their rows say whether
+        // they were archived or merged into another.
+        let active: std::collections::HashSet<i64> =
+            memories.iter().map(|memory| memory.id).collect();
+        let missing: Vec<i64> = base
+            .shown_ids()
+            .into_iter()
+            .filter(|id| !active.contains(id))
+            .collect();
+        let gone = match &self.db {
+            Some(db) => db.memories_by_ids(&missing).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let inputs = head::Inputs {
+            gone: &gone,
+            ..fold_inputs
+        };
+        let (m1, next) = head::delta(&base, &inputs);
         let mut ops = head::head_ops(&next.m0, &m1);
         // The new baseline and the changes m[1] shows count only once the
         // runner takes this view.

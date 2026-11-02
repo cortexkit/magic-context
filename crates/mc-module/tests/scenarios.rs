@@ -1063,7 +1063,7 @@ fn insert_memory(dir: &std::path::Path, id: i64, content: &str) {
 }
 
 #[tokio::test]
-async fn a_head_shows_its_docs_and_memories_first_and_only_its_own_memory_changes_in_m1() {
+async fn a_head_shows_its_docs_and_memories_first_and_every_later_memory_change_in_m1() {
     let dir = scratch("head-memories");
     ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     insert_memory(&dir, 1, "Ask before pushing.");
@@ -1091,18 +1091,14 @@ async fn a_head_shows_its_docs_and_memories_first_and_only_its_own_memory_change
         "{m1}"
     );
 
-    // A memory another writer adds mid-session waits for the next fold,
-    // while this session's own agent change shows in m[1] on the next pass
-    // that builds a view; m[0] stays as it was.
+    // Another writer adds memory 2 and changes memory 1 mid-session: the
+    // next pass that builds a view states both in m[1], and m[0] stays as
+    // it was.
     insert_memory(&dir, 2, "Never force-push.");
     rusqlite::Connection::open(dir.join("context.db"))
         .unwrap()
         .execute(
-            "INSERT INTO memory_agent_fragments (session_id, harness, project_path, operation_key,
-                 memory_ids_json, current_id, lines, visible_texts_json, created_at)
-             VALUES ('s1', 'mock', 'pj-test', 'op-1', '[1]', 1,
-                     '  <updated id=\"1\" category=\"PROJECT_RULES\">Ask before every push.</updated>',
-                     '[{\"id\":1,\"text\":\"Ask before every push.\"}]', 1)",
+            "UPDATE memories SET content = 'Ask before every push.' WHERE id = 1",
             [],
         )
         .unwrap();
@@ -1114,10 +1110,15 @@ async fn a_head_shows_its_docs_and_memories_first_and_only_its_own_memory_change
     assert_clean(&runner);
     let (m0_later, m1) = head_texts(runner.host());
     assert!(
-        m1.contains("<memory-updates>") && m1.contains("Ask before every push."),
+        m1.contains(
+            "<updated id=\"1\" category=\"PROJECT_RULES\">Ask before every push.</updated>"
+        ),
         "{m1}"
     );
-    assert!(!m1.contains("Never force-push."), "{m1}");
+    assert!(
+        m1.contains("<added id=\"2\" category=\"PROJECT_RULES\">Never force-push.</added>"),
+        "{m1}"
+    );
     assert!(!m0_later.contains("Never force-push."), "{m0_later}");
 
     // A lost cache folds both into m[0].
@@ -1283,7 +1284,7 @@ async fn ctx_note_finds_the_notes_a_standalone_session_wrote_and_keeps_new_ones(
 }
 
 #[tokio::test]
-async fn ctx_memory_saves_updates_and_archives_with_history_and_shows_its_changes_in_m1() {
+async fn ctx_memory_saves_updates_and_archives_with_history_and_m1_shows_where_each_memory_ended() {
     let dir = scratch("memory-tool");
     ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     insert_memory(&dir, 1, "Ask before pushing.");
@@ -1341,19 +1342,15 @@ async fn ctx_memory_saves_updates_and_archives_with_history_and_shows_its_change
         outputs[5]
     );
 
-    // The changes show in this session's m[1].
+    // m[1] states where each memory ended up: memory 1 was updated and
+    // then archived before the next view, so it shows as removed.
     let (_, m1) = head_texts(runner.host());
     assert!(
         m1.contains("<added id=\"2\" category=\"NAMING\">Crates use kebab-case.</added>"),
         "{m1}"
     );
-    assert!(
-        m1.contains(
-            "<updated id=\"1\" category=\"PROJECT_RULES\">Ask before every push.</updated>"
-        ),
-        "{m1}"
-    );
     assert!(m1.contains("<removed id=\"1\"/>"), "{m1}");
+    assert!(!m1.contains("<updated id=\"1\""), "{m1}");
 
     // The rows the standalone plugin reads are there.
     let db = rusqlite::Connection::open(dir.join("context.db")).unwrap();

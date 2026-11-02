@@ -133,14 +133,8 @@ fn format_list(memories: &[memory_writes::MemoryRow]) -> String {
     lines.join("\n")
 }
 
-/// Run one `ctx_memory` call. `shows` says whether the session already
-/// sees a memory with exactly a given text.
-pub fn run(
-    conn: &mut Connection,
-    who: &Writer,
-    input: &Value,
-    shows: &dyn Fn(i64, &str) -> bool,
-) -> Result<String, String> {
+/// Run one `ctx_memory` call.
+pub fn run(conn: &mut Connection, who: &Writer, input: &Value) -> Result<String, String> {
     let store = |error: rusqlite::Error| error.to_string();
     let action = input.get("action").and_then(Value::as_str).unwrap_or("");
     match action {
@@ -152,8 +146,7 @@ pub fn run(
             if !CATEGORIES.contains(&category) {
                 return Err(format!("Error: Unknown memory category '{category}'."));
             }
-            let receipt =
-                memory_writes::save(conn, who, category, content, shows).map_err(store)?;
+            let receipt = memory_writes::save(conn, who, category, content).map_err(store)?;
             Ok(
                 match (receipt.applied, receipt.inserted, receipt.memory_id) {
                     (false, _, _) => format!("{}: memory was not saved.", receipt.reason),
@@ -187,7 +180,7 @@ pub fn run(
             }
             Ok(parts.join("\n\n"))
         }
-        "update" | "archive" | "merge" => mutate(conn, who, action, input, shows),
+        "update" | "archive" | "merge" => mutate(conn, who, action, input),
         other => Err(format!(
             "Error: Action '{other}' is not allowed in this context."
         )),
@@ -199,7 +192,6 @@ fn mutate(
     who: &Writer,
     action: &str,
     input: &Value,
-    shows: &dyn Fn(i64, &str) -> bool,
 ) -> Result<String, String> {
     let store = |error: rusqlite::Error| error.to_string();
     let content = text(input, "content");
@@ -278,7 +270,7 @@ fn mutate(
         category,
         reason,
     };
-    match memory_writes::mutate(conn, who, &change, shows) {
+    match memory_writes::mutate(conn, who, &change) {
         Ok(receipt) => Ok(match operation {
             Operation::Update => format!("Updated memory [ID: {}] in {shown_category}.", ids[0]),
             Operation::Merge => format!(

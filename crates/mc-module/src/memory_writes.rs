@@ -3,8 +3,9 @@
 //! (`features/magic-context/memory/lifecycle-applier.ts`), row for row,
 //! because the standalone plugin writes the same tables: each write keeps
 //! the memory's revision, its undo history, the decision receipt and
-//! journal entry, the memory-mutation-log rows, and the agent fragment that
-//! shows the change in the writing session's `m[1]`. Each runs in one
+//! journal entry, and the memory-mutation-log rows. How a change reaches a
+//! prompt is the history head's business: every session that shows the
+//! memory sees the change in its `m[1]` on its next rebuild. Each runs in one
 //! `BEGIN IMMEDIATE` transaction, so it lands whole or not at all.
 //!
 //! Embeddings are not computed here: a changed memory's vector is deleted,
@@ -12,8 +13,6 @@
 
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 use serde_json::{json, Map, Value};
-
-use crate::memory::{added_line, removed_line, superseded_line, updated_line};
 
 /// The categories a memory row may hold; history refuses a snapshot outside them.
 const KNOWN_CATEGORIES: [&str; 12] = [
@@ -305,42 +304,6 @@ fn record_receipt(
     Ok(())
 }
 
-fn record_fragment(
-    tx: &Transaction,
-    who: &Writer,
-    key: &str,
-    memory_ids: &[i64],
-    current_id: Option<i64>,
-    lines: &[String],
-    visible: &[(i64, String)],
-) -> rusqlite::Result<()> {
-    if lines.is_empty() {
-        return Ok(());
-    }
-    let visible: Vec<Value> = visible
-        .iter()
-        .map(|(id, text)| json!({"id": id, "text": text}))
-        .collect();
-    tx.execute(
-        "INSERT OR IGNORE INTO memory_agent_fragments
-            (session_id, harness, project_path, operation_key, memory_ids_json, current_id, lines,
-             visible_texts_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![
-            who.session,
-            who.harness,
-            who.project,
-            key,
-            serde_json::to_string(memory_ids).unwrap_or_default(),
-            current_id,
-            lines.join("\n"),
-            Value::Array(visible).to_string(),
-            now_ms()
-        ],
-    )?;
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn queue_mutation(
     tx: &Transaction,
@@ -467,15 +430,12 @@ fn immediate(conn: &mut Connection) -> rusqlite::Result<Transaction<'_>> {
 }
 
 /// Save a memory the agent asked for. A memory with the same text in the
-/// category bumps that memory's seen count instead. `shows` says whether the
-/// session already sees a memory with exactly a given text; a save it does
-/// not see yet is shown in its `m[1]`.
+/// category bumps that memory's seen count instead.
 pub fn save(
     conn: &mut Connection,
     who: &Writer,
     category: &str,
     content: &str,
-    shows: &dyn Fn(i64, &str) -> bool,
 ) -> rusqlite::Result<Receipt> {
     let key = decision_key();
     let tx = immediate(conn)?;
@@ -543,21 +503,6 @@ pub fn save(
             Some(50),
         )?,
     };
-    if matched.is_none() || !shows(memory.id, &memory.content) {
-        record_fragment(
-            &tx,
-            who,
-            &key,
-            &[memory.id],
-            Some(memory.id),
-            &[added_line(
-                memory.id,
-                Some(&memory.category),
-                &memory.content,
-            )],
-            &[(memory.id, memory.content.clone())],
-        )?;
-    }
     let reason = if matched.is_some() {
         "live_match"
     } else {
@@ -623,7 +568,6 @@ pub fn mutate(
     conn: &mut Connection,
     who: &Writer,
     change: &Change,
-    shows: &dyn Fn(i64, &str) -> bool,
 ) -> Result<Receipt, MutationError> {
     let Change {
         operation,
@@ -711,8 +655,6 @@ pub fn mutate(
     }
     let mut canonical: Option<MemoryRow> = None;
     let mut superseded_ids = Vec::new();
-    let (mut lines, mut memory_ids, mut current_id, mut visible) =
-        (Vec::new(), Vec::new(), None, Vec::new());
     match operation {
         Operation::Update => {
             let content = content.expect("checked");
@@ -732,10 +674,6 @@ pub fn mutate(
                 None,
             )?;
             canonical = get_memory(&tx, first.id)?;
-            lines.push(updated_line(first.id, Some(&category), content));
-            memory_ids.push(first.id);
-            current_id = Some(first.id);
-            visible.push((first.id, content.to_owned()));
         }
         Operation::Archive => {
             for source in &sources {
@@ -751,8 +689,6 @@ pub fn mutate(
                     None,
                     Some(&key),
                 )?;
-                lines.push(removed_line(source.id));
-                memory_ids.push(source.id);
             }
         }
         Operation::Merge => {
@@ -817,8 +753,6 @@ pub fn mutate(
                         Some(&key),
                     )?;
                     superseded_ids.push(source.id);
-                    lines.push(superseded_line(source.id, survivor.id));
-                    memory_ids.push(source.id);
                 }
             }
             let merged: Vec<i64> = merged_from.into_iter().collect();
@@ -834,19 +768,6 @@ pub fn mutate(
                 ],
             )?;
             clear_derived(&tx, survivor.id)?;
-            if !shows(survivor.id, content) {
-                lines.push(
-                    if duplicate.is_some() && sources.iter().any(|source| source.id == survivor.id)
-                    {
-                        updated_line(survivor.id, Some(&category), content)
-                    } else {
-                        added_line(survivor.id, Some(&category), content)
-                    },
-                );
-                visible.push((survivor.id, content.to_owned()));
-            }
-            memory_ids.push(survivor.id);
-            current_id = Some(survivor.id);
             canonical = get_memory(&tx, survivor.id)?;
         }
     }
@@ -919,7 +840,6 @@ pub fn mutate(
             ],
         )?;
     }
-    record_fragment(&tx, who, &key, &memory_ids, current_id, &lines, &visible)?;
     let memory_id = canonical.as_ref().map_or(first.id, |memory| memory.id);
     record_receipt(
         &tx,
