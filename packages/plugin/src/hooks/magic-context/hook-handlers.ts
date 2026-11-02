@@ -22,6 +22,7 @@ import {
     setLastNudgeUndropped,
 } from "../../features/magic-context/storage-meta-persisted";
 import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
+import { resolveStoredSubagentMode } from "../../plugin/subagent-tool-policy";
 import type { PluginContext } from "../../plugin/types";
 import { seedSessionCacheTtlIfUnsynced } from "../../shared/cache-ttl-seed";
 import { sessionLog } from "../../shared/logger";
@@ -767,9 +768,10 @@ export function createToolExecuteAfterHook(args: {
                             (t as { status?: unknown }).status === "cancelled"),
                 )
             ) {
-                // Subagents never deliver note nudges (gated in postprocess), so don't
-                // accumulate orphan trigger state for them.
-                if (sessionMeta && !sessionMeta.isSubagent) {
+                // Subagents never deliver note nudges: the delivery gate reads the
+                // stored fact, so do not accumulate trigger state that
+                // `subagent.compress` cannot hand to them.
+                if (sessionMeta && !resolveStoredSubagentMode(args.db, typedInput.sessionID)) {
                     onNoteTrigger(args.db, typedInput.sessionID, "todos_complete");
                 }
             }

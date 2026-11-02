@@ -138,7 +138,7 @@ describe("MagicContextConfigSchema", () => {
                 },
                 temporal_awareness: false,
                 keep_subagents: false,
-                subagent: { compress: false, memory_write: false, dream: false },
+                subagent: { compress: false, memory_write: false },
                 debug_rpc: false,
                 todowrite: {
                     enabled: false,

@@ -109,6 +109,7 @@ import {
     tryMessagesTransformLkgReplay,
 } from "../../plugin/messages-transform";
 import { registerRpcHandlers } from "../../plugin/rpc-handlers";
+import { setSubagentPolicy } from "../../plugin/subagent-policy";
 import {
     hideSubagentTools,
     removePrimaryOnlyTools,
@@ -869,6 +870,13 @@ export async function registerContext(context: V2Context) {
     log(`[magic-context] OpenCode 2 keep_subagents=${config.keep_subagents === true}`);
     setHomeProjectPermission(config.allow_home_project);
     if (!config.enabled) return;
+    // Same subagent switches as the OpenCode 1 lane; the gates live in this package.
+    // Process-global by design (see plugin/subagent-policy.ts): one plugin instance
+    // per open project, so the last enabled project to boot owns the policy here.
+    setSubagentPolicy({
+        compress: config.subagent.compress === true,
+        memoryWrite: config.subagent.memory_write === true,
+    });
     const nativeRemove = nativeSessionRemove(context.session);
     if (!hasRequiredSessionAPI(context.session) || !nativeRemove) {
         const message = OPENCODE2_SESSION_API_NOTICE;

@@ -14,7 +14,12 @@ import {
     resetSubagentPolicy,
     setSubagentPolicy,
 } from "./subagent-policy";
-import { hideSubagentTools, subagentToolRefusal } from "./subagent-tool-policy";
+import {
+    hideSubagentTools,
+    resolveStoredSubagentMode,
+    storedSubagentMode,
+    subagentToolRefusal,
+} from "./subagent-tool-policy";
 
 let db: ContextDatabase;
 let temp: ReturnType<typeof createTestTempDir>;
@@ -57,7 +62,9 @@ test("compress presents a child as primary without losing the stored flag", () =
     expect(getOrCreateSessionMeta(db, "primary").isSubagent).toBe(false);
     // The stored fact is untouched, so the switches stay reversible.
     expect(
-        db.prepare("SELECT is_subagent AS value FROM session_meta WHERE session_id = ?").get("child"),
+        db
+            .prepare("SELECT is_subagent AS value FROM session_meta WHERE session_id = ?")
+            .get("child"),
     ).toEqual({ value: 1 });
     expect(effectiveSubagent(true)).toBe(false);
 });
@@ -83,9 +90,19 @@ test("memory_write keeps the tools even while compression is off", () => {
 
 test("primary sessions are unaffected by every switch", () => {
     openFresh();
-    setSubagentPolicy({ compress: true, memoryWrite: false, dream: true });
+    setSubagentPolicy({ compress: true, memoryWrite: false });
     const draft = { sessionID: "primary", tools: tools() };
     hideSubagentTools(draft, db);
     expect(Object.keys(draft.tools)).toHaveLength(3);
     expect(subagentToolRefusal(db, "ctx_note", "primary")).toBeUndefined();
+});
+
+test("stored-fact gates ignore compress", () => {
+    openFresh();
+    setSubagentPolicy({ compress: true, memoryWrite: false });
+    // What the session is shown follows the policy; the stored fact does not.
+    expect(effectiveSubagent(true)).toBe(false);
+    expect(storedSubagentMode(db, "child")).toBe(true);
+    expect(resolveStoredSubagentMode(db, "child")).toBe(true);
+    expect(resolveStoredSubagentMode(db, "primary")).toBe(false);
 });

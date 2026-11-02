@@ -8,7 +8,6 @@ import {
 } from "../features/magic-context/dreamer/retrospective-raw-provider";
 import { cleanUserText } from "../hooks/magic-context/read-session-chunk";
 import { hasMeaningfulUserText } from "../hooks/magic-context/read-session-formatting";
-import { dreamIncludesChildren } from "../plugin/subagent-policy";
 import { getDataDir } from "../shared/data-path";
 import type { Database } from "../shared/sqlite";
 import { gaDatabasePath, V2StoreReader } from "./store-reader";
@@ -32,13 +31,14 @@ export class V2RetrospectiveRawProvider implements RetrospectiveRawProvider {
     }
 
     listProjectSessions(projectIdentity: string): RetrospectiveProjectSession[] {
-        const subagentFilter = dreamIncludesChildren() ? "" : "AND COALESCE(m.is_subagent, 0) = 0";
+        // Root sessions only: `rootSessionActivity` reports native user activity,
+        // and a child's "user messages" are agent-authored task prompts.
         const sessions = this.contextDb
             .prepare<[string], { session_id: string }>(`
             SELECT sp.session_id FROM session_projects sp
             LEFT JOIN session_meta m ON m.session_id = sp.session_id
             WHERE sp.project_path = ? AND sp.harness = 'opencode2'
-                ${subagentFilter}
+                AND COALESCE(m.is_subagent, 0) = 0
             ORDER BY sp.session_id`)
             .all(projectIdentity);
         const roots = this.store().rootSessionActivity(sessions.map((row) => row.session_id));

@@ -164,6 +164,19 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("pi.subagent_extensions"))).toBe(true);
     });
 
+    it("strips the subagent switches from project config", () => {
+        const raw: Record<string, unknown> = {
+            subagent: { compress: true, memory_write: true },
+            dreamer: { model: "x" },
+        };
+
+        const warnings = stripUnsafeProjectConfigFields(raw);
+
+        expect("subagent" in raw).toBe(false);
+        expect(raw.dreamer).toEqual({ model: "x" });
+        expect(warnings.some((w) => w.includes("subagent.*"))).toBe(true);
+    });
+
     it("strips user-only embedding fields from project config but keeps safe tuning fields", () => {
         const raw: Record<string, unknown> = {
             embedding: {

@@ -16,8 +16,9 @@ import {
     isCanonicalDreamTask,
 } from "../../features/magic-context/dreamer/task-registry";
 import type { ManualRunResult } from "../../features/magic-context/dreamer/task-scheduler";
-import { getCompartments, getOrCreateSessionMeta } from "../../features/magic-context/storage";
+import { getCompartments } from "../../features/magic-context/storage";
 import type { RustSessionStatus } from "../../plugin/rpc-handlers";
+import { resolveStoredSubagentMode } from "../../plugin/subagent-tool-policy";
 import { sessionLog } from "../../shared";
 import type { MagicContextBuiltinCommandName } from "../../shared/builtin-commands";
 import type { ConfigParseFailure } from "../../shared/config-diagnostics";
@@ -61,14 +62,13 @@ interface RecompConfirmation {
 const recompConfirmationBySession = new Map<string, RecompConfirmation>();
 const RECOMP_CONFIRMATION_WINDOW_MS = 60_000;
 
+/**
+ * Gates anchored to the stored fact, never to `subagent.compress`: wrapup
+ * writes the session's own summary, so a compressed child stays ineligible.
+ */
 function isSubagentSession(db: Database, sessionId: string): boolean {
-    const meta = getOrCreateSessionMeta(db, sessionId);
-    if (meta.isSubagent) return true;
     try {
-        const row = db
-            .prepare("SELECT is_subagent FROM session_meta WHERE session_id = ?")
-            .get(sessionId) as { is_subagent?: unknown } | null;
-        return row?.is_subagent === 1 || row?.is_subagent === true;
+        return resolveStoredSubagentMode(db, sessionId);
     } catch {
         return false;
     }

@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { resetSubagentPolicy, setSubagentPolicy } from "../../plugin/subagent-policy";
+import { hideSubagentTools, resolveStoredSubagentMode } from "../../plugin/subagent-tool-policy";
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
 import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-path";
 import { Database } from "../../shared/sqlite";
@@ -37,6 +39,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+    resetSubagentPolicy();
     meta.close();
     host.close();
     _resetHarnessForTesting();
@@ -148,4 +151,23 @@ test("OC2 caps parent read retries, then retries after cooldown without making u
         read.mockRestore();
         clock.mockRestore();
     }
+});
+
+test("OC2 keeps a compressed child a child for the stored-fact gates on its first pass", () => {
+    setSubagentPolicy({ compress: true, memoryWrite: false });
+    // No session_meta row yet: this is the order the transform uses
+    // (hideSubagentTools runs before the pass stores the row).
+    const draft = {
+        sessionID: "child",
+        tools: { ctx_memory: {}, ctx_note: {}, ctx_search: {} },
+    };
+    hideSubagentTools(draft, meta);
+    expect(Object.keys(draft.tools)).toEqual(["ctx_search"]);
+    // The row now exists and still records the parent link...
+    expect(
+        meta.prepare("SELECT is_subagent FROM session_meta WHERE session_id = 'child'").get(),
+    ).toEqual({ is_subagent: 1 });
+    // ...while the presentation projection hides it from the reduced-path gates.
+    expect(getOrCreateSessionMeta(meta, "child").isSubagent).toBe(false);
+    expect(resolveStoredSubagentMode(meta, "child")).toBe(true);
 });

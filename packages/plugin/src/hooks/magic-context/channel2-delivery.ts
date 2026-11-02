@@ -36,7 +36,6 @@
 // avoid it; that's fixed upstream now, so the separate client + probe are gone.
 
 import { randomUUID } from "node:crypto";
-import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import {
     casChannel2NudgeClaim,
     casChannel2NudgeState,
@@ -44,6 +43,7 @@ import {
     getChannel2NudgeClaim,
     getChannel2NudgeState,
 } from "../../features/magic-context/storage-meta-persisted";
+import { resolveStoredSubagentMode } from "../../plugin/subagent-tool-policy";
 import { sessionLog } from "../../shared/logger";
 import { resolvePromptContext } from "../../shared/prompt-context";
 import type { Database } from "../../shared/sqlite";
@@ -86,8 +86,9 @@ export interface Channel2DeliveryDeps {
  */
 function subagentRunIsActive(deps: Channel2DeliveryDeps, sessionId: string): boolean {
     try {
-        const meta = getOrCreateSessionMeta(deps.db, sessionId);
-        if (!meta.isSubagent) return true;
+        // The stored fact, not the `subagent.compress` projection: a child whose
+        // run is terminal must not have a follow-up turn started for it.
+        if (!resolveStoredSubagentMode(deps.db, sessionId)) return true;
         return assistantAwaitingTools(deps, sessionId);
     } catch (error) {
         sessionLog(

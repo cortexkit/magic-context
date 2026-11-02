@@ -22,6 +22,7 @@ import {
     formatCoordinateRebaseNotice,
     readCoordinateRebaseNotice,
 } from "../../features/magic-context/store-generation-rebase";
+import { resolveStoredSubagentMode } from "../../plugin/subagent-tool-policy";
 import { formatCacheTtlDisplay, resolveCacheTtlDisplay } from "../../shared/cache-ttl-display";
 import {
     type ConfigParseFailure,
@@ -219,7 +220,7 @@ export function executeStatus(
             "",
             `**Protected tool tags:** ${protectionWindow.status.protectedCount} (${protectionWindow.status.protectedMass.toLocaleString()} tokens)`,
             `**Protection floor:** ${protectionWindow.status.floor.toLocaleString()} tokens`,
-            `**Subagent session:** ${meta.isSubagent}`,
+            `**Subagent session:** ${resolveStoredSubagentMode(db, sessionId)}`,
         ];
 
         const storage = getMagicContextStorageResolution();

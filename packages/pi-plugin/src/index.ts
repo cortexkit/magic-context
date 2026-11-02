@@ -118,7 +118,6 @@ import { setEmbeddingSessionBusy } from "@magic-context/core/shared/embedding-ac
 import { setHarness } from "@magic-context/core/shared/harness";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { setKeepSubagents } from "@magic-context/core/shared/keep-subagents";
-import { setSubagentPolicy } from "@magic-context/core/plugin/subagent-policy";
 import { flushLogger, log } from "@magic-context/core/shared/logger";
 import {
 	type ModelInput,
@@ -1478,12 +1477,6 @@ async function startPiMagicContextRuntime(
 	// Debug data-collection toggle: keep subagent child sessions instead of
 	// deleting on success (parity with the OpenCode plugin).
 	setKeepSubagents(config.keep_subagents === true);
-	// Same subagent switches as the OpenCode plugin; the gates live in the shared core.
-	setSubagentPolicy({
-		compress: config.subagent.compress === true,
-		memoryWrite: config.subagent.memory_write === true,
-		dream: config.subagent.dream === true,
-	});
 
 	// Top-level disable: when `enabled: false` is set in config, register
 	// nothing — same fail-closed posture the OpenCode plugin uses.

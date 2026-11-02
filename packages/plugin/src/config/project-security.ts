@@ -356,6 +356,8 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  *    spending the user's provider account on folds.
  *  - `pi.subagent_extensions` — a cloned repo must not choose which extensions
  *    the user's Pi child processes load.
+ *  - `subagent.*` — a cloned repo must not put its own child sessions on the
+ *    historian-enabled compressed path or let them write the shared memory store.
  *  - `prompt_surface.guidance_override_path` / `tool_descriptions` — a repository
  *    may select a reviewed preset, but must not inject arbitrary guidance or tool
  *    description text into the user's provider-visible prompt.
@@ -487,6 +489,17 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         delete pi.subagent_extensions;
         warnings.push(
             "Ignoring pi.subagent_extensions from project config (security: only user-level config may choose extensions loaded by Pi subagent children).",
+        );
+    }
+
+    // subagent.* decides whether a child session takes the compressed (historian-
+    // enabled) path or may write the shared memory store. A repository may not opt
+    // its own cloned children into either; both stay user-tier choices, and a
+    // project-level value would also leak process-wide through the policy.
+    if ("subagent" in projectRaw) {
+        delete projectRaw.subagent;
+        warnings.push(
+            "Ignoring subagent.* from project config (security: only user-level config may let child sessions take the compressed path or write shared memory).",
         );
     }
 

@@ -1087,14 +1087,13 @@ export interface MagicContextConfig {
     keep_subagents: boolean;
     /** How Magic Context treats the caller's own subagent sessions. The stored
      *  `is_subagent` flag still records the parent link; these switches decide
-     *  what that flag costs the session. Defaults keep the reduced path. */
+     *  what that flag costs the session. Defaults keep the reduced path.
+     *  USER-LEVEL ONLY: a project-scope config cannot set them. */
     subagent: {
         /** Let children use compartments, the historian and full guidance. */
         compress: boolean;
         /** Keep `ctx_memory` / `ctx_note` available to children. */
         memory_write: boolean;
-        /** Let the dreamer retrospective read child sessions. */
-        dream: boolean;
     };
     /** Enable loopback-only diagnostic RPCs that expose memory usage and heap snapshots. */
     debug_rpc?: boolean;
@@ -1511,7 +1510,7 @@ export const MagicContextConfigSchema = z
                     .boolean()
                     .default(false)
                     .describe(
-                        "Let child (subagent) sessions take the primary path: compartment injection, the historian, and full guidance. The stored is_subagent flag still records the parent link; this only changes what the session is denied. Default false keeps every child on the reduced path.",
+                        "Let child (subagent) sessions take the primary path: compartment injection, the historian, full guidance, mural, caveman and the Rust pass inputs. The stored is_subagent flag still records the parent link, and every gate that writes, delivers or reports (the memory tools unless subagent.memory_write, channel-2 nudges, /ctx-wrapup, the status surfaces) keeps reading it. Default false keeps every child on the reduced path.",
                     ),
                 memory_write: z
                     .boolean()
@@ -1519,16 +1518,10 @@ export const MagicContextConfigSchema = z
                     .describe(
                         "Keep ctx_memory and ctx_note available to child sessions. Independent of subagent.compress: turning compression on does not hand a child the tools that write project memory unless this is also true.",
                     ),
-                dream: z
-                    .boolean()
-                    .default(false)
-                    .describe(
-                        "Include child sessions in the dreamer retrospective. Default false keeps the existing filter that skips subagent transcripts.",
-                    ),
             })
-            .default({ compress: false, memory_write: false, dream: false })
+            .default({ compress: false, memory_write: false })
             .describe(
-                "How Magic Context treats the caller's own subagent sessions. Three independent switches because they carry different risks: compression changes context management, memory_write lets a child write the shared memory store, dream feeds child transcripts to the nightly retrospective.",
+                "How Magic Context treats the caller's own subagent sessions. USER-LEVEL ONLY: a project-scope config cannot set these. Two switches because they carry different risks: compress changes what a child sees and which context work it gets, memory_write lets a child write the shared memory store.",
             ),
         debug_rpc: z
             .boolean()

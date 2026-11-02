@@ -20,7 +20,7 @@ export function subagentToolRefusal(
     if (
         PRIMARY_ONLY_TOOLS.has(toolId) &&
         !isInternalChild(sessionId) &&
-        hidesMemoryTools(storedSubagentMode(db, sessionId) ?? getOrCreateSessionMeta(db, sessionId).isSubagent)
+        hidesMemoryTools(resolveStoredSubagentMode(db, sessionId))
     ) {
         return `Error: ${toolId} is unavailable in subagent sessions. Use the primary session instead.`;
     }
@@ -59,10 +59,7 @@ export function hideSubagentTools(
     draft: { sessionID: string; tools: Record<string, unknown> },
     db: Database,
 ): void {
-    const stored =
-        storedSubagentMode(db, draft.sessionID) ??
-        getOrCreateSessionMeta(db, draft.sessionID).isSubagent;
-    if (!hidesMemoryTools(stored)) return;
+    if (!hidesMemoryTools(resolveStoredSubagentMode(db, draft.sessionID))) return;
     removePrimaryOnlyTools(draft.tools);
 }
 
@@ -83,4 +80,22 @@ export function storedSubagentMode(db: Database, sessionId: string): boolean | u
         .get(sessionId) as { is_subagent: number | null } | null | undefined;
     if (!row || typeof row.is_subagent !== "number") return undefined;
     return row.is_subagent === 1;
+}
+
+/**
+ * The stored fact, creating the session's row first when it is missing.
+ *
+ * A fresh child's parent link only becomes visible in the row the first
+ * `getOrCreateSessionMeta` writes, and that call returns the policy projection,
+ * so re-reading the raw column is the only way a gate can learn the truth on
+ * the same pass. Nothing here is projected: a compressed child is still a child
+ * for the gates that call this.
+ */
+export function resolveStoredSubagentMode(db: Database, sessionId: string): boolean {
+    const stored = storedSubagentMode(db, sessionId);
+    if (stored !== undefined) return stored;
+    getOrCreateSessionMeta(db, sessionId);
+    // Still undefined means the host could not name the parent yet (OC2 stores
+    // that as NULL and retries later): treat it as primary, the documented posture.
+    return storedSubagentMode(db, sessionId) ?? false;
 }
