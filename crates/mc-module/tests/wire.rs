@@ -280,6 +280,50 @@ fn answer() -> Step {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs the daemon and mock runner binaries; run through scripts/wire-gate.sh"]
+async fn ck_mc_refuses_a_route_from_a_caller_the_daemon_does_not_attest() {
+    let stack = start_stack();
+    // Make sure ck-mc is up: the mock runner's scenario reaches it.
+    let _ = play(
+        &stack,
+        &PlayRequest {
+            config: config("worker"),
+            steps: vec![answer()],
+        },
+    )
+    .await;
+    // This test's own consumer is a direct key-holder, not a module the
+    // daemon launched, so it cannot claim to be a runner. Its Setup names a
+    // session through the route alone, and ck-mc refuses the route.
+    let consumer = SubcConsumer::connect(&stack.connection_file, ConsumerOptions::default())
+        .await
+        .unwrap();
+    let setup = json!({
+        "preset": "worker",
+        "model": {"provider": "test", "model": "test-model"},
+        "context_window": 40_000,
+        "output_reserve": 1_000,
+        "rules": {"signed_reasoning": "none", "history_edit_cost": "suffix"},
+        "now": 0,
+    });
+    let reply = consumer
+        .call(
+            RouteTarget::ToolProvider {
+                module_id: PROVIDER.into(),
+            },
+            BindIdentity::new("mock", "forged"),
+            wire::encode(ck_contract_draft::ops::COMPACTION_SETUP, &setup),
+            CallOptions {
+                timeout: Duration::from_secs(30),
+                ..CallOptions::default()
+            },
+        )
+        .await;
+    let error = format!("{:?}", reply.expect_err("an unattested caller was served"));
+    assert!(error.contains("unattested_runner"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the daemon and mock runner binaries; run through scripts/wire-gate.sh"]
 async fn a_worker_reduces_over_the_real_wire() {
     let stack = start_stack();
     let request = PlayRequest {
