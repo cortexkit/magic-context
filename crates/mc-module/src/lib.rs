@@ -29,6 +29,8 @@ pub mod index;
 pub mod js_text;
 pub mod lanes;
 pub mod memory;
+pub mod memory_tool;
+pub mod memory_writes;
 pub mod module;
 pub mod notes;
 pub mod pass;

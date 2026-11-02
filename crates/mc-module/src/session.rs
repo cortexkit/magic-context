@@ -457,6 +457,25 @@ impl Session {
         match name {
             "ctx_reduce" => self.ctx_reduce(input),
             "ctx_keep" if self.features.ctx_keep => self.ctx_keep(settings, input),
+            "ctx_memory" => {
+                let db = self
+                    .db
+                    .as_ref()
+                    .ok_or("ctx_memory needs the context store")?;
+                let project = self
+                    .project
+                    .as_ref()
+                    .ok_or("Error: Could not resolve project identity for memory action: the session has no project.")?;
+                let who = crate::memory_writes::Writer {
+                    harness: &self.key.harness,
+                    session: &self.key.session,
+                    project: &project.id,
+                };
+                let baseline = self.baseline.as_ref();
+                let shows =
+                    |id: i64, text: &str| baseline.is_some_and(|baseline| baseline.shows(id, text));
+                db.with_connection(|conn| crate::memory_tool::run(conn, &who, input, &shows))
+            }
             "ctx_note" => {
                 let db = self.db.as_ref().ok_or("ctx_note needs the context store")?;
                 let scope = crate::context_db::NoteScope {

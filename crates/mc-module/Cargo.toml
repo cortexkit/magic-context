@@ -17,6 +17,7 @@ regex = "1"
 mc-tokenizer = { workspace = true }
 rusqlite = { workspace = true }
 sha2 = { workspace = true }
+md5 = "0.7"
 
 [dev-dependencies]
 mc-mock-runner = { workspace = true }

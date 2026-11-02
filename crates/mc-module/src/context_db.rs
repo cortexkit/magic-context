@@ -336,6 +336,13 @@ impl ContextDb {
         transaction.commit().map_err(|error| error.to_string())
     }
 
+    /// Run `apply` on the connection, for a caller that manages its own
+    /// transaction.
+    pub fn with_connection<T>(&self, apply: impl FnOnce(&mut Connection) -> T) -> T {
+        let mut connection = self.lock();
+        apply(&mut connection)
+    }
+
     /// Store a session note and return its id.
     pub fn add_session_note(
         &self,

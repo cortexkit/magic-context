@@ -1281,3 +1281,93 @@ async fn ctx_note_finds_the_notes_a_standalone_session_wrote_and_keeps_new_ones(
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn ctx_memory_saves_updates_and_archives_with_history_and_shows_its_changes_in_m1() {
+    let dir = scratch("memory-tool");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    insert_memory(&dir, 1, "Ask before pushing.");
+    let mut config = config("head", Kind::OpenAi, FREE);
+    config.project = Some(ck_contract_draft::setup::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    });
+    let mut runner = start_full(config, Settings::default(), Some(dir.clone())).await;
+    let memory = |input: Value| {
+        Step::Model(Turn {
+            text: Some("Remembering.".into()),
+            tools: vec![ToolCall::ok("ctx_memory", input, "")],
+            output_tokens: 5,
+            ..Turn::default()
+        })
+    };
+    let mut steps = vec![
+        user("Hello."),
+        memory(
+            json!({"action": "write", "category": "NAMING", "content": "Crates use kebab-case.", "ids": []}),
+        ),
+        memory(
+            json!({"action": "write", "category": "NAMING", "content": "crates use   KEBAB-case.", "ids": []}),
+        ),
+        memory(
+            json!({"action": "update", "ids": [1], "content": "Ask before every push.", "category": "PROJECT_RULES"}),
+        ),
+        memory(json!({"action": "archive", "ids": [1], "reason": "now a hook"})),
+        memory(json!({"action": "update", "ids": [1], "content": "x"})),
+        memory(json!({"action": "get", "ids": [2, 999]})),
+    ];
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let outputs = tool_outputs(runner.host(), "ctx_memory");
+    assert_eq!(outputs[0], "Saved memory [ID: 2] in NAMING.");
+    assert_eq!(
+        outputs[1],
+        "Memory already exists [ID: 2] in NAMING (seen count incremented)."
+    );
+    assert_eq!(outputs[2], "Updated memory [ID: 1] in PROJECT_RULES.");
+    assert_eq!(outputs[3], "Archived memory [ID: 1] (now a hook).");
+    assert!(
+        outputs[4].contains("archived or superseded"),
+        "{}",
+        outputs[4]
+    );
+    assert!(
+        outputs[5].starts_with("Found 1 active memory:")
+            && outputs[5].contains("id 999: not found"),
+        "{}",
+        outputs[5]
+    );
+
+    // The changes show in this session's m[1].
+    let (_, m1) = head_texts(runner.host());
+    assert!(
+        m1.contains("<added id=\"2\" category=\"NAMING\">Crates use kebab-case.</added>"),
+        "{m1}"
+    );
+    assert!(
+        m1.contains(
+            "<updated id=\"1\" category=\"PROJECT_RULES\">Ask before every push.</updated>"
+        ),
+        "{m1}"
+    );
+    assert!(m1.contains("<removed id=\"1\"/>"), "{m1}");
+
+    // The rows the standalone plugin reads are there.
+    let db = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    let count = |sql: &str| -> i64 { db.query_row(sql, [], |row| row.get(0)).unwrap() };
+    assert_eq!(count("SELECT revision FROM memories WHERE id = 1"), 3);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM memory_history WHERE memory_id = 1"),
+        2
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM memory_mutation_log WHERE target_memory_id = 1"),
+        2
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM memory_journal"), 4);
+    assert_eq!(count("SELECT seen_count FROM memories WHERE id = 2"), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
