@@ -817,8 +817,35 @@ mod vector_file {
                 part.tag = None;
             }
         }
+        let pasted = vec![
+            entry(
+                1,
+                "u1",
+                Role::User,
+                vec![Part::new(
+                    "f1",
+                    None,
+                    Seal::None,
+                    PartBody::File(FileMedia::inline("image/png", Some(4096))),
+                )],
+                None,
+            ),
+            entry(
+                2,
+                "a1",
+                Role::Assistant,
+                vec![text("t1", 1, "I see it")],
+                None,
+            ),
+        ];
+        let stripped_image = replace(1, &pasted, "u1", "f1", "text", json!("[image stripped]"));
         vec![
             ("an empty view keeps everything", "plan", plan(vec![])),
+            (
+                "text takes an answered image's place",
+                "plan",
+                json!({"entries": pasted, "edits": [stripped_image]}),
+            ),
             (
                 "a dropped part is left out",
                 "plan",
@@ -1049,4 +1076,37 @@ mod vector_file {
             );
         }
     }
+}
+
+#[test]
+fn text_can_take_a_files_place() {
+    let image = Part::new(
+        "f1",
+        None,
+        Seal::None,
+        PartBody::File(FileMedia::inline("image/png", Some(4096))),
+    );
+    let entries = vec![entry(1, "u1", Role::User, vec![image], None)];
+    let edits = vec![replace(
+        1,
+        &entries,
+        "u1",
+        "f1",
+        "text",
+        json!("[image stripped]"),
+    )];
+    let rendered = apply_edits(&entries, &edits).unwrap();
+    assert_eq!(
+        rendered[0].parts[0].body,
+        PartBody::Text {
+            text: "[image stripped]".into()
+        }
+    );
+    assert!(rendered[0].final_text.contains("f1"));
+    // A file takes no other field.
+    let bad = vec![replace(1, &entries, "u1", "f1", "output", json!("x"))];
+    assert!(matches!(
+        apply_edits(&entries, &bad),
+        Err(ViewRefusal::BadField { .. })
+    ));
 }

@@ -14,7 +14,8 @@ use ck_contract_draft::notice::{
     Conditions, Event, NoticeAnswer, NoticeRequest, ENTRIES_BUDGET_BYTES,
 };
 use ck_contract_draft::part::{
-    Delivered, OutputFormat, Part, PartBody, Seal, ToolPart, ToolStatus,
+    Attachment, AttachmentItem, Delivered, FileMedia, OutputFormat, Part, PartBody, Seal, ToolPart,
+    ToolStatus,
 };
 use ck_contract_draft::read::{
     Entry, Head, NoticeOrigin, ReadPage, ReadRequest, Role, SessionRef, StepUsage,
@@ -418,7 +419,11 @@ impl<P: Provider> Runner<P> {
         for step in steps {
             let keep_going = match step {
                 Step::User { text } => {
-                    self.user(text).await;
+                    self.user(text, 0).await;
+                    true
+                }
+                Step::UserWithImages { text, images } => {
+                    self.user(text, *images).await;
                     true
                 }
                 Step::Model(turn) => self.model_step(turn).await,
@@ -477,7 +482,7 @@ impl<P: Provider> Runner<P> {
         }
     }
 
-    async fn user(&mut self, text: &str) {
+    async fn user(&mut self, text: &str, images: u64) {
         let now = self.host.lock().now;
         let edit = match self.provider.pre_user(text, now).await {
             Ok(edit) => edit,
@@ -495,14 +500,11 @@ impl<P: Provider> Runner<P> {
         {
             let mut state = self.host.lock();
             let now = state.now;
-            state.transcript.append(
-                Role::User,
-                None,
-                vec![(Seal::None, PartBody::Text { text: full })],
-                None,
-                None,
-                now,
-            );
+            let mut parts = vec![(Seal::None, PartBody::Text { text: full })];
+            parts.extend((0..images).map(|_| (Seal::None, PartBody::File(pasted_image()))));
+            state
+                .transcript
+                .append(Role::User, None, parts, None, None, now);
         }
         self.notice().await;
     }
@@ -739,7 +741,13 @@ impl<P: Provider> Runner<P> {
             }
             state
                 .transcript
-                .complete_tool(&call_id, status, output, vec![], delivered)
+                .complete_tool(
+                    &call_id,
+                    status,
+                    output,
+                    image_attachments(call.images),
+                    delivered,
+                )
                 .expect("the call is running on the newest message");
         }
     }
@@ -968,4 +976,18 @@ pub fn finished_tool(call_id: &str, name: &str, input: Value, output: &str) -> P
         approval: None,
         delivered: vec![],
     })
+}
+
+/// An inline image as a person pastes one or a tool returns one: 200 KB of PNG.
+fn pasted_image() -> FileMedia {
+    FileMedia::inline("image/png", Some(200_000))
+}
+
+fn image_attachments(count: u64) -> Vec<Attachment> {
+    (0..count)
+        .map(|index| Attachment {
+            id: format!("img-{index}"),
+            item: AttachmentItem::File(pasted_image()),
+        })
+        .collect()
 }

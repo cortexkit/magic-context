@@ -8,7 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ck_contract_draft::part::{Part, PartBody, Seal, ToolPart, ToolStatus};
+use ck_contract_draft::part::{
+    AttachmentItem, FileMedia, Part, PartBody, Seal, ToolPart, ToolStatus, Transport,
+};
 use ck_contract_draft::read::{Entry, Role};
 use ck_contract_draft::view::{EditOp, View};
 use serde_json::{json, Value};
@@ -61,9 +63,16 @@ pub fn input_string_bytes(value: &Value) -> u64 {
 
 /// What the latest view already changes, so lanes leave those parts alone
 /// and keep the shape an earlier view gave them.
+///
+/// An edit either reduces a part for good (a drop, a placeholder, text in an
+/// image's place) or only trims it and leaves the rest in place (stripped
+/// injections, a tool result without its answered images). A trimmed part can
+/// still be dropped later, as in the plugin, where such a part stays active;
+/// the drop's edits then replace the trimming ones.
 #[derive(Default)]
 pub struct Edited {
     parts: BTreeSet<PartKey>,
+    trimmed: BTreeSet<PartKey>,
     messages: BTreeSet<String>,
 }
 
@@ -97,9 +106,22 @@ impl Edited {
                 EditOp::Drop {
                     mid,
                     part: Some(part),
-                }
-                | EditOp::Replace { mid, part, .. } => {
+                } => {
                     edited.parts.insert((mid.clone(), part.clone()));
+                }
+                EditOp::Replace {
+                    mid,
+                    part,
+                    field,
+                    value,
+                    ..
+                } => {
+                    let key = (mid.clone(), part.clone());
+                    if reduces_for_good(index, &key, field, value) {
+                        edited.parts.insert(key);
+                    } else {
+                        edited.trimmed.insert(key);
+                    }
                 }
                 EditOp::Drop { mid, part: None } => {
                     edited.messages.insert(mid.clone());
@@ -107,11 +129,79 @@ impl Edited {
                 EditOp::Insert { .. } | EditOp::Cut { .. } => {}
             }
         }
+        edited.trimmed.retain(|key| !edited.parts.contains(key));
         edited
     }
 
+    /// The part is reduced for good, so no lane changes it again.
     pub fn covers(&self, mid: &str, part: &str) -> bool {
         self.messages.contains(mid) || self.parts.contains(&(mid.to_owned(), part.to_owned()))
+    }
+
+    /// The view changes the part in any way, trimming included.
+    pub fn touches(&self, mid: &str, part: &str) -> bool {
+        self.covers(mid, part) || self.trimmed.contains(&(mid.to_owned(), part.to_owned()))
+    }
+
+    /// The highest tag number among the parts the view reduces for good,
+    /// whole messages and the messages a cut covers included.
+    pub fn watermark(&self, index: &Index) -> u64 {
+        let parts = self
+            .parts
+            .iter()
+            .filter_map(|(mid, part)| index.find(mid, part))
+            .filter_map(|(_, part)| part.tag);
+        let messages = index
+            .entries()
+            .iter()
+            .filter(|entry| self.messages.contains(&entry.mid))
+            .flat_map(|entry| entry.parts.iter().filter_map(|part| part.tag));
+        parts.chain(messages).max().unwrap_or(0)
+    }
+}
+
+/// The highest tag number among the parts `ops` reduce for good.
+pub fn ops_watermark(index: &Index, ops: &[EditOp]) -> u64 {
+    ops.iter()
+        .filter_map(|op| match op {
+            EditOp::Drop {
+                mid,
+                part: Some(part),
+            } => index.find(mid, part).and_then(|(_, part)| part.tag),
+            EditOp::Replace {
+                mid,
+                part,
+                field,
+                value,
+                ..
+            } => {
+                let key = (mid.clone(), part.clone());
+                reduces_for_good(index, &key, field, value)
+                    .then(|| index.find(mid, part).and_then(|(_, part)| part.tag))
+                    .flatten()
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// Whether a replace reduces its part for good: a text or tool output
+/// becoming the part's placeholder, or text in a file's place. Any other
+/// replace only trims (a stripped injection, a result without its images) or
+/// comes with such a placeholder (a dropped result's attachments, an edit
+/// marker's shortened arguments).
+fn reduces_for_good(index: &Index, key: &PartKey, field: &str, value: &Value) -> bool {
+    let Some((_, part)) = index.find(&key.0, &key.1) else {
+        return true;
+    };
+    match (&part.body, field) {
+        (PartBody::File(_), "text") => true,
+        (PartBody::Text { .. }, "text") | (PartBody::Tool(_), "output") => {
+            part.tag.map(placeholder).as_deref() == value.as_str()
+        }
+        (PartBody::Tool(_), _) => false,
+        _ => true,
     }
 }
 
@@ -594,13 +684,172 @@ pub fn injected_text(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Sh
         .entries()
         .iter()
         .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
-        .filter(|(_, part)| !in_tail(part, cutoff))
+        .filter(|(entry, part)| {
+            !in_tail(part, cutoff) && !context.edited.touches(&entry.mid, &part.id)
+        })
         .filter(|(_, part)| match (&part.body, part.tag) {
             (PartBody::Text { text }, Some(tag)) => injection::strip_part(tag, text).is_some(),
             _ => false,
         })
         .map(|(entry, part)| ((entry.mid.clone(), part.id.clone()), Shape::StripInjection))
         .collect()
+}
+
+/// The text an answered image becomes.
+pub const IMAGE_STRIPPED: &str = "[image stripped]";
+
+/// An image whose bytes go with every request, as the plugin counts one
+/// (`isProcessedImagePart`): inline, with a data URL longer than 200
+/// characters.
+pub fn is_inline_image(media: &FileMedia) -> bool {
+    let data_url_prefix = format!("data:{};base64,", media.mime).len() as u64;
+    media.mime.starts_with("image/")
+        && media.transport == Transport::Inline
+        && media
+            .size
+            .is_none_or(|bytes| bytes.div_ceil(3) * 4 + data_url_prefix > 200)
+}
+
+fn image_attachments(tool: &ToolPart) -> usize {
+    tool.attachments
+        .iter()
+        .filter(|attachment| matches!(&attachment.item, AttachmentItem::File(media) if is_inline_image(media)))
+        .count()
+}
+
+/// Finished tool results with an inline image attachment that no view has
+/// changed yet: the answered-images lane rewrites their output, so it needs
+/// their output text, which the index does not hold.
+pub fn image_results(index: &Index, edited: &Edited) -> Vec<PartKey> {
+    index
+        .entries()
+        .iter()
+        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+        .filter(|(entry, part)| match &part.body {
+            PartBody::Tool(tool) => {
+                tool.status == ToolStatus::Completed
+                    && !tool.provider_executed
+                    && part.seal == Seal::None
+                    && image_attachments(tool) > 0
+                    && !edited.touches(&entry.mid, &part.id)
+            }
+            _ => false,
+        })
+        .map(|(entry, part)| (entry.mid.clone(), part.id.clone()))
+        .collect()
+}
+
+/// What the answered-images lane goes by.
+pub struct Images<'a> {
+    /// The output text of the tool results [`image_results`] names, as far
+    /// as ck-mc has read it. A result whose text is missing waits.
+    pub outputs: &'a BTreeMap<PartKey, String>,
+    /// The highest tag number any view or this pass reduces for good.
+    pub watermark: u64,
+    pub cutoff: Option<u64>,
+    /// A request that would not fit: the protected tail yields.
+    pub over_limit: bool,
+    /// Parts this pass already changes.
+    pub skip: &'a [PartKey],
+}
+
+/// Answered images, as in the plugin (`stripProcessedImages` with
+/// `createProcessedImageEligibility`): an inline image in a person's message
+/// or a tool result goes once a later assistant message has answered it and
+/// content at least as new as its message has been dropped (its message's
+/// highest tag, or the next tagged message's, is at or below the watermark),
+/// outside the protected tail. An image in a person's message becomes
+/// `[image stripped]`. A tool result keeps its text and other attachments,
+/// with one `[image stripped]` line per removed image. Protected tool results
+/// and the first message of a session that keeps it stay.
+pub fn answered_images(context: &Context, images: &Images) -> (Vec<EditOp>, Vec<PartKey>) {
+    let entries = context.index.entries();
+    if images.watermark == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let protected = protected_tool_parts(context.index, context.protected_tools);
+    // Each message's age: its own highest tag, or the next tagged message's.
+    let mut ages = vec![None; entries.len()];
+    let mut next = None;
+    for (position, entry) in entries.iter().enumerate().rev() {
+        if let Some(own) = entry.parts.iter().filter_map(|part| part.tag).max() {
+            next = Some(own);
+        }
+        ages[position] = next;
+    }
+    let mut answered = false;
+    let mut ops = Vec::new();
+    let mut changed = Vec::new();
+    for (position, entry) in entries.iter().enumerate().rev() {
+        let was_answered = answered;
+        if entry.role == Role::Assistant {
+            answered = true;
+        }
+        let Some(age) = ages[position] else {
+            continue;
+        };
+        let eligible = was_answered
+            && age <= images.watermark
+            && (images.over_limit || images.cutoff.is_none_or(|cutoff| age < cutoff))
+            && !(context.keep_first_message && position == 0);
+        if !eligible || !matches!(entry.role, Role::User | Role::Assistant) {
+            continue;
+        }
+        for part in &entry.parts {
+            let key = (entry.mid.clone(), part.id.clone());
+            if part.seal != Seal::None
+                || context.edited.touches(&entry.mid, &part.id)
+                || images.skip.contains(&key)
+            {
+                continue;
+            }
+            let replace = |field: &str, value: Value| EditOp::Replace {
+                mid: entry.mid.clone(),
+                part: part.id.clone(),
+                field: field.into(),
+                value,
+                expect: part.digest.clone(),
+            };
+            match &part.body {
+                PartBody::File(media) if entry.role == Role::User && is_inline_image(media) => {
+                    ops.push(replace("text", json!(IMAGE_STRIPPED)));
+                    changed.push(key);
+                }
+                PartBody::Tool(tool)
+                    if entry.role == Role::Assistant
+                        && tool.status == ToolStatus::Completed
+                        && !tool.provider_executed
+                        && !protected.contains(&key) =>
+                {
+                    let removed = image_attachments(tool);
+                    let (Some(tag), Some(output), true) =
+                        (part.tag, images.outputs.get(&key), removed > 0)
+                    else {
+                        continue;
+                    };
+                    let kept: Vec<&str> = tool
+                        .attachments
+                        .iter()
+                        .filter(|attachment| !matches!(&attachment.item, AttachmentItem::File(media) if is_inline_image(media)))
+                        .map(|attachment| attachment.id.as_str())
+                        .collect();
+                    let lines: Vec<&str> = std::iter::once(output.as_str())
+                        .chain(std::iter::repeat_n(IMAGE_STRIPPED, removed))
+                        .filter(|line| !line.is_empty())
+                        .collect();
+                    // A replaced output is final, so it carries its prefix.
+                    ops.push(replace(
+                        "output",
+                        json!(format!("§{tag}§ {}", lines.join("\n"))),
+                    ));
+                    ops.push(replace("attachments", json!(kept)));
+                    changed.push(key);
+                }
+                _ => {}
+            }
+        }
+    }
+    (ops, changed)
 }
 
 /// The newest messages that own tagged parts: tool calls among them may still

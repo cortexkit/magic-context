@@ -729,6 +729,89 @@ async fn injected_text_leaves_older_messages_and_the_rest_of_each_message_stays(
     assert!(seen(host, 1).unwrap().starts_with("§1§ Review the module."));
 }
 
+#[tokio::test]
+async fn answered_images_go_once_newer_content_is_dropped() {
+    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    runner
+        .play(&[
+            user("Look at the screen."),
+            // Tags 2 and 3: a screenshot, answered at tag 4.
+            step(
+                "Taking a screenshot.",
+                vec![ToolCall::ok("screenshot", json!({}), "Screenshot taken.").with_images(1)],
+            ),
+            answer(),
+            // Tag 5 with a pasted image, answered at tag 6.
+            Step::UserWithImages {
+                text: "Here is the error.".into(),
+                images: 1,
+            },
+            answer(),
+            // Dropping tag 6 makes everything up to it old enough.
+            step(
+                "Dropping.",
+                vec![ToolCall::ok("ctx_reduce", json!({"drop": "6"}), "")],
+            ),
+            read_file(50),
+            read_file(50),
+            read_file(50),
+            read_file(50),
+        ])
+        .await;
+    // Stop at the first view, before the age sweep takes the screenshot's
+    // result whole.
+    for _ in 0..5 {
+        if runner.host().applied_version().is_some() {
+            break;
+        }
+        runner.play(&[answer()]).await;
+    }
+    assert_clean(&runner);
+    let host = runner.host();
+    let rendered = host.rendered();
+    let part_with = |tag: u64| {
+        rendered
+            .iter()
+            .flat_map(|message| message.parts.iter())
+            .find(|part| part.tag == Some(tag))
+            .cloned()
+            .unwrap()
+    };
+    // The screenshot's text stays, with a line for the removed image.
+    assert_eq!(
+        seen(host, 3).as_deref(),
+        Some("§3§ Screenshot taken.\n[image stripped]")
+    );
+    let PartBody::Tool(tool) = part_with(3).body else {
+        panic!("tag 3 is a tool part");
+    };
+    assert!(tool.attachments.is_empty(), "{:?}", tool.attachments);
+    // The pasted image becomes a line of text after the person's words.
+    let pasted = rendered
+        .iter()
+        .find(|message| message.parts.iter().any(|part| part.tag == Some(5)))
+        .unwrap();
+    assert!(
+        pasted
+            .parts
+            .iter()
+            .all(|part| !matches!(part.body, PartBody::File(_))),
+        "{:?}",
+        pasted.parts
+    );
+    assert!(pasted.parts.iter().any(|part| part.body
+        == PartBody::Text {
+            text: "[image stripped]".into()
+        }));
+    // A result that only lost its images can still be dropped whole later.
+    runner.play(&[answer(), answer(), answer()]).await;
+    assert_clean(&runner);
+    assert_eq!(
+        seen(runner.host(), 3).as_deref(),
+        Some(placeholder(3).as_str())
+    );
+}
+
 /// A step that runs a shell command whose output is `tokens` tokens.
 fn shell(tokens: usize) -> Step {
     step(

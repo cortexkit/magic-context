@@ -449,6 +449,9 @@ fn check_field(mid: &str, part: &Part, field: &str, value: &Value) -> Result<(),
     }
     match (&part.body, field) {
         (PartBody::Text { .. }, "text") => value.as_str().map(|_| ()).ok_or_else(bad),
+        // A file's place in its message is taken by text, such as a marker
+        // that an answered image was removed.
+        (PartBody::File(_), "text") => value.as_str().map(|_| ()).ok_or_else(bad),
         (PartBody::Tool(tool), _) if tool.provider_executed => Err(bad()),
         // A finished call has an output size in both part forms.
         (PartBody::Tool(tool), "output") if tool.output_bytes.is_some() => {
@@ -534,6 +537,12 @@ fn check_replaced_tags(
 fn replaced(part: &Part, fields: &[FieldReplace]) -> Part {
     let mut body = part.body.clone();
     for FieldReplace { field, value } in fields {
+        if field == "text" && matches!(body, PartBody::File(_)) {
+            body = PartBody::Text {
+                text: string_of(value),
+            };
+            continue;
+        }
         match (&mut body, field.as_str()) {
             (PartBody::Text { text }, "text") => *text = string_of(value),
             (PartBody::Tool(tool), "output") => {

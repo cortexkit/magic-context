@@ -14,6 +14,8 @@ pub enum Step {
     /// A person (or the agent that launched the session) sends a message,
     /// which starts a run.
     User { text: String },
+    /// A message with `images` pasted inline images after its text.
+    UserWithImages { text: String, images: u64 },
     /// One model request. The runner first applies any view that arrived,
     /// asks for a view when the cache is lost or the request would not fit,
     /// then sends the request and stores the reply. Tool calls in the reply
@@ -71,15 +73,25 @@ pub struct ToolCall {
     /// instead, and this is ignored.
     pub output: String,
     pub status: ToolStatus,
+    /// Inline images the result carries, such as a screenshot.
+    #[serde(default)]
+    pub images: u64,
 }
 
 impl ToolCall {
+    /// The same call, with `images` inline images in its result.
+    pub fn with_images(mut self, images: u64) -> Self {
+        self.images = images;
+        self
+    }
+
     pub fn ok(name: &str, input: Value, output: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             input,
             output: output.into(),
             status: ToolStatus::Completed,
+            images: 0,
         }
     }
 }

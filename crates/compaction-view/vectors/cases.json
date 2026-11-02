@@ -189,6 +189,93 @@
     }
   },
   {
+    "name": "text takes an answered image's place",
+    "function": "plan",
+    "input": {
+      "edits": [
+        {
+          "expect": "9b3e320dcbc5fb34f1351889b4d88d401732bdb0330988cfa52f4f648440eda0",
+          "field": "text",
+          "mid": "u1",
+          "op": "replace",
+          "part": "f1",
+          "since": 1,
+          "value": "[image stripped]"
+        }
+      ],
+      "entries": [
+        {
+          "digest": "fe2fcb6f2d00f60fd76dc56c0c79a07efdfcd144899a1c6de77ef9056bb8886a",
+          "mid": "u1",
+          "ordinal": 1,
+          "parts": [
+            {
+              "digest": "9b3e320dcbc5fb34f1351889b4d88d401732bdb0330988cfa52f4f648440eda0",
+              "id": "f1",
+              "kind": "file",
+              "mime": "image/png",
+              "size": 4096,
+              "transport": "inline"
+            }
+          ],
+          "role": "user",
+          "written_at": 1000
+        },
+        {
+          "digest": "31d038ccb5e0fefcdd6792d241ab52eaa30ba3d3bea013a7cd569c851e20b054",
+          "mid": "a1",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "67641dc4cf2738144dde7add68c2effae86ca1a3654dde753d8a9caaa71a089a",
+              "id": "t1",
+              "kind": "text",
+              "tag": 1,
+              "text": "I see it"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 2000
+        }
+      ]
+    },
+    "output": {
+      "ok": {
+        "items": [
+          {
+            "item": "entry",
+            "mid": "u1",
+            "ordinal": 1,
+            "parts": [
+              {
+                "id": "f1",
+                "prefix": false,
+                "replace": [
+                  {
+                    "field": "text",
+                    "value": "[image stripped]"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "item": "entry",
+            "mid": "a1",
+            "ordinal": 2,
+            "parts": [
+              {
+                "id": "t1",
+                "prefix": true,
+                "tag": 1
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
     "name": "a dropped part is left out",
     "function": "plan",
     "input": {

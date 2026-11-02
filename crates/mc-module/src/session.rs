@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use ck_contract_draft::notice::{Conditions, Event, NoticeRequest};
+use ck_contract_draft::part::PartBody;
 use ck_contract_draft::read::{Cursor, Detail, ReadRequest, Select, SessionRef};
 use ck_contract_draft::ride::{RideCause, RideRequest};
 use ck_contract_draft::send::{Delivery, SendRequest};
@@ -89,6 +90,10 @@ pub struct Session {
     /// The session never had a Setup: Magic Context serves its tools only
     /// ([`Session::tools_only`]).
     tools_only: bool,
+    /// The output text of tool results with answered images, read in full
+    /// once, so the answered-images lane can keep the text and mark each
+    /// removed image ([`lanes::image_results`]).
+    image_outputs: std::collections::BTreeMap<lanes::PartKey, String>,
 }
 
 impl Session {
@@ -123,6 +128,7 @@ impl Session {
             cut: None,
             pruned_turns: 0,
             tools_only: false,
+            image_outputs: std::collections::BTreeMap::new(),
         }
     }
 
@@ -247,7 +253,7 @@ impl Session {
         }
         self.sync(client, request.newest.as_ref()).await;
         if self.features.summarizer && self.latest.is_none() && request.newest.is_none() {
-            let (view, _) = self.build(settings, None);
+            let (view, _) = self.build_now(client, settings).await;
             if let Some(view) = view {
                 self.publish(client, view).await;
             }
@@ -344,7 +350,7 @@ impl Session {
         let summary = self.summary_due(settings);
         let force = pass::in_force_band(&self.conditions, settings);
         if std::mem::take(&mut self.head_stale) {
-            let (view, _) = self.build(settings, None);
+            let (view, _) = self.build_now(client, settings).await;
             if let Some(view) = view {
                 self.publish(client, view).await;
             }
@@ -354,7 +360,7 @@ impl Session {
             && (force || !self.summary_on_its_way())
             && !pass::signed_thinking_hold(self.index.entries(), &self.conditions, settings)
         {
-            let (view, freed) = self.build(settings, None);
+            let (view, freed) = self.build_now(client, settings).await;
             if let Some(view) = view {
                 self.publish(client, view).await;
             }
@@ -498,7 +504,7 @@ impl Session {
         self.summaries
             .extend(validated.compartments.iter().map(StoredCompartment::from));
         if pass::at_execute(&self.conditions, settings) {
-            let (view, _) = self.build(settings, None);
+            let (view, _) = self.build_now(client, settings).await;
             if let Some(view) = view {
                 self.publish(client, view).await;
             }
@@ -1151,6 +1157,20 @@ impl Session {
                 self.emergency_latched = true;
             }
         }
+        // Answered images go once content at least as new has been dropped,
+        // by an earlier view or by this pass.
+        let images = lanes::Images {
+            outputs: &self.image_outputs,
+            watermark: edited
+                .watermark(&self.index)
+                .max(lanes::ops_watermark(&self.index, &ops)),
+            cutoff,
+            over_limit: over_limit.is_some(),
+            skip: &covered,
+        };
+        let (image_ops, image_parts) = lanes::answered_images(&context, &images);
+        ops.extend(image_ops);
+        covered.extend(image_parts);
         let bookmark = lanes::far_behind_bookmark(&context, usable);
         // The age sweep only drops on the pass after the one that sees an
         // output far behind, so the first pass over the threshold frees
@@ -1381,6 +1401,63 @@ impl Session {
         let index = &self.index;
         self.queued
             .retain(|(mid, part)| index.find(mid, part).is_some());
+        self.image_outputs
+            .retain(|(mid, part), _| index.find(mid, part).is_some());
+    }
+
+    /// Read in full the tool results with images whose output the
+    /// answered-images lane may need and ck-mc has not read yet, then build.
+    /// Only a pass that may wait on the runner reads; a ride builds with what
+    /// it has, and a result whose text is missing waits for a later rebuild.
+    async fn build_now<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        settings: &Settings,
+    ) -> (Option<View>, u64) {
+        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, None);
+        let wanted: Vec<lanes::PartKey> = lanes::image_results(&self.index, &edited)
+            .into_iter()
+            .filter(|key| !self.image_outputs.contains_key(key))
+            .collect();
+        if !wanted.is_empty() {
+            let mids: Vec<String> = wanted
+                .iter()
+                .map(|(mid, _)| mid.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let request = ReadRequest {
+                select: Select::Mids { mids },
+                detail: Detail::Full,
+                max_bytes: None,
+            };
+            match client.read(&self.key, request).await {
+                Ok(page) => {
+                    for entry in page.entries {
+                        for part in entry.parts {
+                            let key = (entry.mid.clone(), part.id.clone());
+                            // Only text read from the part the index holds.
+                            let same = self
+                                .index
+                                .find(&key.0, &key.1)
+                                .is_some_and(|(_, held)| held.digest == part.digest);
+                            if let (PartBody::Tool(tool), true, true) =
+                                (part.body, same, wanted.contains(&key))
+                            {
+                                if let Some(output) = tool.output {
+                                    self.image_outputs.insert(key, output);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(error) => eprintln!(
+                    "ck-mc: session {}: reading tool results with images failed: {error:?}",
+                    self.key.session
+                ),
+            }
+        }
+        self.build(settings, None)
     }
 }
 

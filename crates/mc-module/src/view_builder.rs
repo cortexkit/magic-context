@@ -49,13 +49,34 @@ pub fn next_view(
             _ => None,
         })
         .collect();
+    // A part that new edits change loses its earlier edits: a drop of a
+    // part an earlier view only trimmed replaces the trimming.
+    let newly_edited: HashSet<(&str, &str)> = new_ops
+        .iter()
+        .filter_map(|op| match op {
+            EditOp::Drop {
+                mid,
+                part: Some(part),
+            }
+            | EditOp::Replace { mid, part, .. } => Some((mid.as_str(), part.as_str())),
+            _ => None,
+        })
+        .collect();
     let replaced = |edit: &Edit| match &edit.op {
         EditOp::Insert { message, .. } => {
             new_inserts.contains(message.id.as_str()) && !new_ops.contains(&edit.op)
         }
         EditOp::Cut { .. } => new_cut.is_some() && !new_ops.contains(&edit.op),
-        EditOp::Drop { mid, .. } | EditOp::Replace { mid, .. } => {
+        EditOp::Drop { mid, part } => {
             new_cut.is_some_and(|cut| ordinal_of(mid).is_some_and(|ordinal| ordinal <= cut))
+                || part.as_deref().is_some_and(|part| {
+                    newly_edited.contains(&(mid.as_str(), part)) && !new_ops.contains(&edit.op)
+                })
+        }
+        EditOp::Replace { mid, part, .. } => {
+            new_cut.is_some_and(|cut| ordinal_of(mid).is_some_and(|ordinal| ordinal <= cut))
+                || (newly_edited.contains(&(mid.as_str(), part.as_str()))
+                    && !new_ops.contains(&edit.op))
         }
     };
     edits.retain(|edit| !replaced(edit) && !retire(&edit.op));
