@@ -288,7 +288,10 @@ const BOUND: ProviderRules = ProviderRules {
 };
 
 /// A session whose usable window is 39,000 tokens, so the execute threshold
-/// (65%) sits at 25,350.
+/// (65%) sits at 25,350. A head's is 99,000 tokens (threshold 64,350): the
+/// summarizer reads at most a quarter of the usable window per run, and at
+/// least 6,000 tokens before it runs early, so a head needs room for turns
+/// whose tool output fits that range ([`turn`]).
 fn config(preset: &str, kind: Kind, rules: ProviderRules) -> SessionConfig {
     SessionConfig {
         session: SessionRef {
@@ -303,7 +306,7 @@ fn config(preset: &str, kind: Kind, rules: ProviderRules) -> SessionConfig {
             variant: None,
             service_tier: None,
         },
-        context_window: 40_000,
+        context_window: if preset == "head" { 100_000 } else { 40_000 },
         output_reserve: 1_000,
         rules,
         kind,
@@ -1148,8 +1151,24 @@ async fn a_worker_that_cannot_free_enough_is_asked_for_ctx_keep_and_keeps_only_w
 }
 
 /// The user's prompt and two file reads: one turn of a head session.
+/// A head's turn: a prompt, two reads of about 12,000 tokens each, and an
+/// answer. Three turns take a head past its execute threshold.
 fn turn(prompt: &str) -> Vec<Step> {
-    vec![user(prompt), read_file(50), read_file(50), answer()]
+    vec![user(prompt), large_read(), large_read(), answer()]
+}
+
+fn large_read() -> Step {
+    Step::Model(Turn {
+        reasoning_tokens: Some(50),
+        text: Some("Reading the next file.".into()),
+        tools: vec![ToolCall::ok(
+            "read",
+            json!({"path": "a.rs"}),
+            "x".repeat(48_000),
+        )],
+        output_tokens: 20,
+        ..Turn::default()
+    })
 }
 
 #[tokio::test]
@@ -1320,6 +1339,18 @@ fn summarizer_failing(
 }
 
 #[tokio::test]
+async fn large_tool_output_alone_does_not_start_a_summary_at_low_usage() {
+    // About 24,000 tokens of reads at about a quarter of the usable window:
+    // the raw history is past the size trigger, but the lines the summarizer
+    // would read (two short tool-call lines) are not, so nothing runs.
+    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    runner.play(&turn("Look at a.rs.")).await;
+    runner.play(&[user("Thanks."), answer()]).await;
+    assert_clean(&runner);
+    assert!(runner.host().child_runs().is_empty());
+}
+
+#[tokio::test]
 async fn an_invalid_summary_gets_one_repair_run_that_sees_the_error() {
     let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
     runner.host().set_responder(summarizer_failing(
@@ -1334,6 +1365,8 @@ async fn an_invalid_summary_gets_one_repair_run_that_sees_the_error() {
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
     }
+    // The third turn's summary lands with the view of the pass after it.
+    steps.push(answer());
     runner.play(&steps).await;
     assert_clean(&runner);
     let runs = runner.host().child_runs();
@@ -1370,7 +1403,7 @@ async fn one_long_turn_at_the_threshold_is_summarized_past_its_prompt_once() {
     // is the current turn, which the summarizer may not read below the force
     // band, except for one run past the prompt at the execute threshold.
     runner.play(&[user("Refactor the whole crate.")]).await;
-    let usable = 39_000.0;
+    let usable = 99_000.0;
     let mut usage_at_first_run = None;
     for _ in 0..24 {
         runner.play(&[read_file(50)]).await;
@@ -1430,6 +1463,8 @@ async fn facts_a_summary_finds_become_project_memories_with_it() {
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
     }
+    // The third turn's summary lands with the view of the pass after it.
+    steps.push(answer());
     runner.play(&steps).await;
     assert_clean(&runner);
     // The summarizer saw the project's memories, to leave known facts out.
@@ -1473,6 +1508,8 @@ async fn routing_picks_the_summarizer_and_a_failed_model_falls_back_to_another()
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
     }
+    // The third turn's summary lands with the view of the pass after it.
+    steps.push(answer());
     runner.play(&steps).await;
     assert_clean(&runner);
     let log = runner.provider().client.routing.lock().unwrap();
@@ -1632,6 +1669,8 @@ async fn a_revert_into_summarized_history_forgets_those_summaries() {
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
     }
+    // The third turn's summary lands with the view of the pass after it.
+    steps.push(answer());
     runner.play(&steps).await;
     assert_clean(&runner);
     // A few quiet steps under the view, so the revert comes below the
@@ -1639,7 +1678,7 @@ async fn a_revert_into_summarized_history_forgets_those_summaries() {
     runner.play(&[answer(), answer()]).await;
     let last = runner.report.requests.last().unwrap();
     assert!(
-        last.usage.prompt_tokens.unwrap() < 25_350,
+        last.usage.prompt_tokens.unwrap() < 64_350,
         "{:?}",
         last.usage.prompt_tokens
     );
@@ -1729,6 +1768,8 @@ async fn a_restarted_ck_mc_keeps_the_history_baseline() {
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
     }
+    // The third turn's summary lands with the view of the pass after it.
+    steps.push(answer());
     runner.play(&steps).await;
     assert_clean(&runner);
     let (m0_before, _) = head_texts(runner.host());
@@ -1871,6 +1912,8 @@ async fn a_head_shows_its_docs_and_memories_first_and_every_later_memory_change_
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
     }
+    // The third turn's summary lands with the view of the pass after it.
+    steps.push(answer());
     runner.play(&steps).await;
     assert_clean(&runner);
     let (m0_later, m1) = head_texts(runner.host());
@@ -2085,6 +2128,8 @@ async fn ctx_memory_saves_updates_and_archives_with_history_and_m1_shows_where_e
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
     }
+    // The third turn's summary lands with the view of the pass after it.
+    steps.push(answer());
     runner.play(&steps).await;
     assert_clean(&runner);
     let outputs = tool_outputs(runner.host(), "ctx_memory");

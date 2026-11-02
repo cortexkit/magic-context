@@ -33,6 +33,12 @@ pub struct Chunk {
     pub token_estimate: u64,
     /// Messages past the chunk were left out to stay within the budget.
     pub has_more: bool,
+    /// Stretches of work that ended in commits: an assistant line with
+    /// commit hashes that follows a line of another role, or opens the chunk
+    /// (`read-session-chunk.ts`, `commitClusters`).
+    pub commit_clusters: u64,
+    /// Messages the chunk's lines cover, noise included.
+    pub messages: usize,
 }
 
 struct Block {
@@ -74,13 +80,17 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
     let mut current: Option<Block> = None;
     let mut total = 0;
     let mut stopped = false;
+    let mut clusters = 0;
+    let mut last_role: Option<char> = None;
 
     // Appends the current block to the chunk; false when it does not fit.
     let flush = |block: Block,
                  lines: &mut Vec<String>,
                  covered: &mut Vec<ChunkLine>,
                  tool_only: &mut Vec<MessageRange>,
-                 total: &mut u64|
+                 total: &mut u64,
+                 clusters: &mut u64,
+                 last_role: &mut Option<char>|
      -> bool {
         let text = block.format();
         let tokens = mc_tokenizer::estimate_tokens(&text) as u64;
@@ -88,6 +98,10 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
             return false;
         }
         *total += tokens;
+        if block.role == 'A' && !block.commit_hashes.is_empty() && *last_role != Some('A') {
+            *clusters += 1;
+        }
+        *last_role = Some(block.role);
         lines.push(text);
         covered.extend(block.lines);
         if block.tool_only {
@@ -133,7 +147,15 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
             continue;
         }
         if let Some(block) = current.take() {
-            if !flush(block, &mut lines, &mut covered, &mut tool_only, &mut total) {
+            if !flush(
+                block,
+                &mut lines,
+                &mut covered,
+                &mut tool_only,
+                &mut total,
+                &mut clusters,
+                &mut last_role,
+            ) {
                 stopped = true;
                 break;
             }
@@ -152,7 +174,15 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
         });
     }
     if let Some(block) = current.take() {
-        if !flush(block, &mut lines, &mut covered, &mut tool_only, &mut total) {
+        if !flush(
+            block,
+            &mut lines,
+            &mut covered,
+            &mut tool_only,
+            &mut total,
+            &mut clusters,
+            &mut last_role,
+        ) {
             stopped = true;
         }
     }
@@ -162,6 +192,7 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
     if !stopped && !covered.is_empty() {
         covered.append(&mut pending_noise);
     }
+    let messages = covered.len();
     let first = covered.first()?;
     let last = covered.last()?;
     let (start, end) = (first.ordinal, last.ordinal);
@@ -179,6 +210,8 @@ pub fn build(entries: &[Entry], token_budget: u64) -> Option<Chunk> {
         },
         token_estimate: total,
         has_more: stopped,
+        commit_clusters: clusters,
+        messages,
     })
 }
 
@@ -509,6 +542,50 @@ mod tests {
         // so it is not tool-only.
         assert!(validation.tool_only_ranges.is_empty());
         assert!(!chunk.has_more);
+    }
+
+    #[test]
+    fn each_stretch_of_work_that_ends_in_commits_counts_once() {
+        let entries = vec![
+            entry(1, Role::User, false, vec![text("Fix the parser.")]),
+            entry(
+                2,
+                Role::Assistant,
+                false,
+                vec![text("Committed abc1234 with the fix.")],
+            ),
+            // A second assistant message in the same stretch adds no cluster.
+            entry(
+                3,
+                Role::Assistant,
+                false,
+                vec![text("Merged def5678 into main.")],
+            ),
+            entry(4, Role::User, false, vec![text("Now the lexer.")]),
+            entry(
+                5,
+                Role::Assistant,
+                false,
+                vec![text("Committed 0abc123 for the lexer.")],
+            ),
+            entry(6, Role::User, false, vec![text("And the docs.")]),
+            entry(
+                7,
+                Role::Assistant,
+                false,
+                vec![text("Updated the docs, nothing to commit.")],
+            ),
+            entry(8, Role::User, false, vec![text("Then tests.")]),
+            entry(
+                9,
+                Role::Assistant,
+                false,
+                vec![text("Committed 9fedcba with the tests.")],
+            ),
+        ];
+        let chunk = build(&entries, 10_000).unwrap();
+        assert_eq!(chunk.commit_clusters, 3, "{}", chunk.input);
+        assert_eq!(chunk.messages, 9);
     }
 
     #[test]

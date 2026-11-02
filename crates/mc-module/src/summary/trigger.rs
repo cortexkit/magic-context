@@ -141,35 +141,121 @@ pub fn tail_start(
 pub enum Reason {
     /// Usage is near the execute threshold.
     Proactive,
-    /// The unsummarized history is large, whatever the usage.
+    /// The history to summarize holds several stretches of work that ended in
+    /// commits.
+    CommitClusters,
+    /// The history to summarize is large, whatever the usage.
     TailSize,
     /// Usage is in the force band.
     Force,
 }
 
-/// Whether a summarizer run should start now, given the history it could
-/// read (`readable_tokens` over `readable_messages`).
-pub fn should_run(
-    usage_percentage: f64,
-    threshold_percentage: f64,
-    force: bool,
-    readable_tokens: u64,
-    readable_messages: usize,
+/// A summary is not needed this pass when the drops landing on it bring
+/// usage to this share of the execute threshold or below.
+const POST_DROP_TARGET_RATIO: f64 = 0.75;
+
+/// What the history the summarizer could read looks like, measured on the
+/// lines it would be sent (`U:`, `A:`, `TC:`), as the plugin measures it.
+pub struct Scan {
+    /// The lines' tokens, scaled to the model's tokens.
+    pub tokens: u64,
+    /// The lines ran past the scan's budget.
+    pub has_more: bool,
+    pub commit_clusters: u64,
+    pub messages: usize,
+    /// The history's own size, tool output included.
+    pub raw_tokens: u64,
+}
+
+/// The usage a pass sees.
+pub struct Pressure {
+    pub usage: f64,
+    pub threshold: f64,
+    pub force: bool,
+    /// Usage once the drops this pass will land have landed, when it lands
+    /// any.
+    pub after_drops: Option<f64>,
+}
+
+/// Whether a summarizer run should start now, in the plugin's order
+/// (`compartment-trigger.ts`): the force band, then commit clusters, then
+/// the history's size, then usage near the threshold. `scan` is `None` when
+/// nothing may be read.
+pub fn decide(
+    pressure: &Pressure,
+    scan: Option<&Scan>,
     trigger_budget: u64,
+    commit_clusters: Option<u64>,
 ) -> Option<Reason> {
-    if readable_messages == 0 {
-        return None;
+    let drops_suffice = pressure
+        .after_drops
+        .is_some_and(|after| after <= pressure.threshold * POST_DROP_TARGET_RATIO);
+    if pressure.force {
+        return (!drops_suffice && scan.is_some()).then_some(Reason::Force);
     }
-    if force {
-        return Some(Reason::Force);
+    let scan = scan?;
+    if commit_clusters.is_some_and(|min| scan.commit_clusters >= min)
+        && scan.tokens >= trigger_budget
+    {
+        return Some(Reason::CommitClusters);
     }
-    if readable_tokens >= trigger_budget * TAIL_SIZE_MULTIPLIER {
+    // The size trigger counts the lines, not the raw history: tool output
+    // the summarizer never reads must not make it run at low usage on a
+    // few large reads, each run summarizing a sliver.
+    if scan.tokens >= trigger_budget * TAIL_SIZE_MULTIPLIER || (scan.has_more && scan.tokens > 0) {
         return Some(Reason::TailSize);
     }
-    let enough = readable_tokens >= MIN_PROACTIVE_TAIL_TOKENS
-        || readable_messages >= MIN_PROACTIVE_TAIL_MESSAGES;
-    (usage_percentage >= threshold_percentage - PROACTIVE_OFFSET_PERCENTAGE && enough)
-        .then_some(Reason::Proactive)
+    if pressure.usage < pressure.threshold - PROACTIVE_OFFSET_PERCENTAGE || drops_suffice {
+        return None;
+    }
+    let meaningful = scan.has_more
+        || scan.raw_tokens >= MIN_PROACTIVE_TAIL_TOKENS
+        || scan.tokens >= MIN_PROACTIVE_TAIL_TOKENS
+        || scan.messages >= MIN_PROACTIVE_TAIL_MESSAGES;
+    meaningful.then_some(Reason::Proactive)
+}
+
+/// The scan reads at most this many model tokens of lines: enough to tell
+/// whether the size trigger fires.
+pub fn scan_budget(trigger_budget: u64) -> u64 {
+    MIN_PROACTIVE_TAIL_TOKENS.max(trigger_budget * TAIL_SIZE_MULTIPLIER)
+}
+
+/// How much raw history one run may read: a multiple of the protected tail
+/// that grows with usage (`protected-tail-boundary.ts`, `selectPerRunCap`).
+pub fn per_run_cap(context_window: u64, threshold_percentage: f64, usage_percentage: f64) -> u64 {
+    let usable = ((context_window as f64 * threshold_percentage / 100.0).round() as u64).max(1);
+    let n = protected_tail_tokens(context_window, threshold_percentage, usage_percentage);
+    let share = |ratio: f64, cap: u64| ((usable as f64 * ratio).round() as u64).min(cap);
+    if usage_percentage >= 95.0 {
+        (4 * n).max(share(0.5, 250_000)).min(750_000)
+    } else if usage_percentage >= 80.0 {
+        (3 * n).max(share(0.35, 150_000)).min(500_000)
+    } else {
+        (2 * n).max(share(0.25, 100_000)).min(250_000)
+    }
+}
+
+/// The first ordinal past what one run may read from `from` on: the oldest
+/// messages until `cap` raw tokens, at least one message.
+pub fn cap_run(
+    entries: &[Entry],
+    weight: impl Fn(&Entry) -> u64,
+    from: u64,
+    until: u64,
+    cap: u64,
+) -> u64 {
+    let mut total = 0;
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.ordinal >= from && entry.ordinal < until)
+    {
+        total += weight(entry);
+        if total > cap && entry.ordinal > from {
+            return entry.ordinal;
+        }
+    }
+    until
 }
 
 #[cfg(test)]
@@ -234,22 +320,166 @@ mod tests {
         assert_eq!(tail_start(&entries, |_: &Entry| 10, 0, 50, true), 0);
     }
 
+    fn pressure(usage: f64, force: bool, after_drops: Option<f64>) -> Pressure {
+        Pressure {
+            usage,
+            threshold: 65.0,
+            force,
+            after_drops,
+        }
+    }
+
+    fn scan(tokens: u64, raw_tokens: u64, commit_clusters: u64) -> Scan {
+        Scan {
+            tokens,
+            has_more: false,
+            commit_clusters,
+            messages: 5,
+            raw_tokens,
+        }
+    }
+
     #[test]
     fn a_run_starts_near_the_threshold_or_when_the_history_is_large() {
-        assert_eq!(should_run(62.0, 65.0, false, 7_000, 5, 6_500), None);
+        let budget = 6_500;
+        let none = None;
+        // Near the threshold, with enough to summarize.
         assert_eq!(
-            should_run(63.0, 65.0, false, 7_000, 5, 6_500),
+            decide(
+                &pressure(62.0, false, none),
+                Some(&scan(7_000, 7_000, 0)),
+                budget,
+                Some(3)
+            ),
+            None
+        );
+        assert_eq!(
+            decide(
+                &pressure(63.0, false, none),
+                Some(&scan(7_000, 7_000, 0)),
+                budget,
+                Some(3)
+            ),
             Some(Reason::Proactive)
         );
-        assert_eq!(should_run(63.0, 65.0, false, 1_000, 5, 6_500), None);
         assert_eq!(
-            should_run(10.0, 65.0, false, 19_500, 5, 6_500),
+            decide(
+                &pressure(63.0, false, none),
+                Some(&scan(1_000, 1_000, 0)),
+                budget,
+                Some(3)
+            ),
+            None
+        );
+        // Size counts the lines the summarizer reads, not the raw history: a
+        // few large tool outputs do not start a run at low usage.
+        assert_eq!(
+            decide(
+                &pressure(10.0, false, none),
+                Some(&scan(1_000, 40_000, 0)),
+                budget,
+                Some(3)
+            ),
+            None
+        );
+        assert_eq!(
+            decide(
+                &pressure(10.0, false, none),
+                Some(&scan(19_500, 19_500, 0)),
+                budget,
+                Some(3)
+            ),
             Some(Reason::TailSize)
         );
+        // Three stretches of committed work and a trigger budget of lines.
         assert_eq!(
-            should_run(90.0, 65.0, true, 10, 1, 6_500),
+            decide(
+                &pressure(10.0, false, none),
+                Some(&scan(6_500, 6_500, 3)),
+                budget,
+                Some(3)
+            ),
+            Some(Reason::CommitClusters)
+        );
+        assert_eq!(
+            decide(
+                &pressure(10.0, false, none),
+                Some(&scan(6_500, 6_500, 3)),
+                budget,
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            decide(
+                &pressure(10.0, false, none),
+                Some(&scan(6_400, 6_400, 3)),
+                budget,
+                Some(3)
+            ),
+            None
+        );
+        // The force band runs whenever anything may be read.
+        assert_eq!(
+            decide(
+                &pressure(90.0, true, none),
+                Some(&scan(10, 10, 0)),
+                budget,
+                Some(3)
+            ),
             Some(Reason::Force)
         );
-        assert_eq!(should_run(90.0, 65.0, true, 0, 0, 6_500), None);
+        assert_eq!(
+            decide(&pressure(90.0, true, none), None, budget, Some(3)),
+            None
+        );
+    }
+
+    #[test]
+    fn drops_that_bring_usage_low_enough_make_a_summary_unneeded() {
+        let budget = 6_500;
+        let readable = scan(7_000, 7_000, 0);
+        // 0.75 x 65% = 48.75%.
+        assert_eq!(
+            decide(
+                &pressure(90.0, true, Some(48.0)),
+                Some(&readable),
+                budget,
+                Some(3)
+            ),
+            None
+        );
+        assert_eq!(
+            decide(
+                &pressure(90.0, true, Some(50.0)),
+                Some(&readable),
+                budget,
+                Some(3)
+            ),
+            Some(Reason::Force)
+        );
+        assert_eq!(
+            decide(
+                &pressure(64.0, false, Some(40.0)),
+                Some(&readable),
+                budget,
+                Some(3)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn one_run_reads_at_most_its_cap_and_never_less_than_a_message() {
+        let entries: Vec<Entry> = (1..=6).map(|n| entry(n, Role::User, false, "x")).collect();
+        let weight = |_: &Entry| 100;
+        assert_eq!(cap_run(&entries, weight, 1, 7, 250), 3);
+        assert_eq!(cap_run(&entries, weight, 1, 7, 10_000), 7);
+        assert_eq!(cap_run(&entries, weight, 1, 7, 50), 2);
+        // The cap grows with usage: 2, 3 and 4 times the protected tail.
+        assert!(per_run_cap(200_000, 65.0, 50.0) < per_run_cap(200_000, 65.0, 85.0));
+        assert!(per_run_cap(200_000, 65.0, 85.0) < per_run_cap(200_000, 65.0, 96.0));
+        // On a huge window: twice the protected tail at its 96,000 ceiling.
+        assert_eq!(per_run_cap(10_000_000, 65.0, 50.0), 192_000);
     }
 }

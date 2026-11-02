@@ -65,6 +65,10 @@ pub struct Settings {
     /// The user-level `language`, lower-cased: the summarizer writes its
     /// prose in it. `None` writes English.
     pub language: Option<String>,
+    /// `commit_cluster_trigger`: the summarizer runs, at any usage, once the
+    /// history it could read holds this many separate stretches of work that
+    /// ended in commits. `None` when turned off.
+    pub commit_clusters: Option<u64>,
 }
 
 /// How the caveman lane compresses.
@@ -117,6 +121,7 @@ impl Default for Settings {
             auto_search: AutoSearch::default(),
             caveman: None,
             language: None,
+            commit_clusters: Some(3),
         }
     }
 }

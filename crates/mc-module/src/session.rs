@@ -412,30 +412,72 @@ impl Session {
         }
         let memory_enabled = settings.memory_enabled && self.project.is_some();
         let window = self.conditions.context_window;
+        let threshold = settings.execute_threshold_percentage;
         let usage = pass::usage(&self.conditions).unwrap_or(0.0) * 100.0;
         let force = pass::in_force_band(&self.conditions, settings);
         let from = self.summarized_through().map_or(1, |ordinal| ordinal + 1);
-        let tail =
-            trigger::protected_tail_tokens(window, settings.execute_threshold_percentage, usage);
+        let tail = trigger::protected_tail_tokens(window, threshold, usage);
         let entries = self.index.entries();
-        let budget = trigger::trigger_budget(window, settings.execute_threshold_percentage);
+        let budget = trigger::trigger_budget(window, threshold);
+        let cap = trigger::per_run_cap(window, threshold, usage);
+        // The scan measures the lines in the summarizer's own tokens, scaled
+        // to the model's by the larger of its prose and tool ratios.
+        let model = &self.conditions.model;
+        let calibration = crate::calibration::DecisionCalibration::for_model(Some(&format!(
+            "{}/{}",
+            model.provider, model.model
+        )));
+        let ratio = calibration
+            .prose_ratio
+            .max(calibration.tools_ratio)
+            .max(1.0);
+        let scan_lines = (trigger::scan_budget(budget) as f64 / ratio).floor() as u64;
+        let bounded = |tail_tokens: u64, lift: bool| {
+            let until = trigger::tail_start(entries, entry_tokens, from, tail_tokens, lift);
+            trigger::cap_run(entries, entry_tokens, from, until, cap)
+        };
+        let scan_at = |until: u64| -> Option<trigger::Scan> {
+            let low = entries.partition_point(|entry| entry.ordinal < from);
+            let high = entries.partition_point(|entry| entry.ordinal < until);
+            let readable = &entries[low..high.max(low)];
+            let chunk = crate::summary::chunk::build(readable, scan_lines)?;
+            Some(trigger::Scan {
+                tokens: (chunk.token_estimate as f64 * ratio).ceil() as u64,
+                has_more: chunk.has_more,
+                commit_clusters: chunk.commit_clusters,
+                messages: chunk.messages,
+                raw_tokens: readable.iter().map(entry_tokens).sum(),
+            })
+        };
+        let pressure = trigger::Pressure {
+            usage,
+            threshold,
+            force,
+            // Drops land on a pass with rebuild permission; a head with a
+            // summary to come has it in the force band.
+            after_drops: force
+                .then(|| self.usage_after_drops(settings, usage))
+                .flatten(),
+        };
         let decide = |until: u64| {
-            let readable: Vec<&ck_contract_draft::read::Entry> = entries
-                .iter()
-                .filter(|entry| entry.ordinal >= from && entry.ordinal < until)
-                .collect();
-            let tokens: u64 = readable.iter().map(|entry| entry_tokens(entry)).sum();
-            trigger::should_run(
-                usage,
-                settings.execute_threshold_percentage,
-                force,
-                tokens,
-                readable.len(),
+            trigger::decide(
+                &pressure,
+                scan_at(until).as_ref(),
                 budget,
+                settings.commit_clusters,
             )
         };
-        let mut until = trigger::tail_start(entries, entry_tokens, from, tail, force);
-        if decide(until).is_none() {
+        let mut until = bounded(tail, force);
+        let mut decision = decide(until);
+        if decision.is_none() && force {
+            // Nothing to read in the force band: the protected tail shrinks
+            // to a half, or a quarter from 95% (the plugin's emergency tail
+            // scale).
+            let scale = if usage >= 95.0 { 0.25 } else { 0.5 };
+            until = bounded((tail as f64 * scale) as u64, true);
+            decision = decide(until);
+        }
+        if decision.is_none() {
             // At the threshold, a long turn's history after the person's
             // newest prompt cannot be summarized while that prompt stays raw.
             // The plugin lets one run summarize past it, once per prompt
@@ -445,15 +487,12 @@ impl Session {
                 .rev()
                 .find(|entry| trigger::is_meaningful_user(entry))
                 .map(|entry| entry.mid.clone());
-            let lifted = trigger::tail_start(entries, entry_tokens, from, tail, true);
-            let at_threshold = usage >= settings.execute_threshold_percentage;
-            if !at_threshold
-                || prompt.is_none()
-                || prompt == self.floor_lifted_for
-                || decide(lifted).is_none()
-            {
+            let lifted = bounded(tail, true);
+            if usage < threshold || prompt.is_none() || prompt == self.floor_lifted_for {
                 return None;
             }
+            decision = decide(lifted);
+            decision?;
             until = lifted;
             self.floor_lifted_for = prompt;
         }
@@ -471,6 +510,40 @@ impl Session {
             memory_enabled,
             auto_promote: settings.auto_promote,
         })
+    }
+
+    /// Usage once this pass's drops land: the model's queued drops and the
+    /// reasoning over its budget, as a share of the transcript the model
+    /// sees, applied to the reported usage (`compartment-trigger.ts`,
+    /// `estimateProjectedPostDropPercentage`). `None` when nothing would go.
+    fn usage_after_drops(&self, settings: &Settings, usage: f64) -> Option<f64> {
+        let edited = lanes::Edited::of(self.latest.as_ref(), &self.index, self.cut);
+        let context = lanes::Context {
+            index: &self.index,
+            edited: &edited,
+            protected_tools: &settings.protected_tools,
+            keep_first_message: self.features.keep_first_message,
+        };
+        let mut wanted: Vec<(lanes::PartKey, lanes::Shape)> = self
+            .queued
+            .iter()
+            .map(|key| (key.clone(), lanes::Shape::Default))
+            .collect();
+        wanted.extend(lanes::reasoning_over_budget(
+            &context,
+            settings.keep_reasoning_tokens,
+        ));
+        let (_, covered) = lanes::drop_ops(&context, &wanted);
+        let freed = freed_tokens(&context, &covered);
+        let total: u64 = self
+            .index
+            .entries()
+            .iter()
+            .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+            .filter(|(entry, part)| !edited.covers(&entry.mid, &part.id))
+            .map(|(_, part)| tokens::part(part))
+            .sum();
+        (freed > 0 && total > 0).then(|| usage * (1.0 - (freed as f64 / total as f64).min(1.0)))
     }
 
     /// Whether a run would read the same history a run before it failed to

@@ -255,6 +255,7 @@ fn resolve_tiers(
         .unwrap_or(false);
     settings.embedding = embedding::Provider::from_tiers(user, project, user_path);
     settings.caveman = caveman(user, project);
+    settings.commit_clusters = commit_clusters(user, project);
     // Only the user sets the language; a project file cannot.
     settings.language = user
         .pointer("/language")
@@ -262,6 +263,30 @@ fn resolve_tiers(
         .map(|language| language.trim().to_ascii_lowercase())
         .filter(|language| !language.is_empty());
     settings
+}
+
+/// `commit_cluster_trigger`: on unless the last tier that sets `enabled`
+/// turns it off, with `min_clusters` (at least 1, default 3) from the last
+/// tier that sets a valid one.
+fn commit_clusters(user: &Value, project: &Value) -> Option<u64> {
+    let mut enabled = true;
+    let mut min = 3;
+    for tier in [user, project] {
+        if let Some(on) = tier
+            .pointer("/commit_cluster_trigger/enabled")
+            .and_then(Value::as_bool)
+        {
+            enabled = on;
+        }
+        if let Some(clusters) = tier
+            .pointer("/commit_cluster_trigger/min_clusters")
+            .and_then(Value::as_u64)
+            .filter(|clusters| *clusters >= 1)
+        {
+            min = clusters;
+        }
+    }
+    enabled.then_some(min)
 }
 
 /// `caveman_text_compression`: on when the last tier that sets `enabled`
