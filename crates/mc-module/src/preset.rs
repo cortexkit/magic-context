@@ -18,6 +18,10 @@ pub struct Features {
     /// goes. For sessions with no summarizer, whose own reasoning and replies
     /// otherwise pile up.
     pub ctx_keep: bool,
+    /// A person's message gets a hint when memories, earlier history or
+    /// commits look relevant to it. Not for sessions another agent started:
+    /// their prompts come from that agent, not from a person's question.
+    pub auto_memory: bool,
 }
 
 /// The features of a preset, or `None` for a preset Magic Context does not
@@ -28,11 +32,13 @@ pub fn features(preset: &str) -> Option<Features> {
             summarizer: true,
             keep_first_message: false,
             ctx_keep: false,
+            auto_memory: true,
         }),
         "worker" | "reader" => Some(Features {
             summarizer: false,
             keep_first_message: true,
             ctx_keep: true,
+            auto_memory: false,
         }),
         _ => None,
     }

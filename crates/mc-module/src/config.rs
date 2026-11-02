@@ -196,6 +196,26 @@ fn resolve_tiers(
         if let Some(budget) = number_at(tier, "/memory/injection_budget_tokens") {
             settings.memory_budget_tokens = budget.max(1.0) as u64;
         }
+        if let Some(enabled) = tier.get("temporal_awareness").and_then(Value::as_bool) {
+            settings.temporal_awareness = enabled;
+        }
+        let auto = &mut settings.auto_search;
+        if let Some(enabled) = tier
+            .pointer("/memory/auto_search/enabled")
+            .and_then(Value::as_bool)
+        {
+            auto.enabled = enabled;
+        }
+        if let Some(threshold) = number_at(tier, "/memory/auto_search/score_threshold") {
+            auto.score_threshold = threshold.clamp(0.3, 0.95);
+        }
+        if let Some(chars) = tier
+            .pointer("/memory/auto_search/min_prompt_chars")
+            .and_then(Value::as_u64)
+            .filter(|chars| *chars > 0)
+        {
+            auto.min_prompt_chars = (chars as usize).clamp(5, 500);
+        }
     }
     // The deprecated key still counts when the user never set the new one.
     if user.pointer("/memory/injection_budget_tokens").is_none() {

@@ -21,8 +21,22 @@ fn regex(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).expect("valid regex"))
 }
 
-fn utf16_len(text: &str) -> usize {
+/// Length as JavaScript counts it: UTF-16 code units.
+pub(crate) fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
+}
+
+/// The longest prefix of at most `units` UTF-16 code units that ends on a
+/// character boundary (JavaScript's `slice(0, units)`, minus a split pair).
+pub(crate) fn utf16_prefix(text: &str, units: usize) -> &str {
+    let mut used = 0;
+    for (at, ch) in text.char_indices() {
+        used += ch.len_utf16();
+        if used > units {
+            return &text[..at];
+        }
+    }
+    text
 }
 
 /// Collapse whitespace runs to one space and trim, as `/\s+/g` does in

@@ -98,6 +98,7 @@ pub trait Provider {
         &self,
         session: &SessionRef,
         text: &str,
+        now: u64,
     ) -> impl Future<Output = Result<UserEdit, CallError>>;
 }
 
@@ -474,7 +475,8 @@ impl<P: Provider> Runner<P> {
 
     async fn user(&mut self, text: &str) {
         let session = self.host.session();
-        let edit = match self.provider.pre_user(&session, text).await {
+        let now = self.host.lock().now;
+        let edit = match self.provider.pre_user(&session, text, now).await {
             Ok(edit) => edit,
             Err(error) => {
                 // `pre_user` is best effort: the message goes out unchanged.

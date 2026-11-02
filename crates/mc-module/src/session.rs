@@ -506,29 +506,7 @@ impl Session {
                     .as_ref()
                     .ok_or("ctx_search needs the context store")?;
                 let empty = std::collections::BTreeMap::new();
-                let seen = self
-                    .baseline
-                    .as_ref()
-                    .map_or(&empty, |baseline| &baseline.seen);
-                let cutoff = self
-                    .summaries
-                    .last()
-                    .map_or(0, |summary| summary.end_message);
-                let root = self
-                    .project
-                    .as_ref()
-                    .map(|project| std::path::Path::new(&project.root));
-                let mut scope = crate::search::Scope {
-                    harness: &self.key.harness,
-                    session: &self.key.session,
-                    project: self.project.as_ref().map(|project| project.id.as_str()),
-                    cutoff,
-                    seen,
-                    memory_enabled: settings.memory_enabled,
-                    git_commits_enabled: settings.git_commits_enabled,
-                    git_repository: root.map(|root| root.join(".git").exists()),
-                    semantic: None,
-                };
+                let mut scope = self.search_scope(settings, &empty);
                 if let Some(answer) =
                     db.with_connection(|conn| crate::search::by_ids(conn, &scope, input))
                 {
@@ -587,6 +565,103 @@ impl Session {
             }
             other => Err(format!("unknown tool {other}")),
         }
+    }
+
+    /// What a search may read for this session: messages up to the last
+    /// summary (later ones are in the model's view), and memories other than
+    /// those the head shows in full.
+    fn search_scope<'a>(
+        &'a self,
+        settings: &Settings,
+        empty: &'a std::collections::BTreeMap<i64, String>,
+    ) -> crate::search::Scope<'a> {
+        let root = self
+            .project
+            .as_ref()
+            .map(|project| std::path::Path::new(&project.root));
+        crate::search::Scope {
+            harness: &self.key.harness,
+            session: &self.key.session,
+            project: self.project.as_ref().map(|project| project.id.as_str()),
+            cutoff: self
+                .summaries
+                .last()
+                .map_or(0, |summary| summary.end_message),
+            seen: self
+                .baseline
+                .as_ref()
+                .map_or(empty, |baseline| &baseline.seen),
+            memory_enabled: settings.memory_enabled,
+            git_commits_enabled: settings.git_commits_enabled,
+            git_repository: root.map(|root| root.join(".git").exists()),
+            semantic: None,
+        }
+    }
+
+    /// `transform.pre_user`: what goes before and after a person's message as
+    /// the runner stores it. A message that is only reminders or notices is
+    /// not a person's, and gets nothing.
+    pub async fn pre_user(
+        &self,
+        settings: &Settings,
+        text: &str,
+        now_ms: u64,
+    ) -> ck_contract_draft::wire::PreUserAnswer {
+        let mut answer = ck_contract_draft::wire::PreUserAnswer::default();
+        if !crate::search::text::is_meaningful_user_text(text) {
+            return answer;
+        }
+        if settings.temporal_awareness {
+            // The gap runs from the newest message the session holds, the one
+            // this message follows, to now, when the message is written.
+            if let Some(previous) = self.index.entries().last() {
+                answer.prepend =
+                    crate::pre_user::time_marker(now_ms.saturating_sub(previous.written_at));
+            }
+        }
+        let auto = &settings.auto_search;
+        let prompt = crate::pre_user::prompt_text(text);
+        if !self.features.auto_memory
+            || !auto.enabled
+            || crate::pre_user::has_hint(text)
+            || crate::search::text::utf16_len(&prompt) < auto.min_prompt_chars
+        {
+            return answer;
+        }
+        let Some(db) = &self.db else {
+            return answer;
+        };
+        let search = async {
+            let embedded = match &settings.embedding {
+                Some(provider) => provider
+                    .embed_query(&prompt)
+                    .await
+                    .map(|vector| (vector, provider.model_id(), provider.chunk_model_id())),
+                None => None,
+            };
+            let empty = std::collections::BTreeMap::new();
+            let mut scope = self.search_scope(settings, &empty);
+            scope.semantic = embedded.as_ref().map(|(vector, model_id, chunk_model_id)| {
+                crate::search::sources::Semantic {
+                    vector,
+                    model_id,
+                    chunk_model_id,
+                }
+            });
+            db.with_connection(|conn| crate::search::auto_hits(conn, &scope, &prompt))
+        };
+        let deadline = std::time::Duration::from_millis(crate::pre_user::AUTO_SEARCH_TIMEOUT_MS);
+        let Ok(hits) = tokio::time::timeout(deadline, search).await else {
+            eprintln!(
+                "ck-mc: session {}: memory search took too long; the message has no hint",
+                self.key.session
+            );
+            return answer;
+        };
+        answer.append =
+            crate::search::build_hint(hits, auto.score_threshold, &prompt, now_ms as i64)
+                .map(|hint| format!("\n\n{hint}"));
+        answer
     }
 
     /// `ctx_keep`: the model names what it still needs, in order of

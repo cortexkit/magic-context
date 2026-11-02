@@ -82,6 +82,10 @@ pub struct ToolCallAnswer {
 pub struct PreUserRequest {
     pub session: SessionRef,
     pub text: String,
+    /// The runner's clock as it stores the message, in milliseconds since the
+    /// Unix epoch: the same clock as every entry's `written_at`, so the gap
+    /// since the previous message is measured on one clock.
+    pub now: u64,
 }
 
 /// Text to put before and after the user's message. Both absent changes

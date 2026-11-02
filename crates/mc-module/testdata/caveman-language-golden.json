@@ -1,0 +1,305 @@
+{
+  "englishLanguages": [
+    null,
+    "",
+    "en",
+    "EN",
+    " en ",
+    "en-US",
+    "en-gb",
+    "zz",
+    "eng",
+    "e1"
+  ],
+  "nonEnglishLanguages": [
+    "es",
+    "ES",
+    " de ",
+    "tr",
+    "fr",
+    "ja",
+    "pt"
+  ],
+  "cases": [
+    {
+      "text": "Es mejor que quite la línea del log.",
+      "neutral": "Es mejor que quite la línea del log."
+    },
+    {
+      "text": "Voy a revisar la configuración.",
+      "neutral": "Voy a revisar la configuración."
+    },
+    {
+      "text": "Ich weiß nicht, was passieren wird, am besten testen.",
+      "neutral": "Ich weiß nicht, was passieren wird, am besten testen."
+    },
+    {
+      "text": "Il a fait le test et a changé la config il y a un an.",
+      "neutral": "Il a fait le test et a changé la config il y a un an."
+    },
+    {
+      "text": "Hola   mundo  \n\n\n\nadiós\t\tamigo  \n```js\nconst  x = 1;\n    return  x;\n```\n",
+      "neutral": "Hola mundo\n\nadiós amigo\n```js\nconst  x = 1;\n    return  x;\n```"
+    },
+    {
+      "text": "  Quizás   deberíamos revisar `a  b` y https://x.io/a  b en src/x/y.ts.  ",
+      "neutral": "Quizás deberíamos revisar `a  b` y https://x.io/a b en src/x/y.ts."
+    },
+    {
+      "text": "U: no   toques   esto\nPor favor, revisa el commit ffa0997b de ayer.",
+      "neutral": "U: no toques esto\nPor favor, revisa el commit ffa0997b de ayer."
+    },
+    {
+      "text": "I just really wanted to basically explain the implementation clearly, and in order to understand it, we need to consider the context.",
+      "neutral": "I just really wanted to basically explain the implementation clearly, and in order to understand it, we need to consider the context."
+    },
+    {
+      "text": "Perhaps the historian was compressed because the repository has been reorganized, and then the database was updated.",
+      "neutral": "Perhaps the historian was compressed because the repository has been reorganized, and then the database was updated."
+    },
+    {
+      "text": "Please review this change, thanks. If possible, tell me whether it is actually safe or simply convenient.",
+      "neutral": "Please review this change, thanks. If possible, tell me whether it is actually safe or simply convenient."
+    },
+    {
+      "text": "Unicode survives: café naïve résumé — 日本語 and emoji 🦕✨ stay readable while filler words disappear.",
+      "neutral": "Unicode survives: café naïve résumé — 日本語 and emoji 🦕✨ stay readable while filler words disappear."
+    },
+    {
+      "text": "Preserve `const context = { message: 'hello' }` and https://example.com/a?b=1, plus src/hooks/magic-context/caveman.ts and abcdef1234567.",
+      "neutral": "Preserve `const context = { message: 'hello' }` and https://example.com/a?b=1, plus src/hooks/magic-context/caveman.ts and abcdef1234567."
+    },
+    {
+      "text": "```rust\nlet message = \"the context is really stable\";\n```\nThe surrounding prose should be shorter.",
+      "neutral": "```rust\nlet message = \"the context is really stable\";\n```\nThe surrounding prose should be shorter."
+    },
+    {
+      "text": "U: The user phrasing must remain exactly as written, even when it has really basically many filler words.",
+      "neutral": "U: The user phrasing must remain exactly as written, even when it has really basically many filler words."
+    },
+    {
+      "text": "",
+      "neutral": ""
+    },
+    {
+      "text": "😀 😀 😀 emoji-only text should not crash, and words around it still compress.",
+      "neutral": "😀 😀 😀 emoji-only text should not crash, and words around it still compress."
+    },
+    {
+      "text": "The context and context and context explain why the message and message are in the repository and the repository is in the directory.",
+      "neutral": "The context and context and context explain why the message and message are in the repository and the repository is in the directory."
+    },
+    {
+      "text": "A bit of text, sort of a test, kind of a fixture; I think it appears probably useful.",
+      "neutral": "A bit of text, sort of a test, kind of a fixture; I think it appears probably useful."
+    },
+    {
+      "text": "The implementation was being tested and the messages were being compressed while the configuration was being validated.",
+      "neutral": "The implementation was being tested and the messages were being compressed while the configuration was being validated."
+    },
+    {
+      "text": "Fixed bug in handler.",
+      "neutral": "Fixed bug in handler."
+    },
+    {
+      "text": "Keep `a  b` and https://example.com/a  b exactly through the final whitespace pass.",
+      "neutral": "Keep `a  b` and https://example.com/a b exactly through the final whitespace pass."
+    },
+    {
+      "text": "Look at `const x = 1` for reference.",
+      "neutral": "Look at `const x = 1` for reference."
+    },
+    {
+      "text": "Try this:\n```ts\nconst x = 1;\n```\nIt works.",
+      "neutral": "Try this:\n```ts\nconst x = 1;\n```\nIt works."
+    },
+    {
+      "text": "See https://github.com/cortexkit/magic-context for details.",
+      "neutral": "See https://github.com/cortexkit/magic-context for details."
+    },
+    {
+      "text": "Fix the bug in src/hooks/magic-context/transform.ts.",
+      "neutral": "Fix the bug in src/hooks/magic-context/transform.ts."
+    },
+    {
+      "text": "Committed as ffa0997b, replayed as bcd8816e.",
+      "neutral": "Committed as ffa0997b, replayed as bcd8816e."
+    },
+    {
+      "text": "See §1234§ for context.",
+      "neutral": "See §1234§ for context."
+    },
+    {
+      "text": "In session ses_331acff95ff the issue was seen.",
+      "neutral": "In session ses_331acff95ff the issue was seen."
+    },
+    {
+      "text": "Narrative text that was really quite verbose.\nU: We should not touch the protected area\nMore narrative.",
+      "neutral": "Narrative text that was really quite verbose.\nU: We should not touch the protected area\nMore narrative."
+    },
+    {
+      "text": "Some narrative.\nU: I just really think we should do this.\n",
+      "neutral": "Some narrative.\nU: I just really think we should do this."
+    },
+    {
+      "text": "The fix was really just a one-line change.",
+      "neutral": "The fix was really just a one-line change."
+    },
+    {
+      "text": "I think probably the cache is stale.",
+      "neutral": "I think probably the cache is stale."
+    },
+    {
+      "text": "Please check the thanks of the log.",
+      "neutral": "Please check the thanks of the log."
+    },
+    {
+      "text": "We did this in order to fix the bug.",
+      "neutral": "We did this in order to fix the bug."
+    },
+    {
+      "text": "Fixed the auth middleware.",
+      "neutral": "Fixed the auth middleware."
+    },
+    {
+      "text": "Fixed the auth middleware in a session.",
+      "neutral": "Fixed the auth middleware in a session."
+    },
+    {
+      "text": "The historian was compressed successfully.",
+      "neutral": "The historian was compressed successfully."
+    },
+    {
+      "text": "The config key `execute_threshold_percentage` was added.",
+      "neutral": "The config key `execute_threshold_percentage` was added."
+    },
+    {
+      "text": "Fixed bug and shipped release and updated docs.",
+      "neutral": "Fixed bug and shipped release and updated docs."
+    },
+    {
+      "text": "Committed and then pushed.",
+      "neutral": "Committed and then pushed."
+    },
+    {
+      "text": "The historian ran. Then historian retried. Then historian succeeded. Historian finished.",
+      "neutral": "The historian ran. Then historian retried. Then historian succeeded. Historian finished."
+    },
+    {
+      "text": "The historian ran once.",
+      "neutral": "The historian ran once."
+    },
+    {
+      "text": "Historian started. Historian ran. Historian finished successfully.",
+      "neutral": "Historian started. Historian ran. Historian finished successfully."
+    },
+    {
+      "text": "The historian was really running in the background, and it was producing compartments for the session. Basically, the compressor was then merging them in order to fit the budget. Therefore, the output tokens were reduced significantly.",
+      "neutral": "The historian was really running in the background, and it was producing compartments for the session. Basically, the compressor was then merging them in order to fit the budget. Therefore, the output tokens were reduced significantly."
+    },
+    {
+      "text": "Fixed  the   really   bad   bug.",
+      "neutral": "Fixed the really bad bug."
+    },
+    {
+      "text": "Line one.   \nLine two.",
+      "neutral": "Line one.\nLine two."
+    },
+    {
+      "text": "Para one.\n\n\n\nPara two.",
+      "neutral": "Para one.\n\nPara two."
+    },
+    {
+      "text": "Committed the live-notification-params fix on feat/context-management as ffa0997b, replayed it onto integrate/athena-context-management as bcd8816e, and rebuilt both branches successfully. The replay was clean; the only remaining integrate dirt was an unrelated pre-existing src/shared/context-limit-resolver.ts modification.",
+      "neutral": "Committed the live-notification-params fix on feat/context-management as ffa0997b, replayed it onto integrate/athena-context-management as bcd8816e, and rebuilt both branches successfully. The replay was clean; the only remaining integrate dirt was an unrelated pre-existing src/shared/context-limit-resolver.ts modification."
+    },
+    {
+      "text": "Fixed the really annoying cache bug in the transform. The fix preserved message order.\nU: We need to make sure the protected tail is not touched.\nCommitted and pushed.",
+      "neutral": "Fixed the really annoying cache bug in the transform. The fix preserved message order.\nU: We need to make sure the protected tail is not touched.\nCommitted and pushed."
+    },
+    {
+      "text": "Hoy es un día para probar la energía de la batería.",
+      "neutral": "Hoy es un día para probar la energía de la batería."
+    },
+    {
+      "text": "Hablé con María y con Sofía sobre la policía.",
+      "neutral": "Hablé con María y con Sofía sobre la policía."
+    },
+    {
+      "text": "Ask María about the café menu.",
+      "neutral": "Ask María about the café menu."
+    },
+    {
+      "text": "Text\n```ts\nfunction f() {\n    return 1;\n}\n```\n",
+      "neutral": "Text\n```ts\nfunction f() {\n    return 1;\n}\n```"
+    },
+    {
+      "text": "Steps:\n1. Build it\nProbably the tests fail.\n\nActually, ship it.",
+      "neutral": "Steps:\n1. Build it\nProbably the tests fail.\n\nActually, ship it."
+    },
+    {
+      "text": "x\n  maybe just do it\ny",
+      "neutral": "x\n maybe just do it\ny"
+    },
+    {
+      "text": "The historian was\ncompressed and the\nresult was fixed.",
+      "neutral": "The historian was\ncompressed and the\nresult was fixed."
+    },
+    {
+      "text": "Es un día para la energía de la red, and the a team.",
+      "neutral": "Es un día para la energía de la red, and the a team."
+    },
+    {
+      "text": "see https://x.io/a﻿then it was fixed and  maybe it is fixed",
+      "neutral": "see https://x.io/a﻿then it was fixed and  maybe it is fixed"
+    },
+    {
+      "text": "it is ing and was ed but it is red and was en",
+      "neutral": "it is ing and was ed but it is red and was en"
+    },
+    {
+      "text": "msg_abc_def was compressed in ses_x_y and the toolu_Q",
+      "neutral": "msg_abc_def was compressed in ses_x_y and the toolu_Q"
+    },
+    {
+      "text": "This is is fixed AND that OR this And then the end",
+      "neutral": "This is is fixed AND that OR this And then the end"
+    },
+    {
+      "text": "it has  been\tfixed and has\nbeen moved, it will  be shipped",
+      "neutral": "it has been fixed and has\nbeen moved, it will  be shipped"
+    },
+    {
+      "text": "𝐀a test of 𝐀 a test and Привет a мир",
+      "neutral": "𝐀a test of 𝐀 a test and Привет a мир"
+    },
+    {
+      "text": "committed é1a2b3c4d and the ffa0997b",
+      "neutral": "committed é1a2b3c4d and the ffa0997b"
+    },
+    {
+      "text": "U: keep this one\nPerhaps the fix was applied.\nU: and this one",
+      "neutral": "U: keep this one\nPerhaps the fix was applied.\nU: and this one"
+    },
+    {
+      "text": "Build it\r\nProbably the tests fail\r\nthanks\r\n",
+      "neutral": "Build it\r\nProbably the tests fail\r\nthanks"
+    },
+    {
+      "text": "contexto context context context Context",
+      "neutral": "contexto context context context Context"
+    },
+    {
+      "text": "the cache and a result were updated",
+      "neutral": "the cache and a result were updated"
+    },
+    {
+      "text": "٣a test and _a test",
+      "neutral": "٣a test and _a test"
+    },
+    {
+      "text": "Just\nreally\n\n\nmaybe\nPlease",
+      "neutral": "Just\nreally\n\nmaybe\nPlease"
+    }
+  ]
+}

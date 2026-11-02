@@ -1,0 +1,380 @@
+[
+  {
+    "text": "I just really wanted to basically explain the implementation clearly, and in order to understand it, we need to consider the context.",
+    "lite": "I wanted to explain the implementation, and to understand it, we need to consider the context.",
+    "full": "I wanted to explain implementation, and to understand it, we need to consider context.",
+    "ultra": "I wanted to explain implementation, + to understand it, we need to consider context."
+  },
+  {
+    "text": "Perhaps the historian was compressed because the repository has been reorganized, and then the database was updated.",
+    "lite": "the historian was compressed because the repository has been reorganized, and then the database was updated.",
+    "full": "historian compressed because repository reorganized, and then database updated.",
+    "ultra": "historian compressed // repository reorganized, → database updated."
+  },
+  {
+    "text": "Please review this change, thanks. If possible, tell me whether it is actually safe or simply convenient.",
+    "lite": "review this change,., tell me whether it is safe or convenient.",
+    "full": "review this change,., tell me whether it is safe or convenient.",
+    "ultra": "review this change,., tell me whether it is safe | convenient."
+  },
+  {
+    "text": "Unicode survives: café naïve résumé — 日本語 and emoji 🦕✨ stay readable while filler words disappear.",
+    "lite": "Unicode survives: café naïve résumé — 日本語 and emoji 🦕✨ stay readable while filler words disappear.",
+    "full": "Unicode survives: café naïve résumé — 日本語 and emoji 🦕✨ stay readable while filler words disappear.",
+    "ultra": "Unicode survives: café naïve résumé — 日本語 + emoji 🦕✨ stay readable while filler words disappear."
+  },
+  {
+    "text": "Preserve `const context = { message: 'hello' }` and https://example.com/a?b=1, plus src/hooks/magic-context/caveman.ts and abcdef1234567.",
+    "lite": "Preserve `const context = { message: 'hello' }` and https://example.com/a?b=1, plus src/hooks/magic-context/caveman.ts and abcdef1234567.",
+    "full": "Preserve `const context = { message: 'hello' }` and https://example.com/a?b=1, plus src/hooks/magic-context/caveman.ts and abcdef1234567.",
+    "ultra": "Preserve `const context = { message: 'hello' }` + https://example.com/a?b=1, plus src/hooks/magic-context/caveman.ts + abcdef1234567."
+  },
+  {
+    "text": "```rust\nlet message = \"the context is really stable\";\n```\nThe surrounding prose should be shorter.",
+    "lite": "```rust\nlet message = \"the context is really stable\";\n```\nThe surrounding prose should be shorter.",
+    "full": "```rust\nlet message = \"the context is really stable\";\n```\nsurrounding prose should be shorter.",
+    "ultra": "```rust\nlet message = \"the context is really stable\";\n```\nsurrounding prose should be shorter."
+  },
+  {
+    "text": "U: The user phrasing must remain exactly as written, even when it has really basically many filler words.",
+    "lite": "U: The user phrasing must remain exactly as written, even when it has really basically many filler words.",
+    "full": "U: The user phrasing must remain exactly as written, even when it has really basically many filler words.",
+    "ultra": "U: The user phrasing must remain exactly as written, even when it has really basically many filler words."
+  },
+  {
+    "text": "",
+    "lite": "",
+    "full": "",
+    "ultra": ""
+  },
+  {
+    "text": "😀 😀 😀 emoji-only text should not crash, and words around it still compress.",
+    "lite": "😀 😀 😀 emoji-only text should not crash, and words around it still compress.",
+    "full": "😀 😀 😀 emoji-only text should not crash, and words around it still compress.",
+    "ultra": "😀 😀 😀 emoji-only text should not crash, + words around it still compress."
+  },
+  {
+    "text": "The context and context and context explain why the message and message are in the repository and the repository is in the directory.",
+    "lite": "The context and context and context explain why the message and message are in the repository and the repository is in the directory.",
+    "full": "context and context and context explain why message and message are in repository and repository is in directory.",
+    "ultra": "ctx + ctx + ctx explain why message + message are in repository + repository is in directory."
+  },
+  {
+    "text": "A bit of text, sort of a test, kind of a fixture; I think it appears probably useful.",
+    "lite": "of text, a test, a fixture; useful.",
+    "full": "of text, test, fixture; useful.",
+    "ultra": "of text, test, fixture; useful."
+  },
+  {
+    "text": "The implementation was being tested and the messages were being compressed while the configuration was being validated.",
+    "lite": "The implementation was being tested and the messages were being compressed while the configuration was being validated.",
+    "full": "implementation being tested and messages being compressed while configuration being validated.",
+    "ultra": "implementation being tested + messages being compressed while configuration being validated."
+  },
+  {
+    "text": "Fixed bug in handler.",
+    "lite": "Fixed bug in handler.",
+    "full": "Fixed bug in handler.",
+    "ultra": "Fixed bug in handler."
+  },
+  {
+    "text": "Keep `a  b` and https://example.com/a  b exactly through the final whitespace pass.",
+    "lite": "Keep `a  b` and https://example.com/a b exactly through the final whitespace pass.",
+    "full": "Keep `a  b` and https://example.com/a b exactly through final whitespace pass.",
+    "ultra": "Keep `a  b` + https://example.com/a b exactly through final whitespace pass."
+  },
+  {
+    "text": "Look at `const x = 1` for reference.",
+    "lite": "Look at `const x = 1` for reference.",
+    "full": "Look at `const x = 1` for reference.",
+    "ultra": "Look at `const x = 1` for reference."
+  },
+  {
+    "text": "Try this:\n```ts\nconst x = 1;\n```\nIt works.",
+    "lite": "Try this:\n```ts\nconst x = 1;\n```\nIt works.",
+    "full": "Try this:\n```ts\nconst x = 1;\n```\nIt works.",
+    "ultra": "Try this:\n```ts\nconst x = 1;\n```\nIt works."
+  },
+  {
+    "text": "See https://github.com/cortexkit/magic-context for details.",
+    "lite": "See https://github.com/cortexkit/magic-context for details.",
+    "full": "See https://github.com/cortexkit/magic-context for details.",
+    "ultra": "See https://github.com/cortexkit/magic-context for details."
+  },
+  {
+    "text": "Fix the bug in src/hooks/magic-context/transform.ts.",
+    "lite": "Fix the bug in src/hooks/magic-context/transform.ts.",
+    "full": "Fix bug in src/hooks/magic-context/transform.ts.",
+    "ultra": "Fix bug in src/hooks/magic-context/transform.ts."
+  },
+  {
+    "text": "Committed as ffa0997b, replayed as bcd8816e.",
+    "lite": "Committed as ffa0997b, replayed as bcd8816e.",
+    "full": "Committed as ffa0997b, replayed as bcd8816e.",
+    "ultra": "Committed as ffa0997b, replayed as bcd8816e."
+  },
+  {
+    "text": "See §1234§ for context.",
+    "lite": "See §1234§ for context.",
+    "full": "See §1234§ for context.",
+    "ultra": "See §1234§ for context."
+  },
+  {
+    "text": "In session ses_331acff95ff the issue was seen.",
+    "lite": "In session ses_331acff95ff the issue was seen.",
+    "full": "In session ses_331acff95ff issue seen.",
+    "ultra": "In session ses_331acff95ff issue seen."
+  },
+  {
+    "text": "Narrative text that was really quite verbose.\nU: We should not touch the protected area\nMore narrative.",
+    "lite": "Narrative text that was verbose.\nU: We should not touch the protected area\nMore narrative.",
+    "full": "Narrative text that was verbose.\nU: We should not touch the protected area\nMore narrative.",
+    "ultra": "Narrative text that was verbose.\nU: We should not touch the protected area\nMore narrative."
+  },
+  {
+    "text": "Some narrative.\nU: I just really think we should do this.\n",
+    "lite": "Some narrative.\nU: I just really think we should do this.",
+    "full": "Some narrative.\nU: I just really think we should do this.",
+    "ultra": "Some narrative.\nU: I just really think we should do this."
+  },
+  {
+    "text": "The fix was really just a one-line change.",
+    "lite": "The fix was a one-line change.",
+    "full": "fix was one-line change.",
+    "ultra": "fix was one-line change."
+  },
+  {
+    "text": "I think probably the cache is stale.",
+    "lite": "the cache is stale.",
+    "full": "cache is stale.",
+    "ultra": "cache is stale."
+  },
+  {
+    "text": "Please check the thanks of the log.",
+    "lite": "check the of the log.",
+    "full": "check of log.",
+    "ultra": "check of log."
+  },
+  {
+    "text": "We did this in order to fix the bug.",
+    "lite": "We did this to fix the bug.",
+    "full": "We did this to fix bug.",
+    "ultra": "We did this to fix bug."
+  },
+  {
+    "text": "Fixed the auth middleware.",
+    "lite": "Fixed the auth middleware.",
+    "full": "Fixed auth middleware.",
+    "ultra": "Fixed auth middleware."
+  },
+  {
+    "text": "Fixed the auth middleware in a session.",
+    "lite": "Fixed the auth middleware in a session.",
+    "full": "Fixed auth middleware in session.",
+    "ultra": "Fixed auth middleware in session."
+  },
+  {
+    "text": "The historian was compressed successfully.",
+    "lite": "The historian was compressed successfully.",
+    "full": "historian compressed successfully.",
+    "ultra": "historian compressed successfully."
+  },
+  {
+    "text": "The config key `execute_threshold_percentage` was added.",
+    "lite": "The config key `execute_threshold_percentage` was added.",
+    "full": "config key `execute_threshold_percentage` added.",
+    "ultra": "config key `execute_threshold_percentage` added."
+  },
+  {
+    "text": "Fixed bug and shipped release and updated docs.",
+    "lite": "Fixed bug and shipped release and updated docs.",
+    "full": "Fixed bug and shipped release and updated docs.",
+    "ultra": "Fixed bug + shipped release + updated docs."
+  },
+  {
+    "text": "Committed and then pushed.",
+    "lite": "Committed and then pushed.",
+    "full": "Committed and then pushed.",
+    "ultra": "Committed → pushed."
+  },
+  {
+    "text": "The historian ran. Then historian retried. Then historian succeeded. Historian finished.",
+    "lite": "The historian ran. Then historian retried. Then historian succeeded. Historian finished.",
+    "full": "historian ran. Then historian retried. Then historian succeeded. Historian finished.",
+    "ultra": "hist ran. Then hist retried. Then hist succeeded. Hist finished."
+  },
+  {
+    "text": "The historian ran once.",
+    "lite": "The historian ran once.",
+    "full": "historian ran once.",
+    "ultra": "historian ran once."
+  },
+  {
+    "text": "Historian started. Historian ran. Historian finished successfully.",
+    "lite": "Historian started. Historian ran. Historian finished successfully.",
+    "full": "Historian started. Historian ran. Historian finished successfully.",
+    "ultra": "Hist started. Hist ran. Hist finished successfully."
+  },
+  {
+    "text": "The historian was really running in the background, and it was producing compartments for the session. Basically, the compressor was then merging them in order to fit the budget. Therefore, the output tokens were reduced significantly.",
+    "lite": "The historian was running in the background, and it was producing compartments for the session., the compressor was then merging them to fit the budget. Therefore, the output tokens were reduced significantly.",
+    "full": "historian running in background, and it producing compartments for session., compressor then merging them to fit budget. Therefore, output tokens reduced significantly.",
+    "ultra": "historian running in background, + it producing compartments for session., compressor then merging them to fit budget. →, output tokens reduced significantly."
+  },
+  {
+    "text": "Fixed  the   really   bad   bug.",
+    "lite": "Fixed the bad bug.",
+    "full": "Fixed bad bug.",
+    "ultra": "Fixed bad bug."
+  },
+  {
+    "text": "Line one.   \nLine two.",
+    "lite": "Line one.\nLine two.",
+    "full": "Line one.\nLine two.",
+    "ultra": "Line one.\nLine two."
+  },
+  {
+    "text": "Para one.\n\n\n\nPara two.",
+    "lite": "Para one.\n\nPara two.",
+    "full": "Para one.\n\nPara two.",
+    "ultra": "Para one.\n\nPara two."
+  },
+  {
+    "text": "Committed the live-notification-params fix on feat/context-management as ffa0997b, replayed it onto integrate/athena-context-management as bcd8816e, and rebuilt both branches successfully. The replay was clean; the only remaining integrate dirt was an unrelated pre-existing src/shared/context-limit-resolver.ts modification.",
+    "lite": "Committed the live-notification-params fix on feat/context-management as ffa0997b, replayed it onto integrate/athena-context-management as bcd8816e, and rebuilt both branches successfully. The replay was clean; the only remaining integrate dirt was an unrelated pre-existing src/shared/context-limit-resolver.ts modification.",
+    "full": "Committed live-notification-params fix on feat/context-management as ffa0997b, replayed it onto integrate/athena-context-management as bcd8816e, and rebuilt both branches successfully. replay was clean; only remaining integrate dirt was unrelated pre-existing src/shared/context-limit-resolver.ts modification.",
+    "ultra": "Committed live-notification-params fix on feat/context-management as ffa0997b, replayed it onto integrate/athena-context-management as bcd8816e, + rebuilt both branches successfully. replay was clean; only remaining integrate dirt was unrelated pre-existing src/shared/context-limit-resolver.ts modification."
+  },
+  {
+    "text": "Fixed the really annoying cache bug in the transform. The fix preserved message order.\nU: We need to make sure the protected tail is not touched.\nCommitted and pushed.",
+    "lite": "Fixed the annoying cache bug in the transform. The fix preserved message order.\nU: We need to make sure the protected tail is not touched.\nCommitted and pushed.",
+    "full": "Fixed annoying cache bug in transform. fix preserved message order.\nU: We need to make sure the protected tail is not touched.\nCommitted and pushed.",
+    "ultra": "Fixed annoying cache bug in transform. fix preserved message order.\nU: We need to make sure the protected tail is not touched.\nCommitted + pushed."
+  },
+  {
+    "text": "Hoy es un día para probar la energía de la batería.",
+    "lite": "Hoy es un día para probar la energía de la batería.",
+    "full": "Hoy es un día para probar la energía de la batería.",
+    "ultra": "Hoy es un día para probar la energía de la batería."
+  },
+  {
+    "text": "Hablé con María y con Sofía sobre la policía.",
+    "lite": "Hablé con María y con Sofía sobre la policía.",
+    "full": "Hablé con María y con Sofía sobre la policía.",
+    "ultra": "Hablé con María y con Sofía sobre la policía."
+  },
+  {
+    "text": "Ask María about the café menu.",
+    "lite": "Ask María about the café menu.",
+    "full": "Ask María about café menu.",
+    "ultra": "Ask María about café menu."
+  },
+  {
+    "text": "Text\n```ts\nfunction f() {\n    return 1;\n}\n```\n",
+    "lite": "Text\n```ts\nfunction f() {\n    return 1;\n}\n```",
+    "full": "Text\n```ts\nfunction f() {\n    return 1;\n}\n```",
+    "ultra": "Text\n```ts\nfunction f() {\n    return 1;\n}\n```"
+  },
+  {
+    "text": "Steps:\n1. Build it\nProbably the tests fail.\n\nActually, ship it.",
+    "lite": "Steps:\n1. Build it\nthe tests fail.\n\n, ship it.",
+    "full": "Steps:\n1. Build it\ntests fail.\n\n, ship it.",
+    "ultra": "Steps:\n1. Build it\ntests fail.\n\n, ship it."
+  },
+  {
+    "text": "x\n  maybe just do it\ny",
+    "lite": "x\n do it\ny",
+    "full": "x\n do it\ny",
+    "ultra": "x\n do it\ny"
+  },
+  {
+    "text": "The historian was\ncompressed and the\nresult was fixed.",
+    "lite": "The historian was\ncompressed and the\nresult was fixed.",
+    "full": "historian was\ncompressed and the\nresult fixed.",
+    "ultra": "historian was\ncompressed + the\nresult fixed."
+  },
+  {
+    "text": "Es un día para la energía de la red, and the a team.",
+    "lite": "Es un día para la energía de la red, and the a team.",
+    "full": "Es un día para la energía de la red, and team.",
+    "ultra": "Es un día para la energía de la red, + team."
+  },
+  {
+    "text": "see https://x.io/a﻿then it was fixed and  maybe it is fixed",
+    "lite": "see https://x.io/a﻿then it was fixed and  it is fixed",
+    "full": "see https://x.io/a﻿then it fixed and  it fixed",
+    "ultra": "see https://x.io/a﻿then it fixed +  it fixed"
+  },
+  {
+    "text": "it is ing and was ed but it is red and was en",
+    "lite": "it is ing and was ed but it is red and was en",
+    "full": "it is ing and was ed but it red and was en",
+    "ultra": "it is ing + was ed but it red + was en"
+  },
+  {
+    "text": "msg_abc_def was compressed in ses_x_y and the toolu_Q",
+    "lite": "msg_abc_def was compressed in ses_x_y and the toolu_Q",
+    "full": "msg_abc_def compressed in ses_x_y and toolu_Q",
+    "ultra": "msg_abc_def compressed in ses_x_y + toolu_Q"
+  },
+  {
+    "text": "This is is fixed AND that OR this And then the end",
+    "lite": "This is is fixed AND that OR this And then the end",
+    "full": "This is fixed AND that OR this And then end",
+    "ultra": "This is fixed + that | this → end"
+  },
+  {
+    "text": "it has  been\tfixed and has\nbeen moved, it will  be shipped",
+    "lite": "it has been fixed and has\nbeen moved, it will  be shipped",
+    "full": "it fixed and has\nbeen moved, it shipped",
+    "ultra": "it fixed + has\nbeen moved, it shipped"
+  },
+  {
+    "text": "𝐀a test of 𝐀 a test and Привет a мир",
+    "lite": "𝐀a test of 𝐀 a test and Привет a мир",
+    "full": "𝐀a test of 𝐀 test and Привет мир",
+    "ultra": "𝐀a test of 𝐀 test + Привет мир"
+  },
+  {
+    "text": "committed é1a2b3c4d and the ffa0997b",
+    "lite": "committed é1a2b3c4d and the ffa0997b",
+    "full": "committed é1a2b3c4d and ffa0997b",
+    "ultra": "committed é1a2b3c4d + ffa0997b"
+  },
+  {
+    "text": "U: keep this one\nPerhaps the fix was applied.\nU: and this one",
+    "lite": "U: keep this one\nthe fix was applied.\nU: and this one",
+    "full": "U: keep this one\nfix applied.\nU: and this one",
+    "ultra": "U: keep this one\nfix applied.\nU: and this one"
+  },
+  {
+    "text": "Build it\r\nProbably the tests fail\r\nthanks\r\n",
+    "lite": "Build it\r\nthe tests fail",
+    "full": "Build it\r\ntests fail",
+    "ultra": "Build it\r\ntests fail"
+  },
+  {
+    "text": "contexto context context context Context",
+    "lite": "contexto context context context Context",
+    "full": "contexto context context context Context",
+    "ultra": "contexto ctx ctx ctx Ctx"
+  },
+  {
+    "text": "the cache and a result were updated",
+    "lite": "the cache and a result were updated",
+    "full": "cache and result updated",
+    "ultra": "cache + result updated"
+  },
+  {
+    "text": "٣a test and _a test",
+    "lite": "٣a test and _a test",
+    "full": "٣a test and _a test",
+    "ultra": "٣a test + _a test"
+  },
+  {
+    "text": "Just\nreally\n\n\nmaybe\nPlease",
+    "lite": "",
+    "full": "",
+    "ultra": ""
+  }
+]

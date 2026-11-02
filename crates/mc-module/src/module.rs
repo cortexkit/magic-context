@@ -20,6 +20,7 @@ use ck_contract_draft::read::SessionRef;
 use ck_contract_draft::ride::{RideAnswer, RideRequest};
 use ck_contract_draft::setup::{SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{View, ViewDelivery, ViewGetRequest};
+use ck_contract_draft::wire::PreUserAnswer;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
@@ -32,6 +33,10 @@ use crate::session::Session;
 use crate::store::Store;
 use crate::summary::run;
 use crate::summary::validate::ValidatedChunk;
+
+/// How long a runner waits for `transform.pre_user` before storing the
+/// message as it is.
+pub const PRE_USER_BUDGET: Duration = Duration::from_millis(1_500);
 
 /// A call ck-mc refuses.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +89,11 @@ enum Job {
         name: String,
         input: Value,
         reply: oneshot::Sender<Result<String, String>>,
+    },
+    PreUser {
+        text: String,
+        now: u64,
+        reply: oneshot::Sender<PreUserAnswer>,
     },
     ViewGet(u64, oneshot::Sender<Option<View>>),
     Idle(oneshot::Sender<()>),
@@ -184,6 +194,26 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
             .await
             .map_err(|_| ModuleError::Stopped)?
             .map_err(ModuleError::Tool)
+    }
+
+    /// `transform.pre_user`: what to add to a person's message, within
+    /// [`PRE_USER_BUDGET`]. A session ck-mc does not know, or an answer that
+    /// misses the budget, adds nothing: the message is never held up.
+    pub async fn pre_user(&self, session: &SessionRef, text: &str, now: u64) -> PreUserAnswer {
+        let (reply, answer) = oneshot::channel();
+        let job = Job::PreUser {
+            text: text.to_owned(),
+            now,
+            reply,
+        };
+        if self.send(session, job).is_err() {
+            return PreUserAnswer::default();
+        }
+        tokio::time::timeout(PRE_USER_BUDGET, answer)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default()
     }
 
     /// Wait until the session's worker has handled every job sent before,
@@ -299,6 +329,14 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                             None => Err("the session has not started".into()),
                         };
                         let _ = reply.send(answer);
+                    }
+                    Job::PreUser { text, now, reply } => {
+                        let answer = match &session {
+                            Some(session) => session.pre_user(settings, &text, now).await,
+                            None => PreUserAnswer::default(),
+                        };
+                        let _ = reply.send(answer);
+                        continue;
                     }
                     Job::ViewGet(version, reply) => {
                         let _ =

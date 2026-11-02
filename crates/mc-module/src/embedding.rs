@@ -470,8 +470,9 @@ mod tests {
 
     #[test]
     fn ids_match_the_plugin_for_the_same_configuration() {
-        // Both ids are what the plugin stored for this configuration on the
-        // live store; a different derivation would search nothing.
+        // The ids the TypeScript plugin derives for this configuration, taken
+        // from vectors it stored. A different derivation would find none of
+        // the plugin's vectors.
         let provider = voyage(true);
         assert_eq!(
             provider.model_id(),

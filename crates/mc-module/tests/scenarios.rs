@@ -74,6 +74,9 @@ struct InProcess {
     settings: Settings,
     /// A scratch folder for the stores, when the scenario keeps them.
     stores: Option<std::path::PathBuf>,
+    /// Whether a person's messages go through ck-mc's `pre_user`. Off for
+    /// scenarios about other things, whose transcripts it would change.
+    pre_user: bool,
 }
 
 impl InProcess {
@@ -154,8 +157,20 @@ impl Provider for InProcess {
             .map_err(call_error)
     }
 
-    async fn pre_user(&self, _: &SessionRef, _: &str) -> Result<UserEdit, CallError> {
-        Ok(UserEdit::default())
+    async fn pre_user(
+        &self,
+        session: &SessionRef,
+        text: &str,
+        now: u64,
+    ) -> Result<UserEdit, CallError> {
+        if !self.pre_user {
+            return Ok(UserEdit::default());
+        }
+        let answer = self.module().pre_user(session, text, now).await;
+        Ok(UserEdit {
+            prepend: answer.prepend,
+            append: answer.append,
+        })
     }
 }
 
@@ -212,6 +227,15 @@ async fn start_full(
     settings: Settings,
     stores: Option<std::path::PathBuf>,
 ) -> Runner<InProcess> {
+    start_runner(config, settings, stores, false).await
+}
+
+async fn start_runner(
+    config: SessionConfig,
+    settings: Settings,
+    stores: Option<std::path::PathBuf>,
+    pre_user: bool,
+) -> Runner<InProcess> {
     let client = HostClient::default();
     let provider = InProcess {
         module: Mutex::new(InProcess::new_module(
@@ -222,6 +246,7 @@ async fn start_full(
         client,
         settings,
         stores,
+        pre_user,
     };
     let runner = Runner::start(config, provider).await.unwrap();
     *runner.provider().client.0.lock().unwrap() = Some(runner.host().clone());
@@ -1648,5 +1673,70 @@ async fn ctx_search_finds_commits_and_memories_by_meaning_with_one_embedding_per
         outputs[3]
     );
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn user_texts(host: &Host) -> Vec<String> {
+    host.entries()
+        .iter()
+        .filter(|entry| entry.role == ck_contract_draft::read::Role::User && entry.notice.is_none())
+        .flat_map(|entry| &entry.parts)
+        .filter_map(|part| match &part.body {
+            PartBody::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_persons_message_gets_the_time_since_the_last_one_and_a_hint_of_related_memory() {
+    let dir = scratch("pre-user");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    {
+        let db = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+        db.execute(
+            "INSERT INTO git_commits (sha, project_path, short_sha, message, author, committed_at, indexed_at)
+             VALUES (?1, 'pj-test', 'aaaaaaa', 'Fix zebra parser crash on empty input', 'a', 1, 1)",
+            rusqlite::params!["a".repeat(40)],
+        )
+        .unwrap();
+    }
+    let mut config = config("head", Kind::OpenAi, FREE);
+    config.project = Some(ck_contract_draft::setup::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    });
+    let settings = Settings {
+        git_commits_enabled: true,
+        ..Settings::default()
+    };
+    let mut runner = start_runner(config, settings, Some(dir.clone()), true).await;
+    let mut steps = turn("Start.");
+    steps.extend([
+        Step::Wait { ms: 6 * 60_000 },
+        // Without an embedding provider a hint comes from full-text matches,
+        // which need every word of the prompt.
+        user("Fix zebra parser crash on empty input"),
+        answer(),
+        user("ok"),
+        answer(),
+    ]);
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let texts = user_texts(runner.host());
+    assert_eq!(texts.len(), 3, "{texts:?}");
+    // The first message follows nothing, and the third follows quickly.
+    assert_eq!(texts[0], "Start.");
+    assert_eq!(texts[2], "ok");
+    // The second comes six minutes after the reply before it, and a commit
+    // matches it.
+    assert_eq!(
+        texts[1],
+        "<!-- +6m -->\nFix zebra parser crash on empty input\n\n<ctx-search-hint>\n\
+         Your memory may contain 1 related fragment:\n\
+         - commit aaaaaaa today: Fix zebra parser crash on empty input\n\
+         If the fragments above seem relevant to the current request, you may run ctx_search to retrieve full context. Otherwise ignore.\n\
+         </ctx-search-hint>"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

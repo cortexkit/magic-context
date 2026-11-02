@@ -57,8 +57,9 @@ pub struct Scope<'a> {
     pub semantic: Option<sources::Semantic<'a>>,
 }
 
+/// One search result, from whichever lane found it.
 #[derive(Clone, Debug, PartialEq)]
-enum Hit {
+pub enum Hit {
     Memory(MemoryHit),
     Message(MessageHit),
     Chunk(ChunkHit),
@@ -68,7 +69,7 @@ enum Hit {
 }
 
 impl Hit {
-    fn score(&self) -> f64 {
+    pub fn score(&self) -> f64 {
         match self {
             Hit::Memory(hit) => hit.score,
             Hit::Message(hit) => hit.score,
@@ -651,18 +652,28 @@ fn fuse_history(messages: Vec<MessageHit>, chunks: Vec<ChunkHit>, limit: usize) 
     ranked.into_iter().map(|entry| entry.hit).collect()
 }
 
-/// Run one `ctx_search` call over every lane; a query of memory ids is
-/// answered by [`by_ids`] first.
-pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String, String> {
-    let request = parse(input)?;
+/// Every lane the request asks for, scored, ranked and cut to the request's
+/// limit. An explicit search also uses literal probes and a relaxed query
+/// for messages, and counts live matches for the reply; an automatic one
+/// does neither.
+fn collect(
+    conn: &Connection,
+    scope: &Scope,
+    request: &Request,
+    explicit: bool,
+    diagnostics: &mut Diagnostics,
+) -> Result<Vec<Hit>, String> {
     let (query, dates) = (request.query, request.dates);
     let active = |source: &str| request.active(source);
     let project = project_of(scope)?;
     let visible = visible_memories(conn, project, scope);
-    let mut diagnostics = Diagnostics::default();
     let limit = request.tool_limit.clamp(1, MAX_LIMIT);
     let tier = (limit * 3).max(DEFAULT_LIMIT);
-    let probes = text::literal_probes(query);
+    let probes = if explicit {
+        text::literal_probes(query)
+    } else {
+        Vec::new()
+    };
     let wanted = messages::Query {
         text: query,
         limit: tier,
@@ -687,9 +698,11 @@ pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String
         );
     }
     if active("message") {
-        diagnostics.live_message_matches =
-            messages::count_live_matches(conn, scope.session, query, scope.cutoff, dates);
-        let found = messages::search(conn, scope.session, &wanted, scope.cutoff, true);
+        if explicit {
+            diagnostics.live_message_matches =
+                messages::count_live_matches(conn, scope.session, query, scope.cutoff, dates);
+        }
+        let found = messages::search(conn, scope.session, &wanted, scope.cutoff, explicit);
         let chunks = match scope.semantic {
             Some(semantic) => sources::search_chunks(
                 conn,
@@ -720,6 +733,15 @@ pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String
     }
     hits.sort_by(compare);
     hits.truncate(limit);
+    Ok(hits)
+}
+
+/// Run one `ctx_search` call over every lane; a query of memory ids is
+/// answered by [`by_ids`] first.
+pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String, String> {
+    let request = parse(input)?;
+    let mut diagnostics = Diagnostics::default();
+    let hits = collect(conn, scope, &request, true, &mut diagnostics)?;
     let returned: Vec<i64> = hits
         .iter()
         .filter_map(|hit| match hit {
@@ -733,7 +755,155 @@ pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String
             scope.session
         );
     }
-    Ok(format_results(query, &hits, scope.session, &diagnostics))
+    Ok(format_results(
+        request.query,
+        &hits,
+        scope.session,
+        &diagnostics,
+    ))
+}
+
+/// The sources an automatic hint searches: never primers or notes, whose
+/// updates must not reach a message the model already saw.
+pub const AUTO_SOURCES: [&str; 3] = ["memory", "message", "git_commit"];
+
+/// The hits an automatic memory hint is built from, for a person's prompt:
+/// the plugin's auto-search, ten results over [`AUTO_SOURCES`], no literal
+/// probes, and retrievals not counted. Each comes with the relevance the
+/// hint threshold applies to: word overlap with the prompt for hits found
+/// by words, the hit's own score for hits found by meaning.
+pub fn auto_hits(conn: &Connection, scope: &Scope, prompt: &str) -> Vec<(Hit, f64)> {
+    let request = Request {
+        query: prompt,
+        dates: None,
+        tool_limit: DEFAULT_LIMIT,
+        requested: Some(
+            AUTO_SOURCES
+                .iter()
+                .map(|source| (*source).to_owned())
+                .collect(),
+        ),
+    };
+    let mut diagnostics = Diagnostics::default();
+    collect(conn, scope, &request, false, &mut diagnostics)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|hit| {
+            let relevance = hint_relevance(&hit, prompt);
+            (hit, relevance)
+        })
+        .collect()
+}
+
+fn hint_relevance(hit: &Hit, prompt: &str) -> f64 {
+    let (content, by_words) = match hit {
+        Hit::Memory(hit) => (hit.content.as_str(), hit.match_type != "semantic"),
+        Hit::Message(hit) => (hit.content.as_str(), true),
+        Hit::Chunk(hit) => (hit.title.as_str(), false),
+        Hit::Commit(hit) => (hit.content.as_str(), hit.match_type != "semantic"),
+        Hit::Primer(hit) => (hit.content.as_str(), hit.match_type != "semantic"),
+        Hit::Note(hit) => (hit.content.as_str(), true),
+    };
+    if text::clean_search_text(content).is_empty() {
+        0.0
+    } else if by_words {
+        text::keyword_relevance(prompt, content)
+    } else {
+        hit.score()
+    }
+}
+
+/// The `<ctx-search-hint>` block for the hits that reach `threshold`, most
+/// relevant first, at most three fragments of about 80 characters, each
+/// compressed to its gist so it reads as a vague recall that invites a
+/// `ctx_search` rather than an answer. `None` when nothing qualifies.
+pub fn build_hint(hits: Vec<(Hit, f64)>, threshold: f64, prompt: &str, now: i64) -> Option<String> {
+    const MAX_FRAGMENTS: usize = 3;
+    const FRAGMENT_CHARS: usize = 80;
+    const MAX_HINT_CHARS: usize = 800;
+    let mut chosen: Vec<(Hit, f64)> = hits
+        .into_iter()
+        .filter(|(_, relevance)| *relevance >= threshold)
+        .collect();
+    // Stable, so fragments of equal relevance keep the search's order.
+    chosen.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let ultra = |text: &str| {
+        crate::caveman::compress(
+            &text::clean_search_text(text),
+            crate::caveman::CavemanLevel::Ultra,
+        )
+    };
+    let lines: Vec<String> = chosen
+        .iter()
+        .take(MAX_FRAGMENTS)
+        .map(|(hit, _)| match hit {
+            Hit::Commit(hit) => {
+                let subject = text::clean_search_text(hit.content.lines().next().unwrap_or(""));
+                format!(
+                    "commit {} {}: {}",
+                    hit.short_sha,
+                    age(hit.committed_at, now),
+                    truncate(&subject, FRAGMENT_CHARS.saturating_sub(20).max(10))
+                )
+            }
+            Hit::Message(hit) => truncate(
+                &crate::caveman::compress(
+                    &text::matched_snippet(&hit.content, prompt, FRAGMENT_CHARS),
+                    crate::caveman::CavemanLevel::Ultra,
+                ),
+                FRAGMENT_CHARS,
+            ),
+            Hit::Chunk(hit) => truncate(&ultra(&hit.title), FRAGMENT_CHARS),
+            Hit::Memory(hit) => truncate(&ultra(&hit.content), FRAGMENT_CHARS),
+            Hit::Primer(hit) => truncate(&ultra(&hit.content), FRAGMENT_CHARS),
+            Hit::Note(hit) => truncate(&ultra(&hit.content), FRAGMENT_CHARS),
+        })
+        .filter(|fragment| !fragment.is_empty())
+        .map(|fragment| format!("- {fragment}"))
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let header = if lines.len() == 1 {
+        "Your memory may contain 1 related fragment:".to_owned()
+    } else {
+        format!("Your memory may contain {} related fragments:", lines.len())
+    };
+    let footer = "If the fragments above seem relevant to the current request, you may run ctx_search to retrieve full context. Otherwise ignore.";
+    let body = std::iter::once(header)
+        .chain(lines)
+        .chain(std::iter::once(footer.to_owned()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let wrapped = format!("<ctx-search-hint>\n{body}\n</ctx-search-hint>");
+    let length = text::utf16_len(&wrapped);
+    if length <= MAX_HINT_CHARS {
+        return Some(wrapped);
+    }
+    // Cut the body's tail, keeping the wrapper.
+    let keep = text::utf16_len(&body).saturating_sub(length - MAX_HINT_CHARS + 1);
+    let trimmed = text::utf16_prefix(&body, keep);
+    Some(format!(
+        "<ctx-search-hint>\n{}…\n</ctx-search-hint>",
+        trimmed.trim_end()
+    ))
+}
+
+/// Collapse whitespace and cut to `limit` UTF-16 units with an ellipsis.
+fn truncate(text: &str, limit: usize) -> String {
+    let normalized = text::collapse_whitespace(text);
+    if text::utf16_len(&normalized) <= limit {
+        return normalized;
+    }
+    format!(
+        "{}…",
+        text::utf16_prefix(&normalized, limit.saturating_sub(1)).trim_end()
+    )
 }
 
 #[cfg(test)]

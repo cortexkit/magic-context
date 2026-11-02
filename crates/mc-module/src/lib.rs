@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 
 pub mod calibration;
+pub mod caveman;
 pub mod client;
 pub mod config;
 pub mod content_language;
@@ -36,6 +37,7 @@ pub mod memory_writes;
 pub mod module;
 pub mod notes;
 pub mod pass;
+pub mod pre_user;
 pub mod preset;
 pub mod project_docs;
 pub mod reads;

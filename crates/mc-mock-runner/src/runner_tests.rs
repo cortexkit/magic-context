@@ -128,7 +128,7 @@ impl Provider for TestProvider {
         Ok(format!("{name} done"))
     }
 
-    async fn pre_user(&self, _: &SessionRef, _: &str) -> Result<UserEdit, CallError> {
+    async fn pre_user(&self, _: &SessionRef, _: &str, _: u64) -> Result<UserEdit, CallError> {
         Ok(UserEdit::default())
     }
 }

@@ -10,7 +10,7 @@ use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendReque
 use ck_contract_draft::view::{
     ViewCurrentAnswer, ViewCurrentRequest, ViewPublishAnswer, ViewPublishRequest,
 };
-use ck_contract_draft::wire::{self, codes, PreUserAnswer, ToolCallAnswer, ToolCallRequest};
+use ck_contract_draft::wire::{self, codes, PreUserRequest, ToolCallAnswer, ToolCallRequest};
 use ck_contract_draft::{ops, COMPACTION_PROVIDES};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -180,7 +180,12 @@ impl Handler {
                 Ok(serde_json::to_value(answer).expect("answers serialize"))
             }
             wire::ops::PRE_USER => {
-                Ok(serde_json::to_value(PreUserAnswer::default()).expect("answers serialize"))
+                let request: PreUserRequest = wire::params(params).map_err(bad)?;
+                let answer = self
+                    .module
+                    .pre_user(&request.session, &request.text, request.now)
+                    .await;
+                Ok(serde_json::to_value(answer).expect("answers serialize"))
             }
             other => {
                 return Err((

@@ -132,10 +132,16 @@ impl Provider for SubcProvider {
         }
     }
 
-    async fn pre_user(&self, session: &SessionRef, text: &str) -> Result<UserEdit, CallError> {
+    async fn pre_user(
+        &self,
+        session: &SessionRef,
+        text: &str,
+        now: u64,
+    ) -> Result<UserEdit, CallError> {
         let request = PreUserRequest {
             session: session.clone(),
             text: text.to_owned(),
+            now,
         };
         let answer: PreUserAnswer = self.call(session, wire::ops::PRE_USER, &request).await?;
         Ok(UserEdit {

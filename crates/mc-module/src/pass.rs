@@ -52,6 +52,31 @@ pub struct Settings {
     /// The embedding provider `ctx_search` scores by meaning with; `None`
     /// leaves search to its word lanes.
     pub embedding: Option<crate::embedding::Provider>,
+    /// `temporal_awareness`: a person's message after a gap of five minutes
+    /// or more starts with a marker saying how long it was.
+    pub temporal_awareness: bool,
+    /// `memory.auto_search`: memory hints on a person's message.
+    pub auto_search: AutoSearch,
+}
+
+/// When a person's message gets a memory hint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutoSearch {
+    pub enabled: bool,
+    /// The relevance a fragment needs to appear in the hint.
+    pub score_threshold: f64,
+    /// Shorter prompts get no hint: too little to search with.
+    pub min_prompt_chars: usize,
+}
+
+impl Default for AutoSearch {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            score_threshold: 0.6,
+            min_prompt_chars: 20,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -69,6 +94,8 @@ impl Default for Settings {
             memory_enabled: true,
             git_commits_enabled: false,
             embedding: None,
+            temporal_awareness: true,
+            auto_search: AutoSearch::default(),
         }
     }
 }
