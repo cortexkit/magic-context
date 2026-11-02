@@ -7,9 +7,10 @@ use std::collections::BTreeSet;
 use ck_contract_draft::notice::{Conditions, Event, NoticeRequest};
 use ck_contract_draft::read::{Cursor, Detail, ReadRequest, Select, SessionRef};
 use ck_contract_draft::ride::{RideCause, RideRequest};
+use ck_contract_draft::send::{Delivery, SendRequest};
 use ck_contract_draft::setup::SetupRequest;
 use ck_contract_draft::view::{
-    View, ViewCurrentRequest, ViewDelivery, ViewPublishAnswer, ViewPublishRequest,
+    EditOp, View, ViewCurrentRequest, ViewDelivery, ViewPublishAnswer, ViewPublishRequest,
 };
 use serde_json::Value;
 
@@ -19,6 +20,7 @@ use crate::lanes;
 use crate::pass::{self, Settings};
 use crate::preset::Features;
 use crate::reduce;
+use crate::tokens;
 use crate::view_builder;
 
 /// How many bytes one catch-up read asks for at most.
@@ -44,6 +46,12 @@ pub struct Session {
     /// one waits until usage leaves the band, or a pass rewrites anyway, so
     /// the band never trickles one rewrite per pass.
     emergency_latched: bool,
+    /// The model was asked to call `ctx_keep` during this stay over the
+    /// execute threshold; it is not asked again until usage falls below it.
+    keep_requested: bool,
+    /// What a `ctx_keep` call asked to keep. The next notice builds the view
+    /// that keeps only that, whatever the usage: the model asked for it.
+    pending_keep: Option<BTreeSet<lanes::PartKey>>,
     /// The highest notice number handled.
     seq: u64,
 }
@@ -60,6 +68,8 @@ impl Session {
             queued: BTreeSet::new(),
             reclaim_bookmark: 0,
             emergency_latched: false,
+            keep_requested: false,
+            pending_keep: None,
             seq: 0,
         }
     }
@@ -116,14 +126,68 @@ impl Session {
         if !pass::in_force_band(&self.conditions, settings) {
             self.emergency_latched = false;
         }
+        let execute = pass::at_execute(&self.conditions, settings);
+        if !execute {
+            self.keep_requested = false;
+        }
+        if let Some(kept) = self.pending_keep.take() {
+            if let Some(view) = self.build_keep(settings, &kept) {
+                self.publish(client, view).await;
+            }
+            self.keep_requested = false;
+            return;
+        }
         let force = pass::in_force_band(&self.conditions, settings);
-        if pass::at_execute(&self.conditions, settings)
+        if execute
             && (force || !self.summary_on_its_way())
             && !pass::signed_thinking_hold(self.index.entries(), &self.conditions, settings)
         {
-            if let Some(view) = self.build(settings, None) {
+            let (view, freed) = self.build(settings, None);
+            if let Some(view) = view {
                 self.publish(client, view).await;
             }
+            self.ask_for_keep_if_short(client, settings, freed).await;
+        }
+    }
+
+    /// After a pass at the execute threshold, a session with `ctx_keep` whose
+    /// lanes freed (or lined up) less than `keep_min_recovery_percentage` of
+    /// the usable window is asked, once per stay over the threshold, to call `ctx_keep`.
+    /// The request goes as a notice message: the model has to act on it, and
+    /// no tool result may come before the context runs out.
+    async fn ask_for_keep_if_short<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        settings: &Settings,
+        freed: u64,
+    ) {
+        let usable = pass::usable_window(&self.conditions);
+        if !self.features.ctx_keep
+            || self.keep_requested
+            || usable == 0
+            || freed as f64 >= usable as f64 * settings.keep_min_recovery_percentage / 100.0
+        {
+            return;
+        }
+        let usage = pass::usage(&self.conditions).unwrap_or(0.0) * 100.0;
+        let text = format!(
+            "Your context is {usage:.0}% full, and dropping old tool output freed only {freed} tokens. \
+             Call ctx_keep now. In `tags`, list the tags you still need, most important first. \
+             In `note`, write a few lines on where you are and what comes next. \
+             Everything else before that call, except your task, is then removed."
+        );
+        let request = SendRequest {
+            session: self.key.clone(),
+            text,
+            template: Some(KEEP_TEMPLATE.into()),
+            delivery: vec![Delivery::Steer],
+        };
+        match client.send(request).await {
+            Ok(_) => self.keep_requested = true,
+            Err(error) => eprintln!(
+                "ck-mc: session {}: session.send failed: {error:?}",
+                self.key.session
+            ),
         }
     }
 
@@ -133,7 +197,7 @@ impl Session {
         self.conditions = ride.conditions.clone();
         let over_limit =
             (ride.cause == RideCause::OverLimit).then_some(ride.request_tokens.unwrap_or(0));
-        let view = self.build(settings, over_limit)?;
+        let view = self.build(settings, over_limit).0?;
         self.accept(view.clone());
         Some(view)
     }
@@ -143,11 +207,76 @@ impl Session {
     }
 
     /// A `ctx_*` tool call.
-    pub fn tool(&mut self, name: &str, input: &Value) -> Result<String, String> {
+    pub fn tool(
+        &mut self,
+        settings: &Settings,
+        name: &str,
+        input: &Value,
+    ) -> Result<String, String> {
         match name {
             "ctx_reduce" => self.ctx_reduce(input),
+            "ctx_keep" if self.features.ctx_keep => self.ctx_keep(settings, input),
             other => Err(format!("unknown tool {other}")),
         }
+    }
+
+    /// `ctx_keep`: the model names what it still needs, in order of
+    /// importance. Tags are kept in that order up to `keep_max_percentage`
+    /// of the usable window; the rest are named in the answer rather than
+    /// refused, since a refusal would only cost another turn.
+    fn ctx_keep(&mut self, settings: &Settings, input: &Value) -> Result<String, String> {
+        let spec = input.get("tags").and_then(Value::as_str).ok_or(
+            "ctx_keep needs `tags`, the tags to keep, most important first, such as \"12,3-5\"",
+        )?;
+        if input
+            .get("note")
+            .and_then(Value::as_str)
+            .is_none_or(|note| note.trim().is_empty())
+        {
+            return Err(
+                "ctx_keep needs `note`: a few lines on where you are and what comes next".into(),
+            );
+        }
+        let tags = reduce::parse_tags_in_order(spec)?;
+        let cap = (pass::usable_window(&self.conditions) as f64 * settings.keep_max_percentage
+            / 100.0) as u64;
+        let mut kept = BTreeSet::new();
+        let (mut kept_tags, mut over, mut missing) = (Vec::new(), Vec::new(), Vec::new());
+        let mut used = 0;
+        for tag in tags {
+            let Some((entry, part)) = self.index.find_tag(tag) else {
+                missing.push(tag);
+                continue;
+            };
+            let cost = tokens::part(part);
+            if used + cost > cap {
+                over.push(tag);
+                continue;
+            }
+            used += cost;
+            kept.insert((entry.mid.clone(), part.id.clone()));
+            kept_tags.push(tag);
+        }
+        let mut answer = if kept_tags.is_empty() {
+            "Keeping only your task and the newest items.".to_owned()
+        } else {
+            format!(
+                "Keeping {} (about {used} tokens), with your task and the newest items.",
+                list(&kept_tags)
+            )
+        };
+        answer.push_str(" Everything else before this call is removed before your next step.");
+        if !over.is_empty() {
+            answer.push_str(&format!(
+                " Not kept, over the limit of {cap} tokens: {}.",
+                list(&over)
+            ));
+        }
+        if !missing.is_empty() {
+            answer.push_str(&format!(" Not found: {}.", list(&missing)));
+        }
+        self.pending_keep = Some(kept);
+        Ok(answer)
     }
 
     fn ctx_reduce(&mut self, input: &Value) -> Result<String, String> {
@@ -207,7 +336,10 @@ impl Session {
     /// `over_limit` carries the runner's estimate of a request that would not
     /// fit, for a ride that says so: the emergency drop then runs whatever
     /// the usage, with the protections that can yield yielding.
-    fn build(&mut self, settings: &Settings, over_limit: Option<u64>) -> Option<View> {
+    ///
+    /// Also returns roughly how many tokens the new edits free, plus what the
+    /// age sweep has lined up for the next pass.
+    fn build(&mut self, settings: &Settings, over_limit: Option<u64>) -> (Option<View>, u64) {
         let edited = lanes::Edited::of(self.latest.as_ref());
         let context = lanes::Context {
             index: &self.index,
@@ -261,7 +393,51 @@ impl Session {
             }
         }
         let bookmark = lanes::far_behind_bookmark(&context, usable);
+        // The age sweep only drops on the pass after the one that sees an
+        // output far behind, so the first pass over the threshold frees
+        // little by design. What it has lined up for the next pass counts as
+        // relief too, or every session would be asked for ctx_keep on its
+        // first crossing.
+        let lined_up: Vec<lanes::PartKey> =
+            lanes::age_sweep(&context, bookmark.max(self.reclaim_bookmark))
+                .into_iter()
+                .map(|(key, _)| key)
+                .filter(|key| !covered.contains(key))
+                .collect();
+        let freed = freed_tokens(&context, &covered) + freed_tokens(&context, &lined_up);
         self.reclaim_bookmark = self.reclaim_bookmark.max(bookmark);
+        (self.seal(ops, &covered), freed)
+    }
+
+    /// The view that keeps only what a `ctx_keep` call asked for (see
+    /// [`lanes::keep_drops`]), plus every other lane's work, which rides the
+    /// same rewrite.
+    fn build_keep(&mut self, settings: &Settings, kept: &BTreeSet<lanes::PartKey>) -> Option<View> {
+        let edited = lanes::Edited::of(self.latest.as_ref());
+        let context = lanes::Context {
+            index: &self.index,
+            edited: &edited,
+            protected_tools: &settings.protected_tools,
+            keep_first_message: self.features.keep_first_message,
+        };
+        let usable = pass::usable_window(&self.conditions);
+        let floor = settings
+            .protected_tokens
+            .unwrap_or_else(|| lanes::default_protected_tokens(usable));
+        let cutoff = lanes::protected_cutoff(&context, floor);
+        let mut wanted: Vec<(lanes::PartKey, lanes::Shape)> = self
+            .queued
+            .iter()
+            .map(|key| (key.clone(), lanes::Shape::Default))
+            .collect();
+        wanted.extend(lanes::keep_drops(&context, kept, cutoff));
+        let (ops, covered) = lanes::drop_ops(&context, &wanted);
+        self.seal(ops, &covered)
+    }
+
+    /// Turn a pass's edits into the next view, and forget the queued drops
+    /// it covers.
+    fn seal(&mut self, ops: Vec<EditOp>, covered: &[lanes::PartKey]) -> Option<View> {
         let version = self.version + 1;
         let built = view_builder::next_view(
             self.latest.as_ref(),
@@ -270,7 +446,7 @@ impl Session {
             &self.conditions.rules,
             version,
         );
-        for part in &covered {
+        for part in covered {
             self.queued.remove(part);
         }
         match built {
@@ -435,4 +611,18 @@ fn list(tags: &[u64]) -> String {
         .map(|tag| format!("§{tag}§"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The template name of the request to call `ctx_keep`.
+pub const KEEP_TEMPLATE: &str = "mc.ctx_keep";
+
+/// Roughly what dropping `covered` frees: the parts not already changed by
+/// an earlier view.
+fn freed_tokens(context: &lanes::Context, covered: &[lanes::PartKey]) -> u64 {
+    covered
+        .iter()
+        .filter(|(mid, part)| !context.edited.covers(mid, part))
+        .filter_map(|(mid, part)| context.index.find(mid, part))
+        .map(|(_, part)| tokens::part(part))
+        .sum()
 }

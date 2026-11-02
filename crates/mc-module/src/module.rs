@@ -202,7 +202,7 @@ impl<C: RunnerClient> Module<C> {
                     }
                     Job::Tool { name, input, reply } => {
                         let answer = match &mut session {
-                            Some(session) => session.tool(&name, &input),
+                            Some(session) => session.tool(&inner.settings, &name, &input),
                             None => Err("the session has not started".into()),
                         };
                         let _ = reply.send(answer);

@@ -12,6 +12,7 @@ use ck_contract_draft::part::PartBody;
 use ck_contract_draft::read::{ReadPage, ReadRequest, SessionRef};
 use ck_contract_draft::ride::{RideAnswer, RideCause, RideRequest};
 use ck_contract_draft::rules::{EditCost, ProviderRules, SignedReasoning};
+use ck_contract_draft::send::{SendAnswer, SendRequest};
 use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{
     View, ViewCurrentAnswer, ViewCurrentRequest, ViewGetRequest, ViewPublishAnswer,
@@ -52,6 +53,10 @@ impl RunnerClient for HostClient {
 
     async fn current(&self, _: ViewCurrentRequest) -> Result<ViewCurrentAnswer, ClientError> {
         Ok(self.host()?.current())
+    }
+
+    async fn send(&self, request: SendRequest) -> Result<SendAnswer, ClientError> {
+        Ok(self.host()?.send(request))
     }
 }
 
@@ -651,4 +656,68 @@ async fn a_request_over_the_limit_gets_a_view_where_the_protections_yield() {
         assert_eq!(seen(host, tag), None, "{tag}");
     }
     assert_eq!(seen(host, 9).as_deref(), Some(placeholder(9).as_str()));
+}
+
+/// A step where the model writes a long reply of about `tokens` tokens.
+fn long_reply(tokens: usize) -> Step {
+    Step::Model(Turn {
+        text: Some("z".repeat(tokens * 4)),
+        output_tokens: tokens as u64,
+        ..Turn::default()
+    })
+}
+
+#[tokio::test]
+async fn a_worker_that_cannot_free_enough_is_asked_for_ctx_keep_and_keeps_only_what_it_names() {
+    // Four long replies of about 7,000 tokens each (tags 2 to 5) take the
+    // worker over its threshold. Replies are the model's own words, which no
+    // lane drops, so the pass frees nothing and the worker is asked to call
+    // ctx_keep (the notice takes tag 7). It keeps the reply at tag 3. The
+    // view then keeps the task, tag 3, and the ctx_keep message (tags 8 and
+    // 9) with what follows; the protected tail starts at the ctx_keep call,
+    // the only tool call.
+    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    runner
+        .play(&[
+            user("Review the module."),
+            long_reply(7_000),
+            long_reply(7_000),
+            long_reply(7_000),
+            long_reply(7_000),
+            answer(),
+            step(
+                "Keeping what matters.",
+                vec![ToolCall::ok(
+                    "ctx_keep",
+                    json!({"tags": "3", "note": "Drafted the review; next: tighten it."}),
+                    "",
+                )],
+            ),
+            answer(),
+        ])
+        .await;
+    assert_clean(&runner);
+    let host = runner.host();
+    let asked = host
+        .entries()
+        .iter()
+        .filter(|entry| {
+            entry
+                .notice
+                .as_ref()
+                .and_then(|notice| notice.template.as_deref())
+                == Some("mc.ctx_keep")
+        })
+        .count();
+    assert_eq!(asked, 1);
+    assert!(seen(host, 1).unwrap().starts_with("§1§ Review"));
+    for tag in [2, 4, 5, 6, 7] {
+        assert_eq!(
+            seen(host, tag).as_deref(),
+            Some(placeholder(tag).as_str()),
+            "{tag}"
+        );
+    }
+    assert!(seen(host, 3).unwrap().starts_with("§3§ zzz"));
+    assert!(seen(host, 9).unwrap().contains("Keeping §3§"));
 }

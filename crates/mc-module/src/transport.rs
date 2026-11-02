@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ck_contract_draft::read::{ReadPage, ReadRequest, SessionRef};
+use ck_contract_draft::send::{SendAnswer, SendRequest};
 use ck_contract_draft::view::{
     ViewCurrentAnswer, ViewCurrentRequest, ViewPublishAnswer, ViewPublishRequest,
 };
@@ -117,6 +118,11 @@ impl RunnerClient for SubcRunnerClient {
 
     async fn current(&self, request: ViewCurrentRequest) -> Result<ViewCurrentAnswer, ClientError> {
         self.call(&request.session.clone(), ops::VIEW_CURRENT, &request)
+            .await
+    }
+
+    async fn send(&self, request: SendRequest) -> Result<SendAnswer, ClientError> {
+        self.call(&request.session.clone(), ops::SESSION_SEND, &request)
             .await
     }
 }

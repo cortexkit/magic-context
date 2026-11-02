@@ -31,6 +31,13 @@ pub struct Settings {
     /// Tokens of the newest tool output the routine heuristics leave alone;
     /// derived from the usable window when not set.
     pub protected_tokens: Option<u64>,
+    /// For sessions with `ctx_keep`: when a pass at the execute threshold
+    /// frees less than this share of the usable window, the model is asked to
+    /// call `ctx_keep`. 100 asks on every such pass.
+    pub keep_min_recovery_percentage: f64,
+    /// What `ctx_keep` may keep, as a share of the usable window. Tags past
+    /// it, in the order the model listed them, are not kept.
+    pub keep_max_percentage: f64,
 }
 
 impl Default for Settings {
@@ -40,6 +47,8 @@ impl Default for Settings {
             keep_reasoning_tokens: 10_000,
             protected_tools: BTreeMap::from([("todowrite".into(), 1), ("ctx_reduce".into(), 3)]),
             protected_tokens: None,
+            keep_min_recovery_percentage: 30.0,
+            keep_max_percentage: 30.0,
         }
     }
 }

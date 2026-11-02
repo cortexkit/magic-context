@@ -6,6 +6,27 @@
 /// cannot make a call expand into millions of numbers.
 pub const MAX_RANGE: u64 = 10_000;
 
+/// Parse a tag list like [`parse_tags`], keeping the order given and the
+/// first of any repeat.
+pub fn parse_tags_in_order(spec: &str) -> Result<Vec<u64>, String> {
+    let mut tags = Vec::new();
+    for item in spec.split(',') {
+        let item = item.trim();
+        if item.chars().all(|c| c == '§' || c.is_whitespace()) {
+            continue;
+        }
+        for tag in parse_tags(item)? {
+            if !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+    }
+    if tags.is_empty() {
+        return Err("no tag numbers given".into());
+    }
+    Ok(tags)
+}
+
 /// Parse a drop list such as `3-5,8,§12§`: numbers and inclusive ranges,
 /// separated by commas, with optional section signs around a number.
 pub fn parse_tags(spec: &str) -> Result<Vec<u64>, String> {

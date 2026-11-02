@@ -13,6 +13,11 @@ pub struct Features {
     /// The session's first message is its task, and is never dropped, not
     /// even when the model asks for it.
     pub keep_first_message: bool,
+    /// When the automatic lanes cannot free enough, the model is asked to
+    /// call `ctx_keep`: it names what it still needs, and everything else
+    /// goes. For sessions with no summarizer, whose own reasoning and replies
+    /// otherwise pile up.
+    pub ctx_keep: bool,
 }
 
 /// The features of a preset, or `None` for a preset Magic Context does not
@@ -22,10 +27,12 @@ pub fn features(preset: &str) -> Option<Features> {
         "head" => Some(Features {
             summarizer: true,
             keep_first_message: false,
+            ctx_keep: false,
         }),
         "worker" | "reader" => Some(Features {
             summarizer: false,
             keep_first_message: true,
+            ctx_keep: true,
         }),
         _ => None,
     }

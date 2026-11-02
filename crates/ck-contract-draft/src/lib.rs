@@ -31,6 +31,7 @@ pub mod part;
 pub mod read;
 pub mod ride;
 pub mod rules;
+pub mod send;
 pub mod setup;
 pub mod view;
 pub mod wire;
@@ -63,4 +64,6 @@ pub mod ops {
     /// Served by the runner: the view it currently applies, for a provider
     /// whose own copy is missing or older (for example after a store restore).
     pub const VIEW_CURRENT: &str = "view.current";
+    /// Served by the runner: queue text for the model ([`crate::send`]).
+    pub const SESSION_SEND: &str = "session.send";
 }

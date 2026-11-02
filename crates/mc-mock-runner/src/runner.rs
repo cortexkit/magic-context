@@ -21,6 +21,7 @@ use ck_contract_draft::read::{
 };
 use ck_contract_draft::ride::{RideAnswer, RideCause, RideRequest, CONTEXT_CEILING};
 use ck_contract_draft::rules::{self, ProviderRules};
+use ck_contract_draft::send::{Delivery, SendAnswer, SendRequest};
 use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{
     self, edits_for_transcript, RenderedMessage, View, ViewCurrentAnswer, ViewDelivery,
@@ -95,24 +96,6 @@ pub trait Provider {
         session: &SessionRef,
         text: &str,
     ) -> impl Future<Output = Result<UserEdit, CallError>>;
-}
-
-/// How a queued reminder may be delivered, in the sender's order of
-/// preference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Delivery {
-    /// Appended to the next tool result, the first time that result is sent.
-    ToolResult,
-    /// Stored as a notice message before the next model request.
-    Steer,
-}
-
-/// A reminder the provider queued with `session.send`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SendRequest {
-    pub text: String,
-    pub template: Option<String>,
-    pub delivery: Vec<Delivery>,
 }
 
 /// What a scenario run observed, for its assertions.
@@ -298,8 +281,9 @@ impl Host {
     }
 
     /// `session.send`: queue a reminder.
-    pub fn send(&self, request: SendRequest) {
+    pub fn send(&self, request: SendRequest) -> SendAnswer {
         self.lock().reminders.push(request);
+        SendAnswer::Queued
     }
 
     pub fn session(&self) -> SessionRef {

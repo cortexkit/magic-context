@@ -759,6 +759,40 @@ pub fn emergency_drop(
     selected
 }
 
+/// The parts a `ctx_keep` view drops: everything before the message holding
+/// the `ctx_keep` call, except the session's first message when it keeps it,
+/// the parts the model asked to keep, and the protected tail. The call's
+/// message and everything after it stay, so the model sees its own note.
+pub fn keep_drops(
+    context: &Context,
+    kept: &BTreeSet<PartKey>,
+    cutoff: Option<u64>,
+) -> Vec<(PartKey, Shape)> {
+    let entries = context.index.entries();
+    let Some(call_at) = entries.iter().rposition(|entry| {
+        entry
+            .parts
+            .iter()
+            .any(|part| matches!(&part.body, PartBody::Tool(tool) if tool.name == "ctx_keep"))
+    }) else {
+        return Vec::new();
+    };
+    let mut drops = Vec::new();
+    for (position, entry) in entries[..call_at].iter().enumerate() {
+        if position == 0 && context.keep_first_message {
+            continue;
+        }
+        for part in &entry.parts {
+            let key = (entry.mid.clone(), part.id.clone());
+            if kept.contains(&key) || in_tail(part, cutoff) {
+                continue;
+            }
+            drops.push((key, Shape::Whole));
+        }
+    }
+    drops
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
