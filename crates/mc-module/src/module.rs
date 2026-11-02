@@ -29,6 +29,7 @@ use crate::config::Config;
 use crate::context_db::ContextDb;
 use crate::pass::Settings;
 use crate::preset;
+use crate::route::Route;
 use crate::session::Session;
 use crate::store::Store;
 use crate::summary::run;
@@ -80,7 +81,7 @@ struct Inner<C> {
 }
 
 enum Job {
-    Setup(SetupRequest, preset::Features),
+    Setup(Route, SetupRequest, preset::Features),
     Notice(NoticeRequest),
     Ride(RideRequest, oneshot::Sender<Option<View>>),
     Tool {
@@ -116,20 +117,20 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
         }
     }
 
-    /// `compaction.setup`. Answers at once; the session reads its transcript
-    /// afterwards, on its worker.
-    pub fn setup(&self, request: SetupRequest) -> Result<SetupAnswer, ModuleError> {
+    /// `compaction.setup` for the session `route` is bound to. Answers at
+    /// once; the session reads its transcript afterwards, on its worker.
+    pub fn setup(&self, route: Route, request: SetupRequest) -> Result<SetupAnswer, ModuleError> {
         let features = preset::features(&request.preset)
             .ok_or_else(|| ModuleError::UnknownPreset(request.preset.clone()))?;
         let worker = {
             let mut workers = self.inner.workers.lock().expect("worker map");
             workers
-                .entry(request.session.clone())
+                .entry(route.session.clone())
                 .or_insert_with(|| self.spawn_worker())
                 .clone()
         };
         worker
-            .send(Job::Setup(request, features))
+            .send(Job::Setup(route, request, features))
             .map_err(|_| ModuleError::Stopped)?;
         Ok(SetupAnswer::Ready)
     }
@@ -137,8 +138,12 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
     /// `compaction.notice`. Answers at once; the work runs afterwards. A
     /// session ck-mc does not know (it restarted since the runner's Setup)
     /// asks the runner to call Setup again.
-    pub fn notice(&self, request: NoticeRequest) -> Result<NoticeAnswer, ModuleError> {
-        match self.send(&request.session.clone(), Job::Notice(request)) {
+    pub fn notice(
+        &self,
+        session: &SessionRef,
+        request: NoticeRequest,
+    ) -> Result<NoticeAnswer, ModuleError> {
+        match self.send(session, Job::Notice(request)) {
             Ok(()) => Ok(NoticeAnswer::Received),
             Err(ModuleError::UnknownSession) => Ok(NoticeAnswer::SetupRequired),
             Err(error) => Err(error),
@@ -148,10 +153,14 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
     /// `compaction.ride`: a view for the coming request, or nothing, within
     /// the runner's deadline. A ride that misses its deadline answers
     /// nothing; the runner then sends with the view it has.
-    pub async fn ride(&self, request: RideRequest) -> Result<RideAnswer, ModuleError> {
+    pub async fn ride(
+        &self,
+        session: &SessionRef,
+        request: RideRequest,
+    ) -> Result<RideAnswer, ModuleError> {
         let deadline = Duration::from_millis(request.deadline_ms);
         let (reply, answer) = oneshot::channel();
-        self.send(&request.session.clone(), Job::Ride(request, reply))?;
+        self.send(session, Job::Ride(request, reply))?;
         match tokio::time::timeout(deadline, answer).await {
             Ok(Ok(Some(view))) => Ok(RideAnswer::View { view }),
             Ok(Ok(None)) | Err(_) => Ok(RideAnswer::Nothing),
@@ -244,11 +253,8 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
             while let Some(job) = receiver.recv().await {
                 let settings: Settings = match (&job, &session) {
                     (Job::Idle(_), _) => Settings::default(),
-                    (Job::Setup(request, _), _) => inner.config.resolve(
-                        request
-                            .project
-                            .as_ref()
-                            .map(|project| project.root.as_str()),
+                    (Job::Setup(route, request, _), _) => inner.config.resolve(
+                        route.project.as_ref().map(|project| project.root.as_str()),
                         &format!("{}/{}", request.model.provider, request.model.model),
                         request
                             .context_window
@@ -262,24 +268,25 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                 };
                 let settings = &settings;
                 match job {
-                    Job::Setup(request, features) => match &mut session {
+                    Job::Setup(route, request, features) => match &mut session {
                         Some(existing) => {
                             existing
-                                .setup(&inner.client, settings, &request, features)
+                                .setup(&inner.client, settings, &route, &request, features)
                                 .await
                         }
                         None => {
-                            let mut fresh = Session::new(&request, features, inner.db.clone());
+                            let mut fresh =
+                                Session::new(&route, &request, features, inner.db.clone());
                             fresh.load_summaries();
                             if let Some(durable) = inner
                                 .store
                                 .as_ref()
-                                .and_then(|store| store.load(&request.session))
+                                .and_then(|store| store.load(&route.session))
                             {
                                 fresh.restore(durable);
                             }
                             fresh
-                                .setup(&inner.client, settings, &request, features)
+                                .setup(&inner.client, settings, &route, &request, features)
                                 .await;
                             session = Some(fresh);
                         }

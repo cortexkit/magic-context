@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::read::{Cursor, Entry, SessionRef};
+use crate::read::{Cursor, Entry};
 use crate::rules::ProviderRules;
 use crate::setup::ModelRef;
 use crate::view::{AppliedView, ViewRefusal};
@@ -23,7 +23,6 @@ pub const ENTRIES_BUDGET_BYTES: usize = 1 << 20;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NoticeRequest {
-    pub session: SessionRef,
     /// Increases by one with every notice for the session, so the provider
     /// can tell a repeated or reordered notice apart.
     pub seq: u64,

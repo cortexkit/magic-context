@@ -6,6 +6,11 @@
 //! before every request. The runner knows nothing about how history should
 //! be edited; it applies a view exactly as written, or refuses it by name.
 //!
+//! Each side calls the other on a route bound to one session: the route's
+//! bind identity names the session, the daemon attests the caller, and the
+//! daemon's scope stamp names the session's folder and project. No request
+//! body names a runner, a session or a project.
+//!
 //! What flows between them, all as calls over their routes:
 //! - the runner presents its transcript in one neutral part model
 //!   ([`part`], [`read`]), whatever its host stores, so a provider needs no
@@ -43,6 +48,13 @@ mod tests;
 /// The capability a compaction provider lists in its manifest. The major is
 /// new because every op below changed shape incompatibly.
 pub const COMPACTION_PROVIDES: &str = "compaction-provider/v2";
+
+/// The role and version a runner declares when it opens a route for this
+/// contract (`role_versions` on the route), so the provider knows which
+/// contract the route speaks. Routes are per session and per role: a runner
+/// opens one route for compaction, one for tools and one for hooks to the
+/// same provider, each bound to the session's identity and scope.
+pub const COMPACTION_ROLE: (&str, &str) = ("compaction-provider", "v2");
 
 /// The capability a runner declares when it serves the runner-side ops below
 /// in these shapes.

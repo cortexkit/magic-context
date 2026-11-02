@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::part::{Part, PartBody, ToolStatus};
-use crate::read::{Entry, NoticeOrigin, Role, SessionRef};
+use crate::read::{Entry, NoticeOrigin, Role};
 
 /// A published view.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -593,7 +593,6 @@ pub const MAX_VIEW_BYTES: usize = 3 << 20;
 /// boundary, never in the middle of a step.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApplyViewRequest {
-    pub session: SessionRef,
     pub view: View,
 }
 
@@ -609,10 +608,8 @@ pub enum ApplyViewAnswer {
 /// `session.applied_view`, served by the runner: the view it applies now, for
 /// a provider whose own copy is missing or older (for example after its store
 /// was restored from a backup).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AppliedViewRequest {
-    pub session: SessionRef,
-}
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppliedViewRequest {}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppliedViewAnswer {

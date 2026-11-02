@@ -13,8 +13,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::read::SessionRef;
-
 #[derive(Serialize, Deserialize)]
 struct Call<P> {
     method: String,
@@ -64,7 +62,6 @@ pub mod ops {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCallRequest {
-    pub session: SessionRef,
     pub name: String,
     pub input: Value,
 }
@@ -80,7 +77,6 @@ pub struct ToolCallAnswer {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PreUserRequest {
-    pub session: SessionRef,
     pub text: String,
     /// The runner's clock as it stores the message, in milliseconds since the
     /// Unix epoch: the same clock as every entry's `written_at`, so the gap

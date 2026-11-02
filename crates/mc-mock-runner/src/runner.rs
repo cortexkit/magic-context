@@ -54,7 +54,7 @@ pub struct SessionConfig {
     pub start_ms: u64,
     /// The session's project, as the route's scope would name it.
     #[serde(default)]
-    pub project: Option<ck_contract_draft::setup::Project>,
+    pub project: Option<Project>,
     /// Real time each model request takes, in milliseconds. Over the real
     /// wire a provider works on a notice while the next request is out, as
     /// with a real model; in process it is 0, and tests wait on the provider
@@ -88,10 +88,11 @@ pub struct UserEdit {
     pub append: Option<String>,
 }
 
-/// Everything the runner calls on the compaction provider. A transport over
-/// the subc daemon (the CortexKit module bus that routes calls between module
-/// processes) implements it for the real wire; tests can implement it in
-/// process.
+/// Everything the runner calls on the compaction provider, for one session.
+/// Each call goes over a route bound to that session, so no request names the
+/// session: a transport over the subc daemon (the CortexKit module bus that
+/// routes calls between module processes) binds its routes to it, and an
+/// in-process provider is built for it.
 pub trait Provider {
     fn setup(&self, request: SetupRequest) -> impl Future<Output = Result<SetupAnswer, CallError>>;
     fn notice(
@@ -100,18 +101,15 @@ pub trait Provider {
     ) -> impl Future<Output = Result<NoticeAnswer, CallError>>;
     fn ride(&self, request: RideRequest) -> impl Future<Output = Result<RideAnswer, CallError>>;
     /// A `ctx_*` tool call the model made; the answer is the tool's output.
-    fn tool(
-        &self,
-        session: &SessionRef,
-        name: &str,
-        input: &Value,
-    ) -> impl Future<Output = Result<String, CallError>>;
-    fn pre_user(
-        &self,
-        session: &SessionRef,
-        text: &str,
-        now: u64,
-    ) -> impl Future<Output = Result<UserEdit, CallError>>;
+    fn tool(&self, name: &str, input: &Value) -> impl Future<Output = Result<String, CallError>>;
+    fn pre_user(&self, text: &str, now: u64) -> impl Future<Output = Result<UserEdit, CallError>>;
+}
+
+/// A session's project, as the daemon's scope stamp on its routes names it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Project {
+    pub id: String,
+    pub root: String,
 }
 
 /// What a scenario run observed, for its assertions.
@@ -391,7 +389,6 @@ impl<P: Provider> Runner<P> {
         let request = {
             let state = self.host.lock();
             SetupRequest {
-                session: state.config.session.clone(),
                 preset: state.config.preset.clone(),
                 model: state.config.model.clone(),
                 context_window: state.config.context_window,
@@ -400,7 +397,6 @@ impl<P: Provider> Runner<P> {
                 applied_view: state.applied.as_ref().map(View::applied),
                 newest: state.transcript.cursor(),
                 now: state.now,
-                project: state.config.project.clone(),
             }
         };
         self.provider.setup(request).await
@@ -472,9 +468,8 @@ impl<P: Provider> Runner<P> {
     }
 
     async fn user(&mut self, text: &str) {
-        let session = self.host.session();
         let now = self.host.lock().now;
-        let edit = match self.provider.pre_user(&session, text, now).await {
+        let edit = match self.provider.pre_user(text, now).await {
             Ok(edit) => edit,
             Err(error) => {
                 // `pre_user` is best effort: the message goes out unchanged.
@@ -669,7 +664,7 @@ impl<P: Provider> Runner<P> {
     }
 
     async fn run_tools(&mut self, calls: &[ToolCall]) {
-        let (session, call_ids) = {
+        let call_ids: Vec<String> = {
             let state = self.host.lock();
             let entry = state
                 .transcript
@@ -677,19 +672,18 @@ impl<P: Provider> Runner<P> {
                 .last()
                 .expect("the reply was stored")
                 .clone();
-            let ids: Vec<String> = entry
+            entry
                 .parts
                 .iter()
                 .filter_map(|part| match &part.body {
                     PartBody::Tool(tool) => Some(tool.call_id.clone()),
                     _ => None,
                 })
-                .collect();
-            (state.config.session.clone(), ids)
+                .collect()
         };
         for (call, call_id) in calls.iter().zip(call_ids) {
             let (status, mut output) = if call.name.starts_with("ctx_") {
-                match self.provider.tool(&session, &call.name, &call.input).await {
+                match self.provider.tool(&call.name, &call.input).await {
                     Ok(output) => (ToolStatus::Completed, output),
                     Err(error) => (ToolStatus::Error, error.0),
                 }
@@ -810,7 +804,6 @@ impl<P: Provider> Runner<P> {
         let request = {
             let state = self.host.lock();
             RideRequest {
-                session: state.config.session.clone(),
                 cause,
                 deadline_ms: if state.last_send.is_none() {
                     COLD_RIDE_DEADLINE_MS
@@ -879,7 +872,6 @@ impl<P: Provider> Runner<P> {
             state.seq += 1;
             state.notified = Some((newest.ordinal, newest.digest.clone()));
             NoticeRequest {
-                session: state.config.session.clone(),
                 seq: state.seq,
                 newest,
                 applied_view: state.applied.as_ref().map(View::applied),

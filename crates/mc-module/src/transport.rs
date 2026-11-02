@@ -2,7 +2,9 @@
 //! between module processes): the handler that serves the provider ops, and
 //! the client that calls a session's runner back.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use ck_contract_draft::read::{ReadPage, ReadRequest, SessionRef};
@@ -11,22 +13,25 @@ use ck_contract_draft::view::{
     AppliedViewAnswer, AppliedViewRequest, ApplyViewAnswer, ApplyViewRequest,
 };
 use ck_contract_draft::wire::{self, codes, PreUserRequest, ToolCallAnswer, ToolCallRequest};
-use ck_contract_draft::{ops, COMPACTION_PROVIDES};
+use ck_contract_draft::{ops, COMPACTION_PROVIDES, COMPACTION_ROLE};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 use subc_client_rs::{
-    async_trait, CallOptions, ConsumerOptions, HandlerOutcome, ModuleHandler, RequestCtx,
-    SubcConsumer,
+    async_trait, BindDecision, CallOptions, ConsumerOptions, HandlerOutcome, ModuleHandler,
+    RequestCtx, RouteBindRequest, SubcConsumer,
 };
 use subc_protocol::manifest::{
-    Concurrency, ExecutionMode, IdentityScope, ModuleManifest, ProviderRole, Tool,
+    CapabilityDeclarations, Concurrency, ExecutionMode, IdentityScope, ModuleManifest,
+    ProviderRole, Tool,
 };
+use subc_protocol::Principal;
 use subc_protocol::{BindIdentity, RouteTarget};
 use tokio::sync::OnceCell;
 
 use crate::client::{ClientError, RunnerClient};
 use crate::module::{Module, ModuleError};
+use crate::route::{Project, Route};
 
 /// How long ck-mc waits on one call to a runner.
 const RUNNER_CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -53,6 +58,18 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
             emits_push: false,
             sub_supervises: false,
         }])
+        // The daemon puts a scope's folder and project on a route's stamp
+        // only for a provider that asks; they are where a session's project
+        // comes from.
+        .capabilities(Some(CapabilityDeclarations {
+            provides: vec![
+                COMPACTION_PROVIDES.to_owned(),
+                subc_protocol::scope::BIND_NO_PROJECT_CAPABILITY.to_owned(),
+                subc_protocol::scope::SCOPE_WORKDIR_CAPABILITY.to_owned(),
+            ],
+            requires: Vec::new(),
+            must_never_reach: Vec::new(),
+        }))
         .build()
 }
 
@@ -106,67 +123,109 @@ impl SubcRunnerClient {
 }
 
 impl RunnerClient for SubcRunnerClient {
-    async fn read(&self, request: ReadRequest) -> Result<ReadPage, ClientError> {
-        self.call(&request.session.clone(), ops::SESSION_READ, &request)
-            .await
-    }
-
-    async fn apply_view(&self, request: ApplyViewRequest) -> Result<ApplyViewAnswer, ClientError> {
-        self.call(&request.session.clone(), ops::SESSION_APPLY_VIEW, &request)
-            .await
-    }
-
-    async fn applied_view(
+    async fn read(
         &self,
-        request: AppliedViewRequest,
-    ) -> Result<AppliedViewAnswer, ClientError> {
-        self.call(
-            &request.session.clone(),
-            ops::SESSION_APPLIED_VIEW,
-            &request,
-        )
-        .await
+        session: &SessionRef,
+        request: ReadRequest,
+    ) -> Result<ReadPage, ClientError> {
+        self.call(session, ops::SESSION_READ, &request).await
     }
 
-    async fn send(&self, request: SendRequest) -> Result<SendAnswer, ClientError> {
-        self.call(&request.session.clone(), ops::SESSION_SEND, &request)
+    async fn apply_view(
+        &self,
+        session: &SessionRef,
+        request: ApplyViewRequest,
+    ) -> Result<ApplyViewAnswer, ClientError> {
+        self.call(session, ops::SESSION_APPLY_VIEW, &request).await
+    }
+
+    async fn applied_view(&self, session: &SessionRef) -> Result<AppliedViewAnswer, ClientError> {
+        self.call(session, ops::SESSION_APPLIED_VIEW, &AppliedViewRequest {})
             .await
     }
 
-    async fn run_result(&self, request: RunResultRequest) -> Result<RunResult, ClientError> {
-        self.call(&request.session.clone(), ops::RUN_RESULT, &request)
-            .await
+    async fn send(
+        &self,
+        session: &SessionRef,
+        request: SendRequest,
+    ) -> Result<SendAnswer, ClientError> {
+        self.call(session, ops::SESSION_SEND, &request).await
+    }
+
+    async fn run_result(
+        &self,
+        session: &SessionRef,
+        request: RunResultRequest,
+    ) -> Result<RunResult, ClientError> {
+        self.call(session, ops::RUN_RESULT, &request).await
     }
 }
 
 /// Serves the provider ops for the daemon.
 pub struct Handler {
     module: Module<SubcRunnerClient>,
+    /// Every bound route, by channel: what the daemon said about it at bind.
+    bound: Mutex<HashMap<u16, Bound>>,
+}
+
+/// The roles of the two published contracts a runner also reaches ck-mc
+/// through, each on a route of its own.
+const TOOL_ROLE: (&str, &str) = ("tool-provider", "v1");
+const HOOK_ROLE: (&str, &str) = ("step-transform-provider", "v1");
+
+/// A bound route: the session it concerns and the role it was opened for.
+#[derive(Clone)]
+struct Bound {
+    route: Route,
+    /// The single role the opener declared, as name and version.
+    role: Option<(String, String)>,
 }
 
 impl Handler {
     pub fn new(module: Module<SubcRunnerClient>) -> Self {
-        Self { module }
+        Self {
+            module,
+            bound: Mutex::default(),
+        }
     }
 
-    async fn dispatch(&self, body: &[u8]) -> Result<Value, (&'static str, String)> {
+    async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Value, (&'static str, String)> {
         let bad = |message: String| (codes::BAD_REQUEST, message);
         let (method, params) = wire::decode(body).map_err(bad)?;
+        let role = match method.as_str() {
+            ops::COMPACTION_SETUP | ops::COMPACTION_NOTICE | ops::COMPACTION_RIDE => {
+                COMPACTION_ROLE
+            }
+            wire::ops::TOOL_CALL => TOOL_ROLE,
+            wire::ops::PRE_USER => HOOK_ROLE,
+            other => {
+                return Err((
+                    codes::UNKNOWN_METHOD,
+                    format!("ck-mc does not serve `{other}`"),
+                ))
+            }
+        };
+        let bound = self.bound(channel, role)?;
+        let session = &bound.route.session;
         let answer = match method.as_str() {
-            ops::COMPACTION_SETUP => {
-                to_value(self.module.setup(wire::params(params).map_err(bad)?))
-            }
-            ops::COMPACTION_NOTICE => {
-                to_value(self.module.notice(wire::params(params).map_err(bad)?))
-            }
-            ops::COMPACTION_RIDE => {
-                to_value(self.module.ride(wire::params(params).map_err(bad)?).await)
-            }
+            ops::COMPACTION_SETUP => to_value(
+                self.module
+                    .setup(bound.route.clone(), wire::params(params).map_err(bad)?),
+            ),
+            ops::COMPACTION_NOTICE => to_value(
+                self.module
+                    .notice(session, wire::params(params).map_err(bad)?),
+            ),
+            ops::COMPACTION_RIDE => to_value(
+                self.module
+                    .ride(session, wire::params(params).map_err(bad)?)
+                    .await,
+            ),
             wire::ops::TOOL_CALL => {
                 let request: ToolCallRequest = wire::params(params).map_err(bad)?;
                 let answer = match self
                     .module
-                    .tool(&request.session, &request.name, request.input)
+                    .tool(session, &request.name, request.input)
                     .await
                 {
                     Ok(output) => ToolCallAnswer {
@@ -185,18 +244,41 @@ impl Handler {
                 let request: PreUserRequest = wire::params(params).map_err(bad)?;
                 let answer = self
                     .module
-                    .pre_user(&request.session, &request.text, request.now)
+                    .pre_user(session, &request.text, request.now)
                     .await;
                 Ok(serde_json::to_value(answer).expect("answers serialize"))
             }
-            other => {
-                return Err((
-                    codes::UNKNOWN_METHOD,
-                    format!("ck-mc does not serve `{other}`"),
-                ))
-            }
+            _ => unreachable!("every method has a role above"),
         };
         answer.map_err(refusal)
+    }
+
+    /// The binding of the route a call came in on, when it was opened for
+    /// `role`. A call on a route opened for another role is refused, so one
+    /// role's route never carries another's ops.
+    fn bound(&self, channel: u16, role: (&str, &str)) -> Result<Bound, (&'static str, String)> {
+        let bound = self
+            .bound
+            .lock()
+            .expect("bound routes")
+            .get(&channel)
+            .cloned()
+            .ok_or((codes::REFUSED, "route_unbound".to_owned()))?;
+        if bound
+            .role
+            .as_ref()
+            .map(|(name, version)| (name.as_str(), version.as_str()))
+            != Some(role)
+        {
+            return Err((
+                codes::REFUSED,
+                format!(
+                    "wrong_route_role: this op needs a route opened for {}/{}",
+                    role.0, role.1
+                ),
+            ));
+        }
+        Ok(bound)
     }
 }
 
@@ -213,8 +295,53 @@ fn refusal(error: ModuleError) -> (&'static str, String) {
 
 #[async_trait]
 impl ModuleHandler for Handler {
-    async fn handle(&self, _ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
-        match self.dispatch(&body).await {
+    /// Record who opened the route and for which session. Only a module the
+    /// daemon attests can open one: the runner's identity is the attested
+    /// module, the session is the route's bind identity, and the project is
+    /// the scope stamp's, so nothing that decides whose data a call reaches
+    /// comes from the caller's own words.
+    async fn on_bind(&self, request: &RouteBindRequest) -> BindDecision {
+        let Some(Principal::Reserved { module_id }) = &request.principal else {
+            return BindDecision::reject(
+                "unattested_runner",
+                "ck-mc serves sessions only to a runner the daemon attests",
+            );
+        };
+        let role = match request.role_versions.as_ref() {
+            Some(roles) if roles.len() == 1 => roles
+                .iter()
+                .next()
+                .map(|(name, version)| (name.clone(), version.clone())),
+            _ => None,
+        };
+        let project =
+            request
+                .scope
+                .as_ref()
+                .and_then(|scope| match (&scope.project_id, &scope.workdir) {
+                    (Some(id), Some(root)) => Some(Project {
+                        id: id.clone(),
+                        root: root.clone(),
+                    }),
+                    _ => None,
+                });
+        let route = Route {
+            session: SessionRef {
+                runner: module_id.clone(),
+                harness: request.identity.harness.clone(),
+                session: request.identity.session.clone(),
+            },
+            project,
+        };
+        self.bound
+            .lock()
+            .expect("bound routes")
+            .insert(request.handle.channel, Bound { route, role });
+        BindDecision::accept()
+    }
+
+    async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
+        match self.dispatch(ctx.route_handle().channel, &body).await {
             Ok(answer) => {
                 HandlerOutcome::Response(serde_json::to_vec(&answer).expect("answers serialize"))
             }

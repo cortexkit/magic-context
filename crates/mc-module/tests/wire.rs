@@ -24,7 +24,7 @@ use mc_mock_runner::model::Kind;
 use mc_mock_runner::runner::{Report, SessionConfig};
 use mc_mock_runner::script::{Step, ToolCall, Turn};
 use mc_mock_runner::subc::{PlayRequest, MOCK_PLAY};
-use serde_json::json;
+use serde_json::{json, Value};
 use subc_client_rs::{CallOptions, ConsumerOptions, SubcConsumer};
 use subc_protocol::{BindIdentity, RouteTarget, SUBC_LAUNCH_NONCE_ENV, SUBC_MODULE_ID_ENV};
 
@@ -132,11 +132,6 @@ fn start_stack() -> Stack {
     for dir in ["runtime", "config/cortexkit", "data"] {
         fs::create_dir_all(root.join(dir)).unwrap();
     }
-    fs::write(
-        root.join("config/cortexkit/subc.jsonc"),
-        json!({"version": 1, "modules": {}}).to_string(),
-    )
-    .unwrap();
     let daemon = dev_copy(&required_binary("MC_TEST_CK_SUBC_BIN"), &root, "subc");
     let runner = dev_copy(
         &required_binary("MC_TEST_MOCK_RUNNER_BIN"),
@@ -144,15 +139,40 @@ fn start_stack() -> Stack {
         "mock-runner",
     );
     let module = dev_copy(Path::new(env!("CARGO_BIN_EXE_ck-mc")), &root, "mc");
+    let connection_file = root.join("runtime/subc-connection.json");
+    // The daemon launches both modules itself, as reserved modules. That is
+    // what makes it attest each one to the other: a runner's routes reach
+    // ck-mc only as an attested module, and ck-mc's reach the runner the
+    // same way.
+    let entry = |program: &Path, env: Value| {
+        json!({
+            "program": program,
+            "args": ["--subc", connection_file],
+            "env": env,
+            "enabled": true,
+            "reserved": true,
+        })
+    };
+    fs::write(
+        root.join("config/cortexkit/subc.jsonc"),
+        json!({
+            "version": 1,
+            "modules": {
+                PROVIDER: entry(&module, json!({})),
+                RUNNER: entry(&runner, json!({"MOCK_RUNNER_PROVIDER": PROVIDER})),
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
 
-    let mut processes = vec![spawn(
+    let processes = vec![spawn(
         &daemon,
         &[],
         &root,
         &[("SUBC_PORT", "0"), ("SUBC_CGROUP_PLACEMENT", "disabled")],
         "subc",
     )];
-    let connection_file = root.join("runtime/subc-connection.json");
     let deadline = Instant::now() + START_TIMEOUT;
     while !connection_file.exists() {
         assert!(
@@ -161,19 +181,6 @@ fn start_stack() -> Stack {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    // Both modules use their default ids. `SUBC_MODULE_ID` stays unset: a
-    // process carrying it attests as that supervised module when it calls
-    // another module, and the daemon refuses an attestation without a launch
-    // nonce, which only a daemon-launched module has.
-    let subc = ["--subc".as_ref(), connection_file.as_os_str()];
-    processes.push(spawn(&module, &subc, &root, &[], "ck-mc"));
-    processes.push(spawn(
-        &runner,
-        &subc,
-        &root,
-        &[("MOCK_RUNNER_PROVIDER", PROVIDER)],
-        "mock-runner",
-    ));
     Stack {
         connection_file,
         _processes: processes,

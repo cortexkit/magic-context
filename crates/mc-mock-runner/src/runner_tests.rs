@@ -89,10 +89,7 @@ impl Provider for TestProvider {
                 .and_then(|decide| decide(&host));
             if let Some(edits) = edits {
                 let view = self.next_view(edits);
-                let answer = host.apply_view(ApplyViewRequest {
-                    session: host.session(),
-                    view,
-                });
+                let answer = host.apply_view(ApplyViewRequest { view });
                 self.published.lock().unwrap().push(answer);
             }
         }
@@ -115,11 +112,11 @@ impl Provider for TestProvider {
         })
     }
 
-    async fn tool(&self, _: &SessionRef, name: &str, _: &Value) -> Result<String, CallError> {
+    async fn tool(&self, name: &str, _: &Value) -> Result<String, CallError> {
         Ok(format!("{name} done"))
     }
 
-    async fn pre_user(&self, _: &SessionRef, _: &str, _: u64) -> Result<UserEdit, CallError> {
+    async fn pre_user(&self, _: &str, _: u64) -> Result<UserEdit, CallError> {
         Ok(UserEdit::default())
     }
 }
@@ -326,7 +323,6 @@ async fn a_view_breaking_signed_reasoning_is_refused_and_its_fixed_form_accepted
         edits.extend(invalid.iter().map(|target| drop_edit(version, target)));
     }
     let answer_fixed = host.apply_view(ApplyViewRequest {
-        session: host.session(),
         view: runner.provider().next_view(edits),
     });
     assert_eq!(answer_fixed, ApplyViewAnswer::Accepted);

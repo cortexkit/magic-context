@@ -6,9 +6,13 @@ use serde::{Deserialize, Serialize};
 use crate::part::Part;
 use crate::view::AppliedView;
 
-/// Names a session. A provider keys everything it keeps for a session on
-/// `harness` plus `session`, which stay the same when a session moves from a
-/// standalone host to a runner.
+/// Names a session: the key each side keeps it under. It is built from the
+/// route a call arrives on, never from a request body, which the caller could
+/// forge. `runner` is the module the daemon attests for the route, and
+/// `harness` and `session` are the identity the route is bound to. Every op of
+/// this contract concerns the session its route is bound to, so no request
+/// names a session. `harness` and `session` stay the same when a session moves
+/// from a standalone host to a runner.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionRef {
     /// The runner module serving the session, for example `thalamus-harness`.
@@ -92,7 +96,6 @@ pub struct Cursor {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReadRequest {
-    pub session: SessionRef,
     pub select: Select,
     pub detail: Detail,
     /// Stop adding entries once the page reaches this many bytes. The page

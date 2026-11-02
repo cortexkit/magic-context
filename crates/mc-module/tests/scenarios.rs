@@ -14,9 +14,7 @@ use ck_contract_draft::ride::{RideAnswer, RideCause, RideRequest};
 use ck_contract_draft::rules::{EditCost, ProviderRules, SignedReasoning};
 use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendRequest};
 use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
-use ck_contract_draft::view::{
-    AppliedViewAnswer, AppliedViewRequest, ApplyViewAnswer, ApplyViewRequest,
-};
+use ck_contract_draft::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
 use mc_mock_runner::model::Kind;
 use mc_mock_runner::runner::{CallError, Host, Provider, Runner, SessionConfig, UserEdit};
 use mc_mock_runner::script::{Step, ToolCall, Turn};
@@ -25,6 +23,7 @@ use mc_module::context_db::ContextDb;
 use mc_module::lanes::placeholder;
 use mc_module::module::{Module, ModuleError};
 use mc_module::pass::Settings;
+use mc_module::route::{Project as RouteProject, Route};
 use mc_module::store::Store;
 use serde_json::{json, Value};
 
@@ -51,7 +50,7 @@ impl HostClient {
 }
 
 impl RunnerClient for HostClient {
-    async fn read(&self, request: ReadRequest) -> Result<ReadPage, ClientError> {
+    async fn read(&self, _: &SessionRef, request: ReadRequest) -> Result<ReadPage, ClientError> {
         let page = self.host()?.read(&request);
         if let (
             ck_contract_draft::read::Detail::Compact,
@@ -66,27 +65,38 @@ impl RunnerClient for HostClient {
         Ok(page)
     }
 
-    async fn apply_view(&self, request: ApplyViewRequest) -> Result<ApplyViewAnswer, ClientError> {
+    async fn apply_view(
+        &self,
+        _: &SessionRef,
+        request: ApplyViewRequest,
+    ) -> Result<ApplyViewAnswer, ClientError> {
         Ok(self.host()?.apply_view(request))
     }
 
-    async fn applied_view(&self, _: AppliedViewRequest) -> Result<AppliedViewAnswer, ClientError> {
+    async fn applied_view(&self, _: &SessionRef) -> Result<AppliedViewAnswer, ClientError> {
         Ok(self.host()?.applied_view())
     }
 
-    async fn send(&self, request: SendRequest) -> Result<SendAnswer, ClientError> {
+    async fn send(&self, _: &SessionRef, request: SendRequest) -> Result<SendAnswer, ClientError> {
         Ok(self.host()?.send(request))
     }
 
-    async fn run_result(&self, request: RunResultRequest) -> Result<RunResult, ClientError> {
+    async fn run_result(
+        &self,
+        _: &SessionRef,
+        request: RunResultRequest,
+    ) -> Result<RunResult, ClientError> {
         self.host()?
             .run_result(&request)
             .ok_or_else(|| ClientError(format!("unknown run {}", request.run_id)))
     }
 }
 
+/// ck-mc in process, as the runner's routes for one session reach it: every
+/// call concerns `route`, which a real transport takes from the route.
 struct InProcess {
     module: Mutex<Module<HostClient>>,
+    route: Route,
     client: HostClient,
     settings: Settings,
     /// A scratch folder for the stores, when the scenario keeps them.
@@ -141,45 +151,40 @@ fn call_error(error: ModuleError) -> CallError {
 
 impl Provider for InProcess {
     async fn setup(&self, request: SetupRequest) -> Result<SetupAnswer, CallError> {
-        self.module().setup(request).map_err(call_error)
+        self.module()
+            .setup(self.route.clone(), request)
+            .map_err(call_error)
     }
 
     async fn notice(&self, request: NoticeRequest) -> Result<NoticeAnswer, CallError> {
-        let session = request.session.clone();
+        let session = &self.route.session;
         let module = self.module();
-        let answer = module.notice(request).map_err(call_error)?;
+        let answer = module.notice(session, request).map_err(call_error)?;
         if answer == NoticeAnswer::Received {
-            module.idle(&session).await.map_err(call_error)?;
+            module.idle(session).await.map_err(call_error)?;
         }
         Ok(answer)
     }
 
     async fn ride(&self, request: RideRequest) -> Result<RideAnswer, CallError> {
-        self.module().ride(request).await.map_err(call_error)
-    }
-
-    async fn tool(
-        &self,
-        session: &SessionRef,
-        name: &str,
-        input: &Value,
-    ) -> Result<String, CallError> {
         self.module()
-            .tool(session, name, input.clone())
+            .ride(&self.route.session, request)
             .await
             .map_err(call_error)
     }
 
-    async fn pre_user(
-        &self,
-        session: &SessionRef,
-        text: &str,
-        now: u64,
-    ) -> Result<UserEdit, CallError> {
+    async fn tool(&self, name: &str, input: &Value) -> Result<String, CallError> {
+        self.module()
+            .tool(&self.route.session, name, input.clone())
+            .await
+            .map_err(call_error)
+    }
+
+    async fn pre_user(&self, text: &str, now: u64) -> Result<UserEdit, CallError> {
         if !self.pre_user {
             return Ok(UserEdit::default());
         }
-        let answer = self.module().pre_user(session, text, now).await;
+        let answer = self.module().pre_user(&self.route.session, text, now).await;
         Ok(UserEdit {
             prepend: answer.prepend,
             append: answer.append,
@@ -251,7 +256,15 @@ async fn start_runner(
     pre_user: bool,
 ) -> Runner<InProcess> {
     let client = HostClient::default();
+    let route = Route {
+        session: config.session.clone(),
+        project: config.project.as_ref().map(|project| RouteProject {
+            id: project.id.clone(),
+            root: project.root.clone(),
+        }),
+    };
     let provider = InProcess {
+        route,
         module: Mutex::new(InProcess::new_module(
             client.clone(),
             settings.clone(),
@@ -1134,7 +1147,7 @@ async fn a_head_shows_its_docs_and_memories_first_and_every_later_memory_change_
     )
     .unwrap();
     let mut config = config("head", Kind::OpenAi, FREE);
-    config.project = Some(ck_contract_draft::setup::Project {
+    config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
     });
@@ -1298,7 +1311,7 @@ async fn ctx_note_finds_the_notes_a_standalone_session_wrote_and_keeps_new_ones(
         )
         .unwrap();
     let mut config = config("head", Kind::OpenAi, FREE);
-    config.project = Some(ck_contract_draft::setup::Project {
+    config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
     });
@@ -1350,7 +1363,7 @@ async fn ctx_memory_saves_updates_and_archives_with_history_and_m1_shows_where_e
     ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     insert_memory(&dir, 1, "Ask before pushing.");
     let mut config = config("head", Kind::OpenAi, FREE);
-    config.project = Some(ck_contract_draft::setup::Project {
+    config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
     });
@@ -1437,7 +1450,7 @@ async fn ctx_search_finds_summarized_messages_notes_and_hidden_memories_but_not_
     ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     insert_memory(&dir, 1, "Crates use kebab-case naming.");
     let mut config = config("head", Kind::OpenAi, FREE);
-    config.project = Some(ck_contract_draft::setup::Project {
+    config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
     });
@@ -1654,7 +1667,7 @@ async fn ctx_search_finds_commits_and_memories_by_meaning_with_one_embedding_per
         .unwrap();
     }
     let mut config = config("head", Kind::OpenAi, FREE);
-    config.project = Some(ck_contract_draft::setup::Project {
+    config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
     });
@@ -1738,7 +1751,7 @@ async fn a_persons_message_gets_the_time_since_the_last_one_and_a_hint_of_relate
         .unwrap();
     }
     let mut config = config("head", Kind::OpenAi, FREE);
-    config.project = Some(ck_contract_draft::setup::Project {
+    config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
     });
@@ -1835,7 +1848,7 @@ impl StuckClient {
 }
 
 impl RunnerClient for StuckClient {
-    async fn read(&self, request: ReadRequest) -> Result<ReadPage, ClientError> {
+    async fn read(&self, session: &SessionRef, _: ReadRequest) -> Result<ReadPage, ClientError> {
         let page = ReadPage {
             entries: Vec::new(),
             next_after: None,
@@ -1844,25 +1857,30 @@ impl RunnerClient for StuckClient {
                 applied_view: None,
             },
         };
-        Self::answer(&request.session, page).await
+        Self::answer(session, page).await
     }
 
-    async fn apply_view(&self, request: ApplyViewRequest) -> Result<ApplyViewAnswer, ClientError> {
-        Self::answer(&request.session, ApplyViewAnswer::Accepted).await
-    }
-
-    async fn applied_view(
+    async fn apply_view(
         &self,
-        request: AppliedViewRequest,
-    ) -> Result<AppliedViewAnswer, ClientError> {
-        Self::answer(&request.session, AppliedViewAnswer { view: None }).await
+        session: &SessionRef,
+        _: ApplyViewRequest,
+    ) -> Result<ApplyViewAnswer, ClientError> {
+        Self::answer(session, ApplyViewAnswer::Accepted).await
     }
 
-    async fn send(&self, request: SendRequest) -> Result<SendAnswer, ClientError> {
-        Self::answer(&request.session, SendAnswer::Queued).await
+    async fn applied_view(&self, session: &SessionRef) -> Result<AppliedViewAnswer, ClientError> {
+        Self::answer(session, AppliedViewAnswer { view: None }).await
     }
 
-    async fn run_result(&self, request: RunResultRequest) -> Result<RunResult, ClientError> {
+    async fn send(&self, session: &SessionRef, _: SendRequest) -> Result<SendAnswer, ClientError> {
+        Self::answer(session, SendAnswer::Queued).await
+    }
+
+    async fn run_result(
+        &self,
+        _: &SessionRef,
+        request: RunResultRequest,
+    ) -> Result<RunResult, ClientError> {
         std::future::pending::<()>().await;
         Err(ClientError(format!("no run {}", request.run_id)))
     }
@@ -1887,8 +1905,11 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
         mid: "m0".into(),
         digest: "d".into(),
     };
-    let setup = |name: &str, newest: Option<ck_contract_draft::read::Cursor>| SetupRequest {
+    let route = |name: &str| Route {
         session: session(name),
+        project: None,
+    };
+    let setup = |newest: Option<ck_contract_draft::read::Cursor>| SetupRequest {
         preset: "worker".into(),
         model: model.clone(),
         context_window: 40_000,
@@ -1897,12 +1918,13 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
         applied_view: None,
         newest,
         now: 0,
-        project: None,
     };
     // The stuck session's Setup has a transcript to read, and that read
     // never returns: its worker waits for good.
-    module.setup(setup("stuck", Some(cursor.clone()))).unwrap();
-    module.setup(setup("free", None)).unwrap();
+    module
+        .setup(route("stuck"), setup(Some(cursor.clone())))
+        .unwrap();
+    module.setup(route("free"), setup(None)).unwrap();
     let conditions = ck_contract_draft::notice::Conditions {
         model: model.clone(),
         context_window: 40_000,
@@ -1910,8 +1932,7 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
         rules: FREE,
         last_prompt_tokens: Some(1_000),
     };
-    let notice = |name: &str| NoticeRequest {
-        session: session(name),
+    let notice = || NoticeRequest {
         seq: 1,
         newest: cursor.clone(),
         applied_view: None,
@@ -1921,8 +1942,14 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
     };
     // A notice is acknowledged at once even for the stuck session; its
     // work waits behind the read.
-    assert_eq!(module.notice(notice("stuck")), Ok(NoticeAnswer::Received));
-    assert_eq!(module.notice(notice("free")), Ok(NoticeAnswer::Received));
+    assert_eq!(
+        module.notice(&session("stuck"), notice()),
+        Ok(NoticeAnswer::Received)
+    );
+    assert_eq!(
+        module.notice(&session("free"), notice()),
+        Ok(NoticeAnswer::Received)
+    );
     let limit = std::time::Duration::from_secs(5);
     tokio::time::timeout(limit, module.idle(&session("free")))
         .await
@@ -1930,14 +1957,13 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
         .unwrap();
     // A ride on the stuck session answers within its deadline, with nothing.
     let ride = RideRequest {
-        session: session("stuck"),
         cause: RideCause::CacheExpired,
         deadline_ms: 200,
         conditions,
         applied_view: None,
         request_tokens: None,
     };
-    let answer = tokio::time::timeout(limit, module.ride(ride))
+    let answer = tokio::time::timeout(limit, module.ride(&session("stuck"), ride))
         .await
         .expect("the ride kept its deadline")
         .unwrap();
@@ -2055,7 +2081,7 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
     }
     // Another session whose summaries stop two messages short.
     insert_summary(&dir, "s2", 0, (1, "msg00001"), (4, "msg00004"), "Started");
-    let project = ck_contract_draft::setup::Project {
+    let project = mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
     };
@@ -2067,7 +2093,10 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
             ..session_config.session.clone()
         },
         preset: "head".into(),
-        project: Some(project.clone()),
+        project: Some(RouteProject {
+            id: project.id.clone(),
+            root: project.root.clone(),
+        }),
         model: session_config.model.clone(),
         context_window: session_config.context_window,
         output_reserve: session_config.output_reserve,

@@ -7,7 +7,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::notice::Conditions;
-use crate::read::SessionRef;
 use crate::view::{AppliedView, View};
 
 /// The refusal code a runner gives a run whose next request still does not
@@ -16,7 +15,6 @@ pub const CONTEXT_CEILING: &str = "context_ceiling";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RideRequest {
-    pub session: SessionRef,
     pub cause: RideCause,
     /// How long the runner waits for the answer, in milliseconds. A cold
     /// start gets a longer deadline, since the provider may first have to

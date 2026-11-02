@@ -27,7 +27,7 @@
 
 use ck_contract_draft::read::{Cursor, SessionRef};
 use ck_contract_draft::rules::ProviderRules;
-use ck_contract_draft::setup::{ModelRef, Project, SetupRequest};
+use ck_contract_draft::setup::{ModelRef, SetupRequest};
 use ck_contract_draft::view::View;
 use rusqlite::{params, OptionalExtension};
 use std::sync::Arc;
@@ -35,6 +35,7 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::context_db::ContextDb;
 use crate::preset;
+use crate::route::{Project, Route};
 use crate::session::Session;
 use crate::store::Store;
 
@@ -95,7 +96,6 @@ pub fn move_in(
         ));
     }
     let setup = SetupRequest {
-        session: key.clone(),
         preset: request.preset.clone(),
         model: request.model.clone(),
         context_window: request.context_window,
@@ -104,10 +104,15 @@ pub fn move_in(
         applied_view: None,
         newest: Some(request.newest.clone()),
         now: request.now,
+    };
+    // The operator names the session and project here; this runs offline,
+    // not on a runner's route.
+    let route = Route {
+        session: key.clone(),
         project: request.project.clone(),
     };
     let db = Arc::new(db);
-    let mut session = Session::new(&setup, features, Some(Arc::clone(&db)));
+    let mut session = Session::new(&route, &setup, features, Some(Arc::clone(&db)));
     session.load_summaries();
     let reaches = session.last_summary_end();
     if reaches.as_deref() != Some(request.newest.mid.as_str()) {

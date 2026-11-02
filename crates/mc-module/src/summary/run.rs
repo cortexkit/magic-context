@@ -73,7 +73,6 @@ pub async fn run<C: RunnerClient>(
         extraction_free: false,
     });
     let request = SendRequest {
-        session: job.session.clone(),
         // A retry after a lost answer finds the run already started.
         send_id: format!(
             "{CHILD}:{}-{}",
@@ -94,7 +93,7 @@ pub async fn run<C: RunnerClient>(
         }),
     };
     let run_id = match client
-        .send(request)
+        .send(&job.session, request)
         .await
         .map_err(|error| format!("session.send: {error:?}"))?
     {
@@ -154,11 +153,11 @@ async fn wait_for<C: RunnerClient>(
 ) -> Result<ck_contract_draft::send::RunResult, String> {
     let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
     loop {
+        let request = RunResultRequest {
+            run_id: run_id.to_owned(),
+        };
         let result = client
-            .run_result(RunResultRequest {
-                session: session.clone(),
-                run_id: run_id.to_owned(),
-            })
+            .run_result(session, request)
             .await
             .map_err(|error| format!("run.result: {error:?}"))?;
         if result.state != RunState::Active {

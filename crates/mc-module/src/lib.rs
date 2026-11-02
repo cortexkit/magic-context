@@ -44,6 +44,7 @@ pub mod preset;
 pub mod project_docs;
 pub mod reads;
 pub mod reduce;
+pub mod route;
 pub mod search;
 pub mod session;
 pub mod store;

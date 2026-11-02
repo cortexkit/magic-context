@@ -5,7 +5,7 @@
 //! which plays one scenario against the provider over the wire and answers
 //! with the run's report.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,18 +20,19 @@ use ck_contract_draft::view::{AppliedViewRequest, ApplyViewRequest};
 use ck_contract_draft::wire::{
     self, codes, PreUserAnswer, PreUserRequest, ToolCallAnswer, ToolCallRequest,
 };
+use ck_contract_draft::COMPACTION_ROLE;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use subc_client_rs::{
-    async_trait, CallOptions, ConsumerOptions, HandlerOutcome, ModuleHandler, RequestCtx,
-    SubcConsumer,
+    async_trait, BindDecision, CallOptions, ConsumerOptions, HandlerOutcome, ModuleHandler,
+    RequestCtx, RouteBindRequest, SubcConsumer,
 };
 use subc_protocol::manifest::{
     Concurrency, IdentityScope, ManagementOperation, ManagementOperationKind, ModuleManifest,
     ProviderRole,
 };
-use subc_protocol::{BindIdentity, RouteTarget};
+use subc_protocol::{BindIdentity, Principal, RouteTarget};
 
 use crate::runner::{CallError, Host, Provider, Report, Runner, SessionConfig, UserEdit};
 use crate::script::Step;
@@ -49,31 +50,60 @@ pub struct PlayRequest {
     pub steps: Vec<Step>,
 }
 
-/// The runner's calls to a compaction provider module.
+/// The roles a runner opens routes for, one route per role and session.
+#[derive(Clone, Copy)]
+enum Role {
+    Compaction,
+    Tools,
+    Hooks,
+}
+
+impl Role {
+    fn versions(self) -> BTreeMap<String, String> {
+        let (role, version) = match self {
+            Self::Compaction => COMPACTION_ROLE,
+            Self::Tools => ("tool-provider", "v1"),
+            Self::Hooks => ("step-transform-provider", "v1"),
+        };
+        BTreeMap::from([(role.to_owned(), version.to_owned())])
+    }
+}
+
+/// The runner's calls to a compaction provider module for one session. Every
+/// call goes over a route bound to the session, one route per role, so the
+/// provider learns the session from the route and the runner from the
+/// daemon's attestation, never from a request body.
 pub struct SubcProvider {
     consumer: SubcConsumer,
     provider: String,
+    session: SessionRef,
 }
 
 impl SubcProvider {
     pub async fn connect(
         connection_file: &std::path::Path,
         provider: String,
+        session: SessionRef,
     ) -> Result<Self, CallError> {
         let consumer = SubcConsumer::connect(connection_file, ConsumerOptions::default())
             .await
             .map_err(|error| CallError(format!("connect: {error:?}")))?;
-        Ok(Self { consumer, provider })
+        Ok(Self {
+            consumer,
+            provider,
+            session,
+        })
     }
 
     async fn call<P: Serialize, A: DeserializeOwned>(
         &self,
-        session: &SessionRef,
+        role: Role,
         method: &str,
         params: &P,
     ) -> Result<A, CallError> {
         let options = CallOptions {
             timeout: PROVIDER_CALL_TIMEOUT,
+            role_versions: Some(role.versions()),
             ..CallOptions::default()
         };
         let reply = self
@@ -82,7 +112,7 @@ impl SubcProvider {
                 RouteTarget::ToolProvider {
                     module_id: self.provider.clone(),
                 },
-                BindIdentity::new(session.harness.clone(), session.session.clone()),
+                BindIdentity::new(self.session.harness.clone(), self.session.session.clone()),
                 wire::encode(method, params),
                 options,
             )
@@ -95,32 +125,28 @@ impl SubcProvider {
 
 impl Provider for SubcProvider {
     async fn setup(&self, request: SetupRequest) -> Result<SetupAnswer, CallError> {
-        self.call(&request.session.clone(), ops::COMPACTION_SETUP, &request)
+        self.call(Role::Compaction, ops::COMPACTION_SETUP, &request)
             .await
     }
 
     async fn notice(&self, request: NoticeRequest) -> Result<NoticeAnswer, CallError> {
-        self.call(&request.session.clone(), ops::COMPACTION_NOTICE, &request)
+        self.call(Role::Compaction, ops::COMPACTION_NOTICE, &request)
             .await
     }
 
     async fn ride(&self, request: RideRequest) -> Result<RideAnswer, CallError> {
-        self.call(&request.session.clone(), ops::COMPACTION_RIDE, &request)
+        self.call(Role::Compaction, ops::COMPACTION_RIDE, &request)
             .await
     }
 
-    async fn tool(
-        &self,
-        session: &SessionRef,
-        name: &str,
-        input: &Value,
-    ) -> Result<String, CallError> {
+    async fn tool(&self, name: &str, input: &Value) -> Result<String, CallError> {
         let request = ToolCallRequest {
-            session: session.clone(),
             name: name.to_owned(),
             input: input.clone(),
         };
-        let answer: ToolCallAnswer = self.call(session, wire::ops::TOOL_CALL, &request).await?;
+        let answer: ToolCallAnswer = self
+            .call(Role::Tools, wire::ops::TOOL_CALL, &request)
+            .await?;
         if answer.is_error {
             Err(CallError(answer.output))
         } else {
@@ -128,18 +154,14 @@ impl Provider for SubcProvider {
         }
     }
 
-    async fn pre_user(
-        &self,
-        session: &SessionRef,
-        text: &str,
-        now: u64,
-    ) -> Result<UserEdit, CallError> {
+    async fn pre_user(&self, text: &str, now: u64) -> Result<UserEdit, CallError> {
         let request = PreUserRequest {
-            session: session.clone(),
             text: text.to_owned(),
             now,
         };
-        let answer: PreUserAnswer = self.call(session, wire::ops::PRE_USER, &request).await?;
+        let answer: PreUserAnswer = self
+            .call(Role::Hooks, wire::ops::PRE_USER, &request)
+            .await?;
         Ok(UserEdit {
             prepend: answer.prepend,
             append: answer.append,
@@ -173,11 +195,24 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
         .build()
 }
 
-/// Serves the runner ops for every session being played.
+/// Who opened a route, as the daemon told the mock at bind: the attested
+/// module, and the session the route is bound to.
+#[derive(Clone)]
+struct Caller {
+    module: Option<String>,
+    harness: String,
+    session: String,
+}
+
+/// Serves the runner ops for every session being played. Each call is about
+/// the session its route is bound to, and only that session's provider may
+/// make it.
 pub struct Handler {
     connection_file: PathBuf,
     provider: String,
-    hosts: Arc<Mutex<HashMap<SessionRef, Host>>>,
+    /// Played sessions by harness and session id.
+    hosts: Arc<Mutex<HashMap<(String, String), Host>>>,
+    callers: Mutex<HashMap<u16, Caller>>,
 }
 
 impl Handler {
@@ -186,49 +221,66 @@ impl Handler {
             connection_file,
             provider,
             hosts: Arc::default(),
+            callers: Mutex::default(),
         }
     }
 
-    fn host(&self, session: &SessionRef) -> Result<Host, (&'static str, String)> {
+    /// The session a provider op is about: the one the route is bound to,
+    /// and only when the daemon attests the session's provider as the caller.
+    fn host(&self, channel: u16) -> Result<Host, (&'static str, String)> {
+        let caller = self
+            .callers
+            .lock()
+            .expect("callers")
+            .get(&channel)
+            .cloned()
+            .ok_or((codes::REFUSED, "route_unbound".to_owned()))?;
+        if caller.module.as_deref() != Some(self.provider.as_str()) {
+            return Err((
+                codes::REFUSED,
+                format!(
+                    "caller_not_provider: only {} may call the runner for its sessions",
+                    self.provider
+                ),
+            ));
+        }
         self.hosts
             .lock()
             .expect("host map")
-            .get(session)
+            .get(&(caller.harness.clone(), caller.session.clone()))
             .cloned()
             .ok_or_else(|| {
                 (
                     codes::UNKNOWN_SESSION,
-                    format!("no session {}", session.session),
+                    format!("no session {}", caller.session),
                 )
             })
     }
 
-    async fn dispatch(&self, body: &[u8]) -> Result<Value, (&'static str, String)> {
+    async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Value, (&'static str, String)> {
         let bad = |message: String| (codes::BAD_REQUEST, message);
         let (method, params) = wire::decode(body).map_err(bad)?;
         match method.as_str() {
             ops::SESSION_READ => {
                 let request: ReadRequest = wire::params(params).map_err(bad)?;
-                Ok(json_of(&self.host(&request.session)?.read(&request)))
+                Ok(json_of(&self.host(channel)?.read(&request)))
             }
             ops::SESSION_APPLY_VIEW => {
                 let request: ApplyViewRequest = wire::params(params).map_err(bad)?;
-                let host = self.host(&request.session)?;
-                Ok(json_of(&host.apply_view(request)))
+                Ok(json_of(&self.host(channel)?.apply_view(request)))
             }
             ops::SESSION_APPLIED_VIEW => {
-                let request: AppliedViewRequest = wire::params(params).map_err(bad)?;
-                Ok(json_of(&self.host(&request.session)?.applied_view()))
+                let _: AppliedViewRequest = wire::params(params).map_err(bad)?;
+                Ok(json_of(&self.host(channel)?.applied_view()))
             }
             ops::SESSION_SEND => {
                 let request: SendRequest = wire::params(params).map_err(bad)?;
-                let host = self.host(&request.session)?;
-                Ok(json_of(&host.send(request)))
+                Ok(json_of(&self.host(channel)?.send(request)))
             }
             ops::RUN_RESULT => {
                 let request: RunResultRequest = wire::params(params).map_err(bad)?;
-                let host = self.host(&request.session)?;
-                host.run_result(&request)
+                self.host(channel)?
+                    .run_result(&request)
                     .map(|result| json_of(&result))
                     .ok_or_else(|| bad(format!("unknown run {}", request.run_id)))
             }
@@ -261,14 +313,15 @@ impl Handler {
                 .expect("a scenario runtime");
             let result = runtime.block_on(async move {
                 let session = request.config.session.clone();
-                let provider = SubcProvider::connect(&connection_file, provider).await?;
+                let key = (session.harness.clone(), session.session.clone());
+                let provider = SubcProvider::connect(&connection_file, provider, session).await?;
                 let mut runner = Runner::start(request.config, provider).await?;
                 hosts
                     .lock()
                     .expect("host map")
-                    .insert(session.clone(), runner.host().clone());
+                    .insert(key.clone(), runner.host().clone());
                 runner.play(&request.steps).await;
-                hosts.lock().expect("host map").remove(&session);
+                hosts.lock().expect("host map").remove(&key);
                 Ok(runner.report)
             });
             let _ = reply.send(result);
@@ -281,8 +334,24 @@ impl Handler {
 
 #[async_trait]
 impl ModuleHandler for Handler {
-    async fn handle(&self, _ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
-        match self.dispatch(&body).await {
+    async fn on_bind(&self, request: &RouteBindRequest) -> BindDecision {
+        let module = match &request.principal {
+            Some(Principal::Reserved { module_id }) => Some(module_id.clone()),
+            _ => None,
+        };
+        self.callers.lock().expect("callers").insert(
+            request.handle.channel,
+            Caller {
+                module,
+                harness: request.identity.harness.clone(),
+                session: request.identity.session.clone(),
+            },
+        );
+        BindDecision::accept()
+    }
+
+    async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
+        match self.dispatch(ctx.route_handle().channel, &body).await {
             Ok(answer) => {
                 HandlerOutcome::Response(serde_json::to_vec(&answer).expect("answers serialize"))
             }

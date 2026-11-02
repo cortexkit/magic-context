@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::read::{SessionRef, StepUsage};
+use crate::read::StepUsage;
 use crate::setup::ModelRef;
 
 /// How queued text may be delivered, in the sender's order of preference.
@@ -28,7 +28,6 @@ pub enum Delivery {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SendRequest {
-    pub session: SessionRef,
     /// The idempotency key: a repeat with the same key does nothing new.
     pub send_id: String,
     pub prompt: String,
@@ -82,7 +81,6 @@ pub enum SendAnswer {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunResultRequest {
-    pub session: SessionRef,
     pub run_id: String,
 }
 

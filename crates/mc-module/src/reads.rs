@@ -21,16 +21,16 @@ pub async fn full_range<C: RunnerClient>(
     let mut entries = Vec::new();
     let mut after = from.checked_sub(1);
     while after.is_none_or(|ordinal| ordinal + 1 < until) {
+        let request = ReadRequest {
+            select: Select::After {
+                after_ordinal: after,
+                limit: None,
+            },
+            detail: Detail::Full,
+            max_bytes: Some(PAGE_BYTES),
+        };
         let page = client
-            .read(ReadRequest {
-                session: session.clone(),
-                select: Select::After {
-                    after_ordinal: after,
-                    limit: None,
-                },
-                detail: Detail::Full,
-                max_bytes: Some(PAGE_BYTES),
-            })
+            .read(session, request)
             .await
             .map_err(|error| format!("session.read: {error:?}"))?;
         let more = page.next_after.is_some();
@@ -54,13 +54,13 @@ pub async fn by_tags<C: RunnerClient>(
     session: &SessionRef,
     tags: Vec<u64>,
 ) -> Result<Vec<Entry>, String> {
+    let request = ReadRequest {
+        select: Select::Tags { tags },
+        detail: Detail::Full,
+        max_bytes: None,
+    };
     client
-        .read(ReadRequest {
-            session: session.clone(),
-            select: Select::Tags { tags },
-            detail: Detail::Full,
-            max_bytes: None,
-        })
+        .read(session, request)
         .await
         .map(|page| page.entries)
         .map_err(|error| format!("session.read: {error:?}"))

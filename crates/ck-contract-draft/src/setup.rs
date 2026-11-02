@@ -2,16 +2,19 @@
 //! it starts serving a session, including after its own restart. Setup only
 //! announces the session; it never carries messages, and the provider reads
 //! the transcript afterwards, never inside Setup.
+//!
+//! The session and its project come from the route, not from the request:
+//! the route's bind identity names the session, and the daemon's scope stamp
+//! on the route names the session's folder and project.
 
 use serde::{Deserialize, Serialize};
 
-use crate::read::{Cursor, SessionRef};
+use crate::read::Cursor;
 use crate::rules::ProviderRules;
 use crate::view::AppliedView;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SetupRequest {
-    pub session: SessionRef,
     /// The session's preset, for example `head`, `worker` or `reader`. The
     /// provider decides what each preset enables.
     pub preset: String,
@@ -31,18 +34,6 @@ pub struct SetupRequest {
     pub newest: Option<Cursor>,
     /// The runner's clock, in milliseconds since the Unix epoch.
     pub now: u64,
-    /// The project the session works in. On the real contract this comes
-    /// from the route's scope stamp, not from the request.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<Project>,
-}
-
-/// A session's project: the identity its memories are kept under, and the
-/// folder its docs are read from.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Project {
-    pub id: String,
-    pub root: String,
 }
 
 /// The model the session currently uses.

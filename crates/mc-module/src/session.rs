@@ -9,10 +9,8 @@ use ck_contract_draft::notice::{Conditions, Event, NoticeRequest};
 use ck_contract_draft::read::{Cursor, Detail, ReadRequest, Select, SessionRef};
 use ck_contract_draft::ride::{RideCause, RideRequest};
 use ck_contract_draft::send::{Delivery, SendRequest};
-use ck_contract_draft::setup::{Project, SetupRequest};
-use ck_contract_draft::view::{
-    AppliedViewRequest, ApplyViewAnswer, ApplyViewRequest, EditOp, View, MAX_VIEW_BYTES,
-};
+use ck_contract_draft::setup::SetupRequest;
+use ck_contract_draft::view::{ApplyViewAnswer, ApplyViewRequest, EditOp, View, MAX_VIEW_BYTES};
 use serde_json::Value;
 
 use crate::client::RunnerClient;
@@ -22,6 +20,7 @@ use crate::lanes;
 use crate::pass::{self, Settings};
 use crate::preset::Features;
 use crate::reduce;
+use crate::route::{Project, Route};
 use crate::summary::head::{self, Baseline};
 use crate::summary::run;
 use crate::summary::trigger;
@@ -90,11 +89,16 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(request: &SetupRequest, features: Features, db: Option<Arc<ContextDb>>) -> Self {
+    pub fn new(
+        route: &Route,
+        request: &SetupRequest,
+        features: Features,
+        db: Option<Arc<ContextDb>>,
+    ) -> Self {
         Self {
             db,
-            project: request.project.clone(),
-            key: request.session.clone(),
+            project: route.project.clone(),
+            key: route.session.clone(),
             features,
             conditions: conditions_of(request),
             index: Index::default(),
@@ -189,12 +193,13 @@ impl Session {
         &mut self,
         client: &C,
         settings: &Settings,
+        route: &Route,
         request: &SetupRequest,
         features: Features,
     ) {
         self.features = features;
         self.conditions = conditions_of(request);
-        self.project = request.project.clone();
+        self.project = route.project.clone();
         self.seq = 0;
         let ours = self.latest.as_ref().map(View::applied);
         if ours != request.applied_view {
@@ -531,14 +536,13 @@ impl Session {
                 continue;
             };
             let request = SendRequest {
-                session: self.key.clone(),
                 send_id: format!("{template}:{}", self.seq),
                 prompt: text,
                 template: Some(template.into()),
                 delivery: vec![delivery],
                 run: None,
             };
-            if let Err(error) = client.send(request).await {
+            if let Err(error) = client.send(&self.key, request).await {
                 eprintln!(
                     "ck-mc: session {}: session.send failed: {error:?}",
                     self.key.session
@@ -574,7 +578,6 @@ impl Session {
              Everything else before that call, except your task, is then removed."
         );
         let request = SendRequest {
-            session: self.key.clone(),
             // One request per stay over the threshold, so the view version
             // that crossed it names it.
             send_id: format!("{KEEP_TEMPLATE}:{}", self.version),
@@ -583,7 +586,7 @@ impl Session {
             delivery: vec![Delivery::Steer],
             run: None,
         };
-        match client.send(request).await {
+        match client.send(&self.key, request).await {
             Ok(_) => self.keep_requested = true,
             Err(error) => eprintln!(
                 "ck-mc: session {}: session.send failed: {error:?}",
@@ -1185,11 +1188,8 @@ impl Session {
             );
             return;
         }
-        let request = ApplyViewRequest {
-            session: self.key.clone(),
-            view: view.clone(),
-        };
-        match client.apply_view(request).await {
+        let request = ApplyViewRequest { view: view.clone() };
+        match client.apply_view(&self.key, request).await {
             Ok(ApplyViewAnswer::Accepted) => self.accept(view),
             Ok(ApplyViewAnswer::Refused { refusal }) => {
                 self.next_baseline = None;
@@ -1234,12 +1234,7 @@ impl Session {
     /// Take the view the runner applies as ck-mc's own: after a refusal, or
     /// when ck-mc's copy is missing or older (for example after a restore).
     async fn adopt_runner_view<C: RunnerClient>(&mut self, client: &C) {
-        match client
-            .applied_view(AppliedViewRequest {
-                session: self.key.clone(),
-            })
-            .await
-        {
+        match client.applied_view(&self.key).await {
             Ok(answer) => {
                 if let Some(view) = &answer.view {
                     self.version = self.version.max(view.version);
@@ -1265,7 +1260,6 @@ impl Session {
                 return;
             }
             let request = ReadRequest {
-                session: self.key.clone(),
                 select: Select::After {
                     after_ordinal: after,
                     limit: None,
@@ -1273,7 +1267,7 @@ impl Session {
                 detail: Detail::Compact,
                 max_bytes: Some(READ_PAGE_BYTES),
             };
-            let page = match client.read(request).await {
+            let page = match client.read(&self.key, request).await {
                 Ok(page) => page,
                 Err(error) => {
                     eprintln!(
