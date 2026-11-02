@@ -2756,20 +2756,62 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
 }
 
 #[tokio::test]
+async fn the_summarizer_reads_at_most_its_quota_per_ten_minutes() {
+    // Twelve turns of conversation in one burst: the summarizer has more to
+    // read than one ten-minute window allows, so it stops until the window
+    // ends, then runs again.
+    let mut session = config("head", Kind::OpenAi, FREE);
+    session.cache_ttl_ms = 24 * 3_600_000;
+    let mut runner = start(session).await;
+    let burst_turn = |prompt: &str| {
+        vec![
+            user(prompt),
+            long_reply(4_000),
+            user("Go on."),
+            long_reply(4_000),
+        ]
+    };
+    let mut steps = Vec::new();
+    for turn_number in 0..12 {
+        steps.extend(burst_turn(&format!("Look at file {turn_number}.")));
+    }
+    runner.play(&steps).await;
+    let in_burst = runner.host().child_runs().len();
+    runner.play(&burst_turn("And another.")).await;
+    let still = runner.host().child_runs().len();
+    runner.play(&[Step::Wait { ms: 11 * 60_000 }]).await;
+    runner.play(&burst_turn("After a pause.")).await;
+    let after = runner.host().child_runs().len();
+    assert_clean(&runner);
+    assert!(in_burst >= 1, "{in_burst}");
+    assert_eq!(still, in_burst);
+    assert!(after > still, "{still} -> {after}");
+}
+
+#[tokio::test]
 async fn a_long_head_session_keeps_ck_mcs_index_window_sized() {
-    // Forty turns of four messages each: summaries keep cutting the older
-    // ones. After a restart, ck-mc reads only what the model still sees,
-    // however long the session has run.
+    // Forty turns of four messages each (about 8,000 tokens of conversation,
+    // which no automatic lane drops), a quarter of an hour apart, so the
+    // summarizer's ten-minute drain quota keeps up. Summaries land with the
+    // next rebuild, once usage reaches the threshold every eight turns or
+    // so, and each cuts the messages they cover. After a restart, ck-mc reads
+    // only what the model still sees, however long the session has run.
     let dir = scratch("long-head");
-    let mut runner = start_full(
-        config("head", Kind::OpenAi, FREE),
-        Settings::default(),
-        Some(dir.clone()),
-    )
-    .await;
+    let mut session = config("head", Kind::OpenAi, FREE);
+    session.cache_ttl_ms = 24 * 3_600_000;
+    let mut runner = start_full(session, Settings::default(), Some(dir.clone())).await;
+    let small_turn = |prompt: &str| {
+        vec![
+            user(prompt),
+            long_reply(4_000),
+            user("Go on."),
+            long_reply(4_000),
+        ]
+    };
     let mut steps = Vec::new();
     for turn_number in 0..40 {
-        steps.extend(turn(&format!("Look at file {turn_number}.")));
+        steps.extend(small_turn(&format!("Look at file {turn_number}.")));
+        steps.push(Step::Wait { ms: 15 * 60_000 });
     }
     runner.play(&steps).await;
     assert_clean(&runner);
@@ -2777,7 +2819,7 @@ async fn a_long_head_session_keeps_ck_mcs_index_window_sized() {
     assert!(total >= 160, "{total}");
     runner.provider().client.reads.lock().unwrap().clear();
     runner.provider().restart();
-    runner.play(&turn("One more.")).await;
+    runner.play(&small_turn("One more.")).await;
     assert_clean(&runner);
     let read: usize = runner
         .provider()
@@ -2788,7 +2830,7 @@ async fn a_long_head_session_keeps_ck_mcs_index_window_sized() {
         .iter()
         .map(|(_, entries)| entries)
         .sum();
-    assert!(read > 0 && read <= 24, "read {read} of {total} entries");
+    assert!(read > 0 && read <= 48, "read {read} of {total} entries");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

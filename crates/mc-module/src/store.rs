@@ -43,6 +43,9 @@ pub struct Durable {
     /// How far each compressed text part is compressed.
     #[serde(default)]
     pub caveman: crate::lanes::CavemanState,
+    /// The summarizer's drain quota.
+    #[serde(default)]
+    pub drain: crate::summary::drain::Drain,
 }
 
 pub struct Store {

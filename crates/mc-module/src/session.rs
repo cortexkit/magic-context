@@ -112,6 +112,10 @@ pub struct Session {
     /// The newest prompt a run has already summarized past once at the
     /// execute threshold ([`Session::summary_due`]).
     floor_lifted_for: Option<String>,
+    /// How much history the summarizer may still read this window.
+    drain: crate::summary::drain::Drain,
+    /// The raw tokens the run in progress reserved.
+    reservation: Option<crate::summary::drain::Reservation>,
     /// The output text of tool results with answered images, read in full
     /// once, so the answered-images lane can keep the text and mark each
     /// removed image ([`lanes::image_results`]).
@@ -156,6 +160,8 @@ impl Session {
             tools_only: false,
             no_progress: None,
             floor_lifted_for: None,
+            drain: Default::default(),
+            reservation: None,
             image_outputs: std::collections::BTreeMap::new(),
         }
     }
@@ -223,6 +229,7 @@ impl Session {
             cut: self.cut,
             pruned_turns: self.pruned_turns,
             caveman: self.caveman.clone(),
+            drain: self.drain.clone(),
         }
     }
 
@@ -238,6 +245,7 @@ impl Session {
         self.cut = durable.cut;
         self.pruned_turns = durable.pruned_turns;
         self.caveman = durable.caveman;
+        self.drain = durable.drain;
         // The first read after a restart starts at the cut: nothing before
         // it is visible to the model.
         self.index = Index::starting_at(durable.cut.unwrap_or(1));
@@ -420,6 +428,17 @@ impl Session {
         let entries = self.index.entries();
         let budget = trigger::trigger_budget(window, threshold);
         let cap = trigger::per_run_cap(window, threshold, usage);
+        let quota = crate::summary::drain::Usage {
+            now: self.clock(),
+            percentage: usage,
+            threshold,
+            force,
+            usable: ((window as f64 * threshold / 100.0).round() as u64).max(1),
+            per_run_cap: cap,
+        };
+        if self.drain.exhausted(&quota) {
+            return None;
+        }
         // The scan measures the lines in the summarizer's own tokens, scaled
         // to the model's by the larger of its prose and tool ratios.
         let model = &self.conditions.model;
@@ -499,6 +518,21 @@ impl Session {
         if self.waits_for_new_history(force) {
             return None;
         }
+        let requested: u64 = self
+            .index
+            .entries()
+            .iter()
+            .filter(|entry| entry.ordinal >= from && entry.ordinal < until)
+            .map(entry_tokens)
+            .sum();
+        let Some(reservation) = self.drain.reserve(&quota, requested) else {
+            eprintln!(
+                "ck-mc: session {}: summary skipped: drain budget spent ({} tokens this window)",
+                self.key.session, self.drain.spent
+            );
+            return None;
+        };
+        self.reservation = Some(reservation);
         self.summarizing = true;
         Some(run::Request {
             session: self.key.clone(),
@@ -510,6 +544,23 @@ impl Session {
             memory_enabled,
             auto_promote: settings.auto_promote,
         })
+    }
+
+    /// The session's clock for the drain quota: when the runner wrote the
+    /// newest message, which a notice follows at once. Decisions then follow
+    /// the transcript alone, as every other decision here does; the wall
+    /// clock is used only before the first message.
+    fn clock(&self) -> i64 {
+        self.index
+            .entries()
+            .last()
+            .map(|entry| entry.written_at as i64)
+            .filter(|written| *written > 0)
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_millis() as i64)
+            })
     }
 
     /// Usage once this pass's drops land: the model's queued drops and the
@@ -647,17 +698,25 @@ impl Session {
         now_ms: i64,
     ) {
         self.summarizing = false;
+        let reservation = self.reservation.take();
         let validated = match result {
             Ok(Some(validated)) => validated,
             Ok(None) => {
+                if let Some(reservation) = reservation {
+                    self.drain.release(reservation);
+                }
                 self.record_no_progress(settings);
                 return;
             }
+            // The summarizer failed: the reservation stays spent, so a broken
+            // summarizer does not run again on every pass.
             Err(error) => {
                 eprintln!(
                     "ck-mc: session {}: summary failed: {error}",
                     self.key.session
                 );
+                let now = self.clock();
+                self.drain.record_failure(now);
                 self.record_no_progress(settings);
                 return;
             }
@@ -669,6 +728,9 @@ impl Session {
                 present(&summary.end_message_id) && present(&summary.start_message_id)
             })
         {
+            if let Some(reservation) = reservation {
+                self.drain.release(reservation);
+            }
             self.record_no_progress(settings);
             return;
         }
