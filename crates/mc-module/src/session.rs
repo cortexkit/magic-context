@@ -111,6 +111,17 @@ impl Session {
         &self.key
     }
 
+    /// What the session's settings depend on: its project folder, its model
+    /// as `provider/model`, and its usable window.
+    pub fn config_inputs(&self) -> (Option<&str>, String, u64) {
+        let model = &self.conditions.model;
+        (
+            self.project.as_ref().map(|project| project.root.as_str()),
+            format!("{}/{}", model.provider, model.model),
+            crate::pass::usable_window(&self.conditions),
+        )
+    }
+
     /// What must survive a restart.
     pub fn durable(&self) -> crate::store::Durable {
         crate::store::Durable {
@@ -507,7 +518,7 @@ impl Session {
                     .project
                     .as_ref()
                     .map(|project| std::path::Path::new(&project.root));
-                let scope = crate::search::Scope {
+                let mut scope = crate::search::Scope {
                     harness: &self.key.harness,
                     session: &self.key.session,
                     project: self.project.as_ref().map(|project| project.id.as_str()),
@@ -516,7 +527,38 @@ impl Session {
                     memory_enabled: settings.memory_enabled,
                     git_commits_enabled: settings.git_commits_enabled,
                     git_repository: root.map(|root| root.join(".git").exists()),
+                    semantic: None,
                 };
+                if let Some(answer) =
+                    db.with_connection(|conn| crate::search::by_ids(conn, &scope, input))
+                {
+                    return answer;
+                }
+                // Embedded once, before the store is touched, so the request
+                // to the endpoint never holds the connection.
+                let query = input.get("query").and_then(Value::as_str).unwrap_or("");
+                let embedded = match &settings.embedding {
+                    Some(provider)
+                        if crate::search::needs_embedding(
+                            input,
+                            settings.memory_enabled,
+                            settings.git_commits_enabled,
+                        ) =>
+                    {
+                        provider
+                            .embed_query(query.trim())
+                            .await
+                            .map(|vector| (vector, provider.model_id(), provider.chunk_model_id()))
+                    }
+                    _ => None,
+                };
+                scope.semantic = embedded.as_ref().map(|(vector, model_id, chunk_model_id)| {
+                    crate::search::sources::Semantic {
+                        vector,
+                        model_id,
+                        chunk_model_id,
+                    }
+                });
                 db.with_connection(|conn| crate::search::run(conn, &scope, input))
             }
             "ctx_note" => {

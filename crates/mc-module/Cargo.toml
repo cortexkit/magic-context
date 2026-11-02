@@ -18,6 +18,8 @@ mc-tokenizer = { workspace = true }
 rusqlite = { workspace = true }
 sha2 = { workspace = true }
 md5 = "0.7"
+# Search query embeddings: one HTTPS POST per explicit search, no redirects.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
 mc-mock-runner = { workspace = true }

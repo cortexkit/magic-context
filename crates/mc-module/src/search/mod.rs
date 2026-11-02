@@ -4,8 +4,12 @@
 //! tool (`tools/ctx-search` and `features/magic-context/search.ts`), so an
 //! agent reads the same in both.
 //!
-//! Not here yet: semantic scores (query embeddings), summary-chunk search,
-//! reranking, and memories a workspace shares from other projects.
+//! A search runs in two steps: [`by_ids`] answers a query of memory ids
+//! without embedding anything; otherwise the caller embeds the query once
+//! (when [`needs_embedding`]) and [`run`] scores every lane with it.
+//!
+//! Not here yet: reranking, and memories a workspace shares from other
+//! projects.
 
 pub mod messages;
 pub mod sources;
@@ -17,7 +21,7 @@ use rusqlite::Connection;
 use serde_json::Value;
 
 use messages::{DateRange, MessageHit};
-use sources::{CommitHit, MemoryHit, NoteHit, PrimerHit};
+use sources::{ChunkHit, CommitHit, MemoryHit, NoteHit, PrimerHit};
 
 const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 25;
@@ -28,6 +32,8 @@ const MESSAGE_BOOST: f64 = 1.275;
 const GIT_COMMIT_BOOST: f64 = 1.2;
 const PRIMER_BOOST: f64 = 1.25;
 const SOURCES: [&str; 5] = ["memory", "message", "git_commit", "primer", "note"];
+/// Reciprocal-rank constant for fusing message and summary hits.
+const RRF_K: f64 = 60.0;
 
 /// What a search may read for one session.
 pub struct Scope<'a> {
@@ -46,12 +52,16 @@ pub struct Scope<'a> {
     pub git_commits_enabled: bool,
     /// Whether the project folder holds a git repository.
     pub git_repository: Option<bool>,
+    /// The query's embedding, when the session has an embedding provider and
+    /// the endpoint answered.
+    pub semantic: Option<sources::Semantic<'a>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 enum Hit {
     Memory(MemoryHit),
     Message(MessageHit),
+    Chunk(ChunkHit),
     Commit(CommitHit),
     Primer(PrimerHit),
     Note(NoteHit),
@@ -62,6 +72,7 @@ impl Hit {
         match self {
             Hit::Memory(hit) => hit.score,
             Hit::Message(hit) => hit.score,
+            Hit::Chunk(hit) => hit.score,
             Hit::Commit(hit) => hit.score,
             Hit::Primer(hit) => hit.score,
             Hit::Note(hit) => hit.score,
@@ -72,7 +83,7 @@ impl Hit {
         self.score()
             * match self {
                 Hit::Memory(_) => MEMORY_BOOST,
-                Hit::Message(_) => MESSAGE_BOOST,
+                Hit::Message(_) | Hit::Chunk(_) => MESSAGE_BOOST,
                 Hit::Commit(_) => GIT_COMMIT_BOOST,
                 Hit::Primer(_) => PRIMER_BOOST,
                 Hit::Note(_) => 1.0,
@@ -93,6 +104,7 @@ fn compare(left: &Hit, right: &Hit) -> std::cmp::Ordering {
     match (left, right) {
         (Hit::Memory(left), Hit::Memory(right)) => left.id.cmp(&right.id),
         (Hit::Message(left), Hit::Message(right)) => left.number.cmp(&right.number),
+        (Hit::Chunk(left), Hit::Chunk(right)) => left.start.cmp(&right.start),
         (Hit::Commit(left), Hit::Commit(right)) => right.committed_at.cmp(&left.committed_at),
         (Hit::Primer(left), Hit::Primer(right)) => right
             .support
@@ -272,15 +284,16 @@ fn format_hit(hit: &Hit, index: usize, session: &str, now: i64) -> String {
             hit.score, hit.id, hit.category, hit.match_type, hit.content
         ),
         Hit::Commit(hit) => format!(
-            "[{index}] [git_commit] score={:.2} sha={} {} match=fts\n{}",
+            "[{index}] [git_commit] score={:.2} sha={} {} match={}\n{}",
             hit.score,
             hit.short_sha,
             age(hit.committed_at, now),
+            hit.match_type,
             hit.content
         ),
         Hit::Primer(hit) => format!(
-            "[{index}] [primer] score={:.2} id={} support={} match=fts\n{}",
-            hit.score, hit.id, hit.support, hit.content
+            "[{index}] [primer] score={:.2} id={} support={} match={}\n{}",
+            hit.score, hit.id, hit.support, hit.match_type, hit.content
         ),
         Hit::Note(hit) => {
             let anchor = match (hit.anchor_ordinal, hit.session_id.as_deref()) {
@@ -296,6 +309,19 @@ fn format_hit(hit: &Hit, index: usize, session: &str, now: i64) -> String {
                 hit.content
             )
         }
+        Hit::Chunk(hit) => format!(
+            "[{index}] [message] score={:.2} compartment_id={} range={}-{} match={} title={}\n{}",
+            hit.score,
+            hit.compartment_id,
+            hit.start,
+            hit.end,
+            hit.match_type,
+            hit.title,
+            match &hit.snippet {
+                Some(snippet) => format!("Snippet: {snippet}"),
+                None => text::preview(&hit.title),
+            }
+        ),
         Hit::Message(hit) => format!(
             "[{index}] [message] score={:.2} ordinal={} range={}-{} role={}\n{}",
             hit.score,
@@ -423,8 +449,24 @@ fn memories_by_id(
     (!hits.is_empty()).then_some(hits)
 }
 
-/// Run one `ctx_search` call.
-pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String, String> {
+/// A call's arguments, checked.
+struct Request<'a> {
+    query: &'a str,
+    dates: Option<DateRange>,
+    tool_limit: usize,
+    /// The sources asked for; `None` means all.
+    requested: Option<Vec<String>>,
+}
+
+impl Request<'_> {
+    fn active(&self, source: &str) -> bool {
+        self.requested
+            .as_ref()
+            .is_none_or(|list| list.iter().any(|known| known == source))
+    }
+}
+
+fn parse(input: &Value) -> Result<Request<'_>, String> {
     let query = input
         .get("query")
         .and_then(Value::as_str)
@@ -438,65 +480,187 @@ pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String
         Some(limit) if limit.is_finite() && limit != 0.0 => (limit.floor() as i64).max(1) as usize,
         _ => DEFAULT_LIMIT,
     };
-    let requested: Option<Vec<String>> =
-        input
-            .get("sources")
-            .and_then(Value::as_array)
-            .and_then(|list| {
-                if list.is_empty() {
-                    return None;
+    let requested = input
+        .get("sources")
+        .and_then(Value::as_array)
+        .and_then(|list| {
+            if list.is_empty() {
+                return None;
+            }
+            let mut seen: Vec<String> = Vec::new();
+            for source in list.iter().filter_map(Value::as_str) {
+                if SOURCES.contains(&source) && !seen.iter().any(|known| known == source) {
+                    seen.push(source.to_owned());
                 }
-                let mut seen = Vec::new();
-                for source in list.iter().filter_map(Value::as_str) {
-                    if SOURCES.contains(&source)
-                        && !seen.iter().any(|known: &String| known == source)
-                    {
-                        seen.push(source.to_owned());
-                    }
-                }
-                Some(seen)
-            });
-    let active = |source: &str| {
-        requested
-            .as_ref()
-            .is_none_or(|list| list.iter().any(|known| known == source))
-    };
-    let Some(project) = scope.project else {
-        return Err(
-            "Error: Could not resolve project identity for search: the session has no project."
-                .into(),
-        );
-    };
-    let visible: BTreeSet<i64> = sources::project_memories(conn, project)
+            }
+            Some(seen)
+        });
+    Ok(Request {
+        query,
+        dates,
+        tool_limit,
+        requested,
+    })
+}
+
+fn project_of<'a>(scope: &Scope<'a>) -> Result<&'a str, String> {
+    scope.project.ok_or_else(|| {
+        "Error: Could not resolve project identity for search: the session has no project.".into()
+    })
+}
+
+/// The memories whose current text the head shows.
+fn visible_memories(conn: &Connection, project: &str, scope: &Scope) -> BTreeSet<i64> {
+    sources::project_memories(conn, project)
         .unwrap_or_default()
         .iter()
         .filter(|memory| scope.seen.get(&memory.id) == Some(&memory.content))
         .map(|memory| memory.id)
-        .collect();
+        .collect()
+}
+
+/// The answer to a query made only of memory ids, or `None` when the query
+/// is not one or names no current memory; then the full search runs.
+pub fn by_ids(
+    conn: &mut Connection,
+    scope: &Scope,
+    input: &Value,
+) -> Option<Result<String, String>> {
+    let request = match parse(input) {
+        Ok(request) => request,
+        Err(error) => return Some(Err(error)),
+    };
+    if !scope.memory_enabled {
+        return None;
+    }
+    let ids = id_query(request.query)?;
+    let project = match project_of(scope) {
+        Ok(project) => project,
+        Err(error) => return Some(Err(error)),
+    };
+    let visible = visible_memories(conn, project, scope);
     let mut diagnostics = Diagnostics::default();
-    if scope.memory_enabled {
-        if let Some(ids) = id_query(query) {
-            let limit = tool_limit.max(ids.len());
-            let found = memories_by_id(
-                conn,
-                project,
-                &ids,
-                limit,
-                &visible,
-                dates,
-                &mut diagnostics,
-            );
-            if found.is_some() || !diagnostics.suppressed_visible.is_empty() {
-                return Ok(format_results(
-                    query,
-                    &found.unwrap_or_default(),
-                    scope.session,
-                    &diagnostics,
-                ));
+    let limit = request.tool_limit.max(ids.len());
+    let found = memories_by_id(
+        conn,
+        project,
+        &ids,
+        limit,
+        &visible,
+        request.dates,
+        &mut diagnostics,
+    );
+    (found.is_some() || !diagnostics.suppressed_visible.is_empty()).then(|| {
+        Ok(format_results(
+            request.query,
+            &found.unwrap_or_default(),
+            scope.session,
+            &diagnostics,
+        ))
+    })
+}
+
+/// Whether a lane the call runs scores by meaning, so the query is worth
+/// embedding. Invalid arguments need none: [`run`] refuses them.
+pub fn needs_embedding(input: &Value, memory_enabled: bool, git_commits_enabled: bool) -> bool {
+    parse(input).is_ok_and(|request| {
+        request.active("message")
+            || (memory_enabled && (request.active("memory") || request.active("primer")))
+            || (git_commits_enabled && request.active("git_commit"))
+    })
+}
+
+/// Fuse the message lane with the summary lane by reciprocal rank, as the
+/// plugin does: a message inside a summary's range adds its rank to that
+/// summary and lends it its text as the snippet, instead of being listed on
+/// its own. Fusion only orders and trims; each hit keeps its own score.
+fn fuse_history(messages: Vec<MessageHit>, chunks: Vec<ChunkHit>, limit: usize) -> Vec<Hit> {
+    if chunks.is_empty() {
+        return messages.into_iter().map(Hit::Message).collect();
+    }
+    if messages.is_empty() {
+        return chunks.into_iter().map(Hit::Chunk).collect();
+    }
+    struct Fused {
+        hit: Hit,
+        score: f64,
+        tie: i64,
+        snippet_score: f64,
+    }
+    let mut fused: Vec<(String, Fused)> = Vec::new();
+    fn add(fused: &mut Vec<(String, Fused)>, key: String, hit: Hit, score: f64, tie: i64) -> usize {
+        if let Some(at) = fused.iter().position(|(known, _)| *known == key) {
+            fused[at].1.score += score;
+            return at;
+        }
+        fused.push((
+            key,
+            Fused {
+                hit,
+                score,
+                tie,
+                snippet_score: -1.0,
+            },
+        ));
+        fused.len() - 1
+    }
+    for (rank, chunk) in chunks.iter().enumerate() {
+        add(
+            &mut fused,
+            format!("compartment:{}", chunk.compartment_id),
+            Hit::Chunk(chunk.clone()),
+            1.0 / (RRF_K + rank as f64),
+            chunk.start,
+        );
+    }
+    for (rank, message) in messages.into_iter().enumerate() {
+        let contribution = 1.0 / (RRF_K + rank as f64);
+        let containing = chunks
+            .iter()
+            .find(|chunk| message.number >= chunk.start && message.number <= chunk.end);
+        let Some(chunk) = containing else {
+            let (key, tie) = (format!("message:{}", message.message_id), message.number);
+            add(&mut fused, key, Hit::Message(message), contribution, tie);
+            continue;
+        };
+        let at = add(
+            &mut fused,
+            format!("compartment:{}", chunk.compartment_id),
+            Hit::Chunk(chunk.clone()),
+            contribution,
+            chunk.start,
+        );
+        let entry = &mut fused[at].1;
+        if message.score > entry.snippet_score {
+            if let Hit::Chunk(hit) = &mut entry.hit {
+                entry.snippet_score = message.score;
+                hit.match_type = "hybrid";
+                hit.snippet = Some(message.content);
             }
         }
     }
-    let limit = tool_limit.clamp(1, MAX_LIMIT);
+    let mut ranked: Vec<Fused> = fused.into_iter().map(|(_, entry)| entry).collect();
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.tie.cmp(&right.tie))
+    });
+    ranked.truncate(limit);
+    ranked.into_iter().map(|entry| entry.hit).collect()
+}
+
+/// Run one `ctx_search` call over every lane; a query of memory ids is
+/// answered by [`by_ids`] first.
+pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String, String> {
+    let request = parse(input)?;
+    let (query, dates) = (request.query, request.dates);
+    let active = |source: &str| request.active(source);
+    let project = project_of(scope)?;
+    let visible = visible_memories(conn, project, scope);
+    let mut diagnostics = Diagnostics::default();
+    let limit = request.tool_limit.clamp(1, MAX_LIMIT);
     let tier = (limit * 3).max(DEFAULT_LIMIT);
     let probes = text::literal_probes(query);
     let wanted = messages::Query {
@@ -511,13 +675,13 @@ pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String
     let mut hits: Vec<Hit> = Vec::new();
     if active("memory") && scope.memory_enabled {
         let (found, suppressed) =
-            sources::search_memories(conn, project, query, tier, &visible, dates);
+            sources::search_memories(conn, project, query, tier, &visible, dates, scope.semantic);
         diagnostics.suppressed_visible = suppressed;
         hits.extend(found.into_iter().map(Hit::Memory));
     }
     if active("primer") && scope.memory_enabled {
         hits.extend(
-            sources::search_primers(conn, project, query, tier, dates)
+            sources::search_primers(conn, project, query, tier, dates, scope.semantic)
                 .into_iter()
                 .map(Hit::Primer),
         );
@@ -525,15 +689,24 @@ pub fn run(conn: &mut Connection, scope: &Scope, input: &Value) -> Result<String
     if active("message") {
         diagnostics.live_message_matches =
             messages::count_live_matches(conn, scope.session, query, scope.cutoff, dates);
-        hits.extend(
-            messages::search(conn, scope.session, &wanted, scope.cutoff, true)
-                .into_iter()
-                .map(Hit::Message),
-        );
+        let found = messages::search(conn, scope.session, &wanted, scope.cutoff, true);
+        let chunks = match scope.semantic {
+            Some(semantic) => sources::search_chunks(
+                conn,
+                scope.session,
+                project,
+                tier,
+                scope.cutoff,
+                dates,
+                semantic,
+            ),
+            None => Vec::new(),
+        };
+        hits.extend(fuse_history(found, chunks, tier));
     }
     if active("git_commit") && scope.git_commits_enabled {
         hits.extend(
-            sources::search_commits(conn, project, query, tier, dates)
+            sources::search_commits(conn, project, query, tier, dates, scope.semantic)
                 .into_iter()
                 .map(Hit::Commit),
         );

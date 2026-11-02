@@ -5,9 +5,9 @@
 use std::error::Error;
 use std::path::PathBuf;
 
+use mc_module::config::{Config, Loader};
 use mc_module::context_db::ContextDb;
 use mc_module::module::Module;
-use mc_module::pass::Settings;
 use mc_module::store::Store;
 use mc_module::transport::{manifest, Handler, SubcRunnerClient};
 
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     };
     let module = Module::new(
         SubcRunnerClient::new(connection_file.clone()),
-        Settings::default(),
+        Config::Files(Loader::from_environment()),
         db,
         store,
     );

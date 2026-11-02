@@ -1475,3 +1475,178 @@ async fn ctx_search_finds_summarized_messages_notes_and_hidden_memories_but_not_
     assert_eq!(indexed, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A stand-in embedding endpoint. Every query embeds to one of two
+/// directions, chosen by whether it mentions versions, and every request is
+/// counted.
+async fn embedding_endpoint() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let counter = Arc::clone(&counter);
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let read = socket.read(&mut chunk).await.unwrap_or(0);
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&request).to_lowercase();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                counter.fetch_add(1, Ordering::SeqCst);
+                let vector = if String::from_utf8_lossy(&request).contains("version") {
+                    "[1.0, 0.0]"
+                } else {
+                    "[0.0, 1.0]"
+                };
+                let body = format!(
+                    "{{\"model\":\"mock-embed\",\"data\":[{{\"index\":0,\"embedding\":{vector}}}]}}"
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{address}/v1"), calls)
+}
+
+fn vector_blob(values: &[f32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+#[tokio::test]
+async fn ctx_search_finds_commits_and_memories_by_meaning_with_one_embedding_per_search() {
+    let dir = scratch("search-meaning");
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    let (endpoint, calls) = embedding_endpoint().await;
+    let provider = mc_module::embedding::Provider::from_tiers(
+        &json!({"embedding": {
+            "provider": "openai-compatible",
+            "endpoint": endpoint,
+            "model": "mock-embed"
+        }}),
+        &json!({}),
+        std::path::Path::new("/"),
+    )
+    .unwrap();
+    let model_id = provider.model_id();
+    let chunk_model_id = provider.chunk_model_id();
+    // None of these shares a word with the query; only their vectors match it.
+    insert_memory(&dir, 2, "Builds verify with the gate script.");
+    {
+        let db = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+        db.execute(
+            "INSERT INTO git_commits (sha, project_path, short_sha, message, author, committed_at, indexed_at)
+             VALUES (?1, 'pj-test', 'aaaaaaa', 'Pin the lockfile before bisecting', 'a', 1, 1)",
+            rusqlite::params!["a".repeat(40)],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO git_commit_embeddings (sha, embedding, model_id, created_at) VALUES (?1, ?2, ?3, 1)",
+            rusqlite::params!["a".repeat(40), vector_blob(&[1.0, 0.0]), model_id],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO memory_embeddings (memory_id, embedding, model_id) VALUES (2, ?1, ?2)",
+            rusqlite::params![vector_blob(&[1.0, 0.0]), model_id],
+        )
+        .unwrap();
+        // A summary of messages the session no longer holds raw, with one
+        // stored chunk vector.
+        db.execute(
+            "INSERT INTO compartments (id, session_id, sequence, start_message, end_message, title,
+                                       content, p1, created_at, harness)
+             VALUES (7, 's1', 0, 50, 60, 'Tracked down a flaky lockfile check', 'Body.', 'Body.', 1, 'mock')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO compartment_chunk_embeddings (compartment_id, session_id, project_path, harness,
+                 window_index, start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at)
+             VALUES (7, 's1', 'pj-test', 'mock', 0, 50, 60, 'h', ?1, 2, ?2, 1)",
+            rusqlite::params![chunk_model_id, vector_blob(&[1.0, 0.0])],
+        )
+        .unwrap();
+    }
+    let mut config = config("head", Kind::OpenAi, FREE);
+    config.project = Some(ck_contract_draft::setup::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    });
+    let settings = Settings {
+        git_commits_enabled: true,
+        embedding: Some(provider),
+        ..Settings::default()
+    };
+    let mut runner = start_full(config, settings, Some(dir.clone())).await;
+    let call = |input: Value| {
+        Step::Model(Turn {
+            text: Some("Looking.".into()),
+            tools: vec![ToolCall::ok("ctx_search", input, "")],
+            output_tokens: 5,
+            ..Turn::default()
+        })
+    };
+    let mut steps = turn("Start.");
+    steps.extend([
+        call(json!({"query": "dependency version mismatch", "sources": ["git_commit"]})),
+        call(json!({"query": "dependency version mismatch", "sources": ["memory"]})),
+        call(json!({"query": "unrelated words", "sources": ["git_commit"]})),
+        call(json!({"query": "dependency version mismatch", "sources": ["message"]})),
+        answer(),
+    ]);
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let outputs = tool_outputs(runner.host(), "ctx_search");
+    assert_eq!(outputs.len(), 4, "{outputs:?}");
+    assert!(
+        outputs[0].contains("[git_commit] score=0.80 sha=aaaaaaa")
+            && outputs[0].contains("match=semantic")
+            && outputs[0].contains("Pin the lockfile before bisecting"),
+        "{}",
+        outputs[0]
+    );
+    // The memory is found by meaning, and left out because the head shows it.
+    assert!(
+        outputs[1].contains(
+            "Memories: 1 match found, all already visible in your project-memory block (ids 2)."
+        ),
+        "{}",
+        outputs[1]
+    );
+    assert!(outputs[2].starts_with("No results found"), "{}", outputs[2]);
+    // The summary is found through its chunk vector.
+    assert!(
+        outputs[3].contains(
+            "[message] score=0.80 compartment_id=7 range=50-60 match=semantic title=Tracked down a flaky lockfile check"
+        ),
+        "{}",
+        outputs[3]
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -21,9 +21,11 @@
 
 pub mod calibration;
 pub mod client;
+pub mod config;
 pub mod content_language;
 pub mod context_db;
 pub mod decay;
+pub mod embedding;
 pub mod expand;
 pub mod index;
 pub mod js_text;

@@ -24,6 +24,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::client::RunnerClient;
+use crate::config::Config;
 use crate::context_db::ContextDb;
 use crate::pass::Settings;
 use crate::preset;
@@ -61,7 +62,10 @@ impl<C> Clone for Module<C> {
 
 struct Inner<C> {
     client: C,
-    settings: Settings,
+    /// Where each session's settings come from. They are resolved again for
+    /// every job, so a configuration edit applies from the session's next
+    /// pass.
+    config: Config,
     /// Where summaries are stored. Without it they live only in memory, which
     /// only tests want.
     db: Option<Arc<ContextDb>>,
@@ -87,11 +91,16 @@ enum Job {
 }
 
 impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
-    pub fn new(client: C, settings: Settings, db: Option<ContextDb>, store: Option<Store>) -> Self {
+    pub fn new(
+        client: C,
+        config: impl Into<Config>,
+        db: Option<ContextDb>,
+        store: Option<Store>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 client,
-                settings,
+                config: config.into(),
                 db: db.map(Arc::new),
                 store,
                 workers: Mutex::new(HashMap::new()),
@@ -218,11 +227,30 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
             let mut session: Option<Session> = None;
             let mut saved: Option<crate::store::Durable> = None;
             while let Some(job) = receiver.recv().await {
+                let settings: Settings = match (&job, &session) {
+                    (Job::ViewGet(..) | Job::Idle(_), _) => Settings::default(),
+                    (Job::Setup(request, _), _) => inner.config.resolve(
+                        request
+                            .project
+                            .as_ref()
+                            .map(|project| project.root.as_str()),
+                        &format!("{}/{}", request.model.provider, request.model.model),
+                        request
+                            .context_window
+                            .saturating_sub(request.output_reserve),
+                    ),
+                    (_, Some(session)) => {
+                        let (root, model_key, usable) = session.config_inputs();
+                        inner.config.resolve(root, &model_key, usable)
+                    }
+                    (_, None) => Settings::default(),
+                };
+                let settings = &settings;
                 match job {
                     Job::Setup(request, features) => match &mut session {
                         Some(existing) => {
                             existing
-                                .setup(&inner.client, &inner.settings, &request, features)
+                                .setup(&inner.client, settings, &request, features)
                                 .await
                         }
                         None => {
@@ -236,7 +264,7 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                                 fresh.restore(durable);
                             }
                             fresh
-                                .setup(&inner.client, &inner.settings, &request, features)
+                                .setup(&inner.client, settings, &request, features)
                                 .await;
                             session = Some(fresh);
                         }
@@ -244,7 +272,7 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                     Job::Notice(notice) => {
                         if let Some(session) = &mut session {
                             if let Some(request) =
-                                session.notice(&inner.client, &inner.settings, notice).await
+                                session.notice(&inner.client, settings, notice).await
                             {
                                 start_summary(&inner, own.clone(), request);
                             }
@@ -253,22 +281,20 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                     Job::SummaryFinished(result) => {
                         if let Some(session) = &mut session {
                             session
-                                .summary_finished(&inner.client, &inner.settings, result, now_ms())
+                                .summary_finished(&inner.client, settings, result, now_ms())
                                 .await;
                         }
                     }
                     Job::Ride(ride, reply) => {
                         let view = session
                             .as_mut()
-                            .and_then(|session| session.ride(&inner.settings, &ride));
+                            .and_then(|session| session.ride(settings, &ride));
                         let _ = reply.send(view);
                     }
                     Job::Tool { name, input, reply } => {
                         let answer = match &mut session {
                             Some(session) => {
-                                session
-                                    .tool(&inner.client, &inner.settings, &name, &input)
-                                    .await
+                                session.tool(&inner.client, settings, &name, &input).await
                             }
                             None => Err("the session has not started".into()),
                         };
