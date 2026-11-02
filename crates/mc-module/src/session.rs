@@ -1118,6 +1118,7 @@ impl Session {
             .iter()
             .map(|key| (key.clone(), lanes::Shape::Default))
             .collect();
+        wanted.extend(lanes::injected_text(&context, cutoff));
         wanted.extend(lanes::superseded_edits(
             &context,
             cutoff,

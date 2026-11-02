@@ -30,6 +30,7 @@ pub mod decay;
 pub mod embedding;
 pub mod expand;
 pub mod index;
+pub mod injection;
 pub mod js_text;
 pub mod lanes;
 pub mod memory;

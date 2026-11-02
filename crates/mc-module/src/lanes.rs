@@ -14,6 +14,7 @@ use ck_contract_draft::view::{EditOp, View};
 use serde_json::{json, Value};
 
 use crate::index::Index;
+use crate::injection::{self, Stripped};
 use crate::tokens;
 
 /// A part, by message id and part id.
@@ -139,6 +140,9 @@ pub enum Shape {
     /// with its file path and only the start of each long diff argument, and
     /// its result is replaced.
     EditMarker,
+    /// A text part loses its injected text ([`crate::injection`]) and keeps
+    /// the rest; one that held nothing else becomes its placeholder.
+    StripInjection,
 }
 
 /// The edits that drop `parts`, and which of them those edits cover. A part
@@ -185,9 +189,14 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
             part: Some(part_id.clone()),
         };
         match &part.body {
-            PartBody::Text { .. } => match part.tag {
-                Some(tag) => ops.push(replace("text", json!(placeholder(tag)))),
-                None => continue,
+            PartBody::Text { text } => match (part.tag, shape) {
+                (Some(tag), Shape::StripInjection) => match injection::strip_part(tag, text) {
+                    Some(Stripped::Empty) => ops.push(replace("text", json!(placeholder(tag)))),
+                    Some(Stripped::Text(kept)) => ops.push(replace("text", json!(kept))),
+                    None => continue,
+                },
+                (Some(tag), _) => ops.push(replace("text", json!(placeholder(tag)))),
+                (None, _) => continue,
             },
             PartBody::Reasoning { .. } => ops.push(drop()),
             PartBody::Tool(tool) => {
@@ -204,7 +213,7 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                 // its result.
                 let ends_transcript = Some(entry.mid.as_str()) == newest_mid;
                 let keep_call = match shape {
-                    Shape::Default => ends_transcript || small_recent,
+                    Shape::Default | Shape::StripInjection => ends_transcript || small_recent,
                     Shape::Whole => ends_transcript,
                     Shape::EditMarker => true,
                 };
@@ -573,6 +582,24 @@ pub fn duplicate_lookups(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey
         .into_iter()
         .filter(|(key, tag, _, part)| newest[key] != *tag && !in_tail(part, cutoff))
         .map(|(_, _, entry, part)| ((entry.mid.clone(), part.id.clone()), Shape::Whole))
+        .collect()
+}
+
+/// Injected text: numbered text parts outside the protected tail that hold a
+/// harness or plugin injection ([`crate::injection`]), in any message the
+/// model sees, as in the plugin's heuristic cleanup.
+pub fn injected_text(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Shape)> {
+    context
+        .index
+        .entries()
+        .iter()
+        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+        .filter(|(_, part)| !in_tail(part, cutoff))
+        .filter(|(_, part)| match (&part.body, part.tag) {
+            (PartBody::Text { text }, Some(tag)) => injection::strip_part(tag, text).is_some(),
+            _ => false,
+        })
+        .map(|(entry, part)| ((entry.mid.clone(), part.id.clone()), Shape::StripInjection))
         .collect()
 }
 

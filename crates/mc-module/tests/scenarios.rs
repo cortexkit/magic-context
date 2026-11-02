@@ -697,6 +697,38 @@ async fn routine_heuristics_land_with_the_first_views() {
     );
 }
 
+#[tokio::test]
+async fn injected_text_leaves_older_messages_and_the_rest_of_each_message_stays() {
+    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    runner
+        .play(&[
+            user("Review the module."),
+            answer(),
+            // Tag 3: nothing but an injected reminder.
+            user("<system-reminder>Plan mode is active.</system-reminder>"),
+            answer(),
+            // Tag 5: the user's words with a reminder after them.
+            user("Use staging.\n<system-reminder>Output was truncated.</system-reminder>"),
+            answer(),
+            read_file(50),
+            read_file(50),
+            read_file(50),
+            read_file(50),
+            // Tag 15, in the protected tail: left as it is.
+            user("Next.\n<system-reminder>Keep going.</system-reminder>"),
+            answer(),
+            answer(),
+            answer(),
+        ])
+        .await;
+    assert_clean(&runner);
+    let host = runner.host();
+    assert_eq!(seen(host, 3).as_deref(), Some(placeholder(3).as_str()));
+    assert_eq!(seen(host, 5).as_deref(), Some("§5§ Use staging."));
+    assert!(seen(host, 15).unwrap().contains("<system-reminder>"));
+    assert!(seen(host, 1).unwrap().starts_with("§1§ Review the module."));
+}
+
 /// A step that runs a shell command whose output is `tokens` tokens.
 fn shell(tokens: usize) -> Step {
     step(
