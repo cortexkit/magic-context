@@ -5,7 +5,8 @@
 //!
 //! A message number is the runner's ordinal, which counts from 1 like the
 //! numbering summary headings and `ctx_search` hits use. A tag number names
-//! one part.
+//! one part of a message: a text block, a reasoning block, or a tool call
+//! with its result.
 
 use std::sync::OnceLock;
 

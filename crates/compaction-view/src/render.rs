@@ -2,7 +2,8 @@
 //! model sees in the neutral part model.
 //!
 //! The provider computes every byte it puts in a view (placeholders such as
-//! `[dropped §12§]`, cut-down edit arguments, the history head). The runner
+//! `[dropped §12§]`, cut-down edit arguments, the summaries and memories
+//! inserted at the start of a head's request). The runner
 //! adds nothing to them, not even a tag prefix; every other numbered text is
 //! rendered with its prefix ([`RenderedMessage::wire_text`]).
 //!
@@ -479,7 +480,8 @@ fn check_field(mid: &str, part: &Part, field: &str, value: &Value) -> Result<(),
         // that an answered image was removed.
         (PartBody::File(_), "text") => value.as_str().map(|_| ()).ok_or_else(bad),
         (PartBody::Tool(tool), _) if tool.provider_executed => Err(bad()),
-        // A finished call has an output size in both part forms. An output
+        // A finished call has an output size whether it came in full or
+        // compact detail (W4.3), and only then a result to rewrite. An output
         // in a format the runner doesn't know is never rewritten (W1.5).
         (PartBody::Tool(tool), "output")
             if tool.output_bytes.is_some()

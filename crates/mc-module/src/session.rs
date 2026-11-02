@@ -65,12 +65,13 @@ pub struct Session {
     seq: u64,
     /// The session's summaries, oldest first.
     summaries: Vec<StoredCompartment>,
-    /// What `m[0]` holds; `None` until the first summary reaches a view.
+    /// What the head's baseline (`m[0]`, see the crate docs) holds; `None`
+    /// until the first summary reaches a view.
     baseline: Option<Baseline>,
     /// A summarizer run is in progress.
     summarizing: bool,
-    /// The next view re-renders `m[0]`, because the provider cache is lost
-    /// anyway.
+    /// The next view re-renders the baseline (`m[0]`), because the
+    /// provider cache is lost anyway.
     fold_due: bool,
     /// Where summaries and memories are kept; absent only in tests.
     db: Option<Arc<ContextDb>>,
@@ -115,7 +116,8 @@ pub struct Session {
     /// The newest prompt a run has already summarized past once at the
     /// execute threshold ([`Session::summary_due`]).
     floor_lifted_for: Option<String>,
-    /// How much history the summarizer may still read this window.
+    /// How much history the summarizer may still read in the drain quota's
+    /// current ten-minute window.
     drain: crate::summary::drain::Drain,
     /// The raw tokens the run in progress reserved.
     reservation: Option<crate::summary::drain::Reservation>,
@@ -478,8 +480,9 @@ impl Session {
             usage,
             threshold,
             force,
-            // Drops land on a pass with rebuild permission; a head with a
-            // summary to come has it in the force band.
+            // Drops land only on a pass allowed to rebuild. A head whose
+            // summary is still to come is allowed one in the force band, so
+            // the usage after its drops counts there.
             after_drops: force
                 .then(|| self.usage_after_drops(settings, usage))
                 .flatten(),
@@ -650,8 +653,9 @@ impl Session {
     }
 
     /// After a revert removed messages from `ordinal` on, forget the summaries
-    /// that cover any of them, as standalone does. A head that showed one is
-    /// rendered again from what remains.
+    /// that cover any of them, as the standalone plugin does when its host
+    /// reverts. If the history head showed one of them, it is rendered again
+    /// from the summaries that remain.
     fn forget_summaries_from(&mut self, ordinal: u64) {
         let Some(first) = self
             .summaries
@@ -1252,8 +1256,8 @@ impl Session {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as i64);
         let shape = self.head_shape(settings);
-        // With memory off, the head shows no memories and no user profile,
-        // as the plugin's m[0] does.
+        // With memory off, the history head shows no memories and no user
+        // profile, as the standalone plugin's does.
         let (memories, profile, profile_max_id) = match (&self.db, &self.project) {
             (Some(db), Some(project)) if shape.memory_enabled => {
                 let memories = db
@@ -1323,7 +1327,8 @@ impl Session {
         ops
     }
 
-    /// The settings `m[0]` depends on, as they are now.
+    /// The settings the history head's baseline (`m[0]`) is rendered under,
+    /// as they are now.
     fn head_shape(&self, settings: &Settings) -> head::Shape {
         head::Shape {
             memory_enabled: settings.memory_enabled,
@@ -1335,7 +1340,7 @@ impl Session {
         }
     }
 
-    /// Whether `m[0]` was rendered under different settings than these. A
+    /// Whether the baseline was rendered under different settings than these. A
     /// baseline from before the shape was recorded counts as unchanged.
     fn head_shape_changed(&self, settings: &Settings) -> bool {
         self.baseline
@@ -1563,8 +1568,8 @@ impl Session {
     async fn publish<C: RunnerClient>(&mut self, client: &C, view: View) {
         let size = serde_json::to_vec(&view).map_or(usize::MAX, |bytes| bytes.len());
         if size > MAX_VIEW_BYTES {
-            // Views name edits, never copies, so one this large is a bug in a
-            // lane. It is not sent; the runner keeps the view it has, and the
+            // Views name edits, never copies, so one this large is a bug in
+            // the code that built it. It is not sent; the runner keeps the view it has, and the
             // queued drops it carried are forgotten, as for any view that
             // fails ck-mc's own checks.
             self.next_baseline = None;
@@ -1774,8 +1779,9 @@ impl Session {
 
     /// Read in full the tool results with images whose output the
     /// answered-images lane may need and ck-mc has not read yet, then build.
-    /// Only a pass that may wait on the runner reads; a ride builds with what
-    /// it has, and a result whose text is missing waits for a later rebuild.
+    /// Only a pass on a notice reads, since it may wait on the runner; a ride
+    /// must answer before the runner's request, so it builds with what it
+    /// has, and a result whose text is missing waits for a later rebuild.
     async fn build_now<C: RunnerClient>(
         &mut self,
         client: &C,

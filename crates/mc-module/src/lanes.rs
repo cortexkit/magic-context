@@ -1315,7 +1315,8 @@ mod tests {
         let index = index();
         let edited = Edited::default();
         let none = BTreeMap::new();
-        // Tags 2 and 3 are 10 tokens each, under the 250-token floor.
+        // The outputs numbered 2 and 3 (`m2/p2`, `m3/p3` above) are 10 tokens
+        // each, under the 250-token floor.
         let swept: Vec<PartKey> = age_sweep(&context(&index, &edited, &none), 6)
             .into_iter()
             .map(|(key, _)| key)
@@ -1426,8 +1427,9 @@ mod tests {
 
     #[test]
     fn a_part_two_lanes_want_keeps_the_first_lanes_shape() {
-        // Tag 4 is a recent call with a small input, not at the end: a
-        // default drop keeps the call, a whole drop removes it.
+        // The call `m3/p4` (numbered 4) is recent, has a small input and is
+        // not at the end: a default drop keeps the call with a placeholder
+        // result, a whole drop removes it.
         let index = index();
         let edited = Edited::default();
         let none = BTreeMap::new();

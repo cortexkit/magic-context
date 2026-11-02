@@ -572,7 +572,7 @@ impl<P: Provider> Runner<P> {
 
         // One ride with every cause that applies. A view that answers a
         // cache loss can still leave the request too big (it may add the
-        // history head), so the runner estimates again and rides once more
+        // summaries and memories a head's view inserts at the start), so the runner estimates again and rides once more
         // for the limit before it refuses.
         let limit = {
             let state = self.host.lock();
@@ -977,9 +977,9 @@ struct Reminder {
     dedupe_key: Option<String>,
 }
 
-/// The ride causes the mock runner detects and declares at Setup. It has no
-/// request chains of its own to reset, and no accounts or tool surfaces that
-/// change.
+/// The ride causes the mock runner detects and declares at Setup. Its model
+/// providers keep no connection whose reset would lose the cache, and it has
+/// no accounts or tool surfaces that change.
 const DETECTS: [RideCause; 4] = [
     RideCause::CacheExpired,
     RideCause::ModelChange,

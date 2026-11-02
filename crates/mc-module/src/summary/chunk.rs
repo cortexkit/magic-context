@@ -22,6 +22,9 @@ use super::validate::{ChunkLine, HistorianChunk, MessageRange};
 
 const MAX_COMMITS_PER_BLOCK: usize = 5;
 const SYSTEM_DIRECTIVE_PREFIX: &str = "[SYSTEM DIRECTIVE: MAGIC-CONTEXT";
+/// The comment oh-my-opencode puts in the user messages it starts itself.
+/// It is not the person's text, so the summarizer never sees it (as the
+/// plugin's `read-session-chunk.ts` strips it).
 const OMO_INTERNAL_INITIATOR_MARKER: &str = "<!-- OMO_INTERNAL_INITIATOR -->";
 
 /// What the summarizer is sent, and what its reply is checked against.
@@ -306,7 +309,8 @@ fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Strip reminder blocks and the OMO marker from a user's text.
+/// Strip reminder blocks and oh-my-opencode's initiator marker from a
+/// user's text.
 fn clean_user_text(text: &str) -> String {
     system_reminder_regex()
         .replace_all(text, "")

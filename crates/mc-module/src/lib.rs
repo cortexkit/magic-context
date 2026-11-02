@@ -17,6 +17,20 @@
 //! A pass ([`pass`]) decides whether the session may rebuild now; when it may,
 //! every lane with work adds its edits ([`lanes`]) and one view carries them
 //! ([`view_builder`]).
+//!
+//! Terms used throughout:
+//! - **Pass:** one decision on a notice or a ride about whether a new view is
+//!   built now. A **ride** is the runner telling ck-mc, before a request,
+//!   that the request rewrites the provider's cache anyway (or would not fit),
+//!   so held work can land in it at no extra cost.
+//! - **Lane:** one kind of reduction (queued `ctx_reduce` drops, the age
+//!   sweep, reasoning clearing, emergency drops, ...).
+//! - **History head:** the two messages a head's view inserts at the start of
+//!   the request. `m[0]` is the baseline: docs, the user profile, memories and
+//!   the summaries as of the last **fold**, the rebuild that re-renders it.
+//!   `m[1]` holds what changed since: newer summaries and memory changes.
+//! - **Standalone:** the Magic Context plugin running inside a host
+//!   (`packages/plugin`), whose behaviour mode 3 matches.
 
 #![forbid(unsafe_code)]
 
