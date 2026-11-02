@@ -689,6 +689,10 @@ impl ModuleHandler for Handler {
                 request.identity.session.clone(),
             ),
             project,
+            workdir: request
+                .scope
+                .as_ref()
+                .and_then(|scope| scope.workdir.clone()),
         };
         self.bound
             .lock()

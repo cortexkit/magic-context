@@ -386,14 +386,28 @@ async fn start_runner(
     stores: Option<std::path::PathBuf>,
     pre_user: bool,
 ) -> Runner<InProcess> {
+    start_runner_with(config, settings, stores, pre_user, |_| {}).await
+}
+
+/// As [`start_runner`], with the route ck-mc sees changed by `adjust`, for
+/// scopes a mock session config cannot describe.
+async fn start_runner_with(
+    config: SessionConfig,
+    settings: Settings,
+    stores: Option<std::path::PathBuf>,
+    pre_user: bool,
+    adjust: impl FnOnce(&mut Route),
+) -> Runner<InProcess> {
     let client = HostClient::default();
-    let route = Route {
+    let mut route = Route {
         session: config.session.clone(),
         project: config.project.as_ref().map(|project| RouteProject {
             id: project.id.clone(),
             root: project.root.clone(),
         }),
+        workdir: config.project.as_ref().map(|project| project.root.clone()),
     };
+    adjust(&mut route);
     let provider = InProcess {
         route,
         module: Mutex::new(InProcess::new_module(
@@ -2740,6 +2754,7 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
     let route = |name: &str| Route {
         session: session(name),
         project: None,
+        workdir: None,
     };
     let setup = |newest: Option<cortexkit_role_compaction::read::Cursor>| {
         let mut request = SetupRequest::new(
@@ -3053,6 +3068,7 @@ async fn a_session_with_no_setup_gets_its_tools_but_none_that_act_on_a_transcrip
             id: "pj-test".into(),
             root: dir.to_string_lossy().into_owned(),
         }),
+        workdir: Some(dir.to_string_lossy().into_owned()),
     };
     let saved = module
         .tool(
@@ -3147,5 +3163,60 @@ async fn a_sessions_project_gets_its_commits_indexed() {
         )
         .unwrap();
     assert_eq!(indexed, 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Core may stamp a session's scope with a folder but no project id. ck-mc
+/// then serves it with no project: its summaries still run, in child
+/// sessions under that folder, while project memories stay out of the head
+/// and the summarizer's prompt, and the project gets no upkeep.
+#[tokio::test]
+async fn a_folder_without_a_project_id_still_summarizes_under_that_folder() {
+    let dir = scratch("folder-only");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    insert_memory(&dir, 1, "Ask before pushing.");
+    let mut config = config("head", Kind::OpenAi, free());
+    config.project = Some(mc_mock_runner::runner::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    });
+    let mut runner = start_runner_with(
+        config,
+        Settings::default(),
+        Some(dir.clone()),
+        false,
+        |route| {
+            route.project = None;
+        },
+    )
+    .await;
+    runner
+        .host()
+        .set_responder(mc_mock_runner::child::scripted_summarizer());
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    steps.push(answer());
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let folders = runner
+        .provider()
+        .client
+        .child_scopes
+        .lock()
+        .unwrap()
+        .clone();
+    assert!(!folders.is_empty(), "no summary ran");
+    let root = dir.to_string_lossy().into_owned();
+    assert!(
+        folders
+            .iter()
+            .all(|folder| folder.as_deref() == Some(root.as_str())),
+        "{folders:?}"
+    );
+    let runs = runner.host().child_runs();
+    assert!(!runs[0].prompt.contains("Ask before pushing."));
+    assert!(runner.provider().module().run_upkeep().await.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }

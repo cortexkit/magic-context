@@ -83,6 +83,10 @@ pub struct Session {
     /// Where summaries and memories are kept; absent only in tests.
     db: Option<Arc<ContextDb>>,
     project: Option<Project>,
+    /// The scope's folder, which may be stamped without a project id (see
+    /// [`Route::workdir`]): configuration and the summarizer's child sessions
+    /// use it even when the session has no project.
+    workdir: Option<String>,
     /// The baseline a view being published was built on; it replaces
     /// `baseline` once the runner takes the view.
     next_baseline: Option<Baseline>,
@@ -144,6 +148,7 @@ impl Session {
         Self {
             db,
             project: route.project.clone(),
+            workdir: folder_of(route),
             key: route.session.clone(),
             features,
             conditions: conditions_of(request),
@@ -217,7 +222,7 @@ impl Session {
     pub fn config_inputs(&self) -> (Option<&str>, String, u64) {
         let model = &self.conditions.model;
         (
-            self.project.as_ref().map(|project| project.root.as_str()),
+            self.workdir.as_deref(),
             format!("{}/{}", model.provider, model.model),
             crate::pass::usable_window(&self.conditions),
         )
@@ -295,6 +300,7 @@ impl Session {
         self.tools_only = false;
         self.conditions = conditions_of(request);
         self.project = route.project.clone();
+        self.workdir = folder_of(route);
         self.seq = 0;
         let ours = self.latest.as_ref().map(View::applied);
         if ours != request.applied_view {
@@ -576,7 +582,7 @@ impl Session {
             session: self.key.clone(),
             from,
             until,
-            project_root: self.project.as_ref().map(|project| project.root.clone()),
+            project_root: self.workdir.clone(),
             summaries: self.summaries.clone(),
             language: settings.language.clone(),
             memories: self.historian_memories(memory_enabled),
@@ -2014,6 +2020,27 @@ impl Session {
         }
         self.build(settings, None, false, None)
     }
+}
+
+/// The route's folder. A folder stamped without a project id gives a session
+/// with no project: reductions, summaries and session notes work, while
+/// memories, project notes, commit search and upkeep stay off until a later
+/// Setup's scope names the project. That is said once per Setup.
+fn folder_of(route: &Route) -> Option<String> {
+    if route.project.is_none() {
+        if let Some(folder) = &route.workdir {
+            eprintln!(
+                "ck-mc: session {} has a folder but no project id ({folder}); \
+                 project memories and upkeep are off for it",
+                route.session.session
+            );
+        }
+    }
+    route
+        .project
+        .as_ref()
+        .map(|project| project.root.clone())
+        .or_else(|| route.workdir.clone())
 }
 
 fn conditions_of(request: &SetupRequest) -> Conditions {

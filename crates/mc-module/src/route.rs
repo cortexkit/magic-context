@@ -22,4 +22,10 @@ pub struct Project {
 pub struct Route {
     pub session: SessionRef,
     pub project: Option<Project>,
+    /// The scope's folder. Core may stamp a folder without a project id (an
+    /// Entorhinal outage, a checkout outside every registered project); such
+    /// a session has no project, but its configuration and its summarizer's
+    /// child sessions still use this folder. Equal to `project.root` when
+    /// both are stamped.
+    pub workdir: Option<String>,
 }
