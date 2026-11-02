@@ -156,11 +156,41 @@ impl Baseline {
     }
 }
 
+/// The `<session-history>` block within `budget` local tokens. The decay
+/// render already fits the summaries' bodies to the budget, but its
+/// estimate drifts and the wrapper adds a little, so a block more than 5%
+/// over is rendered again against a budget 15% tighter, at most three times
+/// (the plugin's `decayPressureMultiplier` loop in `materializeM0`).
+fn fit_history(
+    budget: f64,
+    render: impl Fn(f64) -> String,
+    estimate: impl Fn(&str) -> usize,
+) -> String {
+    let wrap = |history: String| {
+        if history.is_empty() {
+            HISTORY_EMPTY.to_owned()
+        } else {
+            format!("<session-history>\n{history}\n</session-history>")
+        }
+    };
+    let mut multiplier = 1.0;
+    let mut block = wrap(render(budget));
+    let mut attempts = 0;
+    while budget > 0.0 && estimate(&block) as f64 > budget * 1.05 && attempts < 3 {
+        multiplier *= 1.15;
+        block = wrap(render(budget / multiplier));
+        attempts += 1;
+    }
+    block
+}
+
 /// Render a new baseline from everything current: a fold.
 pub fn fold(inputs: &Inputs) -> Baseline {
-    let history = render_stored_compartments(
-        inputs.summaries,
+    let history = fit_history(
         inputs.history_local_budget_tokens as f64,
+        |budget| {
+            render_stored_compartments(inputs.summaries, budget, mc_tokenizer::estimate_tokens)
+        },
         mc_tokenizer::estimate_tokens,
     );
     let memories = memory::trim_to_budget(inputs.memories.to_vec(), inputs.memory_budget_tokens);
@@ -173,11 +203,7 @@ pub fn fold(inputs: &Inputs) -> Baseline {
     if !profile_block.is_empty() {
         sections.push(profile_block);
     }
-    sections.push(if history.is_empty() {
-        HISTORY_EMPTY.to_owned()
-    } else {
-        format!("<session-history>\n{history}\n</session-history>")
-    });
+    sections.push(history);
     let memory_block = memory::render_block(&memories, "project-memory");
     if !memory_block.is_empty() {
         sections.push(memory_block);
@@ -546,6 +572,38 @@ pub fn is_head(op: &EditOp) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_overshooting_history_block_is_rendered_again_under_more_pressure() {
+        // A stand-in render that fills its budget exactly, at four characters
+        // a token: only the wrapper takes the block over.
+        let estimate = |text: &str| text.len() / 4;
+        let budgets = std::cell::RefCell::new(Vec::new());
+        let render = |budget: f64| {
+            budgets.borrow_mut().push(budget);
+            "x".repeat(budget as usize * 4)
+        };
+        // 100 tokens of body plus the wrapper is about 9% over: once more,
+        // 15% tighter, and it fits.
+        let block = fit_history(100.0, render, estimate);
+        assert_eq!(budgets.borrow().len(), 2, "{:?}", budgets.borrow());
+        assert!((budgets.borrow()[1] - 100.0 / 1.15).abs() < 1e-9);
+        assert!(estimate(&block) as f64 <= 105.0);
+        // A large budget absorbs the wrapper: one render.
+        budgets.borrow_mut().clear();
+        fit_history(1000.0, render, estimate);
+        assert_eq!(budgets.borrow().len(), 1);
+        // It stops after three tries even when nothing fits.
+        budgets.borrow_mut().clear();
+        fit_history(
+            10.0,
+            |budget| {
+                budgets.borrow_mut().push(budget);
+                "x".repeat(400)
+            },
+            estimate,
+        );
+        assert_eq!(budgets.borrow().len(), 4);
+    }
     fn summary(sequence: i64, start: i64, end: i64) -> StoredCompartment {
         StoredCompartment {
             sequence,
