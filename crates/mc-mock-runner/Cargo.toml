@@ -7,6 +7,7 @@ description = "Reference llm-runner for the mode-3 contract draft, with mock mod
 
 [dependencies]
 ck-contract-draft = { workspace = true }
+cortexkit-role-compaction = { workspace = true }
 cortexkit-compaction-view = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

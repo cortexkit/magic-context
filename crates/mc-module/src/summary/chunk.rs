@@ -13,8 +13,8 @@
 
 use std::sync::OnceLock;
 
-use ck_contract_draft::part::PartBody;
-use ck_contract_draft::read::{Entry, Role};
+use cortexkit_role_compaction::part::PartBody;
+use cortexkit_role_compaction::read::{Entry, Role};
 use regex::Regex;
 use serde_json::Value;
 
@@ -264,8 +264,9 @@ fn render_entry(entry: &Entry) -> Option<(char, Vec<String>, Vec<String>, bool)>
             Some(('A', vec![text], commits, true))
         }
         // A turn-scoped system entry carries module text, never the user's or
-        // the model's words, so the summarizer leaves it out.
-        Role::System => None,
+        // the model's words, so the summarizer leaves it out, as it does an
+        // entry whose role ck-mc doesn't know.
+        _ => None,
     }
 }
 
@@ -439,30 +440,21 @@ fn commit_verb_regex() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ck_contract_draft::part::{OutputFormat, Part, Seal, ToolPart, ToolStatus};
-    use ck_contract_draft::read::{entry_digest, NoticeOrigin};
+    use cortexkit_role_compaction::part::{Part, ToolPart, ToolStatus};
+    use cortexkit_role_compaction::read::NoticeOrigin;
     use serde_json::json;
 
     fn entry(ordinal: u64, role: Role, notice: bool, parts: Vec<PartBody>) -> Entry {
         let parts: Vec<Part> = parts
             .into_iter()
             .enumerate()
-            .map(|(index, body)| Part::new(format!("p{ordinal}.{index}"), None, Seal::None, body))
+            .map(|(index, body)| Part::new(format!("p{ordinal}.{index}"), body))
             .collect();
-        let notice = notice.then(|| NoticeOrigin {
-            sender: "prefrontal".into(),
-            template: None,
-        });
-        Entry {
-            ordinal,
-            mid: format!("m{ordinal}"),
-            role,
-            digest: entry_digest(role, notice.as_ref(), &parts),
-            notice,
-            written_at: 0,
-            parts,
-            usage: None,
-            generated_under: None,
+        let entry = Entry::new(ordinal, format!("m{ordinal}"), role, 0, parts);
+        if notice {
+            entry.with_notice(NoticeOrigin::new("prefrontal"))
+        } else {
+            entry
         }
     }
 
@@ -471,19 +463,11 @@ mod tests {
     }
 
     fn tool(name: &str, input: Value) -> PartBody {
-        PartBody::Tool(ToolPart {
-            call_id: "c".into(),
-            name: name.into(),
-            input,
-            provider_executed: false,
-            status: ToolStatus::Completed,
-            output: Some("done".into()),
-            output_format: OutputFormat::Text,
-            output_bytes: Some(4),
-            attachments: Vec::new(),
-            approval: None,
-            delivered: Vec::new(),
-        })
+        PartBody::Tool(
+            ToolPart::new("c", name, input, ToolStatus::Completed)
+                .with_output("done")
+                .with_output_bytes(4),
+        )
     }
 
     #[test]

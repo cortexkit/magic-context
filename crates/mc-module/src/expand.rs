@@ -9,8 +9,8 @@
 
 use std::sync::OnceLock;
 
-use ck_contract_draft::part::{AttachmentItem, PartBody, ToolStatus};
-use ck_contract_draft::read::{Entry, Role, SessionRef};
+use cortexkit_role_compaction::part::{AttachmentItem, PartBody};
+use cortexkit_role_compaction::read::{Entry, Role, SessionRef};
 use regex::Regex;
 use serde_json::Value;
 
@@ -117,6 +117,7 @@ fn role_label(entry: &Entry) -> &'static str {
         Role::Assistant => "A (assistant)",
         Role::User => "U (user)",
         Role::System => "S (system)",
+        _ => "? (other)",
     }
 }
 
@@ -173,10 +174,10 @@ fn render_part_full(body: &PartBody) -> Option<String> {
                 "  input: {}",
                 serde_json::to_string(&tool.input).unwrap_or_default()
             ));
-            match (&tool.output, tool.status) {
+            match (&tool.output, crate::neutral::is_finished(&tool.status)) {
                 (Some(output), _) => lines.push(format!("  output:\n{output}")),
-                (None, ToolStatus::Running) => lines.push("  output: (still running)".into()),
-                (None, _) => {}
+                (None, false) => lines.push("  output: (still running)".into()),
+                (None, true) => {}
             }
             lines.extend(attachments_line(
                 tool.attachments
@@ -186,6 +187,7 @@ fn render_part_full(body: &PartBody) -> Option<String> {
                             file.name.clone().unwrap_or_else(|| file.mime.clone())
                         }
                         AttachmentItem::Opaque(opaque) => opaque.provider_kind.clone(),
+                        _ => "attachment".to_owned(),
                     })
                     .collect(),
             ));
@@ -199,6 +201,8 @@ fn render_part_full(body: &PartBody) -> Option<String> {
         // Neither is text anyone wrote: reasoning is never shown, and a
         // provider's own item has no text to show.
         PartBody::Reasoning { .. } | PartBody::Opaque(_) => None,
+        // Kinds the contract may add later are not shown.
+        _ => None,
     }
 }
 
@@ -228,6 +232,8 @@ fn render_part_preview(body: &PartBody) -> Option<String> {
         PartBody::File(file) if file.is_image() => Some("    • [image]".into()),
         PartBody::File(_) => Some("    • [file]".into()),
         PartBody::Opaque(opaque) => Some(format!("    • [{}]", opaque.provider_kind)),
+        // Kinds the contract may add later are not shown.
+        _ => None,
     }
 }
 

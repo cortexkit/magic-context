@@ -8,15 +8,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ck_contract_draft::part::{
+use cortexkit_role_compaction::part::{
     AttachmentItem, FileMedia, Part, PartBody, Seal, ToolPart, ToolStatus, Transport,
 };
-use ck_contract_draft::read::{Entry, Role};
-use ck_contract_draft::view::{EditOp, View};
+use cortexkit_role_compaction::read::{Entry, Role};
+use cortexkit_role_compaction::view::{EditOp, View};
 use serde_json::{json, Value};
 
 use crate::index::Index;
 use crate::injection::{self, Stripped};
+use crate::neutral::{is_finished, is_known};
 use crate::tokens;
 
 /// A part, by message id and part id.
@@ -126,7 +127,8 @@ impl Edited {
                 EditOp::Drop { mid, part: None } => {
                     edited.messages.insert(mid.clone());
                 }
-                EditOp::Insert { .. } | EditOp::Cut { .. } => {}
+                // Inserts, the cut, and ops ck-mc never builds touch no part.
+                _ => {}
             }
         }
         edited.trimmed.retain(|key| !edited.parts.contains(key));
@@ -267,6 +269,11 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
         if context.keep_first_message && Some(entry.mid.as_str()) == first_mid {
             continue;
         }
+        // A part kind, or an entry role, ck-mc doesn't know is carried
+        // unchanged (W1.5).
+        if !is_known(entry, part) {
+            continue;
+        }
         let replace = |field: &str, value: Value| EditOp::Replace {
             mid: mid.clone(),
             part: part_id.clone(),
@@ -290,7 +297,7 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
             },
             PartBody::Reasoning { .. } => ops.push(drop()),
             PartBody::Tool(tool) => {
-                if tool.status == ToolStatus::Running || protected.contains(key) {
+                if !is_finished(&tool.status) || protected.contains(key) {
                     continue;
                 }
                 let Some(tag) = part.tag else {
@@ -324,7 +331,9 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
                     }
                 }
             }
-            PartBody::File(_) | PartBody::Opaque(_) => continue,
+            // Files, opaque parts and kinds ck-mc doesn't know: no lane here
+            // edits them.
+            _ => continue,
         }
         covered.push(key.clone());
     }
@@ -409,7 +418,7 @@ fn starts_user_turn(entry: &Entry) -> bool {
         && entry.parts.iter().any(|part| match &part.body {
             PartBody::Text { text } => !text.trim().is_empty(),
             PartBody::File(_) => true,
-            PartBody::Reasoning { .. } | PartBody::Tool(_) | PartBody::Opaque(_) => false,
+            _ => false,
         })
 }
 
@@ -1130,7 +1139,7 @@ pub fn emergency_drop(
     let protected = protected_tool_parts(context.index, context.protected_tools);
     let candidates: Vec<(&Entry, &Part, u8)> = tool_parts(context)
         .filter(|(entry, part, tool)| {
-            tool.status != ToolStatus::Running
+            is_finished(&tool.status)
                 && part.tag.is_some()
                 && !context.edited.covers(&entry.mid, &part.id)
                 && !protected.contains(&(entry.mid.clone(), part.id.clone()))
@@ -1216,40 +1225,26 @@ pub fn keep_drops(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ck_contract_draft::read::entry_digest;
+    use crate::neutral::part;
 
     fn entry(ordinal: u64, role: Role, parts: Vec<Part>) -> Entry {
-        Entry {
-            ordinal,
-            mid: format!("m{ordinal}"),
-            role,
-            notice: None,
-            written_at: 0,
-            digest: entry_digest(role, None, &parts),
-            parts,
-            usage: None,
-            generated_under: None,
-        }
+        Entry::new(ordinal, format!("m{ordinal}"), role, 0, parts)
     }
 
     fn read(tag: u64, output_bytes: u64) -> Part {
-        Part::new(
+        part(
             format!("p{tag}"),
             Some(tag),
             Seal::None,
-            PartBody::Tool(ToolPart {
-                call_id: format!("c{tag}"),
-                name: "read".into(),
-                input: json!({"path": "b.rs"}),
-                provider_executed: false,
-                status: ToolStatus::Completed,
-                output: None,
-                output_format: ck_contract_draft::part::OutputFormat::Text,
-                output_bytes: Some(output_bytes),
-                attachments: Vec::new(),
-                approval: None,
-                delivered: Vec::new(),
-            }),
+            PartBody::Tool(
+                ToolPart::new(
+                    format!("c{tag}"),
+                    "read",
+                    json!({"path": "b.rs"}),
+                    ToolStatus::Completed,
+                )
+                .with_output_bytes(output_bytes),
+            ),
         )
     }
 
@@ -1257,7 +1252,7 @@ mod tests {
     /// 4,000 bytes (1,000 tokens) at tags 4, 5 and 6.
     fn index() -> Index {
         let text = |tag: u64| {
-            Part::new(
+            part(
                 format!("p{tag}"),
                 Some(tag),
                 Seal::None,
@@ -1337,6 +1332,73 @@ mod tests {
             .collect();
         assert_eq!(swept, [key("m3", "p4"), key("m4", "p5")]);
         let (ops, covered) = drop_ops(&protected, &[(key("m5", "p6"), Shape::Whole)]);
+        assert!(ops.is_empty() && covered.is_empty(), "{ops:?}");
+    }
+
+    /// Values the contract may add later are carried unchanged (W1.5): a tool
+    /// call whose status ck-mc doesn't know counts as running, and no lane
+    /// edits a part of a kind, or in an entry of a role, it doesn't know.
+    #[test]
+    fn parts_ck_mc_does_not_know_are_never_edited() {
+        let mut queued = read(2, 4_000);
+        if let PartBody::Tool(tool) = &mut queued.body {
+            tool.status = ToolStatus::Unknown("queued".into());
+        }
+        let hologram = part(
+            "p3",
+            None,
+            Seal::None,
+            PartBody::Unknown {
+                name: "hologram".into(),
+                fields: serde_json::Map::new(),
+            },
+        );
+        let developer_text = part(
+            "p4",
+            Some(4),
+            Seal::None,
+            PartBody::Text {
+                text: "Use tabs.".into(),
+            },
+        );
+        let mut index = Index::default();
+        index.extend([
+            entry(
+                1,
+                Role::User,
+                vec![part(
+                    "p1",
+                    Some(1),
+                    Seal::None,
+                    PartBody::Text { text: "Go.".into() },
+                )],
+            ),
+            entry(2, Role::Assistant, vec![queued, hologram]),
+            entry(3, Role::Unknown("developer".into()), vec![developer_text]),
+            entry(
+                4,
+                Role::User,
+                vec![part(
+                    "p5",
+                    Some(5),
+                    Seal::None,
+                    PartBody::Text {
+                        text: "Next.".into(),
+                    },
+                )],
+            ),
+        ]);
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        let context = context(&index, &edited, &none);
+        let (ops, covered) = drop_ops(
+            &context,
+            &[
+                (key("m2", "p2"), Shape::Default),
+                (key("m2", "p3"), Shape::Default),
+                (key("m3", "p4"), Shape::Default),
+            ],
+        );
         assert!(ops.is_empty() && covered.is_empty(), "{ops:?}");
     }
 

@@ -25,10 +25,10 @@
 //! The move runs with ck-mc and the session's host stopped, so nothing else
 //! writes either store meanwhile.
 
-use ck_contract_draft::read::{Cursor, SessionRef};
-use ck_contract_draft::rules::ProviderRules;
-use ck_contract_draft::setup::{ModelRef, SetupRequest};
-use ck_contract_draft::view::View;
+use cortexkit_role_compaction::read::{Cursor, SessionRef};
+use cortexkit_role_compaction::rules::ProviderRules;
+use cortexkit_role_compaction::setup::{ModelRef, SetupRequest};
+use cortexkit_role_compaction::view::View;
 use rusqlite::{params, OptionalExtension};
 use std::sync::Arc;
 
@@ -95,19 +95,18 @@ pub fn move_in(
             key.session
         ));
     }
-    let setup = SetupRequest {
-        preset: request.preset.clone(),
-        model: request.model.clone(),
-        context_window: request.context_window,
-        output_reserve: request.output_reserve,
-        rules: request.rules,
-        // Offline, nothing rides; the runner declares what it detects at its
-        // own Setup.
-        detects: Vec::new(),
-        applied_view: None,
-        newest: Some(request.newest.clone()),
-        now: request.now,
-    };
+    // Offline, nothing rides; the runner declares what it detects at its own
+    // Setup.
+    let setup = SetupRequest::new(
+        request.preset.clone(),
+        request.model.clone(),
+        request.context_window,
+        request.output_reserve,
+        request.rules.clone(),
+        Vec::new(),
+        request.now,
+    )
+    .with_newest(request.newest.clone());
     // The operator names the session and project here; this runs offline,
     // not on a runner's route.
     let route = Route {

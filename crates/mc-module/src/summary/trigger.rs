@@ -6,8 +6,8 @@
 //! summarized: the model is still working with it. Its size shrinks as usage
 //! grows, between a floor and a ceiling scaled by the usable window.
 
-use ck_contract_draft::part::{PartBody, ToolStatus};
-use ck_contract_draft::read::{Entry, Role};
+use cortexkit_role_compaction::part::PartBody;
+use cortexkit_role_compaction::read::{Entry, Role};
 
 /// The summarizer may start this many points below the execute threshold,
 /// so a summary is ready when usage reaches it.
@@ -76,7 +76,7 @@ pub fn is_meaningful_user(entry: &Entry) -> bool {
 
 fn has_running_tool(entry: &Entry) -> bool {
     entry.parts.iter().any(
-        |part| matches!(&part.body, PartBody::Tool(tool) if tool.status == ToolStatus::Running),
+        |part| matches!(&part.body, PartBody::Tool(tool) if !crate::neutral::is_finished(&tool.status)),
     )
 }
 
@@ -261,30 +261,19 @@ pub fn cap_run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ck_contract_draft::part::{Part, Seal};
-    use ck_contract_draft::read::{entry_digest, NoticeOrigin};
+    use cortexkit_role_compaction::part::Part;
+    use cortexkit_role_compaction::read::NoticeOrigin;
 
     fn entry(ordinal: u64, role: Role, notice: bool, text: &str) -> Entry {
         let parts = vec![Part::new(
             format!("p{ordinal}"),
-            None,
-            Seal::None,
             PartBody::Text { text: text.into() },
         )];
-        let notice = notice.then(|| NoticeOrigin {
-            sender: "x".into(),
-            template: None,
-        });
-        Entry {
-            ordinal,
-            mid: format!("m{ordinal}"),
-            role,
-            digest: entry_digest(role, notice.as_ref(), &parts),
-            notice,
-            written_at: 0,
-            parts,
-            usage: None,
-            generated_under: None,
+        let entry = Entry::new(ordinal, format!("m{ordinal}"), role, 0, parts);
+        if notice {
+            entry.with_notice(NoticeOrigin::new("x"))
+        } else {
+            entry
         }
     }
 

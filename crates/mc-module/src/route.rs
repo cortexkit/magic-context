@@ -6,7 +6,7 @@
 //! - the session is the identity the route is bound to;
 //! - the project is the daemon's scope stamp on the route.
 
-use ck_contract_draft::read::SessionRef;
+use cortexkit_role_compaction::read::SessionRef;
 
 /// A session's project: the id its memories and notes are kept under, and
 /// the folder its docs and configuration are read from.

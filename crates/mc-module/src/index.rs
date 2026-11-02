@@ -16,8 +16,8 @@
 //! the session runs. The few readers of older messages (the summarizer,
 //! `ctx_expand`) read them from the runner.
 
-use ck_contract_draft::part::{Part, PartBody};
-use ck_contract_draft::read::{Cursor, Entry};
+use cortexkit_role_compaction::part::{Part, PartBody};
+use cortexkit_role_compaction::read::{Cursor, Entry};
 
 #[derive(Clone, Debug)]
 pub struct Index {
@@ -65,11 +65,9 @@ impl Index {
     }
 
     pub fn cursor(&self) -> Option<Cursor> {
-        self.entries.last().map(|entry| Cursor {
-            ordinal: entry.ordinal,
-            mid: entry.mid.clone(),
-            digest: entry.digest.clone(),
-        })
+        self.entries
+            .last()
+            .map(|entry| Cursor::new(entry.ordinal, entry.mid.clone(), entry.digest.clone()))
     }
 
     /// Whether the index ends exactly where the runner says the transcript
@@ -168,27 +166,17 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ck_contract_draft::part::Seal;
-    use ck_contract_draft::read::{entry_digest, Role};
+    use cortexkit_role_compaction::part::Seal;
+    use cortexkit_role_compaction::read::Role;
 
     fn entry(ordinal: u64, mid: &str, text: &str) -> Entry {
-        let parts = vec![Part::new(
+        let parts = vec![crate::neutral::part(
             format!("{mid}:p0"),
             Some(ordinal),
             Seal::None,
             PartBody::Text { text: text.into() },
         )];
-        Entry {
-            ordinal,
-            mid: mid.into(),
-            role: Role::User,
-            notice: None,
-            written_at: 0,
-            digest: entry_digest(Role::User, None, &parts),
-            parts,
-            usage: None,
-            generated_under: None,
-        }
+        Entry::new(ordinal, mid, Role::User, 0, parts)
     }
 
     #[test]

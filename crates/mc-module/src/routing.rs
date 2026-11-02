@@ -9,8 +9,8 @@ use std::future::Future;
 use cortexkit_role_routing::report::{Outcome, ReportRequest, Usage};
 use cortexkit_role_routing::select::{Requirements, SelectAnswer, SelectRequest};
 
-use ck_contract_draft::read::StepUsage;
-use ck_contract_draft::setup::ModelRef;
+use cortexkit_role_compaction::read::StepUsage;
+use cortexkit_role_compaction::setup::ModelRef;
 
 /// The routing capability ck-mc requires.
 pub const CAPABILITY: &str = "routing/v1";
@@ -63,12 +63,10 @@ pub fn summary_select(runner: &str, tried: &[String]) -> SelectRequest {
 /// The model to send to: as the runner names it.
 pub fn model_of(answer: &SelectAnswer) -> ModelRef {
     let model = &answer.runner.model;
-    ModelRef {
-        provider: model.provider.clone(),
-        model: model.model.clone(),
-        variant: model.variant.clone(),
-        service_tier: answer.service_tier_chosen.clone(),
-    }
+    let mut chosen = ModelRef::new(model.provider.clone(), model.model.clone());
+    chosen.variant = model.variant.clone();
+    chosen.service_tier = answer.service_tier_chosen.clone();
+    chosen
 }
 
 /// A report of how a decision's run went, with what the run reported.

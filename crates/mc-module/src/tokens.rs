@@ -6,7 +6,7 @@
 //! real tokenizer with per-model ratios; bringing that in is what makes the
 //! weights match a real model, and it only changes this file.
 
-use ck_contract_draft::part::{AttachmentItem, FileMedia, Part, PartBody};
+use cortexkit_role_compaction::part::{AttachmentItem, FileMedia, Part, PartBody};
 
 /// What an image costs, whatever its size.
 pub const IMAGE_TOKENS: u64 = 1_000;
@@ -35,6 +35,9 @@ pub fn part(part: &Part) -> u64 {
                 .map(|attachment| match &attachment.item {
                     AttachmentItem::File(file) => media(file),
                     AttachmentItem::Opaque(opaque) => bytes(opaque.size.unwrap_or(0)),
+                    // An item kind the contract may add later: its size is
+                    // unknown.
+                    _ => 0,
                 })
                 .sum();
             bytes(tool.name.len() as u64 + input + tool.output_bytes.unwrap_or(0) + delivered)
@@ -42,6 +45,8 @@ pub fn part(part: &Part) -> u64 {
         }
         PartBody::File(file) => media(file),
         PartBody::Opaque(opaque) => bytes(opaque.size.unwrap_or(0)),
+        // A part kind the contract may add later: its size is unknown.
+        _ => 0,
     }
 }
 

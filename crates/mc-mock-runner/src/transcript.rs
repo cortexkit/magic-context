@@ -8,12 +8,13 @@
 //! pattern-match into a jump. Only the runner counts; it hands each part's
 //! number to the compaction provider in reads and notices.
 
-use ck_contract_draft::part::{Attachment, Delivered, Part, PartBody, Seal, ToolStatus};
-use ck_contract_draft::read::{
+use compaction_view::tags::is_numbered;
+use cortexkit_role_compaction::part::{Attachment, Delivered, Part, PartBody, Seal, ToolStatus};
+use cortexkit_role_compaction::read::{
     entry_digest, Cursor, Detail, Entry, NoticeOrigin, Role, Select, StepUsage,
 };
-use ck_contract_draft::view::AppliedView;
-use compaction_view::tags::is_numbered;
+use cortexkit_role_compaction::view::AppliedView;
+use cortexkit_role_compaction::wire::Refusal;
 
 #[derive(Clone, Debug)]
 pub struct Transcript {
@@ -55,11 +56,9 @@ impl Transcript {
     }
 
     pub fn cursor(&self) -> Option<Cursor> {
-        self.entries.last().map(|entry| Cursor {
-            ordinal: entry.ordinal,
-            mid: entry.mid.clone(),
-            digest: entry.digest.clone(),
-        })
+        self.entries
+            .last()
+            .map(|entry| Cursor::new(entry.ordinal, entry.mid.clone(), entry.digest.clone()))
     }
 
     /// Store a message. Numbered parts ([`is_numbered`]) get the next numbers
@@ -80,24 +79,19 @@ impl Transcript {
             .into_iter()
             .enumerate()
             .map(|(index, (seal, body))| {
-                let tag = is_numbered(role, &body).then(|| {
+                let tag = is_numbered(&role, &body).then(|| {
                     next_tag += 1;
                     next_tag - 1
                 });
-                Part::new(format!("{mid}:p{index}"), tag, seal, body)
+                part(format!("{mid}:p{index}"), tag, seal, body)
             })
             .collect();
-        let entry = Entry {
-            ordinal: self.entries.len() as u64 + 1,
-            mid,
-            role,
-            digest: entry_digest(role, notice.as_ref(), &parts),
-            notice,
-            written_at,
-            parts,
-            usage,
-            generated_under,
-        };
+        let mut entry = Entry::new(self.entries.len() as u64 + 1, mid, role, written_at, parts);
+        if let Some(notice) = notice {
+            entry = entry.with_notice(notice);
+        }
+        entry.usage = usage;
+        entry.generated_under = generated_under;
         self.entries.push(entry);
         self.entries.last().expect("just pushed")
     }
@@ -109,21 +103,15 @@ impl Transcript {
         self.next_mid += 1;
         let parts = vec![Part::new(
             format!("{mid}:p0"),
-            None,
-            Seal::None,
             PartBody::Text { text: text.into() },
         )];
-        self.entries.push(Entry {
-            ordinal: self.entries.len() as u64 + 1,
+        self.entries.push(Entry::new(
+            self.entries.len() as u64 + 1,
             mid,
             role,
-            digest: entry_digest(role, None, &parts),
-            notice: None,
             written_at,
             parts,
-            usage: None,
-            generated_under: None,
-        });
+        ));
         self.entries.last().expect("just pushed")
     }
 
@@ -154,8 +142,13 @@ impl Transcript {
         tool.output = Some(output);
         tool.attachments = attachments;
         tool.delivered = delivered;
-        *part = Part::new(part.id.clone(), part.tag, part.seal, PartBody::Tool(tool));
-        entry.digest = entry_digest(entry.role, entry.notice.as_ref(), &entry.parts);
+        *part = self::part(
+            part.id.clone(),
+            part.tag,
+            part.seal.clone(),
+            PartBody::Tool(tool),
+        );
+        entry.digest = entry_digest(entry.role.clone(), entry.notice.as_ref(), &entry.parts);
         Ok(())
     }
 
@@ -172,7 +165,7 @@ impl Transcript {
         select: &Select,
         detail: Detail,
         max_bytes: Option<u64>,
-    ) -> (Vec<Entry>, Option<u64>) {
+    ) -> Result<(Vec<Entry>, Option<u64>), Refusal> {
         let candidates: Vec<&Entry> = match select {
             Select::After { after_ordinal, .. } => self
                 .entries
@@ -194,6 +187,8 @@ impl Transcript {
                         .any(|part| part.tag.is_some_and(|tag| tags.contains(&tag)))
                 })
                 .collect(),
+            // W1.5: a selector the runner doesn't know is refused naming it.
+            _ => return Err(Refusal::invalid_params("select", "unknown entry selector")),
         };
         let limit = match select {
             Select::After { limit, .. } => limit.map(|limit| limit as usize),
@@ -204,10 +199,11 @@ impl Transcript {
         for entry in &candidates {
             let shaped = match detail {
                 Detail::Full => (*entry).clone(),
-                Detail::Compact => Entry {
-                    parts: entry.parts.iter().map(Part::compact).collect(),
-                    ..(*entry).clone()
-                },
+                Detail::Compact => {
+                    let mut compact = (*entry).clone();
+                    compact.parts = entry.parts.iter().map(Part::compact).collect();
+                    compact
+                }
             };
             let size = serde_json::to_vec(&shaped)
                 .expect("entries serialize")
@@ -219,19 +215,26 @@ impl Transcript {
                     Select::After { .. } => page.last().map(|last: &Entry| last.ordinal),
                     _ => None,
                 };
-                return (page, next_after);
+                return Ok((page, next_after));
             }
             bytes += size;
             page.push(shaped);
         }
-        (page, None)
+        Ok((page, None))
     }
+}
+
+/// A part with its number and seal, its checksum computed over the seal.
+pub fn part(id: impl Into<String>, tag: Option<u64>, seal: Seal, body: PartBody) -> Part {
+    let mut part = Part::new(id, body).with_seal(seal);
+    part.tag = tag;
+    part
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ck_contract_draft::part::{OutputFormat, ToolPart};
+    use cortexkit_role_compaction::part::ToolPart;
     use serde_json::json;
 
     fn text(value: &str) -> (Seal, PartBody) {
@@ -241,19 +244,12 @@ mod tests {
     fn tool(call_id: &str) -> (Seal, PartBody) {
         (
             Seal::None,
-            PartBody::Tool(ToolPart {
-                call_id: call_id.into(),
-                name: "read".into(),
-                input: json!({"path": "a.rs"}),
-                provider_executed: false,
-                status: ToolStatus::Running,
-                output: None,
-                output_format: OutputFormat::Text,
-                output_bytes: None,
-                attachments: vec![],
-                approval: None,
-                delivered: vec![],
-            }),
+            PartBody::Tool(ToolPart::new(
+                call_id,
+                "read",
+                json!({"path": "a.rs"}),
+                ToolStatus::Running,
+            )),
         )
     }
 
@@ -321,14 +317,16 @@ mod tests {
                 index,
             );
         }
-        let (page, next) = transcript.read(
-            &Select::After {
-                after_ordinal: None,
-                limit: None,
-            },
-            Detail::Full,
-            Some(700),
-        );
+        let (page, next) = transcript
+            .read(
+                &Select::After {
+                    after_ordinal: None,
+                    limit: None,
+                },
+                Detail::Full,
+                Some(700),
+            )
+            .unwrap();
         assert!(page.len() < 5 && !page.is_empty());
         assert_eq!(next, Some(page.last().unwrap().ordinal));
 
@@ -342,7 +340,9 @@ mod tests {
                 vec![],
             )
             .unwrap();
-        let (page, _) = transcript.read(&Select::Tags { tags: vec![6] }, Detail::Compact, None);
+        let (page, _) = transcript
+            .read(&Select::Tags { tags: vec![6] }, Detail::Compact, None)
+            .unwrap();
         let PartBody::Tool(tool) = &page[0].parts[0].body else {
             panic!()
         };

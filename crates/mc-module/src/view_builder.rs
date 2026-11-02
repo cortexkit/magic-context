@@ -9,13 +9,13 @@
 //! result with the same functions the runner will use, so ck-mc never
 //! publishes a view the runner would refuse.
 
-use ck_contract_draft::read::Entry;
-use ck_contract_draft::rules::ProviderRules;
+use cortexkit_role_compaction::read::Entry;
+use cortexkit_role_compaction::rules::ProviderRules;
 use std::collections::HashSet;
 
-use ck_contract_draft::view::{Edit, EditOp, View, ViewRefusal};
 use compaction_view::render::{self as view, edits_for_transcript};
 use compaction_view::rules;
+use cortexkit_role_compaction::view::{Edit, EditOp, View, ViewRefusal};
 
 /// The next view, or `None` when it would change nothing: no new edit, and
 /// nothing of the previous view left out. Carried edits for which `retire`
@@ -78,6 +78,8 @@ pub fn next_view(
                 || (newly_edited.contains(&(mid.as_str(), part.as_str()))
                     && !new_ops.contains(&edit.op))
         }
+        // ck-mc never builds an op the contract doesn't define.
+        _ => false,
     };
     edits.retain(|edit| !replaced(edit) && !retire(&edit.op));
     let new_ops: Vec<EditOp> = new_ops
@@ -126,9 +128,9 @@ pub fn next_view(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ck_contract_draft::part::{Part, PartBody, Seal};
-    use ck_contract_draft::read::{entry_digest, Role};
-    use ck_contract_draft::rules::{EditCost, SignedParts};
+    use cortexkit_role_compaction::part::{Part, PartBody, Seal};
+    use cortexkit_role_compaction::read::Role;
+    use cortexkit_role_compaction::rules::{EditCost, SignedParts};
     use serde_json::json;
 
     /// ck-mc checks a view with the runner's own functions before it
@@ -138,28 +140,14 @@ mod tests {
     fn a_view_the_runner_would_refuse_is_never_built() {
         let reasoning = Part::new(
             "r1",
-            None,
-            Seal::Encrypted,
             PartBody::Reasoning {
                 text: None,
                 text_bytes: Some(40),
             },
-        );
-        let entry = Entry {
-            ordinal: 1,
-            mid: "m1".into(),
-            role: Role::Assistant,
-            notice: None,
-            written_at: 0,
-            digest: entry_digest(Role::Assistant, None, std::slice::from_ref(&reasoning)),
-            parts: vec![reasoning.clone()],
-            usage: None,
-            generated_under: None,
-        };
-        let rules = ProviderRules {
-            signed_parts: SignedParts::None,
-            history_edit_cost: EditCost::Suffix,
-        };
+        )
+        .with_seal(Seal::Encrypted);
+        let entry = Entry::new(1, "m1", Role::Assistant, 0, vec![reasoning.clone()]);
+        let rules = ProviderRules::new(SignedParts::None, EditCost::Suffix);
         // A sealed part can be dropped but never replaced.
         let replace = EditOp::Replace {
             mid: "m1".into(),

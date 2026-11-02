@@ -27,7 +27,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-use ck_contract_draft::wire::Refusal;
+use cortexkit_role_compaction::wire::Refusal;
 use cortexkit_role_tool_provider::catalog::{self, CatalogRequest, SystemTextItem};
 use cortexkit_role_tool_provider::{errors, ops, PROVIDES};
 use serde::Deserialize;

@@ -13,8 +13,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::read::StepUsage;
-use crate::setup::ModelRef;
+use cortexkit_role_compaction::read::StepUsage;
+use cortexkit_role_compaction::setup::ModelRef;
 
 /// How queued text may be delivered, in the sender's order of preference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

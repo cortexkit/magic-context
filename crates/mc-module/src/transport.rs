@@ -7,13 +7,13 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use ck_contract_draft::read::{ReadPage, ReadRequest, SessionRef};
 use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendRequest};
-use ck_contract_draft::view::{
+use cortexkit_role_compaction::read::{ReadPage, ReadRequest, SessionRef};
+use cortexkit_role_compaction::view::{
     AppliedViewAnswer, AppliedViewRequest, ApplyViewAnswer, ApplyViewRequest,
 };
-use ck_contract_draft::wire::{self, codes, Refusal};
-use ck_contract_draft::{
+use cortexkit_role_compaction::wire::{self, codes, Refusal};
+use cortexkit_role_compaction::{
     ops, COMPACTION_PROVIDES, COMPACTION_ROLE, COMPACTION_RUNNER_ROLE, LLM_RUNNER_ROLE,
 };
 use cortexkit_role_step_transform_provider as step;
@@ -263,7 +263,7 @@ impl RunnerClient for SubcRunnerClient {
             session,
             COMPACTION_RUNNER_ROLE,
             ops::SESSION_APPLIED_VIEW,
-            &AppliedViewRequest {},
+            &AppliedViewRequest::new(),
         )
         .await
     }
@@ -460,11 +460,11 @@ impl Handler {
                 {
                     return Err(Refusal::session_mismatch(&call.session));
                 }
-                let session = SessionRef {
-                    runner: route.session.runner.clone(),
-                    harness: call.harness.clone(),
-                    session: call.session.clone(),
-                };
+                let session = SessionRef::new(
+                    route.session.runner.clone(),
+                    call.harness.clone(),
+                    call.session.clone(),
+                );
                 let answer = match &call.subject {
                     Subject::PreUser { blocks, .. } if !blocks.is_empty() => {
                         let addition = self
@@ -607,11 +607,11 @@ impl ModuleHandler for Handler {
                     _ => None,
                 });
         let route = Route {
-            session: SessionRef {
-                runner: module_id.clone(),
-                harness: request.identity.harness.clone(),
-                session: request.identity.session.clone(),
-            },
+            session: SessionRef::new(
+                module_id.clone(),
+                request.identity.harness.clone(),
+                request.identity.session.clone(),
+            ),
             project,
         };
         self.bound
@@ -624,16 +624,17 @@ impl ModuleHandler for Handler {
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
         match self.dispatch(ctx.route_handle().channel, &body).await {
             Ok(answer) => HandlerOutcome::Response(answer),
-            Err(Refusal {
-                code,
-                message,
-                detail: Some(detail),
-            }) => HandlerOutcome::ErrorWithDetail {
-                code,
-                message,
-                detail,
+            Err(refusal) => match refusal.detail {
+                Some(detail) => HandlerOutcome::ErrorWithDetail {
+                    code: refusal.code,
+                    message: refusal.message,
+                    detail,
+                },
+                None => HandlerOutcome::Error {
+                    code: refusal.code,
+                    message: refusal.message,
+                },
             },
-            Err(Refusal { code, message, .. }) => HandlerOutcome::Error { code, message },
         }
     }
 }

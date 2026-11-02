@@ -15,11 +15,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ck_contract_draft::notice::{NoticeAnswer, NoticeRequest};
-use ck_contract_draft::read::SessionRef;
-use ck_contract_draft::ride::{RideAnswer, RideRequest};
-use ck_contract_draft::setup::{SetupAnswer, SetupRequest};
-use ck_contract_draft::view::View;
+use cortexkit_role_compaction::notice::{NoticeAnswer, NoticeRequest};
+use cortexkit_role_compaction::read::SessionRef;
+use cortexkit_role_compaction::ride::{RideAnswer, RideRequest};
+use cortexkit_role_compaction::setup::{SetupAnswer, SetupRequest};
+use cortexkit_role_compaction::view::View;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 

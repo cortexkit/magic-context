@@ -30,9 +30,9 @@
 
 use std::collections::BTreeSet;
 
-use ck_contract_draft::part::PartBody;
-use ck_contract_draft::read::{Entry, Role};
 use compaction_view::tags::tag_prefix;
+use cortexkit_role_compaction::part::PartBody;
+use cortexkit_role_compaction::read::{Entry, Role};
 use serde::{Deserialize, Serialize};
 
 use crate::lanes::{self, Context, PartKey};
@@ -148,7 +148,7 @@ pub fn measure(
             let (weight, tool) = match &part.body {
                 PartBody::Text { .. } | PartBody::File(_) => (tokens::part(part), None),
                 PartBody::Tool(tool) => (tokens::part(part), Some(tool)),
-                PartBody::Reasoning { .. } | PartBody::Opaque(_) => continue,
+                _ => continue,
             };
             measurement.t += weight;
             let key = (entry.mid.clone(), part.id.clone());

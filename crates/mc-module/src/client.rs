@@ -5,9 +5,9 @@
 
 use std::future::Future;
 
-use ck_contract_draft::read::{ReadPage, ReadRequest, SessionRef};
 use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendRequest};
-use ck_contract_draft::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
+use cortexkit_role_compaction::read::{ReadPage, ReadRequest, SessionRef};
+use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
 
 /// A call to the runner that got no answer.
 #[derive(Clone, Debug, PartialEq, Eq)]

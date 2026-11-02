@@ -8,8 +8,8 @@
 
 use std::collections::HashMap;
 
-use ck_contract_draft::part::PartBody;
-use ck_contract_draft::read::{Entry, Role};
+use cortexkit_role_compaction::part::PartBody;
+use cortexkit_role_compaction::read::{Entry, Role};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use super::text::{
@@ -35,12 +35,8 @@ fn now_ms() -> i64 {
         .map_or(0, |elapsed| elapsed.as_millis() as i64)
 }
 
-fn role_name(role: &Role) -> &'static str {
-    match role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::System => "system",
-    }
+fn role_name(role: &Role) -> &str {
+    role.as_str()
 }
 
 /// What `entry` adds to the index, or empty.

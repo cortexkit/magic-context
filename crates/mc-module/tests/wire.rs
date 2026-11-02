@@ -16,10 +16,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use ck_contract_draft::read::SessionRef;
-use ck_contract_draft::rules::{EditCost, ProviderRules, SignedParts};
-use ck_contract_draft::setup::ModelRef;
-use ck_contract_draft::wire;
+use cortexkit_role_compaction::read::SessionRef;
+use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+use cortexkit_role_compaction::setup::ModelRef;
+use cortexkit_role_compaction::wire;
 use mc_mock_runner::model::Kind;
 use mc_mock_runner::runner::{Report, SessionConfig};
 use mc_mock_runner::script::{Step, ToolCall, Turn};
@@ -223,28 +223,22 @@ async fn play(stack: &Stack, request: &PlayRequest) -> Report {
     }
 }
 
-const FREE: ProviderRules = ProviderRules {
-    signed_parts: SignedParts::None,
-    history_edit_cost: EditCost::Suffix,
-};
+fn free() -> ProviderRules {
+    ProviderRules::new(SignedParts::None, EditCost::Suffix)
+}
 
 fn config(preset: &str) -> SessionConfig {
     SessionConfig {
-        session: SessionRef {
-            runner: RUNNER.into(),
-            harness: "mock".into(),
-            session: format!("wire-{}", COUNTER.fetch_add(1, Ordering::Relaxed)),
-        },
+        session: SessionRef::new(
+            RUNNER,
+            "mock",
+            format!("wire-{}", COUNTER.fetch_add(1, Ordering::Relaxed)),
+        ),
         preset: preset.into(),
-        model: ModelRef {
-            provider: "test".into(),
-            model: "test-model".into(),
-            variant: None,
-            service_tier: None,
-        },
+        model: ModelRef::new("test", "test-model"),
         context_window: 40_000,
         output_reserve: 1_000,
-        rules: FREE,
+        rules: free(),
         kind: Kind::OpenAi,
         cache_ttl_ms: 300_000,
         system_tokens: 500,
@@ -311,7 +305,7 @@ async fn ck_mc_refuses_a_route_from_a_caller_the_daemon_does_not_attest() {
                 module_id: PROVIDER.into(),
             },
             BindIdentity::new("mock", "forged"),
-            wire::encode(ck_contract_draft::ops::COMPACTION_SETUP, &setup),
+            wire::encode(cortexkit_role_compaction::ops::COMPACTION_SETUP, &setup),
             CallOptions {
                 timeout: Duration::from_secs(30),
                 ..CallOptions::default()

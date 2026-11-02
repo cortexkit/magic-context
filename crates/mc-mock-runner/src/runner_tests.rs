@@ -3,14 +3,16 @@
 
 use std::sync::Mutex;
 
-use ck_contract_draft::notice::{Event, NoticeAnswer, NoticeRequest};
-use ck_contract_draft::part::{PartBody, ToolStatus};
-use ck_contract_draft::read::SessionRef;
-use ck_contract_draft::ride::{RideAnswer, RideCause, RideRequest};
-use ck_contract_draft::rules::{EditCost, ProviderRules, RuleBreak, SignedParts};
-use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
-use ck_contract_draft::view::{ApplyViewAnswer, ApplyViewRequest, Edit, EditOp, View, ViewRefusal};
 use compaction_view::rules::invalid_signed_parts;
+use cortexkit_role_compaction::notice::{Event, NoticeAnswer, NoticeRequest};
+use cortexkit_role_compaction::part::{PartBody, ToolStatus};
+use cortexkit_role_compaction::read::SessionRef;
+use cortexkit_role_compaction::ride::{RideAnswer, RideCause, RideRequest};
+use cortexkit_role_compaction::rules::{EditCost, ProviderRules, RuleBreak, SignedParts};
+use cortexkit_role_compaction::setup::{ModelRef, SetupAnswer, SetupRequest};
+use cortexkit_role_compaction::view::{
+    ApplyViewAnswer, ApplyViewRequest, Edit, EditOp, View, ViewRefusal,
+};
 use serde_json::{json, Value};
 
 use crate::model::{Kind, ModelError};
@@ -88,7 +90,7 @@ impl Provider for TestProvider {
                 .and_then(|decide| decide(&host));
             if let Some(edits) = edits {
                 let view = self.next_view(edits);
-                let answer = host.apply_view(ApplyViewRequest { view });
+                let answer = host.apply_view(ApplyViewRequest::new(view));
                 self.published.lock().unwrap().push(answer);
             }
         }
@@ -120,30 +122,19 @@ impl Provider for TestProvider {
     }
 }
 
-const ANTHROPIC_BOUND: ProviderRules = ProviderRules {
-    signed_parts: SignedParts::Bound,
-    history_edit_cost: EditCost::Suffix,
-};
+fn anthropic_bound() -> ProviderRules {
+    ProviderRules::new(SignedParts::Bound, EditCost::Suffix)
+}
 
-const FREE: ProviderRules = ProviderRules {
-    signed_parts: SignedParts::None,
-    history_edit_cost: EditCost::Suffix,
-};
+fn free() -> ProviderRules {
+    ProviderRules::new(SignedParts::None, EditCost::Suffix)
+}
 
 fn config(kind: Kind, rules: ProviderRules, window: u64) -> SessionConfig {
     SessionConfig {
-        session: SessionRef {
-            runner: "mock-runner".into(),
-            harness: "mock".into(),
-            session: "s1".into(),
-        },
+        session: SessionRef::new("mock-runner", "mock", "s1"),
         preset: "head".into(),
-        model: ModelRef {
-            provider: "anthropic".into(),
-            model: "claude-test".into(),
-            variant: None,
-            service_tier: None,
-        },
+        model: ModelRef::new("anthropic", "claude-test"),
         context_window: window,
         output_reserve: 1_000,
         rules,
@@ -219,7 +210,7 @@ fn drop_edit(since: u64, (mid, part): &(String, String)) -> Edit {
 
 #[tokio::test]
 async fn between_views_every_request_extends_the_previous_one() {
-    let mut runner = start(config(Kind::Anthropic, ANTHROPIC_BOUND, 100_000)).await;
+    let mut runner = start(config(Kind::Anthropic, anthropic_bound(), 100_000)).await;
     runner
         .play(&[
             user("start"),
@@ -241,7 +232,7 @@ async fn between_views_every_request_extends_the_previous_one() {
 
 #[tokio::test]
 async fn a_view_costs_one_cache_write_and_reading_resumes_after_it() {
-    let mut runner = start(config(Kind::OpenAi, FREE, 100_000)).await;
+    let mut runner = start(config(Kind::OpenAi, free(), 100_000)).await;
     let provider = runner.provider();
     *provider.on_notice.lock().unwrap() = Some(once(|host: &Host| {
         let tools = tool_parts(host);
@@ -285,7 +276,7 @@ async fn a_view_costs_one_cache_write_and_reading_resumes_after_it() {
 
 #[tokio::test]
 async fn a_view_breaking_signed_reasoning_is_refused_and_its_fixed_form_accepted() {
-    let mut runner = start(config(Kind::Anthropic, ANTHROPIC_BOUND, 100_000)).await;
+    let mut runner = start(config(Kind::Anthropic, anthropic_bound(), 100_000)).await;
     let provider = runner.provider();
     *provider.on_notice.lock().unwrap() = Some(once(|host: &Host| {
         let tools = tool_parts(host);
@@ -315,15 +306,13 @@ async fn a_view_breaking_signed_reasoning_is_refused_and_its_fixed_form_accepted
     let version = runner.provider().version() + 1;
     let mut edits = vec![drop_edit(version, &tools[0])];
     loop {
-        let invalid = invalid_signed_parts(&host.entries(), &edits, &ANTHROPIC_BOUND);
+        let invalid = invalid_signed_parts(&host.entries(), &edits, &anthropic_bound());
         if invalid.is_empty() {
             break;
         }
         edits.extend(invalid.iter().map(|target| drop_edit(version, target)));
     }
-    let answer_fixed = host.apply_view(ApplyViewRequest {
-        view: runner.provider().next_view(edits),
-    });
+    let answer_fixed = host.apply_view(ApplyViewRequest::new(runner.provider().next_view(edits)));
     assert_eq!(answer_fixed, ApplyViewAnswer::Accepted);
     *runner.provider().on_notice.lock().unwrap() = None;
     runner.play(&[answer()]).await;
@@ -340,7 +329,7 @@ async fn a_view_breaking_signed_reasoning_is_refused_and_its_fixed_form_accepted
 async fn the_mock_provider_rejects_a_changed_history_before_signed_reasoning_on_its_own() {
     // The runner declares no signature rule, so only the mock provider can
     // catch the broken view.
-    let mut runner = start(config(Kind::Anthropic, FREE, 100_000)).await;
+    let mut runner = start(config(Kind::Anthropic, free(), 100_000)).await;
     *runner.provider().on_notice.lock().unwrap() = Some(once(|host: &Host| {
         let tools = tool_parts(host);
         (tools.len() == 3).then(|| vec![drop_edit(1, &tools[0])])
@@ -377,7 +366,7 @@ async fn over_the_limit_the_runner_rides_and_refuses_rather_than_send() {
         answer(),
     ];
 
-    let mut runner = start(config(Kind::OpenAi, FREE, 20_000)).await;
+    let mut runner = start(config(Kind::OpenAi, free(), 20_000)).await;
     runner.play(&steps).await;
     assert!(
         runner.report.model_errors.is_empty(),
@@ -393,7 +382,7 @@ async fn over_the_limit_the_runner_rides_and_refuses_rather_than_send() {
     let sent = runner.report.requests.len();
 
     // With a provider that answers the ride, the same script goes through.
-    let mut runner = start(config(Kind::OpenAi, FREE, 20_000)).await;
+    let mut runner = start(config(Kind::OpenAi, free(), 20_000)).await;
     // The script needs exactly one ride, so this is view 1.
     *runner.provider().on_ride.lock().unwrap() = Some(once(|host: &Host| {
         let tools = tool_parts(host);
@@ -416,7 +405,7 @@ async fn over_the_limit_the_runner_rides_and_refuses_rather_than_send() {
 
 #[tokio::test]
 async fn an_idle_gap_past_the_cache_lifetime_rides_before_the_next_request() {
-    let mut runner = start(config(Kind::Anthropic, ANTHROPIC_BOUND, 100_000)).await;
+    let mut runner = start(config(Kind::Anthropic, anthropic_bound(), 100_000)).await;
     runner
         .play(&[
             user("start"),
@@ -434,7 +423,7 @@ async fn an_idle_gap_past_the_cache_lifetime_rides_before_the_next_request() {
 
 #[tokio::test]
 async fn after_a_revert_the_runner_skips_edits_for_messages_that_are_gone() {
-    let mut runner = start(config(Kind::OpenAi, FREE, 100_000)).await;
+    let mut runner = start(config(Kind::OpenAi, free(), 100_000)).await;
     *runner.provider().on_notice.lock().unwrap() = Some(once(|host: &Host| {
         let tools = tool_parts(host);
         (tools.len() == 2).then(|| vec![drop_edit(1, &tools[1])])
@@ -479,7 +468,7 @@ fn continued(report: &crate::runner::Report) -> Vec<bool> {
 
 #[tokio::test]
 async fn self_tagged_replies_keep_a_chained_route_continuing_across_a_revert() {
-    let mut runner = start(config(Kind::OpenAiChained, FREE, 100_000)).await;
+    let mut runner = start(config(Kind::OpenAiChained, free(), 100_000)).await;
     runner
         .play(&[
             user("start"),
@@ -530,7 +519,7 @@ async fn self_tagged_replies_keep_a_chained_route_continuing_across_a_revert() {
 
 #[tokio::test]
 async fn a_reply_without_its_self_tag_breaks_the_chain_every_time() {
-    let mut runner = start(config(Kind::OpenAiChained, FREE, 100_000)).await;
+    let mut runner = start(config(Kind::OpenAiChained, free(), 100_000)).await;
     runner
         .play(&[
             user("start"),
@@ -546,7 +535,7 @@ async fn a_reply_without_its_self_tag_breaks_the_chain_every_time() {
 
 #[tokio::test]
 async fn a_wrong_self_tag_breaks_the_chain_once() {
-    let mut runner = start(config(Kind::OpenAiChained, FREE, 100_000)).await;
+    let mut runner = start(config(Kind::OpenAiChained, free(), 100_000)).await;
     runner
         .play(&[
             user("start"),

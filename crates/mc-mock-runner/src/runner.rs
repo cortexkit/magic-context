@@ -10,27 +10,27 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use ck_contract_draft::notice::{
-    Conditions, Event, NoticeAnswer, NoticeRequest, ENTRIES_BUDGET_BYTES,
-};
-use ck_contract_draft::part::{
-    Attachment, AttachmentItem, Delivered, FileMedia, OutputFormat, Part, PartBody, Seal, ToolPart,
-    ToolStatus,
-};
-use ck_contract_draft::read::{
-    Entry, Head, NoticeOrigin, ReadPage, ReadRequest, Role, SessionRef, StepUsage,
-};
-use ck_contract_draft::ride::{RideAnswer, RideCause, RideRequest, CONTEXT_CEILING};
-use ck_contract_draft::rules::ProviderRules;
 use ck_contract_draft::send::{Delivery, RunResult, RunResultRequest, SendAnswer, SendRequest};
-use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
-use ck_contract_draft::view::{
-    AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest, View, ViewRefusal,
-};
 use compaction_view::clean::clean_reply;
 use compaction_view::render::{self as view, edits_for_transcript, RenderedMessage};
 use compaction_view::rules;
 use compaction_view::tags::tag_prefix;
+use cortexkit_role_compaction::notice::{
+    Conditions, Event, NoticeAnswer, NoticeRequest, ENTRIES_BUDGET_BYTES,
+};
+use cortexkit_role_compaction::part::{
+    Attachment, AttachmentItem, Delivered, FileMedia, Part, PartBody, Seal, ToolPart, ToolStatus,
+};
+use cortexkit_role_compaction::read::{
+    Entry, Head, NoticeOrigin, ReadPage, ReadRequest, Role, SessionRef, StepUsage,
+};
+use cortexkit_role_compaction::ride::{RideAnswer, RideCause, RideRequest, CONTEXT_CEILING};
+use cortexkit_role_compaction::rules::ProviderRules;
+use cortexkit_role_compaction::setup::{ModelRef, SetupAnswer, SetupRequest};
+use cortexkit_role_compaction::view::{
+    AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest, View, ViewRefusal,
+};
+use cortexkit_role_compaction::wire::Refusal;
 use serde_json::Value;
 
 use crate::model::{Completion, Kind, MockModel, ModelError, Request};
@@ -189,13 +189,14 @@ struct State {
 
 impl State {
     fn conditions(&self) -> Conditions {
-        Conditions {
-            model: self.config.model.clone(),
-            context_window: self.config.context_window,
-            output_reserve: self.config.output_reserve,
-            rules: self.config.rules,
-            last_prompt_tokens: self.last_prompt_tokens,
-        }
+        let mut conditions = Conditions::new(
+            self.config.model.clone(),
+            self.config.context_window,
+            self.config.output_reserve,
+            self.config.rules.clone(),
+        );
+        conditions.last_prompt_tokens = self.last_prompt_tokens;
+        conditions
     }
 
     fn latest_version(&self) -> u64 {
@@ -250,20 +251,18 @@ impl Host {
     }
 
     /// `session.read`.
-    pub fn read(&self, request: &ReadRequest) -> ReadPage {
+    pub fn read(&self, request: &ReadRequest) -> Result<ReadPage, Refusal> {
         let state = self.lock();
         let (entries, next_after) =
             state
                 .transcript
-                .read(&request.select, request.detail, request.max_bytes);
-        ReadPage {
-            entries,
-            next_after,
-            head: Head {
-                newest: state.transcript.cursor(),
-                applied_view: state.applied.as_ref().map(View::applied),
-            },
-        }
+                .read(&request.select, request.detail, request.max_bytes)?;
+        let mut head = Head::new();
+        head.newest = state.transcript.cursor();
+        head.applied_view = state.applied.as_ref().map(View::applied);
+        let mut page = ReadPage::new(entries, head);
+        page.next_after = next_after;
+        Ok(page)
     }
 
     /// `session.apply_view`: check the view and store it for the next step.
@@ -280,9 +279,9 @@ impl Host {
 
     /// `session.applied_view`.
     pub fn applied_view(&self) -> AppliedViewAnswer {
-        AppliedViewAnswer {
-            view: self.lock().applied.clone(),
-        }
+        let mut answer = AppliedViewAnswer::new();
+        answer.view = self.lock().applied.clone();
+        answer
     }
 
     /// `session.send`: queue a reminder, or start a run in a child session.
@@ -354,7 +353,7 @@ impl<P: Provider> Runner<P> {
         let mut applied = None;
         if let Some(moved) = &config.moved_in {
             for (role, text) in &moved.messages {
-                transcript.append_unnumbered(*role, text, config.start_ms);
+                transcript.append_unnumbered(role.clone(), text, config.start_ms);
             }
             applied = Some(moved.view.clone());
         }
@@ -398,17 +397,18 @@ impl<P: Provider> Runner<P> {
     async fn setup(&self) -> Result<SetupAnswer, CallError> {
         let request = {
             let state = self.host.lock();
-            SetupRequest {
-                preset: state.config.preset.clone(),
-                model: state.config.model.clone(),
-                context_window: state.config.context_window,
-                output_reserve: state.config.output_reserve,
-                rules: state.config.rules,
-                detects: DETECTS.to_vec(),
-                applied_view: state.applied.as_ref().map(View::applied),
-                newest: state.transcript.cursor(),
-                now: state.now,
-            }
+            let mut request = SetupRequest::new(
+                state.config.preset.clone(),
+                state.config.model.clone(),
+                state.config.context_window,
+                state.config.output_reserve,
+                state.config.rules.clone(),
+                DETECTS.to_vec(),
+                state.now,
+            );
+            request.applied_view = state.applied.as_ref().map(View::applied);
+            request.newest = state.transcript.cursor();
+            request
         };
         self.provider.setup(request).await
     }
@@ -448,7 +448,7 @@ impl<P: Provider> Runner<P> {
                     state.config.model = model.clone();
                     state.config.context_window = *context_window;
                     state.config.output_reserve = *output_reserve;
-                    state.config.rules = *rules;
+                    state.config.rules = rules.clone();
                     state.forced_cause = Some(cause);
                     true
                 }
@@ -640,26 +640,17 @@ impl<P: Provider> Runner<P> {
         for (index, call) in turn.tools.iter().enumerate() {
             bodies.push((
                 Seal::None,
-                PartBody::Tool(ToolPart {
-                    call_id: format!("call-{ordinal}-{index}"),
-                    name: call.name.clone(),
-                    input: call.input.clone(),
-                    provider_executed: false,
-                    status: ToolStatus::Running,
-                    output: None,
-                    output_format: OutputFormat::Text,
-                    output_bytes: None,
-                    attachments: vec![],
-                    approval: None,
-                    delivered: vec![],
-                }),
+                PartBody::Tool(ToolPart::new(
+                    format!("call-{ordinal}-{index}"),
+                    call.name.clone(),
+                    call.input.clone(),
+                    ToolStatus::Running,
+                )),
             ));
         }
-        let usage = StepUsage {
-            output_tokens: Some(turn.output_tokens + turn.reasoning_tokens.unwrap_or(0)),
-            reasoning_tokens: turn.reasoning_tokens,
-            ..completion.usage
-        };
+        let mut usage = completion.usage;
+        usage.output_tokens = Some(turn.output_tokens + turn.reasoning_tokens.unwrap_or(0));
+        usage.reasoning_tokens = turn.reasoning_tokens;
         let generated_under = state.applied.as_ref().map(View::applied);
         let now = state.now;
         let entry = state
@@ -721,7 +712,7 @@ impl<P: Provider> Runner<P> {
                     Err(error) => (ToolStatus::Error, error.0),
                 }
             } else {
-                (call.status, call.output.clone())
+                (call.status.clone(), call.output.clone())
             };
             let mut state = self.host.lock();
             // A reminder that may ride a tool result is delivered with this
@@ -733,11 +724,9 @@ impl<P: Provider> Runner<P> {
                 .position(|reminder| reminder.delivery.first() == Some(&Delivery::ToolResult))
             {
                 let reminder = state.reminders.remove(index);
-                delivered.push(Delivered::new(
-                    "magic-context",
-                    reminder.template.clone(),
-                    reminder.prompt,
-                ));
+                let mut item = Delivered::new("magic-context", reminder.prompt);
+                item.template = reminder.template.clone();
+                delivered.push(item);
             }
             state
                 .transcript
@@ -768,9 +757,10 @@ impl<P: Provider> Runner<P> {
             for reminder in &steers {
                 state.transcript.append(
                     Role::User,
-                    Some(NoticeOrigin {
-                        sender: "magic-context".into(),
-                        template: reminder.template.clone(),
+                    Some({
+                        let mut origin = NoticeOrigin::new("magic-context");
+                        origin.template = reminder.template.clone();
+                        origin
                     }),
                     vec![(
                         Seal::None,
@@ -851,17 +841,15 @@ impl<P: Provider> Runner<P> {
     async fn ride(&mut self, causes: Vec<RideCause>, request_tokens: Option<u64>) {
         let request = {
             let state = self.host.lock();
-            RideRequest {
-                causes: causes.clone(),
-                deadline_ms: if state.last_send.is_none() {
-                    COLD_RIDE_DEADLINE_MS
-                } else {
-                    RIDE_DEADLINE_MS
-                },
-                conditions: state.conditions(),
-                applied_view: state.applied.as_ref().map(View::applied),
-                request_tokens,
-            }
+            let deadline_ms = if state.last_send.is_none() {
+                COLD_RIDE_DEADLINE_MS
+            } else {
+                RIDE_DEADLINE_MS
+            };
+            let mut request = RideRequest::new(causes.clone(), deadline_ms, state.conditions());
+            request.applied_view = state.applied.as_ref().map(View::applied);
+            request.request_tokens = request_tokens;
+            request
         };
         let answer = self.provider.ride(request).await;
         let got_view = match answer {
@@ -877,6 +865,8 @@ impl<P: Provider> Runner<P> {
                 self.report.call_errors.push(error);
                 false
             }
+            // W1.5: an answer the runner doesn't know counts as `nothing`.
+            Ok(_) => false,
         };
         self.report.rides.push(RideRecord { causes, got_view });
     }
@@ -909,9 +899,10 @@ impl<P: Provider> Runner<P> {
                             || (entry.ordinal == *ordinal && &entry.digest != digest)
                     }
                 })
-                .map(|entry| Entry {
-                    parts: entry.parts.iter().map(Part::compact).collect(),
-                    ..entry.clone()
+                .map(|entry| {
+                    let mut compact = entry.clone();
+                    compact.parts = entry.parts.iter().map(Part::compact).collect();
+                    compact
                 })
                 .collect();
             let size = serde_json::to_vec(&entries)
@@ -919,24 +910,20 @@ impl<P: Provider> Runner<P> {
                 .len();
             state.seq += 1;
             state.notified = Some((newest.ordinal, newest.digest.clone()));
-            NoticeRequest {
-                seq: state.seq,
-                newest,
-                applied_view: state.applied.as_ref().map(View::applied),
-                conditions: state.conditions(),
-                events: std::mem::take(&mut state.events),
-                entries: if size > ENTRIES_BUDGET_BYTES {
-                    Vec::new()
-                } else {
-                    entries
-                },
+            let mut request = NoticeRequest::new(state.seq, newest, state.conditions());
+            request.applied_view = state.applied.as_ref().map(View::applied);
+            request.events = std::mem::take(&mut state.events);
+            if size <= ENTRIES_BUDGET_BYTES {
+                request.entries = entries;
             }
+            request
         };
         match self.provider.notice(request.clone()).await {
             Ok(NoticeAnswer::Received) => {}
             // The provider restarted: Setup again, then send the same notice,
-            // with every entry so it can start from the whole transcript.
-            Ok(NoticeAnswer::SetupRequired) => {
+            // with every entry so it can start from the whole transcript. An
+            // answer the runner doesn't know is handled the same way (W1.5).
+            Ok(_) => {
                 if let Err(error) = self.setup().await {
                     self.report.call_errors.push(error);
                     return;
@@ -963,19 +950,11 @@ const DETECTS: [RideCause; 4] = [
 /// A part body for tests and scenarios: a finished tool part as a host would
 /// store it.
 pub fn finished_tool(call_id: &str, name: &str, input: Value, output: &str) -> PartBody {
-    PartBody::Tool(ToolPart {
-        call_id: call_id.into(),
-        name: name.into(),
-        input,
-        provider_executed: false,
-        status: ToolStatus::Completed,
-        output_bytes: Some(output.len() as u64),
-        output: Some(output.into()),
-        output_format: OutputFormat::Text,
-        attachments: vec![],
-        approval: None,
-        delivered: vec![],
-    })
+    PartBody::Tool(
+        ToolPart::new(call_id, name, input, ToolStatus::Completed)
+            .with_output(output)
+            .with_output_bytes(output.len() as u64),
+    )
 }
 
 /// An inline image as a person pastes one or a tool returns one: 200 KB of PNG.
@@ -985,9 +964,6 @@ fn pasted_image() -> FileMedia {
 
 fn image_attachments(count: u64) -> Vec<Attachment> {
     (0..count)
-        .map(|index| Attachment {
-            id: format!("img-{index}"),
-            item: AttachmentItem::File(pasted_image()),
-        })
+        .map(|index| Attachment::new(format!("img-{index}"), AttachmentItem::File(pasted_image())))
         .collect()
 }

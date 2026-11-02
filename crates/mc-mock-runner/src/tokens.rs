@@ -3,8 +3,8 @@
 //! provider has its own estimator and calibrates it against the prompt sizes
 //! the providers report, which is what these counts become.
 
-use ck_contract_draft::part::{AttachmentItem, Part, PartBody};
 use compaction_view::render::RenderedMessage;
+use cortexkit_role_compaction::part::{AttachmentItem, Part, PartBody};
 
 /// Tokens for an image, whatever its size.
 pub const IMAGE_TOKENS: u64 = 1_000;
@@ -38,6 +38,8 @@ pub fn part_tokens(
                 .map(|attachment| match &attachment.item {
                     AttachmentItem::File(file) => media_tokens(&file.mime, file.size),
                     AttachmentItem::Opaque(opaque) => bytes_tokens(opaque.size.unwrap_or(0)),
+                    // An item kind the mock doesn't know costs nothing.
+                    _ => 0,
                 })
                 .sum();
             // Text delivered with the result renders after it.
@@ -50,6 +52,8 @@ pub fn part_tokens(
         }
         PartBody::File(file) => media_tokens(&file.mime, file.size),
         PartBody::Opaque(opaque) => bytes_tokens(opaque.size.unwrap_or(0)),
+        // A part kind the mock doesn't know costs nothing.
+        _ => 0,
     }
 }
 

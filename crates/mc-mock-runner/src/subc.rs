@@ -10,15 +10,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ck_contract_draft::notice::{NoticeAnswer, NoticeRequest};
-use ck_contract_draft::ops;
-use ck_contract_draft::read::{ReadRequest, SessionRef};
-use ck_contract_draft::ride::{RideAnswer, RideRequest};
 use ck_contract_draft::send::{RunResultRequest, SendRequest};
-use ck_contract_draft::setup::{SetupAnswer, SetupRequest};
-use ck_contract_draft::view::{AppliedViewRequest, ApplyViewRequest};
-use ck_contract_draft::wire::{self, codes, Refusal};
-use ck_contract_draft::COMPACTION_ROLE;
+use cortexkit_role_compaction::notice::{NoticeAnswer, NoticeRequest};
+use cortexkit_role_compaction::ops;
+use cortexkit_role_compaction::read::{ReadRequest, SessionRef};
+use cortexkit_role_compaction::ride::{RideAnswer, RideRequest};
+use cortexkit_role_compaction::setup::{SetupAnswer, SetupRequest};
+use cortexkit_role_compaction::view::{AppliedViewRequest, ApplyViewRequest};
+use cortexkit_role_compaction::wire::{self, codes, Refusal};
+use cortexkit_role_compaction::COMPACTION_ROLE;
 use cortexkit_role_step_transform_provider as step;
 use cortexkit_role_tool_provider::result::{ContentPart, ToolResult};
 use serde::de::DeserializeOwned;
@@ -329,7 +329,7 @@ impl Handler {
         match method.as_str() {
             ops::SESSION_ENTRIES => {
                 let request: ReadRequest = wire::params(params)?;
-                Ok(json_of(&self.host(channel)?.read(&request)))
+                Ok(json_of(&self.host(channel)?.read(&request)?))
             }
             ops::SESSION_APPLY_VIEW => {
                 let request: ApplyViewRequest = wire::params(params)?;
@@ -456,16 +456,17 @@ impl ModuleHandler for Handler {
             Ok(answer) => {
                 HandlerOutcome::Response(serde_json::to_vec(&answer).expect("answers serialize"))
             }
-            Err(Refusal {
-                code,
-                message,
-                detail: Some(detail),
-            }) => HandlerOutcome::ErrorWithDetail {
-                code,
-                message,
-                detail,
+            Err(refusal) => match refusal.detail {
+                Some(detail) => HandlerOutcome::ErrorWithDetail {
+                    code: refusal.code,
+                    message: refusal.message,
+                    detail,
+                },
+                None => HandlerOutcome::Error {
+                    code: refusal.code,
+                    message: refusal.message,
+                },
             },
-            Err(Refusal { code, message, .. }) => HandlerOutcome::Error { code, message },
         }
     }
 }

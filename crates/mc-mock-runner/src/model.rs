@@ -13,9 +13,9 @@
 
 use std::collections::HashMap;
 
-use ck_contract_draft::part::{PartBody, Seal};
-use ck_contract_draft::read::{Role, StepUsage};
 use compaction_view::render::RenderedMessage;
+use cortexkit_role_compaction::part::{PartBody, Seal};
+use cortexkit_role_compaction::read::{Role, StepUsage};
 use sha2::{Digest, Sha256};
 
 use crate::tokens::part_tokens;
@@ -237,7 +237,7 @@ impl MockModel {
                 total += part_tokens(message, part, request.reasoning_tokens);
                 let wire = message.wire_text(part).unwrap_or_default();
                 blocks.push(hash(&[
-                    role_name(message.role).as_bytes(),
+                    role_name(&message.role).as_bytes(),
                     part.id.as_bytes(),
                     part.digest.as_bytes(),
                     wire.as_bytes(),
@@ -272,7 +272,7 @@ fn content_before(messages: &[RenderedMessage], limit: usize, system_digest: &st
             }
             if !opened {
                 hasher.update(b"\x00message\x00");
-                hasher.update(role_name(message.role).as_bytes());
+                hasher.update(role_name(&message.role).as_bytes());
                 opened = true;
             }
             hasher.update(b"\x00part\x00");
@@ -296,21 +296,14 @@ fn signed_ids(messages: &[RenderedMessage], limit: usize) -> Vec<String> {
 /// What a request reports: its prompt, what it read from the cache, and the
 /// rest written. The mock reports no output: replies are scripted.
 fn usage(prompt_tokens: u64, read: u64) -> StepUsage {
-    StepUsage {
-        prompt_tokens: Some(prompt_tokens),
-        cache_read_tokens: Some(read),
-        cache_write_tokens: Some(prompt_tokens - read),
-        output_tokens: None,
-        reasoning_tokens: None,
-    }
+    StepUsage::new()
+        .with_prompt_tokens(prompt_tokens)
+        .with_cache_read_tokens(read)
+        .with_cache_write_tokens(prompt_tokens - read)
 }
 
-fn role_name(role: Role) -> &'static str {
-    match role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::System => "system",
-    }
+fn role_name(role: &Role) -> &str {
+    role.as_str()
 }
 
 fn hash(chunks: &[&[u8]]) -> [u8; 32] {

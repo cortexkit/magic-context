@@ -146,12 +146,11 @@ dependencies = [
 
 [[package]]
 name = "ck-contract-draft"
-version = "0.8.0-draft.1"
+version = "0.8.0-draft.2"
 dependencies = [
- "cortexkit-role-llm-runner",
+ "cortexkit-role-compaction",
  "serde",
  "serde_json",
- "serde_path_to_error",
 ]
 
 [[package]]
@@ -744,6 +743,7 @@ version = "0.1.0"
 dependencies = [
  "ck-contract-draft",
  "cortexkit-compaction-view",
+ "cortexkit-role-compaction",
  "cortexkit-role-step-transform-provider",
  "cortexkit-role-tool-provider",
  "serde",
@@ -760,6 +760,7 @@ version = "0.1.0"
 dependencies = [
  "ck-contract-draft",
  "cortexkit-compaction-view",
+ "cortexkit-role-compaction",
  "cortexkit-role-routing",
  "cortexkit-role-step-transform-provider",
  "cortexkit-role-tool-provider",

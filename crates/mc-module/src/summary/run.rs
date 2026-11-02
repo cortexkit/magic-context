@@ -8,11 +8,11 @@
 
 use std::time::Duration;
 
-use ck_contract_draft::read::SessionRef;
 use ck_contract_draft::send::{
     Generation, RunResultRequest, RunSettings, RunState, SendAnswer, SendRequest, StopWhen,
 };
-use ck_contract_draft::setup::ModelRef;
+use cortexkit_role_compaction::read::SessionRef;
+use cortexkit_role_compaction::setup::ModelRef;
 
 use super::{chunk, fit};
 use crate::calibration::DecisionCalibration;
@@ -30,7 +30,7 @@ use super::validate::{
 use crate::client::RunnerClient;
 use crate::context_db::{StoredCompartment, StoredMemory};
 use crate::routing::{self, Router};
-use ck_contract_draft::read::StepUsage;
+use cortexkit_role_compaction::read::StepUsage;
 use cortexkit_role_routing::report::Outcome;
 
 /// Flash-class summarizers echo their examples back above this.
@@ -167,7 +167,7 @@ async fn summarize_on<C: RunnerClient>(
     client: &C,
     job: &Request,
     system: &str,
-    entries: &[ck_contract_draft::read::Entry],
+    entries: &[cortexkit_role_compaction::read::Entry],
     window: fit::Window,
     target: &Target,
     usage: &mut Option<StepUsage>,
@@ -350,13 +350,13 @@ fn add_usage(total: Option<StepUsage>, more: &StepUsage) -> StepUsage {
         (None, None) => None,
         (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
     };
-    StepUsage {
-        prompt_tokens: sum(total.prompt_tokens, more.prompt_tokens),
-        cache_read_tokens: sum(total.cache_read_tokens, more.cache_read_tokens),
-        cache_write_tokens: sum(total.cache_write_tokens, more.cache_write_tokens),
-        output_tokens: sum(total.output_tokens, more.output_tokens),
-        reasoning_tokens: sum(total.reasoning_tokens, more.reasoning_tokens),
-    }
+    let mut usage = StepUsage::new();
+    usage.prompt_tokens = sum(total.prompt_tokens, more.prompt_tokens);
+    usage.cache_read_tokens = sum(total.cache_read_tokens, more.cache_read_tokens);
+    usage.cache_write_tokens = sum(total.cache_write_tokens, more.cache_write_tokens);
+    usage.output_tokens = sum(total.output_tokens, more.output_tokens);
+    usage.reasoning_tokens = sum(total.reasoning_tokens, more.reasoning_tokens);
+    usage
 }
 
 /// Whether a failed call is worth retrying on the same model, as the plugin
@@ -395,7 +395,7 @@ fn backoff(retry: usize) -> Duration {
 async fn read_range<C: RunnerClient>(
     client: &C,
     job: &Request,
-) -> Result<Vec<ck_contract_draft::read::Entry>, String> {
+) -> Result<Vec<cortexkit_role_compaction::read::Entry>, String> {
     crate::reads::full_range(client, &job.session, job.from, job.until, |_| false).await
 }
 

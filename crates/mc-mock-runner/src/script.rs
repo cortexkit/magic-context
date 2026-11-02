@@ -2,9 +2,9 @@
 //! replies are scripted too, so a run is deterministic and a scenario states
 //! exactly how much reasoning, text and tool output each step produces.
 
-use ck_contract_draft::part::ToolStatus;
-use ck_contract_draft::rules::ProviderRules;
-use ck_contract_draft::setup::ModelRef;
+use cortexkit_role_compaction::part::ToolStatus;
+use cortexkit_role_compaction::rules::ProviderRules;
+use cortexkit_role_compaction::setup::ModelRef;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

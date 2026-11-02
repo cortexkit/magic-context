@@ -5,13 +5,15 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use ck_contract_draft::notice::{Conditions, Event, NoticeRequest};
-use ck_contract_draft::part::PartBody;
-use ck_contract_draft::read::{Cursor, Detail, ReadRequest, Select, SessionRef};
-use ck_contract_draft::ride::{RideCause, RideRequest};
 use ck_contract_draft::send::{Delivery, SendRequest};
-use ck_contract_draft::setup::SetupRequest;
-use ck_contract_draft::view::{ApplyViewAnswer, ApplyViewRequest, EditOp, View, MAX_VIEW_BYTES};
+use cortexkit_role_compaction::notice::{Conditions, Event, NoticeRequest};
+use cortexkit_role_compaction::part::PartBody;
+use cortexkit_role_compaction::read::{Cursor, Detail, ReadRequest, Select, SessionRef};
+use cortexkit_role_compaction::ride::{RideCause, RideRequest};
+use cortexkit_role_compaction::setup::SetupRequest;
+use cortexkit_role_compaction::view::{
+    ApplyViewAnswer, ApplyViewRequest, EditOp, View, MAX_VIEW_BYTES,
+};
 use serde_json::Value;
 
 use crate::client::RunnerClient;
@@ -171,25 +173,18 @@ impl Session {
     /// it never had a Setup. Its tools read the project from the route; it has
     /// no transcript, views or summaries.
     pub fn tools_only(route: &Route, db: Option<Arc<ContextDb>>) -> Self {
-        let request = SetupRequest {
-            preset: String::new(),
-            model: ck_contract_draft::setup::ModelRef {
-                provider: String::new(),
-                model: String::new(),
-                variant: None,
-                service_tier: None,
-            },
-            context_window: 0,
-            output_reserve: 0,
-            rules: ck_contract_draft::rules::ProviderRules {
-                signed_parts: ck_contract_draft::rules::SignedParts::None,
-                history_edit_cost: ck_contract_draft::rules::EditCost::Suffix,
-            },
-            detects: Vec::new(),
-            applied_view: None,
-            newest: None,
-            now: 0,
-        };
+        let request = SetupRequest::new(
+            String::new(),
+            cortexkit_role_compaction::setup::ModelRef::new(String::new(), String::new()),
+            0,
+            0,
+            cortexkit_role_compaction::rules::ProviderRules::new(
+                cortexkit_role_compaction::rules::SignedParts::None,
+                cortexkit_role_compaction::rules::EditCost::Suffix,
+            ),
+            Vec::new(),
+            0,
+        );
         let mut session = Self::new(route, &request, Features::NONE, db);
         session.tools_only = true;
         session
@@ -359,6 +354,16 @@ impl Session {
                 }
                 Event::ViewRefused { .. } => refused = true,
                 Event::MarkerWritten { .. } => {}
+                // An event the contract may add later: its reach is unknown,
+                // so the index is read again from the cut, the oldest message
+                // the model still sees (W1.5).
+                other => {
+                    eprintln!(
+                        "ck-mc: session {}: unknown notice event {other:?}; reading the transcript again",
+                        self.key.session
+                    );
+                    self.index = Index::starting_at(self.cut.unwrap_or(1));
+                }
             }
         }
         if refused || self.newer_runner_view(&notice) {
@@ -1362,7 +1367,7 @@ impl Session {
         let view = View::seal(
             version,
             ops.into_iter()
-                .map(|op| ck_contract_draft::view::Edit::new(version, op))
+                .map(|op| cortexkit_role_compaction::view::Edit::new(version, op))
                 .collect(),
         );
         if let Some(next) = self.next_baseline.take() {
@@ -1581,7 +1586,7 @@ impl Session {
             );
             return;
         }
-        let request = ApplyViewRequest { view: view.clone() };
+        let request = ApplyViewRequest::new(view.clone());
         match client.apply_view(&self.key, request).await {
             Ok(ApplyViewAnswer::Accepted) => self.accept(view),
             Ok(ApplyViewAnswer::Refused { refusal }) => {
@@ -1592,6 +1597,19 @@ impl Session {
                     "ck-mc: session {}: runner refused view {}: {refusal:?}",
                     self.key.session, view.version
                 );
+            }
+            // An answer the contract may add later leaves the outcome
+            // unconfirmed (W1.5): the view is not sent again, and ck-mc takes
+            // whatever view the runner applies.
+            Ok(other) => {
+                self.next_baseline = None;
+                self.next_caveman = None;
+                self.keep_refused_drops();
+                eprintln!(
+                    "ck-mc: session {}: unknown answer to view {}: {other:?}",
+                    self.key.session, view.version
+                );
+                self.adopt_runner_view(client).await;
             }
             Err(error) => {
                 self.next_baseline = None;
@@ -1688,14 +1706,14 @@ impl Session {
             if self.index.ends_at(newest) {
                 return;
             }
-            let request = ReadRequest {
-                select: Select::After {
+            let request = ReadRequest::new(
+                Select::After {
                     after_ordinal: after,
                     limit: None,
                 },
-                detail: Detail::Compact,
-                max_bytes: Some(READ_PAGE_BYTES),
-            };
+                Detail::Compact,
+            )
+            .with_max_bytes(READ_PAGE_BYTES);
             let page = match client.read(&self.key, request).await {
                 Ok(page) => page,
                 Err(error) => {
@@ -1784,11 +1802,7 @@ impl Session {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
-            let request = ReadRequest {
-                select: Select::Mids { mids },
-                detail: Detail::Full,
-                max_bytes: None,
-            };
+            let request = ReadRequest::new(Select::Mids { mids }, Detail::Full);
             match client.read(&self.key, request).await {
                 Ok(page) => {
                     for entry in page.entries {
@@ -1820,13 +1834,12 @@ impl Session {
 }
 
 fn conditions_of(request: &SetupRequest) -> Conditions {
-    Conditions {
-        model: request.model.clone(),
-        context_window: request.context_window,
-        output_reserve: request.output_reserve,
-        rules: request.rules,
-        last_prompt_tokens: None,
-    }
+    Conditions::new(
+        request.model.clone(),
+        request.context_window,
+        request.output_reserve,
+        request.rules.clone(),
+    )
 }
 
 fn list(tags: &[u64]) -> String {
@@ -1851,6 +1864,6 @@ fn freed_tokens(context: &lanes::Context, covered: &[lanes::PartKey]) -> u64 {
 }
 
 /// A message's estimated size for the summarizer's boundary.
-fn entry_tokens(entry: &ck_contract_draft::read::Entry) -> u64 {
+fn entry_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
     entry.parts.iter().map(tokens::part).sum()
 }

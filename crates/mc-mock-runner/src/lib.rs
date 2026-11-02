@@ -12,7 +12,7 @@
 //! longer matches what came before it.
 //!
 //! The mock providers check the provider rules on their own, from the
-//! rendered request, without using `ck_contract_draft::rules`. So when a
+//! rendered request, without using `cortexkit_role_compaction::rules`. So when a
 //! compaction provider's view passes the contract's checker but would fail at
 //! a real provider, the scenario fails here too.
 

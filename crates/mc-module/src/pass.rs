@@ -12,9 +12,9 @@
 
 use std::collections::BTreeMap;
 
-use ck_contract_draft::notice::Conditions;
-use ck_contract_draft::read::{Entry, Role};
-use ck_contract_draft::rules::SignedParts;
+use cortexkit_role_compaction::notice::Conditions;
+use cortexkit_role_compaction::read::{Entry, Role};
+use cortexkit_role_compaction::rules::SignedParts;
 
 use crate::lanes;
 

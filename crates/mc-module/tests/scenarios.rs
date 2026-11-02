@@ -7,14 +7,14 @@
 
 use std::sync::{Arc, Mutex};
 
-use ck_contract_draft::notice::{NoticeAnswer, NoticeRequest};
-use ck_contract_draft::part::PartBody;
-use ck_contract_draft::read::{ReadPage, ReadRequest, SessionRef};
-use ck_contract_draft::ride::{RideAnswer, RideCause, RideRequest};
-use ck_contract_draft::rules::{EditCost, ProviderRules, SignedParts};
 use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendRequest};
-use ck_contract_draft::setup::{ModelRef, SetupAnswer, SetupRequest};
-use ck_contract_draft::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
+use cortexkit_role_compaction::notice::{NoticeAnswer, NoticeRequest};
+use cortexkit_role_compaction::part::PartBody;
+use cortexkit_role_compaction::read::{ReadPage, ReadRequest, SessionRef};
+use cortexkit_role_compaction::ride::{RideAnswer, RideCause, RideRequest};
+use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+use cortexkit_role_compaction::setup::{ModelRef, SetupAnswer, SetupRequest};
+use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
 use cortexkit_role_routing::report::ReportRequest;
 use cortexkit_role_routing::select::{RouteRef, RunnerRef, SelectAnswer, SelectRequest};
 use mc_mock_runner::model::Kind;
@@ -124,10 +124,13 @@ impl Router for HostClient {
 
 impl RunnerClient for HostClient {
     async fn read(&self, _: &SessionRef, request: ReadRequest) -> Result<ReadPage, ClientError> {
-        let page = self.host()?.read(&request);
+        let page = self
+            .host()?
+            .read(&request)
+            .map_err(|refusal| ClientError(format!("{refusal:?}")))?;
         if let (
-            ck_contract_draft::read::Detail::Compact,
-            ck_contract_draft::read::Select::After { after_ordinal, .. },
+            cortexkit_role_compaction::read::Detail::Compact,
+            cortexkit_role_compaction::read::Select::After { after_ordinal, .. },
         ) = (&request.detail, &request.select)
         {
             self.reads
@@ -149,7 +152,7 @@ impl RunnerClient for HostClient {
             if *refuse > 0 {
                 *refuse -= 1;
                 return Ok(ApplyViewAnswer::Refused {
-                    refusal: ck_contract_draft::view::ViewRefusal::BadSince,
+                    refusal: cortexkit_role_compaction::view::ViewRefusal::BadSince,
                 });
             }
         }
@@ -277,15 +280,13 @@ impl Provider for InProcess {
     }
 }
 
-const FREE: ProviderRules = ProviderRules {
-    signed_parts: SignedParts::None,
-    history_edit_cost: EditCost::Suffix,
-};
+fn free() -> ProviderRules {
+    ProviderRules::new(SignedParts::None, EditCost::Suffix)
+}
 
-const BOUND: ProviderRules = ProviderRules {
-    signed_parts: SignedParts::Bound,
-    history_edit_cost: EditCost::Suffix,
-};
+fn bound() -> ProviderRules {
+    ProviderRules::new(SignedParts::Bound, EditCost::Suffix)
+}
 
 /// A session whose usable window is 39,000 tokens, so the execute threshold
 /// (65%) sits at 25,350. A head's is 99,000 tokens (threshold 64,350): the
@@ -294,18 +295,9 @@ const BOUND: ProviderRules = ProviderRules {
 /// whose tool output fits that range ([`turn`]).
 fn config(preset: &str, kind: Kind, rules: ProviderRules) -> SessionConfig {
     SessionConfig {
-        session: SessionRef {
-            runner: "mock-runner".into(),
-            harness: "mock".into(),
-            session: "s1".into(),
-        },
+        session: SessionRef::new("mock-runner", "mock", "s1"),
         preset: preset.into(),
-        model: ModelRef {
-            provider: "test".into(),
-            model: "test-model".into(),
-            variant: None,
-            service_tier: None,
-        },
+        model: ModelRef::new("test", "test-model"),
         context_window: if preset == "head" { 100_000 } else { 40_000 },
         output_reserve: 1_000,
         rules,
@@ -435,7 +427,7 @@ fn assert_clean(runner: &Runner<InProcess>) {
 async fn a_worker_lands_its_queued_drops_on_the_first_execute_pass() {
     // Tags: the task is 1; each read step adds a sentence and a call (2/3,
     // 4/5, 6/7, 8/9); the ctx_reduce step is 10/11.
-    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
     runner
         .play(&[
             user("Review the module."),
@@ -489,7 +481,7 @@ fn reads_then_drop_sentences() -> Vec<Step> {
 
 #[tokio::test]
 async fn a_refused_view_keeps_its_queued_drops_for_the_next_and_its_version_is_not_reused() {
-    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
     *runner.provider().client.refuse_views.lock().unwrap() = 1;
     runner.play(&reads_then_drop_sentences()).await;
     assert_clean(&runner);
@@ -505,7 +497,7 @@ async fn a_refused_view_keeps_its_queued_drops_for_the_next_and_its_version_is_n
 
 #[tokio::test]
 async fn a_queued_drop_two_refused_views_carried_is_forgotten() {
-    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
     *runner.provider().client.refuse_views.lock().unwrap() = 2;
     runner.play(&reads_then_drop_sentences()).await;
     runner.play(&[read_file(50), answer(), answer()]).await;
@@ -524,7 +516,7 @@ async fn an_execute_pass_with_nothing_to_drop_publishes_no_view() {
     // A worker whose task alone (about 28,000 tokens, which a worker never
     // drops) puts it over the execute threshold: every pass may rebuild, but
     // no lane has work, so the cache is never rewritten.
-    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
     let task = format!("Review this. {}", "w".repeat(112_000));
     runner
         .play(&[user(&task), answer(), answer(), answer(), answer()])
@@ -544,7 +536,7 @@ async fn an_execute_pass_with_nothing_to_drop_publishes_no_view() {
 
 #[tokio::test]
 async fn nothing_lands_below_the_threshold_and_a_worker_never_drops_its_task() {
-    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
     runner
         .play(&[
             user("Review the module."),
@@ -587,7 +579,7 @@ async fn nothing_lands_below_the_threshold_and_a_worker_never_drops_its_task() {
 
 #[tokio::test]
 async fn drops_before_signed_reasoning_take_the_later_reasoning_with_them() {
-    let mut runner = start(config("worker", Kind::Anthropic, BOUND)).await;
+    let mut runner = start(config("worker", Kind::Anthropic, bound())).await;
     runner
         .play(&[
             user("Review the module."),
@@ -627,7 +619,7 @@ async fn drops_before_signed_reasoning_take_the_later_reasoning_with_them() {
 
 #[tokio::test]
 async fn a_cache_loss_lands_queued_drops_below_the_threshold() {
-    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
     runner
         .play(&[
             user("Review the module."),
@@ -659,7 +651,7 @@ async fn a_cache_loss_lands_queued_drops_below_the_threshold() {
 
 /// Reasoning parts the model sees, and how many the transcript holds.
 fn reasoning_seen(host: &Host) -> (usize, usize) {
-    let count = |parts: &mut dyn Iterator<Item = &ck_contract_draft::part::Part>| {
+    let count = |parts: &mut dyn Iterator<Item = &cortexkit_role_compaction::part::Part>| {
         parts
             .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
             .count()
@@ -680,7 +672,7 @@ async fn the_age_sweep_drops_an_output_only_after_it_was_far_behind_on_an_earlie
     // records that; the pass after the sixth request drops them, so the
     // seventh request is the first under a view. Reasoning is too small to
     // matter here.
-    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
     runner
         .play(&[
             user("Review the module."),
@@ -707,7 +699,7 @@ async fn the_age_sweep_drops_an_output_only_after_it_was_far_behind_on_an_earlie
 
 #[tokio::test]
 async fn reasoning_beyond_the_budget_goes_on_the_first_execute_pass() {
-    for (kind, rules) in [(Kind::OpenAi, FREE), (Kind::Anthropic, BOUND)] {
+    for (kind, rules) in [(Kind::OpenAi, free()), (Kind::Anthropic, bound())] {
         let settings = Settings {
             keep_reasoning_tokens: 1_000,
             ..Settings::default()
@@ -742,7 +734,7 @@ async fn heavy_signed_thinking_holds_the_view_until_usage_passes_threshold_plus_
     // sixth is still under the cap of 75%: both passes are held. The seventh
     // (about 94%) releases the hold, so the eighth request is the first
     // under a view. Without the hold the sixth would be.
-    let mut runner = start(config("worker", Kind::Anthropic, BOUND)).await;
+    let mut runner = start(config("worker", Kind::Anthropic, bound())).await;
     runner
         .play(&[
             user("Review the module."),
@@ -824,7 +816,7 @@ async fn routine_heuristics_land_with_the_first_views() {
     steps.extend((0..22).map(|_| answer()));
     steps.extend([read_file(50), read_file(50), read_file(50), read_file(50)]);
     steps.extend([answer(), answer(), answer()]);
-    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
     runner.play(&steps).await;
     assert_clean(&runner);
     let host = runner.host();
@@ -857,7 +849,7 @@ async fn routine_heuristics_land_with_the_first_views() {
 
 #[tokio::test]
 async fn injected_text_leaves_older_messages_and_the_rest_of_each_message_stays() {
-    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
     runner
         .play(&[
             user("Review the module."),
@@ -889,7 +881,7 @@ async fn injected_text_leaves_older_messages_and_the_rest_of_each_message_stays(
 
 #[tokio::test]
 async fn answered_images_go_once_newer_content_is_dropped() {
-    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
     runner
         .play(&[
             user("Look at the screen."),
@@ -995,7 +987,7 @@ async fn the_force_band_drops_old_tool_output_down_toward_the_target() {
     // in the force band (85%, about 94% here). Shell outputs at tags 3, 5, 7
     // and 9 are 9,000 tokens each; 5, 7 and 9 are the newest three calls,
     // which the protected tail keeps, so the emergency drop takes 3.
-    let mut runner = start_with(config("worker", Kind::OpenAi, FREE), high_threshold()).await;
+    let mut runner = start_with(config("worker", Kind::OpenAi, free()), high_threshold()).await;
     runner
         .play(&[
             user("Build it."),
@@ -1028,7 +1020,7 @@ async fn the_force_band_takes_one_emergency_batch_per_stay() {
     // (newer content stays under a quarter of the window), so only the
     // emergency drop takes any.
     let task = format!("Build it. {}", "w".repeat(110_000));
-    let mut runner = start_with(config("worker", Kind::OpenAi, FREE), high_threshold()).await;
+    let mut runner = start_with(config("worker", Kind::OpenAi, free()), high_threshold()).await;
     runner
         .play(&[
             user(&task),
@@ -1063,7 +1055,7 @@ async fn a_request_over_the_limit_gets_a_view_where_the_protections_yield() {
     // so the runner rides with over_limit before sending it. The emergency
     // drop then takes the protected tail too, oldest first, and dropped calls
     // go whole, except the newest, whose result ends the transcript.
-    let mut runner = start_with(config("worker", Kind::OpenAi, FREE), high_threshold()).await;
+    let mut runner = start_with(config("worker", Kind::OpenAi, free()), high_threshold()).await;
     runner
         .play(&[
             user("Build it."),
@@ -1104,7 +1096,7 @@ async fn a_worker_that_cannot_free_enough_is_asked_for_ctx_keep_and_keeps_only_w
     // view then keeps the task, tag 3, and the ctx_keep message (tags 8 and
     // 9) with what follows; the protected tail starts at the ctx_keep call,
     // the only tool call.
-    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("worker", Kind::OpenAi, free())).await;
     runner
         .play(&[
             user("Review the module."),
@@ -1173,7 +1165,7 @@ fn large_read() -> Step {
 
 #[tokio::test]
 async fn a_head_summarizes_older_turns_and_shows_them_in_place_of_the_messages() {
-    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("head", Kind::OpenAi, free())).await;
     let mut steps = Vec::new();
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
@@ -1265,7 +1257,7 @@ async fn caveman_compresses_older_long_text_by_age_when_turned_on() {
             "Message {n}: I really just think that the very simple approach is actually quite good, and we should basically go with it because it is the clearest option."
         )
     };
-    let mut runner = start_with(config("head", Kind::OpenAi, FREE), settings).await;
+    let mut runner = start_with(config("head", Kind::OpenAi, free()), settings).await;
     let mut steps = Vec::new();
     // Ten person messages and ten replies: twenty eligible text parts, tags
     // 1 to 20, oldest first.
@@ -1345,7 +1337,7 @@ async fn large_tool_output_alone_does_not_start_a_summary_at_low_usage() {
     // lie outside the protected tail and past the size trigger (15,000), but
     // the lines the summarizer would read are a few short tool-call lines, so
     // nothing runs.
-    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("head", Kind::OpenAi, free())).await;
     for prompt in ["Build it.", "Build it again."] {
         let mut steps = vec![user(prompt)];
         steps.extend((0..4).map(|_| shell(4_000)));
@@ -1361,7 +1353,7 @@ async fn large_tool_output_alone_does_not_start_a_summary_at_low_usage() {
 
 #[tokio::test]
 async fn an_invalid_summary_gets_one_repair_run_that_sees_the_error() {
-    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("head", Kind::OpenAi, free())).await;
     runner.host().set_responder(summarizer_failing(
         ":first",
         mc_mock_runner::child::Reply {
@@ -1407,7 +1399,7 @@ async fn an_invalid_summary_gets_one_repair_run_that_sees_the_error() {
 
 #[tokio::test]
 async fn one_long_turn_at_the_threshold_is_summarized_past_its_prompt_once() {
-    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("head", Kind::OpenAi, free())).await;
     // One prompt, then a long run of tool steps: everything after the prompt
     // is the current turn, which the summarizer may not read below the force
     // band, except for one run past the prompt at the execute threshold.
@@ -1451,7 +1443,7 @@ async fn facts_a_summary_finds_become_project_memories_with_it() {
         })
         .unwrap()
     };
-    let mut config = config("head", Kind::OpenAi, FREE);
+    let mut config = config("head", Kind::OpenAi, free());
     config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
@@ -1497,7 +1489,7 @@ async fn facts_a_summary_finds_become_project_memories_with_it() {
 
 #[tokio::test]
 async fn routing_picks_the_summarizer_and_a_failed_model_falls_back_to_another() {
-    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("head", Kind::OpenAi, free())).await;
     runner.provider().client.routing.lock().unwrap().routes =
         vec!["broken/model".into(), "good/model".into()];
     let summarizer = mc_mock_runner::child::scripted_summarizer();
@@ -1562,7 +1554,7 @@ async fn routing_picks_the_summarizer_and_a_failed_model_falls_back_to_another()
 
 #[tokio::test]
 async fn with_no_route_no_summary_runs_and_ck_mc_picks_no_model_itself() {
-    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("head", Kind::OpenAi, free())).await;
     runner.provider().client.routing.lock().unwrap().no_route = true;
     let mut steps = Vec::new();
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
@@ -1583,7 +1575,7 @@ async fn with_no_route_no_summary_runs_and_ck_mc_picks_no_model_itself() {
 
 #[tokio::test]
 async fn a_transient_provider_error_retries_the_summary_after_a_pause() {
-    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("head", Kind::OpenAi, free())).await;
     runner.host().set_responder(summarizer_failing(
         ":first",
         mc_mock_runner::child::Reply {
@@ -1633,7 +1625,7 @@ async fn a_transient_provider_error_retries_the_summary_after_a_pause() {
 
 #[tokio::test]
 async fn a_lost_cache_folds_the_newer_summaries_into_the_baseline() {
-    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("head", Kind::OpenAi, free())).await;
     let mut steps = Vec::new();
     for prompt in [
         "Look at a.rs.",
@@ -1673,7 +1665,7 @@ async fn a_lost_cache_folds_the_newer_summaries_into_the_baseline() {
 
 #[tokio::test]
 async fn a_revert_into_summarized_history_forgets_those_summaries() {
-    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("head", Kind::OpenAi, free())).await;
     let mut steps = Vec::new();
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
@@ -1735,7 +1727,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
 async fn a_restarted_ck_mc_keeps_queued_drops_and_the_view_the_runner_applies() {
     let dir = scratch("restart-worker");
     let mut runner = start_full(
-        config("worker", Kind::OpenAi, FREE),
+        config("worker", Kind::OpenAi, free()),
         Settings::default(),
         Some(dir.clone()),
     )
@@ -1768,7 +1760,7 @@ async fn a_restarted_ck_mc_keeps_queued_drops_and_the_view_the_runner_applies() 
 async fn a_restarted_ck_mc_keeps_the_history_baseline() {
     let dir = scratch("restart-head");
     let mut runner = start_full(
-        config("head", Kind::OpenAi, FREE),
+        config("head", Kind::OpenAi, free()),
         Settings::default(),
         Some(dir.clone()),
     )
@@ -1790,7 +1782,7 @@ async fn a_restarted_ck_mc_keeps_the_history_baseline() {
         .position(|entry| {
             runner.host().applied_view().view.is_some_and(|view| {
                 view.edits.iter().any(|edit| {
-                    matches!(&edit.op, ck_contract_draft::view::EditOp::Cut { through } if *through == entry.mid)
+                    matches!(&edit.op, cortexkit_role_compaction::view::EditOp::Cut { through } if *through == entry.mid)
                 })
             })
         })
@@ -1851,7 +1843,7 @@ async fn switching_memory_off_folds_m0_at_once_without_memories() {
     let dir = scratch("memory-off");
     ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     insert_memory(&dir, 1, "Ask before pushing.");
-    let mut config = config("head", Kind::OpenAi, FREE);
+    let mut config = config("head", Kind::OpenAi, free());
     config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
@@ -1887,7 +1879,7 @@ async fn a_head_shows_its_docs_and_memories_first_and_every_later_memory_change_
         "# Architecture\n\nOne crate.\n",
     )
     .unwrap();
-    let mut config = config("head", Kind::OpenAi, FREE);
+    let mut config = config("head", Kind::OpenAi, free());
     config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
@@ -1963,7 +1955,7 @@ fn expand_outputs(host: &Host) -> Vec<String> {
 
 #[tokio::test]
 async fn ctx_expand_shows_summarized_messages_and_parts_again() {
-    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut runner = start(config("head", Kind::OpenAi, free())).await;
     let mut steps = Vec::new();
     for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
         steps.extend(turn(prompt));
@@ -2053,7 +2045,7 @@ async fn ctx_note_finds_the_notes_a_standalone_session_wrote_and_keeps_new_ones(
             [],
         )
         .unwrap();
-    let mut config = config("head", Kind::OpenAi, FREE);
+    let mut config = config("head", Kind::OpenAi, free());
     config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
@@ -2105,7 +2097,7 @@ async fn ctx_memory_saves_updates_and_archives_with_history_and_m1_shows_where_e
     let dir = scratch("memory-tool");
     ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     insert_memory(&dir, 1, "Ask before pushing.");
-    let mut config = config("head", Kind::OpenAi, FREE);
+    let mut config = config("head", Kind::OpenAi, free());
     config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
@@ -2194,7 +2186,7 @@ async fn ctx_search_finds_summarized_messages_notes_and_hidden_memories_but_not_
     let dir = scratch("search-tool");
     ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
     insert_memory(&dir, 1, "Crates use kebab-case naming.");
-    let mut config = config("head", Kind::OpenAi, FREE);
+    let mut config = config("head", Kind::OpenAi, free());
     config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
@@ -2411,7 +2403,7 @@ async fn ctx_search_finds_commits_and_memories_by_meaning_with_one_embedding_per
         )
         .unwrap();
     }
-    let mut config = config("head", Kind::OpenAi, FREE);
+    let mut config = config("head", Kind::OpenAi, free());
     config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
@@ -2473,7 +2465,9 @@ async fn ctx_search_finds_commits_and_memories_by_meaning_with_one_embedding_per
 fn user_texts(host: &Host) -> Vec<String> {
     host.entries()
         .iter()
-        .filter(|entry| entry.role == ck_contract_draft::read::Role::User && entry.notice.is_none())
+        .filter(|entry| {
+            entry.role == cortexkit_role_compaction::read::Role::User && entry.notice.is_none()
+        })
         .flat_map(|entry| &entry.parts)
         .filter_map(|part| match &part.body {
             PartBody::Text { text } => Some(text.clone()),
@@ -2495,7 +2489,7 @@ async fn a_persons_message_gets_the_time_since_the_last_one_and_a_hint_of_relate
         )
         .unwrap();
     }
-    let mut config = config("head", Kind::OpenAi, FREE);
+    let mut config = config("head", Kind::OpenAi, free());
     config.project = Some(mc_mock_runner::runner::Project {
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
@@ -2541,7 +2535,7 @@ async fn a_reduce_reminder_rides_the_next_tool_result_once_and_a_reduce_quiets_i
     // threshold: only the reminders act. Each read adds about 7,000 tokens;
     // the newest three are protected. After nine, 6 of 9 results are spent:
     // U/T is about 0.67, the urgent band.
-    let mut config = config("worker", Kind::OpenAi, FREE);
+    let mut config = config("worker", Kind::OpenAi, free());
     config.context_window = 400_000;
     let mut runner = start(config).await;
     let mut steps = vec![user("Survey the repository.")];
@@ -2625,14 +2619,7 @@ impl Router for StuckClient {
 
 impl RunnerClient for StuckClient {
     async fn read(&self, session: &SessionRef, _: ReadRequest) -> Result<ReadPage, ClientError> {
-        let page = ReadPage {
-            entries: Vec::new(),
-            next_after: None,
-            head: ck_contract_draft::read::Head {
-                newest: None,
-                applied_view: None,
-            },
-        };
+        let page = ReadPage::new(Vec::new(), cortexkit_role_compaction::read::Head::new());
         Self::answer(session, page).await
     }
 
@@ -2645,7 +2632,7 @@ impl RunnerClient for StuckClient {
     }
 
     async fn applied_view(&self, session: &SessionRef) -> Result<AppliedViewAnswer, ClientError> {
-        Self::answer(session, AppliedViewAnswer { view: None }).await
+        Self::answer(session, AppliedViewAnswer::new()).await
     }
 
     async fn send(&self, session: &SessionRef, _: SendRequest) -> Result<SendAnswer, ClientError> {
@@ -2665,36 +2652,25 @@ impl RunnerClient for StuckClient {
 #[tokio::test]
 async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
     let module = Module::new(StuckClient, Settings::default(), None, None);
-    let session = |name: &str| SessionRef {
-        runner: "mock-runner".into(),
-        harness: "mock".into(),
-        session: name.into(),
-    };
-    let model = ModelRef {
-        provider: "test".into(),
-        model: "test-model".into(),
-        variant: None,
-        service_tier: None,
-    };
-    let cursor = ck_contract_draft::read::Cursor {
-        ordinal: 1,
-        mid: "m0".into(),
-        digest: "d".into(),
-    };
+    let session = |name: &str| SessionRef::new("mock-runner", "mock", name);
+    let model = ModelRef::new("test", "test-model");
+    let cursor = cortexkit_role_compaction::read::Cursor::new(1, "m0", "d");
     let route = |name: &str| Route {
         session: session(name),
         project: None,
     };
-    let setup = |newest: Option<ck_contract_draft::read::Cursor>| SetupRequest {
-        preset: "worker".into(),
-        model: model.clone(),
-        context_window: 40_000,
-        output_reserve: 4_000,
-        rules: FREE,
-        detects: Vec::new(),
-        applied_view: None,
-        newest,
-        now: 0,
+    let setup = |newest: Option<cortexkit_role_compaction::read::Cursor>| {
+        let mut request = SetupRequest::new(
+            "worker",
+            model.clone(),
+            40_000,
+            4_000,
+            free(),
+            Vec::new(),
+            0,
+        );
+        request.newest = newest;
+        request
     };
     // The stuck session's Setup has a transcript to read, and that read
     // never returns: its worker waits for good.
@@ -2702,21 +2678,10 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
         .setup(route("stuck"), setup(Some(cursor.clone())))
         .unwrap();
     module.setup(route("free"), setup(None)).unwrap();
-    let conditions = ck_contract_draft::notice::Conditions {
-        model: model.clone(),
-        context_window: 40_000,
-        output_reserve: 4_000,
-        rules: FREE,
-        last_prompt_tokens: Some(1_000),
-    };
-    let notice = || NoticeRequest {
-        seq: 1,
-        newest: cursor.clone(),
-        applied_view: None,
-        conditions: conditions.clone(),
-        events: Vec::new(),
-        entries: Vec::new(),
-    };
+    let conditions =
+        cortexkit_role_compaction::notice::Conditions::new(model.clone(), 40_000, 4_000, free())
+            .with_last_prompt_tokens(1_000);
+    let notice = || NoticeRequest::new(1, cursor.clone(), conditions.clone());
     // A notice is acknowledged at once even for the stuck session; its
     // work waits behind the read.
     assert_eq!(
@@ -2733,13 +2698,7 @@ async fn a_session_whose_runner_never_answers_holds_up_no_other_session() {
         .expect("the free session finished its notice")
         .unwrap();
     // A ride on the stuck session answers within its deadline, with nothing.
-    let ride = RideRequest {
-        causes: vec![RideCause::CacheExpired],
-        deadline_ms: 200,
-        conditions,
-        applied_view: None,
-        request_tokens: None,
-    };
+    let ride = RideRequest::new(vec![RideCause::CacheExpired], 200, conditions);
     let answer = tokio::time::timeout(limit, module.ride(&session("stuck"), ride))
         .await
         .expect("the ride kept its deadline")
@@ -2760,7 +2719,7 @@ async fn the_summarizer_reads_at_most_its_quota_per_ten_minutes() {
     // Twelve turns of conversation in one burst: the summarizer has more to
     // read than one ten-minute window allows, so it stops until the window
     // ends, then runs again.
-    let mut session = config("head", Kind::OpenAi, FREE);
+    let mut session = config("head", Kind::OpenAi, free());
     session.cache_ttl_ms = 24 * 3_600_000;
     let mut runner = start(session).await;
     let burst_turn = |prompt: &str| {
@@ -2797,7 +2756,7 @@ async fn a_long_head_session_keeps_ck_mcs_index_window_sized() {
     // so, and each cuts the messages they cover. After a restart, ck-mc reads
     // only what the model still sees, however long the session has run.
     let dir = scratch("long-head");
-    let mut session = config("head", Kind::OpenAi, FREE);
+    let mut session = config("head", Kind::OpenAi, free());
     session.cache_ttl_ms = 24 * 3_600_000;
     let mut runner = start_full(session, Settings::default(), Some(dir.clone())).await;
     let small_turn = |prompt: &str| {
@@ -2904,13 +2863,14 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         id: "pj-test".into(),
         root: dir.to_string_lossy().into_owned(),
     };
-    let mut session_config = config("head", Kind::OpenAi, FREE);
+    let mut session_config = config("head", Kind::OpenAi, free());
     session_config.project = Some(project.clone());
     let request = |session: &str| MoveRequest {
-        session: SessionRef {
-            session: session.into(),
-            ..session_config.session.clone()
-        },
+        session: SessionRef::new(
+            session_config.session.runner.clone(),
+            session_config.session.harness.clone(),
+            session,
+        ),
         preset: "head".into(),
         project: Some(RouteProject {
             id: project.id.clone(),
@@ -2919,12 +2879,8 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         model: session_config.model.clone(),
         context_window: session_config.context_window,
         output_reserve: session_config.output_reserve,
-        rules: FREE,
-        newest: ck_contract_draft::read::Cursor {
-            ordinal: 6,
-            mid: "msg00006".into(),
-            digest: "d".into(),
-        },
+        rules: free(),
+        newest: cortexkit_role_compaction::read::Cursor::new(6, "msg00006", "d"),
         now: 1,
     };
     let config_source = mc_module::config::Config::from(Settings::default());
@@ -2953,9 +2909,9 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         messages: (1..=6)
             .map(|n| {
                 let role = if n % 2 == 1 {
-                    ck_contract_draft::read::Role::User
+                    cortexkit_role_compaction::read::Role::User
                 } else {
-                    ck_contract_draft::read::Role::Assistant
+                    cortexkit_role_compaction::read::Role::Assistant
                 };
                 (role, format!("Old message {n}."))
             })
@@ -3010,11 +2966,7 @@ async fn a_session_with_no_setup_gets_its_tools_but_none_that_act_on_a_transcrip
         None,
     );
     let route = Route {
-        session: SessionRef {
-            runner: "mock-runner".into(),
-            harness: "mock".into(),
-            session: "plain".into(),
-        },
+        session: SessionRef::new("mock-runner", "mock", "plain"),
         project: Some(RouteProject {
             id: "pj-test".into(),
             root: dir.to_string_lossy().into_owned(),

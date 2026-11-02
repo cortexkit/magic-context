@@ -15,8 +15,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use ck_contract_draft::read::Role;
-use ck_contract_draft::view::{EditOp, InsertAt, InsertedMessage};
+use cortexkit_role_compaction::read::Role;
+use cortexkit_role_compaction::view::{EditOp, InsertAt, InsertedMessage};
 use serde::{Deserialize, Serialize};
 
 use super::render::{
@@ -522,11 +522,7 @@ pub fn head_ops(m0: &str, m1: &str) -> Vec<EditOp> {
         .into_iter()
         .map(|(id, text)| EditOp::Insert {
             at: InsertAt::Start,
-            message: InsertedMessage {
-                id: id.into(),
-                role: Role::User,
-                texts: vec![text.to_owned()],
-            },
+            message: InsertedMessage::new(id, Role::User, vec![text.to_owned()]),
         })
         .collect()
 }

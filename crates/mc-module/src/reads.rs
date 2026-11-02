@@ -1,6 +1,6 @@
 //! Reading messages from the runner in full, page by page.
 
-use ck_contract_draft::read::{Detail, Entry, ReadRequest, Select, SessionRef};
+use cortexkit_role_compaction::read::{Detail, Entry, ReadRequest, Select, SessionRef};
 
 use crate::client::RunnerClient;
 
@@ -21,14 +21,14 @@ pub async fn full_range<C: RunnerClient>(
     let mut entries = Vec::new();
     let mut after = from.checked_sub(1);
     while after.is_none_or(|ordinal| ordinal + 1 < until) {
-        let request = ReadRequest {
-            select: Select::After {
+        let request = ReadRequest::new(
+            Select::After {
                 after_ordinal: after,
                 limit: None,
             },
-            detail: Detail::Full,
-            max_bytes: Some(PAGE_BYTES),
-        };
+            Detail::Full,
+        )
+        .with_max_bytes(PAGE_BYTES);
         let page = client
             .read(session, request)
             .await
@@ -54,11 +54,7 @@ pub async fn by_tags<C: RunnerClient>(
     session: &SessionRef,
     tags: Vec<u64>,
 ) -> Result<Vec<Entry>, String> {
-    let request = ReadRequest {
-        select: Select::Tags { tags },
-        detail: Detail::Full,
-        max_bytes: None,
-    };
+    let request = ReadRequest::new(Select::Tags { tags }, Detail::Full);
     client
         .read(session, request)
         .await
