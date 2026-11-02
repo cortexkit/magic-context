@@ -16,8 +16,24 @@
 //! the session runs. The few readers of older messages (the summarizer,
 //! `ctx_expand`) read them from the runner.
 
-use cortexkit_role_compaction::part::{Part, PartBody};
-use cortexkit_role_compaction::read::{Cursor, Entry};
+use cortexkit_role_compaction::part::{Part, PartBody, ToolStatus};
+use cortexkit_role_compaction::read::{Cursor, Entry, Role};
+
+/// Whether `new` is `held` with only tool parts changed: the same parts in
+/// the same order, each the same or a tool part (its status, result, or the
+/// sends delivered with it).
+fn only_tool_results_changed(held: &Entry, new: &Entry) -> bool {
+    held.role == new.role
+        && held.parts.len() == new.parts.len()
+        && held.parts.iter().zip(&new.parts).all(|(old, new)| {
+            old.id == new.id
+                && (old.digest == new.digest
+                    || matches!(
+                        (&old.body, &new.body),
+                        (PartBody::Tool(old), PartBody::Tool(new)) if old.call_id == new.call_id
+                    ))
+        })
+}
 
 #[derive(Clone, Debug)]
 pub struct Index {
@@ -41,8 +57,9 @@ pub enum Extend {
     Continued,
     /// The first new entry is beyond the end: something was missed.
     Gap,
-    /// An entry differs from what the index holds at its ordinal, and it is
-    /// not the newest message being updated.
+    /// An entry differs from what the index holds at its ordinal in a way
+    /// the contract does not allow for a stored message (P5): it is another
+    /// message, or more than a tool result changed.
     Diverged,
 }
 
@@ -96,8 +113,12 @@ impl Index {
             if held.digest == entry.digest && held.mid == entry.mid {
                 continue;
             }
+            // The newest message may still be written; an older one changes
+            // only when one of its tool calls gets its result, or a send is
+            // delivered with one (P5), even when the host stored the result
+            // in a later message.
             let newest = entry.ordinal + 1 == next;
-            if newest && held.mid == entry.mid {
+            if held.mid == entry.mid && (newest || only_tool_results_changed(held, &entry)) {
                 *held = entry;
                 continue;
             }
@@ -126,10 +147,34 @@ impl Index {
     /// again; `None` reads from the transcript's start.
     pub fn read_after(&self) -> Option<u64> {
         let first = match self.entries.last() {
-            Some(newest) => newest.ordinal,
+            Some(newest) => newest
+                .ordinal
+                .min(self.changeable_from().unwrap_or(u64::MAX)),
             None => self.base,
         };
         first.checked_sub(1).filter(|after| *after > 0)
+    }
+
+    /// The oldest held entry that may still change (P5): one with a tool
+    /// call still running, or the newest assistant message on, whose results
+    /// may yet have a send delivered with them. A read from here sees every
+    /// change a notice could not carry.
+    pub fn changeable_from(&self) -> Option<u64> {
+        let running = self.entries.iter().find(|entry| {
+            entry.parts.iter().any(|part| {
+                matches!(&part.body, PartBody::Tool(tool) if tool.status == ToolStatus::Running)
+            })
+        });
+        let newest_assistant = self
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.role == Role::Assistant);
+        [running, newest_assistant]
+            .into_iter()
+            .flatten()
+            .map(|entry| entry.ordinal)
+            .min()
     }
 
     /// The entry and part that carry tag number `tag`.
@@ -167,7 +212,6 @@ impl Index {
 mod tests {
     use super::*;
     use cortexkit_role_compaction::part::Seal;
-    use cortexkit_role_compaction::read::Role;
 
     fn entry(ordinal: u64, mid: &str, text: &str) -> Entry {
         let parts = vec![crate::neutral::part(
@@ -194,12 +238,43 @@ mod tests {
             Extend::Continued
         );
         assert_eq!(index.find_tag(2).unwrap().0.mid, "b");
-        // An older one may not, nor may a different message at a known ordinal.
+        // An older one may not, unless only a tool result changed, nor may a
+        // different message at a known ordinal.
         assert_eq!(index.extend([entry(1, "a", "changed")]), Extend::Diverged);
         assert_eq!(index.extend([entry(2, "c", "other")]), Extend::Diverged);
         assert_eq!(index.extend([entry(4, "d", "later")]), Extend::Gap);
         index.truncate(2);
         assert_eq!(index.cursor().unwrap().mid, "a");
+    }
+
+    /// An assistant message with one `read` call, running or completed.
+    fn call(ordinal: u64, mid: &str, done: bool) -> Entry {
+        let status = if done { "completed" } else { "running" };
+        let mut tool = serde_json::json!({
+            "id": "p0", "kind": "tool", "call_id": "c1", "name": "read",
+            "input": {}, "status": status, "digest": status,
+        });
+        if done {
+            tool["output_bytes"] = 4.into();
+        }
+        let parts = vec![serde_json::from_value(tool).unwrap()];
+        Entry::new(ordinal, mid, Role::Assistant, 0, parts)
+    }
+
+    #[test]
+    fn an_older_call_takes_its_result_after_later_messages() {
+        let mut index = Index::default();
+        index.extend([call(1, "a", false), entry(2, "b", "meanwhile")]);
+        assert_eq!(index.changeable_from(), Some(1));
+        assert_eq!(index.read_after(), None, "a read covers the running call");
+        // The result arrives in place, after a later message was stored.
+        assert_eq!(index.extend([call(1, "a", true)]), Extend::Continued);
+        assert!(matches!(
+            &index.entries()[0].parts[0].body,
+            PartBody::Tool(tool) if tool.status == ToolStatus::Completed
+        ));
+        // Anything else changing in an older message still diverges.
+        assert_eq!(index.extend([entry(1, "a", "text now")]), Extend::Diverged);
     }
 
     #[test]

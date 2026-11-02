@@ -185,8 +185,10 @@ pub fn invalid_signed_parts(
         let edited_before = changes
             .iter()
             .any(|(change, since)| *since > generated && *change < position);
-        // Earlier signed parts may be left out only as an oldest run: a part
-        // left out after `generated` must not follow one that is still kept.
+        // Signed parts may be left out only at the ends, as an oldest run, a
+        // newest run, or both (PR2): a kept part is invalid when a part left
+        // out after it was generated lies between it and an earlier kept one.
+        // Leaving out the newest parts makes no kept part invalid.
         let mut seen_kept = false;
         let mut gap = false;
         for earlier in &signed[..index] {

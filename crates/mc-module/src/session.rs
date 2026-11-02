@@ -305,7 +305,10 @@ impl Session {
         settings: &Settings,
         notice: NoticeRequest,
     ) -> Option<run::Request> {
-        if notice.seq <= self.seq && self.seq != 0 {
+        // Not newer than the last notice handled since Setup (N5). Setup sets
+        // the count to 0 and a runner's first notice after it is 1, so this
+        // also ignores a notice numbered 0.
+        if notice.seq <= self.seq {
             return None;
         }
         let version = self.latest.as_ref().map(|view| view.version);
@@ -372,10 +375,16 @@ impl Session {
         if refused || self.newer_runner_view(&notice) {
             self.adopt_runner_view(client).await;
         }
+        // A notice leaves its entries out when they are too large (W5.2), and
+        // then a change to an older message is not in it either: read from
+        // the oldest entry that may have changed.
+        let omitted = notice.entries.is_empty();
         if self.index.extend(notice.entries) != Extend::Continued
             || !self.index.ends_at(Some(&notice.newest))
         {
             self.sync(client, Some(&notice.newest)).await;
+        } else if omitted {
+            self.sync_from_changeable(client, &notice.newest).await;
         }
         self.forget_missing();
         self.update_search_index();
@@ -908,6 +917,11 @@ impl Session {
             self.fold_due = true;
         }
         let view = self.build(settings, over_limit).0?;
+        // The size limit holds for a view in a ride's answer as for a pushed
+        // one (V5); an oversized one is answered as nothing.
+        if self.refuse_oversized(&view) {
+            return None;
+        }
         self.accept(view.clone());
         Some(view)
     }
@@ -1559,21 +1573,28 @@ impl Session {
         }
     }
 
+    /// Whether `view` is over the size limit (V5). Views name edits, never
+    /// copies, so one this large is a bug in the code that built it. It is
+    /// not sent, the runner keeps the view it has, and the queued drops it
+    /// carried are forgotten, as for any view that fails ck-mc's own checks.
+    fn refuse_oversized(&mut self, view: &View) -> bool {
+        let size = serde_json::to_vec(view).map_or(usize::MAX, |bytes| bytes.len());
+        if size <= MAX_VIEW_BYTES {
+            return false;
+        }
+        self.next_baseline = None;
+        self.next_caveman = None;
+        let covered = std::mem::take(&mut self.next_covered);
+        self.forget_queued(&covered);
+        eprintln!(
+            "ck-mc: session {}: view {} not sent: view_too_large ({size} bytes, limit {MAX_VIEW_BYTES})",
+            self.key.session, view.version
+        );
+        true
+    }
+
     async fn publish<C: RunnerClient>(&mut self, client: &C, view: View) {
-        let size = serde_json::to_vec(&view).map_or(usize::MAX, |bytes| bytes.len());
-        if size > MAX_VIEW_BYTES {
-            // Views name edits, never copies, so one this large is a bug in
-            // the code that built it. It is not sent; the runner keeps the view it has, and the
-            // queued drops it carried are forgotten, as for any view that
-            // fails ck-mc's own checks.
-            self.next_baseline = None;
-            self.next_caveman = None;
-            let covered = std::mem::take(&mut self.next_covered);
-            self.forget_queued(&covered);
-            eprintln!(
-                "ck-mc: session {}: view {} not sent: view_too_large ({size} bytes, limit {MAX_VIEW_BYTES})",
-                self.key.session, view.version
-            );
+        if self.refuse_oversized(&view) {
             return;
         }
         let request = ApplyViewRequest::new(view.clone());
@@ -1689,11 +1710,30 @@ impl Session {
     /// Bring the index up to `newest` with reads, from the index's own newest
     /// entry on (which may have changed since). If the transcript diverged
     /// from the index, read it all again.
+    /// Read from the oldest held entry that may still change, even though
+    /// the index already ends where the runner's transcript does.
+    async fn sync_from_changeable<C: RunnerClient>(&mut self, client: &C, newest: &Cursor) {
+        if self.index.changeable_from().is_some() {
+            self.read_until(client, Some(newest), true).await;
+        }
+    }
+
     async fn sync<C: RunnerClient>(&mut self, client: &C, newest: Option<&Cursor>) {
+        self.read_until(client, newest, false).await;
+    }
+
+    /// Read until the index ends at `newest`; with `force`, read at least
+    /// once.
+    async fn read_until<C: RunnerClient>(
+        &mut self,
+        client: &C,
+        newest: Option<&Cursor>,
+        mut force: bool,
+    ) {
         let mut rebuilt = false;
         let mut after = self.index.read_after();
         loop {
-            if self.index.ends_at(newest) {
+            if !std::mem::take(&mut force) && self.index.ends_at(newest) {
                 return;
             }
             let request = ReadRequest::new(

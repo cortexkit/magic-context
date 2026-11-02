@@ -10,8 +10,12 @@
 //!   every refusal a malformed view earns;
 //! - [`render::apply`] and [`render::apply_edits`]: the same result in the
 //!   neutral part model, which is what the provider plans against;
-//! - [`render::check_carried`]: that a new view repeats the edits of the view
-//!   the runner applies now, so none is hidden from the rule check;
+//! - [`render::check_carried`]: that each edit of a new view claims an honest
+//!   `since`, so no new edit is hidden from the rule check by backdating it.
+//!   It does not check that the view carries every earlier edit (V2): an
+//!   edit also leaves when a later cut covers its message or a revert removes
+//!   it, and only the provider holds those rules, so carrying edits forward
+//!   is the provider's obligation;
 //! - [`rules::check`]: whether a view keeps every signed part valid under the
 //!   rules the runner declared, and [`rules::defaults`] for a model;
 //! - [`tags`]: which parts take a number, how a runner counts them and how it

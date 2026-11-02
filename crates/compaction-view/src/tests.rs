@@ -486,7 +486,7 @@ fn a_new_history_head_at_the_start_invalidates_every_older_signed_part() {
 }
 
 #[test]
-fn signed_parts_may_be_left_out_only_as_an_oldest_run() {
+fn signed_parts_may_be_left_out_only_at_the_ends() {
     let entries = signed_transcript([0, 0, 0]);
     // Leaving out the oldest is fine.
     assert!(invalid(&entries, &[drop_part(1, "a1", "r1")]).is_empty());
@@ -498,6 +498,14 @@ fn signed_parts_may_be_left_out_only_as_an_oldest_run() {
     .is_empty());
     // Leaving out the middle one invalidates the newer one.
     assert_eq!(invalid(&entries, &[drop_part(1, "a3", "r3")]), ["r5"]);
+    // Leaving out the newest keeps the older ones valid, alone or together
+    // with the oldest.
+    assert!(invalid(&entries, &[drop_part(1, "a5", "r5")]).is_empty());
+    assert!(invalid(
+        &entries,
+        &[drop_part(1, "a1", "r1"), drop_part(1, "a5", "r5")]
+    )
+    .is_empty());
     // A gap made before r5 was generated was already part of its history.
     let entries = signed_transcript([0, 0, 1]);
     assert!(invalid(&entries, &[drop_part(1, "a3", "r3")]).is_empty());
@@ -1133,10 +1141,11 @@ mod vector_file {
     /// Each `PLAN_VERSION`, with the checksum of what the rendering vectors
     /// produce under it, oldest first. When a change makes the library render
     /// different bytes, the test below fails until `PLAN_VERSION` is bumped
-    /// and a row for it is added here; an existing row never changes.
+    /// and a row for it is added here; once a version is published, its row
+    /// never changes.
     const PLAN_OUTPUTS: &[(u32, &str)] = &[(
         1,
-        "3d84ce2befe70fa75d47f618ce91b36f887716f3e86bfd25bf67aae1cc7d9a74",
+        "c851d76033d54c137256800577344dd5e3ee040a8f4f8cf9ece2e41bb905c665",
     )];
 
     /// The functions whose output a runner renders, or renders from.

@@ -30,27 +30,35 @@ pub fn empty_result_label(tool: &ToolPart) -> Option<&'static str> {
     Some(if all_images { "[image]" } else { "[file]" })
 }
 
-/// Every tag number written as a prefix anywhere in `text`: a section sign,
-/// one or more ASCII digits, a section sign. The runner checks view bytes with
-/// it, so a summary or a replaced field cannot show the model a number that
-/// would mislead its count.
-pub fn tag_numbers_in(text: &str) -> Vec<u64> {
-    let mut numbers = Vec::new();
+/// Every tag notation written anywhere in `text` (a section sign, one or more
+/// ASCII digits, a section sign), as its digits without leading zeros. The
+/// notation is syntactic (W6.4): digits too many for a number still count.
+/// The runner checks view bytes with it, so a summary or a replaced field
+/// cannot show the model a number that would mislead its count.
+pub fn tag_notation_in(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
     let mut rest = text;
     while let Some(start) = rest.find('§') {
         let after_open = &rest[start + '§'.len_utf8()..];
         let digits = after_open.bytes().take_while(u8::is_ascii_digit).count();
         match after_open[digits..].strip_prefix('§') {
             Some(after_close) if digits > 0 => {
-                if let Ok(number) = after_open[..digits].parse() {
-                    numbers.push(number);
-                }
+                let number = after_open[..digits].trim_start_matches('0');
+                found.push(if number.is_empty() { "0" } else { number }.to_owned());
                 rest = after_close;
             }
             _ => rest = after_open,
         }
     }
-    numbers
+    found
+}
+
+/// The tag numbers written in `text` ([`tag_notation_in`]) that fit a `u64`.
+pub fn tag_numbers_in(text: &str) -> Vec<u64> {
+    tag_notation_in(text)
+        .iter()
+        .filter_map(|number| number.parse().ok())
+        .collect()
 }
 
 /// Whether a part takes a number: text parts of user, notice and assistant
@@ -76,7 +84,9 @@ pub fn is_numbered(role: &Role, body: &PartBody) -> bool {
 /// checkpoint of the session's latest compaction marker, plus each numbered
 /// part's position ([`is_numbered`]) among the numbered parts of the entries
 /// after the marker's cut, counting from 1. Parts that take no number get
-/// none. `entries` are the entries after the cut, in transcript order.
+/// none. `entries` are the entries after the cut, in transcript order. Each
+/// entry's checksum is computed again, since it covers its parts' numbers
+/// (W7).
 pub fn assign_tags(checkpoint: u64, entries: &mut [Entry]) {
     let mut next = checkpoint;
     for entry in entries.iter_mut() {
@@ -89,6 +99,11 @@ pub fn assign_tags(checkpoint: u64, entries: &mut [Entry]) {
                 None
             };
         }
+        entry.digest = cortexkit_role_compaction::read::entry_digest(
+            entry.role.clone(),
+            entry.notice.as_ref(),
+            &entry.parts,
+        );
     }
 }
 
@@ -141,6 +156,12 @@ mod tests {
         );
         assert_eq!(tag_numbers_in("§§9§"), vec![9]);
         assert!(tag_numbers_in("no numbers § here").is_empty());
+        // The notation is syntactic: too many digits for a number still count.
+        assert_eq!(
+            tag_notation_in("§18446744073709551616§ and §007§"),
+            ["18446744073709551616", "7"]
+        );
+        assert!(tag_numbers_in("§18446744073709551616§").is_empty());
     }
 
     #[test]

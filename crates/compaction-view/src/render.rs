@@ -21,7 +21,7 @@ use cortexkit_role_compaction::view::{Edit, EditOp, InsertAt, InsertedMessage, V
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::tags::tag_numbers_in;
+use crate::tags::tag_notation_in;
 
 /// One message as the model sees it after a view is applied.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -252,7 +252,7 @@ pub fn plan(entries: &[Entry], edits: &[Edit]) -> Result<RenderPlan, ViewRefusal
                 if message
                     .texts
                     .iter()
-                    .any(|text| !tag_numbers_in(text).is_empty())
+                    .any(|text| !tag_notation_in(text).is_empty())
                 {
                     return Err(ViewRefusal::TaggedInsert {
                         id: message.id.clone(),
@@ -308,7 +308,10 @@ pub fn plan(entries: &[Entry], edits: &[Edit]) -> Result<RenderPlan, ViewRefusal
                 })
                 .unwrap_or_default();
             let text_is_final = writes_final_text(&replace);
-            let empty_result_label = match &part.body {
+            // The label follows the part as replaced: keeping only some of a
+            // result's attachments can turn `[file]` into `[image]`, as the
+            // neutral rendering shows it.
+            let empty_result_label = match &replaced(part, &replace).body {
                 PartBody::Tool(tool) if !text_is_final => {
                     crate::tags::empty_result_label(tool).map(str::to_owned)
                 }
@@ -548,18 +551,20 @@ fn check_replaced_tags(
             .and_then(Value::as_str),
         _ => None,
     };
-    let known: BTreeSet<u64> = original
-        .map(tag_numbers_in)
+    let known: BTreeSet<String> = original
+        .map(tag_notation_in)
         .unwrap_or_default()
         .into_iter()
         .collect();
-    for number in tag_numbers_in(new_text) {
-        if Some(number) != part.tag && !known.contains(&number) {
+    let own = part.tag.map(|tag| tag.to_string());
+    for number in tag_notation_in(new_text) {
+        if Some(&number) != own.as_ref() && !known.contains(&number) {
             return Err(ViewRefusal::ForeignTag {
                 mid: mid.to_owned(),
                 part: part.id.clone(),
                 field: field.to_owned(),
-                tag: number,
+                // Digits too many for a number are reported as the largest.
+                tag: number.parse().unwrap_or(u64::MAX),
             });
         }
     }

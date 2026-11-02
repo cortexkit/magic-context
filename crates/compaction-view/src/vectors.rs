@@ -44,7 +44,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ),
     (
         "check_carried",
-        "{previous?, next}: whether the new view repeats the edits the runner applies now",
+        "{previous?, next}: whether each edit of the new view claims an honest `since`",
     ),
     (
         "check_rules",
