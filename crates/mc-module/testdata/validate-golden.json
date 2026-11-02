@@ -1,0 +1,1610 @@
+[
+  {
+    "label": "clean multi-compartment with side channels",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"2\" title=\"alpha\" episode_type=\"feature\" importance=\"50\">\n<p1>alpha full &amp; exact</p1>\n<p2>alpha short</p2>\n<p3>alpha</p3>\n<p4 />\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"beta\" episode_type=\"feature\" importance=\"50\">\n<p1>beta full &amp; exact</p1>\n<p2>beta short</p2>\n<p3>beta</p3>\n<p4 />\n</compartment>\n</compartments>\n\n<facts>\n<PROJECT_RULES>\n* Keep generated goldens deterministic.\n</PROJECT_RULES>\n</facts>\n<events>\n<causal_incident at_compartment=\"1\"><summary>Kept event.</summary><evidence>raw line</evidence></causal_incident>\n<trajectory_correction at_compartment=\"2\"><summary>Second event.</summary><evidence>raw line</evidence></trajectory_correction>\n</events>\n<user_observations>\n* User prefers direct validation failures.\n</user_observations>\n<primer_candidates>\n<primer at_compartment=\"2\">How does historian validation map endpoints?</primer>\n</primer_candidates>\n<meta><messages_processed>1-4</messages_processed><unprocessed_from>5</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 7,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          },
+          {
+            "ordinal": 3,
+            "message_id": "msg-3"
+          },
+          {
+            "ordinal": 4,
+            "message_id": "msg-4"
+          },
+          {
+            "ordinal": 5,
+            "message_id": "msg-5"
+          },
+          {
+            "ordinal": 6,
+            "message_id": "msg-6"
+          },
+          {
+            "ordinal": 7,
+            "message_id": "msg-7"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "alpha",
+          "content": "alpha full & exact",
+          "p1": "alpha full & exact",
+          "p2": "alpha short",
+          "p3": "alpha",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "beta",
+          "content": "beta full & exact",
+          "p1": "beta full & exact",
+          "p2": "beta short",
+          "p3": "beta",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [
+        {
+          "category": "PROJECT_RULES",
+          "content": "Keep generated goldens deterministic.",
+          "origin_compartment_index": null
+        }
+      ],
+      "events": [
+        {
+          "kind": "causal_incident",
+          "at_compartment": 1,
+          "fields": {
+            "evidence": "raw line",
+            "summary": "Kept event."
+          }
+        },
+        {
+          "kind": "trajectory_correction",
+          "at_compartment": 2,
+          "fields": {
+            "evidence": "raw line",
+            "summary": "Second event."
+          }
+        }
+      ],
+      "unprocessed_from": 5,
+      "user_observations": [
+        {
+          "content": "User prefers direct validation failures.",
+          "origin_compartment_index": null
+        }
+      ],
+      "primer_candidates": [
+        {
+          "question": "How does historian validation map endpoints?",
+          "origin_compartment_index": 2
+        }
+      ]
+    },
+    "validation": {
+      "ok": true,
+      "result": {
+        "compartments": [
+          {
+            "sequence": 0,
+            "start_message_id": "msg-1",
+            "end_message_id": "msg-2",
+            "start_message": 1,
+            "end_message": 2,
+            "title": "alpha",
+            "content": "alpha full & exact",
+            "p1": "alpha full & exact",
+            "p2": "alpha short",
+            "p3": "alpha",
+            "p4": "",
+            "importance": 50,
+            "episode_type": "feature"
+          },
+          {
+            "sequence": 1,
+            "start_message_id": "msg-3",
+            "end_message_id": "msg-4",
+            "start_message": 3,
+            "end_message": 4,
+            "title": "beta",
+            "content": "beta full & exact",
+            "p1": "beta full & exact",
+            "p2": "beta short",
+            "p3": "beta",
+            "p4": "",
+            "importance": 50,
+            "episode_type": "feature"
+          }
+        ],
+        "facts": [
+          {
+            "category": "PROJECT_RULES",
+            "content": "Keep generated goldens deterministic.",
+            "origin_compartment_index": null
+          }
+        ],
+        "events": [
+          {
+            "kind": "causal_incident",
+            "at_compartment": 1,
+            "fields": {
+              "evidence": "raw line",
+              "summary": "Kept event."
+            }
+          },
+          {
+            "kind": "trajectory_correction",
+            "at_compartment": 2,
+            "fields": {
+              "evidence": "raw line",
+              "summary": "Second event."
+            }
+          }
+        ],
+        "primer_candidates": [
+          {
+            "question": "How does historian validation map endpoints?",
+            "origin_compartment_index": 2
+          }
+        ],
+        "user_observations": [
+          {
+            "content": "User prefers direct validation failures.",
+            "origin_compartment_index": null
+          }
+        ],
+        "unprocessed_from": 5,
+        "discarded_last": false
+      }
+    }
+  },
+  {
+    "label": "overlapping ranges reject",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"3\" title=\"alpha\" episode_type=\"feature\" importance=\"50\">\n<p1>alpha full &amp; exact</p1>\n<p2>alpha short</p2>\n<p3>alpha</p3>\n<p4 />\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"beta\" episode_type=\"feature\" importance=\"50\">\n<p1>beta full &amp; exact</p1>\n<p2>beta short</p2>\n<p3>beta</p3>\n<p4 />\n</compartment>\n</compartments>\n\n<meta><messages_processed>1-4</messages_processed><unprocessed_from>5</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 4,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          },
+          {
+            "ordinal": 3,
+            "message_id": "msg-3"
+          },
+          {
+            "ordinal": 4,
+            "message_id": "msg-4"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 3,
+          "title": "alpha",
+          "content": "alpha full & exact",
+          "p1": "alpha full & exact",
+          "p2": "alpha short",
+          "p3": "alpha",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "beta",
+          "content": "beta full & exact",
+          "p1": "beta full & exact",
+          "p2": "beta short",
+          "p3": "beta",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [],
+      "events": [],
+      "unprocessed_from": 5,
+      "user_observations": [],
+      "primer_candidates": []
+    },
+    "validation": {
+      "ok": false,
+      "error": "Historian returned invalid compartment output: overlap before message 4 (saw 3-4)"
+    }
+  },
+  {
+    "label": "large narrative gap rejects",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"2\" title=\"alpha\" episode_type=\"feature\" importance=\"50\">\n<p1>alpha full &amp; exact</p1>\n<p2>alpha short</p2>\n<p3>alpha</p3>\n<p4 />\n</compartment>\n<compartment start=\"19\" end=\"22\" title=\"beta\" episode_type=\"feature\" importance=\"50\">\n<p1>beta full &amp; exact</p1>\n<p2>beta short</p2>\n<p3>beta</p3>\n<p4 />\n</compartment>\n</compartments>\n\n<meta><messages_processed>1-22</messages_processed><unprocessed_from>23</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 22,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          },
+          {
+            "ordinal": 3,
+            "message_id": "msg-3"
+          },
+          {
+            "ordinal": 4,
+            "message_id": "msg-4"
+          },
+          {
+            "ordinal": 5,
+            "message_id": "msg-5"
+          },
+          {
+            "ordinal": 6,
+            "message_id": "msg-6"
+          },
+          {
+            "ordinal": 7,
+            "message_id": "msg-7"
+          },
+          {
+            "ordinal": 8,
+            "message_id": "msg-8"
+          },
+          {
+            "ordinal": 9,
+            "message_id": "msg-9"
+          },
+          {
+            "ordinal": 10,
+            "message_id": "msg-10"
+          },
+          {
+            "ordinal": 11,
+            "message_id": "msg-11"
+          },
+          {
+            "ordinal": 12,
+            "message_id": "msg-12"
+          },
+          {
+            "ordinal": 13,
+            "message_id": "msg-13"
+          },
+          {
+            "ordinal": 14,
+            "message_id": "msg-14"
+          },
+          {
+            "ordinal": 15,
+            "message_id": "msg-15"
+          },
+          {
+            "ordinal": 16,
+            "message_id": "msg-16"
+          },
+          {
+            "ordinal": 17,
+            "message_id": "msg-17"
+          },
+          {
+            "ordinal": 18,
+            "message_id": "msg-18"
+          },
+          {
+            "ordinal": 19,
+            "message_id": "msg-19"
+          },
+          {
+            "ordinal": 20,
+            "message_id": "msg-20"
+          },
+          {
+            "ordinal": 21,
+            "message_id": "msg-21"
+          },
+          {
+            "ordinal": 22,
+            "message_id": "msg-22"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "alpha",
+          "content": "alpha full & exact",
+          "p1": "alpha full & exact",
+          "p2": "alpha short",
+          "p3": "alpha",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        },
+        {
+          "start_message": 19,
+          "end_message": 22,
+          "title": "beta",
+          "content": "beta full & exact",
+          "p1": "beta full & exact",
+          "p2": "beta short",
+          "p3": "beta",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [],
+      "events": [],
+      "unprocessed_from": 23,
+      "user_observations": [],
+      "primer_candidates": []
+    },
+    "validation": {
+      "ok": false,
+      "error": "Historian returned invalid compartment output: gap before present message 19 (expected 3)"
+    }
+  },
+  {
+    "label": "twenty-message tool-only gap heals",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"2\" title=\"alpha\" episode_type=\"feature\" importance=\"50\">\n<p1>alpha full &amp; exact</p1>\n<p2>alpha short</p2>\n<p3>alpha</p3>\n<p4 />\n</compartment>\n<compartment start=\"23\" end=\"24\" title=\"beta\" episode_type=\"feature\" importance=\"50\">\n<p1>beta full &amp; exact</p1>\n<p2>beta short</p2>\n<p3>beta</p3>\n<p4 />\n</compartment>\n</compartments>\n\n<meta><messages_processed>1-24</messages_processed><unprocessed_from>25</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 24,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          },
+          {
+            "ordinal": 3,
+            "message_id": "msg-3"
+          },
+          {
+            "ordinal": 4,
+            "message_id": "msg-4"
+          },
+          {
+            "ordinal": 5,
+            "message_id": "msg-5"
+          },
+          {
+            "ordinal": 6,
+            "message_id": "msg-6"
+          },
+          {
+            "ordinal": 7,
+            "message_id": "msg-7"
+          },
+          {
+            "ordinal": 8,
+            "message_id": "msg-8"
+          },
+          {
+            "ordinal": 9,
+            "message_id": "msg-9"
+          },
+          {
+            "ordinal": 10,
+            "message_id": "msg-10"
+          },
+          {
+            "ordinal": 11,
+            "message_id": "msg-11"
+          },
+          {
+            "ordinal": 12,
+            "message_id": "msg-12"
+          },
+          {
+            "ordinal": 13,
+            "message_id": "msg-13"
+          },
+          {
+            "ordinal": 14,
+            "message_id": "msg-14"
+          },
+          {
+            "ordinal": 15,
+            "message_id": "msg-15"
+          },
+          {
+            "ordinal": 16,
+            "message_id": "msg-16"
+          },
+          {
+            "ordinal": 17,
+            "message_id": "msg-17"
+          },
+          {
+            "ordinal": 18,
+            "message_id": "msg-18"
+          },
+          {
+            "ordinal": 19,
+            "message_id": "msg-19"
+          },
+          {
+            "ordinal": 20,
+            "message_id": "msg-20"
+          },
+          {
+            "ordinal": 21,
+            "message_id": "msg-21"
+          },
+          {
+            "ordinal": 22,
+            "message_id": "msg-22"
+          },
+          {
+            "ordinal": 23,
+            "message_id": "msg-23"
+          },
+          {
+            "ordinal": 24,
+            "message_id": "msg-24"
+          }
+        ],
+        "tool_only_ranges": [
+          {
+            "start": 3,
+            "end": 22
+          }
+        ]
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "alpha",
+          "content": "alpha full & exact",
+          "p1": "alpha full & exact",
+          "p2": "alpha short",
+          "p3": "alpha",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        },
+        {
+          "start_message": 23,
+          "end_message": 24,
+          "title": "beta",
+          "content": "beta full & exact",
+          "p1": "beta full & exact",
+          "p2": "beta short",
+          "p3": "beta",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [],
+      "events": [],
+      "unprocessed_from": 25,
+      "user_observations": [],
+      "primer_candidates": []
+    },
+    "validation": {
+      "ok": true,
+      "result": {
+        "compartments": [
+          {
+            "sequence": 0,
+            "start_message_id": "msg-1",
+            "end_message_id": "msg-22",
+            "start_message": 1,
+            "end_message": 22,
+            "title": "alpha",
+            "content": "alpha full & exact",
+            "p1": "alpha full & exact",
+            "p2": "alpha short",
+            "p3": "alpha",
+            "p4": "",
+            "importance": 50,
+            "episode_type": "feature"
+          }
+        ],
+        "facts": [],
+        "events": [],
+        "primer_candidates": [],
+        "user_observations": [],
+        "unprocessed_from": 23,
+        "discarded_last": true
+      }
+    }
+  },
+  {
+    "label": "five-message non-tool gap rejects",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"2\" title=\"alpha\" episode_type=\"feature\" importance=\"50\">\n<p1>alpha full &amp; exact</p1>\n<p2>alpha short</p2>\n<p3>alpha</p3>\n<p4 />\n</compartment>\n<compartment start=\"8\" end=\"10\" title=\"beta\" episode_type=\"feature\" importance=\"50\">\n<p1>beta full &amp; exact</p1>\n<p2>beta short</p2>\n<p3>beta</p3>\n<p4 />\n</compartment>\n</compartments>\n\n<meta><messages_processed>1-10</messages_processed><unprocessed_from>11</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 10,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          },
+          {
+            "ordinal": 3,
+            "message_id": "msg-3"
+          },
+          {
+            "ordinal": 4,
+            "message_id": "msg-4"
+          },
+          {
+            "ordinal": 5,
+            "message_id": "msg-5"
+          },
+          {
+            "ordinal": 6,
+            "message_id": "msg-6"
+          },
+          {
+            "ordinal": 7,
+            "message_id": "msg-7"
+          },
+          {
+            "ordinal": 8,
+            "message_id": "msg-8"
+          },
+          {
+            "ordinal": 9,
+            "message_id": "msg-9"
+          },
+          {
+            "ordinal": 10,
+            "message_id": "msg-10"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "alpha",
+          "content": "alpha full & exact",
+          "p1": "alpha full & exact",
+          "p2": "alpha short",
+          "p3": "alpha",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        },
+        {
+          "start_message": 8,
+          "end_message": 10,
+          "title": "beta",
+          "content": "beta full & exact",
+          "p1": "beta full & exact",
+          "p2": "beta short",
+          "p3": "beta",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [],
+      "events": [],
+      "unprocessed_from": 11,
+      "user_observations": [],
+      "primer_candidates": []
+    },
+    "validation": {
+      "ok": false,
+      "error": "Historian returned invalid compartment output: gap before present message 8 (expected 3)"
+    }
+  },
+  {
+    "label": "wrong unprocessed_from rejects",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"2\" title=\"alpha\" episode_type=\"feature\" importance=\"50\">\n<p1>alpha full &amp; exact</p1>\n<p2>alpha short</p2>\n<p3>alpha</p3>\n<p4 />\n</compartment>\n</compartments>\n\n<meta><messages_processed>1-3</messages_processed><unprocessed_from>4</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 5,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          },
+          {
+            "ordinal": 3,
+            "message_id": "msg-3"
+          },
+          {
+            "ordinal": 4,
+            "message_id": "msg-4"
+          },
+          {
+            "ordinal": 5,
+            "message_id": "msg-5"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "alpha",
+          "content": "alpha full & exact",
+          "p1": "alpha full & exact",
+          "p2": "alpha short",
+          "p3": "alpha",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [],
+      "events": [],
+      "unprocessed_from": 4,
+      "user_observations": [],
+      "primer_candidates": []
+    },
+    "validation": {
+      "ok": false,
+      "error": "Historian returned invalid compartment output: <unprocessed_from> 4 does not match next uncovered message 3"
+    }
+  },
+  {
+    "label": "chunk coverage rejects missing trailing line",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"3\" title=\"alpha\" episode_type=\"feature\" importance=\"50\">\n<p1>alpha full &amp; exact</p1>\n<p2>alpha short</p2>\n<p3>alpha</p3>\n<p4 />\n</compartment>\n</compartments>\n\n<meta><messages_processed>1-3</messages_processed><unprocessed_from>4</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 3,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 3,
+          "title": "alpha",
+          "content": "alpha full & exact",
+          "p1": "alpha full & exact",
+          "p2": "alpha short",
+          "p3": "alpha",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [],
+      "events": [],
+      "unprocessed_from": 4,
+      "user_observations": [],
+      "primer_candidates": []
+    },
+    "validation": {
+      "ok": false,
+      "error": "Historian chunk coverage invalid: chunk omits raw message 3 while still claiming coverage through 3"
+    }
+  },
+  {
+    "label": "prior live adjacency accepts next present raw ordinal",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"3\" end=\"5\" title=\"gamma\" episode_type=\"feature\" importance=\"50\">\n<p1>gamma full &amp; exact</p1>\n<p2>gamma short</p2>\n<p3>gamma</p3>\n<p4 />\n</compartment>\n</compartments>\n\n<meta><messages_processed>3-5</messages_processed><unprocessed_from>6</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 3,
+        "end_index": 5,
+        "lines": [
+          {
+            "ordinal": 3,
+            "message_id": "msg-3"
+          },
+          {
+            "ordinal": 4,
+            "message_id": "msg-4"
+          },
+          {
+            "ordinal": 5,
+            "message_id": "msg-5"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2
+        }
+      ],
+      "options": {
+        "sequence_offset": 1,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 3,
+          "end_message": 5,
+          "title": "gamma",
+          "content": "gamma full & exact",
+          "p1": "gamma full & exact",
+          "p2": "gamma short",
+          "p3": "gamma",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [],
+      "events": [],
+      "unprocessed_from": 6,
+      "user_observations": [],
+      "primer_candidates": []
+    },
+    "validation": {
+      "ok": true,
+      "result": {
+        "compartments": [
+          {
+            "sequence": 1,
+            "start_message_id": "msg-3",
+            "end_message_id": "msg-5",
+            "start_message": 3,
+            "end_message": 5,
+            "title": "gamma",
+            "content": "gamma full & exact",
+            "p1": "gamma full & exact",
+            "p2": "gamma short",
+            "p3": "gamma",
+            "p4": "",
+            "importance": 50,
+            "episode_type": "feature"
+          }
+        ],
+        "facts": [],
+        "events": [],
+        "primer_candidates": [],
+        "user_observations": [],
+        "unprocessed_from": 6,
+        "discarded_last": false
+      }
+    }
+  },
+  {
+    "label": "prior live adjacency rejects skipped present raw ordinal",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"4\" end=\"5\" title=\"gamma\" episode_type=\"feature\" importance=\"50\">\n<p1>gamma full &amp; exact</p1>\n<p2>gamma short</p2>\n<p3>gamma</p3>\n<p4 />\n</compartment>\n</compartments>\n\n<meta><messages_processed>4-5</messages_processed><unprocessed_from>6</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 4,
+        "end_index": 5,
+        "lines": [
+          {
+            "ordinal": 4,
+            "message_id": "msg-4"
+          },
+          {
+            "ordinal": 5,
+            "message_id": "msg-5"
+          }
+        ],
+        "present_ordinals": [1, 2, 3, 4, 5],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2
+        }
+      ],
+      "options": {
+        "sequence_offset": 1,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 4,
+          "end_message": 5,
+          "title": "gamma",
+          "content": "gamma full & exact",
+          "p1": "gamma full & exact",
+          "p2": "gamma short",
+          "p3": "gamma",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [],
+      "events": [],
+      "unprocessed_from": 6,
+      "user_observations": [],
+      "primer_candidates": []
+    },
+    "validation": {
+      "ok": false,
+      "error": "Historian chunk starts at raw message 4 but existing compartments end at 2; expected next present raw message 3"
+    }
+  },
+  {
+    "label": "discard-last fires on weak lookahead and filters anchored tail",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"2\" title=\"alpha\" episode_type=\"feature\" importance=\"50\">\n<p1>alpha full &amp; exact</p1>\n<p2>alpha short</p2>\n<p3>alpha</p3>\n<p4 />\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"beta\" episode_type=\"feature\" importance=\"50\">\n<p1>beta full &amp; exact</p1>\n<p2>beta short</p2>\n<p3>beta</p3>\n<p4 />\n</compartment>\n</compartments>\n\n<facts>\n<PROJECT_RULES>\n* Provisional facts are skipped on discard-last because current facts are unanchored.\n</PROJECT_RULES>\n</facts>\n<events>\n<causal_incident at_compartment=\"1\"><summary>Earlier event.</summary></causal_incident>\n<trajectory_correction at_compartment=\"2\"><summary>Tail event.</summary></trajectory_correction>\n</events>\n<user_observations>\n* Provisional observations are skipped on discard-last because current observations are unanchored.\n</user_observations>\n<primer_candidates>\n<primer at_compartment=\"1\">How does the kept compartment work?</primer>\n<primer at_compartment=\"2\">How does the discarded compartment work?</primer>\n</primer_candidates>\n<meta><messages_processed>1-4</messages_processed><unprocessed_from>5</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 4,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          },
+          {
+            "ordinal": 3,
+            "message_id": "msg-3"
+          },
+          {
+            "ordinal": 4,
+            "message_id": "msg-4"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "alpha",
+          "content": "alpha full & exact",
+          "p1": "alpha full & exact",
+          "p2": "alpha short",
+          "p3": "alpha",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "beta",
+          "content": "beta full & exact",
+          "p1": "beta full & exact",
+          "p2": "beta short",
+          "p3": "beta",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [
+        {
+          "category": "PROJECT_RULES",
+          "content": "Provisional facts are skipped on discard-last because current facts are unanchored.",
+          "origin_compartment_index": null
+        }
+      ],
+      "events": [
+        {
+          "kind": "causal_incident",
+          "at_compartment": 1,
+          "fields": {
+            "summary": "Earlier event."
+          }
+        },
+        {
+          "kind": "trajectory_correction",
+          "at_compartment": 2,
+          "fields": {
+            "summary": "Tail event."
+          }
+        }
+      ],
+      "unprocessed_from": 5,
+      "user_observations": [
+        {
+          "content": "Provisional observations are skipped on discard-last because current observations are unanchored.",
+          "origin_compartment_index": null
+        }
+      ],
+      "primer_candidates": [
+        {
+          "question": "How does the kept compartment work?",
+          "origin_compartment_index": 1
+        },
+        {
+          "question": "How does the discarded compartment work?",
+          "origin_compartment_index": 2
+        }
+      ]
+    },
+    "validation": {
+      "ok": true,
+      "result": {
+        "compartments": [
+          {
+            "sequence": 0,
+            "start_message_id": "msg-1",
+            "end_message_id": "msg-2",
+            "start_message": 1,
+            "end_message": 2,
+            "title": "alpha",
+            "content": "alpha full & exact",
+            "p1": "alpha full & exact",
+            "p2": "alpha short",
+            "p3": "alpha",
+            "p4": "",
+            "importance": 50,
+            "episode_type": "feature"
+          }
+        ],
+        "facts": [],
+        "events": [],
+        "primer_candidates": [],
+        "user_observations": [],
+        "unprocessed_from": 3,
+        "discarded_last": true
+      }
+    }
+  },
+  {
+    "label": "discard-last suppressed for k1 progress guard",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"4\" title=\"single\" episode_type=\"feature\" importance=\"50\">\n<p1>single full &amp; exact</p1>\n<p2>single short</p2>\n<p3>single</p3>\n<p4 />\n</compartment>\n</compartments>\n\n<meta><messages_processed>1-4</messages_processed><unprocessed_from>5</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 4,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          },
+          {
+            "ordinal": 3,
+            "message_id": "msg-3"
+          },
+          {
+            "ordinal": 4,
+            "message_id": "msg-4"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 4,
+          "title": "single",
+          "content": "single full & exact",
+          "p1": "single full & exact",
+          "p2": "single short",
+          "p3": "single",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [],
+      "events": [],
+      "unprocessed_from": 5,
+      "user_observations": [],
+      "primer_candidates": []
+    },
+    "validation": {
+      "ok": true,
+      "result": {
+        "compartments": [
+          {
+            "sequence": 0,
+            "start_message_id": "msg-1",
+            "end_message_id": "msg-4",
+            "start_message": 1,
+            "end_message": 4,
+            "title": "single",
+            "content": "single full & exact",
+            "p1": "single full & exact",
+            "p2": "single short",
+            "p3": "single",
+            "p4": "",
+            "importance": 50,
+            "episode_type": "feature"
+          }
+        ],
+        "facts": [],
+        "events": [],
+        "primer_candidates": [],
+        "user_observations": [],
+        "unprocessed_from": 5,
+        "discarded_last": false
+      }
+    }
+  },
+  {
+    "label": "discard-last suppressed in emergency",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"2\" title=\"alpha\" episode_type=\"feature\" importance=\"50\">\n<p1>alpha full &amp; exact</p1>\n<p2>alpha short</p2>\n<p3>alpha</p3>\n<p4 />\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"beta\" episode_type=\"feature\" importance=\"50\">\n<p1>beta full &amp; exact</p1>\n<p2>beta short</p2>\n<p3>beta</p3>\n<p4 />\n</compartment>\n</compartments>\n\n<meta><messages_processed>1-4</messages_processed><unprocessed_from>5</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 4,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          },
+          {
+            "ordinal": 3,
+            "message_id": "msg-3"
+          },
+          {
+            "ordinal": 4,
+            "message_id": "msg-4"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": true
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "alpha",
+          "content": "alpha full & exact",
+          "p1": "alpha full & exact",
+          "p2": "alpha short",
+          "p3": "alpha",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "beta",
+          "content": "beta full & exact",
+          "p1": "beta full & exact",
+          "p2": "beta short",
+          "p3": "beta",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [],
+      "events": [],
+      "unprocessed_from": 5,
+      "user_observations": [],
+      "primer_candidates": []
+    },
+    "validation": {
+      "ok": true,
+      "result": {
+        "compartments": [
+          {
+            "sequence": 0,
+            "start_message_id": "msg-1",
+            "end_message_id": "msg-2",
+            "start_message": 1,
+            "end_message": 2,
+            "title": "alpha",
+            "content": "alpha full & exact",
+            "p1": "alpha full & exact",
+            "p2": "alpha short",
+            "p3": "alpha",
+            "p4": "",
+            "importance": 50,
+            "episode_type": "feature"
+          },
+          {
+            "sequence": 1,
+            "start_message_id": "msg-3",
+            "end_message_id": "msg-4",
+            "start_message": 3,
+            "end_message": 4,
+            "title": "beta",
+            "content": "beta full & exact",
+            "p1": "beta full & exact",
+            "p2": "beta short",
+            "p3": "beta",
+            "p4": "",
+            "importance": 50,
+            "episode_type": "feature"
+          }
+        ],
+        "facts": [],
+        "events": [],
+        "primer_candidates": [],
+        "user_observations": [],
+        "unprocessed_from": 5,
+        "discarded_last": false
+      }
+    }
+  },
+  {
+    "label": "primer at_compartment remains 1-based publish index",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"2\" title=\"alpha\" episode_type=\"feature\" importance=\"50\">\n<p1>alpha full &amp; exact</p1>\n<p2>alpha short</p2>\n<p3>alpha</p3>\n<p4 />\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"beta\" episode_type=\"feature\" importance=\"50\">\n<p1>beta full &amp; exact</p1>\n<p2>beta short</p2>\n<p3>beta</p3>\n<p4 />\n</compartment>\n</compartments>\n<primer_candidates><primer at_compartment=\"2\">How does beta work?</primer></primer_candidates>\n<meta><messages_processed>1-4</messages_processed><unprocessed_from>5</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 7,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          },
+          {
+            "ordinal": 3,
+            "message_id": "msg-3"
+          },
+          {
+            "ordinal": 4,
+            "message_id": "msg-4"
+          },
+          {
+            "ordinal": 5,
+            "message_id": "msg-5"
+          },
+          {
+            "ordinal": 6,
+            "message_id": "msg-6"
+          },
+          {
+            "ordinal": 7,
+            "message_id": "msg-7"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "alpha",
+          "content": "alpha full & exact",
+          "p1": "alpha full & exact",
+          "p2": "alpha short",
+          "p3": "alpha",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "beta",
+          "content": "beta full & exact",
+          "p1": "beta full & exact",
+          "p2": "beta short",
+          "p3": "beta",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [],
+      "events": [],
+      "unprocessed_from": 5,
+      "user_observations": [],
+      "primer_candidates": [
+        {
+          "question": "How does beta work?",
+          "origin_compartment_index": 2
+        }
+      ]
+    },
+    "validation": {
+      "ok": true,
+      "result": {
+        "compartments": [
+          {
+            "sequence": 0,
+            "start_message_id": "msg-1",
+            "end_message_id": "msg-2",
+            "start_message": 1,
+            "end_message": 2,
+            "title": "alpha",
+            "content": "alpha full & exact",
+            "p1": "alpha full & exact",
+            "p2": "alpha short",
+            "p3": "alpha",
+            "p4": "",
+            "importance": 50,
+            "episode_type": "feature"
+          },
+          {
+            "sequence": 1,
+            "start_message_id": "msg-3",
+            "end_message_id": "msg-4",
+            "start_message": 3,
+            "end_message": 4,
+            "title": "beta",
+            "content": "beta full & exact",
+            "p1": "beta full & exact",
+            "p2": "beta short",
+            "p3": "beta",
+            "p4": "",
+            "importance": 50,
+            "episode_type": "feature"
+          }
+        ],
+        "facts": [],
+        "events": [],
+        "primer_candidates": [
+          {
+            "question": "How does beta work?",
+            "origin_compartment_index": 2
+          }
+        ],
+        "user_observations": [],
+        "unprocessed_from": 5,
+        "discarded_last": false
+      }
+    }
+  },
+  {
+    "label": "events beyond persisted compartment count are filtered",
+    "input": {
+      "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"2\" title=\"alpha\" episode_type=\"feature\" importance=\"50\">\n<p1>alpha full &amp; exact</p1>\n<p2>alpha short</p2>\n<p3>alpha</p3>\n<p4 />\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"beta\" episode_type=\"feature\" importance=\"50\">\n<p1>beta full &amp; exact</p1>\n<p2>beta short</p2>\n<p3>beta</p3>\n<p4 />\n</compartment>\n</compartments>\n<events><causal_incident at_compartment=\"1\"><summary>kept</summary></causal_incident><trajectory_correction at_compartment=\"3\"><summary>dropped</summary></trajectory_correction></events>\n<meta><messages_processed>1-4</messages_processed><unprocessed_from>5</unprocessed_from></meta>\n</output>",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 7,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          },
+          {
+            "ordinal": 3,
+            "message_id": "msg-3"
+          },
+          {
+            "ordinal": 4,
+            "message_id": "msg-4"
+          },
+          {
+            "ordinal": 5,
+            "message_id": "msg-5"
+          },
+          {
+            "ordinal": 6,
+            "message_id": "msg-6"
+          },
+          {
+            "ordinal": 7,
+            "message_id": "msg-7"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "alpha",
+          "content": "alpha full & exact",
+          "p1": "alpha full & exact",
+          "p2": "alpha short",
+          "p3": "alpha",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "beta",
+          "content": "beta full & exact",
+          "p1": "beta full & exact",
+          "p2": "beta short",
+          "p3": "beta",
+          "p4": "",
+          "importance": 50,
+          "episode_type": "feature"
+        }
+      ],
+      "facts": [],
+      "events": [
+        {
+          "kind": "causal_incident",
+          "at_compartment": 1,
+          "fields": {
+            "summary": "kept"
+          }
+        },
+        {
+          "kind": "trajectory_correction",
+          "at_compartment": 3,
+          "fields": {
+            "summary": "dropped"
+          }
+        }
+      ],
+      "unprocessed_from": 5,
+      "user_observations": [],
+      "primer_candidates": []
+    },
+    "validation": {
+      "ok": true,
+      "result": {
+        "compartments": [
+          {
+            "sequence": 0,
+            "start_message_id": "msg-1",
+            "end_message_id": "msg-2",
+            "start_message": 1,
+            "end_message": 2,
+            "title": "alpha",
+            "content": "alpha full & exact",
+            "p1": "alpha full & exact",
+            "p2": "alpha short",
+            "p3": "alpha",
+            "p4": "",
+            "importance": 50,
+            "episode_type": "feature"
+          },
+          {
+            "sequence": 1,
+            "start_message_id": "msg-3",
+            "end_message_id": "msg-4",
+            "start_message": 3,
+            "end_message": 4,
+            "title": "beta",
+            "content": "beta full & exact",
+            "p1": "beta full & exact",
+            "p2": "beta short",
+            "p3": "beta",
+            "p4": "",
+            "importance": 50,
+            "episode_type": "feature"
+          }
+        ],
+        "facts": [],
+        "events": [
+          {
+            "kind": "causal_incident",
+            "at_compartment": 1,
+            "fields": {
+              "summary": "kept"
+            }
+          }
+        ],
+        "primer_candidates": [],
+        "user_observations": [],
+        "unprocessed_from": 5,
+        "discarded_last": false
+      }
+    }
+  },
+  {
+    "label": "malformed xml rejects with no usable compartments",
+    "input": {
+      "text": "<output><compartment start=\"1\" end=\"2\" title=\"bad\">missing close",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 2,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [],
+      "facts": [],
+      "events": [],
+      "unprocessed_from": null,
+      "user_observations": [],
+      "primer_candidates": []
+    },
+    "validation": {
+      "ok": false,
+      "error": "Historian returned no usable compartments."
+    }
+  },
+  {
+    "label": "empty output rejects",
+    "input": {
+      "text": "",
+      "chunk": {
+        "start_index": 1,
+        "end_index": 2,
+        "lines": [
+          {
+            "ordinal": 1,
+            "message_id": "msg-1"
+          },
+          {
+            "ordinal": 2,
+            "message_id": "msg-2"
+          }
+        ],
+        "tool_only_ranges": []
+      },
+      "prior_compartments": [],
+      "options": {
+        "sequence_offset": 0,
+        "in_emergency": false
+      }
+    },
+    "parsed": {
+      "compartments": [],
+      "facts": [],
+      "events": [],
+      "unprocessed_from": null,
+      "user_observations": [],
+      "primer_candidates": []
+    },
+    "validation": {
+      "ok": false,
+      "error": "Historian returned no usable compartments."
+    }
+  }
+]

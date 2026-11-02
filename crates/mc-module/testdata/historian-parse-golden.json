@@ -1,0 +1,524 @@
+[
+  {
+    "label": "well-formed tiers, facts and side channels",
+    "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"2\" title=\"Setup\" episode_type=\"infra\" importance=\"40\">\n<p1>did setup</p1>\n<p2>did setup short</p2>\n<p3>did setup shorter</p3>\n<p4/>\n</compartment>\n</compartments>\n<facts>\n<PROJECT_RULES>\n* Keep goldens deterministic.\n</PROJECT_RULES>\n</facts>\n<events><causal_incident at_compartment=\"1\"><summary>Setup broke.</summary></causal_incident></events>\n<user_observations>\n* Prefers short answers.\n</user_observations>\n<primer_candidates><primer at_compartment=\"1\">How is setup done?</primer></primer_candidates>\n<meta><unprocessed_from>3</unprocessed_from></meta>\n</output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "Setup",
+          "content": "did setup",
+          "p1": "did setup",
+          "p2": "did setup short",
+          "p3": "did setup shorter",
+          "p4": "",
+          "importance": 40,
+          "episode_type": "infra"
+        }
+      ],
+      "facts": [
+        {
+          "category": "PROJECT_RULES",
+          "content": "Keep goldens deterministic.",
+          "origin_compartment_index": null
+        }
+      ],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [
+        {
+          "kind": "causal_incident",
+          "at_compartment": 1,
+          "fields": {
+            "summary": "Setup broke."
+          }
+        }
+      ],
+      "unprocessed_from": 3,
+      "user_observations": [
+        {
+          "content": "Prefers short answers.",
+          "origin_compartment_index": null
+        }
+      ],
+      "primer_candidates": [
+        {
+          "question": "How is setup done?",
+          "origin_compartment_index": 1
+        }
+      ]
+    }
+  },
+  {
+    "label": "mismatched and missing tier closes stay lenient",
+    "text": "<output><compartments>\n<compartment start=\"1\" end=\"2\" title=\"mismatch\"><p1>first</p2><p2>second</p1><p3>third</p3><p4 /></compartment>\n<compartment start=\"3\" end=\"4\" title=\"missing\"><p1>first body<p2>second body</p2><p3>third</p3><p4/></compartment>\n<compartment start=\"5\" end=\"6\" title=\"overcapture\"><p1>alpha<p2>beta</p1><p3>gamma</p3><p4/></compartment>\n<compartment start=\"7\" end=\"8\" title=\"flat\">just flat content</compartment>\n</compartments></output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "mismatch",
+          "content": "first",
+          "p1": "first",
+          "p2": "second",
+          "p3": "third",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "missing",
+          "content": "first body",
+          "p1": "first body",
+          "p2": "second body",
+          "p3": "third",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 5,
+          "end_message": 6,
+          "title": "overcapture",
+          "content": "alpha",
+          "p1": "alpha",
+          "p2": "beta",
+          "p3": "gamma",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 7,
+          "end_message": 8,
+          "title": "flat",
+          "content": "just flat content",
+          "p1": null,
+          "p2": null,
+          "p3": null,
+          "p4": null,
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [],
+      "unprocessed_from": null,
+      "user_observations": [],
+      "primer_candidates": []
+    }
+  },
+  {
+    "label": "xml entities decode exactly once",
+    "text": "<output><compartments>\n<compartment start=\"1\" end=\"2\" title=\"A &amp;lt; B &quot;q&quot;\" episode_type=\"x&amp;amp;y\">\n<p1>Use &amp;lt; entity &amp;amp; &lt;tag&gt; &apos;s &amp;gt;</p1>\n<p2>Use &amp;lt; entity &amp;amp; &lt;tag&gt; &apos;s &amp;gt; short</p2>\n<p3>Use &amp;lt; entity &amp;amp; &lt;tag&gt; &apos;s &amp;gt; shorter</p3>\n<p4/>\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"flat\">Flat &amp;quot; body &amp; more</compartment>\n</compartments>\n<facts>\n<ARCHITECTURE>\n* Escape with &amp;amp; before &amp;lt;.\n</ARCHITECTURE>\n</facts>\n<events><causal_incident at_compartment=\"1\"><summary>Saw &amp;lt;p1&amp;gt; literally</summary></causal_incident></events>\n<user_observations>\n* Writes &amp;apos; often.\n</user_observations>\n<primer_candidates><primer at_compartment=\"1\">What is &amp;quot;?</primer></primer_candidates>\n</output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "A &lt; B \"q\"",
+          "content": "Use &lt; entity &amp; <tag> 's &gt;",
+          "p1": "Use &lt; entity &amp; <tag> 's &gt;",
+          "p2": "Use &lt; entity &amp; <tag> 's &gt; short",
+          "p3": "Use &lt; entity &amp; <tag> 's &gt; shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": "x&amp;y"
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "flat",
+          "content": "Flat &quot; body & more",
+          "p1": null,
+          "p2": null,
+          "p3": null,
+          "p4": null,
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [
+        {
+          "category": "ARCHITECTURE",
+          "content": "Escape with &amp; before &lt;.",
+          "origin_compartment_index": null
+        }
+      ],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [
+        {
+          "kind": "causal_incident",
+          "at_compartment": 1,
+          "fields": {
+            "summary": "Saw &lt;p1&gt; literally"
+          }
+        }
+      ],
+      "unprocessed_from": null,
+      "user_observations": [
+        {
+          "content": "Writes &apos; often.",
+          "origin_compartment_index": null
+        }
+      ],
+      "primer_candidates": [
+        {
+          "question": "What is &quot;?",
+          "origin_compartment_index": 1
+        }
+      ]
+    }
+  },
+  {
+    "label": "raw > inside a quoted attribute value keeps the compartment",
+    "text": "<output><compartments>\n<compartment start=\"1\" end=\"2\" title=\"Migrate store -> SQLite\" episode_type=\"a>b\" importance=\"70\">\n<p1>moved storage</p1>\n<p2>moved storage short</p2>\n<p3>moved storage shorter</p3>\n<p4/>\n</compartment>\n<compartment\n  start=\"3\"\n  end=\"4\"\n  title=\"Multi-line attrs => fine\">\n<p1>next</p1>\n<p2>next short</p2>\n<p3>next shorter</p3>\n<p4/>\n</compartment>\n<compartment start=\"5\" end=\"6\" title=\"unbalanced>\n<p1>skipped: the quote never closes on its line</p1>\n<p2>skipped: the quote never closes on its line short</p2>\n<p3>skipped: the quote never closes on its line shorter</p3>\n<p4/>\n</compartment>\n</compartments>\n<meta><unprocessed_from>5</unprocessed_from></meta>\n</output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "Migrate store -> SQLite",
+          "content": "moved storage",
+          "p1": "moved storage",
+          "p2": "moved storage short",
+          "p3": "moved storage shorter",
+          "p4": "",
+          "importance": 70,
+          "episode_type": "a>b"
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "Multi-line attrs => fine",
+          "content": "next",
+          "p1": "next",
+          "p2": "next short",
+          "p3": "next shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [],
+      "unprocessed_from": 5,
+      "user_observations": [],
+      "primer_candidates": []
+    }
+  },
+  {
+    "label": "tier tags written inside a properly closed tier stay text",
+    "text": "<output><compartments>\n<compartment start=\"1\" end=\"2\" title=\"Tier tags\">\n<p1>Discussed <p2> tags vs <pre> and the </p1> close</p1>\n<p2>Tier tag talk with <p3/></p2>\n<p3>Tags</p3>\n<p4>mentions <p1> again</p4>\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"duplicate close\"><p1>dup</p1></p1>\n<p2>two</p2><p3>three</p3><p4/></compartment>\n<compartment start=\"5\" end=\"6\" title=\"prose between tiers\"><p1>kept</p1>\nstray note\n<p2>two</p2><p3>three</p3><p4/></compartment>\n</compartments></output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "Tier tags",
+          "content": "Discussed <p2> tags vs <pre> and the </p1> close",
+          "p1": "Discussed <p2> tags vs <pre> and the </p1> close",
+          "p2": "Tier tag talk with <p3/>",
+          "p3": "Tags",
+          "p4": "mentions <p1> again",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "duplicate close",
+          "content": "dup",
+          "p1": "dup",
+          "p2": "two",
+          "p3": "three",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 5,
+          "end_message": 6,
+          "title": "prose between tiers",
+          "content": "kept",
+          "p1": "kept",
+          "p2": "two",
+          "p3": "three",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [],
+      "unprocessed_from": null,
+      "user_observations": [],
+      "primer_candidates": []
+    }
+  },
+  {
+    "label": "compartment close and block tags written inside a body stay text",
+    "text": "<output><compartments>\n<compartment start=\"1\" end=\"2\" title=\"XML format\">\n<p1>Each block ends with </compartment> and facts go in <facts> or <events>.</p1>\n<p2>The example was <events><causal_incident at_compartment=\"1\"><summary>Fake.</summary></causal_incident></events> and <unprocessed_from>9</unprocessed_from>.</p2>\n<p3>Quoted <primer_candidates><primer at_compartment=\"1\">Fake?</primer></primer_candidates> too, all inside <output>…</output></p3>\n<p4/>\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"Next\">\n<p1>next work</p1>\n<p2>next work short</p2>\n<p3>next work shorter</p3>\n<p4/>\n</compartment>\n</compartments>\n<facts>\n<PROJECT_RULES>\n* Real fact mentioning </compartment> as text.\n</PROJECT_RULES>\n</facts>\n<events><causal_incident at_compartment=\"2\"><summary>Real event about </p1> text.</summary><evidence>Saw </compartment> too</evidence></causal_incident></events>\n<user_observations>\n* Real observation.\n</user_observations>\n<primer_candidates><primer at_compartment=\"2\">Real question?</primer></primer_candidates>\n<meta><unprocessed_from>5</unprocessed_from></meta>\n</output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "XML format",
+          "content": "Each block ends with </compartment> and facts go in <facts> or <events>.",
+          "p1": "Each block ends with </compartment> and facts go in <facts> or <events>.",
+          "p2": "The example was <events><causal_incident at_compartment=\"1\"><summary>Fake.</summary></causal_incident></events> and <unprocessed_from>9</unprocessed_from>.",
+          "p3": "Quoted <primer_candidates><primer at_compartment=\"1\">Fake?</primer></primer_candidates> too, all inside <output>…</output>",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "Next",
+          "content": "next work",
+          "p1": "next work",
+          "p2": "next work short",
+          "p3": "next work shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [
+        {
+          "category": "PROJECT_RULES",
+          "content": "Real fact mentioning </compartment> as text.",
+          "origin_compartment_index": null
+        }
+      ],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [
+        {
+          "kind": "causal_incident",
+          "at_compartment": 2,
+          "fields": {
+            "evidence": "Saw </compartment> too",
+            "summary": "Real event about </p1> text."
+          }
+        }
+      ],
+      "unprocessed_from": 5,
+      "user_observations": [
+        {
+          "content": "Real observation.",
+          "origin_compartment_index": null
+        }
+      ],
+      "primer_candidates": [
+        {
+          "question": "Real question?",
+          "origin_compartment_index": 2
+        }
+      ]
+    }
+  },
+  {
+    "label": "bare legacy fact blocks are read outside compartment bodies",
+    "text": "<output><compartments>\n<compartment start=\"1\" end=\"2\" title=\"Legacy\">\n<p1>Body quoting </compartment> then <NAMING>\n* Fake fact\n</NAMING></p1>\n<p2>two</p2><p3>three</p3><p4/>\n</compartment>\n</compartments>\n<NAMING>\n* Real legacy fact\n</NAMING>\n<unprocessed_from>3</unprocessed_from>\n</output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "Legacy",
+          "content": "Body quoting </compartment> then <NAMING>\n* Fake fact\n</NAMING>",
+          "p1": "Body quoting </compartment> then <NAMING>\n* Fake fact\n</NAMING>",
+          "p2": "two",
+          "p3": "three",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [
+        {
+          "category": "NAMING",
+          "content": "Real legacy fact",
+          "origin_compartment_index": null
+        }
+      ],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [],
+      "unprocessed_from": 3,
+      "user_observations": [],
+      "primer_candidates": []
+    }
+  },
+  {
+    "label": "anchors follow their compartment when compartments are emitted out of order",
+    "text": "<output><compartments>\n<compartment start=\"5\" end=\"6\" title=\"Third\">\n<p1>third</p1>\n<p2>third short</p2>\n<p3>third shorter</p3>\n<p4/>\n</compartment>\n<compartment start=\"1\" end=\"2\" title=\"First\">\n<p1>first</p1>\n<p2>first short</p2>\n<p3>first shorter</p3>\n<p4/>\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"Second\">\n<p1>second</p1>\n<p2>second short</p2>\n<p3>second shorter</p3>\n<p4/>\n</compartment>\n</compartments>\n<events><causal_incident at_compartment=\"1\"><summary>About third.</summary></causal_incident>\n<trajectory_correction at_compartment=\"3\"><summary>About second.</summary></trajectory_correction>\n<causal_incident at_compartment=\"0\"><summary>Zero stays.</summary></causal_incident>\n<causal_incident at_compartment=\"9\"><summary>Out of range stays.</summary></causal_incident></events>\n<primer_candidates><primer at_compartment=\"2\">How did the first part go?</primer></primer_candidates>\n<meta><unprocessed_from>7</unprocessed_from></meta>\n</output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "First",
+          "content": "first",
+          "p1": "first",
+          "p2": "first short",
+          "p3": "first shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "Second",
+          "content": "second",
+          "p1": "second",
+          "p2": "second short",
+          "p3": "second shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 5,
+          "end_message": 6,
+          "title": "Third",
+          "content": "third",
+          "p1": "third",
+          "p2": "third short",
+          "p3": "third shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [
+        {
+          "kind": "causal_incident",
+          "at_compartment": 3,
+          "fields": {
+            "summary": "About third."
+          }
+        },
+        {
+          "kind": "trajectory_correction",
+          "at_compartment": 2,
+          "fields": {
+            "summary": "About second."
+          }
+        },
+        {
+          "kind": "causal_incident",
+          "at_compartment": 0,
+          "fields": {
+            "summary": "Zero stays."
+          }
+        },
+        {
+          "kind": "causal_incident",
+          "at_compartment": 9,
+          "fields": {
+            "summary": "Out of range stays."
+          }
+        }
+      ],
+      "unprocessed_from": 7,
+      "user_observations": [],
+      "primer_candidates": [
+        {
+          "question": "How did the first part go?",
+          "origin_compartment_index": 1
+        }
+      ]
+    }
+  },
+  {
+    "label": "fact source anchors follow their compartment when compartments are emitted out of order",
+    "text": "<output><compartments>\n<compartment start=\"5\" end=\"6\" title=\"Third\">\n<p1>third</p1>\n<p2>third short</p2>\n<p3>third shorter</p3>\n<p4/>\n</compartment>\n<compartment start=\"1\" end=\"2\" title=\"First\">\n<p1>first</p1>\n<p2>first short</p2>\n<p3>first shorter</p3>\n<p4/>\n</compartment>\n</compartments>\n<facts>\n<PROJECT_RULES>\n* [at_compartment=1 messages=5-6] Fact from the third range.\n* (origin_compartment=\"2\" messages=\"1\") Fact from the first range.\n* [at_compartment=unknown] Fact with an unknown source.\n* [at_compartment=2] Fact with an index only.\n* Fact without an anchor.\n</PROJECT_RULES>\n</facts>\n<meta><unprocessed_from>7</unprocessed_from></meta>\n</output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "First",
+          "content": "first",
+          "p1": "first",
+          "p2": "first short",
+          "p3": "first shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 5,
+          "end_message": 6,
+          "title": "Third",
+          "content": "third",
+          "p1": "third",
+          "p2": "third short",
+          "p3": "third shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [
+        {
+          "category": "PROJECT_RULES",
+          "content": "Fact from the third range.",
+          "origin_compartment_index": 2,
+          "source_range": {
+            "start": 5,
+            "end": 6
+          }
+        },
+        {
+          "category": "PROJECT_RULES",
+          "content": "Fact from the first range.",
+          "origin_compartment_index": 1,
+          "source_range": {
+            "start": 1,
+            "end": 1
+          }
+        },
+        {
+          "category": "PROJECT_RULES",
+          "content": "Fact with an unknown source.",
+          "origin_compartment_index": null
+        },
+        {
+          "category": "PROJECT_RULES",
+          "content": "Fact with an index only.",
+          "origin_compartment_index": 1
+        },
+        {
+          "category": "PROJECT_RULES",
+          "content": "Fact without an anchor.",
+          "origin_compartment_index": null
+        }
+      ],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [],
+      "unprocessed_from": 7,
+      "user_observations": [],
+      "primer_candidates": []
+    }
+  }
+]

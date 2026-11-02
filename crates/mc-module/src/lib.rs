@@ -19,14 +19,20 @@
 
 #![forbid(unsafe_code)]
 
+pub mod calibration;
 pub mod client;
+pub mod content_language;
+pub mod context_db;
+pub mod decay;
 pub mod index;
+pub mod js_text;
 pub mod lanes;
 pub mod module;
 pub mod pass;
 pub mod preset;
 pub mod reduce;
 pub mod session;
+pub mod summary;
 pub mod tokens;
 pub mod transport;
 pub mod view_builder;

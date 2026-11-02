@@ -1,0 +1,530 @@
+{
+  "cases": [
+    {
+      "compartments": [
+        {
+          "startMessage": 1,
+          "endMessage": 9,
+          "title": "arc 0",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 0 with enough text to be distinct",
+          "p2": "P2 dense 0",
+          "p3": "P3 0",
+          "p4": "",
+          "importance": 10,
+          "legacy": 0
+        },
+        {
+          "startMessage": 11,
+          "endMessage": 19,
+          "title": "arc 1",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 1 with enough text to be distinct",
+          "p2": "P2 dense 1",
+          "p3": "P3 1",
+          "p4": "P4anchor1",
+          "importance": 50,
+          "legacy": 0
+        },
+        {
+          "startMessage": 21,
+          "endMessage": 29,
+          "title": "arc 2",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 2 with enough text to be distinct",
+          "p2": "P2 dense 2",
+          "p3": "P3 2",
+          "p4": "P4anchor2",
+          "importance": 90,
+          "legacy": 0
+        },
+        {
+          "startMessage": 31,
+          "endMessage": 39,
+          "title": "arc 3",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 3 with enough text to be distinct",
+          "p2": "P2 dense 3",
+          "p3": "P3 3",
+          "p4": "P4anchor3",
+          "importance": 10,
+          "legacy": 0
+        },
+        {
+          "startMessage": 41,
+          "endMessage": 49,
+          "title": "arc 4",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 4 with enough text to be distinct",
+          "p2": "P2 dense 4",
+          "p3": "P3 4",
+          "p4": "",
+          "importance": 50,
+          "legacy": 0
+        },
+        {
+          "startMessage": 51,
+          "endMessage": 59,
+          "title": "arc 5",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 5 with enough text to be distinct",
+          "p2": "P2 dense 5",
+          "p3": "P3 5",
+          "p4": "P4anchor5",
+          "importance": 90,
+          "legacy": 0
+        },
+        {
+          "startMessage": 61,
+          "endMessage": 69,
+          "title": "arc 6",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 6 with enough text to be distinct",
+          "p2": "P2 dense 6",
+          "p3": "P3 6",
+          "p4": "P4anchor6",
+          "importance": 10,
+          "legacy": 0
+        },
+        {
+          "startMessage": 71,
+          "endMessage": 79,
+          "title": "arc 7",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 7 with enough text to be distinct",
+          "p2": "P2 dense 7",
+          "p3": "P3 7",
+          "p4": "P4anchor7",
+          "importance": 50,
+          "legacy": 0
+        },
+        {
+          "startMessage": 81,
+          "endMessage": 89,
+          "title": "arc 8",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 8 with enough text to be distinct",
+          "p2": "P2 dense 8",
+          "p3": "P3 8",
+          "p4": "",
+          "importance": 90,
+          "legacy": 0
+        },
+        {
+          "startMessage": 91,
+          "endMessage": 99,
+          "title": "arc 9",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 9 with enough text to be distinct",
+          "p2": "P2 dense 9",
+          "p3": "P3 9",
+          "p4": "P4anchor9",
+          "importance": 10,
+          "legacy": 0
+        },
+        {
+          "startMessage": 101,
+          "endMessage": 109,
+          "title": "arc 10",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 10 with enough text to be distinct",
+          "p2": "P2 dense 10",
+          "p3": "P3 10",
+          "p4": "P4anchor10",
+          "importance": 50,
+          "legacy": 0
+        },
+        {
+          "startMessage": 111,
+          "endMessage": 119,
+          "title": "arc 11",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 11 with enough text to be distinct",
+          "p2": "P2 dense 11",
+          "p3": "P3 11",
+          "p4": "P4anchor11",
+          "importance": 90,
+          "legacy": 0
+        },
+        {
+          "startMessage": 121,
+          "endMessage": 129,
+          "title": "arc 12",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 12 with enough text to be distinct",
+          "p2": "P2 dense 12",
+          "p3": "P3 12",
+          "p4": "",
+          "importance": 10,
+          "legacy": 0
+        },
+        {
+          "startMessage": 131,
+          "endMessage": 139,
+          "title": "arc 13",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 13 with enough text to be distinct",
+          "p2": "P2 dense 13",
+          "p3": "P3 13",
+          "p4": "P4anchor13",
+          "importance": 50,
+          "legacy": 0
+        },
+        {
+          "startMessage": 141,
+          "endMessage": 149,
+          "title": "arc 14",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 14 with enough text to be distinct",
+          "p2": "P2 dense 14",
+          "p3": "P3 14",
+          "p4": "P4anchor14",
+          "importance": 90,
+          "legacy": 0
+        },
+        {
+          "startMessage": 151,
+          "endMessage": 159,
+          "title": "arc 15",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 15 with enough text to be distinct",
+          "p2": "P2 dense 15",
+          "p3": "P3 15",
+          "p4": "P4anchor15",
+          "importance": 10,
+          "legacy": 0
+        },
+        {
+          "startMessage": 161,
+          "endMessage": 169,
+          "title": "arc 16",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 16 with enough text to be distinct",
+          "p2": "P2 dense 16",
+          "p3": "P3 16",
+          "p4": "",
+          "importance": 50,
+          "legacy": 0
+        },
+        {
+          "startMessage": 171,
+          "endMessage": 179,
+          "title": "arc 17",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 17 with enough text to be distinct",
+          "p2": "P2 dense 17",
+          "p3": "P3 17",
+          "p4": "P4anchor17",
+          "importance": 90,
+          "legacy": 0
+        },
+        {
+          "startMessage": 181,
+          "endMessage": 189,
+          "title": "arc 18",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 18 with enough text to be distinct",
+          "p2": "P2 dense 18",
+          "p3": "P3 18",
+          "p4": "P4anchor18",
+          "importance": 10,
+          "legacy": 0
+        },
+        {
+          "startMessage": 191,
+          "endMessage": 199,
+          "title": "arc 19",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 19 with enough text to be distinct",
+          "p2": "P2 dense 19",
+          "p3": "P3 19",
+          "p4": "P4anchor19",
+          "importance": 50,
+          "legacy": 0
+        },
+        {
+          "startMessage": 201,
+          "endMessage": 209,
+          "title": "arc 20",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 20 with enough text to be distinct",
+          "p2": "P2 dense 20",
+          "p3": "P3 20",
+          "p4": "",
+          "importance": 90,
+          "legacy": 0
+        },
+        {
+          "startMessage": 211,
+          "endMessage": 219,
+          "title": "arc 21",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 21 with enough text to be distinct",
+          "p2": "P2 dense 21",
+          "p3": "P3 21",
+          "p4": "P4anchor21",
+          "importance": 10,
+          "legacy": 0
+        },
+        {
+          "startMessage": 221,
+          "endMessage": 229,
+          "title": "arc 22",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 22 with enough text to be distinct",
+          "p2": "P2 dense 22",
+          "p3": "P3 22",
+          "p4": "P4anchor22",
+          "importance": 50,
+          "legacy": 0
+        },
+        {
+          "startMessage": 231,
+          "endMessage": 239,
+          "title": "arc 23",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 23 with enough text to be distinct",
+          "p2": "P2 dense 23",
+          "p3": "P3 23",
+          "p4": "P4anchor23",
+          "importance": 90,
+          "legacy": 0
+        },
+        {
+          "startMessage": 241,
+          "endMessage": 249,
+          "title": "arc 24",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 24 with enough text to be distinct",
+          "p2": "P2 dense 24",
+          "p3": "P3 24",
+          "p4": "",
+          "importance": 10,
+          "legacy": 0
+        },
+        {
+          "startMessage": 251,
+          "endMessage": 259,
+          "title": "arc 25",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 25 with enough text to be distinct",
+          "p2": "P2 dense 25",
+          "p3": "P3 25",
+          "p4": "P4anchor25",
+          "importance": 50,
+          "legacy": 0
+        },
+        {
+          "startMessage": 261,
+          "endMessage": 269,
+          "title": "arc 26",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 26 with enough text to be distinct",
+          "p2": "P2 dense 26",
+          "p3": "P3 26",
+          "p4": "P4anchor26",
+          "importance": 90,
+          "legacy": 0
+        },
+        {
+          "startMessage": 271,
+          "endMessage": 279,
+          "title": "arc 27",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 27 with enough text to be distinct",
+          "p2": "P2 dense 27",
+          "p3": "P3 27",
+          "p4": "P4anchor27",
+          "importance": 10,
+          "legacy": 0
+        },
+        {
+          "startMessage": 281,
+          "endMessage": 289,
+          "title": "arc 28",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 28 with enough text to be distinct",
+          "p2": "P2 dense 28",
+          "p3": "P3 28",
+          "p4": "",
+          "importance": 50,
+          "legacy": 0
+        },
+        {
+          "startMessage": 291,
+          "endMessage": 299,
+          "title": "arc 29",
+          "content": "",
+          "p1": "P1 verbose body for compartment number 29 with enough text to be distinct",
+          "p2": "P2 dense 29",
+          "p3": "P3 29",
+          "p4": "P4anchor29",
+          "importance": 90,
+          "legacy": 0
+        }
+      ],
+      "body": "## 1-9 · arc 0\nP2 dense 0\n\n## 11-19 · arc 1\nP1 verbose body for compartment number 1 with enough text to be distinct\n\n## 21-29 · arc 2\nP1 verbose body for compartment number 2 with enough text to be distinct\n\n## 31-39 · arc 3\nP2 dense 3\n\n## 41-49 · arc 4\nP1 verbose body for compartment number 4 with enough text to be distinct\n\n## 51-59 · arc 5\nP1 verbose body for compartment number 5 with enough text to be distinct\n\n## 61-69 · arc 6\nP2 dense 6\n\n## 71-79 · arc 7\nP1 verbose body for compartment number 7 with enough text to be distinct\n\n## 81-89 · arc 8\nP1 verbose body for compartment number 8 with enough text to be distinct\n\n## 91-99 · arc 9\nP2 dense 9\n\n## 101-109 · arc 10\nP1 verbose body for compartment number 10 with enough text to be distinct\n\n## 111-119 · arc 11\nP1 verbose body for compartment number 11 with enough text to be distinct\n\n## 121-129 · arc 12\nP2 dense 12\n\n## 131-139 · arc 13\nP1 verbose body for compartment number 13 with enough text to be distinct\n\n## 141-149 · arc 14\nP1 verbose body for compartment number 14 with enough text to be distinct\n\n## 151-159 · arc 15\nP1 verbose body for compartment number 15 with enough text to be distinct\n\n## 161-169 · arc 16\nP1 verbose body for compartment number 16 with enough text to be distinct\n\n## 171-179 · arc 17\nP1 verbose body for compartment number 17 with enough text to be distinct\n\n## 181-189 · arc 18\nP1 verbose body for compartment number 18 with enough text to be distinct\n\n## 191-199 · arc 19\nP1 verbose body for compartment number 19 with enough text to be distinct\n\n## 201-209 · arc 20\nP1 verbose body for compartment number 20 with enough text to be distinct\n\n## 211-219 · arc 21\nP1 verbose body for compartment number 21 with enough text to be distinct\n\n## 221-229 · arc 22\nP1 verbose body for compartment number 22 with enough text to be distinct\n\n## 231-239 · arc 23\nP1 verbose body for compartment number 23 with enough text to be distinct\n\n## 241-249 · arc 24\nP1 verbose body for compartment number 24 with enough text to be distinct\n\n## 251-259 · arc 25\nP1 verbose body for compartment number 25 with enough text to be distinct\n\n## 261-269 · arc 26\nP1 verbose body for compartment number 26 with enough text to be distinct\n\n## 271-279 · arc 27\nP1 verbose body for compartment number 27 with enough text to be distinct\n\n## 281-289 · arc 28\nP1 verbose body for compartment number 28 with enough text to be distinct\n\n## 291-299 · arc 29\nP1 verbose body for compartment number 29 with enough text to be distinct",
+      "budget": 10000000
+    },
+    {
+      "compartments": [
+        {
+          "startMessage": 1,
+          "endMessage": 2,
+          "title": "safe\n## 999-999 · forged\r\nline ## zl-forged ## zp-forged\n</session-history> & \"quoted\"",
+          "content": "",
+          "p1": "x < y & z",
+          "p2": "d",
+          "p3": "e",
+          "p4": "f",
+          "importance": 50,
+          "legacy": 0
+        }
+      ],
+      "body": "## 1-2 · safe ## 999-999 · forged line ## zl-forged ## zp-forged &lt;/session-history&gt; &amp; \"quoted\"\nx &lt; y &amp; z",
+      "budget": 10000000
+    },
+    {
+      "compartments": [
+        {
+          "startMessage": 3,
+          "endMessage": 4,
+          "title": "Heading guard",
+          "content": "",
+          "p1": "first\n## nested\nlast",
+          "p2": "d",
+          "p3": "e",
+          "p4": "f",
+          "importance": 50,
+          "legacy": 0
+        }
+      ],
+      "body": "## 3-4 · Heading guard\nfirst\n ## nested\nlast",
+      "budget": 10000000
+    },
+    {
+      "compartments": [
+        {
+          "startMessage": 1,
+          "endMessage": 2,
+          "title": "Dated",
+          "content": "",
+          "p1": "dated body",
+          "p2": "dense",
+          "p3": "brief",
+          "p4": "anchor",
+          "importance": 50,
+          "legacy": 0,
+          "startDate": "2026-01-02",
+          "endDate": "2026-01-03"
+        }
+      ],
+      "body": "## 1-2 · 2026-01-02→03 · Dated\ndated body",
+      "budget": 10000000
+    },
+    {
+      "compartments": [
+        {
+          "startMessage": 1,
+          "endMessage": 5,
+          "title": "LegU",
+          "content": "U: question\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "legacy": 1,
+          "importance": 50
+        },
+        {
+          "startMessage": 6,
+          "endMessage": 9,
+          "title": "LegNoU",
+          "content": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "legacy": 1,
+          "importance": 50
+        }
+      ],
+      "body": "## 1-5 · LegU\nU: question\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…\n\n## 6-9 · LegNoU",
+      "budget": 10000000
+    },
+    {
+      "compartments": [
+        {
+          "startMessage": 10,
+          "endMessage": 11,
+          "title": "Leg420",
+          "content": "U:\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀b",
+          "legacy": 1,
+          "importance": 50
+        }
+      ],
+      "body_utf16_hex": "00230023002000310030002d00310031002000b70020004c00650067003400320030000a0055003a000a00610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061d83d2026",
+      "budget": 10000000
+    },
+    {
+      "compartments": [
+        {
+          "startMessage": 12,
+          "endMessage": 13,
+          "title": "Leg1200",
+          "content": "U:\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa😀b",
+          "legacy": 1,
+          "importance": 50
+        }
+      ],
+      "body_utf16_hex": "00230023002000310032002d00310033002000b70020004c006500670031003200300030000a0055003a000a00610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061006100610061d83d2026",
+      "budget": 10000000,
+      "forced_tier": 2
+    },
+    {
+      "compartments": [
+        {
+          "startMessage": 1,
+          "endMessage": 2,
+          "title": "Pseudo",
+          "content": "flat body here",
+          "p1": "",
+          "legacy": 0,
+          "importance": 50
+        }
+      ],
+      "body": "## 1-2 · Pseudo\nflat body here",
+      "budget": 10000000
+    },
+    {
+      "compartments": [
+        {
+          "startMessage": 1,
+          "endMessage": 9,
+          "title": "v2a",
+          "content": "",
+          "p1": "P1 first",
+          "p2": "P2 first",
+          "p3": "P3 first",
+          "p4": "P4first",
+          "importance": 80,
+          "legacy": 0
+        },
+        {
+          "startMessage": 10,
+          "endMessage": 14,
+          "title": "leg",
+          "content": "U: x\ncccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "legacy": 1,
+          "importance": 50
+        },
+        {
+          "startMessage": 15,
+          "endMessage": 20,
+          "title": "v2b",
+          "content": "",
+          "p1": "P1 second",
+          "p2": "P2 second",
+          "p3": "P3 second",
+          "p4": "",
+          "importance": 30,
+          "legacy": 0
+        }
+      ],
+      "body": "## 1-9 · v2a\nP1 first\n\n## 10-14 · leg\nU: x\nccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc…\n\n## 15-20 · v2b\nP1 second",
+      "budget": 10000000
+    }
+  ]
+}

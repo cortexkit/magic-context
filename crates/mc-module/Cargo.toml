@@ -13,9 +13,13 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 subc-client-rs = { workspace = true }
 subc-protocol = { workspace = true }
+regex = "1"
+mc-tokenizer = { workspace = true }
+rusqlite = { workspace = true }
 
 [dev-dependencies]
 mc-mock-runner = { workspace = true }
+sha2 = { workspace = true }
 
 [[bin]]
 name = "ck-mc"

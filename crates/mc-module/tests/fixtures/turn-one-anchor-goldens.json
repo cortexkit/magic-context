@@ -1,0 +1,102 @@
+{
+  "description": "Historian turn-one fact anchors. `line` is a <facts> bullet without its leading '* '. `expect.compartment` and `expect.range` are the parsed anchor (null when absent); `expect.resolved` is the anchor resolved against `compartments` (the published compartments of the same reply, in order) and `blocks` (the [N]/[N-M] lines sent to the historian). The TypeScript parser and resolver (packages/plugin/src/features/magic-context/memory/turn-one-publication.test.ts) and the Rust parser and validator (crates/mc-module/src/historian_validate.rs) must both produce exactly these values. `keep` cases pin which facts of a validated reply are published (`keepPublishedFact` in TypeScript, `keep_side_channel` in Rust): `index` is the fact's anchor index (null when unanchored), `persisted` the number of published compartments, `droppedTail` whether a compartment of the reply was dropped, and `weakFinal` the index of a final compartment kept without lookahead (null when none).",
+  "compartments": [[10, 14], [15, 22]],
+  "blocks": [[10, 10], [11, 12], [13, 14], [15, 15], [16, 19], [20, 22]],
+  "cases": [
+    {
+      "name": "one printed line",
+      "line": "[at_compartment=2 messages=16-19] Cache TTL is 5 minutes.",
+      "expect": { "content": "Cache TTL is 5 minutes.", "compartment": 2, "range": [16, 19], "resolved": { "compartment": 2, "blocks": [[16, 19]] } }
+    },
+    {
+      "name": "single-message line written as one ordinal",
+      "line": "[at_compartment=1 messages=10] Keep `64 KiB` as the cap.",
+      "expect": { "content": "Keep `64 KiB` as the cap.", "compartment": 1, "range": [10, 10], "resolved": { "compartment": 1, "blocks": [[10, 10]] } }
+    },
+    {
+      "name": "range tiled by two consecutive lines",
+      "line": "[at_compartment=1 messages=11-14] Builds run on Linux.",
+      "expect": { "content": "Builds run on Linux.", "compartment": 1, "range": [11, 14], "resolved": { "compartment": 1, "blocks": [[11, 12], [13, 14]] } }
+    },
+    {
+      "name": "quoted values",
+      "line": "[at_compartment=\"2\" messages=\"15-15\"] Quoted anchor.",
+      "expect": { "content": "Quoted anchor.", "compartment": 2, "range": [15, 15], "resolved": { "compartment": 2, "blocks": [[15, 15]] } }
+    },
+    {
+      "name": "parenthesised origin_compartment with spaced dash",
+      "line": "(origin_compartment=1 messages=11 - 12) Spaced range.",
+      "expect": { "content": "Spaced range.", "compartment": 1, "range": [11, 12], "resolved": { "compartment": 1, "blocks": [[11, 12]] } }
+    },
+    {
+      "name": "explicitly unknown anchor",
+      "line": "[at_compartment=unknown] The source lines were not named.",
+      "expect": { "content": "The source lines were not named.", "compartment": null, "range": null, "resolved": null }
+    },
+    {
+      "name": "no anchor prefix",
+      "line": "Plain fact without an anchor.",
+      "expect": { "content": "Plain fact without an anchor.", "compartment": null, "range": null, "resolved": null }
+    },
+    {
+      "name": "compartment index without a range",
+      "line": "[at_compartment=2] Index only.",
+      "expect": { "content": "Index only.", "compartment": 2, "range": null, "resolved": null }
+    },
+    {
+      "name": "range starting inside a printed line",
+      "line": "[at_compartment=2 messages=17-19] Starts mid-line.",
+      "expect": { "content": "Starts mid-line.", "compartment": 2, "range": [17, 19], "resolved": null }
+    },
+    {
+      "name": "range ending inside a printed line",
+      "line": "[at_compartment=2 messages=16-21] Ends mid-line.",
+      "expect": { "content": "Ends mid-line.", "compartment": 2, "range": [16, 21], "resolved": null }
+    },
+    {
+      "name": "range in another compartment",
+      "line": "[at_compartment=1 messages=15] Wrong compartment.",
+      "expect": { "content": "Wrong compartment.", "compartment": 1, "range": [15, 15], "resolved": null }
+    },
+    {
+      "name": "range crossing a compartment boundary",
+      "line": "[at_compartment=1 messages=13-15] Crosses compartments.",
+      "expect": { "content": "Crosses compartments.", "compartment": 1, "range": [13, 15], "resolved": null }
+    },
+    {
+      "name": "index past the published compartments (a discarded tail)",
+      "line": "[at_compartment=3 messages=16-19] From the discarded tail.",
+      "expect": { "content": "From the discarded tail.", "compartment": 3, "range": [16, 19], "resolved": null }
+    },
+    {
+      "name": "zero index",
+      "line": "[at_compartment=0 messages=10] Zero index.",
+      "expect": { "content": "Zero index.", "compartment": 0, "range": [10, 10], "resolved": null }
+    },
+    {
+      "name": "reversed range",
+      "line": "[at_compartment=1 messages=12-11] Reversed.",
+      "expect": { "content": "Reversed.", "compartment": 1, "range": [12, 11], "resolved": null }
+    },
+    {
+      "name": "line cut from the text the historian was sent",
+      "line": "[at_compartment=1 messages=13-14] Past the cut.",
+      "blocks": [[10, 10], [11, 12]],
+      "expect": { "content": "Past the cut.", "compartment": 1, "range": [13, 14], "resolved": null }
+    }
+  ],
+  "keep": [
+    {"name": "anchored to a published compartment", "index": 1, "persisted": 2, "droppedTail": false, "weakFinal": null, "keep": true},
+    {"name": "anchored past the published compartments", "index": 3, "persisted": 2, "droppedTail": false, "weakFinal": null, "keep": false},
+    {"name": "zero index", "index": 0, "persisted": 2, "droppedTail": false, "weakFinal": null, "keep": false},
+    {"name": "unanchored, no weak tail", "index": null, "persisted": 2, "droppedTail": false, "weakFinal": null, "keep": true},
+    {"name": "discard-last: anchored to a published compartment", "index": 1, "persisted": 1, "droppedTail": true, "weakFinal": null, "keep": true},
+    {"name": "discard-last: anchored to the discarded tail", "index": 2, "persisted": 1, "droppedTail": true, "weakFinal": null, "keep": false},
+    {"name": "discard-last: unanchored", "index": null, "persisted": 1, "droppedTail": true, "weakFinal": null, "keep": false},
+    {"name": "forced keep: anchored before the weak final compartment", "index": 1, "persisted": 2, "droppedTail": false, "weakFinal": 2, "keep": true},
+    {"name": "forced keep: anchored to the weak final compartment", "index": 2, "persisted": 2, "droppedTail": false, "weakFinal": 2, "keep": false},
+    {"name": "forced keep: unanchored", "index": null, "persisted": 2, "droppedTail": false, "weakFinal": 2, "keep": false},
+    {"name": "forced keep whose final compartment was snapped away: anchored to a published compartment", "index": 2, "persisted": 2, "droppedTail": true, "weakFinal": 3, "keep": true},
+    {"name": "forced keep whose final compartment was snapped away: unanchored", "index": null, "persisted": 2, "droppedTail": true, "weakFinal": 3, "keep": false}
+  ]
+}
