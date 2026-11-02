@@ -1,0 +1,725 @@
+{
+  "parsed": [
+    {
+      "name": "tool_activity",
+      "text": "{}",
+      "length_capped": false,
+      "tool_activity": true,
+      "refused": "tool_activity"
+    },
+    {
+      "name": "length_capped",
+      "text": "{\"result\":{\"step\":\"turn_two\",\"decisions\":[]}}",
+      "length_capped": true,
+      "tool_activity": false,
+      "refused": "length_capped"
+    },
+    {
+      "name": "prose",
+      "text": "Here is my answer: {}",
+      "length_capped": false,
+      "tool_activity": false,
+      "refused": "unparseable"
+    },
+    {
+      "name": "wrong_step",
+      "text": "{\"result\":{\"step\":\"turn_one\",\"decisions\":[]}}",
+      "length_capped": false,
+      "tool_activity": false,
+      "refused": "schema_invalid"
+    },
+    {
+      "name": "no_decisions",
+      "text": "{\"result\":{\"step\":\"turn_two\"}}",
+      "length_capped": false,
+      "tool_activity": false,
+      "refused": "schema_invalid"
+    },
+    {
+      "name": "scores_not_array",
+      "text": "{\"result\":{\"step\":\"turn_two\",\"decisions\":[],\"scores\":{}}}",
+      "length_capped": false,
+      "tool_activity": false,
+      "refused": "schema_invalid"
+    },
+    {
+      "name": "every_action",
+      "text": "{\"result\":{\"step\":\"turn_two\",\"decisions\":[{\"fact_id\":1,\"check\":\"ok\",\"action\":\"new\",\"decided\":true},{\"fact_id\":2,\"check\":\"ok\",\"action\":\"abstain\"},{\"fact_id\":3,\"check\":\"ok\",\"action\":\"conflict\",\"target_id\":7},{\"fact_id\":4,\"check\":\"ok\",\"action\":\"covered\",\"target_id\":7,\"revision\":2,\"clauses\":[1,3],\"excerpt\":\"q\"},{\"fact_id\":5,\"check\":\"ok\",\"action\":\"edit\",\"target_id\":7,\"revision\":2,\"kept\":[{\"memory_id\":7,\"clause\":1}],\"removed\":[{\"memory_id\":7,\"clause\":2,\"block\":10,\"excerpt\":\"e\"}],\"added\":[{\"text\":\"New clause.\",\"block\":10,\"excerpt\":\"f\"}],\"final_text\":\"A. New clause.\"},{\"fact_id\":6,\"check\":\"ok\",\"action\":\"merge\",\"sources\":[{\"id\":7,\"revision\":2},{\"id\":8,\"revision\":1}],\"survivor_id\":7,\"kept\":[],\"replaced\":[{\"memory_id\":8,\"clause\":1,\"block\":11,\"excerpt\":\"g\"}],\"final_text\":\"Merged.\"},{\"fact_id\":9,\"check\":\"ok\",\"action\":\"retire\",\"target_id\":7}],\"scores\":[{\"item\":1,\"importance\":70,\"class\":\"rule\"},{\"item\":2,\"importance\":0,\"class\":\"rule\"},{\"item\":3,\"importance\":50,\"class\":\"x\"},{\"item\":3,\"importance\":60,\"class\":\"y\"}]}}",
+      "length_capped": false,
+      "tool_activity": false,
+      "schema_valid": false,
+      "decisions": [
+        [
+          1,
+          {
+            "fact_id": 1,
+            "ordinal": 0,
+            "action": "new",
+            "target_id": null,
+            "revision": null,
+            "sources": null,
+            "survivor_id": null,
+            "clauses": null,
+            "decided": true,
+            "excerpt": null,
+            "removed": [],
+            "replaced": [],
+            "kept": [],
+            "added": [],
+            "final_text": null
+          }
+        ],
+        [
+          2,
+          {
+            "fact_id": 2,
+            "ordinal": 1,
+            "action": "abstain",
+            "target_id": null,
+            "revision": null,
+            "sources": null,
+            "survivor_id": null,
+            "clauses": null,
+            "decided": null,
+            "excerpt": null,
+            "removed": [],
+            "replaced": [],
+            "kept": [],
+            "added": [],
+            "final_text": null
+          }
+        ],
+        [
+          3,
+          {
+            "fact_id": 3,
+            "ordinal": 2,
+            "action": "conflict",
+            "target_id": 7,
+            "revision": null,
+            "sources": null,
+            "survivor_id": null,
+            "clauses": null,
+            "decided": null,
+            "excerpt": null,
+            "removed": [],
+            "replaced": [],
+            "kept": [],
+            "added": [],
+            "final_text": null
+          }
+        ],
+        [
+          4,
+          {
+            "fact_id": 4,
+            "ordinal": 3,
+            "action": "covered",
+            "target_id": 7,
+            "revision": 2,
+            "sources": null,
+            "survivor_id": null,
+            "clauses": [
+              1,
+              3
+            ],
+            "decided": null,
+            "excerpt": "q",
+            "removed": [],
+            "replaced": [],
+            "kept": [],
+            "added": [],
+            "final_text": null
+          }
+        ],
+        [
+          5,
+          {
+            "fact_id": 5,
+            "ordinal": 4,
+            "action": "edit",
+            "target_id": 7,
+            "revision": 2,
+            "sources": null,
+            "survivor_id": null,
+            "clauses": null,
+            "decided": null,
+            "excerpt": null,
+            "removed": [
+              {
+                "memoryId": 7,
+                "clause": 2,
+                "block": 10,
+                "excerpt": "e"
+              }
+            ],
+            "replaced": [],
+            "kept": [
+              [
+                7,
+                1
+              ]
+            ],
+            "added": [
+              {
+                "text": "New clause.",
+                "block": 10,
+                "excerpt": "f"
+              }
+            ],
+            "final_text": "A. New clause."
+          }
+        ],
+        [
+          6,
+          {
+            "fact_id": 6,
+            "ordinal": 5,
+            "action": "merge",
+            "target_id": null,
+            "revision": null,
+            "sources": [
+              [
+                7,
+                2
+              ],
+              [
+                8,
+                1
+              ]
+            ],
+            "survivor_id": 7,
+            "clauses": null,
+            "decided": null,
+            "excerpt": null,
+            "removed": [],
+            "replaced": [
+              {
+                "memoryId": 8,
+                "clause": 1,
+                "block": 11,
+                "excerpt": "g"
+              }
+            ],
+            "kept": [],
+            "added": [],
+            "final_text": "Merged."
+          }
+        ],
+        [
+          9,
+          {
+            "fact_id": 9,
+            "ordinal": 6,
+            "action": "retire",
+            "target_id": 7,
+            "revision": null,
+            "sources": null,
+            "survivor_id": null,
+            "clauses": null,
+            "decided": null,
+            "excerpt": null,
+            "removed": [],
+            "replaced": [],
+            "kept": [],
+            "added": [],
+            "final_text": null
+          }
+        ]
+      ],
+      "scores": [
+        [
+          1,
+          70,
+          "rule"
+        ]
+      ]
+    },
+    {
+      "name": "malformed_and_duplicates",
+      "text": "{\"result\":{\"step\":\"turn_two\",\"decisions\":[{\"fact_id\":1,\"check\":\"ok\",\"action\":\"abstain\",\"decided\":false},{\"fact_id\":2,\"check\":\"ok\",\"action\":\"covered\",\"target_id\":7,\"revision\":2,\"clauses\":[]},{\"fact_id\":3,\"check\":\"ok\",\"action\":\"edit\",\"target_id\":7,\"revision\":2,\"kept\":[],\"final_text\":\"x\",\"removed\":null},{\"fact_id\":4,\"check\":\"ok\",\"action\":\"new\"},{\"fact_id\":4,\"check\":\"ok\",\"action\":\"abstain\"},{\"check\":\"no fact\"},{\"fact_id\":5,\"check\":\"ok\",\"action\":\"merge\",\"sources\":[{\"id\":1,\"revision\":1}],\"survivor_id\":1,\"kept\":[],\"final_text\":\"x\"},{\"fact_id\":6,\"action\":\"new\"},{\"fact_id\":7,\"check\":\"ok\",\"action\":\"new\",\"decided\":\"yes\"}]}}",
+      "length_capped": false,
+      "tool_activity": false,
+      "schema_valid": false,
+      "decisions": [
+        [
+          1,
+          "malformed"
+        ],
+        [
+          2,
+          "malformed"
+        ],
+        [
+          3,
+          "malformed"
+        ],
+        [
+          4,
+          "malformed"
+        ],
+        [
+          5,
+          "malformed"
+        ],
+        [
+          6,
+          "malformed"
+        ],
+        [
+          7,
+          "malformed"
+        ]
+      ],
+      "scores": []
+    }
+  ],
+  "prompts": [
+    {
+      "name": "plain",
+      "facts": [
+        {
+          "factId": 1,
+          "category": "ARCHITECTURE",
+          "content": "Fact 1 word word word word word",
+          "sourceSessionId": "ses_1",
+          "anchorKnown": true,
+          "backlog": false,
+          "blocks": [
+            {
+              "startOrdinal": 11,
+              "endOrdinal": 13,
+              "role": "user",
+              "parts": [
+                "part 1",
+                "shared"
+              ]
+            },
+            {
+              "startOrdinal": 40,
+              "endOrdinal": 40,
+              "role": "assistant",
+              "parts": [
+                "same block"
+              ]
+            }
+          ],
+          "neighbours": [
+            {
+              "id": 101,
+              "revision": 3,
+              "category": "NAMING",
+              "content": "First clause. Second clause, e.g. with detail. Third — spaced."
+            }
+          ]
+        },
+        {
+          "factId": 2,
+          "category": "ARCHITECTURE",
+          "content": "Fact 2 word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+          "sourceSessionId": "ses_0",
+          "anchorKnown": true,
+          "backlog": false,
+          "blocks": [
+            {
+              "startOrdinal": 12,
+              "endOrdinal": 14,
+              "role": "user",
+              "parts": [
+                "part 2",
+                "shared"
+              ]
+            },
+            {
+              "startOrdinal": 40,
+              "endOrdinal": 40,
+              "role": "assistant",
+              "parts": [
+                "same block"
+              ]
+            }
+          ],
+          "neighbours": [
+            {
+              "id": 100,
+              "revision": 3,
+              "category": "NAMING",
+              "content": "First clause. Second clause, e.g. with detail. Third — spaced."
+            }
+          ]
+        },
+        {
+          "factId": 3,
+          "category": "ARCHITECTURE",
+          "content": "Fact 3 word word word word word word word word word word word word word word word word word word word word",
+          "sourceSessionId": "ses_1",
+          "anchorKnown": false,
+          "backlog": false,
+          "blocks": [],
+          "neighbours": []
+        }
+      ],
+      "items": [],
+      "lexical_only": false,
+      "deferred": [
+        0,
+        0
+      ],
+      "prompt": "Turn two: check each candidate fact, then compare it with project memory.\nallowed_fact_ids: [1,2,3]\n\n1. Return exactly one decision for each id in allowed_fact_ids, and no others. The bullet numbers and compartment numbers in your turn-one reply are not fact ids.\n2. Check the fact first, using \"What becomes a memory\" in the system prompt. The whole chunk is above, in turn one's <new_messages>. Read the lines the fact cites and every line after them:\n   - Is it stated in this chunk's new messages?\n   - What settles it: a `U:` decision, a ruling the agent acted on, the agent's own verification or work that went live, or only a proposal to the user, a plan or another agent's agreement? Delivered, held for review or waiting for a window is not live.\n   - Does a later line correct, reverse, measure or replace it, or call it an expectation or send it off to be checked?\n   - Is it a hypothesis, an open question, a one-off step, a temporary rule or a value that changes on the next build? A rule that holds \"until\", \"for now\" or \"for this window\" is temporary, even when decided.\n   - Would it still apply to the next, different task? A ruling that only governed this task, this worker or this incident is a one-off step, even when acted on.\n   If any check fails, the action is `abstain`.\n   If it is an accepted decision that isn't built and its text doesn't start with `Decided:`, it still passes: use `new` with `\"decided\": true`, or an edit whose `final_text` starts with `Decided:`.\n3. Only a fact that passes is compared with memory. Its neighbouring memories are listed under it:\n   - `covered`: a neighbour already says the same thing.\n   - `edit` or `replaces`: a neighbour says something this fact updates or overturns.\n   - `merge`: two or more neighbours and this fact belong in one memory.\n   - `conflict`: it contradicts a neighbour, and the chunk doesn't settle which is right.\n   - `new`: no neighbour covers it.\n4. Write `check` before `action`. Example: `\"check\": \"A proposes it at [410-412]; U accepts at [415]. Not built in this chunk; the text starts with Decided:. Passes.\"`\n5. In `removed`, `replaced` and `added`, `block` is the start ordinal printed on one of that fact's source blocks, and `excerpt` is exact text from that block. Only that fact's neighbours are eligible targets.\n\n\n## Fact 1 [ARCHITECTURE] from session ses_1\nFact 1 word word word word word\nSource block refs: source:9c6964e8f08fcac180eab5ce24b1ebc986b1d8cc9ddb0822bf019895b5612058, source:97a5a69cdcf5f23115a323d3cb91f3e4c9992f80d85f8d1ca8da6c5737f6394f\nNeighbour refs:\nmemory:101@3\n\n## Fact 2 [ARCHITECTURE] from session ses_0\nFact 2 word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word\nSource block refs: source:c27cc248670022827aac6a3892008d0a2b22d1ca9f7ecbcfdb9aaf21735bd5d2, source:4d0149c96638b05cd8a17c98df5c742a55f8d45a780e6b0450f4b482377666eb\nNeighbour refs:\nmemory:100@3\n\n## Fact 3 [ARCHITECTURE] from session ses_1\nFact 3 word word word word word word word word word word word word word word word word word word word word\nSource blocks: unknown (this fact cannot evidence an edit).\nNeighbour refs:\n- none retrieved\n\n## Shared source blocks\n\n### source:9c6964e8f08fcac180eab5ce24b1ebc986b1d8cc9ddb0822bf019895b5612058 (session ses_1)\n[11-13] user: part 1 / shared\n\n### source:97a5a69cdcf5f23115a323d3cb91f3e4c9992f80d85f8d1ca8da6c5737f6394f (session ses_1)\n[40] assistant: same block\n\n### source:c27cc248670022827aac6a3892008d0a2b22d1ca9f7ecbcfdb9aaf21735bd5d2 (session ses_0)\n[12-14] user: part 2 / shared\n\n### source:4d0149c96638b05cd8a17c98df5c742a55f8d45a780e6b0450f4b482377666eb (session ses_0)\n[40] assistant: same block\n\n## Shared neighbouring memories\n\n### memory:101@3\n- #101 rev 3 [NAMING]\n  c1: First clause. \n  c2: Second clause, e.g. with detail. \n  c3: Third — \n  c4: spaced.\n\n### memory:100@3\n- #100 rev 3 [NAMING]\n  c1: First clause. \n  c2: Second clause, e.g. with detail. \n  c3: Third — \n  c4: spaced."
+    },
+    {
+      "name": "lexical_deferred",
+      "facts": [
+        {
+          "factId": 4,
+          "category": "ARCHITECTURE",
+          "content": "Fact 4 word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+          "sourceSessionId": "ses_0",
+          "anchorKnown": true,
+          "backlog": true,
+          "blocks": [
+            {
+              "startOrdinal": 14,
+              "endOrdinal": 16,
+              "role": "user",
+              "parts": [
+                "part 4",
+                "shared"
+              ]
+            },
+            {
+              "startOrdinal": 40,
+              "endOrdinal": 40,
+              "role": "assistant",
+              "parts": [
+                "same block"
+              ]
+            }
+          ],
+          "neighbours": [
+            {
+              "id": 100,
+              "revision": 3,
+              "category": "NAMING",
+              "content": "First clause. Second clause, e.g. with detail. Third — spaced."
+            }
+          ]
+        },
+        {
+          "factId": 5,
+          "category": "ARCHITECTURE",
+          "content": "Fact 5 word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+          "sourceSessionId": "ses_1",
+          "anchorKnown": true,
+          "backlog": true,
+          "blocks": [
+            {
+              "startOrdinal": 15,
+              "endOrdinal": 17,
+              "role": "user",
+              "parts": [
+                "part 5",
+                "shared"
+              ]
+            },
+            {
+              "startOrdinal": 40,
+              "endOrdinal": 40,
+              "role": "assistant",
+              "parts": [
+                "same block"
+              ]
+            }
+          ],
+          "neighbours": [
+            {
+              "id": 101,
+              "revision": 3,
+              "category": "NAMING",
+              "content": "First clause. Second clause, e.g. with detail. Third — spaced."
+            }
+          ]
+        },
+        {
+          "factId": 6,
+          "category": "ARCHITECTURE",
+          "content": "Fact 6 word word word word word word word word word word",
+          "sourceSessionId": "ses_0",
+          "anchorKnown": false,
+          "backlog": true,
+          "blocks": [],
+          "neighbours": []
+        }
+      ],
+      "items": [
+        {
+          "item": 1,
+          "memoryId": 500,
+          "content": "An agent memory.",
+          "excerpt": "the excerpt"
+        },
+        {
+          "item": 2,
+          "memoryId": 501,
+          "content": "Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. ",
+          "excerpt": "more"
+        }
+      ],
+      "lexical_only": true,
+      "deferred": [
+        2,
+        1
+      ],
+      "prompt": "Turn two: check each candidate fact, then compare it with project memory.\nallowed_fact_ids: [4,5,6]\n\n1. Return exactly one decision for each id in allowed_fact_ids, and no others. The bullet numbers and compartment numbers in your turn-one reply are not fact ids.\n2. Check the fact first, using \"What becomes a memory\" in the system prompt. The whole chunk is above, in turn one's <new_messages>. Read the lines the fact cites and every line after them:\n   - Is it stated in this chunk's new messages?\n   - What settles it: a `U:` decision, a ruling the agent acted on, the agent's own verification or work that went live, or only a proposal to the user, a plan or another agent's agreement? Delivered, held for review or waiting for a window is not live.\n   - Does a later line correct, reverse, measure or replace it, or call it an expectation or send it off to be checked?\n   - Is it a hypothesis, an open question, a one-off step, a temporary rule or a value that changes on the next build? A rule that holds \"until\", \"for now\" or \"for this window\" is temporary, even when decided.\n   - Would it still apply to the next, different task? A ruling that only governed this task, this worker or this incident is a one-off step, even when acted on.\n   If any check fails, the action is `abstain`.\n   If it is an accepted decision that isn't built and its text doesn't start with `Decided:`, it still passes: use `new` with `\"decided\": true`, or an edit whose `final_text` starts with `Decided:`.\n3. Only a fact that passes is compared with memory. Its neighbouring memories are listed under it:\n   - `covered`: a neighbour already says the same thing.\n   - `edit` or `replaces`: a neighbour says something this fact updates or overturns.\n   - `merge`: two or more neighbours and this fact belong in one memory.\n   - `conflict`: it contradicts a neighbour, and the chunk doesn't settle which is right.\n   - `new`: no neighbour covers it.\n4. Write `check` before `action`. Example: `\"check\": \"A proposes it at [410-412]; U accepts at [415]. Not built in this chunk; the text starts with Decided:. Passes.\"`\n5. In `removed`, `replaced` and `added`, `block` is the start ordinal printed on one of that fact's source blocks, and `excerpt` is exact text from that block. Only that fact's neighbours are eligible targets.\n\nNeighbour retrieval was lexical-only for this request (no usable stored embeddings); a fact with no neighbour listed may still duplicate an existing memory.\nCoverage: this request is partial. 2 pending fact(s) and 1 agent memory item(s) were left out to fit the request size. They remain eligible for a later run, but no later request is guaranteed; judge only what is listed here.\n\n## Fact 4 (backlog) [ARCHITECTURE] from session ses_0\nFact 4 word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word\nSource block refs: source:996976b662f90e180c570d8cf4957a74c7a68bf00a179958678a3aa58f27e238, source:4d0149c96638b05cd8a17c98df5c742a55f8d45a780e6b0450f4b482377666eb\nNeighbour refs:\nmemory:100@3\n\n## Fact 5 (backlog) [ARCHITECTURE] from session ses_1\nFact 5 word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word\nSource block refs: source:8f511a26e648cd1abf85823eaca20047bad7f19050f2eb990e26412744d3173f, source:97a5a69cdcf5f23115a323d3cb91f3e4c9992f80d85f8d1ca8da6c5737f6394f\nNeighbour refs:\nmemory:101@3\n\n## Fact 6 (backlog) [ARCHITECTURE] from session ses_0\nFact 6 word word word word word word word word word word\nSource blocks: unknown (this fact cannot evidence an edit).\nNeighbour refs:\n- none retrieved\n\n## Shared source blocks\n\n### source:996976b662f90e180c570d8cf4957a74c7a68bf00a179958678a3aa58f27e238 (session ses_0)\n[14-16] user: part 4 / shared\n\n### source:4d0149c96638b05cd8a17c98df5c742a55f8d45a780e6b0450f4b482377666eb (session ses_0)\n[40] assistant: same block\n\n### source:8f511a26e648cd1abf85823eaca20047bad7f19050f2eb990e26412744d3173f (session ses_1)\n[15-17] user: part 5 / shared\n\n### source:97a5a69cdcf5f23115a323d3cb91f3e4c9992f80d85f8d1ca8da6c5737f6394f (session ses_1)\n[40] assistant: same block\n\n## Shared neighbouring memories\n\n### memory:100@3\n- #100 rev 3 [NAMING]\n  c1: First clause. \n  c2: Second clause, e.g. with detail. \n  c3: Third — \n  c4: spaced.\n\n### memory:101@3\n- #101 rev 3 [NAMING]\n  c1: First clause. \n  c2: Second clause, e.g. with detail. \n  c3: Third — \n  c4: spaced.\n\n## Agent memories to score\n\n### Item 1 (memory #500)\nAn agent memory.\nExcerpt:\nthe excerpt\n\n### Item 2 (memory #501)\nAnother agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. \nExcerpt:\nmore"
+    }
+  ],
+  "fit_input": {
+    "facts": [
+      {
+        "factId": 1,
+        "category": "ARCHITECTURE",
+        "content": "Fact 1 word word word word word",
+        "sourceSessionId": "ses_1",
+        "anchorKnown": true,
+        "backlog": false,
+        "blocks": [
+          {
+            "startOrdinal": 11,
+            "endOrdinal": 13,
+            "role": "user",
+            "parts": [
+              "part 1",
+              "shared"
+            ]
+          },
+          {
+            "startOrdinal": 40,
+            "endOrdinal": 40,
+            "role": "assistant",
+            "parts": [
+              "same block"
+            ]
+          }
+        ],
+        "neighbours": [
+          {
+            "id": 101,
+            "revision": 3,
+            "category": "NAMING",
+            "content": "First clause. Second clause, e.g. with detail. Third — spaced."
+          }
+        ]
+      },
+      {
+        "factId": 2,
+        "category": "ARCHITECTURE",
+        "content": "Fact 2 word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+        "sourceSessionId": "ses_0",
+        "anchorKnown": true,
+        "backlog": false,
+        "blocks": [
+          {
+            "startOrdinal": 12,
+            "endOrdinal": 14,
+            "role": "user",
+            "parts": [
+              "part 2",
+              "shared"
+            ]
+          },
+          {
+            "startOrdinal": 40,
+            "endOrdinal": 40,
+            "role": "assistant",
+            "parts": [
+              "same block"
+            ]
+          }
+        ],
+        "neighbours": [
+          {
+            "id": 100,
+            "revision": 3,
+            "category": "NAMING",
+            "content": "First clause. Second clause, e.g. with detail. Third — spaced."
+          }
+        ]
+      },
+      {
+        "factId": 3,
+        "category": "ARCHITECTURE",
+        "content": "Fact 3 word word word word word word word word word word word word word word word word word word word word",
+        "sourceSessionId": "ses_1",
+        "anchorKnown": false,
+        "backlog": false,
+        "blocks": [],
+        "neighbours": []
+      },
+      {
+        "factId": 4,
+        "category": "ARCHITECTURE",
+        "content": "Fact 4 word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+        "sourceSessionId": "ses_0",
+        "anchorKnown": true,
+        "backlog": true,
+        "blocks": [
+          {
+            "startOrdinal": 14,
+            "endOrdinal": 16,
+            "role": "user",
+            "parts": [
+              "part 4",
+              "shared"
+            ]
+          },
+          {
+            "startOrdinal": 40,
+            "endOrdinal": 40,
+            "role": "assistant",
+            "parts": [
+              "same block"
+            ]
+          }
+        ],
+        "neighbours": [
+          {
+            "id": 100,
+            "revision": 3,
+            "category": "NAMING",
+            "content": "First clause. Second clause, e.g. with detail. Third — spaced."
+          }
+        ]
+      },
+      {
+        "factId": 5,
+        "category": "ARCHITECTURE",
+        "content": "Fact 5 word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+        "sourceSessionId": "ses_1",
+        "anchorKnown": true,
+        "backlog": true,
+        "blocks": [
+          {
+            "startOrdinal": 15,
+            "endOrdinal": 17,
+            "role": "user",
+            "parts": [
+              "part 5",
+              "shared"
+            ]
+          },
+          {
+            "startOrdinal": 40,
+            "endOrdinal": 40,
+            "role": "assistant",
+            "parts": [
+              "same block"
+            ]
+          }
+        ],
+        "neighbours": [
+          {
+            "id": 101,
+            "revision": 3,
+            "category": "NAMING",
+            "content": "First clause. Second clause, e.g. with detail. Third — spaced."
+          }
+        ]
+      },
+      {
+        "factId": 6,
+        "category": "ARCHITECTURE",
+        "content": "Fact 6 word word word word word word word word word word",
+        "sourceSessionId": "ses_0",
+        "anchorKnown": false,
+        "backlog": true,
+        "blocks": [],
+        "neighbours": []
+      }
+    ],
+    "items": [
+      {
+        "item": 1,
+        "memoryId": 500,
+        "content": "An agent memory.",
+        "excerpt": "the excerpt"
+      },
+      {
+        "item": 2,
+        "memoryId": 501,
+        "content": "Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. Another agent memory. ",
+        "excerpt": "more"
+      }
+    ]
+  },
+  "fits": [
+    {
+      "max_length": 3000,
+      "facts": [
+        4
+      ],
+      "items": [],
+      "deferred": [
+        5,
+        2
+      ],
+      "prompt_sha256": "84fd7e335ed17d1ea2c1a6b4bdcfa515739594350216d28ed96908edd8fb6062"
+    },
+    {
+      "max_length": 6000,
+      "facts": [
+        1,
+        3,
+        4
+      ],
+      "items": [
+        1,
+        2
+      ],
+      "deferred": [
+        3,
+        0
+      ],
+      "prompt_sha256": "8c11238bb7f110c29e48174be139faa452d661c67d7a6fd88b094b302115394b"
+    },
+    {
+      "max_length": 12000,
+      "facts": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "items": [
+        1,
+        2
+      ],
+      "deferred": [
+        0,
+        0
+      ],
+      "prompt_sha256": "87403922f581ef9f633dc0fba5484b266b2d72996024c28aef119826f7246813"
+    },
+    {
+      "max_length": 1000000,
+      "facts": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "items": [
+        1,
+        2
+      ],
+      "deferred": [
+        0,
+        0
+      ],
+      "prompt_sha256": "87403922f581ef9f633dc0fba5484b266b2d72996024c28aef119826f7246813"
+    }
+  ]
+}
