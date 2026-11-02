@@ -287,6 +287,23 @@ impl ContextDb {
         transaction.commit().map_err(|error| error.to_string())
     }
 
+    /// Delete a session's summaries from `sequence` on, after a revert removed
+    /// messages they cover.
+    pub fn delete_compartments_from(
+        &self,
+        harness: &str,
+        session: &str,
+        sequence: i64,
+    ) -> Result<(), String> {
+        self.lock()
+            .execute(
+                "DELETE FROM compartments WHERE session_id = ?1 AND harness = ?2 AND sequence >= ?3",
+                params![session, harness, sequence],
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.connection
             .lock()

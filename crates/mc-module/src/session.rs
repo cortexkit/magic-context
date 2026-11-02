@@ -68,6 +68,10 @@ pub struct Session {
     /// The next view re-renders `m[0]`, because the provider cache is lost
     /// anyway.
     fold_due: bool,
+    /// A revert removed summaries the head shows. The next notice rebuilds
+    /// the head whatever the usage: the model must not keep seeing history
+    /// that was undone.
+    head_stale: bool,
 }
 
 impl Session {
@@ -89,6 +93,7 @@ impl Session {
             baseline: None,
             summarizing: false,
             fold_due: false,
+            head_stale: false,
         }
     }
 
@@ -129,6 +134,7 @@ impl Session {
         &mut self,
         client: &C,
         settings: &Settings,
+        db: Option<&ContextDb>,
         notice: NoticeRequest,
     ) -> Option<run::Request> {
         if notice.seq <= self.seq && self.seq != 0 {
@@ -141,6 +147,7 @@ impl Session {
             match event {
                 Event::TranscriptChanged { from_ordinal } => {
                     self.index.truncate(*from_ordinal);
+                    self.forget_summaries_from(*from_ordinal, db);
                 }
                 Event::ViewRefused { .. } => refused = true,
                 Event::MarkerWritten { .. } => {}
@@ -171,6 +178,13 @@ impl Session {
         }
         let summary = self.summary_due(settings);
         let force = pass::in_force_band(&self.conditions, settings);
+        if std::mem::take(&mut self.head_stale) {
+            let (view, _) = self.build(settings, None);
+            if let Some(view) = view {
+                self.publish(client, view).await;
+            }
+            return summary;
+        }
         if execute
             && (force || !self.summary_on_its_way())
             && !pass::signed_thinking_hold(self.index.entries(), &self.conditions, settings)
@@ -226,6 +240,37 @@ impl Session {
         })
     }
 
+    /// After a revert removed messages from `ordinal` on, forget the summaries
+    /// that cover any of them, as standalone does. A head that showed one is
+    /// rendered again from what remains.
+    fn forget_summaries_from(&mut self, ordinal: u64, db: Option<&ContextDb>) {
+        let number = ordinal + 1;
+        let Some(first) = self
+            .summaries
+            .iter()
+            .position(|summary| summary.end_message as u64 >= number)
+        else {
+            return;
+        };
+        let sequence = self.summaries[first].sequence;
+        if let Some(db) = db {
+            if let Err(error) =
+                db.delete_compartments_from(&self.key.harness, &self.key.session, sequence)
+            {
+                eprintln!(
+                    "ck-mc: session {}: deleting reverted summaries failed: {error}",
+                    self.key.session
+                );
+            }
+        }
+        self.summaries.truncate(first);
+        self.baseline = None;
+        self.head_stale = self
+            .latest
+            .as_ref()
+            .is_some_and(|view| view.edits.iter().any(|edit| head::is_head(&edit.op)));
+    }
+
     /// The last ordinal a summary covers.
     fn summarized_through(&self) -> Option<u64> {
         self.summaries
@@ -256,7 +301,13 @@ impl Session {
                 return;
             }
         };
-        if validated.compartments.is_empty() {
+        // A revert during the run may have removed what it summarized.
+        let present = |mid: &str| self.index.entries().iter().any(|entry| entry.mid == mid);
+        if validated.compartments.is_empty()
+            || !validated.compartments.iter().all(|summary| {
+                present(&summary.end_message_id) && present(&summary.start_message_id)
+            })
+        {
             return;
         }
         if let Some(db) = db {
@@ -614,12 +665,15 @@ impl Session {
     /// it covers.
     fn seal(&mut self, ops: Vec<EditOp>, covered: &[lanes::PartKey]) -> Option<View> {
         let version = self.version + 1;
+        // With no summary left, the head and the cut go with them.
+        let no_history = self.summaries.is_empty();
         let built = view_builder::next_view(
             self.latest.as_ref(),
             self.index.entries(),
             ops,
             &self.conditions.rules,
             version,
+            |op| no_history && (head::is_head(op) || matches!(op, EditOp::Cut { .. })),
         );
         for part in covered {
             self.queued.remove(part);

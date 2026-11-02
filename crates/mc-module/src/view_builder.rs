@@ -16,13 +16,15 @@ use std::collections::HashSet;
 use ck_contract_draft::view::{self, edits_for_transcript, Edit, EditOp, View, ViewRefusal};
 
 /// The next view, or `None` when it would change nothing: no new edit, and
-/// nothing of the previous view left out.
+/// nothing of the previous view left out. Carried edits for which `retire`
+/// holds are left out, such as a history head with no summaries left to show.
 pub fn next_view(
     previous: Option<&View>,
     entries: &[Entry],
     new_ops: Vec<EditOp>,
     rules: &ProviderRules,
     version: u64,
+    retire: impl Fn(&EditOp) -> bool,
 ) -> Result<Option<View>, ViewRefusal> {
     let previous_edits = previous
         .map(|view| view.edits.as_slice())
@@ -54,7 +56,7 @@ pub fn next_view(
             new_cut.is_some_and(|cut| ordinal_of(mid).is_some_and(|ordinal| ordinal <= cut))
         }
     };
-    edits.retain(|edit| !replaced(edit));
+    edits.retain(|edit| !replaced(edit) && !retire(&edit.op));
     let new_ops: Vec<EditOp> = new_ops
         .into_iter()
         .filter(|op| match op {

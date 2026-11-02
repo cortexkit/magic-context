@@ -222,8 +222,9 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                     },
                     Job::Notice(notice) => {
                         if let Some(session) = &mut session {
-                            if let Some(request) =
-                                session.notice(&inner.client, &inner.settings, notice).await
+                            if let Some(request) = session
+                                .notice(&inner.client, &inner.settings, inner.db.as_ref(), notice)
+                                .await
                             {
                                 start_summary(&inner, own.clone(), request);
                             }

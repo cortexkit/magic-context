@@ -762,10 +762,20 @@ async fn a_head_summarizes_older_turns_and_shows_them_in_place_of_the_messages()
     let texts: Vec<String> = rendered
         .iter()
         .take(2)
-        .map(|message| message.parts.iter().filter_map(|part| message.wire_text(part)).collect())
+        .map(|message| {
+            message
+                .parts
+                .iter()
+                .filter_map(|part| message.wire_text(part))
+                .collect()
+        })
         .collect();
     assert!(texts[0].starts_with("<session-history>"), "{:?}", texts[0]);
-    assert!(texts[1].starts_with("<session-history-since>"), "{:?}", texts[1]);
+    assert!(
+        texts[1].starts_with("<session-history-since>"),
+        "{:?}",
+        texts[1]
+    );
     let first_kept = rendered
         .iter()
         .find_map(|message| match &message.source {
@@ -774,10 +784,11 @@ async fn a_head_summarizes_older_turns_and_shows_them_in_place_of_the_messages()
         })
         .unwrap();
     assert!(first_kept > 0, "nothing was cut");
-    assert!(rendered.iter().any(|message| message
-        .parts
+    assert!(rendered
         .iter()
-        .any(|part| message.wire_text(part).is_some_and(|text| text.contains("And c.rs.")))));
+        .any(|message| message.parts.iter().any(|part| message
+            .wire_text(part)
+            .is_some_and(|text| text.contains("And c.rs.")))));
 
     // Every request between views extends the one before it.
     let requests = &runner.report.requests;
@@ -785,5 +796,109 @@ async fn a_head_summarizes_older_turns_and_shows_them_in_place_of_the_messages()
         if pair[0].view == pair[1].view {
             assert_eq!(pair[1].usage.cache_read_tokens, pair[0].usage.prompt_tokens);
         }
+    }
+}
+
+/// The texts of the two history messages at the start, as the model sees them.
+fn head_texts(host: &Host) -> (String, String) {
+    let rendered = host.rendered();
+    let text = |index: usize| -> String {
+        let message = &rendered[index];
+        message
+            .parts
+            .iter()
+            .filter_map(|part| message.wire_text(part))
+            .collect()
+    };
+    (text(0), text(1))
+}
+
+#[tokio::test]
+async fn a_lost_cache_folds_the_newer_summaries_into_the_baseline() {
+    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut steps = Vec::new();
+    for prompt in [
+        "Look at a.rs.",
+        "Now b.rs.",
+        "And c.rs.",
+        "Then d.rs.",
+        "Last e.rs.",
+    ] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let (_, m1) = head_texts(runner.host());
+    assert!(
+        m1.contains("<new-compartments>"),
+        "no newer summary before the fold: {m1}"
+    );
+
+    // The cache expires; the ride before the next request folds m[1] into m[0].
+    runner
+        .play(&[Step::Wait { ms: 400_000 }, user("Next.")])
+        .await;
+    runner.play(&[answer()]).await;
+    assert_clean(&runner);
+    let ride = runner.report.rides.last().unwrap();
+    assert_eq!(ride.cause, RideCause::CacheExpired);
+    assert!(ride.got_view);
+    let (m0, m1) = head_texts(runner.host());
+    assert!(
+        m1.starts_with("<session-history-since>(no new content"),
+        "{m1}"
+    );
+    let newest = runner.host().child_runs().len();
+    assert!(newest > 0);
+    assert!(m0.contains("<session-history>\n"), "{m0}");
+}
+
+#[tokio::test]
+async fn a_revert_into_summarized_history_forgets_those_summaries() {
+    let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    // A few quiet steps under the view, so the revert comes below the
+    // threshold, where no execute pass would rebuild the head.
+    runner.play(&[answer(), answer()]).await;
+    let last = runner.report.requests.last().unwrap();
+    assert!(
+        last.usage.prompt_tokens < 25_350,
+        "{}",
+        last.usage.prompt_tokens
+    );
+
+    // The summaries of everything after the first message.
+    let (m0, m1) = head_texts(runner.host());
+    let head = format!("{m0}\n{m1}");
+    let undone: Vec<String> = head
+        .lines()
+        .filter(|line| line.starts_with("## ") && !line.starts_with("## 1-1 "))
+        .map(str::to_owned)
+        .collect();
+    assert!(!undone.is_empty(), "{head}");
+
+    // Undo back to the second message. The next step already shows a head
+    // without the summaries of what was undone, at low usage.
+    runner
+        .play(&[
+            Step::Revert { ordinal: 1 },
+            user("Start over."),
+            answer(),
+            answer(),
+        ])
+        .await;
+    assert_clean(&runner);
+    let (m0, m1) = head_texts(runner.host());
+    let head = format!("{m0}\n{m1}");
+    for line in &undone {
+        assert!(
+            !head.contains(line.as_str()),
+            "a reverted summary is still shown: {line}\n{head}"
+        );
     }
 }
