@@ -59,7 +59,7 @@ pub struct RunSettings {
     /// that gets its accounts from routing passes it to `route.account_for`;
     /// one that runs models through its host's own login ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub route_decision: Option<String>,
+    pub route_decision_id: Option<String>,
     pub generation: Generation,
     pub stop_when: StopWhen,
 }

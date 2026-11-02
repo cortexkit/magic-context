@@ -1382,7 +1382,7 @@ async fn routing_picks_the_summarizer_and_a_failed_model_falls_back_to_another()
         .map(|run| run.request.run.as_ref().unwrap())
         .find(|run| run.model.provider == "good")
         .expect("no run on the fallback model");
-    assert_eq!(good.route_decision.as_deref(), Some("d2"));
+    assert_eq!(good.route_decision_id.as_deref(), Some("d2"));
     let (m0, m1) = head_texts(runner.host());
     assert!(
         m0.contains("<session-history>\n") || m1.contains("<new-compartments>"),

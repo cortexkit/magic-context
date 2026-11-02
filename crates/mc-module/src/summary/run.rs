@@ -303,7 +303,7 @@ async fn call<C: RunnerClient>(
             child: child.to_owned(),
             system: system.to_owned(),
             model: target.model.clone(),
-            route_decision: Some(target.decision_id.clone()),
+            route_decision_id: Some(target.decision_id.clone()),
             generation: Generation {
                 max_output_tokens: target.output_tokens,
                 temperature: Some(TEMPERATURE),
