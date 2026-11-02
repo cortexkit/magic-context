@@ -202,11 +202,13 @@ impl InProcess {
     /// ck-mc restarts: a new process with the same stores, and no sessions
     /// until runners call Setup again.
     fn restart(&self) {
-        *self.module.lock().unwrap() = Self::new_module(
-            self.client.clone(),
-            self.settings.clone(),
-            self.stores.as_deref(),
-        );
+        self.restart_with(self.settings.clone());
+    }
+
+    /// Restart ck-mc with different settings, as after a config edit.
+    fn restart_with(&self, settings: Settings) {
+        *self.module.lock().unwrap() =
+            Self::new_module(self.client.clone(), settings, self.stores.as_deref());
     }
 }
 
@@ -1670,6 +1672,37 @@ fn insert_memory(dir: &std::path::Path, id: i64, content: &str) {
             rusqlite::params![id, content, format!("hash-{id}")],
         )
         .unwrap();
+}
+
+#[tokio::test]
+async fn switching_memory_off_folds_m0_at_once_without_memories() {
+    let dir = scratch("memory-off");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    insert_memory(&dir, 1, "Ask before pushing.");
+    let mut config = config("head", Kind::OpenAi, FREE);
+    config.project = Some(mc_mock_runner::runner::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    });
+    let mut runner = start_full(config, Settings::default(), Some(dir.clone())).await;
+    runner.play(&[user("Hello."), answer()]).await;
+    let (m0, _) = head_texts(runner.host());
+    assert!(m0.contains("Ask before pushing."), "{m0}");
+    let views_before = runner.report.requests.last().unwrap().view;
+
+    // The user switches memory off. Below the threshold no lane has work,
+    // yet m[0] is rendered again on the next pass, without the memory.
+    runner.provider().restart_with(Settings {
+        memory_enabled: false,
+        ..Settings::default()
+    });
+    runner.play(&[user("Go on."), answer()]).await;
+    assert_clean(&runner);
+    let (m0, m1) = head_texts(runner.host());
+    assert!(!m0.contains("Ask before pushing."), "{m0}");
+    assert!(!m1.contains("Ask before pushing."), "{m1}");
+    assert_ne!(runner.report.requests.last().unwrap().view, views_before);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]

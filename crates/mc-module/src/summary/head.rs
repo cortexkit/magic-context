@@ -109,6 +109,22 @@ pub struct Baseline {
     /// the aggregate line leaves the model without that memory's text.
     #[serde(default)]
     pub seen: BTreeMap<i64, String>,
+    /// The settings `m[0]` was rendered under. When they change, `m[0]` is
+    /// rendered again at once ([`Shape`]).
+    #[serde(default)]
+    pub shape: Option<Shape>,
+}
+
+/// The settings that decide what `m[0]` may hold. The plugin folds `m[0]` on
+/// its own when one changes (`mustMaterialize`, `inject-compartments.ts`):
+/// memory switched off (`render_config:memory_disabled`), or a different
+/// memory or history budget (`render_config:budget`). Waiting for a natural
+/// fold would keep showing memories the user just switched off.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shape {
+    pub memory_enabled: bool,
+    pub memory_budget_tokens: u64,
+    pub history_budget_tokens: u64,
 }
 
 impl Baseline {
@@ -173,6 +189,7 @@ pub fn fold(inputs: &Inputs) -> Baseline {
             .iter()
             .map(|memory| (memory.id, memory.content.clone()))
             .collect(),
+        shape: None,
     }
 }
 

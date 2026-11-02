@@ -369,6 +369,10 @@ impl Session {
         }
         let summary = self.summary_due(settings);
         let force = pass::in_force_band(&self.conditions, settings);
+        if self.head_shape_changed(settings) {
+            self.fold_due = true;
+            self.head_stale = true;
+        }
         if std::mem::take(&mut self.head_stale) {
             let (view, _) = self.build_now(client, settings).await;
             if let Some(view) = view {
@@ -1106,8 +1110,11 @@ impl Session {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as i64);
+        let shape = self.head_shape(settings);
+        // With memory off, the head shows no memories and no user profile,
+        // as the plugin's m[0] does.
         let (memories, profile, profile_max_id) = match (&self.db, &self.project) {
-            (Some(db), Some(project)) => {
+            (Some(db), Some(project)) if shape.memory_enabled => {
                 let memories = db
                     .project_memories(&project.id, now)
                     .unwrap_or_else(|error| {
@@ -1122,9 +1129,7 @@ impl Session {
             }
             _ => (Vec::new(), Vec::new(), 0),
         };
-        let history_budget_tokens =
-            (self.conditions.context_window as f64 * settings.execute_threshold_percentage / 100.0
-                * settings.history_budget_percentage) as u64;
+        let history_budget_tokens = shape.history_budget_tokens;
         let fold_inputs = head::Inputs {
             summaries: &self.summaries,
             docs: &docs,
@@ -1158,18 +1163,44 @@ impl Session {
                 },
             )
         };
+        let folded = |inputs: &head::Inputs| {
+            let mut base = head::fold(inputs);
+            base.shape = Some(shape.clone());
+            base
+        };
         let (mut m1, mut next) = match (&self.baseline, self.fold_due) {
             (Some(baseline), false) => delta_from(baseline),
-            _ => delta_from(&head::fold(&fold_inputs)),
+            _ => delta_from(&folded(&fold_inputs)),
         };
         if let (Some(baseline), false) = (&self.baseline, self.fold_due) {
             if head::needs_refold(baseline, &m1, &next, history_budget_tokens) {
-                (m1, next) = delta_from(&head::fold(&fold_inputs));
+                (m1, next) = delta_from(&folded(&fold_inputs));
             }
         }
         let ops = head::head_ops(&next.m0, &m1);
         self.next_baseline = Some(next);
         ops
+    }
+
+    /// The settings `m[0]` depends on, as they are now.
+    fn head_shape(&self, settings: &Settings) -> head::Shape {
+        head::Shape {
+            memory_enabled: settings.memory_enabled,
+            memory_budget_tokens: settings.memory_budget_tokens,
+            history_budget_tokens: (self.conditions.context_window as f64
+                * settings.execute_threshold_percentage
+                / 100.0
+                * settings.history_budget_percentage) as u64,
+        }
+    }
+
+    /// Whether `m[0]` was rendered under different settings than these. A
+    /// baseline from before the shape was recorded counts as unchanged.
+    fn head_shape_changed(&self, settings: &Settings) -> bool {
+        self.baseline
+            .as_ref()
+            .and_then(|baseline| baseline.shape.as_ref())
+            .is_some_and(|shape| *shape != self.head_shape(settings))
     }
 
     /// The first view of a session moved in from a standalone host whose
