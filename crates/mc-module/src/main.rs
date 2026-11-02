@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use mc_module::context_db::ContextDb;
 use mc_module::module::Module;
 use mc_module::pass::Settings;
+use mc_module::store::Store;
 use mc_module::transport::{manifest, Handler, SubcRunnerClient};
 
 const DEFAULT_MODULE_ID: &str = "magic-context";
@@ -26,10 +27,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(path) => Some(ContextDb::open(&path)?),
         None => None,
     };
+    let store = match store_path() {
+        Some(path) => Some(Store::open(&path)?),
+        None => None,
+    };
     let module = Module::new(
         SubcRunnerClient::new(connection_file.clone()),
         Settings::default(),
         db,
+        store,
     );
     let (_handle, serve) = subc_client_rs::serve_with_handle(
         &connection_file,
@@ -45,6 +51,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 /// memory only, which only throwaway test runs want.
 fn context_db_path() -> Option<PathBuf> {
     std::env::var_os("MAGIC_CONTEXT_DB")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// ck-mc's own store, named by `MAGIC_CONTEXT_MODE3_STORE`. Without it a
+/// restart forgets queued drops and re-renders history heads.
+fn store_path() -> Option<PathBuf> {
+    std::env::var_os("MAGIC_CONTEXT_MODE3_STORE")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
 }

@@ -22,9 +22,11 @@ use mc_mock_runner::model::Kind;
 use mc_mock_runner::runner::{CallError, Host, Provider, Runner, SessionConfig, UserEdit};
 use mc_mock_runner::script::{Step, ToolCall, Turn};
 use mc_module::client::{ClientError, RunnerClient};
+use mc_module::context_db::ContextDb;
 use mc_module::lanes::placeholder;
 use mc_module::module::{Module, ModuleError};
 use mc_module::pass::Settings;
+use mc_module::store::Store;
 use serde_json::{json, Value};
 
 /// ck-mc's calls back into the mock runner. The runner exists only after its
@@ -67,8 +69,47 @@ impl RunnerClient for HostClient {
 }
 
 struct InProcess {
-    module: Module<HostClient>,
+    module: Mutex<Module<HostClient>>,
     client: HostClient,
+    settings: Settings,
+    /// A scratch folder for the stores, when the scenario keeps them.
+    stores: Option<std::path::PathBuf>,
+}
+
+impl InProcess {
+    fn module(&self) -> Module<HostClient> {
+        self.module.lock().unwrap().clone()
+    }
+
+    fn new_module(
+        client: HostClient,
+        settings: Settings,
+        stores: Option<&std::path::Path>,
+    ) -> Module<HostClient> {
+        let (db, store) = match stores {
+            Some(dir) => {
+                let db_path = dir.join("context.db");
+                let db = if db_path.exists() {
+                    ContextDb::open(&db_path).unwrap()
+                } else {
+                    ContextDb::create_for_tests(&db_path).unwrap()
+                };
+                (Some(db), Some(Store::open(&dir.join("mode3.db")).unwrap()))
+            }
+            None => (None, None),
+        };
+        Module::new(client, settings, db, store)
+    }
+
+    /// ck-mc restarts: a new process with the same stores, and no sessions
+    /// until runners call Setup again.
+    fn restart(&self) {
+        *self.module.lock().unwrap() = Self::new_module(
+            self.client.clone(),
+            self.settings.clone(),
+            self.stores.as_deref(),
+        );
+    }
 }
 
 fn call_error(error: ModuleError) -> CallError {
@@ -80,22 +121,25 @@ fn call_error(error: ModuleError) -> CallError {
 
 impl Provider for InProcess {
     async fn setup(&self, request: SetupRequest) -> Result<SetupAnswer, CallError> {
-        self.module.setup(request).map_err(call_error)
+        self.module().setup(request).map_err(call_error)
     }
 
     async fn notice(&self, request: NoticeRequest) -> Result<NoticeAnswer, CallError> {
         let session = request.session.clone();
-        let answer = self.module.notice(request).map_err(call_error)?;
-        self.module.idle(&session).await.map_err(call_error)?;
+        let module = self.module();
+        let answer = module.notice(request).map_err(call_error)?;
+        if answer == NoticeAnswer::Received {
+            module.idle(&session).await.map_err(call_error)?;
+        }
         Ok(answer)
     }
 
     async fn ride(&self, request: RideRequest) -> Result<RideAnswer, CallError> {
-        self.module.ride(request).await.map_err(call_error)
+        self.module().ride(request).await.map_err(call_error)
     }
 
     async fn view_get(&self, request: ViewGetRequest) -> Result<View, CallError> {
-        self.module.view_get(request).await.map_err(call_error)
+        self.module().view_get(request).await.map_err(call_error)
     }
 
     async fn tool(
@@ -104,7 +148,7 @@ impl Provider for InProcess {
         name: &str,
         input: &Value,
     ) -> Result<String, CallError> {
-        self.module
+        self.module()
             .tool(session, name, input.clone())
             .await
             .map_err(call_error)
@@ -158,10 +202,25 @@ async fn start(config: SessionConfig) -> Runner<InProcess> {
 }
 
 async fn start_with(config: SessionConfig, settings: Settings) -> Runner<InProcess> {
+    start_full(config, settings, None).await
+}
+
+/// A scenario whose ck-mc keeps its stores in `stores`, so it can restart.
+async fn start_full(
+    config: SessionConfig,
+    settings: Settings,
+    stores: Option<std::path::PathBuf>,
+) -> Runner<InProcess> {
     let client = HostClient::default();
     let provider = InProcess {
-        module: Module::new(client.clone(), settings, None),
+        module: Mutex::new(InProcess::new_module(
+            client.clone(),
+            settings.clone(),
+            stores.as_deref(),
+        )),
         client,
+        settings,
+        stores,
     };
     let runner = Runner::start(config, provider).await.unwrap();
     *runner.provider().client.0.lock().unwrap() = Some(runner.host().clone());
@@ -901,4 +960,90 @@ async fn a_revert_into_summarized_history_forgets_those_summaries() {
             "a reverted summary is still shown: {line}\n{head}"
         );
     }
+}
+
+/// A fresh scratch folder for one scenario's stores.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ck-mc-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn a_restarted_ck_mc_keeps_queued_drops_and_the_view_the_runner_applies() {
+    let dir = scratch("restart-worker");
+    let mut runner = start_full(
+        config("worker", Kind::OpenAi, FREE),
+        Settings::default(),
+        Some(dir.clone()),
+    )
+    .await;
+    runner
+        .play(&[
+            user("Review the module."),
+            read_file(50),
+            read_file(50),
+            reduce("3,5"),
+        ])
+        .await;
+    assert_eq!(runner.host().applied_version(), None);
+
+    // ck-mc restarts. The runner's next notice is answered "Setup required";
+    // it calls Setup and sends the notice again.
+    runner.provider().restart();
+    runner
+        .play(&[read_file(50), read_file(50), answer(), answer()])
+        .await;
+    assert_clean(&runner);
+    // The drops queued before the restart landed on the first execute pass.
+    let host = runner.host();
+    assert_eq!(seen(host, 3).as_deref(), Some(placeholder(3).as_str()));
+    assert_eq!(seen(host, 5).as_deref(), Some(placeholder(5).as_str()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_restarted_ck_mc_keeps_the_history_baseline() {
+    let dir = scratch("restart-head");
+    let mut runner = start_full(
+        config("head", Kind::OpenAi, FREE),
+        Settings::default(),
+        Some(dir.clone()),
+    )
+    .await;
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let (m0_before, _) = head_texts(runner.host());
+    let views_before = runner.host().applied_version();
+
+    // After a restart, more turns: m[0] is not rendered again, and each
+    // request between views still extends the one before it.
+    runner.provider().restart();
+    let mut steps = Vec::new();
+    for prompt in ["Then d.rs.", "Last e.rs."] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let (m0_after, _) = head_texts(runner.host());
+    assert!(
+        runner.host().applied_version() > views_before,
+        "no view after the restart"
+    );
+    assert_eq!(
+        m0_before, m0_after,
+        "m[0] was rendered again after the restart"
+    );
+    let requests = &runner.report.requests;
+    for pair in requests.windows(2) {
+        if pair[0].view == pair[1].view {
+            assert_eq!(pair[1].usage.cache_read_tokens, pair[0].usage.prompt_tokens);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

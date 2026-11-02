@@ -934,8 +934,20 @@ impl<P: Provider> Runner<P> {
                 },
             }
         };
-        if let Err(error) = self.provider.notice(request).await {
-            self.report.call_errors.push(error);
+        match self.provider.notice(request.clone()).await {
+            Ok(NoticeAnswer::Received) => {}
+            // The provider restarted: Setup again, then send the same notice,
+            // with every entry so it can start from the whole transcript.
+            Ok(NoticeAnswer::SetupRequired) => {
+                if let Err(error) = self.setup().await {
+                    self.report.call_errors.push(error);
+                    return;
+                }
+                if let Err(error) = self.provider.notice(request).await {
+                    self.report.call_errors.push(error);
+                }
+            }
+            Err(error) => self.report.call_errors.push(error),
         }
     }
 }

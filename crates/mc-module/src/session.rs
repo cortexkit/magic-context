@@ -97,6 +97,32 @@ impl Session {
         }
     }
 
+    pub fn key(&self) -> &SessionRef {
+        &self.key
+    }
+
+    /// What must survive a restart.
+    pub fn durable(&self) -> crate::store::Durable {
+        crate::store::Durable {
+            version: self.version,
+            queued: self.queued.clone(),
+            reclaim_bookmark: self.reclaim_bookmark,
+            emergency_latched: self.emergency_latched,
+            keep_requested: self.keep_requested,
+            baseline: self.baseline.clone(),
+        }
+    }
+
+    /// Take back what a previous ck-mc process saved for the session.
+    pub fn restore(&mut self, durable: crate::store::Durable) {
+        self.version = durable.version;
+        self.queued = durable.queued;
+        self.reclaim_bookmark = durable.reclaim_bookmark;
+        self.emergency_latched = durable.emergency_latched;
+        self.keep_requested = durable.keep_requested;
+        self.baseline = durable.baseline;
+    }
+
     /// Load the summaries `context.db` already holds for the session, such as
     /// those of a session moved in from a standalone host.
     pub fn load_summaries(&mut self, db: &ContextDb) {

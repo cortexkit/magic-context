@@ -32,6 +32,7 @@ pub mod pass;
 pub mod preset;
 pub mod reduce;
 pub mod session;
+pub mod store;
 pub mod summary;
 pub mod tokens;
 pub mod transport;

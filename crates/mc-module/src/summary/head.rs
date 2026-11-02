@@ -27,7 +27,7 @@ const M1_EMPTY: &str =
 
 /// The summaries `m[0]` holds and the budget it was rendered with, so the
 /// same head can be rendered again byte for byte.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Baseline {
     /// The highest summary sequence in `m[0]`.
     pub through_sequence: i64,

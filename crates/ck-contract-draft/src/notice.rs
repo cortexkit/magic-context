@@ -74,10 +74,12 @@ pub enum Event {
     ViewRefused { version: u64, refusal: ViewRefusal },
 }
 
-/// The provider's answer: it has the notice. It says nothing about the work
-/// the notice causes.
+/// The provider's answer: it has the notice, which says nothing about the
+/// work the notice causes; or it does not know the session (it restarted),
+/// and the runner calls Setup again before its next notice.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "answer", rename_all = "snake_case")]
 pub enum NoticeAnswer {
     Received,
+    SetupRequired,
 }

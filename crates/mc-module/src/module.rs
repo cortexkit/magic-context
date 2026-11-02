@@ -28,6 +28,7 @@ use crate::context_db::ContextDb;
 use crate::pass::Settings;
 use crate::preset;
 use crate::session::Session;
+use crate::store::Store;
 use crate::summary::run;
 use crate::summary::validate::ValidatedChunk;
 
@@ -64,6 +65,8 @@ struct Inner<C> {
     /// Where summaries are stored. Without it they live only in memory, which
     /// only tests want.
     db: Option<ContextDb>,
+    /// Where each session's own decisions survive a restart.
+    store: Option<Store>,
     workers: Mutex<HashMap<SessionRef, mpsc::UnboundedSender<Job>>>,
     /// Summarizer runs in progress, so [`Module::idle`] can wait for them.
     summaries_running: Mutex<usize>,
@@ -84,12 +87,13 @@ enum Job {
 }
 
 impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
-    pub fn new(client: C, settings: Settings, db: Option<ContextDb>) -> Self {
+    pub fn new(client: C, settings: Settings, db: Option<ContextDb>, store: Option<Store>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 client,
                 settings,
                 db,
+                store,
                 workers: Mutex::new(HashMap::new()),
                 summaries_running: Mutex::new(0),
             }),
@@ -114,10 +118,15 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
         Ok(SetupAnswer::Ready)
     }
 
-    /// `compaction.notice`. Answers at once; the work runs afterwards.
+    /// `compaction.notice`. Answers at once; the work runs afterwards. A
+    /// session ck-mc does not know (it restarted since the runner's Setup)
+    /// asks the runner to call Setup again.
     pub fn notice(&self, request: NoticeRequest) -> Result<NoticeAnswer, ModuleError> {
-        self.send(&request.session.clone(), Job::Notice(request))?;
-        Ok(NoticeAnswer::Received)
+        match self.send(&request.session.clone(), Job::Notice(request)) {
+            Ok(()) => Ok(NoticeAnswer::Received),
+            Err(ModuleError::UnknownSession) => Ok(NoticeAnswer::SetupRequired),
+            Err(error) => Err(error),
+        }
     }
 
     /// `compaction.ride`: a view for the coming request, or nothing, within
@@ -207,6 +216,7 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
         let own = jobs.downgrade();
         tokio::spawn(async move {
             let mut session: Option<Session> = None;
+            let mut saved: Option<crate::store::Durable> = None;
             while let Some(job) = receiver.recv().await {
                 match job {
                     Job::Setup(request, features) => match &mut session {
@@ -215,6 +225,13 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                             let mut fresh = Session::new(&request, features);
                             if let Some(db) = &inner.db {
                                 fresh.load_summaries(db);
+                            }
+                            if let Some(durable) = inner
+                                .store
+                                .as_ref()
+                                .and_then(|store| store.load(&request.session))
+                            {
+                                fresh.restore(durable);
                             }
                             fresh.setup(&inner.client, &request, features).await;
                             session = Some(fresh);
@@ -259,9 +276,18 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                     Job::ViewGet(version, reply) => {
                         let _ =
                             reply.send(session.as_ref().and_then(|session| session.view(version)));
+                        continue;
                     }
                     Job::Idle(reply) => {
                         let _ = reply.send(());
+                        continue;
+                    }
+                }
+                if let (Some(store), Some(session)) = (&inner.store, &session) {
+                    let durable = session.durable();
+                    if saved.as_ref() != Some(&durable) {
+                        store.save(session.key(), &durable);
+                        saved = Some(durable);
                     }
                 }
             }
