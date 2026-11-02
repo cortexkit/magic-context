@@ -166,6 +166,13 @@ pub struct Report {
     /// order.
     #[serde(default)]
     pub child_runs: Vec<String>,
+    /// Each message a person wrote, as stored after the `pre_user` hook.
+    #[serde(default)]
+    pub user_texts: Vec<String>,
+    /// The plan template of every send delivered with a tool result, in
+    /// order.
+    #[serde(default)]
+    pub delivered_templates: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

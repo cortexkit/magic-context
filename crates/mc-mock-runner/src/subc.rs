@@ -584,6 +584,37 @@ impl Handler {
                     .into_iter()
                     .map(|run| run.child)
                     .collect();
+                // What a wire test cannot see inside the runner: the stored
+                // user messages and the reminders delivered.
+                let entries = runner.host().entries();
+                report.user_texts = entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.role == cortexkit_role_compaction::read::Role::User
+                            && entry.notice.is_none()
+                    })
+                    .flat_map(|entry| &entry.parts)
+                    .filter_map(|part| match &part.body {
+                        cortexkit_role_compaction::part::PartBody::Text { text } => {
+                            Some(text.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                report.delivered_templates = entries
+                    .iter()
+                    .flat_map(|entry| &entry.parts)
+                    .filter_map(|part| match &part.body {
+                        cortexkit_role_compaction::part::PartBody::Tool(tool) => Some(
+                            tool.delivered
+                                .iter()
+                                .filter_map(|item| item.template.clone())
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
                 Ok(report)
             });
             let _ = reply.send(result);
