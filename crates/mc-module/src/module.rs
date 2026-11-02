@@ -64,7 +64,7 @@ struct Inner<C> {
     settings: Settings,
     /// Where summaries are stored. Without it they live only in memory, which
     /// only tests want.
-    db: Option<ContextDb>,
+    db: Option<Arc<ContextDb>>,
     /// Where each session's own decisions survive a restart.
     store: Option<Store>,
     workers: Mutex<HashMap<SessionRef, mpsc::UnboundedSender<Job>>>,
@@ -92,7 +92,7 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
             inner: Arc::new(Inner {
                 client,
                 settings,
-                db,
+                db: db.map(Arc::new),
                 store,
                 workers: Mutex::new(HashMap::new()),
                 summaries_running: Mutex::new(0),
@@ -220,12 +220,14 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
             while let Some(job) = receiver.recv().await {
                 match job {
                     Job::Setup(request, features) => match &mut session {
-                        Some(existing) => existing.setup(&inner.client, &request, features).await,
+                        Some(existing) => {
+                            existing
+                                .setup(&inner.client, &inner.settings, &request, features)
+                                .await
+                        }
                         None => {
-                            let mut fresh = Session::new(&request, features);
-                            if let Some(db) = &inner.db {
-                                fresh.load_summaries(db);
-                            }
+                            let mut fresh = Session::new(&request, features, inner.db.clone());
+                            fresh.load_summaries();
                             if let Some(durable) = inner
                                 .store
                                 .as_ref()
@@ -233,15 +235,16 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                             {
                                 fresh.restore(durable);
                             }
-                            fresh.setup(&inner.client, &request, features).await;
+                            fresh
+                                .setup(&inner.client, &inner.settings, &request, features)
+                                .await;
                             session = Some(fresh);
                         }
                     },
                     Job::Notice(notice) => {
                         if let Some(session) = &mut session {
-                            if let Some(request) = session
-                                .notice(&inner.client, &inner.settings, inner.db.as_ref(), notice)
-                                .await
+                            if let Some(request) =
+                                session.notice(&inner.client, &inner.settings, notice).await
                             {
                                 start_summary(&inner, own.clone(), request);
                             }
@@ -250,13 +253,7 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                     Job::SummaryFinished(result) => {
                         if let Some(session) = &mut session {
                             session
-                                .summary_finished(
-                                    &inner.client,
-                                    &inner.settings,
-                                    inner.db.as_ref(),
-                                    result,
-                                    now_ms(),
-                                )
+                                .summary_finished(&inner.client, &inner.settings, result, now_ms())
                                 .await;
                         }
                     }

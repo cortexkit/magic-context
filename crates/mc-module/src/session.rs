@@ -3,12 +3,13 @@
 //! needs a lock.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use ck_contract_draft::notice::{Conditions, Event, NoticeRequest};
 use ck_contract_draft::read::{Cursor, Detail, ReadRequest, Select, SessionRef};
 use ck_contract_draft::ride::{RideCause, RideRequest};
 use ck_contract_draft::send::{Delivery, SendRequest};
-use ck_contract_draft::setup::SetupRequest;
+use ck_contract_draft::setup::{Project, SetupRequest};
 use ck_contract_draft::view::{
     EditOp, View, ViewCurrentRequest, ViewDelivery, ViewPublishAnswer, ViewPublishRequest,
 };
@@ -68,6 +69,9 @@ pub struct Session {
     /// The next view re-renders `m[0]`, because the provider cache is lost
     /// anyway.
     fold_due: bool,
+    /// Where summaries and memories are kept; absent only in tests.
+    db: Option<Arc<ContextDb>>,
+    project: Option<Project>,
     /// A revert removed summaries the head shows. The next notice rebuilds
     /// the head whatever the usage: the model must not keep seeing history
     /// that was undone.
@@ -75,8 +79,10 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(request: &SetupRequest, features: Features) -> Self {
+    pub fn new(request: &SetupRequest, features: Features, db: Option<Arc<ContextDb>>) -> Self {
         Self {
+            db,
+            project: request.project.clone(),
             key: request.session.clone(),
             features,
             conditions: conditions_of(request),
@@ -125,7 +131,10 @@ impl Session {
 
     /// Load the summaries `context.db` already holds for the session, such as
     /// those of a session moved in from a standalone host.
-    pub fn load_summaries(&mut self, db: &ContextDb) {
+    pub fn load_summaries(&mut self) {
+        let Some(db) = &self.db else {
+            return;
+        };
         match db.compartments(&self.key.harness, &self.key.session) {
             Ok(summaries) => self.summaries = summaries,
             Err(error) => eprintln!(
@@ -135,23 +144,34 @@ impl Session {
         }
     }
 
-    /// The runner called Setup again (it restarted, or the session's model
-    /// changed): take the new conditions, and make sure ck-mc's view matches
-    /// the one the runner applies.
+    /// Setup: take the conditions, and make sure ck-mc's view matches the one
+    /// the runner applies (after a restart of either side it may not).
+    ///
+    /// A new session with a head gets its first view right away, before its
+    /// first request: nothing is cached yet, so it costs nothing, and the
+    /// model sees its memories and docs from the first step.
     pub async fn setup<C: RunnerClient>(
         &mut self,
         client: &C,
+        settings: &Settings,
         request: &SetupRequest,
         features: Features,
     ) {
         self.features = features;
         self.conditions = conditions_of(request);
+        self.project = request.project.clone();
         self.seq = 0;
         let ours = self.latest.as_ref().map(View::applied);
         if ours != request.applied_view {
             self.adopt_runner_view(client).await;
         }
         self.sync(client, request.newest.as_ref()).await;
+        if self.features.summarizer && self.latest.is_none() && request.newest.is_none() {
+            let (view, _) = self.build(settings, None);
+            if let Some(view) = view {
+                self.publish(client, view).await;
+            }
+        }
     }
 
     /// Handle a notice. Returns a summarizer run for the worker to start, when
@@ -160,7 +180,6 @@ impl Session {
         &mut self,
         client: &C,
         settings: &Settings,
-        db: Option<&ContextDb>,
         notice: NoticeRequest,
     ) -> Option<run::Request> {
         if notice.seq <= self.seq && self.seq != 0 {
@@ -173,7 +192,7 @@ impl Session {
             match event {
                 Event::TranscriptChanged { from_ordinal } => {
                     self.index.truncate(*from_ordinal);
-                    self.forget_summaries_from(*from_ordinal, db);
+                    self.forget_summaries_from(*from_ordinal);
                 }
                 Event::ViewRefused { .. } => refused = true,
                 Event::MarkerWritten { .. } => {}
@@ -269,7 +288,7 @@ impl Session {
     /// After a revert removed messages from `ordinal` on, forget the summaries
     /// that cover any of them, as standalone does. A head that showed one is
     /// rendered again from what remains.
-    fn forget_summaries_from(&mut self, ordinal: u64, db: Option<&ContextDb>) {
+    fn forget_summaries_from(&mut self, ordinal: u64) {
         let number = ordinal + 1;
         let Some(first) = self
             .summaries
@@ -279,7 +298,7 @@ impl Session {
             return;
         };
         let sequence = self.summaries[first].sequence;
-        if let Some(db) = db {
+        if let Some(db) = &self.db {
             if let Err(error) =
                 db.delete_compartments_from(&self.key.harness, &self.key.session, sequence)
             {
@@ -311,7 +330,6 @@ impl Session {
         &mut self,
         client: &C,
         settings: &Settings,
-        db: Option<&ContextDb>,
         result: Result<Option<ValidatedChunk>, String>,
         now_ms: i64,
     ) {
@@ -336,7 +354,7 @@ impl Session {
         {
             return;
         }
-        if let Some(db) = db {
+        if let Some(db) = &self.db {
             if let Err(error) = db.append_compartments(
                 &self.key.harness,
                 &self.key.session,
@@ -541,38 +559,80 @@ impl Session {
         self.summarizing
     }
 
-    /// The history head and the cut, when the session has summaries whose
-    /// covered messages are still in the transcript. A due fold re-renders
-    /// `m[0]` with every summary.
+    /// The history head, and the cut when the newest summary's last message
+    /// is still in the transcript. Only presets with a summarizer have a
+    /// head. A due fold renders `m[0]` again from everything current.
     fn history_ops(&mut self, settings: &Settings) -> (Vec<EditOp>, Option<u64>) {
-        let Some(last) = self.summaries.last() else {
+        if !self.features.summarizer {
             return (Vec::new(), None);
+        }
+        let docs = self
+            .project
+            .as_ref()
+            .map(|project| {
+                crate::project_docs::read_project_docs_canonical(&project.root).rendered_block
+            })
+            .unwrap_or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as i64);
+        let (memories, profile, profile_max_id, mutation_cursor) = match (&self.db, &self.project) {
+            (Some(db), Some(project)) => {
+                let memories = db
+                    .project_memories(&project.id, now)
+                    .unwrap_or_else(|error| {
+                        eprintln!(
+                            "ck-mc: session {}: reading memories failed: {error}",
+                            self.key.session
+                        );
+                        Vec::new()
+                    });
+                let (profile, profile_max_id) = db.user_profile().unwrap_or_default();
+                let cursor = db.last_memory_mutation(&project.id).unwrap_or(0);
+                (memories, profile, profile_max_id, cursor)
+            }
+            _ => (Vec::new(), Vec::new(), 0, 0),
         };
-        let Some(through) = self
-            .index
-            .entries()
-            .iter()
-            .find(|entry| entry.mid == last.end_message_id)
-        else {
-            return (Vec::new(), None);
+        let inputs = head::Inputs {
+            summaries: &self.summaries,
+            docs: &docs,
+            profile: &profile,
+            profile_max_id,
+            memories: &memories,
+            mutation_cursor,
+            history_budget_tokens: (self.conditions.context_window as f64
+                * settings.execute_threshold_percentage
+                / 100.0
+                * settings.history_budget_percentage) as u64,
+            memory_budget_tokens: settings.memory_budget_tokens,
+            profile_budget_tokens: settings.profile_budget_tokens,
         };
-        let cut = through.ordinal;
-        let budget = (self.conditions.context_window as f64 * settings.execute_threshold_percentage
-            / 100.0
-            * settings.history_budget_percentage) as u64;
         if self.baseline.is_none() || self.fold_due {
-            self.baseline = Some(Baseline {
-                through_sequence: last.sequence,
-                budget_tokens: budget,
-            });
+            self.baseline = Some(head::fold(&inputs));
             self.fold_due = false;
         }
         let baseline = self.baseline.clone().unwrap_or_default();
-        let mut ops = head::head_ops(&self.summaries, &baseline);
-        ops.push(EditOp::Cut {
-            through: last.end_message_id.clone(),
+        let mutations = match (&self.db, &self.project) {
+            (Some(db), Some(project)) => db
+                .memory_mutations_after(&project.id, baseline.mutation_cursor)
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let m1 = head::delta(&baseline, &inputs, &mutations);
+        let mut ops = head::head_ops(&baseline.m0, &m1);
+        let cut = self.summaries.last().and_then(|last| {
+            self.index
+                .entries()
+                .iter()
+                .find(|entry| entry.mid == last.end_message_id)
+                .map(|entry| (entry.ordinal, last.end_message_id.clone()))
         });
-        (ops, Some(cut))
+        if let Some((_, through)) = &cut {
+            ops.push(EditOp::Cut {
+                through: through.clone(),
+            });
+        }
+        (ops, cut.map(|(ordinal, _)| ordinal))
     }
 
     /// A pass with permission to rebuild: every lane adds the parts it wants

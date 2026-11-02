@@ -165,6 +165,7 @@ fn config(kind: Kind, rules: ProviderRules, window: u64) -> SessionConfig {
         system_tokens: 500,
         tag_checkpoint: 0,
         start_ms: 1_000_000,
+        project: None,
         model_latency_ms: 0,
     }
 }

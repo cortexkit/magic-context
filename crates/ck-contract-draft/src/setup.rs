@@ -31,6 +31,18 @@ pub struct SetupRequest {
     pub newest: Option<Cursor>,
     /// The runner's clock, in milliseconds since the Unix epoch.
     pub now: u64,
+    /// The project the session works in. On the real contract this comes
+    /// from the route's scope stamp, not from the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<Project>,
+}
+
+/// A session's project: the identity its memories are kept under, and the
+/// folder its docs are read from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Project {
+    pub id: String,
+    pub root: String,
 }
 
 /// The model the session currently uses.

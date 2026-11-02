@@ -193,6 +193,7 @@ fn config(preset: &str, kind: Kind, rules: ProviderRules) -> SessionConfig {
         system_tokens: 500,
         tag_checkpoint: 0,
         start_ms: 1_000_000,
+        project: None,
         model_latency_ms: 0,
     }
 }
@@ -1045,5 +1046,74 @@ async fn a_restarted_ck_mc_keeps_the_history_baseline() {
             assert_eq!(pair[1].usage.cache_read_tokens, pair[0].usage.prompt_tokens);
         }
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Store a project memory the way a standalone plugin would.
+fn insert_memory(dir: &std::path::Path, id: i64, content: &str) {
+    let connection = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO memories (id, project_path, category, content, normalized_hash, importance,
+                                   first_seen_at, created_at, updated_at, last_seen_at)
+             VALUES (?1, 'pj-test', 'PROJECT_RULES', ?2, ?3, 80, 1, 1, 1, 1)",
+            rusqlite::params![id, content, format!("hash-{id}")],
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_head_shows_its_docs_and_memories_from_the_first_step_and_newer_ones_in_m1() {
+    let dir = scratch("head-memories");
+    ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    insert_memory(&dir, 1, "Ask before pushing.");
+    std::fs::write(
+        dir.join("ARCHITECTURE.md"),
+        "# Architecture\n\nOne crate.\n",
+    )
+    .unwrap();
+    let mut config = config("head", Kind::OpenAi, FREE);
+    config.project = Some(ck_contract_draft::setup::Project {
+        id: "pj-test".into(),
+        root: dir.to_string_lossy().into_owned(),
+    });
+    let mut runner = start_full(config, Settings::default(), Some(dir.clone())).await;
+    runner.play(&[user("Hello."), answer()]).await;
+    assert_clean(&runner);
+    // The first request already carried the head, so it was the only write.
+    assert_eq!(runner.report.requests[0].view, Some(1));
+    let (m0, m1) = head_texts(runner.host());
+    assert!(m0.starts_with("<project-docs>"), "{m0}");
+    assert!(m0.contains("One crate."), "{m0}");
+    assert!(m0.contains("#1: Ask before pushing."), "{m0}");
+    assert!(
+        m1.starts_with("<session-history-since>(no new content"),
+        "{m1}"
+    );
+
+    // A memory written mid-session shows in m[1] on the next pass that
+    // builds a view, and m[0] stays as it was.
+    insert_memory(&dir, 2, "Never force-push.");
+    let mut steps = Vec::new();
+    for prompt in ["Look at a.rs.", "Now b.rs.", "And c.rs."] {
+        steps.extend(turn(prompt));
+    }
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let (m0_later, m1) = head_texts(runner.host());
+    assert!(
+        m1.contains("<new-memories>") && m1.contains("#2: Never force-push."),
+        "{m1}"
+    );
+    assert!(!m0_later.contains("Never force-push."), "{m0_later}");
+
+    // A lost cache folds it into m[0].
+    runner
+        .play(&[Step::Wait { ms: 400_000 }, user("Next."), answer()])
+        .await;
+    assert_clean(&runner);
+    let (m0, m1) = head_texts(runner.host());
+    assert!(m0.contains("#2: Never force-push."), "{m0}");
+    assert!(!m1.contains("Never force-push."), "{m1}");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -243,6 +243,7 @@ fn config(preset: &str) -> SessionConfig {
         system_tokens: 500,
         tag_checkpoint: 0,
         start_ms: 1_000_000,
+        project: None,
         model_latency_ms: 200,
     }
 }

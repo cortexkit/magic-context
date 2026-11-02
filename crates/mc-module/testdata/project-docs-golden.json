@@ -1,0 +1,63 @@
+{
+  "cases": [
+    {
+      "files": [],
+      "rendered_block": "",
+      "canonical_hash": ""
+    },
+    {
+      "files": [
+        [
+          "ARCHITECTURE.md",
+          "# Arch\nbody line"
+        ]
+      ],
+      "rendered_block": "<project-docs>\n<file name=\"ARCHITECTURE.md\">\n# Arch\nbody line\n</file>\n</project-docs>",
+      "canonical_hash": "ee2b7376d6ced28e8a48838d5d5e703e8b46c8d26e16a017a0097a7653321d03"
+    },
+    {
+      "files": [
+        [
+          "ARCHITECTURE.md",
+          "# Arch\nalpha"
+        ],
+        [
+          "STRUCTURE.md",
+          "# Struct\nbeta"
+        ]
+      ],
+      "rendered_block": "<project-docs>\n<file name=\"ARCHITECTURE.md\">\n# Arch\nalpha\n</file>\n\n<file name=\"STRUCTURE.md\">\n# Struct\nbeta\n</file>\n</project-docs>",
+      "canonical_hash": "9ddcdc965c62f5754177ea1496f216643eb28d20c679abf0e8eaac1c3c998e4d"
+    },
+    {
+      "files": [
+        [
+          "ARCHITECTURE.md",
+          "﻿line1  \r\nline2\t\n\n\n"
+        ]
+      ],
+      "rendered_block": "<project-docs>\n<file name=\"ARCHITECTURE.md\">\nline1\nline2\n</file>\n</project-docs>",
+      "canonical_hash": "5bd730b59310cb388c25d1c6d5927a9da8467d9e184ef19c8471d8a19c6c6ba8"
+    },
+    {
+      "files": [
+        [
+          "STRUCTURE.md",
+          "a < b & c > d"
+        ]
+      ],
+      "rendered_block": "<project-docs>\n<file name=\"STRUCTURE.md\">\na &lt; b &amp; c &gt; d\n</file>\n</project-docs>",
+      "canonical_hash": "59da31f7623ad73a8bd8e47317a8ba3cc8038628db40cb0648424eca05a1c034"
+    },
+    {
+      "files": [
+        [
+          "STRUCTURE.md",
+          "solo struct"
+        ]
+      ],
+      "rendered_block": "<project-docs>\n<file name=\"STRUCTURE.md\">\nsolo struct\n</file>\n</project-docs>",
+      "canonical_hash": "a8ad96816cea2f69e6c7c3200803e66662d3b4683119b598959654fb5b2479c6"
+    }
+  ]
+}

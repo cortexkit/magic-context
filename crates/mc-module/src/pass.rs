@@ -41,6 +41,10 @@ pub struct Settings {
     /// The history head's budget, as a share of the window up to the execute
     /// threshold.
     pub history_budget_percentage: f64,
+    /// Project memories shown in the head, in tokens.
+    pub memory_budget_tokens: u64,
+    /// User profile lines shown in the head, in tokens.
+    pub profile_budget_tokens: u64,
 }
 
 impl Default for Settings {
@@ -53,6 +57,8 @@ impl Default for Settings {
             keep_min_recovery_percentage: 30.0,
             keep_max_percentage: 30.0,
             history_budget_percentage: 0.15,
+            memory_budget_tokens: 4_000,
+            profile_budget_tokens: 4_000,
         }
     }
 }

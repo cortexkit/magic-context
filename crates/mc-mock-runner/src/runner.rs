@@ -52,6 +52,9 @@ pub struct SessionConfig {
     pub tag_checkpoint: u64,
     /// The scenario clock at the start, in milliseconds since the Unix epoch.
     pub start_ms: u64,
+    /// The session's project, as the route's scope would name it.
+    #[serde(default)]
+    pub project: Option<ck_contract_draft::setup::Project>,
     /// Real time each model request takes, in milliseconds. Over the real
     /// wire a provider works on a notice while the next request is out, as
     /// with a real model; in process it is 0, and tests wait on the provider
@@ -398,6 +401,7 @@ impl<P: Provider> Runner<P> {
                 applied_view: state.applied.as_ref().map(View::applied),
                 newest: state.transcript.cursor(),
                 now: state.now,
+                project: state.config.project.clone(),
             }
         };
         self.provider.setup(request).await

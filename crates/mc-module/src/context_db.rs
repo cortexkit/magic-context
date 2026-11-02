@@ -141,6 +141,17 @@ impl From<&ValidatedCompartment> for StoredCompartment {
     }
 }
 
+/// A change to a memory the head may already show, from the mutation log.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredMutation {
+    pub id: i64,
+    pub mutation_type: String,
+    pub target_memory_id: i64,
+    pub superseded_by_id: Option<i64>,
+    pub category: Option<String>,
+    pub new_content: Option<String>,
+}
+
 pub struct ContextDb {
     connection: Mutex<Connection>,
 }
@@ -285,6 +296,109 @@ impl ContextDb {
             }
         }
         transaction.commit().map_err(|error| error.to_string())
+    }
+
+    /// A project's memories that may be shown: active or permanent, and not
+    /// expired at `now_ms`.
+    pub fn project_memories(
+        &self,
+        project: &str,
+        now_ms: i64,
+    ) -> Result<Vec<StoredMemory>, String> {
+        let connection = self.lock();
+        let mut statement = connection
+            .prepare_cached(
+                "SELECT id, project_path, category, content, importance, status, expires_at,
+                        superseded_by_memory_id, updated_at, last_seen_at, verified_at
+                   FROM memories
+                  WHERE project_path = ?1 AND status IN ('active', 'permanent')
+                    AND (expires_at IS NULL OR expires_at > ?2)
+                  ORDER BY COALESCE(importance, 50) DESC, id ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![project, now_ms], |row| {
+                Ok(StoredMemory {
+                    id: row.get(0)?,
+                    project_path: row.get(1)?,
+                    category: row.get(2)?,
+                    content: row.get(3)?,
+                    importance: row.get(4)?,
+                    status: row
+                        .get::<_, Option<String>>(5)?
+                        .unwrap_or_else(|| "active".into()),
+                    expires_at: row.get(6)?,
+                    superseded_by_memory_id: row.get(7)?,
+                    updated_at: row.get(8)?,
+                    last_seen_at: row.get(9)?,
+                    verified_at: row.get(10)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    /// The active user profile, oldest first, and its highest id.
+    pub fn user_profile(&self) -> Result<(Vec<String>, i64), String> {
+        let connection = self.lock();
+        let mut statement = connection
+            .prepare_cached(
+                "SELECT id, content FROM user_memories WHERE status = 'active' ORDER BY promoted_at ASC, id ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows: Vec<(i64, String)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())?;
+        let max_id = rows.iter().map(|(id, _)| *id).max().unwrap_or(0);
+        Ok((
+            rows.into_iter().map(|(_, content)| content).collect(),
+            max_id,
+        ))
+    }
+
+    /// A project's memory changes after the log entry `after`, oldest first.
+    pub fn memory_mutations_after(
+        &self,
+        project: &str,
+        after: i64,
+    ) -> Result<Vec<StoredMutation>, String> {
+        let connection = self.lock();
+        let mut statement = connection
+            .prepare_cached(
+                "SELECT id, mutation_type, target_memory_id, superseded_by_id, category, new_content
+                   FROM memory_mutation_log
+                  WHERE project_path = ?1 AND id > ?2
+                  ORDER BY id ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![project, after], |row| {
+                Ok(StoredMutation {
+                    id: row.get(0)?,
+                    mutation_type: row.get(1)?,
+                    target_memory_id: row.get(2)?,
+                    superseded_by_id: row.get(3)?,
+                    category: row.get(4)?,
+                    new_content: row.get(5)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    /// The newest memory change logged for a project, or 0.
+    pub fn last_memory_mutation(&self, project: &str) -> Result<i64, String> {
+        self.lock()
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM memory_mutation_log WHERE project_path = ?1",
+                params![project],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
     }
 
     /// Delete a session's summaries from `sequence` on, after a revert removed
