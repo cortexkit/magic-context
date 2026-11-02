@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ck_contract_draft::part::{Part, PartBody, Sealing, ToolStatus};
+use ck_contract_draft::part::{Part, PartBody, Sealing, ToolPart, ToolStatus};
 use ck_contract_draft::read::{Entry, Role};
 use ck_contract_draft::view::{EditOp, View};
 use serde_json::{json, Value};
@@ -103,14 +103,28 @@ pub struct Context<'a> {
     pub keep_first_message: bool,
 }
 
+/// How a lane wants a tool part dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    /// A recent call with a small input keeps its arguments and only its
+    /// result is replaced; any other call goes with its result. Text becomes
+    /// the placeholder, reasoning goes.
+    Default,
+    /// The call goes with its result, however recent. Used where the call
+    /// itself is redundant (a duplicate of a newer identical call).
+    Whole,
+    /// An edit superseded by a newer edit of the same file: the call stays,
+    /// with its file path and only the start of each long diff argument, and
+    /// its result is replaced.
+    EditMarker,
+}
+
 /// The edits that drop `parts`, and which of them those edits cover. A part
-/// already changed by the latest view counts as covered and gets no new
-/// edit. A part that cannot go yet (a running tool call, a protected result)
-/// is left out of both, so a queued drop of it waits.
-pub fn drop_ops<'a>(
-    context: &Context,
-    parts: impl IntoIterator<Item = &'a PartKey>,
-) -> (Vec<EditOp>, Vec<PartKey>) {
+/// requested twice keeps the shape of its first request. A part already
+/// changed by the latest view counts as covered and gets no new edit. A part
+/// that cannot go yet (a running tool call, a protected result) is left out
+/// of both, so a queued drop of it waits.
+pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, Vec<PartKey>) {
     let index = context.index;
     let recent: BTreeSet<u64> = index
         .newest_tool_tags(RECENT_TOOL_WINDOW)
@@ -119,9 +133,14 @@ pub fn drop_ops<'a>(
     let protected = protected_tool_parts(index, context.protected_tools);
     let newest_mid = index.entries().last().map(|entry| entry.mid.as_str());
     let first_mid = index.entries().first().map(|entry| entry.mid.as_str());
+    let mut shapes: BTreeMap<&PartKey, Shape> = BTreeMap::new();
+    for (key, shape) in parts {
+        shapes.entry(key).or_insert(*shape);
+    }
     let mut ops = Vec::new();
     let mut covered = Vec::new();
-    for key @ (mid, part_id) in parts.into_iter().collect::<BTreeSet<_>>() {
+    for (key, shape) in shapes {
+        let (mid, part_id) = key;
         if context.edited.covers(mid, part_id) {
             covered.push(key.clone());
             continue;
@@ -157,19 +176,32 @@ pub fn drop_ops<'a>(
                     continue;
                 };
                 let input = Value::Object(tool.input.clone());
+                let small_recent =
+                    recent.contains(&tag) && input_string_bytes(&input) <= SMALL_INPUT_MAX_BYTES;
                 // A call whose result ends the transcript stays a call: the
                 // request would otherwise end on the call's message without
                 // its result.
-                let keep_call = Some(entry.mid.as_str()) == newest_mid
-                    || (recent.contains(&tag)
-                        && input_string_bytes(&input) <= SMALL_INPUT_MAX_BYTES);
-                if keep_call {
-                    ops.push(replace("output", json!(placeholder(tag))));
-                    if !tool.attachments.is_empty() {
-                        ops.push(replace("attachments", json!([])));
-                    }
-                } else {
+                let ends_transcript = Some(entry.mid.as_str()) == newest_mid;
+                let keep_call = match shape {
+                    Shape::Default => ends_transcript || small_recent,
+                    Shape::Whole => ends_transcript,
+                    Shape::EditMarker => true,
+                };
+                if !keep_call {
                     ops.push(drop());
+                    covered.push(key.clone());
+                    continue;
+                }
+                ops.push(replace("output", json!(placeholder(tag))));
+                if !tool.attachments.is_empty() {
+                    ops.push(replace("attachments", json!([])));
+                }
+                if shape == Shape::EditMarker {
+                    for (name, value) in &tool.input {
+                        if let Some(marked) = edit_marker(name, value) {
+                            ops.push(replace(&format!("input.{name}"), json!(marked)));
+                        }
+                    }
                 }
             }
             PartBody::Image(_) | PartBody::File(_) => continue,
@@ -177,6 +209,46 @@ pub fn drop_ops<'a>(
         covered.push(key.clone());
     }
     (ops, covered)
+}
+
+/// Diff arguments of an edit call longer than this keep only their start.
+pub const EDIT_REGION_HINT_LEN: usize = 40;
+
+/// What a shortened diff argument ends with. Also marks one as already
+/// shortened.
+const TRUNCATION_SENTINEL: &str = "...[truncated]";
+
+/// The edit-marker form of one argument of an edit call: diff arguments
+/// (`oldString`, `newString`, `content` and their snake-case forms) longer
+/// than 40 UTF-16 code units keep their first 40, without splitting a
+/// surrogate pair, plus a truncation sentinel. `None` for an argument that
+/// stays as it is, which includes every file path.
+pub fn edit_marker(name: &str, value: &Value) -> Option<String> {
+    const DIFF_KEYS: [&str; 5] = [
+        "oldString",
+        "newString",
+        "content",
+        "old_string",
+        "new_string",
+    ];
+    let Value::String(text) = value else {
+        return None;
+    };
+    let units: Vec<u16> = text.encode_utf16().collect();
+    if !DIFF_KEYS.contains(&name)
+        || units.len() <= EDIT_REGION_HINT_LEN
+        || text.ends_with(TRUNCATION_SENTINEL)
+    {
+        return None;
+    }
+    let mut end = EDIT_REGION_HINT_LEN;
+    if (0xD800..=0xDBFF).contains(&units[end - 1]) {
+        end -= 1;
+    }
+    Some(format!(
+        "{}{TRUNCATION_SENTINEL}",
+        String::from_utf16_lossy(&units[..end])
+    ))
 }
 
 /// The newest results of each protected tool, by part.
@@ -265,7 +337,7 @@ pub fn far_behind_bookmark(context: &Context, usable_window: u64) -> u64 {
 
 /// The age sweep: tool outputs at or below `bookmark` (recorded by the
 /// previous rebuild), worth dropping, and not protected.
-pub fn age_sweep(context: &Context, bookmark: u64) -> Vec<PartKey> {
+pub fn age_sweep(context: &Context, bookmark: u64) -> Vec<(PartKey, Shape)> {
     if bookmark == 0 {
         return Vec::new();
     }
@@ -284,7 +356,7 @@ pub fn age_sweep(context: &Context, bookmark: u64) -> Vec<PartKey> {
             {
                 continue;
             }
-            parts.push(key);
+            parts.push((key, Shape::Default));
         }
     }
     parts
@@ -343,7 +415,7 @@ fn reasoning_cost(entry: &Entry, reasoning: &[&Part]) -> u64 {
 /// entry always keeps its reasoning and is charged first. What goes is always
 /// an oldest contiguous run, which every provider accepts, signed reasoning
 /// included.
-pub fn reasoning_over_budget(context: &Context, budget: u64) -> Vec<PartKey> {
+pub fn reasoning_over_budget(context: &Context, budget: u64) -> Vec<(PartKey, Shape)> {
     let assistants: Vec<(&Entry, Vec<&Part>)> = context
         .index
         .entries()
@@ -383,7 +455,301 @@ pub fn reasoning_over_budget(context: &Context, budget: u64) -> Vec<PartKey> {
         .flat_map(|(entry, reasoning)| {
             reasoning
                 .iter()
-                .map(|part| (entry.mid.clone(), part.id.clone()))
+                .map(|part| ((entry.mid.clone(), part.id.clone()), Shape::Default))
         })
         .collect()
+}
+
+/// The protected tail's default size for a usable window: 5% of it, at
+/// least 8% capped at 16,000 tokens, and never more than 64,000.
+pub fn default_protected_tokens(usable_window: u64) -> u64 {
+    let usable = usable_window as f64;
+    let lower = (0.08 * usable).round().min(16_000.0);
+    let target = (0.05 * usable).round();
+    target.max(lower).min(64_000.0) as u64
+}
+
+/// The protected tail, as the lowest protected tag number: walking tool
+/// outputs newest first until they add up to `floor` tokens, and never fewer
+/// than the newest three tool calls. Parts tagged at or above it are left
+/// alone by the routine heuristics. `None` when the session has no tool
+/// calls, which protects nothing.
+pub fn protected_cutoff(context: &Context, floor: u64) -> Option<u64> {
+    let tools: Vec<(u64, u64)> = context
+        .index
+        .entries()
+        .iter()
+        .rev()
+        .flat_map(|entry| entry.parts.iter().rev())
+        .filter_map(|part| match (&part.body, part.tag) {
+            (PartBody::Tool(tool), Some(tag)) => {
+                Some((tag, tokens::bytes(tool.output_bytes.unwrap_or(0))))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut mass = 0;
+    let mut mass_cutoff = None;
+    for (tag, tokens) in &tools {
+        mass += tokens;
+        mass_cutoff = Some(*tag);
+        if mass >= floor {
+            break;
+        }
+    }
+    let newest_three = tools.iter().take(3).next_back().map(|(tag, _)| *tag);
+    match (mass_cutoff, newest_three) {
+        (Some(mass), Some(three)) => Some(mass.min(three)),
+        (cutoff, three) => cutoff.or(three),
+    }
+}
+
+fn in_tail(part: &Part, cutoff: Option<u64>) -> bool {
+    match (part.tag, cutoff) {
+        (Some(tag), Some(cutoff)) => tag >= cutoff,
+        _ => false,
+    }
+}
+
+/// Every tool part with the entry that holds it, oldest first.
+fn tool_parts<'a>(
+    context: &'a Context,
+) -> impl Iterator<Item = (&'a Entry, &'a Part, &'a ToolPart)> + 'a {
+    context.index.entries().iter().flat_map(|entry| {
+        entry.parts.iter().filter_map(move |part| match &part.body {
+            PartBody::Tool(tool) => Some((entry, part, tool)),
+            _ => None,
+        })
+    })
+}
+
+/// Lookup tools whose identical repeated calls return the same thing.
+const DEDUP_TOOLS: [&str; 9] = [
+    "grep",
+    "read",
+    "glob",
+    "ast_grep_search",
+    "lsp_diagnostics",
+    "lsp_symbols",
+    "lsp_find_references",
+    "lsp_goto_definition",
+    "lsp_prepare_rename",
+];
+
+/// Duplicate lookups: calls of the same lookup tool with the same arguments
+/// within one assistant message. The newest stays; older ones go whole,
+/// outside the protected tail.
+pub fn duplicate_lookups(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Shape)> {
+    let mut newest: BTreeMap<(String, String, String), u64> = BTreeMap::new();
+    let mut calls = Vec::new();
+    for (entry, part, tool) in tool_parts(context) {
+        let name = tool.name.strip_prefix("mcp_").unwrap_or(&tool.name);
+        let (true, Some(tag)) = (DEDUP_TOOLS.contains(&name), part.tag) else {
+            continue;
+        };
+        let input = serde_json::to_string(&tool.input).unwrap_or_default();
+        let key = (entry.mid.clone(), tool.name.clone(), input);
+        let held = newest.entry(key.clone()).or_insert(tag);
+        *held = (*held).max(tag);
+        calls.push((key, tag, entry, part));
+    }
+    calls
+        .into_iter()
+        .filter(|(key, tag, _, part)| newest[key] != *tag && !in_tail(part, cutoff))
+        .map(|(_, _, entry, part)| ((entry.mid.clone(), part.id.clone()), Shape::Whole))
+        .collect()
+}
+
+/// The newest messages that own tagged parts: tool calls among them may still
+/// guide what the model does next, so supersession leaves them alone.
+pub const SUPERSESSION_RECENT_MESSAGE_WINDOW: usize = 20;
+
+fn recent_owner_messages<'a>(context: &'a Context) -> BTreeSet<&'a str> {
+    context
+        .index
+        .entries()
+        .iter()
+        .rev()
+        .filter(|entry| entry.parts.iter().any(|part| part.tag.is_some()))
+        .take(SUPERSESSION_RECENT_MESSAGE_WINDOW)
+        .map(|entry| entry.mid.as_str())
+        .collect()
+}
+
+/// Spent control-plane outputs: results that are worthless once the call
+/// ran (`todowrite`, `ctx_reduce`, `bash_status`, `bash_kill`, and `ctx_note`
+/// reads and dismissals), whatever their age, outside the newest 20 owning
+/// messages and the protected tail.
+pub fn spent_control_plane(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Shape)> {
+    let recent = recent_owner_messages(context);
+    tool_parts(context)
+        .filter(|(entry, part, tool)| {
+            let spent = match normalize_tool_name(&tool.name).as_str() {
+                "todowrite" | "ctx_reduce" | "bash_status" | "bash_kill" => true,
+                // Writes and updates carry intent; only reads and dismissals
+                // are spent. An unreadable action is not spent.
+                "ctx_note" => matches!(
+                    tool.input.get("action").and_then(Value::as_str),
+                    Some("read" | "dismiss")
+                ),
+                _ => false,
+            };
+            spent && !recent.contains(entry.mid.as_str()) && !in_tail(part, cutoff)
+        })
+        .map(|(entry, part, _)| ((entry.mid.clone(), part.id.clone()), Shape::Default))
+        .collect()
+}
+
+/// Superseded edits: among `edit` and `write` calls on the same file, the
+/// newest stays whole. An older one becomes an edit marker once it is at or
+/// below the age sweep's bookmark (it was far behind on an earlier rebuild),
+/// outside the newest 20 owning messages and the protected tail. A call
+/// without a readable file path is never superseded.
+pub fn superseded_edits(
+    context: &Context,
+    cutoff: Option<u64>,
+    bookmark: u64,
+) -> Vec<(PartKey, Shape)> {
+    let recent = recent_owner_messages(context);
+    let mut seen_files = BTreeSet::new();
+    let mut parts = Vec::new();
+    let edits: Vec<_> = tool_parts(context)
+        .filter(|(_, _, tool)| tool.name == "edit" || tool.name == "write")
+        .collect();
+    for (entry, part, tool) in edits.into_iter().rev() {
+        if in_tail(part, cutoff) {
+            continue;
+        }
+        let Some(path) = ["filePath", "file_path", "path"].iter().find_map(|key| {
+            tool.input
+                .get(*key)
+                .and_then(Value::as_str)
+                .filter(|path| !path.is_empty())
+        }) else {
+            continue;
+        };
+        if seen_files.insert(path.to_owned()) {
+            continue;
+        }
+        if part.tag.is_some_and(|tag| tag <= bookmark) && !recent.contains(entry.mid.as_str()) {
+            parts.push(((entry.mid.clone(), part.id.clone()), Shape::EditMarker));
+        }
+    }
+    parts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ck_contract_draft::read::entry_digest;
+
+    fn entry(ordinal: u64, role: Role, parts: Vec<Part>) -> Entry {
+        Entry {
+            ordinal,
+            mid: format!("m{ordinal}"),
+            role,
+            notice: None,
+            written_at: 0,
+            digest: entry_digest(role, None, &parts),
+            parts,
+            usage: None,
+            generated_under: None,
+        }
+    }
+
+    fn read(tag: u64, output_bytes: u64) -> Part {
+        Part::new(
+            format!("p{tag}"),
+            Some(tag),
+            PartBody::Tool(ToolPart {
+                call_id: format!("c{tag}"),
+                name: "read".into(),
+                input: json!({"path": "b.rs"}).as_object().unwrap().clone(),
+                status: ToolStatus::Completed,
+                output: None,
+                output_bytes: Some(output_bytes),
+                attachments: Vec::new(),
+            }),
+        )
+    }
+
+    /// Two identical reads in one message (tags 2 and 3), then reads of
+    /// 4,000 bytes (1,000 tokens) at tags 4, 5 and 6.
+    fn index() -> Index {
+        let text = |tag: u64| {
+            Part::new(
+                format!("p{tag}"),
+                Some(tag),
+                PartBody::Text { text: "Go.".into() },
+            )
+        };
+        let mut index = Index::default();
+        index.extend([
+            entry(0, Role::User, vec![text(1)]),
+            entry(1, Role::Assistant, vec![read(2, 40), read(3, 40)]),
+            entry(2, Role::Assistant, vec![read(4, 4_000)]),
+            entry(3, Role::Assistant, vec![read(5, 4_000)]),
+            entry(4, Role::Assistant, vec![read(6, 4_000)]),
+        ]);
+        index
+    }
+
+    #[test]
+    fn the_protected_tail_covers_the_floor_and_at_least_three_calls_and_the_heuristics_respect_it()
+    {
+        let index = index();
+        let edited = Edited::default();
+        let protected_tools = BTreeMap::new();
+        let context = Context {
+            index: &index,
+            edited: &edited,
+            protected_tools: &protected_tools,
+            keep_first_message: false,
+        };
+        // The newest three calls (6, 5, 4) hold 3,000 tokens.
+        assert_eq!(protected_cutoff(&context, 1), Some(4));
+        assert_eq!(protected_cutoff(&context, 3_000), Some(4));
+        assert_eq!(protected_cutoff(&context, 3_001), Some(3));
+        assert_eq!(protected_cutoff(&context, 100_000), Some(2));
+
+        let duplicate = vec![(("m1".to_owned(), "p2".to_owned()), Shape::Whole)];
+        assert_eq!(duplicate_lookups(&context, Some(4)), duplicate);
+        assert_eq!(duplicate_lookups(&context, Some(2)), []);
+    }
+
+    #[test]
+    fn the_protected_tail_default_follows_the_standalone_table() {
+        for (usable, expected) in [
+            (100_000, 8_000),
+            (200_000, 16_000),
+            (372_000, 18_600),
+            (872_000, 43_600),
+            (1_000_000, 50_000),
+            (2_000_000, 64_000),
+        ] {
+            assert_eq!(default_protected_tokens(usable), expected, "{usable}");
+        }
+    }
+
+    #[test]
+    fn an_edit_marker_keeps_paths_and_the_start_of_long_diffs() {
+        let long = "x".repeat(41);
+        assert_eq!(
+            edit_marker("oldString", &json!(long)).unwrap(),
+            format!("{}...[truncated]", "x".repeat(40))
+        );
+        assert_eq!(edit_marker("oldString", &json!("x".repeat(40))), None);
+        assert_eq!(edit_marker("filePath", &json!(long)), None);
+        assert_eq!(
+            edit_marker("content", &json!(format!("{long}...[truncated]"))),
+            None
+        );
+        // 39 units, then an emoji that is two UTF-16 units: the cut steps back
+        // rather than split it.
+        let emoji = format!("{}😀tail", "x".repeat(39));
+        assert_eq!(
+            edit_marker("newString", &json!(emoji)).unwrap(),
+            format!("{}...[truncated]", "x".repeat(39))
+        );
+    }
 }

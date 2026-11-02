@@ -484,3 +484,92 @@ async fn heavy_signed_thinking_holds_the_view_until_usage_passes_threshold_plus_
         Some(placeholder(3).as_str())
     );
 }
+
+/// The arguments the model sees for the tool part numbered `tag`.
+fn seen_input(host: &Host, tag: u64) -> Option<serde_json::Map<String, Value>> {
+    host.rendered().iter().find_map(|message| {
+        message
+            .parts
+            .iter()
+            .find(|part| part.tag == Some(tag))
+            .and_then(|part| match &part.body {
+                PartBody::Tool(tool) => Some(tool.input.clone()),
+                _ => None,
+            })
+    })
+}
+
+fn step(text: &str, tools: Vec<ToolCall>) -> Step {
+    Step::Model(Turn {
+        text: Some(text.into()),
+        tools,
+        output_tokens: 10,
+        ..Turn::default()
+    })
+}
+
+#[tokio::test]
+async fn routine_heuristics_land_with_the_first_views() {
+    let edit = |old: &str, new: &str| {
+        ToolCall::ok(
+            "edit",
+            json!({"filePath": "c.rs", "oldString": old.repeat(100), "newString": new.repeat(100)}),
+            "Edit applied.",
+        )
+    };
+    let lookup = || ToolCall::ok("read", json!({"path": "b.rs"}), "fn b() {}");
+    let todo = |n: u64| ToolCall::ok("todowrite", json!({"todos": [n]}), "Todos updated.");
+    let mut steps = vec![
+        user("Review the module."),
+        // Tags 2, 3, 4: the same lookup twice in one message.
+        step("Looking twice.", vec![lookup(), lookup()]),
+        // Tags 5, 6 and 7, 8: two todo updates; only the newest is kept.
+        step("Planning.", vec![todo(1)]),
+        step("Replanning.", vec![todo(2)]),
+        // Tags 9, 10: a note read.
+        step(
+            "Checking notes.",
+            vec![ToolCall::ok(
+                "ctx_note",
+                json!({"action": "read"}),
+                "No notes.",
+            )],
+        ),
+        // Tags 11, 12 and 13, 14: two edits of the same file.
+        step("Editing.", vec![edit("a", "b")]),
+        step("Editing again.", vec![edit("c", "d")]),
+    ];
+    // Push all of that out of the newest 20 owning messages.
+    steps.extend((0..22).map(|_| answer()));
+    steps.extend([read_file(50), read_file(50), read_file(50), read_file(50)]);
+    steps.extend([answer(), answer(), answer()]);
+    let mut runner = start(config("worker", Kind::OpenAi, FREE)).await;
+    runner.play(&steps).await;
+    assert_clean(&runner);
+    let host = runner.host();
+
+    // The older duplicate goes whole; the newer stays.
+    assert_eq!(seen(host, 3), None);
+    assert!(seen(host, 4).unwrap().starts_with("§4§ fn b()"));
+    // Spent control-plane outputs: the older todo update and the note read.
+    assert_eq!(seen(host, 6).as_deref(), Some(placeholder(6).as_str()));
+    assert!(seen(host, 8).unwrap().starts_with("§8§ Todos updated."));
+    assert_eq!(seen(host, 10).as_deref(), Some(placeholder(10).as_str()));
+    // The older edit keeps its path and the start of each diff.
+    assert_eq!(seen(host, 12).as_deref(), Some(placeholder(12).as_str()));
+    let marked = seen_input(host, 12).unwrap();
+    assert_eq!(marked["filePath"], json!("c.rs"));
+    assert_eq!(
+        marked["oldString"],
+        json!(format!("{}...[truncated]", "a".repeat(40)))
+    );
+    assert_eq!(
+        marked["newString"],
+        json!(format!("{}...[truncated]", "b".repeat(40)))
+    );
+    // The newest edit of the file stays whole.
+    assert_eq!(
+        seen_input(host, 14).unwrap()["oldString"],
+        json!("c".repeat(100))
+    );
+}

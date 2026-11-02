@@ -200,14 +200,33 @@ impl Session {
             protected_tools: &settings.protected_tools,
             keep_first_message: self.features.keep_first_message,
         };
-        let mut wanted: Vec<lanes::PartKey> = self.queued.iter().cloned().collect();
+        let usable = pass::usable_window(&self.conditions);
+        let floor = settings
+            .protected_tokens
+            .unwrap_or_else(|| lanes::default_protected_tokens(usable));
+        let cutoff = lanes::protected_cutoff(&context, floor);
+        // A part two lanes want keeps the first lane's shape, so the order
+        // here decides it: the model's own request first, then the lanes
+        // that keep a call, then the rest.
+        let mut wanted: Vec<(lanes::PartKey, lanes::Shape)> = self
+            .queued
+            .iter()
+            .map(|key| (key.clone(), lanes::Shape::Default))
+            .collect();
+        wanted.extend(lanes::superseded_edits(
+            &context,
+            cutoff,
+            self.reclaim_bookmark,
+        ));
+        wanted.extend(lanes::spent_control_plane(&context, cutoff));
+        wanted.extend(lanes::duplicate_lookups(&context, cutoff));
         wanted.extend(lanes::age_sweep(&context, self.reclaim_bookmark));
         wanted.extend(lanes::reasoning_over_budget(
             &context,
             settings.keep_reasoning_tokens,
         ));
         let (ops, covered) = lanes::drop_ops(&context, &wanted);
-        let bookmark = lanes::far_behind_bookmark(&context, pass::usable_window(&self.conditions));
+        let bookmark = lanes::far_behind_bookmark(&context, usable);
         self.reclaim_bookmark = self.reclaim_bookmark.max(bookmark);
         let version = self.version + 1;
         let built = view_builder::next_view(

@@ -28,6 +28,9 @@ pub struct Settings {
     /// The newest results of these tools are never dropped automatically:
     /// tool name to how many results it keeps.
     pub protected_tools: BTreeMap<String, u64>,
+    /// Tokens of the newest tool output the routine heuristics leave alone;
+    /// derived from the usable window when not set.
+    pub protected_tokens: Option<u64>,
 }
 
 impl Default for Settings {
@@ -36,6 +39,7 @@ impl Default for Settings {
             execute_threshold_percentage: 65.0,
             keep_reasoning_tokens: 10_000,
             protected_tools: BTreeMap::from([("todowrite".into(), 1), ("ctx_reduce".into(), 3)]),
+            protected_tokens: None,
         }
     }
 }
