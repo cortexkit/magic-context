@@ -1018,28 +1018,37 @@ impl Session {
             memory_budget_tokens: settings.memory_budget_tokens,
             profile_budget_tokens: settings.profile_budget_tokens,
         };
-        let base = match (&self.baseline, self.fold_due) {
-            (Some(baseline), false) => baseline.clone(),
-            _ => head::fold(&fold_inputs),
-        };
-        // Shown memories that left the active set: their rows say whether
-        // they were archived or merged into another.
         let active: std::collections::HashSet<i64> =
             memories.iter().map(|memory| memory.id).collect();
-        let missing: Vec<i64> = base
-            .shown_ids()
-            .into_iter()
-            .filter(|id| !active.contains(id))
-            .collect();
-        let gone = match &self.db {
-            Some(db) => db.memories_by_ids(&missing).unwrap_or_default(),
-            None => Vec::new(),
+        // `m[1]` from a baseline: shown memories that left the active set get
+        // their rows, which say whether they were archived or merged.
+        let delta_from = |base: &Baseline| {
+            let missing: Vec<i64> = base
+                .shown_ids()
+                .into_iter()
+                .filter(|id| !active.contains(id))
+                .collect();
+            let gone = match &self.db {
+                Some(db) => db.memories_by_ids(&missing).unwrap_or_default(),
+                None => Vec::new(),
+            };
+            head::delta(
+                base,
+                &head::Inputs {
+                    gone: &gone,
+                    ..fold_inputs
+                },
+            )
         };
-        let inputs = head::Inputs {
-            gone: &gone,
-            ..fold_inputs
+        let (mut m1, mut next) = match (&self.baseline, self.fold_due) {
+            (Some(baseline), false) => delta_from(baseline),
+            _ => delta_from(&head::fold(&fold_inputs)),
         };
-        let (m1, next) = head::delta(&base, &inputs);
+        if let (Some(baseline), false) = (&self.baseline, self.fold_due) {
+            if head::needs_refold(baseline, &m1, &next, history_budget_tokens) {
+                (m1, next) = delta_from(&head::fold(&fold_inputs));
+            }
+        }
         let ops = head::head_ops(&next.m0, &m1);
         self.next_baseline = Some(next);
         ops

@@ -457,6 +457,48 @@ pub fn delta(baseline: &Baseline, inputs: &Inputs) -> (String, Baseline) {
     (text, next)
 }
 
+/// The memory changes `m[1]` shows past which a rebuild folds instead, as
+/// the plugin does (`memoryUpdateCount > 40` in `inject-compartments.ts`).
+const REFOLD_MEMORY_CHANGES: u64 = 40;
+
+/// Whether a rebuild that would keep `m[0]` should fold instead, because
+/// `m[1]` grew too large (the plugin's pressure backstop). A session whose
+/// cache never expires would otherwise never fold, and its `m[1]` would keep
+/// growing: newer summaries stay at full detail there, and memory changes
+/// pile up. Any one of three folds:
+/// - more than [`REFOLD_MEMORY_CHANGES`] memory changes shown since the fold;
+/// - `m[1]` over a fifth of the history budget;
+/// - `m[1]` over 15% of `m[0]`, once `m[0]` holds at least 500 tokens (a
+///   smaller `m[0]` would make that share trivially exceeded).
+///
+/// `m1` and `next` are what [`delta`] produced from `baseline`.
+pub fn needs_refold(
+    baseline: &Baseline,
+    m1: &str,
+    next: &Baseline,
+    history_budget_tokens: u64,
+) -> bool {
+    let changes: u64 = next
+        .committed
+        .iter()
+        .map(|entry| match entry.form {
+            Form::Overflow => entry.overflow_count,
+            _ => 1,
+        })
+        .sum();
+    if changes > REFOLD_MEMORY_CHANGES {
+        return true;
+    }
+    if m1 == M1_EMPTY {
+        return false;
+    }
+    let m1_tokens = tokens(m1) as f64;
+    let m0_tokens = tokens(&baseline.m0);
+    m1_tokens > history_budget_tokens as f64 * M1_ABSOLUTE_CAP_RATIO
+        || (m0_tokens >= M0_DRIFT_RATIO_FLOOR_TOKENS
+            && m1_tokens > m0_tokens as f64 * M1_DRIFT_RATIO)
+}
+
 /// `m[0]` and `m[1]` as view edits, in that order.
 pub fn head_ops(m0: &str, m1: &str) -> Vec<EditOp> {
     [(M0_ID, m0), (M1_ID, m1)]
@@ -600,5 +642,46 @@ mod tests {
         assert_eq!(after.committed.last().unwrap().form, Form::Overflow);
         // A change shown as a marker or counted is not shown again.
         assert_eq!(delta(&after, &later).0, m1_later);
+    }
+
+    #[test]
+    fn a_large_m1_or_many_memory_changes_fold_instead_of_refreshing_m1() {
+        let words = |n: usize| "word ".repeat(n);
+        let small_m0 = Baseline {
+            m0: words(10),
+            ..Baseline::default()
+        };
+        let big_m0 = Baseline {
+            m0: words(4_000),
+            ..Baseline::default()
+        };
+        let m1 = |n: usize| {
+            format!(
+                "<session-history-since>\n{}\n</session-history-since>",
+                words(n)
+            )
+        };
+        let none = Baseline::default();
+        // Nothing new: never.
+        assert!(!needs_refold(&big_m0, M1_EMPTY, &none, 10_000));
+        // Over 15% of a large m[0].
+        let big_m0_tokens = tokens(&big_m0.m0);
+        let over = m1((big_m0_tokens as f64 * 0.2) as usize);
+        assert!(needs_refold(&big_m0, &over, &none, 1_000_000));
+        // A small m[0] does not count the share; a fifth of the history
+        // budget does.
+        assert!(!needs_refold(&small_m0, &m1(300), &none, 10_000));
+        assert!(needs_refold(&small_m0, &m1(3_000), &none, 10_000));
+        // More than 40 memory changes, whatever the sizes.
+        let changes = Baseline {
+            committed: vec![Committed {
+                form: Form::Overflow,
+                lines: Vec::new(),
+                overflow_ids: Vec::new(),
+                overflow_count: 41,
+            }],
+            ..Baseline::default()
+        };
+        assert!(needs_refold(&small_m0, &m1(1), &changes, 1_000_000));
     }
 }
