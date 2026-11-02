@@ -26,7 +26,7 @@
 //
 // The Spleen font supplies printable ASCII and U+2500; the additional mural
 // cue marks use deterministic 5x8 companion patterns because they are not
-// mapped by the Spleen 5x8 OTB.
+// mapped by the Spleen 5x8 font file (an OTB bitmap font).
 //
 // Source: pxpipe/assets/Spleen-5x8.otb
 
