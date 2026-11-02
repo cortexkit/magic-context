@@ -1340,13 +1340,22 @@ fn summarizer_failing(
 
 #[tokio::test]
 async fn large_tool_output_alone_does_not_start_a_summary_at_low_usage() {
-    // About 24,000 tokens of reads at about a quarter of the usable window:
-    // the raw history is past the size trigger, but the lines the summarizer
-    // would read (two short tool-call lines) are not, so nothing runs.
+    // Two turns of four 4,000-token shell outputs, then a short exchange:
+    // about a third of the usable window. The first turn's 16,000 raw tokens
+    // lie outside the protected tail and past the size trigger (15,000), but
+    // the lines the summarizer would read are a few short tool-call lines, so
+    // nothing runs.
     let mut runner = start(config("head", Kind::OpenAi, FREE)).await;
-    runner.play(&turn("Look at a.rs.")).await;
+    for prompt in ["Build it.", "Build it again."] {
+        let mut steps = vec![user(prompt)];
+        steps.extend((0..4).map(|_| shell(4_000)));
+        steps.push(answer());
+        runner.play(&steps).await;
+    }
     runner.play(&[user("Thanks."), answer()]).await;
     assert_clean(&runner);
+    let last = runner.report.requests.last().unwrap();
+    assert!(last.usage.prompt_tokens.unwrap() < 40_000, "{last:?}");
     assert!(runner.host().child_runs().is_empty());
 }
 
