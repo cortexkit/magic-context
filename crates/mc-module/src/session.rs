@@ -737,7 +737,7 @@ impl Session {
         }
     }
 
-    /// `transform.pre_user`: what goes before and after a person's message as
+    /// The `pre_user` hook: what goes before and after a person's message as
     /// the runner stores it. A message that is only reminders or notices is
     /// not a person's, and gets nothing.
     pub async fn pre_user(
@@ -745,12 +745,12 @@ impl Session {
         settings: &Settings,
         text: &str,
         now_ms: u64,
-    ) -> ck_contract_draft::wire::PreUserAnswer {
-        let mut answer = ck_contract_draft::wire::PreUserAnswer::default();
+    ) -> crate::pre_user::Addition {
+        let mut answer = crate::pre_user::Addition::default();
         if !crate::search::text::is_meaningful_user_text(text) {
             return answer;
         }
-        if settings.temporal_awareness {
+        if self.features.time_marker && settings.temporal_awareness {
             // The gap runs from the newest message the session holds, the one
             // this message follows, to now, when the message is written.
             if let Some(previous) = self.index.entries().last() {

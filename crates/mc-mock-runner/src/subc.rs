@@ -17,13 +17,14 @@ use ck_contract_draft::ride::{RideAnswer, RideRequest};
 use ck_contract_draft::send::{RunResultRequest, SendRequest};
 use ck_contract_draft::setup::{SetupAnswer, SetupRequest};
 use ck_contract_draft::view::{AppliedViewRequest, ApplyViewRequest};
-use ck_contract_draft::wire::{
-    self, codes, PreUserAnswer, PreUserRequest, ToolCallAnswer, ToolCallRequest,
-};
+use ck_contract_draft::wire::{self, codes};
 use ck_contract_draft::COMPACTION_ROLE;
+use cortexkit_role_step_transform_provider as step;
+use cortexkit_role_tool_provider::result::{ContentPart, ToolResult};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use step::answer::{HookAnswer, Operation};
 use subc_client_rs::{
     async_trait, BindDecision, CallOptions, ConsumerOptions, HandlerOutcome, ModuleHandler,
     RequestCtx, RouteBindRequest, SubcConsumer,
@@ -32,6 +33,7 @@ use subc_protocol::manifest::{
     Concurrency, IdentityScope, ManagementOperation, ManagementOperationKind, ModuleManifest,
     ProviderRole,
 };
+use subc_protocol::tool_call::ToolCallRequest;
 use subc_protocol::{BindIdentity, Principal, RouteTarget};
 
 use crate::runner::{CallError, Host, Provider, Report, Runner, SessionConfig, UserEdit};
@@ -101,6 +103,18 @@ impl SubcProvider {
         method: &str,
         params: &P,
     ) -> Result<A, CallError> {
+        self.call_body(role, method, wire::encode(method, params))
+            .await
+    }
+
+    /// Send `body` on the session's route for `role`; `label` names the call
+    /// in errors.
+    async fn call_body<A: DeserializeOwned>(
+        &self,
+        role: Role,
+        label: &str,
+        body: Vec<u8>,
+    ) -> Result<A, CallError> {
         let options = CallOptions {
             timeout: PROVIDER_CALL_TIMEOUT,
             role_versions: Some(role.versions()),
@@ -113,13 +127,13 @@ impl SubcProvider {
                     module_id: self.provider.clone(),
                 },
                 BindIdentity::new(self.session.harness.clone(), self.session.session.clone()),
-                wire::encode(method, params),
+                body,
                 options,
             )
             .await
-            .map_err(|error| CallError(format!("{method}: {error:?}")))?;
+            .map_err(|error| CallError(format!("{label}: {error:?}")))?;
         serde_json::from_slice(&reply)
-            .map_err(|error| CallError(format!("{method} answer: {error}")))
+            .map_err(|error| CallError(format!("{label} answer: {error}")))
     }
 }
 
@@ -139,34 +153,63 @@ impl Provider for SubcProvider {
             .await
     }
 
+    /// A tool call in the published tool-provider shape: the body is the
+    /// `{name, arguments}` call, and the answer its tool result.
     async fn tool(&self, name: &str, input: &Value) -> Result<String, CallError> {
-        let request = ToolCallRequest {
-            name: name.to_owned(),
-            input: input.clone(),
-        };
-        let answer: ToolCallAnswer = self
-            .call(Role::Tools, wire::ops::TOOL_CALL, &request)
-            .await?;
-        if answer.is_error {
-            Err(CallError(answer.output))
+        let call = ToolCallRequest::new(name, input.clone());
+        let body = serde_json::to_vec(&call).expect("tool calls serialize");
+        let result: ToolResult = self.call_body(Role::Tools, name, body).await?;
+        let text = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if result.is_error == Some(true) {
+            Err(CallError(text))
         } else {
-            Ok(answer.output)
+            Ok(text)
         }
     }
 
-    async fn pre_user(&self, text: &str, now: u64) -> Result<UserEdit, CallError> {
-        let request = PreUserRequest {
-            text: text.to_owned(),
-            now,
-        };
-        let answer: PreUserAnswer = self
-            .call(Role::Hooks, wire::ops::PRE_USER, &request)
+    /// The `pre_user` hook in the published step-transform shape. The
+    /// provider uses its own clock; `_now` is the scenario's, which only an
+    /// in-process provider can share.
+    async fn pre_user(&self, text: &str, _now: u64) -> Result<UserEdit, CallError> {
+        let call = json!({
+            "session": self.session.session,
+            "harness": self.session.harness,
+            "hook": "pre_user",
+            "blocks": [text],
+        });
+        let answer: HookAnswer = self
+            .call(Role::Hooks, step::ops::TRANSFORM_HOOK, &call)
             .await?;
-        Ok(UserEdit {
-            prepend: answer.prepend,
-            append: answer.append,
-        })
+        Ok(user_edit(answer))
     }
+}
+
+/// A hook answer as text before and after the message: the ops the mock
+/// sends a one-block message can only prepend to or append to that block.
+pub fn user_edit(answer: HookAnswer) -> UserEdit {
+    let mut edit = UserEdit::default();
+    if let HookAnswer::Ops { ops } = answer {
+        for op in ops {
+            match op {
+                Operation::Prepend { text, .. } => {
+                    edit.prepend = Some(text + edit.prepend.as_deref().unwrap_or(""));
+                }
+                Operation::Append { text, .. } => {
+                    edit.append = Some(edit.append.unwrap_or_default() + &text);
+                }
+                Operation::Replace { .. } => {}
+            }
+        }
+    }
+    edit
 }
 
 /// The module's manifest: a management surface, the role compaction

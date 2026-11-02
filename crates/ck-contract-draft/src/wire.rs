@@ -3,11 +3,9 @@
 //! is the op's answer as JSON. A refusal travels as the transport's error
 //! frame, with a stable code and a message for people.
 //!
-//! The draft also carries two ops that will come from other contracts when it
-//! is published: model tool calls (`tool.call`, the tool-provider contract)
-//! and the edit to a user message before it is stored (`transform.pre_user`,
-//! the step-transform-provider contract). Their shapes here are what the mock
-//! runner needs, not those contracts' final form.
+//! Model tool calls and the edit to a person's message before it is stored are
+//! not part of this contract: they use the published `tool-provider/v1` and
+//! `step-transform-provider/v1` contracts, each on a route of its own.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -50,46 +48,4 @@ pub mod codes {
     pub const UNKNOWN_SESSION: &str = "unknown_session";
     /// The op was understood and refused; the message says why.
     pub const REFUSED: &str = "refused";
-}
-
-/// Op names that come from other contracts (see the module docs).
-pub mod ops {
-    /// Served by the provider: a tool call the session's model made.
-    pub const TOOL_CALL: &str = "tool.call";
-    /// Served by the provider: edit a user message before it is stored.
-    pub const PRE_USER: &str = "transform.pre_user";
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ToolCallRequest {
-    pub name: String,
-    pub input: Value,
-}
-
-/// The tool's output for the model. A failed call is still an answer: the
-/// model reads `output` either way, and `is_error` marks the result failed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolCallAnswer {
-    pub output: String,
-    #[serde(default)]
-    pub is_error: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PreUserRequest {
-    pub text: String,
-    /// The runner's clock as it stores the message, in milliseconds since the
-    /// Unix epoch: the same clock as every entry's `written_at`, so the gap
-    /// since the previous message is measured on one clock.
-    pub now: u64,
-}
-
-/// Text to put before and after the user's message. Both absent changes
-/// nothing.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PreUserAnswer {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prepend: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub append: Option<String>,
 }

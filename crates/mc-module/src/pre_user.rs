@@ -1,5 +1,5 @@
-//! What ck-mc adds to a person's message before the runner stores it
-//! (`transform.pre_user`): a time marker in front when the previous message
+//! What ck-mc adds to a person's message before the runner stores it (the
+//! `pre_user` hook of the step-transform-provider contract): a time marker in front when the previous message
 //! is more than five minutes old, and, for sessions with automatic memory, a
 //! short hint after it when a search over memories, history and commits finds
 //! something relevant.
@@ -13,6 +13,14 @@ use regex::Regex;
 use std::sync::OnceLock;
 
 use crate::search::text;
+
+/// Text to put before and after a person's message. Both absent changes
+/// nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Addition {
+    pub prepend: Option<String>,
+    pub append: Option<String>,
+}
 
 /// Gaps shorter than this get no marker.
 const THRESHOLD_MS: u64 = 5 * 60 * 1_000;

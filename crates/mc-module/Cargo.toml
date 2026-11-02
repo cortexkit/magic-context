@@ -18,6 +18,10 @@ mc-tokenizer = { workspace = true }
 rusqlite = { workspace = true }
 sha2 = { workspace = true }
 md5 = "0.7"
+# Model tool calls and the edit to a person's message come through these
+# published contracts, each on a route of its own.
+cortexkit-role-tool-provider = "=0.14.6"
+cortexkit-role-step-transform-provider = "=0.4.2"
 # Search query embeddings: one HTTPS POST per explicit search, no redirects.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 

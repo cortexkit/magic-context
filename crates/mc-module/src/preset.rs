@@ -22,6 +22,9 @@ pub struct Features {
     /// commits look relevant to it. Not for sessions another agent started:
     /// their prompts come from that agent, not from a person's question.
     pub auto_memory: bool,
+    /// A person's message gets a marker of the time since the previous
+    /// message after a long gap. A reader runs one short task and gets none.
+    pub time_marker: bool,
 }
 
 /// The features of a preset, or `None` for a preset Magic Context does not
@@ -33,12 +36,21 @@ pub fn features(preset: &str) -> Option<Features> {
             keep_first_message: false,
             ctx_keep: false,
             auto_memory: true,
+            time_marker: true,
         }),
-        "worker" | "reader" => Some(Features {
+        "worker" => Some(Features {
             summarizer: false,
             keep_first_message: true,
             ctx_keep: true,
             auto_memory: false,
+            time_marker: true,
+        }),
+        "reader" => Some(Features {
+            summarizer: false,
+            keep_first_message: true,
+            ctx_keep: true,
+            auto_memory: false,
+            time_marker: false,
         }),
         _ => None,
     }

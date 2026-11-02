@@ -20,7 +20,6 @@ use ck_contract_draft::read::SessionRef;
 use ck_contract_draft::ride::{RideAnswer, RideRequest};
 use ck_contract_draft::setup::{SetupAnswer, SetupRequest};
 use ck_contract_draft::view::View;
-use ck_contract_draft::wire::PreUserAnswer;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
@@ -28,6 +27,7 @@ use crate::client::RunnerClient;
 use crate::config::Config;
 use crate::context_db::ContextDb;
 use crate::pass::Settings;
+use crate::pre_user::Addition;
 use crate::preset;
 use crate::route::Route;
 use crate::session::Session;
@@ -35,8 +35,8 @@ use crate::store::Store;
 use crate::summary::run;
 use crate::summary::validate::ValidatedChunk;
 
-/// How long a runner waits for `transform.pre_user` before storing the
-/// message as it is.
+/// How long a runner waits for the `pre_user` hook before storing the
+/// message as it is: the budget ck-mc declares for it.
 pub const PRE_USER_BUDGET: Duration = Duration::from_millis(1_500);
 
 /// A call ck-mc refuses.
@@ -92,7 +92,7 @@ enum Job {
     PreUser {
         text: String,
         now: u64,
-        reply: oneshot::Sender<PreUserAnswer>,
+        reply: oneshot::Sender<Addition>,
     },
     Idle(oneshot::Sender<()>),
     SummaryFinished(Result<Option<ValidatedChunk>, String>),
@@ -190,10 +190,10 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
             .map_err(ModuleError::Tool)
     }
 
-    /// `transform.pre_user`: what to add to a person's message, within
+    /// The `pre_user` hook: what to add to a person's message, within
     /// [`PRE_USER_BUDGET`]. A session ck-mc does not know, or an answer that
     /// misses the budget, adds nothing: the message is never held up.
-    pub async fn pre_user(&self, session: &SessionRef, text: &str, now: u64) -> PreUserAnswer {
+    pub async fn pre_user(&self, session: &SessionRef, text: &str, now: u64) -> Addition {
         let (reply, answer) = oneshot::channel();
         let job = Job::PreUser {
             text: text.to_owned(),
@@ -201,7 +201,7 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
             reply,
         };
         if self.send(session, job).is_err() {
-            return PreUserAnswer::default();
+            return Addition::default();
         }
         tokio::time::timeout(PRE_USER_BUDGET, answer)
             .await
@@ -325,7 +325,7 @@ impl<C: RunnerClient + Send + Sync + 'static> Module<C> {
                     Job::PreUser { text, now, reply } => {
                         let answer = match &session {
                             Some(session) => session.pre_user(settings, &text, now).await,
-                            None => PreUserAnswer::default(),
+                            None => Addition::default(),
                         };
                         let _ = reply.send(answer);
                         continue;

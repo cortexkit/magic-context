@@ -12,11 +12,18 @@ use ck_contract_draft::send::{RunResult, RunResultRequest, SendAnswer, SendReque
 use ck_contract_draft::view::{
     AppliedViewAnswer, AppliedViewRequest, ApplyViewAnswer, ApplyViewRequest,
 };
-use ck_contract_draft::wire::{self, codes, PreUserRequest, ToolCallAnswer, ToolCallRequest};
+use ck_contract_draft::wire::{self, codes};
 use ck_contract_draft::{ops, COMPACTION_PROVIDES, COMPACTION_ROLE};
+use cortexkit_role_step_transform_provider as step;
+use cortexkit_role_tool_provider::result::{ContentPart, ToolResult};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
+use step::answer::{HookAnswer, Operation};
+use step::hook::{HookCall, Subject};
+use step::subscription::{
+    Declaration, DeclareRequest, DeclaredSubscription, Hook, OnUnavailable, Op,
+};
 use subc_client_rs::{
     async_trait, BindDecision, CallOptions, ConsumerOptions, HandlerOutcome, ModuleHandler,
     RequestCtx, RouteBindRequest, SubcConsumer,
@@ -25,12 +32,14 @@ use subc_protocol::manifest::{
     CapabilityDeclarations, Concurrency, ExecutionMode, IdentityScope, ModuleManifest,
     ProviderRole, Tool,
 };
+use subc_protocol::tool_call::ToolCallRequest;
 use subc_protocol::Principal;
 use subc_protocol::{BindIdentity, RouteTarget};
 use tokio::sync::OnceCell;
 
 use crate::client::{ClientError, RunnerClient};
-use crate::module::{Module, ModuleError};
+use crate::module::{Module, ModuleError, PRE_USER_BUDGET};
+use crate::pre_user::Addition;
 use crate::route::{Project, Route};
 
 /// How long ck-mc waits on one call to a runner.
@@ -189,28 +198,39 @@ impl Handler {
         }
     }
 
-    async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Value, (&'static str, String)> {
-        let bad = |message: String| (codes::BAD_REQUEST, message);
+    async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Value, (String, String)> {
+        let bound = self
+            .bound
+            .lock()
+            .expect("bound routes")
+            .get(&channel)
+            .cloned()
+            .ok_or_else(|| (codes::REFUSED.to_owned(), "route_unbound".to_owned()))?;
+        let role = bound
+            .role
+            .as_ref()
+            .map(|(name, version)| (name.as_str(), version.as_str()));
+        match role {
+            Some(COMPACTION_ROLE) => self.compaction(&bound.route, body).await,
+            Some(TOOL_ROLE) => self.tool(&bound.route, body).await,
+            Some(HOOK_ROLE) => self.hook(&bound.route, body).await,
+            _ => Err((
+                codes::REFUSED.to_owned(),
+                "unknown_route_role: open the route for compaction-provider/v2, tool-provider/v1 or step-transform-provider/v1"
+                    .to_owned(),
+            )),
+        }
+    }
+
+    /// A compaction op, about the session the route is bound to.
+    async fn compaction(&self, route: &Route, body: &[u8]) -> Result<Value, (String, String)> {
+        let bad = |message: String| (codes::BAD_REQUEST.to_owned(), message);
         let (method, params) = wire::decode(body).map_err(bad)?;
-        let role = match method.as_str() {
-            ops::COMPACTION_SETUP | ops::COMPACTION_NOTICE | ops::COMPACTION_RIDE => {
-                COMPACTION_ROLE
-            }
-            wire::ops::TOOL_CALL => TOOL_ROLE,
-            wire::ops::PRE_USER => HOOK_ROLE,
-            other => {
-                return Err((
-                    codes::UNKNOWN_METHOD,
-                    format!("ck-mc does not serve `{other}`"),
-                ))
-            }
-        };
-        let bound = self.bound(channel, role)?;
-        let session = &bound.route.session;
+        let session = &route.session;
         let answer = match method.as_str() {
             ops::COMPACTION_SETUP => to_value(
                 self.module
-                    .setup(bound.route.clone(), wire::params(params).map_err(bad)?),
+                    .setup(route.clone(), wire::params(params).map_err(bad)?),
             ),
             ops::COMPACTION_NOTICE => to_value(
                 self.module
@@ -221,75 +241,172 @@ impl Handler {
                     .ride(session, wire::params(params).map_err(bad)?)
                     .await,
             ),
-            wire::ops::TOOL_CALL => {
-                let request: ToolCallRequest = wire::params(params).map_err(bad)?;
-                let answer = match self
-                    .module
-                    .tool(session, &request.name, request.input)
-                    .await
-                {
-                    Ok(output) => ToolCallAnswer {
-                        output,
-                        is_error: false,
-                    },
-                    Err(ModuleError::Tool(output)) => ToolCallAnswer {
-                        output,
-                        is_error: true,
-                    },
-                    Err(other) => return Err(refusal(other)),
-                };
-                Ok(serde_json::to_value(answer).expect("answers serialize"))
-            }
-            wire::ops::PRE_USER => {
-                let request: PreUserRequest = wire::params(params).map_err(bad)?;
-                let answer = self
-                    .module
-                    .pre_user(session, &request.text, request.now)
-                    .await;
-                Ok(serde_json::to_value(answer).expect("answers serialize"))
-            }
-            _ => unreachable!("every method has a role above"),
+            other => return Err(unknown_method(other)),
         };
         answer.map_err(refusal)
     }
 
-    /// The binding of the route a call came in on, when it was opened for
-    /// `role`. A call on a route opened for another role is refused, so one
-    /// role's route never carries another's ops.
-    fn bound(&self, channel: u16, role: (&str, &str)) -> Result<Bound, (&'static str, String)> {
-        let bound = self
-            .bound
-            .lock()
-            .expect("bound routes")
-            .get(&channel)
-            .cloned()
-            .ok_or((codes::REFUSED, "route_unbound".to_owned()))?;
-        if bound
-            .role
-            .as_ref()
-            .map(|(name, version)| (name.as_str(), version.as_str()))
-            != Some(role)
-        {
-            return Err((
-                codes::REFUSED,
-                format!(
-                    "wrong_route_role: this op needs a route opened for {}/{}",
-                    role.0, role.1
-                ),
-            ));
+    /// A model tool call (`tool-provider/v1`): the body is the published
+    /// `{name, arguments}` call, and the answer its tool result. The call is
+    /// about the session the route is bound to.
+    async fn tool(&self, route: &Route, body: &[u8]) -> Result<Value, (String, String)> {
+        let call: ToolCallRequest = serde_json::from_slice(body).map_err(|error| {
+            (
+                codes::BAD_REQUEST.to_owned(),
+                format!("not a tool call: {error}"),
+            )
+        })?;
+        if !call.name.starts_with("ctx_") {
+            let error = cortexkit_role_tool_provider::errors::unknown_tool(&call.name);
+            return Err((error.code, error.message));
         }
-        Ok(bound)
+        let (text, is_error) = match self
+            .module
+            .tool(&route.session, &call.name, call.arguments)
+            .await
+        {
+            Ok(output) => (output, false),
+            Err(ModuleError::Tool(output)) => (output, true),
+            Err(other) => return Err(refusal(other)),
+        };
+        let mut result = ToolResult::new(vec![ContentPart::text(text)]);
+        if is_error {
+            result.is_error = Some(true);
+        }
+        Ok(serde_json::to_value(result).expect("answers serialize"))
     }
+
+    /// A hook op (`step-transform-provider/v1`). That contract names the
+    /// session in the body, on a route that may serve all of a runner's
+    /// sessions. The body only picks among the sessions of the runner the
+    /// daemon attests for the route, so one runner never reaches another's;
+    /// on a route bound to one session, the body must name that session.
+    async fn hook(&self, route: &Route, body: &[u8]) -> Result<Value, (String, String)> {
+        let bad = |message: String| (codes::BAD_REQUEST.to_owned(), message);
+        let (method, params) = wire::decode(body).map_err(bad)?;
+        match method.as_str() {
+            step::ops::TRANSFORM_DECLARE => {
+                let request: DeclareRequest = wire::params(params).map_err(bad)?;
+                let declaration = declare(request.preset.as_deref().unwrap_or("head"))
+                    .ok_or_else(|| bad("unknown preset".into()))?;
+                Ok(serde_json::to_value(declaration).expect("answers serialize"))
+            }
+            step::ops::TRANSFORM_HOOK => {
+                let call: HookCall = wire::params(params).map_err(bad)?;
+                let bound_to_session = route.session.harness != MODULE_LEVEL_HARNESS;
+                if bound_to_session
+                    && (call.harness != route.session.harness
+                        || call.session != route.session.session)
+                {
+                    return Err((
+                        codes::REFUSED.to_owned(),
+                        "session_mismatch: the hook names another session than its route".into(),
+                    ));
+                }
+                let session = SessionRef {
+                    runner: route.session.runner.clone(),
+                    harness: call.harness.clone(),
+                    session: call.session.clone(),
+                };
+                let answer = match &call.subject {
+                    Subject::PreUser { blocks, .. } if !blocks.is_empty() => {
+                        let addition = self
+                            .module
+                            .pre_user(&session, &blocks.join("\n"), now_ms())
+                            .await;
+                        hook_answer(addition, blocks.len())
+                    }
+                    _ => HookAnswer::Pass,
+                };
+                Ok(serde_json::to_value(answer).expect("answers serialize"))
+            }
+            other => Err(unknown_method(other)),
+        }
+    }
+}
+
+/// The bind harness a runner declares on a route that serves all of its
+/// sessions, as the step-transform contract allows.
+const MODULE_LEVEL_HARNESS: &str = "runner";
+
+/// What ck-mc subscribes to for a preset: `pre_user` for presets that add a
+/// time marker or a memory hint, with ck-mc's budget, passing on any
+/// failure so a message is never held up. `None` for a preset ck-mc does not
+/// know.
+fn declare(preset: &str) -> Option<Declaration> {
+    let features = crate::preset::features(preset)?;
+    let mut ops = Vec::new();
+    if features.time_marker {
+        ops.push(Op::Prepend);
+    }
+    if features.auto_memory {
+        ops.push(Op::Append);
+    }
+    let budget = u64::try_from(PRE_USER_BUDGET.as_millis()).unwrap_or(u64::MAX);
+    let subscriptions = if ops.is_empty() {
+        Vec::new()
+    } else {
+        vec![DeclaredSubscription::new(Hook::PreUser, ops, budget)
+            .with_on_unavailable(OnUnavailable::Pass)]
+    };
+    Some(Declaration {
+        subscriptions,
+        claude_code: None,
+    })
+}
+
+/// The hook answer for an addition: the time marker before the first block,
+/// the hint after the last.
+fn hook_answer(addition: Addition, blocks: usize) -> HookAnswer {
+    let last = u32::try_from(blocks.saturating_sub(1)).unwrap_or(u32::MAX);
+    let mut ops = Vec::new();
+    if let Some(text) = addition.prepend {
+        ops.push(Operation::Prepend {
+            block: 0,
+            text,
+            note: None,
+        });
+    }
+    if let Some(text) = addition.append {
+        ops.push(Operation::Append {
+            block: last,
+            text,
+            note: None,
+        });
+    }
+    if ops.is_empty() {
+        HookAnswer::Pass
+    } else {
+        HookAnswer::Ops { ops }
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+fn unknown_method(method: &str) -> (String, String) {
+    (
+        codes::UNKNOWN_METHOD.to_owned(),
+        format!("ck-mc does not serve `{method}` on this route"),
+    )
 }
 
 fn to_value<T: Serialize>(result: Result<T, ModuleError>) -> Result<Value, ModuleError> {
     result.map(|answer| serde_json::to_value(answer).expect("answers serialize"))
 }
 
-fn refusal(error: ModuleError) -> (&'static str, String) {
+fn refusal(error: ModuleError) -> (String, String) {
     match error {
-        ModuleError::UnknownSession => (codes::UNKNOWN_SESSION, "no Setup for this session".into()),
-        other => (codes::REFUSED, format!("{other:?}")),
+        ModuleError::UnknownSession => (
+            codes::UNKNOWN_SESSION.to_owned(),
+            "no Setup for this session".into(),
+        ),
+        other => (codes::REFUSED.to_owned(), format!("{other:?}")),
     }
 }
 
@@ -345,10 +462,7 @@ impl ModuleHandler for Handler {
             Ok(answer) => {
                 HandlerOutcome::Response(serde_json::to_vec(&answer).expect("answers serialize"))
             }
-            Err((code, message)) => HandlerOutcome::Error {
-                code: code.into(),
-                message,
-            },
+            Err((code, message)) => HandlerOutcome::Error { code, message },
         }
     }
 }
