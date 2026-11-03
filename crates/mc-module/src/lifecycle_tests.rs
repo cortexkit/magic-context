@@ -22,6 +22,9 @@ struct Client {
     reads: Mutex<Vec<ReadRequest>>,
     offered: Mutex<Vec<View>>,
     refuse: Mutex<bool>,
+    /// The refusal a refused view gets; `bad_since`, which names no part,
+    /// when unset.
+    refusal: Mutex<Option<ViewRefusal>>,
 }
 
 impl RunnerClient for Client {
@@ -56,7 +59,12 @@ impl RunnerClient for Client {
         self.offered.lock().unwrap().push(request.view);
         Ok(if *self.refuse.lock().unwrap() {
             ApplyViewAnswer::Refused {
-                refusal: ViewRefusal::BadSince,
+                refusal: self
+                    .refusal
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or(ViewRefusal::BadSince),
             }
         } else {
             ApplyViewAnswer::Accepted
@@ -463,7 +471,7 @@ fn lifecycle_rolling_back_an_earlier_view_restores_a_later_head_retry() {
     session.next_baseline = session.baseline.clone();
     session.accept(View::seal(2, Vec::new()));
     assert!(!session.head_stale);
-    session.roll_back(1, false);
+    session.roll_back(1, false, None);
     assert!(
         session.head_stale,
         "rolling back a chain lost its later rebuild obligation"
@@ -845,4 +853,143 @@ async fn lifecycle_restored_state_ahead_of_context_db_moves_the_cut_back() {
     assert_eq!(cut.as_deref(), Some("b"), "{offered:?}");
     drop(offered);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Two old outputs outside the protected tail, both picked by the age sweep.
+fn two_old_outputs(session: &mut Session) {
+    let tool_part = |id: &str, tag: u64, output_bytes: u64| -> Part {
+        let mut part: Part = serde_json::from_value(serde_json::json!({
+            "id":id, "kind":"tool", "call_id":id, "name":"read", "input":{"path": id},
+            "status":"completed", "output":"result", "output_bytes":output_bytes, "digest":""
+        }))
+        .unwrap();
+        part.tag = Some(tag);
+        part
+    };
+    session.index.extend(vec![
+        text(1, "task"),
+        Entry::new(
+            2,
+            "old",
+            Role::Assistant,
+            2,
+            vec![tool_part("p", 2, 40000), tool_part("p2", 3, 40000)],
+        ),
+        text(3, "next"),
+        Entry::new(
+            4,
+            "newer",
+            Role::Assistant,
+            4,
+            vec![
+                tool_part("q", 4, 10),
+                tool_part("r", 5, 10),
+                tool_part("s", 6, 10),
+            ],
+        ),
+    ]);
+    session.reclaim_bookmark = 3;
+}
+
+/// A refusal that names the part at fault sets aside only that part: the
+/// view's other automatic drops are offered again on the next pass.
+#[tokio::test]
+async fn lifecycle_a_refusal_naming_a_part_sets_aside_only_that_part() {
+    let (mut session, client, _, _, settings) = fixture();
+    let settings = Settings {
+        protected_tokens: Some(0),
+        ..settings
+    };
+    two_old_outputs(&mut session);
+    *client.refuse.lock().unwrap() = true;
+    *client.refusal.lock().unwrap() = Some(ViewRefusal::StalePart {
+        mid: "old".into(),
+        part: "p".into(),
+    });
+    let (view, _) = session.build(&settings, None, false, None);
+    let view = view.expect("both old outputs selected");
+    assert!(session.next_covered.contains(&("old".into(), "p".into())));
+    assert!(session.next_covered.contains(&("old".into(), "p2".into())));
+    session.publish(&client, view).await;
+    assert!(session.failed_parts.contains(&("old".into(), "p".into())));
+    assert!(
+        !session.failed_parts.contains(&("old".into(), "p2".into())),
+        "a part the refusal did not name was set aside"
+    );
+}
+
+/// A refused view puts the age-sweep bookmark back where it was, with
+/// everything else it changed: an output first seen far behind on that pass
+/// still survives one more rebuild.
+#[tokio::test]
+async fn lifecycle_a_refused_view_puts_the_age_sweep_bookmark_back() {
+    let (mut session, client, _, _, settings) = fixture();
+    let settings = Settings {
+        protected_tokens: Some(0),
+        ..settings
+    };
+    two_old_outputs(&mut session);
+    *client.refuse.lock().unwrap() = true;
+    let (view, _) = session.build(&settings, None, false, None);
+    session.next_reclaim_bookmark = Some(5);
+    session
+        .publish(&client, view.expect("both old outputs selected"))
+        .await;
+    assert_eq!(session.reclaim_bookmark, 3);
+}
+
+fn output_part(id: &str, tag: u64) -> Part {
+    let mut part: Part = serde_json::from_value(serde_json::json!({
+        "id":id, "kind":"tool", "call_id":id, "name":"read", "input":{"path": id},
+        "status":"completed", "output":"result", "output_bytes":40000, "digest":""
+    }))
+    .unwrap();
+    part.tag = Some(tag);
+    part
+}
+
+/// A fold for a changed head shape (a settings or window change) waits out a
+/// heavy-thinking turn on a model that binds its thinking to the prefix, as
+/// an execute pass does: re-rendering `m[0]` then would drop the thinking.
+#[test]
+fn lifecycle_a_shape_fold_waits_out_a_heavy_thinking_turn() {
+    let (mut session, _, _, _, settings) = fixture();
+    session.conditions.rules = ProviderRules::new(SignedParts::Bound, EditCost::Suffix);
+    session.conditions.last_prompt_tokens = Some(30_000);
+    let reasoning: Part = serde_json::from_value(serde_json::json!({
+        "id":"r", "kind":"reasoning", "text_bytes":400, "digest":""
+    }))
+    .unwrap();
+    let mut thinking = Entry::new(
+        2,
+        "think",
+        Role::Assistant,
+        2,
+        vec![reasoning, output_part("t", 2)],
+    );
+    thinking.usage =
+        Some(cortexkit_role_compaction::read::StepUsage::default().with_reasoning_tokens(2_000));
+    session.index.extend(vec![text(1, "task"), thinking]);
+    let mut shape = session.head_shape(&settings);
+    shape.memory_enabled = !shape.memory_enabled;
+    session.baseline = Some(Baseline {
+        shape: Some(shape),
+        ..Baseline::default()
+    });
+    let pass = session.decide_notice(&settings);
+    assert!(!pass.rebuild, "the shape fold rebuilt during the hold");
+    assert!(!session.fold_due);
+}
+
+/// The force-band summary skip projects usage after the drops this pass can
+/// land: a queued drop waiting in the protected tail frees nothing yet.
+#[test]
+fn lifecycle_drops_waiting_in_the_tail_free_nothing_in_the_projection() {
+    let (mut session, _, _, _, settings) = fixture();
+    session.index.extend(vec![
+        text(1, "task"),
+        Entry::new(2, "tool", Role::Assistant, 2, vec![output_part("p", 2)]),
+    ]);
+    session.queued.insert(("tool".into(), "p".into()));
+    assert_eq!(session.usage_after_drops(&settings, 0.9), None);
 }

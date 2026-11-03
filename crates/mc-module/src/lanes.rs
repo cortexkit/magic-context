@@ -669,8 +669,12 @@ pub fn reasoning_over_budget(
         }
     }
     let (older, exempt) = assistants.split_at(exempt_from);
+    // An exempt step whose reasoning an earlier view already removed (a
+    // signed-part companion drop, say) costs nothing, as in the plugin
+    // (`alreadyRemoved`).
     let mut kept: u64 = exempt
         .iter()
+        .filter(|(_, reasoning)| !reasoning.is_empty())
         .map(|(entry, reasoning)| reasoning_cost(entry, reasoning))
         .sum();
     let mut cut = None;
@@ -1538,6 +1542,42 @@ mod tests {
             1_800, false,
         ));
         assert_eq!(reasoning_cost(&step, &parts), 1_800);
+    }
+
+    /// An exempt step whose reasoning is already gone (here the steps of the
+    /// current Anthropic turn, which report reasoning but hold none) costs
+    /// nothing against the budget, so older reasoning that fits stays.
+    #[test]
+    fn exempt_steps_without_reasoning_left_cost_nothing() {
+        let say = |id: &str, tag: u64| {
+            part(
+                id.to_owned(),
+                Some(tag),
+                Seal::None,
+                PartBody::Text { text: "Go.".into() },
+            )
+        };
+        let reported = |mut step: Entry| {
+            step.usage = Some(
+                cortexkit_role_compaction::read::StepUsage::default().with_reasoning_tokens(6_000),
+            );
+            step
+        };
+        // 8,000 and 2,000 tokens of older reasoning (the newer of them is the
+        // newest reasoning left, so exempt), then a turn whose two steps
+        // report 6,000 each but hold none. Only the 2,000 counts as kept, so
+        // the 8,000 fits the 10,000 budget.
+        let mut index = Index::default();
+        index.extend([
+            entry(1, Role::Assistant, vec![reasoning("r1", 32_000)]),
+            entry(2, Role::Assistant, vec![reasoning("r2", 8_000)]),
+            entry(3, Role::User, vec![say("p3", 3)]),
+            reported(entry(4, Role::Assistant, vec![say("p4", 4)])),
+            reported(entry(5, Role::Assistant, vec![say("p5", 5)])),
+        ]);
+        let edited = Edited::default();
+        let none = BTreeMap::new();
+        assert!(reasoning_over_budget(&context(&index, &edited, &none), 10_000, true).is_empty());
     }
 
     /// When the newest assistant has no reasoning, the newest one that has

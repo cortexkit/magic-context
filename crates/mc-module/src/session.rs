@@ -69,6 +69,10 @@ pub struct Session {
     /// The age sweep's bookmark from the previous pass with permission to
     /// rebuild: tool outputs at or below it were already far behind then.
     reclaim_bookmark: u64,
+    /// The bookmark a built view moves `reclaim_bookmark` to once the
+    /// runner takes it (or once the pass ends without a view), so an undone
+    /// view puts the bookmark back with everything else it changed.
+    next_reclaim_bookmark: Option<u64>,
     /// An emergency batch landed during this stay in the force band. Another
     /// one waits until usage leaves the band, or a pass rewrites anyway, so
     /// the band never trickles one rewrite per pass.
@@ -200,6 +204,8 @@ struct Before {
     caveman: lanes::CavemanState,
     cut: Option<u64>,
     pruned_turns: u64,
+    #[serde(default)]
+    reclaim_bookmark: Option<u64>,
 }
 
 /// Admission for a notice, before any lane selects work or publishes a view.
@@ -255,6 +261,7 @@ impl Session {
             version: 0,
             queued: BTreeSet::new(),
             reclaim_bookmark: 0,
+            next_reclaim_bookmark: None,
             emergency_latched: false,
             next_latch: false,
             failed_parts: BTreeSet::new(),
@@ -728,7 +735,13 @@ impl Session {
     /// admission runs first, so a run started here also holds the queued work.
     fn decide_notice(&mut self, settings: &Settings) -> NoticePass {
         let summary = self.summary_due(settings);
-        if self.head_shape_changed(settings) {
+        let hold = pass::signed_thinking_hold(self.index.entries(), &self.conditions, settings);
+        // A fold for a settings or window change waits out a heavy-thinking
+        // turn, as an execute pass does: re-rendering `m[0]` then would drop
+        // the signed thinking the model just paid for. The change is found
+        // again on the next pass. A head made stale by an undo or a restore
+        // can't wait: it shows history that no longer holds.
+        if !hold && self.head_shape_changed(settings) {
             self.fold_due = true;
             self.head_stale = true;
         }
@@ -738,11 +751,7 @@ impl Session {
                 || (pass::at_execute(&self.conditions, settings)
                     && (pass::in_force_band(&self.conditions, settings)
                         || !self.summary_on_its_way())
-                    && !pass::signed_thinking_hold(
-                        self.index.entries(),
-                        &self.conditions,
-                        settings,
-                    )),
+                    && !hold),
             head_stale: self.head_stale,
         }
     }
@@ -937,9 +946,18 @@ impl Session {
             protected_tools: &settings.protected_tools,
             keep_first_message: self.features.keep_first_message,
         };
+        // Only queued drops this pass can land count: one in the protected
+        // tail waits for it to move on, as `build` does and as the plugin
+        // credits only eligible pending drops.
+        let usable = pass::usable_window(&self.conditions);
+        let floor = settings
+            .protected_tokens
+            .unwrap_or_else(|| lanes::default_protected_tokens(usable));
+        let cutoff = lanes::protected_cutoff(&context, floor);
         let mut wanted: Vec<(lanes::PartKey, lanes::Shape)> = self
             .queued
             .iter()
+            .filter(|key| !lanes::in_protected_tail(&context, key, cutoff))
             .map(|key| (key.clone(), lanes::Shape::Requested))
             .collect();
         let model = &self.conditions.model;
@@ -2310,6 +2328,9 @@ impl Session {
                 * settings.execute_threshold_percentage
                 / 100.0
                 * settings.history_budget_percentage) as u64,
+            history_budget_percentage_bp: Some(
+                (settings.history_budget_percentage * 10_000.0).round() as u64,
+            ),
         }
     }
 
@@ -2319,7 +2340,7 @@ impl Session {
         self.baseline
             .as_ref()
             .and_then(|baseline| baseline.shape.as_ref())
-            .is_some_and(|shape| *shape != self.head_shape(settings))
+            .is_some_and(|shape| shape.requires_fold(&self.head_shape(settings)))
     }
 
     /// The first view of a session moved in from a standalone host whose
@@ -2564,7 +2585,7 @@ impl Session {
                 .filter(|key| !covered.contains(key))
                 .collect();
         let freed = freed_tokens(&context, &covered) + freed_tokens(&context, &lined_up);
-        self.reclaim_bookmark = self.reclaim_bookmark.max(bookmark);
+        self.next_reclaim_bookmark = Some(self.reclaim_bookmark.max(bookmark));
         ops.extend(history);
         (self.seal(ops, &covered), freed)
     }
@@ -2593,6 +2614,7 @@ impl Session {
             // left pending, it would rewrite `m[0]` on a later pass whose
             // cache is still warm.
             Ok(None) => {
+                self.commit_bookmark();
                 self.forget_queued(covered);
                 if let Some(next) = self.next_baseline.take() {
                     self.baseline = Some(next);
@@ -2607,6 +2629,7 @@ impl Session {
             // automatic lanes chose alike, so the same failure does not repeat
             // on every pass.
             Err(refusal) => {
+                self.commit_bookmark();
                 self.forget_queued(covered);
                 self.failed_parts.extend(covered.iter().cloned());
                 self.next_latch = false;
@@ -2650,7 +2673,7 @@ impl Session {
         self.accept(view.clone());
         if let Err(error) = self.save() {
             eprintln!("ck-mc: {error}");
-            self.roll_back(view.version, false);
+            self.roll_back(view.version, false, None);
             return;
         }
         let request = ApplyViewRequest::new(view.clone());
@@ -2673,7 +2696,7 @@ impl Session {
                     }
                     _ => false,
                 };
-                self.roll_back(view.version, !stale);
+                self.roll_back(view.version, !stale, refusal_part(&refusal));
             }
             // An answer the contract may add later leaves the outcome
             // unknown (compaction contract W1.5): the view is not sent again,
@@ -2683,12 +2706,12 @@ impl Session {
                     "ck-mc: session {}: unknown answer to view {}: {other:?}",
                     self.key.session, view.version
                 );
-                self.roll_back(view.version, false);
+                self.roll_back(view.version, false, None);
                 self.adopt_runner_view(client).await;
             }
             Err(error) => {
                 self.runner_call_failed("session.apply_view", &error);
-                self.roll_back(view.version, false);
+                self.roll_back(view.version, false, None);
             }
         }
     }
@@ -2717,18 +2740,18 @@ impl Session {
                     "ck-mc: session {}: runner refused view {} offered again: {refusal:?}",
                     self.key.session, view.version
                 );
-                self.roll_back(oldest, true);
+                self.roll_back(oldest, true, None);
             }
             Ok(other) => {
                 eprintln!(
                     "ck-mc: session {}: unknown answer to view {} offered again: {other:?}",
                     self.key.session, view.version
                 );
-                self.roll_back(oldest, false);
+                self.roll_back(oldest, false, None);
             }
             Err(error) => {
                 self.runner_call_failed(&format!("offering view {} again", view.version), &error);
-                self.roll_back(oldest, false);
+                self.roll_back(oldest, false, None);
             }
         }
     }
@@ -2779,6 +2802,13 @@ impl Session {
 
     /// Take `view` as the one the runner shows, unconfirmed until a notice
     /// reports it applied (see [`Unconfirmed`]).
+    /// Move the age-sweep bookmark to where the last build left it.
+    fn commit_bookmark(&mut self) {
+        if let Some(bookmark) = self.next_reclaim_bookmark.take() {
+            self.reclaim_bookmark = self.reclaim_bookmark.max(bookmark);
+        }
+    }
+
     fn accept(&mut self, view: View) {
         self.app_record_view(&view);
         let covered = std::mem::take(&mut self.next_covered);
@@ -2793,7 +2823,9 @@ impl Session {
             caveman: self.caveman.clone(),
             cut: self.cut,
             pruned_turns: self.pruned_turns,
+            reclaim_bookmark: Some(self.reclaim_bookmark),
         };
+        self.commit_bookmark();
         self.unconfirmed.push(Unconfirmed {
             view: view.clone(),
             covered: covered.clone(),
@@ -2864,7 +2896,7 @@ impl Session {
             })
             .min()
         {
-            self.roll_back(*version, true);
+            self.roll_back(*version, true, None);
         }
     }
 
@@ -2872,7 +2904,7 @@ impl Session {
     /// it, changed. Its queued drops are queued again, except one that a
     /// refused view already carried once: a drop the runner keeps refusing
     /// must not make every later pass build a view it refuses.
-    fn roll_back(&mut self, version: u64, refused: bool) {
+    fn roll_back(&mut self, version: u64, refused: bool, culprit: Option<lanes::PartKey>) {
         if let Some(record) = self
             .app_decisions
             .iter_mut()
@@ -2916,6 +2948,9 @@ impl Session {
         self.caveman = before.caveman;
         self.cut = before.cut;
         self.pruned_turns = before.pruned_turns;
+        if let Some(bookmark) = before.reclaim_bookmark {
+            self.reclaim_bookmark = bookmark;
+        }
         if cut_moved {
             // The index already forgot what the cut removed; read it again
             // from the cut the runner still shows.
@@ -2923,11 +2958,21 @@ impl Session {
             self.index_ready = false;
         }
         if refused {
-            self.failed_parts.extend(
-                covered
+            // A refusal that names the part at fault sets aside only that
+            // part; one that names none sets aside every automatic part the
+            // view carried, so the same view is not built again.
+            let at_fault: Vec<lanes::PartKey> = match culprit {
+                Some(part) => covered
                     .iter()
-                    .filter(|part| !self.queued.contains(*part))
-                    .cloned(),
+                    .filter(|key| **key == part)
+                    .cloned()
+                    .collect(),
+                None => covered.clone(),
+            };
+            self.failed_parts.extend(
+                at_fault
+                    .into_iter()
+                    .filter(|part| !self.queued.contains(part)),
             );
             self.next_covered = covered;
             self.keep_refused_drops();
@@ -2937,7 +2982,7 @@ impl Session {
     /// A ride's view whose answer never reached the runner (its deadline
     /// passed): the runner never had it.
     pub fn ride_undelivered(&mut self, version: u64) {
-        self.roll_back(version, false);
+        self.roll_back(version, false, None);
     }
 
     /// Whether the runner applies a view ck-mc does not expect: neither its
@@ -3129,9 +3174,13 @@ impl Session {
         self.image_outputs
             .retain(|(mid, part), _| index.find(mid, part).is_some());
         self.caveman.retain_present(index);
+        // A keep whose parts have all left the transcript is forgotten. A
+        // keep that named nothing keepable from the start still stands: the
+        // model was told everything else goes, so its view must still land.
         if let Some(kept) = &mut self.pending_keep {
+            let had_parts = !kept.is_empty();
             kept.retain(|(mid, part)| index.find(mid, part).is_some());
-            if kept.is_empty() {
+            if had_parts && kept.is_empty() {
                 self.pending_keep = None;
             }
         }
@@ -3259,6 +3308,19 @@ fn freed_tokens(context: &lanes::Context, covered: &[lanes::PartKey]) -> u64 {
 /// A message's estimated size for the summarizer's boundary.
 fn entry_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
     entry.parts.iter().map(tokens::part).sum()
+}
+
+/// The part a runner's view refusal names as at fault, if it names one.
+fn refusal_part(refusal: &ViewRefusal) -> Option<lanes::PartKey> {
+    match refusal {
+        ViewRefusal::UnknownPart { mid, part }
+        | ViewRefusal::StalePart { mid, part }
+        | ViewRefusal::BadField { mid, part, .. }
+        | ViewRefusal::Conflict { mid, part }
+        | ViewRefusal::RunningTool { mid, part }
+        | ViewRefusal::ForeignTag { mid, part, .. } => Some((mid.clone(), part.clone())),
+        _ => None,
+    }
 }
 
 /// Which of the previous view's history edits (the history head's two

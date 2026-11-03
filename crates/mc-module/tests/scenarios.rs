@@ -699,7 +699,15 @@ async fn a_refused_view_keeps_its_queued_drops_for_the_next_and_its_version_is_n
     // The refused view was version 1; the next is 2, never 1 again.
     assert_eq!(offered[..2], [1, 2], "{offered:?}");
     let host = runner.host();
-    assert_eq!(host.applied_version(), Some(*offered.last().unwrap()));
+    // The runner applies a view after the refused one. A later view can still
+    // be waiting for the next request: the refused view's age-sweep bookmark
+    // was undone with it, so outputs it first saw far behind drop one
+    // rebuild later.
+    assert!(
+        host.applied_version().is_some_and(|version| version >= 2),
+        "{:?}",
+        host.applied_version()
+    );
     // The drops the refused view carried landed with the next one.
     assert_eq!(seen(host, 2).as_deref(), Some(placeholder(2).as_str()));
     assert_eq!(seen(host, 4).as_deref(), Some(placeholder(4).as_str()));

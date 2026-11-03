@@ -152,6 +152,33 @@ pub struct Shape {
     pub memory_enabled: bool,
     pub memory_budget_tokens: u64,
     pub history_budget_tokens: u64,
+    /// The configured `history_budget_percentage`, in basis points. Absent
+    /// on baselines saved before it was recorded.
+    #[serde(default)]
+    pub history_budget_percentage_bp: Option<u64>,
+}
+
+impl Shape {
+    /// Whether a baseline rendered under `self` must fold for `now`, as the
+    /// plugin's budget identity decides. A change the user makes (memory
+    /// on or off, the memory budget, the history percentage) folds. The
+    /// history budget in tokens also moves with the window the runner
+    /// reports, which a catalog refresh can change without any edit: that
+    /// folds only when it shrinks by more than 64 tokens or 1%, whichever is
+    /// larger (`renderedBudgetShrinkReason`), and growth never folds.
+    pub fn requires_fold(&self, now: &Shape) -> bool {
+        let shrank = self
+            .history_budget_tokens
+            .saturating_sub(now.history_budget_tokens)
+            > 64.max(self.history_budget_tokens / 100);
+        self.memory_enabled != now.memory_enabled
+            || self.memory_budget_tokens != now.memory_budget_tokens
+            || matches!(
+                (self.history_budget_percentage_bp, now.history_budget_percentage_bp),
+                (Some(old), Some(new)) if old != new
+            )
+            || shrank
+    }
 }
 
 impl Baseline {
