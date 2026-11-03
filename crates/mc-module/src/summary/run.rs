@@ -24,7 +24,7 @@ use regex::Regex;
 
 use super::prompt::{
     build_compartment_agent_prompt, build_historian_repair_prompt, with_content_language_directive,
-    CompartmentPromptInputs, ContentLanguageDirectiveOptions, HISTORIAN_SYSTEM_PROMPT,
+    CompartmentPromptInputs, ContentLanguageDirectiveOptions,
 };
 use super::validate::{
     validate_historian_output, StoredCompartmentRange, ValidateOptions, ValidatedChunk,
@@ -183,7 +183,7 @@ pub async fn run<C: RunnerClient + Router>(
         )
         .into_owned()
     };
-    let one_pass = language(HISTORIAN_SYSTEM_PROMPT);
+    let one_pass = language(super::prompt::historian_system_prompt());
     let two_pass = two_pass_system(job.language.as_deref());
     let carrier = format!("ck-mc:{}", job.session.runner);
     let mut tried: Vec<String> = Vec::new();

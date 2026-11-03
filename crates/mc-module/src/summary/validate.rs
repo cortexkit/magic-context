@@ -2380,7 +2380,7 @@ full narrative
     #[test]
     fn fully_covered_chunk_validates_with_the_prompt_prescribed_boundary() {
         assert!(
-            crate::summary::prompt::HISTORIAN_SYSTEM_PROMPT.contains(
+            crate::summary::prompt::historian_system_prompt().contains(
                 "If every message in the chunk is covered by a compartment, nothing is unprocessed: set `<unprocessed_from>` to the chunk's last message index + 1."
             ),
             "historian system prompt must define the fully covered <unprocessed_from> value"
