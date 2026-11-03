@@ -15,8 +15,8 @@ import { buildDreamTaskRuntimeConfigs } from "@magic-context/core/features/magic
 import { resolveEpochFloorForPass } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { isConfigLoadUntrusted } from "@magic-context/core/plugin/embedding-bootstrap-helpers";
 import { Database } from "@magic-context/core/shared/sqlite";
-import configParityGolden from "../../../../crates/mc-module/testdata/config_parity/golden.json";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
+import configParityGolden from "../../../plugin/test-fixtures/runtime/config_parity/golden.json";
 import { loadPiConfig, loadPiConfigDetailed } from "./index";
 
 const tempRoots: string[] = [];

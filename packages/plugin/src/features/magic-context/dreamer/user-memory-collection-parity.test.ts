@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import parity from "../../../../../../crates/mc-module/testdata/user-memory-collection-parity.json";
+import parity from "../../../../test-fixtures/runtime/user-memory-collection-parity.json";
 import { parsePluginConfig } from "../../../config";
 import { userObservationCollectionEnabled, userObservationsRequested } from "./task-config";
 

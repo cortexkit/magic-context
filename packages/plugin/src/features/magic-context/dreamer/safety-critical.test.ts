@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import selectionCase from "../../../../../../crates/mc-module/testdata/safety_critical_classify_selection.json";
-import scoreCases from "../../../../../../crates/mc-store/testdata/safety-score-cases.json";
+import selectionCase from "../../../../test-fixtures/runtime/safety_critical_classify_selection.json";
+import scoreCases from "../../../../test-fixtures/runtime/safety-score-cases.json";
 import { Database } from "../../../shared/sqlite";
 import {
     getMemoryById,

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import configParityGolden from "../../../../crates/mc-module/testdata/config_parity/golden.json";
+import configParityGolden from "../../test-fixtures/runtime/config_parity/golden.json";
 import { resolveEpochFloorForPass } from "../features/magic-context/storage-meta-persisted";
 import { buildOpenCodeConfigWarningBanner } from "../shared/config-warning-surface";
 import * as logger from "../shared/logger";

@@ -1,5 +1,4 @@
 {
-	"crates/mc-module/testdata/codec/opencode-golden.json": "5ba97aea2f85ec38bf180e8e41626eeeac496af19db5a1466385c9a97551ae55",
 	"packages/e2e-tests/mutations/goldens-dg-1.json": "3460cfe3cfa31ef3a4576235ac24fba0b36d9372804fd941a9c7ab6d239b52af",
 	"packages/e2e-tests/mutations/goldens-dg-2.json": "f8b7e04765f428b159fa21306fa6e70b7918a92309537b67af1a6cc6a5b69eda",
 	"packages/e2e-tests/mutations/goldens-dg-3.json": "155c8ec37fb0be2d906a0000e2671d5e473106ae70b02b0cfb0d1ee8e28f7c41",

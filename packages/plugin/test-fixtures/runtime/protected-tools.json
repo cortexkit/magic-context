@@ -1,0 +1,10 @@
+[
+  {"label":"emergency protection holds at 95 with normalized names","lane":"emergency","protected_tools":{"CUSTOM":2},"tools":["custom","mcp_CUSTOM","custom","MCP_custom"],"expected":[1,2]},
+  {"label":"age protection keeps newest two","lane":"age","protected_tools":{"MCP_custom":2},"tools":["custom","CUSTOM","mcp_custom","custom"],"expected":[1,2]},
+  {"label":"supersession respects configured todowrite count","lane":"supersession","protected_tools":{"TODOWRITE":2},"tools":["todowrite","mcp_TODOWRITE","todowrite","todowrite"],"expected":[1,2]},
+  {"label":"edit markers respect protection","lane":"edit","protected_tools":{"MCP_edit":2},"tools":["edit","edit","edit","edit"],"expected":[1,2]},
+  {"label":"duplicate removal respects protection","lane":"duplicate","protected_tools":{"MCP_READ":3},"tools":["read","read","read","read"],"expected":[1]},
+  {"label":"defaults preserve todowrite in emergency","lane":"emergency","protected_tools":{},"tools":["todowrite","todowrite","todowrite","todowrite"],"expected":[1,2,3]},
+  {"label":"defaults preserve ctx_reduce in age","lane":"age","protected_tools":{},"tools":["ctx_reduce","ctx_reduce","ctx_reduce","ctx_reduce"],"expected":[1]},
+  {"label":"zero overrides default in supersession","lane":"supersession","protected_tools":{"ctx_reduce":0},"tools":["ctx_reduce","ctx_reduce","ctx_reduce","ctx_reduce"],"expected":[1,2,3,4]}
+]

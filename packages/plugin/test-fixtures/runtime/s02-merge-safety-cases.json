@@ -1,0 +1,15 @@
+[
+  {"name":"true-false","flags":[true,false],"expected":true,"importance":80},
+  {"name":"true-unknown","flags":[true,null],"expected":true,"importance":80},
+  {"name":"true-true","flags":[true,true],"expected":true,"importance":80},
+  {"name":"false-false","flags":[false,false],"expected":false,"importance":50},
+  {"name":"false-unknown","flags":[false,null],"expected":null,"importance":50},
+  {"name":"unknown-unknown","flags":[null,null],"expected":null,"importance":50},
+  {"name":"false-true","flags":[false,true],"expected":true,"importance":80},
+  {"name":"unknown-true","flags":[null,true],"expected":true,"importance":80},
+  {"name":"unknown-false","flags":[null,false],"expected":null,"importance":50},
+  {"name":"three-with-true","flags":[false,null,true],"expected":true,"importance":80},
+  {"name":"three-all-false","flags":[false,false,false],"expected":false,"importance":50},
+  {"name":"three-with-unknown","flags":[false,false,null],"expected":null,"importance":50},
+  {"name":"archived-assessed-source","flags":[null,true],"archivedSource":1,"expected":true,"importance":80}
+]

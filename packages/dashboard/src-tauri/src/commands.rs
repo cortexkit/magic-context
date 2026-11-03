@@ -183,7 +183,7 @@ async fn dashboard_edit(
     project_path: &str,
     operation_id: &str,
     ids: &[i64],
-    expectations: &[mc_store::memory_history::RevisionExpectation],
+    expectations: &[crate::memory_history::RevisionExpectation],
     field: &str,
     value: &str,
 ) -> Result<serde_json::Value, String> {
@@ -212,7 +212,7 @@ pub async fn update_memory_status(
         &project_path,
         &operation_id,
         &[memory_id],
-        &[mc_store::memory_history::RevisionExpectation {
+        &[crate::memory_history::RevisionExpectation {
             memory_id,
             revision: expected_revision,
         }],
@@ -235,7 +235,7 @@ pub async fn update_memory_content(
         &project_path,
         &operation_id,
         &[memory_id],
-        &[mc_store::memory_history::RevisionExpectation {
+        &[crate::memory_history::RevisionExpectation {
             memory_id,
             revision: expected_revision,
         }],
@@ -258,7 +258,7 @@ pub async fn update_memory_category(
         &project_path,
         &operation_id,
         &[memory_id],
-        &[mc_store::memory_history::RevisionExpectation {
+        &[crate::memory_history::RevisionExpectation {
             memory_id,
             revision: expected_revision,
         }],
@@ -280,7 +280,7 @@ pub async fn delete_memory(
         &project_path,
         &operation_id,
         &[memory_id],
-        &[mc_store::memory_history::RevisionExpectation {
+        &[crate::memory_history::RevisionExpectation {
             memory_id,
             revision: expected_revision,
         }],
@@ -296,7 +296,7 @@ pub async fn bulk_update_memory_status(
     status: String,
     project_path: String,
     operation_id: String,
-    expected_revisions: Vec<mc_store::memory_history::RevisionExpectation>,
+    expected_revisions: Vec<crate::memory_history::RevisionExpectation>,
 ) -> Result<serde_json::Value, String> {
     dashboard_edit(
         state,
@@ -315,7 +315,7 @@ pub async fn bulk_delete_memory(
     memory_ids: Vec<i64>,
     project_path: String,
     operation_id: String,
-    expected_revisions: Vec<mc_store::memory_history::RevisionExpectation>,
+    expected_revisions: Vec<crate::memory_history::RevisionExpectation>,
 ) -> Result<serde_json::Value, String> {
     dashboard_edit(
         state,

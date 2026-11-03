@@ -1,10 +1,7 @@
 import { readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-const retrievalCapture = resolve(
-    import.meta.dir,
-    "../../../../crates/mc-module/testdata/parity_retrieval/context.db",
-);
+const archivedCrates = resolve(import.meta.dir, "../../../../crates_old");
 
 export function findTestStorageLeaks(directory: string): string[] {
     const violations: string[] = [];
@@ -13,12 +10,13 @@ export function findTestStorageLeaks(directory: string): string[] {
             const path = join(root, entry.name);
             if (entry.isDirectory()) {
                 if (entry.name === "node_modules" || entry.name === ".git") continue;
+                // The archived crate tree is excluded from the shipped workspace and tests.
+                // Do not descend into its historical database captures during a root scan.
+                if (resolve(path) === archivedCrates) continue;
                 if (entry.name === "undefined") violations.push(path);
                 scan(path);
             } else if (entry.isFile() && entry.name === "context.db") {
-                // The checked-in retrieval capture is input data, not a leaked test store.
-                // Exempt only that exact path; generated databases beside it still fail.
-                if (resolve(path) !== retrievalCapture) violations.push(path);
+                violations.push(path);
             }
         }
     };

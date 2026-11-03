@@ -1,0 +1,273 @@
+{
+  "schema": 1,
+  "generator_version": 1,
+  "provenance": {
+    "generator": "crates/mc-module/gen/gen-temporal-parity-golden.ts",
+    "audit_script": "scripts/audit-transform-wire-parity.py",
+    "sources": [
+      {
+        "lane": "ts",
+        "file": "2026-08-24T08-33-57-109Z-003521-ses_331acff95fferWZOYF1pG0cjOn-direct-sticky-ufuk2.body.json",
+        "observed_markers": [
+          "+13h 29m",
+          "+31m"
+        ]
+      },
+      {
+        "lane": "rust",
+        "file": "2026-08-24T15-02-25-580Z-004729-ses_0ad83017cffexe0g5N8UG0y3LZ-direct-sticky-main.body.json",
+        "observed_temporal_carriers": 2
+      }
+    ],
+    "note": "Message text is minimized from the audited wire excerpts; timestamps retain the observed marker durations."
+  },
+  "cases": [
+    {
+      "name": "historical-completed-and-transport-created-bases",
+      "raw_messages": [
+        {
+          "info": {
+            "id": "temporal-user-1",
+            "role": "user",
+            "time": {
+              "created": 1000
+            }
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "Earlier question"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "temporal-assistant-1",
+            "role": "assistant",
+            "time": {
+              "created": 10000,
+              "completed": 70000
+            }
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "Earlier answer"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "temporal-user-2",
+            "role": "user",
+            "time": {
+              "created": 48610000
+            }
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "We'll do a opencode restart soon, do you need to rebuild dists?"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "temporal-assistant-2",
+            "role": "assistant",
+            "time": {
+              "created": 48611000,
+              "completed": 48629000
+            }
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "No rebuild needed"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "temporal-transport",
+            "role": "user",
+            "time": {
+              "created": 48709000
+            }
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "<system-reminder>Background work finished.</system-reminder>"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "temporal-user-3",
+            "role": "user",
+            "time": {
+              "created": 50569000
+            }
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "Continue after the reminder"
+            }
+          ]
+        }
+      ],
+      "encoded_input": [
+        {
+          "mid": "temporal-user-1",
+          "ordinal": 1,
+          "ck": {
+            "role": "user",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "Earlier question"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "temporal-user-1",
+              "ordinal": 1,
+              "synthetic": false,
+              "summary": false,
+              "errored": false,
+              "created_at_ms": 1000
+            }
+          }
+        },
+        {
+          "mid": "temporal-assistant-1",
+          "ordinal": 2,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "Earlier answer"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "temporal-assistant-1",
+              "ordinal": 2,
+              "synthetic": false,
+              "summary": false,
+              "errored": false,
+              "created_at_ms": 10000,
+              "completed_at_ms": 70000
+            }
+          }
+        },
+        {
+          "mid": "temporal-user-2",
+          "ordinal": 3,
+          "ck": {
+            "role": "user",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "We'll do a opencode restart soon, do you need to rebuild dists?"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "temporal-user-2",
+              "ordinal": 3,
+              "synthetic": false,
+              "summary": false,
+              "errored": false,
+              "created_at_ms": 48610000
+            }
+          }
+        },
+        {
+          "mid": "temporal-assistant-2",
+          "ordinal": 4,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "No rebuild needed"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "temporal-assistant-2",
+              "ordinal": 4,
+              "synthetic": false,
+              "summary": false,
+              "errored": false,
+              "created_at_ms": 48611000,
+              "completed_at_ms": 48629000
+            }
+          }
+        },
+        {
+          "mid": "temporal-transport",
+          "ordinal": 5,
+          "ck": {
+            "role": "user",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "<system-reminder>Background work finished.</system-reminder>"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "temporal-transport",
+              "ordinal": 5,
+              "synthetic": false,
+              "summary": false,
+              "errored": false,
+              "created_at_ms": 48709000
+            }
+          }
+        },
+        {
+          "mid": "temporal-user-3",
+          "ordinal": 6,
+          "ck": {
+            "role": "user",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "Continue after the reminder"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "temporal-user-3",
+              "ordinal": 6,
+              "synthetic": false,
+              "summary": false,
+              "errored": false,
+              "created_at_ms": 50569000
+            }
+          }
+        }
+      ],
+      "expected_text_by_mid": {
+        "temporal-user-1": "Earlier question",
+        "temporal-assistant-1": "Earlier answer",
+        "temporal-user-2": "<!-- +13h 29m -->\nWe'll do a opencode restart soon, do you need to rebuild dists?",
+        "temporal-assistant-2": "No rebuild needed",
+        "temporal-transport": "<system-reminder>Background work finished.</system-reminder>",
+        "temporal-user-3": "<!-- +31m -->\nContinue after the reminder"
+      }
+    }
+  ]
+}

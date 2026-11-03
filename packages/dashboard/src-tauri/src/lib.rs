@@ -7,6 +7,7 @@ pub mod external_cache_sessions;
 pub mod jsonc;
 pub mod log_parser;
 pub mod memory_bridge;
+pub mod memory_history;
 pub mod pi_sessions;
 pub mod process_ext;
 pub mod project_identity;

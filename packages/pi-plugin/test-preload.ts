@@ -12,6 +12,7 @@
 import { afterAll } from "bun:test";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
+import { __setPiHarnessKindForTesting } from "./src/pi-harness-kind";
 import { __setLocalEmbeddingPoolingTestFallback } from "@magic-context/core/features/magic-context/memory/local-embedding-pooling";
 import {
 	createTestTempDir,
@@ -28,6 +29,10 @@ const { dir: isolatedDataHome } = createTestTempDir("mc-pi-test-xdg-");
 process.env.MAGIC_CONTEXT_TEST_DATA_DIR = isolatedDataHome;
 process.env.XDG_DATA_HOME = isolatedDataHome;
 process.env.XDG_CONFIG_HOME = isolatedDataHome;
+process.env.XDG_STATE_HOME = isolatedDataHome;
+// Installing both host SDKs must not make fixture sessions boot as Oh My Pi.
+// Host-detection tests clear this override when they exercise real detection.
+__setPiHarnessKindForTesting("pi");
 
 // Provider fixtures in this package use fake model IDs and retain the legacy mean path.
 __setLocalEmbeddingPoolingTestFallback({

@@ -8,8 +8,8 @@ import { openDatabase } from "@magic-context/core/features/magic-context/storage
 import { reasoningStepCost } from "@magic-context/core/hooks/magic-context/reasoning-budget";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
-import prefixBoundGolden from "../../../crates/mc-module/testdata/prefix-bound-reasoning-trim.json";
-import budgetGolden from "../../../crates/mc-module/testdata/reasoning-budget-trim.json";
+import prefixBoundGolden from "../../plugin/test-fixtures/runtime/prefix-bound-reasoning-trim.json";
+import budgetGolden from "../../plugin/test-fixtures/runtime/reasoning-budget-trim.json";
 import {
 	buildMessageIdToMaxTag,
 	clearOldReasoningPi,

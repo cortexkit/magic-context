@@ -1,0 +1,650 @@
+{
+  "session": "ses_mode3_move_fixture",
+  "opencode": {
+    "schema": "\nCREATE TABLE message (\n    id text PRIMARY KEY,\n    session_id text NOT NULL,\n    time_created integer NOT NULL,\n    time_updated integer NOT NULL,\n    data text NOT NULL,\n    CONSTRAINT fk_message_session_id_session_id_fk FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE\n);\nCREATE TABLE part (\n    id text PRIMARY KEY,\n    message_id text NOT NULL,\n    session_id text NOT NULL,\n    time_created integer NOT NULL,\n    time_updated integer NOT NULL,\n    data text NOT NULL,\n    CONSTRAINT fk_part_message_id_message_id_fk FOREIGN KEY (message_id) REFERENCES message(id) ON DELETE CASCADE\n);\nCREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);\nCREATE INDEX part_message_id_id_idx ON part(message_id, id);\nCREATE INDEX part_session_idx ON part(session_id);",
+    "message": [
+      {
+        "id": "msg_m001",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 1000,
+        "time_updated": 1000,
+        "data": "{\"role\":\"user\",\"time\":{\"created\":1000}}"
+      },
+      {
+        "id": "msg_m002",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 2000,
+        "time_updated": 2000,
+        "data": "{\"role\":\"assistant\",\"time\":{\"created\":2000}}"
+      },
+      {
+        "id": "msg_m003",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 3000,
+        "time_updated": 3000,
+        "data": "{\"role\":\"user\",\"time\":{\"created\":3000}}"
+      },
+      {
+        "id": "msg_m004",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 4000,
+        "time_updated": 4000,
+        "data": "{\"role\":\"assistant\",\"time\":{\"created\":4000}}"
+      },
+      {
+        "id": "msg_m005",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 5000,
+        "time_updated": 5000,
+        "data": "{\"role\":\"user\",\"time\":{\"created\":5000}}"
+      },
+      {
+        "id": "msg_0000013890011TLOnC0hggUweo",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 5001,
+        "time_updated": 5001,
+        "data": "{\"role\":\"assistant\",\"parentID\":\"msg_m005\",\"summary\":true,\"finish\":\"stop\",\"mode\":\"compaction\",\"agent\":\"compaction\",\"path\":{\"cwd\":\"/repo\",\"root\":\"/repo\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"modelID\":\"magic-context\",\"providerID\":\"magic-context\",\"time\":{\"created\":5001,\"completed\":5001}}"
+      },
+      {
+        "id": "msg_m006",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 6000,
+        "time_updated": 6000,
+        "data": "{\"role\":\"assistant\",\"time\":{\"created\":6000}}"
+      },
+      {
+        "id": "msg_m007",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 7000,
+        "time_updated": 7000,
+        "data": "{\"role\":\"user\",\"time\":{\"created\":7000}}"
+      },
+      {
+        "id": "msg_m008",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 8000,
+        "time_updated": 8000,
+        "data": "{\"role\":\"assistant\",\"time\":{\"created\":8000}}"
+      },
+      {
+        "id": "msg_m009",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 9000,
+        "time_updated": 9000,
+        "data": "{\"role\":\"user\",\"time\":{\"created\":9000}}"
+      },
+      {
+        "id": "msg_m010",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 10000,
+        "time_updated": 10000,
+        "data": "{\"role\":\"assistant\",\"time\":{\"created\":10000}}"
+      },
+      {
+        "id": "msg_m011",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 11000,
+        "time_updated": 11000,
+        "data": "{\"role\":\"user\",\"time\":{\"created\":11000}}"
+      },
+      {
+        "id": "msg_m012",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 12000,
+        "time_updated": 12000,
+        "data": "{\"role\":\"assistant\",\"time\":{\"created\":12000}}"
+      }
+    ],
+    "part": [
+      {
+        "id": "prt_0000013890020zGA8sPgeGCoLV",
+        "message_id": "msg_0000013890011TLOnC0hggUweo",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 5001,
+        "time_updated": 5001,
+        "data": "{\"type\":\"text\",\"text\":\"[Compacted by Magic Context]\"}"
+      },
+      {
+        "id": "prt_m001_a",
+        "message_id": "msg_m001",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 1000,
+        "time_updated": 1000,
+        "data": "{\"type\":\"text\",\"text\":\"Set up the parser.\"}"
+      },
+      {
+        "id": "prt_m002_a",
+        "message_id": "msg_m002",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 2000,
+        "time_updated": 2000,
+        "data": "{\"type\":\"reasoning\",\"text\":\"Look at the grammar first.\"}"
+      },
+      {
+        "id": "prt_m002_b",
+        "message_id": "msg_m002",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 2000,
+        "time_updated": 2000,
+        "data": "{\"type\":\"text\",\"text\":\"Reading the grammar.\"}"
+      },
+      {
+        "id": "prt_m002_c",
+        "message_id": "msg_m002",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 2000,
+        "time_updated": 2000,
+        "data": "{\"type\":\"tool\",\"callID\":\"call_c1\",\"tool\":\"read\",\"state\":{\"status\":\"completed\",\"input\":{\"filePath\":\"/repo/call_c1.ts\"},\"output\":\"grammar contents before the cut\",\"title\":\"call_c1.ts\",\"metadata\":{},\"time\":{\"start\":1,\"end\":2}}}"
+      },
+      {
+        "id": "prt_m003_a",
+        "message_id": "msg_m003",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 3000,
+        "time_updated": 3000,
+        "data": "{\"type\":\"text\",\"text\":\"Now the lexer.\"}"
+      },
+      {
+        "id": "prt_m004_a",
+        "message_id": "msg_m004",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 4000,
+        "time_updated": 4000,
+        "data": "{\"type\":\"tool\",\"callID\":\"call_c2\",\"tool\":\"read\",\"state\":{\"status\":\"completed\",\"input\":{\"filePath\":\"/repo/call_c2.ts\"},\"output\":\"lexer contents\",\"title\":\"call_c2.ts\",\"metadata\":{},\"time\":{\"start\":1,\"end\":2}}}"
+      },
+      {
+        "id": "prt_m004_b",
+        "message_id": "msg_m004",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 4000,
+        "time_updated": 4000,
+        "data": "{\"type\":\"text\",\"text\":\"The lexer is done.\"}"
+      },
+      {
+        "id": "prt_0000013880017vSwDweLmvnis8",
+        "message_id": "msg_m005",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 5000,
+        "time_updated": 5000,
+        "data": "{\"type\":\"compaction\",\"auto\":true}"
+      },
+      {
+        "id": "prt_m005_a",
+        "message_id": "msg_m005",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 5000,
+        "time_updated": 5000,
+        "data": "{\"type\":\"text\",\"text\":\"Add error recovery.\"}"
+      },
+      {
+        "id": "prt_m006_a",
+        "message_id": "msg_m006",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 6000,
+        "time_updated": 6000,
+        "data": "{\"type\":\"text\",\"text\":\"Recovery added.\"}"
+      },
+      {
+        "id": "prt_m006_b",
+        "message_id": "msg_m006",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 6000,
+        "time_updated": 6000,
+        "data": "{\"type\":\"tool\",\"callID\":\"call_c3\",\"tool\":\"read\",\"state\":{\"status\":\"completed\",\"input\":{\"filePath\":\"/repo/call_c3.ts\"},\"output\":\"recovery diff\",\"title\":\"call_c3.ts\",\"metadata\":{},\"time\":{\"start\":1,\"end\":2}}}"
+      },
+      {
+        "id": "prt_m007_a",
+        "message_id": "msg_m007",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 7000,
+        "time_updated": 7000,
+        "data": "{\"type\":\"text\",\"text\":\"Run the tests.\"}"
+      },
+      {
+        "id": "prt_m008_a",
+        "message_id": "msg_m008",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 8000,
+        "time_updated": 8000,
+        "data": "{\"type\":\"reasoning\",\"text\":\"Tests first, then summary.\"}"
+      },
+      {
+        "id": "prt_m008_b",
+        "message_id": "msg_m008",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 8000,
+        "time_updated": 8000,
+        "data": "{\"type\":\"text\",\"text\":\"Running the suite now.\"}"
+      },
+      {
+        "id": "prt_m008_c",
+        "message_id": "msg_m008",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 8000,
+        "time_updated": 8000,
+        "data": "{\"type\":\"tool\",\"callID\":\"call_c4\",\"tool\":\"read\",\"state\":{\"status\":\"completed\",\"input\":{\"filePath\":\"/repo/call_c4.ts\"},\"output\":\"test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed test output: 412 passed \",\"title\":\"call_c4.ts\",\"metadata\":{},\"time\":{\"start\":1,\"end\":2}}}"
+      },
+      {
+        "id": "prt_m008_d",
+        "message_id": "msg_m008",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 8000,
+        "time_updated": 8000,
+        "data": "{\"type\":\"text\",\"text\":\"All 412 tests pass; the long log above is no longer needed.\"}"
+      },
+      {
+        "id": "prt_m009_a",
+        "message_id": "msg_m009",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 9000,
+        "time_updated": 9000,
+        "data": "{\"type\":\"text\",\"text\":\"Here is the failing input.\"}"
+      },
+      {
+        "id": "prt_m009_b",
+        "message_id": "msg_m009",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 9000,
+        "time_updated": 9000,
+        "data": "{\"type\":\"file\",\"mime\":\"text/plain\",\"filename\":\"failing.txt\",\"url\":\"data:text/plain;base64,ZmFpbGluZyBpbnB1dA==\"}"
+      },
+      {
+        "id": "prt_m010_a",
+        "message_id": "msg_m010",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 10000,
+        "time_updated": 10000,
+        "data": "{\"type\":\"tool\",\"callID\":\"call_c5\",\"tool\":\"read\",\"state\":{\"status\":\"completed\",\"input\":{\"filePath\":\"/repo/call_c5.ts\"},\"output\":\"parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace parser trace \",\"title\":\"call_c5.ts\",\"metadata\":{},\"time\":{\"start\":1,\"end\":2}}}"
+      },
+      {
+        "id": "prt_m010_b",
+        "message_id": "msg_m010",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 10000,
+        "time_updated": 10000,
+        "data": "{\"type\":\"text\",\"text\":\"The trace shows the recovery loop.\"}"
+      },
+      {
+        "id": "prt_m010_c",
+        "message_id": "msg_m010",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 10000,
+        "time_updated": 10000,
+        "data": "{\"type\":\"tool\",\"callID\":\"call_c6\",\"tool\":\"read\",\"state\":{\"status\":\"completed\",\"input\":{\"filePath\":\"/repo/call_c6.ts\"},\"output\":\"fixed recovery loop\",\"title\":\"call_c6.ts\",\"metadata\":{},\"time\":{\"start\":1,\"end\":2}}}"
+      },
+      {
+        "id": "prt_m011_a",
+        "message_id": "msg_m011",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 11000,
+        "time_updated": 11000,
+        "data": "{\"type\":\"text\",\"text\":\"Ship it.\"}"
+      },
+      {
+        "id": "prt_m012_a",
+        "message_id": "msg_m012",
+        "session_id": "ses_mode3_move_fixture",
+        "time_created": 12000,
+        "time_updated": 12000,
+        "data": "{\"type\":\"text\",\"text\":\"Shipped.\"}"
+      }
+    ]
+  },
+  "context": {
+    "session_meta": [
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "harness": "opencode",
+        "counter": 20,
+        "compaction_marker_state": "{\"boundaryMessageId\":\"msg_m005\",\"summaryMessageId\":\"msg_0000013890011TLOnC0hggUweo\",\"compactionPartId\":\"prt_0000013880017vSwDweLmvnis8\",\"summaryPartId\":\"prt_0000013890020zGA8sPgeGCoLV\",\"boundaryOrdinal\":5,\"targetEndMessageId\":\"msg_m006\"}",
+        "pending_compaction_marker_state": null,
+        "is_subagent": 0
+      }
+    ],
+    "tags": [
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m001:p0",
+        "type": "message",
+        "status": "active",
+        "byte_size": 18,
+        "tag_number": 1,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m002:p1",
+        "type": "message",
+        "status": "active",
+        "byte_size": 20,
+        "tag_number": 2,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "call_c1",
+        "type": "tool",
+        "status": "dropped",
+        "byte_size": 31,
+        "tag_number": 3,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": "read",
+        "tool_owner_message_id": "msg_m002"
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m003:p0",
+        "type": "message",
+        "status": "active",
+        "byte_size": 14,
+        "tag_number": 4,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "call_c2",
+        "type": "tool",
+        "status": "active",
+        "byte_size": 14,
+        "tag_number": 5,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": "read",
+        "tool_owner_message_id": "msg_m004"
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m004:p1",
+        "type": "message",
+        "status": "active",
+        "byte_size": 18,
+        "tag_number": 6,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m005:p0",
+        "type": "message",
+        "status": "active",
+        "byte_size": 19,
+        "tag_number": 7,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m006:p0",
+        "type": "message",
+        "status": "active",
+        "byte_size": 15,
+        "tag_number": 8,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "call_c3",
+        "type": "tool",
+        "status": "active",
+        "byte_size": 13,
+        "tag_number": 9,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": "read",
+        "tool_owner_message_id": "msg_m006"
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m007:p0",
+        "type": "message",
+        "status": "active",
+        "byte_size": 14,
+        "tag_number": 10,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m008:p1",
+        "type": "message",
+        "status": "active",
+        "byte_size": 22,
+        "tag_number": 11,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "call_c4",
+        "type": "tool",
+        "status": "dropped",
+        "byte_size": 480,
+        "tag_number": 12,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": "read",
+        "tool_owner_message_id": "msg_m008"
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m008:p3",
+        "type": "message",
+        "status": "dropped",
+        "byte_size": 59,
+        "tag_number": 13,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m009:p0",
+        "type": "message",
+        "status": "active",
+        "byte_size": 26,
+        "tag_number": 14,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m009:file1",
+        "type": "file",
+        "status": "active",
+        "byte_size": 43,
+        "tag_number": 15,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "call_c5",
+        "type": "tool",
+        "status": "active",
+        "byte_size": 390,
+        "tag_number": 16,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": "read",
+        "tool_owner_message_id": "msg_m010"
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m010:p1",
+        "type": "message",
+        "status": "active",
+        "byte_size": 34,
+        "tag_number": 17,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "call_c6",
+        "type": "tool",
+        "status": "active",
+        "byte_size": 19,
+        "tag_number": 18,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": "read",
+        "tool_owner_message_id": "msg_m010"
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m011:p0",
+        "type": "message",
+        "status": "active",
+        "byte_size": 8,
+        "tag_number": 19,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "message_id": "msg_m012:p0",
+        "type": "message",
+        "status": "active",
+        "byte_size": 8,
+        "tag_number": 20,
+        "harness": "opencode",
+        "drop_mode": "full",
+        "tool_name": null,
+        "tool_owner_message_id": null
+      }
+    ],
+    "pending_ops": [
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "tag_id": 16,
+        "operation": "drop",
+        "queued_at": 1700000100000,
+        "harness": "opencode"
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "tag_id": 17,
+        "operation": "drop",
+        "queued_at": 1700000100001,
+        "harness": "opencode"
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "tag_id": 15,
+        "operation": "drop",
+        "queued_at": 1700000100002,
+        "harness": "opencode"
+      }
+    ],
+    "compartments": [
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "sequence": 1,
+        "start_message": 1,
+        "end_message": 2,
+        "start_message_id": "msg_m001",
+        "end_message_id": "msg_m002",
+        "start_block_index": null,
+        "end_block_index": null,
+        "title": "Parser setup",
+        "content": "The user asked for a parser; the grammar was read.",
+        "p1": "The user asked for a parser; the grammar was read.",
+        "p2": "Parser started from the grammar.",
+        "p3": null,
+        "p4": null,
+        "importance": 60,
+        "episode_type": "feature",
+        "legacy": 0,
+        "created_at": 1700000000000,
+        "harness": "opencode"
+      },
+      {
+        "session_id": "ses_mode3_move_fixture",
+        "sequence": 2,
+        "start_message": 3,
+        "end_message": 6,
+        "start_message_id": "msg_m003",
+        "end_message_id": "msg_m006",
+        "start_block_index": null,
+        "end_block_index": null,
+        "title": "Lexer and recovery",
+        "content": "The lexer was written, then error recovery was added.",
+        "p1": "The lexer was written, then error recovery was added.",
+        "p2": null,
+        "p3": null,
+        "p4": null,
+        "importance": 55,
+        "episode_type": null,
+        "legacy": 0,
+        "created_at": 1700000000000,
+        "harness": "opencode"
+      }
+    ]
+  },
+  "expected": {
+    "tag_checkpoint": 20,
+    "cut": "msg_m005",
+    "marker_part": "prt_0000013880017vSwDweLmvnis8",
+    "coverage_end": "msg_m006",
+    "applied": [
+      {
+        "mid": "msg_m008",
+        "part": "prt_m008_c"
+      },
+      {
+        "mid": "msg_m008",
+        "part": "prt_m008_d"
+      }
+    ],
+    "queued": [
+      {
+        "mid": "msg_m009",
+        "part": "prt_m009_b"
+      },
+      {
+        "mid": "msg_m010",
+        "part": "prt_m010_a"
+      },
+      {
+        "mid": "msg_m010",
+        "part": "prt_m010_b"
+      }
+    ],
+    "behind_cut": [
+      {
+        "mid": "msg_m002",
+        "part": "prt_m002_c"
+      }
+    ]
+  }
+}

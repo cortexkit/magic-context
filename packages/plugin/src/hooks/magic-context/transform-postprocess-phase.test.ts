@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import todoRideGolden from "../../../../../crates/mc-module/testdata/todo-ride-only.json";
+import todoRideGolden from "../../../test-fixtures/runtime/todo-ride-only.json";
 import {
     clearSessionMetaFixtureFault,
     rejectSessionMetaCollectionWrites,

@@ -1,0 +1,21 @@
+{
+  "description": "Provider response classification shared by ck-mc's runner-lane usage policy (crates/mc-module/src/providers/usage_policy.rs) and the TypeScript helpers in packages/plugin/src/shared/provider-response-completion.ts. Both test suites read this file; change both sides together.",
+  "response_completion": [
+    { "label": "served with a finish reason and time", "finish": "stop", "error": false, "completed_at": 10, "failed": false, "successful": true },
+    { "label": "served mid-turn", "finish": "tool-calls", "error": false, "completed_at": 10, "failed": false, "successful": true },
+    { "label": "finish reason without a time", "finish": "stop", "error": false, "completed_at": null, "failed": false, "successful": true },
+    { "label": "time without a finish reason", "finish": null, "error": false, "completed_at": 10, "failed": false, "successful": true },
+    { "label": "shell: no finish, no time", "finish": null, "error": false, "completed_at": null, "failed": false, "successful": false },
+    { "label": "blank finish, no time", "finish": "  ", "error": false, "completed_at": null, "failed": false, "successful": false },
+    { "label": "error finish", "finish": "error", "error": false, "completed_at": 10, "failed": true, "successful": false },
+    { "label": "failed finish", "finish": "failed", "error": false, "completed_at": 10, "failed": true, "successful": false },
+    { "label": "abort finish", "finish": "abort", "error": false, "completed_at": 10, "failed": true, "successful": false },
+    { "label": "aborted finish, padded and upper case", "finish": " Aborted ", "error": false, "completed_at": 10, "failed": true, "successful": false },
+    { "label": "interrupted finish", "finish": "interrupted", "error": false, "completed_at": 10, "failed": true, "successful": false },
+    { "label": "cancelled finish", "finish": "cancelled", "error": false, "completed_at": 10, "failed": true, "successful": false },
+    { "label": "canceled finish", "finish": "canceled", "error": false, "completed_at": 10, "failed": true, "successful": false },
+    { "label": "an error outranks a clean finish", "finish": "stop", "error": true, "completed_at": 10, "failed": true, "successful": false },
+    { "label": "an error alone", "finish": null, "error": true, "completed_at": null, "failed": true, "successful": false },
+    { "label": "unknown finish reason is served", "finish": "unrecognized_failure", "error": false, "completed_at": 10, "failed": false, "successful": true }
+  ]
+}

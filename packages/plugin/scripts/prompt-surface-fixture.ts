@@ -12,14 +12,10 @@ import {
     TOKENIZER_VERSION,
 } from "./prompt-surface-measurement";
 import { ACTIVE_TOOL_IDS } from "../src/shared/prompt-surface-runtime";
+import { enabledCatalogGuidance } from "./catalog-guidance.fixture";
 
 export const RATIFIED_FULL_MUTABLE_PROSE_CEILING = 3750;
 export const RATIFIED_LIGHT_MUTABLE_PROSE_CEILING = 1917;
-
-const DEFAULT_CC_LIGHT_ASSET_PATHS = [
-    resolve(import.meta.dir, "../../../crates/mc-module/assets/guidance_light_primary.txt"),
-    resolve(import.meta.dir, "../../../crates/mc-module/assets/guidance_light_no_reduce.txt"),
-];
 
 interface BudgetFixture {
     status?: string;
@@ -198,8 +194,14 @@ export function validateBudgetFixture(options: {
         }
     }
 
-    for (const path of options.ccLightAssetPaths ?? DEFAULT_CC_LIGHT_ASSET_PATHS) {
-        const measurement = measurePromptSurfaceText(readFileSync(resolve(path), "utf8"));
+    const ccLight = options.ccLightAssetPaths
+        ? options.ccLightAssetPaths.map((path) => ({ path, text: readFileSync(resolve(path), "utf8") }))
+        : [true, false].map((reduce) => ({
+              path: `catalog:head/${reduce ? "reduce" : "no_reduce"}/light`,
+              text: enabledCatalogGuidance(reduce, "light"),
+          }));
+    for (const { path, text } of ccLight) {
+        const measurement = measurePromptSurfaceText(text);
         messages.push(`Claude Code light guidance ${path}: ${measurement.tokens} tokens`);
         if (measurement.tokens > RATIFIED_LIGHT_MUTABLE_PROSE_CEILING) {
             errors.push(

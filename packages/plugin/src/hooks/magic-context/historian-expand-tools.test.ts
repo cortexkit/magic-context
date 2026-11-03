@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import fixture from "../../../../../crates/mc-module/testdata/historian-tool-expansions.json";
+import fixture from "../../../test-fixtures/runtime/historian-tool-expansions.json";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { DEFAULT_TOOL_EXPANSIONS, expandToolPart } from "../../shared/historian-tool-expansions";
 import { renderToolTemplate, toolTemplateError } from "../../shared/historian-tool-template";

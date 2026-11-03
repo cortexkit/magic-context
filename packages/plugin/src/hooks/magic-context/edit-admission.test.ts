@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import corpus from "../../../../../crates/mc-module/testdata/edit-admission.json";
+import corpus from "../../../test-fixtures/runtime/edit-admission.json";
 import { assertAdmissionParity } from "./__tests__/admission-parity.test";
 import {
     admitCompound,

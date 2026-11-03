@@ -1670,7 +1670,7 @@ pub struct TableCount {
 
 #[cfg(test)]
 fn normalize_hash(content: &str) -> String {
-    mc_store::memory_history::normalized_hash(content)
+    crate::memory_history::normalized_hash(content)
 }
 
 #[cfg(test)]

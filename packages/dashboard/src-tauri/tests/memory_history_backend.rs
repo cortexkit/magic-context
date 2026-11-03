@@ -2,10 +2,13 @@ use magic_context_dashboard_lib::{db, memory_bridge};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
+#[path = "support/context_db.rs"]
+mod schema_fixture;
+
 fn fixture(path: &std::path::Path) -> Connection {
-    mc_store::single_store_domain::create_test_context_db(path).unwrap();
+    schema_fixture::create_test_context_db(path);
     let conn = Connection::open(path).unwrap();
-    conn.execute("INSERT INTO memories(project_path,category,content,normalized_hash,source_type,importance,scope,shareable,status,first_seen_at,created_at,updated_at,last_seen_at) VALUES('git:idle','CONFIG_VALUES',?1,?2,'agent',50,'project',0,'active',1,1,1,1)", params!["cache_ttl=5m", mc_store::memory_history::normalized_hash("cache_ttl=5m")]).unwrap();
+    conn.execute("INSERT INTO memories(project_path,category,content,normalized_hash,source_type,importance,scope,shareable,status,first_seen_at,created_at,updated_at,last_seen_at) VALUES('git:idle','CONFIG_VALUES',?1,?2,'agent',50,'project',0,'active',1,1,1,1)", params!["cache_ttl=5m", magic_context_dashboard_lib::memory_history::normalized_hash("cache_ttl=5m")]).unwrap();
     conn
 }
 fn edit_request() -> Value {
@@ -39,7 +42,9 @@ async fn module_owned_idle_host_keeps_history_readable_and_refuses_without_sql_f
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("context.db");
     let mut conn = fixture(&path);
-    let edited = mc_store::memory_history::local_write(&mut conn, &edit_request(), 1000).unwrap();
+    let edited =
+        magic_context_dashboard_lib::memory_history::local_write(&mut conn, &edit_request(), 1000)
+            .unwrap();
     conn.execute("INSERT INTO authority_managed(project_path,context_store_uuid,marked_at) VALUES('git:idle','idle-context',1000)", []).unwrap();
     drop(conn);
     // A live daemon endpoint cannot grant the external editor local ownership.
@@ -137,7 +142,8 @@ import { runMigrations } from './packages/plugin/src/features/magic-context/migr
 import { insertMemory, getMemoryById } from './packages/plugin/src/features/magic-context/memory/storage-memory';
 import { applyMemoryAdmission, applyHistorianRevision } from './packages/plugin/src/features/magic-context/memory/lifecycle-applier';
 import { memoryHistorySnapshot } from './packages/plugin/src/features/magic-context/memory/history-applier';
-import { CHECK_SYSTEM_PROMPTS } from './packages/plugin/src/features/magic-context/memory/lifecycle-gates';
+import { buildTurnOneAuthorizationRequest } from './packages/plugin/src/features/magic-context/memory/turn-two';
+import { expandTurnTwoEntry } from './packages/plugin/src/features/magic-context/memory/turn-two-profile';
 import { lifecycleTextHash } from './packages/plugin/src/features/magic-context/memory/lifecycle-text';
 const db = new Database(process.env.UNDO_DATABASE);
 initializeDatabase(db);
@@ -160,7 +166,15 @@ if (operation === 'new' || operation === 'conflict') {
     }
     before = sources.map((row) => memoryHistorySnapshot(db, row.id));
     const evidence = { blockStartOrdinal: 42, excerpt: 'New rule.' };
-    const profile = { provider: 'test', modelId: 'undo', variant: null, temperature: 0, systemHash: 'historian' };
+    const authorization = buildTurnOneAuthorizationRequest({
+        lane: 'opencode-1', carrier: 'hidden-completion', provider: 'test', modelId: 'undo',
+        variant: null, temperature: 0, thinkingLevel: null,
+    }, {
+        system: 'historian system prompt', formatInstruction: 'Combined historian format contract',
+        toolSurface: ['historian'], checkToolSurface: [],
+    });
+    const profiles = expandTurnTwoEntry(authorization.requestedIdentity);
+    const profile = profiles[0];
     const receipt = await applyHistorianRevision(db, {
         key: 'operation', action: operation, projectPath,
         expectedSources: before.map((row) => ({ id: row.id, revision: row.revision })),
@@ -172,9 +186,9 @@ if (operation === 'new' || operation === 'conflict') {
         blocks: [{ startOrdinal: 42, endOrdinal: 42, role: 'user', parts: ['New rule.'], joinedText: 'New rule.' }],
         sources: before.map((row) => ({ ...getMemoryById(db, row.id), revision: row.revision })),
         historianProfile: profile,
-        validatedProfiles: [profile, ...Object.values(CHECK_SYSTEM_PROMPTS).map((system) => ({ ...profile, systemHash: lifecycleTextHash(system) }))],
+        validatedProfiles: profiles,
     }, { sessionId: 'undo', harness: 'opencode' }, async (request) => ({
-        profile: { ...profile, systemHash: request.systemHash },
+        profile: profiles.slice(1).find((candidate) => candidate.systemHash === request.systemHash),
         verdicts: (request.kind === 'compatibility' ? request.pairs : request.operands).map((operand) => ({ id: operand.id, verdict: request.kind === 'disproof' || request.kind === 'support' ? 'yes' : 'no' })),
     }));
     if (receipt.state !== 'applied') throw new Error(JSON.stringify(receipt));
@@ -189,6 +203,13 @@ console.log(JSON.stringify({ before, survivorId }));
         .current_dir(root)
         .env("UNDO_DATABASE", path)
         .env("UNDO_OPERATION", operation)
+        .env("HOME", path.parent().unwrap())
+        .env("XDG_DATA_HOME", path.parent().unwrap())
+        .env("XDG_CONFIG_HOME", path.parent().unwrap())
+        .env("XDG_STATE_HOME", path.parent().unwrap())
+        .env("MAGIC_CONTEXT_STORAGE_DIR", path.parent().unwrap())
+        .env("MAGIC_CONTEXT_TEST_DATA_DIR", path.parent().unwrap())
+        .env_remove("OPENCODE_DB")
         .output()
         .expect("bun is required to produce TypeScript-owned undo fixtures");
     assert!(
@@ -308,7 +329,7 @@ async fn dashboard_undoes_typescript_operations_atomically_without_rebuilding_ca
         assert_eq!(restored["state"], "applied", "{operation}: {restored}");
         for original in fixture["before"].as_array().unwrap() {
             let id = original["id"].as_i64().unwrap();
-            let current = mc_store::memory_history::snapshot(&conn, id)
+            let current = magic_context_dashboard_lib::memory_history::snapshot(&conn, id)
                 .unwrap()
                 .unwrap();
             for field in [
@@ -337,7 +358,7 @@ async fn dashboard_undoes_typescript_operations_atomically_without_rebuilding_ca
             let stale = memory_bridge::request(&path, "memory.edit", json!({"projectPath":"git:undo","operationId":format!("old-{id}"),"expectedRevisions":[{"memoryId":id,"revision":1}],"changes":[{"memoryId":id,"content":"Stale decision."}]})).await.unwrap();
             assert_eq!(stale["reason"], "stale_revision");
             assert_eq!(
-                mc_store::memory_history::snapshot(&conn, id)
+                magic_context_dashboard_lib::memory_history::snapshot(&conn, id)
                     .unwrap()
                     .unwrap(),
                 current
@@ -345,7 +366,7 @@ async fn dashboard_undoes_typescript_operations_atomically_without_rebuilding_ca
         }
         let survivor = fixture["survivorId"].as_i64().unwrap();
         if ["replaces", "new", "conflict"].contains(&operation) {
-            let current = mc_store::memory_history::snapshot(&conn, survivor)
+            let current = magic_context_dashboard_lib::memory_history::snapshot(&conn, survivor)
                 .unwrap()
                 .unwrap();
             assert_eq!(current["status"], "archived");

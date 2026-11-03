@@ -11,7 +11,7 @@ it("ordinary long repository texts retain exact whole-text BPE counts", () => {
     const whole = new Tokenizer(require("ai-tokenizer/encoding/claude"));
     const paths = [
         "assets/magic-context.schema.json",
-        "crates/mc-core/testdata/decay-golden.json",
+        "crates/mc-module/testdata/decay-golden.json",
         "ARCHITECTURE.md",
         "CONFIGURATION.md",
         "packages/plugin/src/hooks/magic-context/host-runner/opencode-adapter.ts",

@@ -1,0 +1,58 @@
+{
+  "description": "A runner transcript's native todowrite call and its result, and the todo_state.set request a host bridge sends for the same todos. ck-mc derives todo state from the transcript (crates/mc-module/src/providers/runner_todo.rs) and must store exactly what todo_state.set stores; the Bun test packages/plugin/src/shared/runner-policy-fixtures.test.ts checks that the TypeScript normalizer still produces expected_state_json from both inputs.",
+  "lineage_id": "L",
+  "todo_state_set": {
+    "method": "todo_state.set",
+    "v": 1,
+    "owner_message_id": "m1",
+    "todos": [
+      { "id": "one", "content": "Synthetic task", "status": "pending", "priority": "high" },
+      { "content": "Ship module", "status": "in_progress" },
+      { "content": "Old step", "status": "completed", "priority": "low" }
+    ]
+  },
+  "expected_state_json": "[{\"content\":\"Synthetic task\",\"status\":\"pending\",\"priority\":\"high\"},{\"content\":\"Ship module\",\"status\":\"in_progress\",\"priority\":\"medium\"},{\"content\":\"Old step\",\"status\":\"completed\",\"priority\":\"low\"}]",
+  "transcript": [
+    {
+      "ordinal": 0,
+      "mid": "m0",
+      "message": { "role": "user", "content": [{ "type": "text", "text": "Plan the work" }] }
+    },
+    {
+      "ordinal": 1,
+      "mid": "m1",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_call",
+            "tool_call_id": "call-todo",
+            "tool_name": "todowrite",
+            "input": {
+              "todos": [
+                { "id": "one", "content": "Synthetic task", "status": "pending", "priority": "high" },
+                { "content": "Ship module", "status": "in_progress" },
+                { "content": "Old step", "status": "completed", "priority": "low" }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "ordinal": 2,
+      "mid": "m2",
+      "message": {
+        "role": "tool",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_call_id": "call-todo",
+            "output": { "kind": "text", "text": "2 todos" },
+            "is_error": false
+          }
+        ]
+      }
+    }
+  ]
+}

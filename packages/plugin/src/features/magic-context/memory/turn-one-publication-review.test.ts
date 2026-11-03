@@ -307,7 +307,7 @@ describe("turn-one anchor fuzz corpus shared with the Rust validator", () => {
         const generator = (await import(
             resolve(
                 import.meta.dir,
-                "../../../../../../crates/mc-module/gen/gen-turn-one-anchor-fuzz.ts",
+                "../../../../test-fixtures/runtime/gen-turn-one-anchor-fuzz.ts",
             )
         )) as {
             generateCorpus: () => Promise<unknown>;

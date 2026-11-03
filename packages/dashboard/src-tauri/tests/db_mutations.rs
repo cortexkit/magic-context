@@ -37,6 +37,7 @@ fn create_schema(conn: &Connection) {
             importance INTEGER DEFAULT 50,
             scope TEXT DEFAULT 'project',
             shareable INTEGER DEFAULT 0,
+            safety_critical INTEGER CHECK(safety_critical IN (0,1)),
             classified_at INTEGER,
             UNIQUE(project_path,category,normalized_hash)
         );
@@ -100,6 +101,8 @@ fn create_schema(conn: &Connection) {
         CREATE TABLE memory_journal(id INTEGER PRIMARY KEY AUTOINCREMENT,project_path TEXT NOT NULL,decision_key TEXT NOT NULL UNIQUE,operation TEXT NOT NULL,receipt_json TEXT NOT NULL,applied_at INTEGER NOT NULL,before_json TEXT,after_json TEXT);
         CREATE TABLE memory_decision_receipts(decision_key TEXT PRIMARY KEY,project_path TEXT NOT NULL,fact_id INTEGER,receipt_json TEXT NOT NULL,resolved_at INTEGER NOT NULL);
         CREATE TABLE memory_successor_links(source_id INTEGER NOT NULL,successor_id INTEGER NOT NULL,decision_key TEXT NOT NULL,PRIMARY KEY(source_id,successor_id));
+        CREATE TABLE memory_conflict_links(left_id INTEGER NOT NULL,right_id INTEGER NOT NULL,decision_key TEXT NOT NULL,PRIMARY KEY(left_id,right_id),CHECK(left_id < right_id));
+        CREATE TABLE memory_clause_evidence(memory_id INTEGER NOT NULL,revision INTEGER NOT NULL,clause_ordinal INTEGER NOT NULL,text_hash TEXT NOT NULL,evidence_json TEXT NOT NULL,PRIMARY KEY(memory_id,revision,clause_ordinal));
         CREATE TABLE tx_probe (value TEXT NOT NULL);
         CREATE TABLE notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,14 +138,16 @@ fn audited_edit(
         .unwrap();
     let expected = ids
         .iter()
-        .map(|id| mc_store::memory_history::RevisionExpectation {
-            memory_id: *id,
-            revision: conn
-                .query_row("SELECT revision FROM memories WHERE id=?1", [id], |row| {
-                    row.get(0)
-                })
-                .unwrap(),
-        })
+        .map(
+            |id| magic_context_dashboard_lib::memory_history::RevisionExpectation {
+                memory_id: *id,
+                revision: conn
+                    .query_row("SELECT revision FROM memories WHERE id=?1", [id], |row| {
+                        row.get(0)
+                    })
+                    .unwrap(),
+            },
+        )
         .collect::<Vec<_>>();
     let operation = format!(
         "test-{}",
@@ -170,7 +175,7 @@ fn insert_memory(conn: &Connection, project_path: &str, status: &str) -> i64 {
         "INSERT INTO memories
            (project_path, category, content, normalized_hash, status, created_at, updated_at, first_seen_at, last_seen_at)
          VALUES (?1, 'CONSTRAINTS', ?2, ?3, ?4, 1, 1, 1, 1)",
-        params![project_path, content, mc_store::memory_history::normalized_hash(&content), status],
+        params![project_path, content, magic_context_dashboard_lib::memory_history::normalized_hash(&content), status],
     )
     .expect("insert memory");
     conn.last_insert_rowid()
@@ -348,10 +353,12 @@ fn bulk_delete_archives_rows_in_one_undoable_decision() {
     let ids = [first, second];
     let expected = ids
         .iter()
-        .map(|id| mc_store::memory_history::RevisionExpectation {
-            memory_id: *id,
-            revision: 1,
-        })
+        .map(
+            |id| magic_context_dashboard_lib::memory_history::RevisionExpectation {
+                memory_id: *id,
+                revision: 1,
+            },
+        )
         .collect::<Vec<_>>();
     let request = magic_context_dashboard_lib::memory_bridge::edit_request(
         "git:project-a",
@@ -393,16 +400,34 @@ fn bulk_delete_archives_rows_in_one_undoable_decision() {
     // Replaying an old durable receipt must remain valid after the render policy changes.
     let mut legacy_receipt = restored.clone();
     legacy_receipt["adoption"] = serde_json::json!("dashboard_epoch_hard");
-    assert!(mc_store::memory_history::valid_receipt("memory.restore", &undo, &legacy_receipt));
+    assert!(magic_context_dashboard_lib::memory_history::valid_receipt(
+        "memory.restore",
+        &undo,
+        &legacy_receipt
+    ));
     let deltas = mutation_log_rows(&conn);
     assert_eq!(deltas.len(), 4);
     assert_eq!(deltas[0].1, "archive");
     assert_eq!(deltas[1].1, "archive");
     assert_eq!(deltas[2].1, "update");
     assert_eq!(deltas[3].1, "update");
-    assert_eq!(deltas[2].4, Some(format!("memory {} for git:project-a", ids[0])));
-    assert_eq!(deltas[3].4, Some(format!("memory {} for git:project-a", ids[1])));
-    assert_eq!(conn.query_row("SELECT COUNT(*) FROM memory_mutation_log WHERE operation_id LIKE 'dashboard:%'", [], |row| row.get::<_, i64>(0)).unwrap(), 4);
+    assert_eq!(
+        deltas[2].4,
+        Some(format!("memory {} for git:project-a", ids[0]))
+    );
+    assert_eq!(
+        deltas[3].4,
+        Some(format!("memory {} for git:project-a", ids[1]))
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM memory_mutation_log WHERE operation_id LIKE 'dashboard:%'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        4
+    );
     for id in ids {
         assert_eq!(
             conn.query_row("SELECT status FROM memories WHERE id=?1", [id], |row| {
@@ -778,7 +803,7 @@ fn test_update_memory_category_collision() {
 
     // Try to update Memory 1's category to NAMING. This should collide with Memory 2.
     // Both rows use the production hash so the category change truly collides.
-    let hash = mc_store::memory_history::normalized_hash("same content");
+    let hash = magic_context_dashboard_lib::memory_history::normalized_hash("same content");
     conn.execute("UPDATE memories SET normalized_hash=?1", [hash])
         .unwrap();
     let receipt = audited_edit(&mut conn, &[id1], "category", "NAMING").unwrap();

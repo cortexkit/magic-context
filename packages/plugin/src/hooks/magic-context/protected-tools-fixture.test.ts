@@ -1,5 +1,5 @@
 import { expect } from "bun:test";
-import fixture from "../../../../../crates/mc-module/tests/fixtures/protected-tools.json";
+import fixture from "../../../test-fixtures/runtime/protected-tools.json";
 import { getTagsBySession, insertTag } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";

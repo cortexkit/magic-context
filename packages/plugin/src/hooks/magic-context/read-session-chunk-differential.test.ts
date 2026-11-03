@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import expansions from "../../../../../crates/mc-module/testdata/historian-tool-expansions.json";
+import expansions from "../../../test-fixtures/runtime/historian-tool-expansions.json";
 import { readSessionChunk, withRawMessageProvider } from "./read-session-chunk";
 import type { RawMessage } from "./read-session-raw";
 

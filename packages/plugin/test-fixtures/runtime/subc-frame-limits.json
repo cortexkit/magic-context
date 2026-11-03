@@ -1,0 +1,5 @@
+{
+  "max_frame_body_bytes": 67108864,
+  "application_body_bytes": 50331648,
+  "transform_staging_bytes": 268435456
+}

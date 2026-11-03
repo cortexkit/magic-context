@@ -1,0 +1,8 @@
+{
+  "steps": [
+    { "name": "bootstrap", "execute": false, "flush": true, "state": null, "expectedTodo": null, "replay": false },
+    { "name": "todo-only execute", "execute": true, "flush": false, "state": [{ "content": "Pending todo", "status": "in_progress", "priority": "high" }], "expectedTodo": null, "replay": true },
+    { "name": "next independent flush", "execute": true, "flush": true, "state": [{ "content": "Pending todo", "status": "in_progress", "priority": "high" }], "expectedTodo": [{ "content": "Pending todo", "status": "in_progress", "priority": "high" }], "replay": false },
+    { "name": "defer replay", "execute": false, "flush": false, "state": [{ "content": "Pending todo", "status": "in_progress", "priority": "high" }], "expectedTodo": [{ "content": "Pending todo", "status": "in_progress", "priority": "high" }], "replay": true }
+  ]
+}

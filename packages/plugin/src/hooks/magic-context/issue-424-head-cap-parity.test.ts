@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import fixtureSet from "../../../../../crates/mc-module/testdata/issue-424-head-cap.json";
+import fixtureSet from "../../../test-fixtures/runtime/issue-424-head-cap.json";
 import { applyHeadCap } from "./protected-tail-boundary";
 import type { RawMessage } from "./read-session-raw";
 import {

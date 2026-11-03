@@ -1,0 +1,11 @@
+[
+  {"model":"opencode/free","blockedRead":true},
+  {"model":"opencode/big-pickle","blockedRead":true},
+  {"model":"opencode/paid-model","blockedRead":true},
+  {"model":"opencode/nested/model","blockedRead":true},
+  {"model":"opencode-zen/free","blockedRead":false},
+  {"model":"opencode-go/free","blockedRead":false},
+  {"model":"OpenCode/free","blockedRead":false},
+  {"model":"anthropic/free","blockedRead":false},
+  {"model":"openai/model","blockedRead":false}
+]

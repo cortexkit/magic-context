@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "id": "channel1-gentle",
+      "channel": "channel1",
+      "level": "gentle",
+      "reclaimable_tool_outputs": 16,
+      "reclaimable_tokens": 90000,
+      "sticky": false,
+      "hint": [{ "tag_number": 123, "tool_name": "read" }],
+      "expected": "\n\n<system-reminder>\nHousekeeping: 16 spent tool outputs (~90k tokens) are reclaimable. Stamp each output with ctx_reduce as soon as you've taken what you need from it; don't wait for the task to finish.\noldest reclaimable: §123§ read.\n</system-reminder>"
+    },
+    {
+      "id": "channel1-firm",
+      "channel": "channel1",
+      "level": "firm",
+      "reclaimable_tool_outputs": 16,
+      "reclaimable_tokens": 90000,
+      "sticky": false,
+      "hint": [{ "tag_number": 123, "tool_name": "read" }],
+      "expected": "\n\n<system-reminder>\n16 spent tool outputs (~90k tokens) are reclaimable. Make a ctx_reduce pass now over the outputs you've already used, then continue.\noldest reclaimable: §123§ read.\n</system-reminder>"
+    },
+    {
+      "id": "channel1-urgent",
+      "channel": "channel1",
+      "level": "urgent",
+      "reclaimable_tool_outputs": 16,
+      "reclaimable_tokens": 90000,
+      "sticky": false,
+      "hint": [{ "tag_number": 123, "tool_name": "read" }],
+      "expected": "\n\n<system-reminder>\n16 spent tool outputs (~90k tokens) are still unstamped. Call ctx_reduce now, before your next tool call, on every output you've already used.\noldest reclaimable: §123§ read.\n</system-reminder>"
+    },
+    {
+      "id": "channel1-sticky",
+      "channel": "channel1",
+      "level": "firm",
+      "reclaimable_tool_outputs": 16,
+      "reclaimable_tokens": 90000,
+      "sticky": true,
+      "hint": [{ "tag_number": 123, "tool_name": "read" }],
+      "expected": "\n\n<system-reminder>\nStill unstamped: 16 spent tool outputs (~90k tokens). Stamp the ones you've used with ctx_reduce now.\noldest reclaimable: §123§ read.\n</system-reminder>"
+    },
+    {
+      "id": "channel2",
+      "channel": "channel2",
+      "reclaimable_tool_outputs": 16,
+      "reclaimable_tokens": 90000,
+      "hint": [{ "tag_number": 123, "tool_name": "read" }],
+      "expected": "<system-reminder>\nYour next step: call ctx_reduce on the outputs you've already used (16 spent tool outputs (~90k tokens)). Then continue your task.\noldest reclaimable: §123§ read.\n</system-reminder>"
+    }
+  ]
+}

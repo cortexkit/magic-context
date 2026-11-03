@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import toolLoopGolden from "../../../../../crates/mc-module/testdata/cc-tool-loop-tag-golden.json";
+import toolLoopGolden from "../../../test-fixtures/runtime/cc-tool-loop-tag-golden.json";
 import { closeDatabase, getTagById, openDatabase } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";

@@ -106,7 +106,7 @@ describe("estimateImageTokensFromDataUrl", () => {
 // each fallback path.
 describe("image token parity with the Rust module", () => {
     const fixturePath = new URL(
-        "../../../../../crates/mc-module/testdata/image-token-parity.json",
+        "../../../test-fixtures/runtime/image-token-parity.json",
         import.meta.url,
     );
     const cases = JSON.parse(readFileSync(fixturePath, "utf8")) as Array<{

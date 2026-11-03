@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import zenModels from "../../../../crates/mc-module/testdata/historian-zen-models.json";
+import zenModels from "../../test-fixtures/runtime/historian-zen-models.json";
 import {
     needsBlockedRead,
     rememberV1HiddenRun,

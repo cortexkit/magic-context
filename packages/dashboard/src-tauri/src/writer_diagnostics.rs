@@ -7,7 +7,7 @@ use rusqlite::Connection;
 
 // Compile the transaction wrapper against the dashboard's rusqlite version,
 // without pulling the cache store or its different SQLite library into Tauri.
-#[path = "../../../../crates/mc-store/src/writer_diagnostics.rs"]
+#[path = "writer_transaction.rs"]
 mod transaction;
 
 pub fn begin<'conn>(

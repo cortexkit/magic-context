@@ -51,6 +51,7 @@ process.env.XDG_DATA_HOME = isolatedDataHome;
 // Keep it in the same throwaway tree so fixture-scoped loads cannot inherit a
 // developer's embedding destination or credentials from the real user tier.
 process.env.XDG_CONFIG_HOME = isolatedDataHome;
+process.env.XDG_STATE_HOME = isolatedDataHome;
 
 // Provider tests use fake model IDs; treat those fixtures as legacy mean models
 // unless a test explicitly installs declared pooling metadata.

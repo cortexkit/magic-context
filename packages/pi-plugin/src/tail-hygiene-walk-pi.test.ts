@@ -1049,7 +1049,7 @@ describe("TS/Pi/module differential hygiene corpus", () => {
 		readFileSync(
 			join(
 				import.meta.dir,
-				"../../../crates/mc-module/testdata/nudge-hygiene-golden.json",
+				"../../plugin/test-fixtures/runtime/nudge-hygiene-golden.json",
 			),
 			"utf8",
 		),

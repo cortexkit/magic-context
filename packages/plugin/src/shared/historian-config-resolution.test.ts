@@ -11,28 +11,15 @@ import { type ModelHarness, resolveHistorianModel } from "./model-resolution";
 import { clearModelsDevCache, getSdkOutputLimit, getSdkWindowGeometry } from "./models-dev-cache";
 
 /**
- * Drift check for the historian settings ck-mc resolves from its own config.
- *
- * When a harness runs Magic Context through ck-mc without this plugin's bridge,
- * nothing sends ck-mc the historian model chain, so ck-mc reads the user's config
- * and resolves the chain, variants, per-model limits, timeout and output cap
- * itself (crates/mc-module/src/providers/historian_config.rs). The
- * committed fixture records what this plugin resolves for the same config matrix,
- * and the Rust test compares against it. This test fails whenever the TypeScript
- * resolution changes without the fixture being regenerated:
+ * Standalone historian settings oracle for model chains, variants, limits and timeouts.
+ * An empty model catalog keeps the vectors independent of installed providers.
+ * Regenerate deliberately when the standalone resolution contract changes:
  *
  *   MC_REGENERATE_HISTORIAN_CONFIG_FIXTURE=1 bun test src/shared/historian-config-resolution.test.ts
- *
- * The resolution is the one the plugin uses everywhere it hands the module a
- * chain: `resolveHistorianModel` (model-resolution.ts), the timeout default from
- * `sampleHistorian` (hooks/magic-context/hook.ts), `historian.maxTokens` as the
- * output cap and `historianFieldsFromConfig` below for the chain, variants and
- * limits. ck-mc has no model catalog, so the matrix is resolved with an empty
- * catalog: every per-model limit entry is then empty, as it is in ck-mc.
  */
 const FIXTURE_PATH = resolve(
     import.meta.dir,
-    "../../../../crates/mc-module/testdata/historian-config-resolution.json",
+    "../../test-fixtures/runtime/historian-config-resolution.json",
 );
 
 interface MatrixCase {
@@ -266,7 +253,7 @@ function bridgeChain(entry: MatrixCase): string[] {
 }
 
 describe("historian config resolution fixture", () => {
-    it("matches the committed fixture ck-mc is tested against", () => {
+    it("matches the committed standalone historian settings fixture", () => {
         // An empty model catalog: ck-mc has none, so neither side may use one.
         clearModelsDevCache();
         const fixture = {

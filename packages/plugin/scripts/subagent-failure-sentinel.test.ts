@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "../src/shared/sqlite";
+import { initializeDatabase } from "../src/features/magic-context/storage-db";
+import { runMigrations } from "../src/features/magic-context/migrations";
 
 import { normalizeError, runFailureSentinel } from "./subagent-failure-sentinel";
 
@@ -16,19 +18,20 @@ beforeEach(() => {
     mkdirSync(join(tmpdir(), "magic-context"), { recursive: true });
     root = mkdtempSync(join(tmpdir(), "magic-context", "subagent-failure-sentinel-"));
     db = new Database(join(root, "context.db"));
-    db.exec(readFileSync(join(import.meta.dir, "../../../crates/mc-module/tests/fixtures/context-db-schema.sql"), "utf8"));
+    initializeDatabase(db);
+    runMigrations(db);
     serial = 0;
 });
-afterEach(() => { db.close(false); rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
 
 function add(status: string, time = NOW - 1_000, error = "failure code 42", task = "historian", subagent = "historian") {
     serial++;
-    db.query("INSERT INTO subagent_invocations (session_id, harness, subagent, task, started_at, ended_at, status, error) VALUES (?, 'opencode', ?, ?, ?, ?, ?, ?)")
+    db.prepare("INSERT INTO subagent_invocations (session_id, harness, subagent, task, started_at, ended_at, status, error) VALUES (?, 'opencode', ?, ?, ?, ?, ?, ?)")
         .run(`session-${serial}`, subagent, task, time - 100, time, status, error);
 }
 // Inserts one attempt with explicit session, task and parent link, and returns its id.
 function attempt(fields: { session: string; status: string; time: number; error?: string | null; task?: string | null; parent?: number | null; subagent?: string }): number {
-    const row = db.query("INSERT INTO subagent_invocations (session_id, harness, subagent, task, started_at, ended_at, status, error, parent_invocation_id) VALUES (?, 'opencode', ?, ?, ?, ?, ?, ?, ?) RETURNING id")
+    const row = db.prepare("INSERT INTO subagent_invocations (session_id, harness, subagent, task, started_at, ended_at, status, error, parent_invocation_id) VALUES (?, 'opencode', ?, ?, ?, ?, ?, ?, ?) RETURNING id")
         .get(fields.session, fields.subagent ?? "historian", fields.task ?? null, fields.time - 100, fields.time, fields.status, fields.error ?? null, fields.parent ?? null) as { id: number };
     return row.id;
 }

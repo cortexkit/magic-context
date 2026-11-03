@@ -7,20 +7,17 @@ import {
     providerResponseFailed,
 } from "./provider-response-completion";
 
-// ck-mc's runner-lane usage and todo policies are ported from the TypeScript
-// event handler and host bridge. The Rust tests read these same committed
-// fixtures, so a change on either side that is not mirrored fails here or there.
+// These saved cases distinguish failed model-provider replies from successful
+// ones and convert supported todo lists into the same JSON representation.
+// Their expected values do not depend on how external model runners encode messages.
 function fixture<T>(name: string): T {
     return JSON.parse(
-        readFileSync(
-            resolve(import.meta.dir, `../../../../crates/mc-module/testdata/${name}`),
-            "utf8",
-        ),
+        readFileSync(resolve(import.meta.dir, `../../test-fixtures/runtime/${name}`), "utf8"),
     ) as T;
 }
 
-describe("runner-lane policy fixtures shared with ck-mc", () => {
-    it("classifies provider responses the way the Rust usage policy does", () => {
+describe("standalone completion and todo policy fixtures", () => {
+    it("classifies provider responses against the committed usage oracle", () => {
         const vectors = fixture<{
             response_completion: Array<{
                 label: string;

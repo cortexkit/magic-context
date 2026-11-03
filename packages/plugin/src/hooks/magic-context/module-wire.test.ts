@@ -19,10 +19,7 @@ import type { MessageLike } from "./transform-operations";
 it("pins shared state-sync frame budgets to the module fixture", () => {
     const limits = JSON.parse(
         readFileSync(
-            join(
-                import.meta.dir,
-                "../../../../../crates/mc-module/testdata/subc-frame-limits.json",
-            ),
+            join(import.meta.dir, "../../../test-fixtures/runtime/subc-frame-limits.json"),
             "utf8",
         ),
     );
@@ -309,10 +306,7 @@ describe("encodeOpenCodeMessagesToCk", () => {
     it("carries nested OpenCode timestamps from the generated temporal parity fixture", () => {
         const golden = JSON.parse(
             readFileSync(
-                join(
-                    import.meta.dir,
-                    "../../../../../crates/mc-module/testdata/temporal-parity-golden.json",
-                ),
+                join(import.meta.dir, "../../../test-fixtures/runtime/temporal-parity-golden.json"),
                 "utf8",
             ),
         ) as {
@@ -338,7 +332,7 @@ describe("encodeOpenCodeMessagesToCk", () => {
             readFileSync(
                 join(
                     import.meta.dir,
-                    "../../../../../crates/mc-module/testdata/merged-reasoning-adapter-golden.json",
+                    "../../../test-fixtures/runtime/merged-reasoning-adapter-golden.json",
                 ),
                 "utf8",
             ),
