@@ -4,16 +4,21 @@
 //! Only a fully summarized session moves: before the move it runs
 //! `/ctx-wrapup 0`, so its summaries reach its newest message. The move then
 //! has nothing to pick or carry. It
-//! 1. refuses, by name, a session already moved or whose summaries stop
-//!    short of the transcript's end;
-//! 2. builds the session's first view, the history head and a cut through the
+//! 1. refuses, by name, a session already moved;
+//! 2. converts the message numbers Magic Context stored for the session to
+//!    the runner's numbering, when the runner's move tool sends the
+//!    transcript's message rows ([`crate::move_renumber`]); the standalone
+//!    plugin numbers messages differently after a compaction;
+//! 3. refuses, by name, a session whose summaries stop short of the
+//!    transcript's end;
+//! 4. builds the session's first view, the history head and a cut through the
 //!    newest message, and saves it as ck-mc's accepted view, so the runner's
 //!    Setup finds it applied;
-//! 3. answers that view and the standalone plugin's highest tag number. The
+//! 5. answers that view and the standalone plugin's highest tag number. The
 //!    runner's own move installs the view as its stored current view and
 //!    writes the number as the checkpoint on its compaction marker, so new
 //!    tag numbers continue above every number the model has seen;
-//! 4. writes the fence the standalone plugin checks
+//! 6. writes the fence the standalone plugin checks
 //!    (`mode3_move:<harness>:<session>` in `schema_migrations_meta`), last,
 //!    as the move's commit point. From then on that plugin stands down on
 //!    the session.
@@ -54,6 +59,12 @@ pub struct MoveRequest {
     pub newest: Cursor,
     /// Milliseconds since the Unix epoch, for the fence record.
     pub now: u64,
+    /// Every message row of the session's active path, in host order, with
+    /// the runner's entry number for each. Needed when the transcript holds a
+    /// compaction, where the standalone plugin's numbering differs from the
+    /// runner's; without it the stored numbers must already be the runner's.
+    #[serde(default)]
+    pub messages: Option<Vec<crate::move_renumber::HostMessage>>,
 }
 
 /// What the runner's move tool installs. `ck-mc move-in` prints it as JSON.
@@ -94,6 +105,20 @@ pub fn move_in(
             "session_already_moved: {} was already moved to mode 3",
             key.session
         ));
+    }
+    if let Some(messages) = &request.messages {
+        // Only the OpenCode 1 plugin's numbering is rebuilt here; another
+        // host's standalone numbering has its own rules.
+        if key.harness != "opencode" {
+            return Err(format!(
+                "renumbering_unsupported: converting message numbers is built for OpenCode 1 sessions, not {}",
+                key.harness
+            ));
+        }
+        let numbering = crate::move_renumber::Numbering::opencode(messages, &request.newest)?;
+        db.with_connection(|conn| {
+            crate::move_renumber::renumber(conn, &key.harness, &key.session, &numbering)
+        })?;
     }
     // Offline, nothing rides; the runner declares what it detects at its own
     // Setup.

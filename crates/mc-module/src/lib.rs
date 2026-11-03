@@ -62,6 +62,7 @@ pub mod memory_tool;
 pub mod memory_writes;
 pub mod module;
 pub mod move_in;
+pub mod move_renumber;
 pub mod mural;
 pub mod neutral;
 pub mod notes;

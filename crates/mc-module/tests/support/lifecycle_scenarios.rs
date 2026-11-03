@@ -199,6 +199,7 @@ fn move_request(dir: &std::path::Path) -> mc_module::move_in::MoveRequest {
         rules: free(),
         newest: cortexkit_role_compaction::read::Cursor::new(2, "m2", "d"),
         now: 1,
+        messages: None,
     }
 }
 
@@ -281,6 +282,77 @@ fn lifecycle_move_refuses_incompatible_message_ordinals() {
     );
     assert_eq!(fenced(&dir), 0);
     assert!(store.load(&request.session).is_none());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn lifecycle_move_converts_the_plugins_numbers_across_a_compaction() {
+    use mc_module::move_renumber::HostMessage;
+    let dir = scratch("move-renumber");
+    let db = ContextDb::create_for_tests(&dir.join("context.db")).unwrap();
+    // The OpenCode 1 plugin numbered the message opening a compaction (row 3)
+    // and left out its finished summary (row 4). The runner leaves out both,
+    // so the plugin's 4 and 5 are the runner's 3 and 4.
+    insert_summary(&dir, "s1", 0, (1, "m1"), (3, "opener"), "Before");
+    insert_summary(&dir, "s1", 1, (4, "m5"), (5, "m6"), "After");
+    rusqlite::Connection::open(dir.join("context.db"))
+        .unwrap()
+        .execute("UPDATE compartments SET harness = 'opencode'", [])
+        .unwrap();
+    let store = Store::open(&dir.join("mode3.db")).unwrap();
+    let mut request = move_request(&dir);
+    request.session = SessionRef::new("mock-runner", "opencode", "s1");
+    request.newest = cortexkit_role_compaction::read::Cursor::new(4, "m6", "d");
+    let row = |mid: &str, entry: Option<u64>, finished_summary: bool| HostMessage {
+        mid: mid.into(),
+        entry,
+        finished_summary,
+    };
+    let messages = vec![
+        row("m1", Some(1), false),
+        row("m2", Some(2), false),
+        row("opener", None, false),
+        row("summary", None, true),
+        row("m5", Some(3), false),
+        row("m6", Some(4), false),
+    ];
+    let config: mc_module::config::Config = Settings::default().into();
+
+    // Without the message rows the stored numbers are taken as the runner's,
+    // and they run past its newest entry.
+    let refused = mc_module::move_in::move_in(db, &store, &config, &request).unwrap_err();
+    assert!(refused.starts_with("session_not_summarized:"), "{refused}");
+
+    // Another host's standalone numbering isn't built.
+    let mut other_host = move_request(&dir);
+    other_host.messages = Some(messages.clone());
+    let db = ContextDb::open(&dir.join("context.db")).unwrap();
+    let refused = mc_module::move_in::move_in(db, &store, &config, &other_host).unwrap_err();
+    assert!(refused.starts_with("renumbering_unsupported:"), "{refused}");
+
+    request.messages = Some(messages);
+    let db = ContextDb::open(&dir.join("context.db")).unwrap();
+    mc_module::move_in::move_in(db, &store, &config, &request).unwrap();
+    let connection = rusqlite::Connection::open(dir.join("context.db")).unwrap();
+    let ranges: Vec<String> = connection
+        .prepare(
+            "SELECT start_message || '-' || end_message FROM compartments
+             WHERE session_id = 's1' ORDER BY sequence",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(ranges, ["1-2", "3-4"]);
+    let fence: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations_meta WHERE key IN ('mode3_move:opencode:s1', 'mode3_renumber:opencode:s1')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(fence, 2);
     std::fs::remove_dir_all(dir).unwrap();
 }
 

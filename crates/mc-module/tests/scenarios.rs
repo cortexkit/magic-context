@@ -3576,6 +3576,7 @@ async fn a_fully_summarized_standalone_session_moves_in_with_its_history_and_num
         rules: free(),
         newest: cortexkit_role_compaction::read::Cursor::new(6, "msg00006", "d"),
         now: 1,
+        messages: None,
     };
     let config_source = mc_module::config::Config::from(Settings::default());
     let open = || {
