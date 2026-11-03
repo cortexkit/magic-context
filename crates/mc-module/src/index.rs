@@ -47,6 +47,11 @@ pub struct Index {
     /// contract W4.11): the family named by the last page or notice that
     /// carried counts.
     family: Option<String>,
+    app_identity: u64,
+    app_changed: std::collections::BTreeSet<u64>,
+    app_truncated: Option<u64>,
+    app_pruned: Option<u64>,
+    positions: std::collections::HashMap<String, u64>,
 }
 
 /// An empty index that holds the whole transcript, from its first entry.
@@ -67,16 +72,21 @@ fn clear_counts(entry: &mut Entry) {
 
 /// Take `new`'s counts into `held`, the same message with the same content.
 /// Counts sit outside the checksum, so they can arrive after the message, or
-/// change when the family does; a count `new` lacks is kept.
-fn refresh_counts(held: &mut Entry, new: &Entry) {
-    if new.reasoning_tokens.is_some() {
+/// change when the family does; a count `new` lacks is kept. Says whether
+/// any count changed.
+fn refresh_counts(held: &mut Entry, new: &Entry) -> bool {
+    let mut changed = false;
+    if new.reasoning_tokens.is_some() && held.reasoning_tokens != new.reasoning_tokens {
         held.reasoning_tokens = new.reasoning_tokens;
+        changed = true;
     }
     for (held, new) in held.parts.iter_mut().zip(&new.parts) {
-        if held.id == new.id && new.tokens.is_some() {
+        if held.id == new.id && new.tokens.is_some() && held.tokens != new.tokens {
             held.tokens = new.tokens;
+            changed = true;
         }
     }
+    changed
 }
 
 /// What adding entries did.
@@ -95,10 +105,16 @@ pub enum Extend {
 impl Index {
     /// An empty index that holds the transcript from `base` on.
     pub fn starting_at(base: u64) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             base,
             entries: Vec::new(),
             family: None,
+            app_identity: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            app_changed: Default::default(),
+            app_truncated: None,
+            app_pruned: None,
+            positions: Default::default(),
         }
     }
 
@@ -142,6 +158,9 @@ impl Index {
     ) -> Extend {
         if let Some(family) = family.filter(|family| self.family.as_deref() != Some(*family)) {
             self.entries.iter_mut().for_each(clear_counts);
+            // Every message's weights changed, and the apps show them.
+            self.app_changed
+                .extend(self.entries.iter().map(|entry| entry.ordinal));
             self.family = Some(family.to_owned());
         }
         for mut entry in incoming {
@@ -154,6 +173,8 @@ impl Index {
                 continue;
             }
             if entry.ordinal == next {
+                self.app_changed.insert(entry.ordinal);
+                self.positions.insert(entry.mid.clone(), entry.ordinal);
                 self.entries.push(entry);
                 continue;
             }
@@ -165,10 +186,13 @@ impl Index {
                 // The host's finish stamp can arrive after the message was
                 // first read. It isn't part of the transcript, so it only
                 // fills in the held copy.
-                if entry.completed_at.is_some() {
+                if entry.completed_at.is_some() && held.completed_at != entry.completed_at {
                     held.completed_at = entry.completed_at;
+                    self.app_changed.insert(entry.ordinal);
                 }
-                refresh_counts(held, &entry);
+                if refresh_counts(held, &entry) {
+                    self.app_changed.insert(entry.ordinal);
+                }
                 continue;
             }
             // The newest message may still be written; an older one changes
@@ -177,6 +201,7 @@ impl Index {
             // host stored the result in a later message.
             let newest = entry.ordinal + 1 == next;
             if held.mid == entry.mid && (newest || only_tool_results_changed(held, &entry)) {
+                self.app_changed.insert(entry.ordinal);
                 *held = entry;
                 continue;
             }
@@ -188,6 +213,14 @@ impl Index {
     /// Forget every entry from `ordinal` on. An ordinal before the base
     /// empties the index; the caller decides where it starts again.
     pub fn truncate(&mut self, ordinal: u64) {
+        for entry in self
+            .entries
+            .iter()
+            .skip(ordinal.saturating_sub(self.base) as usize)
+        {
+            self.positions.remove(&entry.mid);
+        }
+        self.app_truncated = Some(self.app_truncated.map_or(ordinal, |old| old.min(ordinal)));
         self.entries
             .truncate(ordinal.saturating_sub(self.base) as usize);
     }
@@ -197,7 +230,14 @@ impl Index {
     pub fn prune_before(&mut self, ordinal: u64) -> Vec<Entry> {
         let count = (ordinal.saturating_sub(self.base) as usize).min(self.entries.len());
         self.base += count as u64;
-        self.entries.drain(..count).collect()
+        if count > 0 {
+            self.app_pruned = Some(self.base);
+        }
+        let gone: Vec<_> = self.entries.drain(..count).collect();
+        for entry in &gone {
+            self.positions.remove(&entry.mid);
+        }
+        gone
     }
 
     /// Where a read that brings the index up to date starts: after this
@@ -248,7 +288,7 @@ impl Index {
 
     /// The entry and part with these ids.
     pub fn find(&self, mid: &str, part: &str) -> Option<(&Entry, &Part)> {
-        let entry = self.entries.iter().find(|entry| entry.mid == mid)?;
+        let entry = self.at(*self.positions.get(mid)?)?;
         let part = entry.parts.iter().find(|candidate| candidate.id == part)?;
         Some((entry, part))
     }
@@ -263,6 +303,21 @@ impl Index {
             .filter_map(|part| part.tag)
             .take(count)
             .collect()
+    }
+
+    pub(crate) fn app_changes(&mut self) -> (u64, Vec<u64>, Option<u64>, Option<u64>) {
+        (
+            self.app_identity,
+            std::mem::take(&mut self.app_changed).into_iter().collect(),
+            self.app_truncated.take(),
+            self.app_pruned.take(),
+        )
+    }
+
+    pub(crate) fn at(&self, ordinal: u64) -> Option<&Entry> {
+        ordinal
+            .checked_sub(self.base)
+            .and_then(|at| self.entries.get(at as usize))
     }
 }
 

@@ -268,6 +268,18 @@ fn query_rows(
     dates: Option<DateRange>,
     visible: Option<&BTreeSet<i64>>,
 ) -> Vec<Row> {
+    query_rows_page(conn, session, fts, (limit, 0), cutoff, dates, visible)
+}
+
+fn query_rows_page(
+    conn: &Connection,
+    session: &str,
+    fts: &str,
+    page: (usize, usize),
+    cutoff: i64,
+    dates: Option<DateRange>,
+    visible: Option<&BTreeSet<i64>>,
+) -> Vec<Row> {
     if fts.is_empty() {
         return Vec::new();
     }
@@ -289,7 +301,7 @@ fn query_rows(
             AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?3 {date_filter}
             AND CAST(message_history_fts.message_ordinal AS INTEGER) NOT IN (SELECT value FROM json_each(?7))
           ORDER BY bm25(message_history_fts), CAST(message_history_fts.message_ordinal AS INTEGER) ASC
-          LIMIT ?4"
+           LIMIT ?4 OFFSET ?8"
     );
     let read = |conn: &Connection| -> rusqlite::Result<Vec<Row>> {
         let mut statement = conn.prepare_cached(&sql)?;
@@ -315,10 +327,11 @@ fn query_rows(
                     session,
                     matching,
                     cutoff,
-                    limit as i64,
+                    page.0 as i64,
                     dates.map(|dates| dates.from),
                     dates.map(|dates| dates.to),
-                    visible
+                    visible,
+                    page.1 as i64
                 ],
                 map,
             )?
@@ -330,6 +343,39 @@ fn query_rows(
     };
     // Malformed FTS syntax that survived quoting finds nothing.
     read(conn).unwrap_or_default()
+}
+
+/// App search includes visible messages as well as hidden history. Offset is
+/// applied by SQLite, rather than fetching every preceding page into memory.
+pub fn app_page(
+    conn: &Connection,
+    session: &str,
+    text: &str,
+    offset: usize,
+    limit: usize,
+) -> Vec<MessageHit> {
+    let base = sanitize_fts_query(text.trim());
+    let mut rows = query_rows_page(conn, session, &base, (limit, offset), i64::MAX, None, None);
+    let base_empty = if offset == 0 {
+        rows.is_empty()
+    } else {
+        query_rows_page(conn, session, &base, (1, 0), i64::MAX, None, None).is_empty()
+    };
+    if base_empty {
+        rows = query_rows_page(
+            conn,
+            session,
+            &relaxed_fts_query(text),
+            (limit, offset),
+            i64::MAX,
+            None,
+            None,
+        );
+    }
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| hit(row, text, 1.0 / (offset + index + 1) as f64))
+        .collect()
 }
 
 /// How many messages up to `cutoff` match `fts`, for one probe's weight.

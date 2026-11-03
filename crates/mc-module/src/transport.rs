@@ -57,30 +57,49 @@ const RUNNER_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// their compaction routes to.
 pub fn manifest(module_id: &str) -> ModuleManifest {
     ModuleManifest::builder(module_id, env!("CARGO_PKG_VERSION"))
-        .provides(vec![ProviderRole::ToolProvider {
-            tools: vec![Tool {
-                name: "ctx_reduce".into(),
-                description: Some(format!(
-                    "Drop tagged items you no longer need ({COMPACTION_PROVIDES})."
-                )),
-                execution_mode: ExecutionMode::Mutating,
-                schema: json!({
-                    "type": "object",
-                    "properties": {"drop": {"type": "string"}},
-                    "required": ["drop"],
-                }),
-            }],
-            identity_scope: vec![IdentityScope::Session],
-            concurrency: Concurrency::ModuleManaged,
-            emits_push: false,
-            sub_supervises: false,
-        }])
+        .provides(vec![
+            ProviderRole::ToolProvider {
+                tools: vec![Tool {
+                    name: "ctx_reduce".into(),
+                    description: Some(format!(
+                        "Drop tagged items you no longer need ({COMPACTION_PROVIDES})."
+                    )),
+                    execution_mode: ExecutionMode::Mutating,
+                    schema: json!({
+                        "type": "object",
+                        "properties": {"drop": {"type": "string"}},
+                        "required": ["drop"],
+                    }),
+                }],
+                identity_scope: vec![IdentityScope::Session],
+                concurrency: Concurrency::ModuleManaged,
+                emits_push: false,
+                sub_supervises: false,
+            },
+            ProviderRole::InternalService {
+                service_id: crate::app_read::ROLE.0.into(),
+                transport: subc_protocol::manifest::InternalTransport::Bulk,
+                agent_facing: false,
+                operations: [
+                    "session_data.read",
+                    "context.watch",
+                    "context.states",
+                    "context.compartment",
+                    "context.cache_why",
+                    "context.search",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            },
+        ])
         // The daemon puts a scope's folder and project on a route's stamp
         // only for a provider that asks; they are where a session's project
         // comes from.
         .capabilities(Some(CapabilityDeclarations {
             provides: vec![
                 COMPACTION_PROVIDES.to_owned(),
+                "mc-app-read/v1".to_owned(),
                 // Core finds tool providers and step-transform providers in
                 // the daemon's module catalog by these claims, before it calls
                 // `role.describe`. Without them core composes Magic Context
@@ -476,6 +495,60 @@ pub struct Handler {
     module: Module<SubcRunnerClient>,
     /// Every bound route, by channel: what the daemon said about it at bind.
     bound: Mutex<HashMap<u16, Bound>>,
+    app_bound: Mutex<HashMap<u16, AppCaller>>,
+}
+
+#[derive(Clone, Debug)]
+struct AppCaller {
+    principal: Principal,
+    harness: String,
+}
+
+impl AppCaller {
+    fn allowed(&self) -> bool {
+        match &self.principal {
+            Principal::Direct => crate::app_read::DEVELOPMENT_ADMITS_DIRECT,
+            Principal::Reserved { module_id } => {
+                module_id == "callosum" && self.harness.starts_with("fed-phone:")
+            }
+            _ => false,
+        }
+    }
+    fn quota(&self) -> String {
+        if matches!(self.principal, Principal::Direct) {
+            "direct".into()
+        } else {
+            self.harness.clone()
+        }
+    }
+}
+
+fn app_admission(request: &RouteBindRequest) -> Result<AppCaller, Refusal> {
+    let refused = || {
+        Refusal::new(
+            "not_permitted",
+            "App reads require an unscoped operator app route.",
+            None,
+        )
+    };
+    if !matches!(&request.target, RouteTarget::InternalService { module_id, service_id } if module_id == crate::MODULE_ID && service_id == crate::app_read::ROLE.0)
+        || request.scope.is_some()
+        || request.role_versions.as_ref().is_some_and(|roles| {
+            roles.iter().any(|(name, version)| {
+                name != crate::app_read::ROLE.0 || version != crate::app_read::ROLE.1
+            })
+        })
+    {
+        return Err(refused());
+    }
+    let caller = AppCaller {
+        principal: request.principal.clone().ok_or_else(refused)?,
+        harness: request.identity.harness.clone(),
+    };
+    if !caller.allowed() {
+        return Err(refused());
+    }
+    Ok(caller)
 }
 
 /// The roles of the two published contracts a runner also reaches ck-mc
@@ -528,7 +601,59 @@ impl Handler {
         Self {
             module,
             bound: Mutex::default(),
+            app_bound: Mutex::default(),
         }
+    }
+
+    async fn app(
+        &self,
+        ctx: &RequestCtx,
+        body: &[u8],
+        caller: AppCaller,
+    ) -> Result<HandlerOutcome, Refusal> {
+        if !caller.allowed() {
+            return Err(Refusal::new(
+                "not_permitted",
+                "App admission is no longer granted.",
+                None,
+            ));
+        }
+        if body.len() > 64 * 1024 {
+            return Err(Refusal::new(
+                "invalid_params",
+                "App request exceeds 64 KiB.",
+                None,
+            ));
+        }
+        let value: Value =
+            serde_json::from_slice(body).map_err(|_| crate::app_read::invalid("request"))?;
+        let envelope = crate::app_read::object(&value, &["method", "params"])?;
+        let method = crate::app_read::string(envelope, "method")?;
+        let params = envelope.get("params").cloned().unwrap_or(Value::Null);
+        if method == "context.watch" {
+            let mut subscription = self.module.app_read().watch(caller.quota(), params).await?;
+            loop {
+                let notice = tokio::select! {
+                    _ = ctx.cancelled() => return Ok(HandlerOutcome::Streamed),
+                    value = subscription.recv() => match value? { Some(value) => value, None => return Ok(HandlerOutcome::Streamed) },
+                };
+                let bytes = crate::app_read::result_bytes(notice);
+                tokio::select! {
+                    _ = ctx.cancelled() => return Ok(HandlerOutcome::Streamed),
+                    result = ctx.emit(bytes) => if result.is_err() { return Ok(HandlerOutcome::Streamed); },
+                }
+            }
+        }
+        let value = self.module.app_read().read(method, params).await?;
+        let bytes = crate::app_read::result_bytes(value);
+        if bytes.len() > 512 * 1024 {
+            return Err(Refusal::new(
+                "app_op_unavailable",
+                "App reply exceeds the frame budget.",
+                None,
+            ));
+        }
+        Ok(HandlerOutcome::Response(bytes))
     }
 
     async fn dispatch(&self, channel: u16, body: &[u8]) -> Result<Vec<u8>, Refusal> {
@@ -761,6 +886,33 @@ impl ModuleHandler for Handler {
     /// the scope stamp's, so nothing that decides whose data a call reaches
     /// comes from the caller's own words.
     async fn on_bind(&self, request: &RouteBindRequest) -> BindDecision {
+        self.bound
+            .lock()
+            .expect("bound routes")
+            .remove(&request.handle.channel);
+        self.app_bound
+            .lock()
+            .expect("app routes")
+            .remove(&request.handle.channel);
+        if matches!(
+            &request.target,
+            RouteTarget::InternalService { .. } | RouteTarget::ManagementSurface { .. }
+        ) || request
+            .role_versions
+            .as_ref()
+            .is_some_and(|roles| roles.contains_key(crate::app_read::ROLE.0))
+        {
+            return match app_admission(request) {
+                Ok(caller) => {
+                    self.app_bound
+                        .lock()
+                        .expect("app routes")
+                        .insert(request.handle.channel, caller);
+                    BindDecision::accept()
+                }
+                Err(error) => BindDecision::reject(error.code, error.message),
+            };
+        }
         let Some(Principal::Reserved { module_id }) = &request.principal else {
             return BindDecision::reject(
                 codes::UNATTESTED_RUNNER,
@@ -819,8 +971,21 @@ impl ModuleHandler for Handler {
     }
 
     async fn handle(&self, ctx: RequestCtx, body: Vec<u8>) -> HandlerOutcome {
-        match self.dispatch(ctx.route_handle().channel, &body).await {
-            Ok(answer) => HandlerOutcome::Response(answer),
+        let caller = self
+            .app_bound
+            .lock()
+            .expect("app routes")
+            .get(&ctx.route_handle().channel)
+            .cloned();
+        let result = if let Some(caller) = caller {
+            self.app(&ctx, &body, caller).await
+        } else {
+            self.dispatch(ctx.route_handle().channel, &body)
+                .await
+                .map(HandlerOutcome::Response)
+        };
+        match result {
+            Ok(answer) => answer,
             Err(refusal) => match refusal.detail {
                 Some(detail) => HandlerOutcome::ErrorWithDetail {
                     code: refusal.code,
@@ -909,6 +1074,115 @@ mod agent_surface_tests {
             "ctx_missing".into(),
         ));
         assert_eq!(refusal.code, "unknown_tool");
+    }
+}
+
+#[cfg(test)]
+mod app_read_tests {
+    use super::*;
+
+    fn request() -> RouteBindRequest {
+        let mut request = RouteBindRequest::new(
+            subc_client_rs::RouteHandle::detached(10, 1),
+            RouteTarget::InternalService {
+                module_id: crate::MODULE_ID.into(),
+                service_id: "mc-app-read".into(),
+            },
+            BindIdentity::new("", "alfonso-desktop"),
+        );
+        request.principal = Some(Principal::Direct);
+        request.role_versions = Some(std::collections::BTreeMap::from([(
+            "mc-app-read".into(),
+            "v1".into(),
+        )]));
+        request
+    }
+
+    #[test]
+    fn app_read_development_direct_and_attested_phone_are_the_only_admissions() {
+        let mut request = request();
+        let direct = app_admission(&request).unwrap();
+        assert!(direct.allowed());
+        assert_eq!(direct.quota(), "direct");
+        request.principal = Some(Principal::Reserved {
+            module_id: "callosum".into(),
+        });
+        request.identity = BindIdentity::new("fed-phone:device-a", "app");
+        let phone = app_admission(&request).unwrap();
+        assert!(phone.allowed());
+        assert_eq!(phone.quota(), "fed-phone:device-a");
+        request.identity = BindIdentity::new("other", "app");
+        assert_eq!(app_admission(&request).err().unwrap().code, "not_permitted");
+        request.identity = BindIdentity::new("fed-phone:device-a", "app");
+        for principal in [
+            None,
+            Some(Principal::Unverified),
+            Some(Principal::Reserved {
+                module_id: "untrusted-module".into(),
+            }),
+        ] {
+            request.principal = principal;
+            assert_eq!(app_admission(&request).err().unwrap().code, "not_permitted");
+        }
+    }
+
+    #[test]
+    fn app_read_refuses_management_wrong_target_roles_and_all_scopes_including_flows() {
+        for target in [
+            RouteTarget::ManagementSurface {
+                module_id: crate::MODULE_ID.into(),
+            },
+            RouteTarget::InternalService {
+                module_id: "other".into(),
+                service_id: "mc-app-read".into(),
+            },
+            RouteTarget::ToolProvider {
+                module_id: crate::MODULE_ID.into(),
+            },
+        ] {
+            let mut request = request();
+            request.target = target;
+            assert_eq!(app_admission(&request).err().unwrap().code, "not_permitted");
+        }
+        let mut scoped = request();
+        let mut scope = subc_protocol::scope::ScopeStamp::new(
+            Principal::Direct,
+            "scope",
+            1,
+            subc_protocol::scope::ScopeKind::Head,
+        );
+        scoped.scope = Some(scope.clone());
+        assert_eq!(app_admission(&scoped).err().unwrap().code, "not_permitted");
+        scope.attributes.flow_id = Some("flow".into());
+        scoped.scope = Some(scope);
+        assert_eq!(app_admission(&scoped).err().unwrap().code, "not_permitted");
+    }
+
+    #[test]
+    fn app_read_accepts_omitted_role_versions_on_the_exact_internal_target() {
+        let mut request = request();
+        request.role_versions = None;
+        assert!(app_admission(&request).is_ok());
+    }
+
+    #[test]
+    fn app_read_refuses_a_supplied_wrong_version() {
+        let mut request = request();
+        request.role_versions = Some(std::collections::BTreeMap::from([(
+            "mc-app-read".into(),
+            "v2".into(),
+        )]));
+        assert_eq!(app_admission(&request).err().unwrap().code, "not_permitted");
+    }
+
+    #[test]
+    fn app_read_refuses_any_supplied_additional_role() {
+        let mut request = request();
+        request.role_versions = Some(std::collections::BTreeMap::from([
+            ("mc-app-read".into(), "v1".into()),
+            ("tool-provider".into(), "v1".into()),
+        ]));
+        assert_eq!(app_admission(&request).err().unwrap().code, "not_permitted");
     }
 }
 

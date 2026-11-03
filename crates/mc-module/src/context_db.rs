@@ -194,6 +194,7 @@ fn placeholders(count: usize) -> String {
 pub(crate) const CONTEXT_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub struct ContextDb {
+    pub(crate) path: std::path::PathBuf,
     connection: Mutex<Connection>,
     #[cfg(feature = "context-db-timing")]
     timing: timing::Timing,
@@ -237,6 +238,7 @@ impl ContextDb {
         #[cfg(feature = "context-db-timing")]
         let timing = timing::Timing::install(&connection);
         Ok(Self {
+            path: path.to_owned(),
             connection: Mutex::new(connection),
             #[cfg(feature = "context-db-timing")]
             timing,

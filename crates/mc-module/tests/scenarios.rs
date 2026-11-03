@@ -33,6 +33,8 @@ use serde_json::{json, Value};
 
 #[path = "scenarios/agent_surface.rs"]
 mod agent_surface;
+#[path = "support/app_read.rs"]
+mod app_read;
 #[path = "support/lifecycle_scenarios.rs"]
 mod lifecycle_scenarios;
 

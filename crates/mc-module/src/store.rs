@@ -7,7 +7,7 @@
 //! rollback to one of them finds its own file untouched.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -21,6 +21,8 @@ use crate::summary::head::Baseline;
 /// What a session keeps across a restart.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Durable {
+    #[serde(default)]
+    pub app: crate::app_read::SessionState,
     /// Compaction features and conditions, for a tool arriving before Setup
     /// after a restart. Older rows recover these at their next Setup.
     #[serde(default)]
@@ -84,11 +86,20 @@ pub struct Durable {
 }
 
 pub struct Store {
+    #[cfg(test)]
+    write_max_ns: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    snapshot_writes: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    index_writes: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    decision_writes: std::sync::atomic::AtomicU64,
     connection: Mutex<Connection>,
+    pub(crate) path: PathBuf,
 }
 
 /// The newest mode3.db schema this build can read and write.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 3;
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -127,7 +138,31 @@ impl Store {
                      png BLOB NOT NULL,
                      PRIMARY KEY (runner, harness, session)
                  );
-                 CREATE TABLE IF NOT EXISTS memory_contexts (
+                  CREATE TABLE IF NOT EXISTS app_read_snapshots (
+                      runner TEXT NOT NULL,
+                      harness TEXT NOT NULL,
+                      session TEXT NOT NULL,
+                      snapshot TEXT NOT NULL,
+                      PRIMARY KEY (runner, harness, session)
+                  );
+                  CREATE TABLE IF NOT EXISTS app_read_message_index (
+                      runner TEXT NOT NULL,
+                      harness TEXT NOT NULL,
+                      session TEXT NOT NULL,
+                      message_id TEXT NOT NULL,
+                      ordinal INTEGER NOT NULL,
+                      at_ms INTEGER NOT NULL,
+                      PRIMARY KEY (runner, harness, session, message_id)
+                  );
+                  CREATE INDEX IF NOT EXISTS app_read_message_ordinals ON app_read_message_index(runner, harness, session, ordinal);
+                  CREATE TABLE IF NOT EXISTS app_read_decisions (
+                      runner TEXT NOT NULL,
+                      harness TEXT NOT NULL,
+                      session TEXT NOT NULL,
+                      decisions TEXT NOT NULL,
+                      PRIMARY KEY(runner,harness,session)
+                  );
+                  CREATE TABLE IF NOT EXISTS memory_contexts (
                      runner TEXT NOT NULL,
                      harness TEXT NOT NULL,
                      session TEXT NOT NULL,
@@ -141,7 +176,16 @@ impl Store {
             .and_then(|()| connection.execute_batch("COMMIT;"))
             .map_err(|error| format!("store {}: {error}", path.display()))?;
         Ok(Self {
+            #[cfg(test)]
+            write_max_ns: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            snapshot_writes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            index_writes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            decision_writes: std::sync::atomic::AtomicU64::new(0),
             connection: Mutex::new(connection),
+            path: path.to_owned(),
         })
     }
 
@@ -166,14 +210,118 @@ impl Store {
 
     pub fn save(&self, key: &SessionRef, state: &Durable) -> Result<(), String> {
         let text = serde_json::to_string(state).expect("state serializes");
-        let result = self.lock().execute(
+        let connection = self.lock();
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        let result = connection.execute(
             "INSERT INTO sessions (runner, harness, session, state) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (runner, harness, session) DO UPDATE SET state = excluded.state",
             params![key.runner, key.harness, key.session, text],
         );
+        #[cfg(test)]
+        self.record_write(started);
         result
             .map(|_| ())
             .map_err(|error| format!("session {}: saving its state failed: {error}", key.session))
+    }
+
+    /// Checkpoint a projection only on Setup, a cut, or a transcript replacement.
+    /// Ordinary notices persist only newly observed message identities.
+    pub(crate) fn save_app_snapshot(
+        &self,
+        snapshot: &crate::app_read::Snapshot,
+    ) -> Result<(), String> {
+        let key = &snapshot.key;
+        let text = serde_json::to_string(snapshot).expect("snapshot JSON");
+        let connection = self.lock();
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        let result=connection.execute("INSERT INTO app_read_snapshots VALUES (?1,?2,?3,?4) ON CONFLICT(runner,harness,session) DO UPDATE SET snapshot=excluded.snapshot",params![key.runner,key.harness,key.session,text]);
+        #[cfg(test)]
+        {
+            self.record_write(started);
+            self.snapshot_writes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        result
+            .map(|_| ())
+            .map_err(|error| format!("app checkpoint: {error}"))
+    }
+
+    pub(crate) fn app_index_tip(&self, key: &SessionRef) -> Option<(u64, String)> {
+        self.lock().query_row("SELECT ordinal,message_id FROM app_read_message_index WHERE runner=?1 AND harness=?2 AND session=?3 ORDER BY ordinal DESC LIMIT 1",params![key.runner,key.harness,key.session],|row|Ok((row.get(0)?,row.get(1)?))).optional().unwrap_or_default()
+    }
+
+    pub(crate) fn save_app_index(
+        &self,
+        key: &SessionRef,
+        rows: &[crate::app_read::IndexRow],
+        reverted_from: Option<u64>,
+    ) -> Result<(), String> {
+        let mut connection = self.lock();
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        let result = (|| -> rusqlite::Result<()> {
+            let tx = connection.transaction()?;
+            if let Some(from) = reverted_from {
+                tx.execute("DELETE FROM app_read_message_index WHERE runner=?1 AND harness=?2 AND session=?3 AND ordinal>=?4",params![key.runner,key.harness,key.session,from])?;
+            }
+            {
+                let mut insert=tx.prepare_cached("INSERT INTO app_read_message_index VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(runner,harness,session,message_id) DO UPDATE SET ordinal=excluded.ordinal,at_ms=excluded.at_ms WHERE ordinal<>excluded.ordinal OR at_ms<>excluded.at_ms")?;
+                for row in rows {
+                    let written = insert.execute(params![
+                        key.runner,
+                        key.harness,
+                        key.session,
+                        row.mid,
+                        row.ordinal,
+                        row.at_ms
+                    ])?;
+                    #[cfg(test)]
+                    self.index_writes
+                        .fetch_add(written as u64, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(not(test))]
+                    let _ = written;
+                }
+            }
+            tx.commit()
+        })();
+        #[cfg(test)]
+        self.record_write(started);
+        result.map_err(|error| format!("app message index: {error}"))
+    }
+
+    pub(crate) fn app_decisions(&self, key: &SessionRef) -> Vec<serde_json::Value> {
+        let text:Option<String>=self.lock().query_row("SELECT decisions FROM app_read_decisions WHERE runner=?1 AND harness=?2 AND session=?3",params![key.runner,key.harness,key.session],|row|row.get(0)).optional().unwrap_or_default();
+        let mut rows: Vec<serde_json::Value> = text
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        if rows.len() > 256 {
+            rows.drain(..rows.len() - 256);
+        }
+        rows
+    }
+
+    pub(crate) fn save_app_decisions(
+        &self,
+        key: &SessionRef,
+        decisions: &[serde_json::Value],
+    ) -> Result<(), String> {
+        let decisions = &decisions[decisions.len().saturating_sub(256)..];
+        let text = serde_json::to_string(decisions).expect("decision JSON");
+        let connection = self.lock();
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        let result=connection.execute("INSERT INTO app_read_decisions VALUES(?1,?2,?3,?4) ON CONFLICT(runner,harness,session) DO UPDATE SET decisions=excluded.decisions",params![key.runner,key.harness,key.session,text]);
+        #[cfg(test)]
+        {
+            self.record_write(started);
+            self.decision_writes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        result
+            .map(|_| ())
+            .map_err(|error| format!("app decisions: {error}"))
     }
 
     /// Keep the mural image the session's history head was last folded
@@ -253,6 +401,36 @@ impl Store {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    #[cfg(test)]
+    fn record_write(&self, started: std::time::Instant) {
+        self.write_max_ns.fetch_max(
+            started.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_write_max_ns(&self) -> u64 {
+        self.write_max_ns
+            .swap(0, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_app_writes(&self) -> (u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.index_writes.swap(0, Relaxed),
+            self.snapshot_writes.swap(0, Relaxed),
+            self.decision_writes.swap(0, Relaxed),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_connection_held(&self, f: impl FnOnce()) {
+        let _connection = self.lock();
+        f();
+    }
 }
 
 #[cfg(test)]
@@ -268,7 +446,9 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 3);
+        let tables: u32 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('app_read_snapshots','app_read_message_index','app_read_decisions')", [], |row| row.get(0)).unwrap();
+        assert_eq!(tables, 3);
     }
 
     #[test]
@@ -306,6 +486,6 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 3);
     }
 }
